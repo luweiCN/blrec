@@ -1,4 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ReactiveFormsModule } from '@angular/forms';
+import { NzFormModule } from 'ng-zorro-antd/form';
+import { NzInputModule } from 'ng-zorro-antd/input';
 
 import { InputDurationComponent } from './input-duration.component';
 
@@ -8,9 +11,10 @@ describe('InputDurationComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ InputDurationComponent ]
+      declarations: [InputDurationComponent],
+      imports: [ReactiveFormsModule, NzFormModule, NzInputModule],
     })
-    .compileComponents();
+      .compileComponents();
   });
 
   beforeEach(() => {

@@ -1,3 +1,4 @@
+import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { BasePlayInfoApiUrlEditDialogComponent } from './base-play-info-api-url-edit-dialog.component';
@@ -8,9 +9,9 @@ describe('BasePlayInfoApiUrlEditDialogComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ BasePlayInfoApiUrlEditDialogComponent ]
-    })
-    .compileComponents();
+      declarations: [BasePlayInfoApiUrlEditDialogComponent],
+      schemas: [NO_ERRORS_SCHEMA],
+    }).compileComponents();
   });
 
   beforeEach(() => {

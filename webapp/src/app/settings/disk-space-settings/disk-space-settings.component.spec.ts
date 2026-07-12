@@ -1,5 +1,11 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
+import { of } from 'rxjs';
+
+import { SettingsModule } from '../settings.module';
+import { SpaceSettings } from '../shared/setting.model';
+import { SettingsSyncService } from '../shared/services/settings-sync.service';
 import { DiskSpaceSettingsComponent } from './disk-space-settings.component';
 
 describe('DiskSpaceSettingsComponent', () => {
@@ -7,15 +13,29 @@ describe('DiskSpaceSettingsComponent', () => {
   let fixture: ComponentFixture<DiskSpaceSettingsComponent>;
 
   beforeEach(async () => {
+    const settingsSyncService = jasmine.createSpyObj<SettingsSyncService>(
+      'SettingsSyncService',
+      ['syncSettings']
+    );
+    settingsSyncService.syncSettings.and.returnValue(of());
+
     await TestBed.configureTestingModule({
-      declarations: [ DiskSpaceSettingsComponent ]
-    })
-    .compileComponents();
+      imports: [NoopAnimationsModule, SettingsModule],
+      providers: [
+        { provide: SettingsSyncService, useValue: settingsSyncService },
+      ],
+    }).compileComponents();
   });
 
   beforeEach(() => {
     fixture = TestBed.createComponent(DiskSpaceSettingsComponent);
     component = fixture.componentInstance;
+    component.settings = {
+      checkInterval: 60,
+      spaceThreshold: 1024 ** 3,
+      recycleRecords: false,
+    } satisfies SpaceSettings;
+    component.ngOnChanges();
     fixture.detectChanges();
   });
 

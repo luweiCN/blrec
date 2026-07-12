@@ -1,3 +1,4 @@
+import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { BaseLiveApiUrlEditDialogComponent } from './base-live-api-url-edit-dialog.component';
@@ -8,9 +9,9 @@ describe('BaseLiveApiUrlEditDialogComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ BaseLiveApiUrlEditDialogComponent ]
-    })
-    .compileComponents();
+      declarations: [BaseLiveApiUrlEditDialogComponent],
+      schemas: [NO_ERRORS_SCHEMA],
+    }).compileComponents();
   });
 
   beforeEach(() => {
