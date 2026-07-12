@@ -1,10 +1,11 @@
 import asyncio
 from collections import deque
 from typing import Deque, List, Optional, Sequence, Union
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from blrec.bili import live_status_coordinator as coordinator_module
 from blrec.bili.batch_status_client import (
     BatchApiError,
     BatchProtocolError,
@@ -270,6 +271,37 @@ async def test_first_live_requires_anonymous_confirmation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_confirmation_failure_is_reported_and_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = RuntimeError('confirmation failed')
+    reported = Mock()
+    monkeypatch.setattr(coordinator_module, 'submit_exception', reported, raising=False)
+    failed_listener = AsyncMock()
+    healthy_listener = AsyncMock()
+    client = ScriptedBatchClient(results=[batch_for([1, 2], ObservedStatus.LIVE)])
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    failed_registration = coordinator.register(
+        1, 1001, failed_listener, AsyncMock(side_effect=failure)
+    )
+    healthy_registration = coordinator.register(
+        2,
+        1002,
+        healthy_listener,
+        AsyncMock(return_value=confirmation(2, ObservedStatus.LIVE)),
+    )
+
+    await coordinator.poll_once()
+
+    reported.assert_called_once_with(failure)
+    assert failed_registration.current is ObservedStatus.UNKNOWN
+    assert failed_listener.await_count == 0
+    assert healthy_registration.current is ObservedStatus.LIVE
+    assert healthy_listener.await_count == 1
+    assert coordinator.metrics(100.0).breaker_state is BreakerState.CLOSED
+
+
+@pytest.mark.asyncio
 async def test_repeated_broadcast_is_suppressed() -> None:
     listener = AsyncMock()
     confirmer = AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE))
@@ -416,6 +448,73 @@ async def test_confirmation_cooldown_limits_physical_requests() -> None:
     assert coordinator.fallback_count == 2
     assert confirmer.await_count == 2
     assert listener.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unregister_during_confirmation_does_not_notify() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def confirm_after_release() -> StatusSnapshot:
+        entered.set()
+        await release.wait()
+        return confirmation(1, ObservedStatus.LIVE)
+
+    listener = AsyncMock()
+    confirmer = AsyncMock(side_effect=confirm_after_release)
+    client = ScriptedBatchClient(results=[batch_result(1, ObservedStatus.LIVE)])
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    registration = coordinator.register(1, 1001, listener, confirmer)
+
+    polling = asyncio.create_task(coordinator.poll_once())
+    await entered.wait()
+    coordinator.unregister(1001)
+    release.set()
+    await polling
+
+    assert listener.await_count == 0
+    assert registration.current is ObservedStatus.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_reregistered_room_does_not_reuse_previous_confirmation() -> None:
+    old_entered = asyncio.Event()
+    old_release = asyncio.Event()
+
+    async def old_confirmation() -> StatusSnapshot:
+        old_entered.set()
+        await old_release.wait()
+        return confirmation(1, ObservedStatus.PREPARING)
+
+    old_listener = AsyncMock()
+    old_confirmer = AsyncMock(side_effect=old_confirmation)
+    coordinator = LiveStatusCoordinator(ScriptedBatchClient(), clock=lambda: 100.0)
+    old_registration = coordinator.register(1, 1001, old_listener, old_confirmer)
+    old_registration.current = ObservedStatus.LIVE
+
+    old_observation = asyncio.create_task(
+        coordinator.observe_wss(1001, ObservedStatus.PREPARING)
+    )
+    await old_entered.wait()
+
+    new_listener = AsyncMock()
+    new_confirmer = AsyncMock(return_value=confirmation(1, ObservedStatus.ROUND))
+    new_registration = coordinator.register(1, 1001, new_listener, new_confirmer)
+    new_registration.current = ObservedStatus.LIVE
+    new_observation = asyncio.create_task(
+        coordinator.observe_wss(1001, ObservedStatus.ROUND)
+    )
+
+    old_release.set()
+    await asyncio.gather(old_observation, new_observation)
+
+    assert old_confirmer.await_count == 1
+    assert new_confirmer.await_count == 1
+    assert coordinator.fallback_count == 2
+    assert old_listener.await_count == 0
+    assert [call.args[0].status for call in new_listener.await_args_list] == [
+        ObservedStatus.ROUND
+    ]
 
 
 @pytest.mark.asyncio
@@ -566,6 +665,39 @@ async def test_start_runs_lowest_uid_canary_before_full_poll() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_attaches_exception_callback_to_polling_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = RuntimeError('polling loop failed')
+    reported: List[object] = []
+    real_sleep = asyncio.sleep
+
+    async def fail_sleep(delay: float) -> None:
+        raise failure
+
+    def capture(future: object) -> None:
+        reported.append(future)
+
+    monkeypatch.setattr(
+        coordinator_module, 'exception_callback', capture, raising=False
+    )
+    monkeypatch.setattr(asyncio, 'sleep', fail_sleep)
+    coordinator = LiveStatusCoordinator(ScriptedBatchClient())
+
+    await coordinator.start()
+    task = coordinator._polling_task
+    assert task is not None
+    for _ in range(10):
+        if reported:
+            break
+        await real_sleep(0)
+    assert task.done()
+    assert task.exception() is failure
+
+    assert reported == [task]
+
+
+@pytest.mark.asyncio
 async def test_rooms_registered_after_start_are_canaried_before_full_poll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -620,11 +752,16 @@ async def test_polling_cycles_do_not_overlap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_listener_failure_rolls_back_and_does_not_block_other_rooms() -> None:
+async def test_listener_failure_rolls_back_and_does_not_block_other_rooms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = MutableClock()
     first_result = batch_for([1, 2], ObservedStatus.LIVE)
     client = ScriptedBatchClient(results=[first_result, first_result])
-    first_listener = AsyncMock(side_effect=RuntimeError('listener failed'))
+    failure = RuntimeError('listener failed')
+    reported = Mock()
+    monkeypatch.setattr(coordinator_module, 'submit_exception', reported, raising=False)
+    first_listener = AsyncMock(side_effect=failure)
     second_listener = AsyncMock()
     first_confirmer = AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE))
     second_confirmer = AsyncMock(return_value=confirmation(2, ObservedStatus.LIVE))
@@ -639,6 +776,7 @@ async def test_listener_failure_rolls_back_and_does_not_block_other_rooms() -> N
     assert first_registration.current is ObservedStatus.UNKNOWN
     assert second_registration.current is ObservedStatus.LIVE
     assert second_listener.await_count == 1
+    reported.assert_called_once_with(failure)
 
     first_listener.side_effect = None
     clock.advance(600)

@@ -4,6 +4,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
+from ..exception import exception_callback, submit_exception
 from .batch_status_client import BatchApiError, BatchStatusClient
 from .live_status import (
     BatchStatusResult,
@@ -142,7 +143,9 @@ class LiveStatusCoordinator:
         self._fallback_cooldown_seconds = fallback_cooldown_seconds
         self._clock = clock
         self._registrations: Dict[int, _Registration] = {}
-        self._fallback_tasks: Dict[int, asyncio.Task[StatusSnapshot]] = {}
+        self._fallback_tasks: Dict[
+            int, Tuple[_Registration, asyncio.Task[StatusSnapshot]]
+        ] = {}
         self._breaker = StatusCircuitBreaker(clock=clock)
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._poll_lock = asyncio.Lock()
@@ -162,11 +165,13 @@ class LiveStatusCoordinator:
         confirmer: StatusConfirmer,
     ) -> _Registration:
         registration = _Registration(uid, room_id, listener, confirmer)
+        self._fallback_tasks.pop(room_id, None)
         self._registrations[room_id] = registration
         return registration
 
     def unregister(self, room_id: int) -> None:
         self._registrations.pop(room_id, None)
+        self._fallback_tasks.pop(room_id, None)
 
     def resume(self) -> None:
         self._breaker.resume()
@@ -191,6 +196,7 @@ class LiveStatusCoordinator:
         if self._polling_task is not None and not self._polling_task.done():
             return
         self._polling_task = asyncio.create_task(self._polling_loop())
+        self._polling_task.add_done_callback(exception_callback)
 
     async def stop(self) -> None:
         task = self._polling_task
@@ -320,6 +326,9 @@ class LiveStatusCoordinator:
             if same_broadcast:
                 return
             confirmed = await self._confirm(registration)
+            if self._registrations.get(registration.room_id) is not registration:
+                self._restore_registration_state(registration, previous)
+                return
             if confirmed.status is not ObservedStatus.LIVE:
                 return
             registration.current = ObservedStatus.LIVE
@@ -357,27 +366,36 @@ class LiveStatusCoordinator:
         except asyncio.CancelledError:
             self._restore_registration_state(registration, previous)
             raise
-        except Exception:
+        except Exception as exc:
             self._restore_registration_state(registration, previous)
+            submit_exception(exc)
 
     async def _confirm(self, registration: _Registration) -> StatusSnapshot:
-        task = self._fallback_tasks.get(registration.room_id)
+        entry = self._fallback_tasks.get(registration.room_id)
+        task = entry[1] if entry is not None and entry[0] is registration else None
         if task is None:
             now = self._clock()
             if now - registration.last_fallback_at < self._fallback_cooldown_seconds:
                 return self._unknown_snapshot(registration)
             registration.last_fallback_at = now
             task = asyncio.create_task(self._call_confirmer(registration.confirmer))
-            self._fallback_tasks[registration.room_id] = task
+            self._fallback_tasks[registration.room_id] = (registration, task)
             self._fallback_count += 1
         try:
             return await task
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            submit_exception(exc)
             return self._unknown_snapshot(registration)
         finally:
-            if task.done() and self._fallback_tasks.get(registration.room_id) is task:
+            entry = self._fallback_tasks.get(registration.room_id)
+            if (
+                task.done()
+                and entry is not None
+                and entry[0] is registration
+                and entry[1] is task
+            ):
                 self._fallback_tasks.pop(registration.room_id, None)
 
     @staticmethod
