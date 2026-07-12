@@ -1,5 +1,14 @@
 import { CommonModule } from '@angular/common';
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import {
+  HttpClientTestingModule,
+  HttpTestingController,
+} from '@angular/common/http/testing';
+import {
+  ComponentFixture,
+  TestBed,
+  fakeAsync,
+  tick,
+} from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
@@ -9,9 +18,11 @@ import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
 import { NzFormModule } from 'ng-zorro-antd/form';
 import { NzInputModule } from 'ng-zorro-antd/input';
+import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 
+import { UrlService } from 'src/app/core/services/url.service';
 import {
   LiveMonitorSettings,
   LiveStatusMetrics,
@@ -271,4 +282,107 @@ describe('LiveMonitorSettingsComponent', () => {
     expect(syncStopped).toBeTrue();
     expect(valueChangesCompleted).toBeTrue();
   });
+});
+
+describe('LiveMonitorSettingsComponent persistence', () => {
+  let component: LiveMonitorSettingsComponent;
+  let fixture: ComponentFixture<LiveMonitorSettingsComponent>;
+  let http: HttpTestingController;
+
+  const settingsFixture: LiveMonitorSettings = {
+    mode: 'legacy',
+    intervalSeconds: 45,
+    batchSize: 11,
+    fallbackCooldownSeconds: 1200,
+  };
+
+  const metricsFixture: LiveStatusMetrics = {
+    mode: 'legacy',
+    intervalSeconds: 45,
+    batchSize: 11,
+    registeredRooms: 58,
+    activeWebsockets: 0,
+    lastSuccessAt: 100,
+    snapshotMaxAgeSeconds: 12,
+    missingResults: 0,
+    fallbackRequests: 0,
+    breakerState: 'closed',
+    breakerReason: null,
+  };
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      declarations: [LiveMonitorSettingsComponent],
+      imports: [
+        CommonModule,
+        HttpClientTestingModule,
+        ReactiveFormsModule,
+        NoopAnimationsModule,
+        NzAlertModule,
+        NzButtonModule,
+        NzCardModule,
+        NzFormModule,
+        NzInputModule,
+        NzSelectModule,
+        NzSpinModule,
+      ],
+      providers: [
+        {
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
+        },
+        {
+          provide: NzMessageService,
+          useValue: { error: jasmine.createSpy('error') },
+        },
+      ],
+    }).compileComponents();
+
+    http = TestBed.inject(HttpTestingController);
+    fixture = TestBed.createComponent(LiveMonitorSettingsComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => http.verify());
+
+  it('persists a non-mode field as the exact nested PATCH diff', fakeAsync(() => {
+    fixture.detectChanges();
+
+    const settingsRequest = http.expectOne(
+      (request) => request.url === '/api/v1/settings'
+    );
+    expect(settingsRequest.request.method).toBe('GET');
+    expect(settingsRequest.request.params.getAll('include')).toEqual([
+      'liveMonitor',
+    ]);
+    settingsRequest.flush({ liveMonitor: settingsFixture });
+
+    const statusRequest = http.expectOne('/api/v1/live-status');
+    expect(statusRequest.request.method).toBe('GET');
+    statusRequest.flush(metricsFixture);
+    tick();
+    fixture.detectChanges();
+
+    expect(component.settingsLoad.state).toBe('ready');
+    expect(component.settingsForm.getRawValue()).toEqual(settingsFixture);
+
+    component.settingsForm.controls['batchSize'].setValue(12);
+    tick();
+
+    const patchRequest = http.expectOne('/api/v1/settings');
+    expect(patchRequest.request.method).toBe('PATCH');
+    expect(patchRequest.request.body).toEqual({
+      liveMonitor: { batchSize: 12 },
+    });
+    patchRequest.flush({
+      liveMonitor: { ...settingsFixture, batchSize: 12 },
+    });
+    tick();
+
+    expect(component.settingsForm.getRawValue()).toEqual({
+      ...settingsFixture,
+      batchSize: 12,
+    });
+    http.expectNone((request) => request.method === 'PATCH');
+  }));
 });
