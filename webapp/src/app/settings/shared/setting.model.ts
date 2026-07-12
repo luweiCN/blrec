@@ -13,6 +13,11 @@ export interface LiveMonitorSettings {
   fallbackCooldownSeconds: number;
 }
 
+export type LiveMonitorSettingsView =
+  | { state: 'loading' }
+  | { state: 'ready' }
+  | { state: 'error'; message: string };
+
 export interface LiveStatusMetrics {
   mode: 'batch' | 'legacy';
   intervalSeconds: number;

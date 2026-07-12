@@ -1,4 +1,27 @@
-<form nz-form [formGroup]="settingsForm">
+<div class="settings-load-state" aria-live="polite">
+  <nz-spin *ngIf="settingsLoad.state === 'loading'" nzSimple></nz-spin>
+  <nz-alert
+    *ngIf="settingsLoad.state === 'error'"
+    nzType="error"
+    [nzMessage]="settingsLoad.message"
+    nzShowIcon
+  ></nz-alert>
+  <button
+    *ngIf="settingsLoad.state === 'error'"
+    nz-button
+    type="button"
+    data-testid="retry-settings"
+    (click)="retrySettings()"
+  >
+    重试加载设置
+  </button>
+</div>
+
+<form
+  nz-form
+  [formGroup]="settingsForm"
+  [attr.aria-busy]="settingsLoad.state === 'loading'"
+>
   <nz-form-item class="setting-item">
     <nz-form-label class="setting-label" nzNoColon>监控模式</nz-form-label>
     <nz-form-control class="setting-control select">

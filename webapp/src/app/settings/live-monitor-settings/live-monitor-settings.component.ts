@@ -2,14 +2,17 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
 } from '@angular/core';
 import { FormBuilder, FormGroup, Validators } from '@angular/forms';
 
-import { Observable } from 'rxjs';
+import { Observable, Subject } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
 
 import {
   LiveMonitorSettings,
+  LiveMonitorSettingsView,
   LiveStatusView,
 } from '../shared/setting.model';
 import { LiveStatusService } from '../shared/services/live-status.service';
@@ -22,7 +25,8 @@ import { SettingsSyncService } from '../shared/services/settings-sync.service';
   styleUrls: ['./live-monitor-settings.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class LiveMonitorSettingsComponent implements OnInit {
+export class LiveMonitorSettingsComponent implements OnInit, OnDestroy {
+  settingsLoad: LiveMonitorSettingsView = { state: 'loading' };
   status: LiveStatusView = { state: 'loading' };
 
   readonly settingsForm: FormGroup;
@@ -30,6 +34,7 @@ export class LiveMonitorSettingsComponent implements OnInit {
     { label: '批量模式', value: 'batch' },
     { label: '旧模式', value: 'legacy' },
   ];
+  private readonly destroy$ = new Subject<void>();
 
   constructor(
     formBuilder: FormBuilder,
@@ -53,6 +58,7 @@ export class LiveMonitorSettingsComponent implements OnInit {
         [Validators.required, Validators.min(600), Validators.max(3600)],
       ],
     });
+    this.settingsForm.disable({ emitEvent: false });
   }
 
   ngOnInit(): void {
@@ -60,39 +66,71 @@ export class LiveMonitorSettingsComponent implements OnInit {
     this.loadStatus();
   }
 
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  retrySettings(): void {
+    this.loadSettings();
+  }
+
   resume(): void {
     this.status = { state: 'loading' };
     this.changeDetector.markForCheck();
-    this.liveStatusService.resume().subscribe({
-      next: () => this.loadStatus(),
-      error: (error: Error) => this.showStatusError(error),
-    });
+    this.liveStatusService
+      .resume()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: () => this.loadStatus(),
+        error: (error: Error) => this.showStatusError(error),
+      });
   }
 
   private loadSettings(): void {
-    this.settingService.getSettings(['liveMonitor']).subscribe((settings) => {
-      const liveMonitor = settings.liveMonitor;
-      this.settingsForm.setValue(liveMonitor, { emitEvent: false });
-      this.settingsSyncService
-        .syncSettings(
-          'liveMonitor',
-          liveMonitor,
-          this.settingsForm.valueChanges as Observable<LiveMonitorSettings>
-        )
-        .subscribe();
-      this.changeDetector.markForCheck();
-    });
+    this.settingsLoad = { state: 'loading' };
+    this.settingsForm.disable({ emitEvent: false });
+    this.changeDetector.markForCheck();
+    this.settingService
+      .getSettings(['liveMonitor'])
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (settings) => {
+          const liveMonitor = settings.liveMonitor;
+          this.settingsForm.setValue(liveMonitor, { emitEvent: false });
+          this.settingsForm.enable({ emitEvent: false });
+          this.settingsLoad = { state: 'ready' };
+          this.settingsSyncService
+            .syncSettings(
+              'liveMonitor',
+              liveMonitor,
+              this.settingsForm.valueChanges.pipe(
+                takeUntil(this.destroy$)
+              ) as Observable<LiveMonitorSettings>
+            )
+            .pipe(takeUntil(this.destroy$))
+            .subscribe();
+          this.changeDetector.markForCheck();
+        },
+        error: (error: Error) => {
+          this.settingsLoad = { state: 'error', message: error.message };
+          this.changeDetector.markForCheck();
+        },
+      });
   }
 
   private loadStatus(): void {
     this.status = { state: 'loading' };
-    this.liveStatusService.getMetrics().subscribe({
-      next: (data) => {
-        this.status = { state: 'ready', data };
-        this.changeDetector.markForCheck();
-      },
-      error: (error: Error) => this.showStatusError(error),
-    });
+    this.liveStatusService
+      .getMetrics()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (data) => {
+          this.status = { state: 'ready', data };
+          this.changeDetector.markForCheck();
+        },
+        error: (error: Error) => this.showStatusError(error),
+      });
   }
 
   private showStatusError(error: Error): void {

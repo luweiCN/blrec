@@ -101,6 +101,43 @@ async def test_settings_manager_restarts_for_safe_mode_change() -> None:
 
 
 @pytest.mark.asyncio
+async def test_partial_live_monitor_update_preserves_legacy_mode() -> None:
+    application = SettingsApplication(recording=True)
+    current = Settings(
+        live_monitor=LiveMonitorSettings(
+            mode='legacy',
+            interval_seconds=45,
+            batch_size=20,
+            fallback_cooldown_seconds=1200,
+        )
+    )
+    manager = SettingsManager(application, current)  # type: ignore[arg-type]
+    dump_count = 0
+
+    async def record_dump() -> None:
+        nonlocal dump_count
+        dump_count += 1
+
+    manager.dump_settings = record_dump  # type: ignore[assignment]
+    update = SettingsIn.parse_obj({'liveMonitor': {'batchSize': 10}})
+
+    assert update.live_monitor is not None
+    assert update.live_monitor.__fields_set__ == {'batch_size'}
+
+    result = await manager.change_settings(update)
+
+    assert current.live_monitor == LiveMonitorSettings(
+        mode='legacy',
+        interval_seconds=45,
+        batch_size=10,
+        fallback_cooldown_seconds=1200,
+    )
+    assert result.live_monitor == current.live_monitor
+    assert application.restart_count == 0
+    assert dump_count == 1
+
+
+@pytest.mark.asyncio
 async def test_application_stops_coordinator_after_tasks() -> None:
     calls: List[str] = []
     app = object.__new__(Application)

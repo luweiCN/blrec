@@ -55,6 +55,7 @@ class SettingsManager:
         mode_changed = (
             'live_monitor' in settings.__fields_set__
             and live_monitor is not None
+            and 'mode' in live_monitor.__fields_set__
             and live_monitor.mode != self._settings.live_monitor.mode
         )
         if mode_changed and self._app.has_recording_task():
