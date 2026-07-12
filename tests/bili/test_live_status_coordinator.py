@@ -518,6 +518,59 @@ async def test_reregistered_room_does_not_reuse_previous_confirmation() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('lifecycle_change', ['unregister', 'replace'])
+async def test_later_stale_registration_is_skipped_after_listener_await(
+    lifecycle_change: str,
+) -> None:
+    first_listener_entered = asyncio.Event()
+    release_first_listener = asyncio.Event()
+
+    async def block_first_listener(snapshot: StatusSnapshot) -> None:
+        first_listener_entered.set()
+        await release_first_listener.wait()
+
+    first_listener = AsyncMock(side_effect=block_first_listener)
+    old_second_listener = AsyncMock()
+    replacement_listener = AsyncMock()
+    client = ScriptedBatchClient(
+        results=[
+            BatchStatusResult(
+                {
+                    1: snapshot(1, ObservedStatus.LIVE),
+                    2: snapshot(2, ObservedStatus.PREPARING),
+                },
+                frozenset(),
+            )
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    coordinator.register(
+        1,
+        1001,
+        first_listener,
+        AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE)),
+    )
+    old_second_registration = coordinator.register(
+        2, 1002, old_second_listener, AsyncMock()
+    )
+    old_second_registration.current = ObservedStatus.LIVE
+    old_second_registration.negative_count = 1
+
+    polling = asyncio.create_task(coordinator.poll_once())
+    await first_listener_entered.wait()
+    if lifecycle_change == 'unregister':
+        coordinator.unregister(1002)
+    else:
+        coordinator.register(2, 1002, replacement_listener, AsyncMock())
+    release_first_listener.set()
+    await polling
+
+    assert old_second_listener.await_count == 0
+    assert replacement_listener.await_count == 0
+    assert old_second_registration.current is ObservedStatus.LIVE
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     'error',
     [

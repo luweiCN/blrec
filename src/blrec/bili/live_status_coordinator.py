@@ -306,8 +306,11 @@ class LiveStatusCoordinator:
             if snapshot is None:
                 continue
             for registration in registrations:
-                if registration.uid == uid:
-                    await self._apply_snapshot(registration, snapshot)
+                if registration.uid != uid:
+                    continue
+                if self._registrations.get(registration.room_id) is not registration:
+                    continue
+                await self._apply_snapshot(registration, snapshot)
         return len(missing) > len(batch) / 2
 
     async def _apply_snapshot(
