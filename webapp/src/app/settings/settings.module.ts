@@ -6,6 +6,7 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzCardModule } from 'ng-zorro-antd/card';
+import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzFormModule } from 'ng-zorro-antd/form';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzSwitchModule } from 'ng-zorro-antd/switch';
@@ -73,6 +74,7 @@ import { BasePlayInfoApiUrlEditDialogComponent } from './bili-api-settings/base-
 import { BarkNotificationSettingsComponent } from './notification-settings/bark-notification-settings/bark-notification-settings.component';
 import { BarkSettingsComponent } from './notification-settings/bark-notification-settings/bark-settings/bark-settings.component';
 import { BarkNotificationSettingsResolver } from './shared/services/bark-notification-settings.resolver';
+import { LiveMonitorSettingsComponent } from './live-monitor-settings/live-monitor-settings.component';
 
 @NgModule({
   declarations: [
@@ -116,6 +118,7 @@ import { BarkNotificationSettingsResolver } from './shared/services/bark-notific
     BaseApiUrlEditDialogComponent,
     BaseLiveApiUrlEditDialogComponent,
     BasePlayInfoApiUrlEditDialogComponent,
+    LiveMonitorSettingsComponent,
   ],
   imports: [
     CommonModule,
@@ -126,6 +129,7 @@ import { BarkNotificationSettingsResolver } from './shared/services/bark-notific
     NzSpinModule,
     NzPageHeaderModule,
     NzCardModule,
+    NzAlertModule,
     NzFormModule,
     NzInputModule,
     NzSwitchModule,

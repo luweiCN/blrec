@@ -1,0 +1,102 @@
+<form nz-form [formGroup]="settingsForm">
+  <nz-form-item class="setting-item">
+    <nz-form-label class="setting-label" nzNoColon>监控模式</nz-form-label>
+    <nz-form-control class="setting-control select">
+      <nz-select formControlName="mode" [nzOptions]="modeOptions"></nz-select>
+    </nz-form-control>
+  </nz-form-item>
+
+  <nz-form-item class="setting-item">
+    <nz-form-label class="setting-label" nzNoColon>轮询间隔（秒）</nz-form-label>
+    <nz-form-control class="setting-control select">
+      <input
+        nz-input
+        type="number"
+        min="30"
+        max="60"
+        formControlName="intervalSeconds"
+      />
+    </nz-form-control>
+  </nz-form-item>
+
+  <nz-form-item class="setting-item">
+    <nz-form-label class="setting-label" nzNoColon>每批数量</nz-form-label>
+    <nz-form-control class="setting-control select">
+      <input
+        nz-input
+        type="number"
+        min="1"
+        max="29"
+        formControlName="batchSize"
+      />
+    </nz-form-control>
+  </nz-form-item>
+
+  <nz-form-item class="setting-item">
+    <nz-form-label class="setting-label" nzNoColon
+      >兜底冷却（秒）</nz-form-label
+    >
+    <nz-form-control class="setting-control select">
+      <input
+        nz-input
+        type="number"
+        min="600"
+        max="3600"
+        formControlName="fallbackCooldownSeconds"
+      />
+    </nz-form-control>
+  </nz-form-item>
+</form>
+
+<nz-card class="status-card" nzTitle="运行状态" aria-live="polite">
+  <nz-spin *ngIf="status.state === 'loading'" nzSimple></nz-spin>
+  <nz-alert
+    *ngIf="status.state === 'error'"
+    nzType="error"
+    [nzMessage]="status.message"
+    nzShowIcon
+  ></nz-alert>
+
+  <ng-container *ngIf="status.state === 'ready'">
+    <p>模式：{{ status.data.mode }}</p>
+    <p>
+      轮询：{{ status.data.intervalSeconds }} 秒 / 每批
+      {{ status.data.batchSize }}
+    </p>
+    <p>房间：{{ status.data.registeredRooms }}</p>
+    <p>活跃 WSS：{{ status.data.activeWebsockets }}</p>
+    <p>
+      缺项：{{ status.data.missingResults }}；兜底：{{
+        status.data.fallbackRequests
+      }}
+    </p>
+    <p>
+      上次成功：{{
+        status.data.lastSuccessAt === null
+          ? '尚无'
+          : status.data.lastSuccessAt
+      }}
+    </p>
+    <p>
+      快照最长年龄：{{
+        status.data.snapshotMaxAgeSeconds === null
+          ? '尚无'
+          : status.data.snapshotMaxAgeSeconds + ' 秒'
+      }}
+    </p>
+    <p>熔断原因：{{ status.data.breakerReason || '无' }}</p>
+    <nz-alert
+      *ngIf="status.data.mode === 'legacy'"
+      nzType="warning"
+      nzMessage="旧模式会为离线房间维持连接"
+    ></nz-alert>
+    <button
+      nz-button
+      type="button"
+      *ngIf="status.data.breakerState === 'paused'"
+      (click)="resume()"
+    >
+      恢复小批 canary
+    </button>
+  </ng-container>
+</nz-card>

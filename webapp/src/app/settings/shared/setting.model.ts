@@ -6,6 +6,32 @@ export interface BiliApiSettings {
   basePlayInfoApiUrls: string[];
 }
 
+export interface LiveMonitorSettings {
+  mode: 'batch' | 'legacy';
+  intervalSeconds: number;
+  batchSize: number;
+  fallbackCooldownSeconds: number;
+}
+
+export interface LiveStatusMetrics {
+  mode: 'batch' | 'legacy';
+  intervalSeconds: number;
+  batchSize: number;
+  registeredRooms: number;
+  activeWebsockets: number;
+  lastSuccessAt: number | null;
+  snapshotMaxAgeSeconds: number | null;
+  missingResults: number;
+  fallbackRequests: number;
+  breakerState: 'closed' | 'open' | 'half_open' | 'paused';
+  breakerReason: string | null;
+}
+
+export type LiveStatusView =
+  | { state: 'loading' }
+  | { state: 'ready'; data: LiveStatusMetrics }
+  | { state: 'error'; message: string };
+
 export type BiliApiOptions = Nullable<BiliApiSettings>;
 
 export interface HeaderSettings {
@@ -394,6 +420,7 @@ export interface Settings {
   output: OutputSettings;
   logging: LoggingSettings;
   biliApi: BiliApiSettings;
+  liveMonitor: LiveMonitorSettings;
   header: HeaderSettings;
   danmaku: DanmakuSettings;
   recorder: RecorderSettings;
