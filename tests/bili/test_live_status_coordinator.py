@@ -850,3 +850,66 @@ async def test_unregister_removes_room_from_later_polls() -> None:
     await coordinator.poll_once()
 
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_room_aware_confirmer_receives_real_room_id() -> None:
+    client = ScriptedBatchClient(results=[batch_result(1, ObservedStatus.LIVE)])
+    confirmer = AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE))
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    coordinator.register(1, 1001, AsyncMock(), confirmer, confirmer_uses_room_id=True)
+
+    await coordinator.poll_once()
+
+    confirmer.assert_awaited_once_with(1001)
+
+
+@pytest.mark.asyncio
+async def test_redirected_missing_uid_mappings_are_resolved_and_deduplicated() -> None:
+    client = ScriptedBatchClient()
+    mapping_loader = AsyncMock(return_value={123: (2002, 7), 456: (2002, 7)})
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    for requested_room_id in (123, 456):
+        coordinator.register(
+            0,
+            requested_room_id,
+            AsyncMock(),
+            AsyncMock(),
+            requested_room_id=requested_room_id,
+            mapping_loader=mapping_loader,
+        )
+
+    await coordinator.poll_once()
+
+    mapping_loader.assert_awaited_once_with((123, 456))
+    assert client.calls == [[7]]
+    assert coordinator.metrics(100.0).registered_rooms == 1
+
+
+@pytest.mark.asyncio
+async def test_unresolved_mapping_uses_fallback_cooldown() -> None:
+    clock = MutableClock()
+    client = ScriptedBatchClient()
+    mapping_loader = AsyncMock(return_value={})
+    coordinator = LiveStatusCoordinator(client, clock=clock)
+    coordinator.register(
+        0,
+        123,
+        AsyncMock(),
+        AsyncMock(),
+        requested_room_id=123,
+        mapping_loader=mapping_loader,
+    )
+
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+    clock.advance(599)
+    await coordinator.poll_once()
+
+    mapping_loader.assert_awaited_once_with((123,))
+    assert client.calls == []
+
+    clock.advance(1)
+    await coordinator.poll_once()
+
+    assert mapping_loader.await_count == 2

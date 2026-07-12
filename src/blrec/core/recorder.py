@@ -439,7 +439,7 @@ class Recorder(
         self._logger.debug('Started recorder')
 
         self._print_live_info()
-        if self._live.is_living():
+        if self._live_monitor.enabled and self._live.is_living():
             self._stream_available = True
             await self._start_recording()
         else:

@@ -1,11 +1,13 @@
 import os
 from contextlib import suppress
 from pathlib import PurePath
-from typing import Iterator, List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
 from blrec.bili.danmaku_client import DanmakuClient
 from blrec.bili.live import Live
+from blrec.bili.live_connection_controller import LiveConnectionController
 from blrec.bili.live_monitor import LiveMonitor
+from blrec.bili.live_status import ObservedStatus
 from blrec.bili.models import RoomInfo, UserInfo
 from blrec.bili.typing import QualityNumber, StreamFormat
 from blrec.core import Recorder
@@ -31,6 +33,10 @@ from .models import (
     VideoFileStatus,
 )
 
+if TYPE_CHECKING:
+    from blrec.bili.anonymous_room_client import AnonymousRoomClient
+    from blrec.bili.live_status_coordinator import LiveStatusCoordinator
+
 __all__ = ('RecordTask',)
 
 
@@ -46,8 +52,16 @@ class RecordTask:
         remux_to_mp4: bool = False,
         inject_extra_metadata: bool = True,
         delete_source: DeleteStrategy = DeleteStrategy.AUTO,
+        live_status_coordinator: Optional['LiveStatusCoordinator'] = None,
+        anonymous_room_client: Optional['AnonymousRoomClient'] = None,
     ) -> None:
         super().__init__()
+
+        if (live_status_coordinator is None) != (anonymous_room_client is None):
+            raise ValueError(
+                'live_status_coordinator and anonymous_room_client '
+                'must be provided together'
+            )
 
         self._live = Live(room_id, user_agent, cookie)
 
@@ -59,6 +73,9 @@ class RecordTask:
         self._remux_to_mp4 = remux_to_mp4
         self._inject_extra_metadata = inject_extra_metadata
         self._delete_source = delete_source
+        self._live_status_coordinator = live_status_coordinator
+        self._anonymous_room_client = anonymous_room_client
+        self._batch_monitoring = live_status_coordinator is not None
 
         self._ready = False
         self._monitor_enabled: bool = False
@@ -454,16 +471,34 @@ class RecordTask:
             return
         self._monitor_enabled = True
 
-        await self._danmaku_client.start()
-        self._live_monitor.enable()
+        if self._batch_monitoring:
+            assert self._live_status_coordinator is not None
+            assert self._anonymous_room_client is not None
+            self._live_status_coordinator.register(
+                uid=self._live.user_info.uid,
+                room_id=self._live.room_info.room_id,
+                listener=self._connection_controller.on_confirmed_status,
+                confirmer=self._anonymous_room_client.confirm_status,
+                requested_room_id=self._room_id,
+                mapping_loader=self._anonymous_room_client.fetch_uid_mappings,
+                confirmer_uses_room_id=True,
+            )
+        else:
+            await self._danmaku_client.start()
+            self._live_monitor.enable()
 
     async def disable_monitor(self) -> None:
         if not self._monitor_enabled:
             return
         self._monitor_enabled = False
 
-        self._live_monitor.disable()
-        await self._danmaku_client.stop()
+        if self._batch_monitoring:
+            assert self._live_status_coordinator is not None
+            self._live_status_coordinator.unregister(self._live.room_info.room_id)
+            await self._connection_controller.close()
+        else:
+            self._live_monitor.disable()
+            await self._danmaku_client.stop()
 
     async def enable_recorder(self) -> None:
         if self._recorder_enabled:
@@ -489,6 +524,8 @@ class RecordTask:
         return await self._live.update_info(raise_exception=raise_exception)
 
     async def restart_danmaku_client(self) -> None:
+        if self._batch_monitoring and not self._connection_controller.active:
+            return
         await self._danmaku_client.restart()
 
     async def _setup(self) -> None:
@@ -505,12 +542,32 @@ class RecordTask:
             self._live.session,
             self._live.appapi,
             self._live.webapi,
-            self._live.room_id,
+            self._live.room_info.room_id,
             headers=self._live.headers,
         )
 
     def _setup_live_monitor(self) -> None:
-        self._live_monitor = LiveMonitor(self._danmaku_client, self._live)
+        if not self._batch_monitoring:
+            self._live_monitor = LiveMonitor(self._danmaku_client, self._live)
+            return
+
+        assert self._live_status_coordinator is not None
+        assert self._anonymous_room_client is not None
+        live_status_coordinator = self._live_status_coordinator
+        anonymous_room_client = self._anonymous_room_client
+        self._live_monitor = LiveMonitor(
+            self._danmaku_client, self._live, status_sink=self._forward_wss_hint
+        )
+        self._connection_controller = LiveConnectionController(
+            self._live,
+            self._danmaku_client,
+            self._live_monitor,
+            lambda: anonymous_room_client.load_room_info(self._live.room_info.room_id),
+            status_sink=live_status_coordinator.observe_wss,
+        )
+
+    async def _forward_wss_hint(self, status: ObservedStatus) -> None:
+        await self._connection_controller.on_wss_hint(status)
 
     def _setup_live_event_submitter(self) -> None:
         self._live_event_submitter = LiveEventSubmitter(self._live_monitor)

@@ -16,6 +16,8 @@ from .models import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 from .task import RecordTask
 
 if TYPE_CHECKING:
+    from ..bili.anonymous_room_client import AnonymousRoomClient
+    from ..bili.live_status_coordinator import LiveStatusCoordinator
     from ..setting import SettingsManager
 
 from loguru import logger
@@ -34,8 +36,20 @@ __all__ = ('RecordTaskManager',)
 
 
 class RecordTaskManager:
-    def __init__(self, settings_manager: SettingsManager) -> None:
+    def __init__(
+        self,
+        settings_manager: SettingsManager,
+        live_status_coordinator: Optional[LiveStatusCoordinator] = None,
+        anonymous_room_client: Optional[AnonymousRoomClient] = None,
+    ) -> None:
+        if (live_status_coordinator is None) != (anonymous_room_client is None):
+            raise ValueError(
+                'live_status_coordinator and anonymous_room_client '
+                'must be provided together'
+            )
         self._settings_manager = settings_manager
+        self._live_status_coordinator = live_status_coordinator
+        self._anonymous_room_client = anonymous_room_client
         self._tasks: Dict[int, RecordTask] = {}
 
     async def load_all_tasks(self) -> None:
@@ -76,7 +90,11 @@ class RecordTaskManager:
     async def add_task(self, settings: TaskSettings) -> None:
         logger.info(f'Adding task {settings.room_id}...')
 
-        task = RecordTask(settings.room_id)
+        task = RecordTask(
+            settings.room_id,
+            live_status_coordinator=self._live_status_coordinator,
+            anonymous_room_client=self._anonymous_room_client,
+        )
         self._tasks[settings.room_id] = task
 
         try:

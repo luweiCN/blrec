@@ -139,6 +139,10 @@ class Live:
     def room_info(self) -> RoomInfo:
         return self._room_info
 
+    def replace_room_info(self, room_info: RoomInfo) -> None:
+        self._room_info = room_info
+        self._room_id = room_info.room_id
+
     @property
     def user_info(self) -> UserInfo:
         return self._user_info

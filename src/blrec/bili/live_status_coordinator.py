@@ -2,7 +2,17 @@ import asyncio
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Sequence, Tuple
+from typing import (
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 from ..exception import exception_callback, submit_exception
 from .batch_status_client import BatchApiError, BatchStatusClient
@@ -20,6 +30,9 @@ from .live_status import (
 __all__ = ('LiveStatusCoordinator', 'StatusCircuitBreaker')
 
 _RegistrationState = Tuple[ObservedStatus, Optional[str], int, bool]
+_RoomMappingLoader = Callable[[Sequence[int]], Awaitable[Dict[int, Tuple[int, int]]]]
+_RoomStatusConfirmer = Callable[[int], Awaitable[StatusSnapshot]]
+_RegistrationConfirmer = Union[StatusConfirmer, _RoomStatusConfirmer]
 
 
 @dataclass
@@ -27,12 +40,17 @@ class _Registration:
     uid: int
     room_id: int
     listener: LiveStatusListener
-    confirmer: StatusConfirmer
+    confirmer: _RegistrationConfirmer
+    requested_room_id: int
+    mapping_loader: Optional[_RoomMappingLoader]
+    confirmer_uses_room_id: bool
+    mapping_resolved: bool
     current: ObservedStatus = ObservedStatus.UNKNOWN
     observation_key: Optional[str] = None
     negative_count: int = 0
     wss_negative: bool = False
     last_fallback_at: float = float('-inf')
+    last_mapping_at: float = float('-inf')
 
 
 class StatusCircuitBreaker:
@@ -162,9 +180,26 @@ class LiveStatusCoordinator:
         uid: int,
         room_id: int,
         listener: LiveStatusListener,
-        confirmer: StatusConfirmer,
+        confirmer: _RegistrationConfirmer,
+        *,
+        requested_room_id: Optional[int] = None,
+        mapping_loader: Optional[_RoomMappingLoader] = None,
+        confirmer_uses_room_id: bool = False,
     ) -> _Registration:
-        registration = _Registration(uid, room_id, listener, confirmer)
+        requested_room_id = requested_room_id or room_id
+        mapping_resolved = mapping_loader is None or (
+            uid > 0 and requested_room_id == room_id
+        )
+        registration = _Registration(
+            uid,
+            room_id,
+            listener,
+            confirmer,
+            requested_room_id,
+            mapping_loader,
+            confirmer_uses_room_id,
+            mapping_resolved,
+        )
         self._fallback_tasks.pop(room_id, None)
         self._registrations[room_id] = registration
         return registration
@@ -189,7 +224,10 @@ class LiveStatusCoordinator:
 
     async def poll_once(self) -> None:
         async with self._poll_lock:
-            uids = sorted({item.uid for item in self._registrations.values()})
+            await self._resolve_uid_mappings()
+            uids = sorted(
+                {item.uid for item in self._registrations.values() if item.uid > 0}
+            )
             await self._poll_uids(uids)
 
     async def start(self) -> None:
@@ -232,7 +270,10 @@ class LiveStatusCoordinator:
     async def _polling_loop(self) -> None:
         while True:
             async with self._poll_lock:
-                uids = sorted({item.uid for item in self._registrations.values()})
+                await self._resolve_uid_mappings()
+                uids = sorted(
+                    {item.uid for item in self._registrations.values() if item.uid > 0}
+                )
                 if uids:
                     canary_succeeded = await self._poll_uids([uids[0]], forced=True)
                     break
@@ -242,6 +283,80 @@ class LiveStatusCoordinator:
         while True:
             await asyncio.sleep(self._interval_seconds)
             await self.poll_once()
+
+    async def _resolve_uid_mappings(self) -> None:
+        now = self._clock()
+        groups: Dict[_RoomMappingLoader, List[_Registration]] = {}
+        for registration in self._registrations.values():
+            loader = registration.mapping_loader
+            if loader is None or registration.mapping_resolved:
+                continue
+            if now - registration.last_mapping_at < self._fallback_cooldown_seconds:
+                continue
+            registration.last_mapping_at = now
+            groups.setdefault(loader, []).append(registration)
+
+        for loader, registrations in groups.items():
+            requested_room_ids = tuple(
+                dict.fromkeys(item.requested_room_id for item in registrations)
+            )
+            try:
+                mappings = await loader(requested_room_ids)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                submit_exception(exc)
+                continue
+
+            updates: List[Tuple[_Registration, int, int]] = []
+            for registration in registrations:
+                if not any(
+                    item is registration for item in self._registrations.values()
+                ):
+                    continue
+                mapping = mappings.get(registration.requested_room_id)
+                if mapping is None:
+                    continue
+                real_room_id, uid = mapping
+                if (
+                    isinstance(real_room_id, bool)
+                    or not isinstance(real_room_id, int)
+                    or real_room_id <= 0
+                    or isinstance(uid, bool)
+                    or not isinstance(uid, int)
+                    or uid <= 0
+                ):
+                    continue
+                updates.append((registration, real_room_id, uid))
+
+            if updates:
+                self._apply_mapping_updates(updates)
+
+    def _apply_mapping_updates(
+        self, updates: Sequence[Tuple[_Registration, int, int]]
+    ) -> None:
+        registrations = dict(self._registrations)
+        for registration, real_room_id, uid in updates:
+            current_keys = [
+                room_id
+                for room_id, item in registrations.items()
+                if item is registration
+            ]
+            if not current_keys:
+                continue
+            for room_id in current_keys:
+                registrations.pop(room_id)
+
+            registration.uid = uid
+            registration.room_id = real_room_id
+            registration.mapping_resolved = True
+            duplicate = any(
+                item.uid == uid and item.room_id == real_room_id
+                for item in registrations.values()
+            )
+            if not duplicate:
+                registrations[real_room_id] = registration
+        self._registrations = registrations
 
     async def _poll_uids(self, uids: Sequence[int], forced: bool = False) -> bool:
         if not uids:
@@ -381,7 +496,7 @@ class LiveStatusCoordinator:
             if now - registration.last_fallback_at < self._fallback_cooldown_seconds:
                 return self._unknown_snapshot(registration)
             registration.last_fallback_at = now
-            task = asyncio.create_task(self._call_confirmer(registration.confirmer))
+            task = asyncio.create_task(self._call_confirmer(registration))
             self._fallback_tasks[registration.room_id] = (registration, task)
             self._fallback_count += 1
         try:
@@ -402,8 +517,12 @@ class LiveStatusCoordinator:
                 self._fallback_tasks.pop(registration.room_id, None)
 
     @staticmethod
-    async def _call_confirmer(confirmer: StatusConfirmer) -> StatusSnapshot:
-        return await confirmer()
+    async def _call_confirmer(registration: _Registration) -> StatusSnapshot:
+        if registration.confirmer_uses_room_id:
+            room_confirmer = cast(_RoomStatusConfirmer, registration.confirmer)
+            return await room_confirmer(registration.room_id)
+        status_confirmer = cast(StatusConfirmer, registration.confirmer)
+        return await status_confirmer()
 
     def _unknown_snapshot(self, registration: _Registration) -> StatusSnapshot:
         return StatusSnapshot(
