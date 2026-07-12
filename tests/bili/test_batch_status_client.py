@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from blrec.bili.anonymous_room_client import AnonymousRoomClient
 from blrec.bili.batch_status_client import (
@@ -80,6 +82,18 @@ def assert_anonymous_get(call: Tuple[str, Dict[str, Any]]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_empty_uid_list_skips_transport() -> None:
+    session = FakeSession()
+    client = BatchStatusClient(session)  # type: ignore[arg-type]
+
+    result = await client.fetch([], observed_at=100.0)
+
+    assert result.snapshots == {}
+    assert result.missing_uids == frozenset()
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_fetch_uses_anonymous_get_and_marks_partial_items_missing() -> None:
     session = FakeSession(
         FakeResponse(
@@ -111,6 +125,46 @@ async def test_fetch_uses_anonymous_get_and_marks_partial_items_missing() -> Non
     assert result.snapshots[10].source is StatusSource.BATCH
     assert result.snapshots[10].observation_key == '10:1000'
     assert result.missing_uids == frozenset({11, 12, 13})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('uid', True),
+        ('room_id', 20.5),
+        ('live_status', 1.0),
+        ('live_time', False),
+        ('live_time', 0.0),
+    ],
+)
+async def test_fetch_treats_lossy_numeric_fields_as_missing(
+    field: str, value: object
+) -> None:
+    item = room_data(uid=1, room_id=20, short_id=0, live_time=1000)
+    item[field] = value
+    session = FakeSession(FakeResponse({'code': 0, 'data': {'1': item}}))
+    client = BatchStatusClient(session)  # type: ignore[arg-type]
+
+    result = await client.fetch([1], observed_at=100.0)
+
+    assert result.snapshots == {}
+    assert result.missing_uids == frozenset({1})
+
+
+@pytest.mark.asyncio
+async def test_fetch_ignores_item_whose_uid_does_not_match_response_key() -> None:
+    session = FakeSession(
+        FakeResponse(
+            {'code': 0, 'data': {'10': room_data(uid=11, room_id=20, short_id=0)}}
+        )
+    )
+    client = BatchStatusClient(session)  # type: ignore[arg-type]
+
+    result = await client.fetch([11], observed_at=100.0)
+
+    assert result.snapshots == {}
+    assert result.missing_uids == frozenset({11})
 
 
 @pytest.mark.asyncio
@@ -182,6 +236,40 @@ async def test_anonymous_room_client_maps_requested_short_and_real_ids() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('field', 'value', 'requested_room_id'),
+    [('room_id', 200.5, 200), ('short_id', 123.5, 123), ('uid', 42.5, 200)],
+)
+async def test_uid_mapping_ignores_lossy_numeric_fields(
+    field: str, value: object, requested_room_id: int
+) -> None:
+    item = room_data()
+    item[field] = value
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'by_room_ids': {'200': item}}})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    mapping = await client.fetch_uid_mappings([requested_room_id])
+
+    assert mapping == {}
+
+
+@pytest.mark.asyncio
+async def test_uid_mapping_ignores_item_whose_room_id_does_not_match_key() -> None:
+    session = FakeSession(
+        FakeResponse(
+            {'code': 0, 'data': {'by_room_ids': {'999': room_data(room_id=200)}}}
+        )
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    mapping = await client.fetch_uid_mappings([200])
+
+    assert mapping == {}
+
+
+@pytest.mark.asyncio
 async def test_confirm_status_uses_anonymous_single_room_read_and_clock() -> None:
     session = FakeSession(FakeResponse({'code': 0, 'data': room_data()}))
     client = AnonymousRoomClient(session, clock=lambda: 321.5)  # type: ignore[arg-type]
@@ -205,6 +293,17 @@ async def test_confirm_status_uses_anonymous_single_room_read_and_clock() -> Non
 
 
 @pytest.mark.asyncio
+async def test_confirm_status_rejects_unrequested_room_identity() -> None:
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': room_data(room_id=200, short_id=999)})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    with pytest.raises(BatchProtocolError, match='invalid room item'):
+        await client.confirm_status(123)
+
+
+@pytest.mark.asyncio
 async def test_load_room_info_uses_anonymous_base_info_read() -> None:
     data = room_data(live_status=0, live_time='0000-00-00 00:00:00')
     session = FakeSession(
@@ -225,6 +324,21 @@ async def test_load_room_info_uses_anonymous_base_info_read() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_room_info_normalizes_model_parsing_failure() -> None:
+    data = room_data(live_status=0, live_time='0000-00-00 00:00:00')
+    data['cover'] = 123
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'by_room_ids': {'200': data}}})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    with pytest.raises(BatchProtocolError) as error:
+        await client.load_room_info(123)
+
+    assert str(error.value) == 'invalid room item'
+
+
+@pytest.mark.asyncio
 async def test_clients_reject_real_session_with_non_dummy_cookie_jar() -> None:
     session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar())
     try:
@@ -242,9 +356,97 @@ async def test_clients_reject_real_session_with_default_credentials() -> None:
         cookie_jar=aiohttp.DummyCookieJar(), headers={'Authorization': 'secret'}
     )
     try:
-        with pytest.raises(ValueError, match='credential headers'):
+        with pytest.raises(ValueError, match='default headers'):
             BatchStatusClient(session)
-        with pytest.raises(ValueError, match='credential headers'):
+        with pytest.raises(ValueError, match='default headers'):
             AnonymousRoomClient(session)
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'session_kwargs',
+    [
+        {'auth': aiohttp.BasicAuth('user', 'secret')},
+        {'trust_env': True},
+        {'headers': {'X-Bili-Device-Id': 'secret'}},
+    ],
+    ids=['basic-auth', 'trust-env', 'device-header'],
+)
+async def test_clients_reject_real_session_with_unsafe_defaults(
+    session_kwargs: Dict[str, Any],
+) -> None:
+    session = aiohttp.ClientSession(
+        cookie_jar=aiohttp.DummyCookieJar(), **session_kwargs
+    )
+    try:
+        with pytest.raises(ValueError, match='anonymous session'):
+            BatchStatusClient(session)
+        with pytest.raises(ValueError, match='anonymous session'):
+            AnonymousRoomClient(session)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_client_revalidates_session_before_request() -> None:
+    session = FakeSession()
+    client = BatchStatusClient(session)  # type: ignore[arg-type]
+    session.headers['X-Bili-Device-Id'] = 'secret'
+
+    with pytest.raises(ValueError, match='default headers'):
+        await client.fetch([10], observed_at=100.0)
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_room_client_revalidates_session_before_request() -> None:
+    session = FakeSession()
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+    session.headers['X-Bili-Device-Id'] = 'secret'
+
+    with pytest.raises(ValueError, match='default headers'):
+        await client.fetch_uid_mappings([123])
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_real_session_outbound_headers_are_anonymous() -> None:
+    received_headers: List[Dict[str, str]] = []
+
+    async def batch_handler(request: web.Request) -> web.Response:
+        received_headers.append(dict(request.headers))
+        return web.json_response(
+            {'code': 0, 'data': {'10': room_data(uid=10, room_id=20)}}
+        )
+
+    async def base_info_handler(request: web.Request) -> web.Response:
+        received_headers.append(dict(request.headers))
+        return web.json_response(
+            {'code': 0, 'data': {'by_room_ids': {'200': room_data()}}}
+        )
+
+    app = web.Application()
+    app.router.add_get(BatchStatusClient.PATH, batch_handler)
+    app.router.add_get(AnonymousRoomClient.BASE_INFO_PATH, base_info_handler)
+    server = TestServer(app)
+    await server.start_server()
+    session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+    try:
+        base_url = str(server.make_url('/')).rstrip('/')
+        batch_client = BatchStatusClient(session, base_url=base_url)
+        room_client = AnonymousRoomClient(session, base_url=base_url)
+
+        await batch_client.fetch([10], observed_at=100.0)
+        await room_client.fetch_uid_mappings([200])
+    finally:
+        await session.close()
+        await server.close()
+
+    assert len(received_headers) == 2
+    allowed_headers = {'accept', 'accept-encoding', 'host', 'user-agent'}
+    for headers in received_headers:
+        assert {name.lower() for name in headers} <= allowed_headers
