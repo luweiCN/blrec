@@ -1,6 +1,5 @@
+from .models import DeleteStrategy, PostprocessorStatus
 from .postprocessor import Postprocessor, PostprocessorEventListener
-from .models import PostprocessorStatus, DeleteStrategy
-
 
 __all__ = (
     'Postprocessor',

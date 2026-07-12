@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from enum import IntEnum
 from typing import Any, Final, Optional, TypeVar, cast
-from typing_extensions import TypeGuard
 
 import attr
+from typing_extensions import TypeGuard
 
 from ..utils.hash import cksum
 
@@ -160,7 +161,7 @@ class FlvTag(ABC, FlvTagHeader):
     @property
     @abstractmethod
     def header_size(self) -> int:
-        ...
+        pass
 
     @property
     def tag_size(self) -> int:
@@ -193,9 +194,9 @@ class FlvTag(ABC, FlvTagHeader):
 
     def is_the_same_as(self, another: FlvTag) -> bool:
         return (
-            self.tag_type == another.tag_type and
-            self.data_size == another.data_size and
-            self.body == another.body
+            self.tag_type == another.tag_type
+            and self.data_size == another.data_size
+            and self.body == another.body
         )
 
     def evolve(self: _T, **changes: Any) -> _T:

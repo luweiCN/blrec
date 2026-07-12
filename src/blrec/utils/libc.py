@@ -16,3 +16,4 @@ def malloc_trim(pad: int) -> bool:
         return False
     with suppress(Exception):
         return libc.malloc_trim(pad) == 1
+    return False

@@ -1,8 +1,7 @@
 from abc import ABC
-from typing import TypeVar, Type, final
+from typing import Type, TypeVar, final
 
-
-__all__ = 'Singleton',
+__all__ = ('Singleton',)
 
 
 _T = TypeVar('_T', bound='Singleton')

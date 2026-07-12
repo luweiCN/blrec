@@ -1,8 +1,7 @@
 import atexit
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _TimeoutError
-from typing import Callable, Any, Iterable, Mapping, TypeVar
-
+from typing import Any, Callable, Iterable, Mapping, TypeVar
 
 _T = TypeVar('_T')
 
@@ -15,7 +14,7 @@ def wait_for(
     *,
     args: Iterable[Any] = [],
     kwargs: Mapping[str, Any] = {},
-    timeout: float
+    timeout: float,
 ) -> _T:
     global _executor
     if _executor is None:

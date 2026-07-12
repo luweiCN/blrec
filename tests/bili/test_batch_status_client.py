@@ -532,7 +532,7 @@ async def test_clients_reject_real_session_with_default_credentials() -> None:
     ids=['basic-auth', 'trust-env', 'device-header'],
 )
 async def test_clients_reject_real_session_with_unsafe_defaults(
-    session_kwargs: Dict[str, Any],
+    session_kwargs: Dict[str, Any]
 ) -> None:
     session = aiohttp.ClientSession(
         cookie_jar=aiohttp.DummyCookieJar(), **session_kwargs

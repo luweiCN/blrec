@@ -179,9 +179,11 @@ class Live:
 
     async def check_connectivity(self) -> bool:
         try:
-            await self._session.head('https://live.bilibili.com/', timeout=3, headers={
-                'User-Agent': self._user_agent,
-            })
+            await self._session.head(
+                'https://live.bilibili.com/',
+                timeout=3,
+                headers={'User-Agent': self._user_agent},
+            )
             return True
         except Exception as e:
             self._logger.warning(f'Check connectivity failed: {repr(e)}')

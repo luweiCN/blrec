@@ -24,22 +24,22 @@ class LiveEventListener(EventListener):
     async def on_live_status_changed(
         self, current_status: LiveStatus, previous_status: LiveStatus
     ) -> None:
-        ...
+        pass
 
     async def on_live_began(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_live_ended(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_live_stream_available(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_live_stream_reset(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_room_changed(self, room_info: RoomInfo) -> None:
-        ...
+        pass
 
 
 class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMixin):

@@ -22,9 +22,9 @@ from tenacity import (
 
 from blrec.bili.live import Live
 from blrec.core import operators as core_ops
+from blrec.exception.helpers import format_exception
 from blrec.utils import operators as utils_ops
 from blrec.utils.hash import cksum
-from blrec.exception.helpers import format_exception
 
 from ..exceptions import FetchSegmentError, SegmentDataCorrupted
 

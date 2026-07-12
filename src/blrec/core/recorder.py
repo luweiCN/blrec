@@ -34,36 +34,36 @@ __all__ = 'RecorderEventListener', 'Recorder'
 
 class RecorderEventListener(EventListener):
     async def on_recording_started(self, recorder: Recorder) -> None:
-        ...
+        pass
 
     async def on_recording_finished(self, recorder: Recorder) -> None:
-        ...
+        pass
 
     async def on_recording_cancelled(self, recorder: Recorder) -> None:
-        ...
+        pass
 
     async def on_video_file_created(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_video_file_completed(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_danmaku_file_created(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_danmaku_file_completed(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_raw_danmaku_file_created(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_raw_danmaku_file_completed(
         self, recorder: Recorder, path: str
     ) -> None:
-        ...
+        pass
 
     async def on_cover_image_downloaded(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
 
 class Recorder(

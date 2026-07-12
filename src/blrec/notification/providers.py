@@ -39,7 +39,7 @@ class MessagingProvider(Singleton, ABC):
     async def send_message(
         self, title: str, content: str, msg_type: MessageType
     ) -> None:
-        ...
+        pass
 
 
 class EmailService(MessagingProvider):

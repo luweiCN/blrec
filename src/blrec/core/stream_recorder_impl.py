@@ -35,24 +35,24 @@ logging.getLogger(urllib3.__name__).setLevel(logging.WARNING)
 
 class StreamRecorderEventListener(EventListener):
     async def on_video_file_created(self, path: str, record_start_time: int) -> None:
-        ...
+        pass
 
     async def on_video_file_completed(self, path: str) -> None:
-        ...
+        pass
 
     async def on_stream_recording_interrupted(
         self, timestamp: float, duration: float
     ) -> None:
-        ...
+        pass
 
     async def on_stream_recording_recovered(self, timestamp: float) -> None:
-        ...
+        pass
 
     async def on_duration_lost(self, duration: float) -> None:
-        ...
+        pass
 
     async def on_stream_recording_completed(self) -> None:
-        ...
+        pass
 
 
 class StreamRecorderImpl(

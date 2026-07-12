@@ -1,14 +1,8 @@
-
 import asyncio
 
 from .exception_center import ExceptionCenter
 
-
-__all__ = (
-    'ExceptionSubmitter',
-    'submit_exception',
-    'exception_callback',
-)
+__all__ = ('ExceptionSubmitter', 'submit_exception', 'exception_callback')
 
 
 class ExceptionSubmitter:
@@ -28,5 +22,5 @@ def submit_exception(exc: BaseException) -> None:
 def exception_callback(future: asyncio.Future) -> None:  # type: ignore
     if not future.done() or future.cancelled():
         return
-    if (exc := future.exception()):
+    if exc := future.exception():
         submit_exception(exc)

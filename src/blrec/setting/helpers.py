@@ -2,7 +2,6 @@ from typing import TypeVar
 
 from pydantic.main import BaseModel
 
-
 __all__ = 'update_settings', 'shadow_settings'
 
 

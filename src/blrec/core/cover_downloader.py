@@ -21,7 +21,8 @@ __all__ = 'CoverDownloader', 'CoverDownloaderEventListener'
 
 
 class CoverDownloaderEventListener(EventListener):
-    async def on_cover_image_downloaded(self, path: str) -> None: ...
+    async def on_cover_image_downloaded(self, path: str) -> None:
+        pass
 
 
 class CoverSaveStrategy(Enum):

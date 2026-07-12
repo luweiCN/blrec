@@ -1,6 +1,9 @@
 from .helpers import shadow_settings, update_settings
 from .models import (
     DEFAULT_SETTINGS_FILE,
+    BarkMessageTemplateSettings,
+    BarkNotificationSettings,
+    BarkSettings,
     BiliApiSettings,
     DanmakuOptions,
     DanmakuSettings,
@@ -36,9 +39,6 @@ from .models import (
     TelegramMessageTemplateSettings,
     TelegramNotificationSettings,
     TelegramSettings,
-    BarkMessageTemplateSettings,
-    BarkNotificationSettings,
-    BarkSettings,
     WebHookSettings,
 )
 from .setting_manager import SettingsManager

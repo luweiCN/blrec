@@ -1,10 +1,9 @@
 import os
 from typing import Iterable
 
-
-from .io import DanmakuReader, DanmakuWriter
 from .combination import DanmakuCombinator, TimebaseType
 from .concatenation import DanmakuConcatenator
+from .io import DanmakuReader, DanmakuWriter
 
 
 async def has_danmu(path: str) -> bool:

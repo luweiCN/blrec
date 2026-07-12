@@ -1,17 +1,11 @@
-from enum import IntEnum
-from datetime import datetime
 from collections import OrderedDict
+from datetime import datetime
+from enum import IntEnum
 from typing import Any, BinaryIO, Dict, Final, List, Tuple
 
+from .struct_io import StructReader, StructWriter
 
-from .struct_io import StructWriter, StructReader
-
-
-__all__ = (
-    'Undefined',
-    'AMFReader',
-    'AMFWriter',
-)
+__all__ = ('Undefined', 'AMFReader', 'AMFWriter')
 
 
 class ScriptDataValueType(IntEnum):

@@ -28,19 +28,19 @@ __all__ = 'DanmakuClient', 'DanmakuListener', 'Danmaku', 'DanmakuCommand'
 
 class DanmakuListener(EventListener):
     async def on_client_connected(self) -> None:
-        ...
+        pass
 
     async def on_client_disconnected(self) -> None:
-        ...
+        pass
 
     async def on_client_reconnected(self) -> None:
-        ...
+        pass
 
     async def on_danmaku_received(self, danmu: Danmaku) -> None:
-        ...
+        pass
 
     async def on_error_occurred(self, error: Exception) -> None:
-        ...
+        pass
 
 
 class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):

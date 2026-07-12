@@ -3,12 +3,7 @@ from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel
 
-
-__all__ = (
-    'ResponseMessage',
-    'DataSelection',
-    'AliasKeyOfSettings',
-)
+__all__ = ('ResponseMessage', 'DataSelection', 'AliasKeyOfSettings')
 
 
 class ResponseMessage(BaseModel):

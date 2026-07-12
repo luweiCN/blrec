@@ -121,7 +121,6 @@ def concat(
                     last_video_sequence_header = tag
 
             def gather_tags(tag: FlvTag) -> None:
-                nonlocal gathered_tags
                 nonlocal action
                 nonlocal last_audio_sequence_header, last_video_sequence_header
                 if is_audio_sequence_header(tag):

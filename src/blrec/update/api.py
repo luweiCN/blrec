@@ -2,16 +2,11 @@ from http import HTTPStatus
 from typing import Any, Final, Optional
 
 import aiohttp
-from tenacity import (
-    retry,
-    wait_exponential,
-    stop_after_delay,
-)
+from tenacity import retry, stop_after_delay, wait_exponential
 
 from .typing import JsonResponse, Metadata
 
-
-__all__ = 'PypiApi',
+__all__ = ('PypiApi',)
 
 
 class PypiApi:
@@ -24,11 +19,7 @@ class PypiApi:
     def _make_url(cls, path: str) -> str:
         return cls.BASE_URL + path
 
-    @retry(
-        reraise=True,
-        stop=stop_after_delay(5),
-        wait=wait_exponential(0.1),
-    )
+    @retry(reraise=True, stop=stop_after_delay(5), wait=wait_exponential(0.1))
     async def _get(self, *args: Any, **kwds: Any) -> Optional[JsonResponse]:
         try:
             async with self._session.get(
@@ -41,9 +32,7 @@ class PypiApi:
             else:
                 raise
 
-    async def get_project_metadata(
-        self, project_name: str
-    ) -> Optional[Metadata]:
+    async def get_project_metadata(self, project_name: str) -> Optional[Metadata]:
         url = self._make_url(f'/{project_name}/json')
         return await self._get(url)
 

@@ -3,8 +3,7 @@ from __future__ import annotations
 from bitarray import bitarray
 from bitarray.util import ba2int
 
-
-__all__ = 'BitsReader',
+__all__ = ('BitsReader',)
 
 
 class BitsReader:
@@ -24,4 +23,4 @@ class BitsReader:
         assert n >= 0
         if n == 0:
             return bitarray('0')
-        return self._bits[self._ptr:self._ptr + n]
+        return self._bits[self._ptr : self._ptr + n]

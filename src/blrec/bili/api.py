@@ -10,8 +10,8 @@ import aiohttp
 from loguru import logger
 from tenacity import retry, stop_after_delay, wait_exponential
 
-from .exceptions import ApiRequestError
 from . import wbi
+from .exceptions import ApiRequestError
 from .typing import JsonResponse, QualityNumber, ResponseData
 
 __all__ = 'AppApi', 'WebApi'
@@ -63,10 +63,10 @@ class BaseApi(ABC):
             )
 
     @retry(reraise=True, stop=stop_after_delay(5), wait=wait_exponential(0.1))
-    async def _get_json_res(self, *args: Any, **kwds: Any) -> JsonResponse:
+    async def _get_json_res(self, url: str, *args: Any, **kwds: Any) -> JsonResponse:
         should_check_response = kwds.pop('check_response', True)
         kwds = {'timeout': self.timeout, 'headers': self.headers, **kwds}
-        async with self._session.get(*args, **kwds) as res:
+        async with self._session.get(url, *args, **kwds) as res:
             self._logger.trace('Request: {}', res.request_info)
             self._logger.trace('Response: {}', await res.text())
             try:
@@ -252,7 +252,7 @@ class WebApi(BaseApi):
 
     @retry(reraise=True, stop=stop_after_delay(20), wait=wait_exponential(0.1))
     async def _get_json_res(
-        self, url: str, with_wbi: bool = False, *args: Any, **kwds: Any
+        self, url: str, *args: Any, with_wbi: bool = False, **kwds: Any
     ) -> JsonResponse:
         if with_wbi:
             key = self.__class__._wbi_key

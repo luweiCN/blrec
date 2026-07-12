@@ -1,7 +1,6 @@
 import time
 
-
-__all__ = 'Statistics',
+__all__ = ('Statistics',)
 
 
 class Statistics:

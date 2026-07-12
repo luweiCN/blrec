@@ -1,15 +1,14 @@
 import re
-from enum import IntEnum
 from datetime import datetime
+from enum import IntEnum
 from typing import cast
 
 import attr
 from lxml import html
 from lxml.html.clean import clean_html
 
-from .typing import ResponseData
 from ..utils.url import ensure_scheme
-
+from .typing import ResponseData
 
 __all__ = 'LiveStatus', 'RoomInfo', 'UserInfo'
 

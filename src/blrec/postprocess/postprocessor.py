@@ -46,12 +46,12 @@ class PostprocessorEventListener(EventListener):
     async def on_video_postprocessing_completed(
         self, postprocessor: Postprocessor, path: str
     ) -> None:
-        ...
+        pass
 
     async def on_postprocessing_completed(
         self, postprocessor: Postprocessor, files: List[str]
     ) -> None:
-        ...
+        pass
 
 
 class Postprocessor(
