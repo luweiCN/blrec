@@ -468,10 +468,14 @@ async def test_unregister_during_confirmation_does_not_notify() -> None:
 
     polling = asyncio.create_task(coordinator.poll_once())
     await entered.wait()
+    fallback_entry = coordinator._fallback_tasks[1001]
     coordinator.unregister(1001)
+    assert 1001 not in coordinator._fallback_tasks
+    assert fallback_entry.task.cancelled() is False
     release.set()
     await polling
 
+    assert fallback_entry.task.cancelled() is False
     assert listener.await_count == 0
     assert registration.current is ObservedStatus.UNKNOWN
 
@@ -949,11 +953,39 @@ async def test_alias_mappings_fan_out_one_batch_and_one_confirmation() -> None:
         ObservedStatus.LIVE
     ]
     assert coordinator.metrics(100.0).registered_rooms == 2
+    entry = coordinator._fallback_tasks[2002]
+    assert set(entry.generations) == {123, 456}
+    assert set(entry.consumed) == {123, 456}
 
     coordinator.unregister(123)
     assert coordinator.metrics(100.0).registered_rooms == 1
+    assert coordinator._fallback_tasks[2002] is entry
+    assert set(entry.generations) == {456}
+    assert set(entry.consumed) == {456}
     coordinator.unregister(456)
     assert coordinator.metrics(100.0).registered_rooms == 0
+    assert 2002 not in coordinator._fallback_tasks
+
+
+@pytest.mark.asyncio
+async def test_reregister_releases_completed_fallback_generation() -> None:
+    client = ScriptedBatchClient(results=[batch_result(1, ObservedStatus.LIVE)])
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    old_registration = coordinator.register(
+        1,
+        1001,
+        AsyncMock(),
+        AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE)),
+    )
+    await coordinator.poll_once()
+    old_entry = coordinator._fallback_tasks[1001]
+    assert old_entry.generations[1001] is old_registration
+    assert old_entry.consumed[1001] is old_registration
+
+    new_registration = coordinator.register(1, 1001, AsyncMock(), AsyncMock())
+
+    assert 1001 not in coordinator._fallback_tasks
+    assert coordinator._registrations[1001] is new_registration
 
 
 @pytest.mark.asyncio

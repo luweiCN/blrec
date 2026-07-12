@@ -208,11 +208,35 @@ class LiveStatusCoordinator:
             confirmer_uses_room_id,
             mapping_resolved,
         )
+        previous = self._registrations.pop(registration_key, None)
+        if previous is not None:
+            self._remove_fallback_owner(previous)
         self._registrations[registration_key] = registration
         return registration
 
     def unregister(self, registration_key: int) -> None:
-        self._registrations.pop(registration_key, None)
+        registration = self._registrations.pop(registration_key, None)
+        if registration is not None:
+            self._remove_fallback_owner(registration)
+
+    def _remove_fallback_owner(self, registration: _Registration) -> None:
+        entry = self._fallback_tasks.get(registration.room_id)
+        if entry is None:
+            return
+        registration_key = registration.registration_key
+        if entry.generations.get(registration_key) is registration:
+            entry.generations.pop(registration_key)
+        if entry.consumed.get(registration_key) is registration:
+            entry.consumed.pop(registration_key)
+        has_current_owner = any(
+            item.room_id == registration.room_id
+            for item in self._registrations.values()
+        )
+        if (
+            not has_current_owner
+            and self._fallback_tasks.get(registration.room_id) is entry
+        ):
+            self._fallback_tasks.pop(registration.room_id)
 
     def resume(self) -> None:
         self._breaker.resume()
@@ -530,11 +554,21 @@ class LiveStatusCoordinator:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            entry.consumed[registration.registration_key] = registration
+            self._mark_fallback_consumed(entry, registration)
             submit_exception(exc)
             return self._unknown_snapshot(registration)
-        entry.consumed[registration.registration_key] = registration
+        self._mark_fallback_consumed(entry, registration)
         return snapshot
+
+    def _mark_fallback_consumed(
+        self, entry: _FallbackEntry, registration: _Registration
+    ) -> None:
+        registration_key = registration.registration_key
+        if (
+            self._registrations.get(registration_key) is registration
+            and entry.generations.get(registration_key) is registration
+        ):
+            entry.consumed[registration_key] = registration
 
     @staticmethod
     async def _call_confirmer(registration: _Registration) -> StatusSnapshot:
