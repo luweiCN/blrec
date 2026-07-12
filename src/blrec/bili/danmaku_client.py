@@ -99,6 +99,17 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._uid = extract_uid_from_cookie(cookie) or 0
         self._buvid = extract_buvid_from_cookie(cookie) or ''
 
+    @property
+    def room_id(self) -> int:
+        return self._room_id
+
+    def set_room_id(self, room_id: int) -> None:
+        if not self.stopped:
+            raise RuntimeError('room_id can only change while stopped')
+        self._room_id = room_id
+        self._logger_context = {'room_id': room_id}
+        self._logger = logger.bind(**self._logger_context)
+
     async def _do_start(self) -> None:
         await self._update_danmu_info()
         await self._connect()

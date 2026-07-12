@@ -159,7 +159,7 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
             }.get(danmu_cmd)
             if status is not None:
                 await self._status_sink(status)
-                return
+            return
 
         if danmu_cmd == DanmakuCommand.LIVE.value:
             await self._live.update_room_info()

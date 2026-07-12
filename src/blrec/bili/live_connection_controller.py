@@ -21,14 +21,18 @@ class LiveConnectionController:
         live: Live,
         danmaku: DanmakuClient,
         monitor: LiveMonitor,
-        room_info_loader: Callable[[], Awaitable[RoomInfo]],
+        room_info_loader: Callable[[int], Awaitable[RoomInfo]],
         status_sink: Optional[Callable[[int, ObservedStatus], Awaitable[None]]] = None,
+        registration_key: Optional[int] = None,
     ) -> None:
         self._live = live
         self._danmaku = danmaku
         self._monitor = monitor
         self._room_info_loader = room_info_loader
         self._status_sink = status_sink
+        self._registration_key = (
+            live.room_id if registration_key is None else registration_key
+        )
         self._active = False
         self._lock = asyncio.Lock()
 
@@ -38,15 +42,16 @@ class LiveConnectionController:
 
     async def on_wss_hint(self, status: ObservedStatus) -> None:
         if self._status_sink is not None:
-            await self._status_sink(self._live.room_id, status)
+            await self._status_sink(self._registration_key, status)
 
     async def on_confirmed_status(self, snapshot: StatusSnapshot) -> None:
         async with self._lock:
             if snapshot.status is ObservedStatus.LIVE:
                 if self._active:
                     return
-                room_info = await self._room_info_loader()
+                room_info = await self._room_info_loader(snapshot.room_id)
                 self._live.replace_room_info(room_info)
+                self._danmaku.set_room_id(room_info.room_id)
                 self._monitor.enable()
                 try:
                     await self._danmaku.start()
@@ -56,6 +61,8 @@ class LiveConnectionController:
                     await self._danmaku.stop()
                     raise
                 self._active = True
+                return
+            if snapshot.status not in (ObservedStatus.PREPARING, ObservedStatus.ROUND):
                 return
             if not self._active:
                 return

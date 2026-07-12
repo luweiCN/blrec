@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from blrec.bili.live_connection_controller import LiveConnectionController
-from blrec.bili.live_status import ObservedStatus, StatusSnapshot, StatusSource
+from blrec.bili.live_status import (
+    BatchStatusResult,
+    ObservedStatus,
+    StatusSnapshot,
+    StatusSource,
+)
 from blrec.bili.models import LiveStatus, RoomInfo
 
 
@@ -42,6 +47,12 @@ class FakeMonitor:
 
     async def apply_confirmed_status(self, status: ObservedStatus) -> None:
         self.confirmed.append(status)
+
+
+def mocked_danmaku() -> AsyncMock:
+    danmaku = AsyncMock()
+    danmaku.set_room_id = Mock()
+    return danmaku
 
 
 def live_snapshot() -> StatusSnapshot:
@@ -79,7 +90,7 @@ def room_info(
 
 @pytest.mark.asyncio
 async def test_offline_registration_does_not_start_websocket() -> None:
-    danmaku = AsyncMock()
+    danmaku = mocked_danmaku()
     monitor = FakeMonitor()
     controller = LiveConnectionController(
         FakeLive(), danmaku, monitor, AsyncMock(return_value=object())
@@ -91,9 +102,9 @@ async def test_offline_registration_does_not_start_websocket() -> None:
 
 @pytest.mark.asyncio
 async def test_confirmed_live_starts_once_and_offline_releases_wss() -> None:
-    danmaku = AsyncMock()
+    danmaku = mocked_danmaku()
     monitor = FakeMonitor()
-    validated_room_info = object()
+    validated_room_info = room_info()
     room_info_loader = AsyncMock(return_value=validated_room_info)
     live = FakeLive()
     controller = LiveConnectionController(live, danmaku, monitor, room_info_loader)
@@ -104,18 +115,39 @@ async def test_confirmed_live_starts_once_and_offline_releases_wss() -> None:
 
     danmaku.start.assert_awaited_once()
     danmaku.stop.assert_awaited_once()
-    room_info_loader.assert_awaited_once_with()
+    room_info_loader.assert_awaited_once_with(1001)
     assert live.room_info is validated_room_info
     assert monitor.confirmed == [ObservedStatus.LIVE, ObservedStatus.PREPARING]
     assert controller.active is False
 
 
 @pytest.mark.asyncio
-async def test_close_releases_an_active_connection_once() -> None:
-    danmaku = AsyncMock()
+@pytest.mark.parametrize('status', [ObservedStatus.UNKNOWN, ObservedStatus.STALE])
+async def test_unknown_status_keeps_active_connection(status: ObservedStatus) -> None:
+    danmaku = mocked_danmaku()
     monitor = FakeMonitor()
     controller = LiveConnectionController(
-        FakeLive(), danmaku, monitor, AsyncMock(return_value=object())
+        FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
+    )
+    await controller.on_confirmed_status(live_snapshot())
+    danmaku.reset_mock()
+
+    await controller.on_confirmed_status(
+        StatusSnapshot(1, 1001, status, 130.0, StatusSource.BATCH, 10, '1:10')
+    )
+
+    danmaku.stop.assert_not_awaited()
+    assert monitor.confirmed == [ObservedStatus.LIVE]
+    assert monitor.enabled is True
+    assert controller.active is True
+
+
+@pytest.mark.asyncio
+async def test_close_releases_an_active_connection_once() -> None:
+    danmaku = mocked_danmaku()
+    monitor = FakeMonitor()
+    controller = LiveConnectionController(
+        FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
     )
     await controller.on_confirmed_status(live_snapshot())
 
@@ -146,11 +178,11 @@ async def test_wss_hint_is_forwarded_with_room_id() -> None:
 @pytest.mark.asyncio
 async def test_failed_websocket_start_rolls_back_monitor() -> None:
     failure = RuntimeError('websocket failed')
-    danmaku = AsyncMock()
+    danmaku = mocked_danmaku()
     danmaku.start.side_effect = failure
     monitor = FakeMonitor()
     controller = LiveConnectionController(
-        FakeLive(), danmaku, monitor, AsyncMock(return_value=object())
+        FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
     )
 
     with pytest.raises(RuntimeError, match='websocket failed'):
@@ -205,6 +237,25 @@ async def test_external_monitor_forwards_wss_status_hints() -> None:
         call(ObservedStatus.ROUND),
     ]
     live.update_room_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_external_monitor_ignores_room_change_legacy_read() -> None:
+    from blrec.bili.danmaku_client import DanmakuCommand
+    from blrec.bili.live_monitor import LiveMonitor
+
+    live = Mock()
+    live.room_id = 1001
+    live.room_info = SimpleNamespace(live_status=LiveStatus.LIVE)
+    live.update_room_info = AsyncMock()
+    status_sink = AsyncMock()
+    monitor = LiveMonitor(Mock(), live, status_sink=status_sink)
+    monitor.enable()
+
+    await monitor.on_danmaku_received({'cmd': DanmakuCommand.ROOM_CHANGE.value})
+
+    live.update_room_info.assert_not_awaited()
+    status_sink.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -286,6 +337,25 @@ async def test_live_replaces_validated_room_info_and_real_room_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_danmaku_room_id_can_only_change_while_stopped() -> None:
+    from blrec.bili.danmaku_client import DanmakuClient
+
+    danmaku = object.__new__(DanmakuClient)
+    danmaku._stopped = True
+    danmaku._room_id = 1001
+    danmaku._logger_context = {'room_id': 1001}
+    danmaku._logger = Mock()
+
+    danmaku.set_room_id(2002)
+
+    assert danmaku.room_id == 2002
+    danmaku._stopped = False
+    with pytest.raises(RuntimeError, match='while stopped'):
+        danmaku.set_room_id(3003)
+    assert danmaku.room_id == 2002
+
+
+@pytest.mark.asyncio
 async def test_batch_task_registers_without_starting_websocket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -331,9 +401,109 @@ async def test_batch_task_registers_without_starting_websocket(
 
     await task.disable_monitor()
 
-    coordinator.unregister.assert_called_once_with(task.room_info.room_id)
+    coordinator.unregister.assert_called_once_with(1001)
     controller.close.assert_awaited_once()
     recorder.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_redirect_uses_canonical_room_with_stable_task_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from blrec.bili.live_status_coordinator import LiveStatusCoordinator
+
+    task_module = load_task_module(monkeypatch)
+
+    class CanonicalLive:
+        def __init__(self) -> None:
+            self.room_id = 123
+            self.room_info = room_info(uid=0, room_id=123)
+            self.user_info = SimpleNamespace(uid=0)
+
+        def replace_room_info(self, value: RoomInfo) -> None:
+            self.room_info = value
+            self.room_id = value.room_id
+
+    class CanonicalDanmaku:
+        def __init__(self, live: CanonicalLive) -> None:
+            self.live = live
+            self.room_id = 123
+            self.stopped = True
+            self.started = 0
+            self.stopped_count = 0
+
+        def set_room_id(self, value: int) -> None:
+            assert self.stopped is True
+            self.room_id = value
+
+        async def start(self) -> None:
+            assert self.live.room_id == 2002
+            assert self.room_id == 2002
+            self.stopped = False
+            self.started += 1
+
+        async def stop(self) -> None:
+            self.stopped = True
+            self.stopped_count += 1
+
+    canonical_live = CanonicalLive()
+    monkeypatch.setattr(task_module, 'Live', Mock(return_value=canonical_live))
+    batch_snapshot = StatusSnapshot(
+        7, 2002, ObservedStatus.LIVE, 100.0, StatusSource.BATCH, 10, '7:10'
+    )
+    batch_client = Mock()
+    batch_client.fetch = AsyncMock(
+        return_value=BatchStatusResult({7: batch_snapshot}, frozenset())
+    )
+    coordinator = LiveStatusCoordinator(batch_client, clock=lambda: 100.0)
+    observe_wss = AsyncMock(wraps=coordinator.observe_wss)
+    coordinator.observe_wss = observe_wss
+    anonymous = Mock()
+    anonymous.fetch_uid_mappings = AsyncMock(return_value={123: (2002, 7)})
+    anonymous.confirm_status = AsyncMock(
+        return_value=StatusSnapshot(
+            7, 2002, ObservedStatus.LIVE, 100.0, StatusSource.CONFIRMATION, 10, '7:10'
+        )
+    )
+    canonical_room_info = room_info(uid=7, room_id=2002)
+    anonymous.load_room_info = AsyncMock(return_value=canonical_room_info)
+    danmaku = CanonicalDanmaku(canonical_live)
+    monitor = FakeMonitor()
+    controller = LiveConnectionController(
+        canonical_live,
+        danmaku,
+        monitor,
+        anonymous.load_room_info,
+        status_sink=coordinator.observe_wss,
+        registration_key=123,
+    )
+    task = task_module.RecordTask(
+        123, live_status_coordinator=coordinator, anonymous_room_client=anonymous
+    )
+    task._danmaku_client = danmaku
+    task._live_monitor = monitor
+    task._connection_controller = controller
+
+    await task.enable_monitor()
+    await coordinator.poll_once()
+
+    anonymous.fetch_uid_mappings.assert_awaited_once_with((123,))
+    anonymous.confirm_status.assert_awaited_once_with(2002)
+    anonymous.load_room_info.assert_awaited_once_with(2002)
+    assert canonical_live.room_info is canonical_room_info
+    assert danmaku.started == 1
+    assert coordinator.metrics(100.0).registered_rooms == 1
+
+    await controller.on_wss_hint(ObservedStatus.PREPARING)
+    observe_wss.assert_awaited_once_with(123, ObservedStatus.PREPARING)
+    original_unregister = coordinator.unregister
+    unregister = Mock(side_effect=original_unregister)
+    coordinator.unregister = unregister
+    await task.disable_monitor()
+
+    unregister.assert_called_once_with(123)
+    assert coordinator.metrics(100.0).registered_rooms == 0
+    assert danmaku.stopped_count == 1
 
 
 @pytest.mark.asyncio
@@ -405,11 +575,12 @@ async def test_batch_task_builds_external_monitor_for_real_room(
     controller.on_wss_hint.assert_awaited_once_with(ObservedStatus.PREPARING)
     controller_factory.assert_called_once()
     room_info_loader = controller_factory.call_args.args[3]
-    assert await room_info_loader() is live.room_info
+    assert await room_info_loader(2002) is live.room_info
     anonymous.load_room_info.assert_awaited_once_with(2002)
     assert controller_factory.call_args.kwargs['status_sink'] == (
         coordinator.observe_wss
     )
+    assert controller_factory.call_args.kwargs['registration_key'] == 1001
 
 
 @pytest.mark.asyncio

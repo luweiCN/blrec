@@ -1,7 +1,7 @@
 import asyncio
 from collections import deque
 from typing import Deque, List, Optional, Sequence, Union
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -865,7 +865,7 @@ async def test_room_aware_confirmer_receives_real_room_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_redirected_missing_uid_mappings_are_resolved_and_deduplicated() -> None:
+async def test_redirected_missing_uid_mappings_preserve_registration_owners() -> None:
     client = ScriptedBatchClient()
     mapping_loader = AsyncMock(return_value={123: (2002, 7), 456: (2002, 7)})
     coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
@@ -883,7 +883,77 @@ async def test_redirected_missing_uid_mappings_are_resolved_and_deduplicated() -
 
     mapping_loader.assert_awaited_once_with((123, 456))
     assert client.calls == [[7]]
+    assert coordinator.metrics(100.0).registered_rooms == 2
+
+
+@pytest.mark.asyncio
+async def test_alias_mappings_fan_out_one_batch_and_one_confirmation() -> None:
+    live_snapshot = StatusSnapshot(
+        uid=7,
+        room_id=2002,
+        status=ObservedStatus.LIVE,
+        observed_at=100.0,
+        source=StatusSource.BATCH,
+        live_time=10,
+        observation_key='7:10',
+    )
+    confirmation_snapshot = StatusSnapshot(
+        uid=7,
+        room_id=2002,
+        status=ObservedStatus.LIVE,
+        observed_at=100.0,
+        source=StatusSource.CONFIRMATION,
+        live_time=10,
+        observation_key='7:10',
+    )
+    client = ScriptedBatchClient(
+        results=[BatchStatusResult({7: live_snapshot}, frozenset())]
+    )
+    mapping_loader = AsyncMock(return_value={123: (2002, 7), 456: (2002, 7)})
+    first_listener = AsyncMock()
+    second_listener = AsyncMock()
+    first_confirmer = AsyncMock(return_value=confirmation_snapshot)
+    second_confirmer = AsyncMock(return_value=confirmation_snapshot)
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    coordinator.register(
+        0,
+        123,
+        first_listener,
+        first_confirmer,
+        requested_room_id=123,
+        mapping_loader=mapping_loader,
+        confirmer_uses_room_id=True,
+    )
+    coordinator.register(
+        0,
+        456,
+        second_listener,
+        second_confirmer,
+        requested_room_id=456,
+        mapping_loader=mapping_loader,
+        confirmer_uses_room_id=True,
+    )
+
+    await coordinator.poll_once()
+
+    mapping_loader.assert_awaited_once_with((123, 456))
+    assert client.calls == [[7]]
+    assert first_confirmer.await_args_list + second_confirmer.await_args_list == [
+        call(2002)
+    ]
+    assert coordinator.fallback_count == 1
+    assert [item.args[0].status for item in first_listener.await_args_list] == [
+        ObservedStatus.LIVE
+    ]
+    assert [item.args[0].status for item in second_listener.await_args_list] == [
+        ObservedStatus.LIVE
+    ]
+    assert coordinator.metrics(100.0).registered_rooms == 2
+
+    coordinator.unregister(123)
     assert coordinator.metrics(100.0).registered_rooms == 1
+    coordinator.unregister(456)
+    assert coordinator.metrics(100.0).registered_rooms == 0
 
 
 @pytest.mark.asyncio

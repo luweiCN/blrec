@@ -80,6 +80,7 @@ class RecordTask:
         self._ready = False
         self._monitor_enabled: bool = False
         self._recorder_enabled: bool = False
+        self._monitor_registration_key: Optional[int] = None
 
     @property
     def ready(self) -> bool:
@@ -474,6 +475,7 @@ class RecordTask:
         if self._batch_monitoring:
             assert self._live_status_coordinator is not None
             assert self._anonymous_room_client is not None
+            self._monitor_registration_key = self._room_id
             self._live_status_coordinator.register(
                 uid=self._live.user_info.uid,
                 room_id=self._live.room_info.room_id,
@@ -494,7 +496,9 @@ class RecordTask:
 
         if self._batch_monitoring:
             assert self._live_status_coordinator is not None
-            self._live_status_coordinator.unregister(self._live.room_info.room_id)
+            assert self._monitor_registration_key is not None
+            self._live_status_coordinator.unregister(self._monitor_registration_key)
+            self._monitor_registration_key = None
             await self._connection_controller.close()
         else:
             self._live_monitor.disable()
@@ -562,8 +566,9 @@ class RecordTask:
             self._live,
             self._danmaku_client,
             self._live_monitor,
-            lambda: anonymous_room_client.load_room_info(self._live.room_info.room_id),
+            anonymous_room_client.load_room_info,
             status_sink=live_status_coordinator.observe_wss,
+            registration_key=self._room_id,
         )
 
     async def _forward_wss_hint(self, status: ObservedStatus) -> None:

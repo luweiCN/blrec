@@ -37,6 +37,7 @@ _RegistrationConfirmer = Union[StatusConfirmer, _RoomStatusConfirmer]
 
 @dataclass
 class _Registration:
+    registration_key: int
     uid: int
     room_id: int
     listener: LiveStatusListener
@@ -49,8 +50,15 @@ class _Registration:
     observation_key: Optional[str] = None
     negative_count: int = 0
     wss_negative: bool = False
-    last_fallback_at: float = float('-inf')
     last_mapping_at: float = float('-inf')
+
+
+@dataclass
+class _FallbackEntry:
+    task: asyncio.Task[StatusSnapshot]
+    started_at: float
+    generations: Dict[int, _Registration]
+    consumed: Dict[int, _Registration]
 
 
 class StatusCircuitBreaker:
@@ -161,9 +169,7 @@ class LiveStatusCoordinator:
         self._fallback_cooldown_seconds = fallback_cooldown_seconds
         self._clock = clock
         self._registrations: Dict[int, _Registration] = {}
-        self._fallback_tasks: Dict[
-            int, Tuple[_Registration, asyncio.Task[StatusSnapshot]]
-        ] = {}
+        self._fallback_tasks: Dict[int, _FallbackEntry] = {}
         self._breaker = StatusCircuitBreaker(clock=clock)
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._poll_lock = asyncio.Lock()
@@ -187,10 +193,12 @@ class LiveStatusCoordinator:
         confirmer_uses_room_id: bool = False,
     ) -> _Registration:
         requested_room_id = requested_room_id or room_id
+        registration_key = requested_room_id
         mapping_resolved = mapping_loader is None or (
             uid > 0 and requested_room_id == room_id
         )
         registration = _Registration(
+            registration_key,
             uid,
             room_id,
             listener,
@@ -200,26 +208,24 @@ class LiveStatusCoordinator:
             confirmer_uses_room_id,
             mapping_resolved,
         )
-        self._fallback_tasks.pop(room_id, None)
-        self._registrations[room_id] = registration
+        self._registrations[registration_key] = registration
         return registration
 
-    def unregister(self, room_id: int) -> None:
-        self._registrations.pop(room_id, None)
-        self._fallback_tasks.pop(room_id, None)
+    def unregister(self, registration_key: int) -> None:
+        self._registrations.pop(registration_key, None)
 
     def resume(self) -> None:
         self._breaker.resume()
 
-    async def observe_wss(self, room_id: int, status: ObservedStatus) -> None:
+    async def observe_wss(self, registration_key: int, status: ObservedStatus) -> None:
         if status not in (ObservedStatus.PREPARING, ObservedStatus.ROUND):
             return
-        registration = self._registrations.get(room_id)
+        registration = self._registrations.get(registration_key)
         if registration is None:
             return
         registration.wss_negative = True
         confirmed = await self._confirm(registration)
-        if self._registrations.get(room_id) is registration:
+        if self._registrations.get(registration_key) is registration:
             await self._apply_snapshot(registration, confirmed)
 
     async def poll_once(self) -> None:
@@ -335,28 +341,15 @@ class LiveStatusCoordinator:
     def _apply_mapping_updates(
         self, updates: Sequence[Tuple[_Registration, int, int]]
     ) -> None:
-        registrations = dict(self._registrations)
         for registration, real_room_id, uid in updates:
-            current_keys = [
-                room_id
-                for room_id, item in registrations.items()
-                if item is registration
-            ]
-            if not current_keys:
+            if (
+                self._registrations.get(registration.registration_key)
+                is not registration
+            ):
                 continue
-            for room_id in current_keys:
-                registrations.pop(room_id)
-
             registration.uid = uid
             registration.room_id = real_room_id
             registration.mapping_resolved = True
-            duplicate = any(
-                item.uid == uid and item.room_id == real_room_id
-                for item in registrations.values()
-            )
-            if not duplicate:
-                registrations[real_room_id] = registration
-        self._registrations = registrations
 
     async def _poll_uids(self, uids: Sequence[int], forced: bool = False) -> bool:
         if not uids:
@@ -423,7 +416,10 @@ class LiveStatusCoordinator:
             for registration in registrations:
                 if registration.uid != uid:
                     continue
-                if self._registrations.get(registration.room_id) is not registration:
+                if (
+                    self._registrations.get(registration.registration_key)
+                    is not registration
+                ):
                     continue
                 await self._apply_snapshot(registration, snapshot)
         return len(missing) > len(batch) / 2
@@ -444,7 +440,10 @@ class LiveStatusCoordinator:
             if same_broadcast:
                 return
             confirmed = await self._confirm(registration)
-            if self._registrations.get(registration.room_id) is not registration:
+            if (
+                self._registrations.get(registration.registration_key)
+                is not registration
+            ):
                 self._restore_registration_state(registration, previous)
                 return
             if confirmed.status is not ObservedStatus.LIVE:
@@ -489,32 +488,53 @@ class LiveStatusCoordinator:
             submit_exception(exc)
 
     async def _confirm(self, registration: _Registration) -> StatusSnapshot:
+        now = self._clock()
         entry = self._fallback_tasks.get(registration.room_id)
-        task = entry[1] if entry is not None and entry[0] is registration else None
-        if task is None:
-            now = self._clock()
-            if now - registration.last_fallback_at < self._fallback_cooldown_seconds:
-                return self._unknown_snapshot(registration)
-            registration.last_fallback_at = now
+        generation = (
+            entry.generations.get(registration.registration_key)
+            if entry is not None
+            else None
+        )
+        expired = (
+            entry is not None
+            and entry.task.done()
+            and now - entry.started_at >= self._fallback_cooldown_seconds
+        )
+        if (
+            entry is None
+            or expired
+            or generation is None
+            or generation is not registration
+        ):
             task = asyncio.create_task(self._call_confirmer(registration))
-            self._fallback_tasks[registration.room_id] = (registration, task)
+            entry = _FallbackEntry(
+                task=task,
+                started_at=now,
+                generations={
+                    item.registration_key: item
+                    for item in self._registrations.values()
+                    if item.room_id == registration.room_id
+                },
+                consumed={},
+            )
+            entry.generations[registration.registration_key] = registration
+            self._fallback_tasks[registration.room_id] = entry
             self._fallback_count += 1
+        elif (
+            entry.task.done()
+            and entry.consumed.get(registration.registration_key) is registration
+        ):
+            return self._unknown_snapshot(registration)
         try:
-            return await task
+            snapshot = await entry.task
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            entry.consumed[registration.registration_key] = registration
             submit_exception(exc)
             return self._unknown_snapshot(registration)
-        finally:
-            entry = self._fallback_tasks.get(registration.room_id)
-            if (
-                task.done()
-                and entry is not None
-                and entry[0] is registration
-                and entry[1] is task
-            ):
-                self._fallback_tasks.pop(registration.room_id, None)
+        entry.consumed[registration.registration_key] = registration
+        return snapshot
 
     @staticmethod
     async def _call_confirmer(registration: _Registration) -> StatusSnapshot:
