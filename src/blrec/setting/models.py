@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import ClassVar, Collection, Final, List, Optional, TypeVar
+from typing import ClassVar, Collection, Final, List, Literal, Optional, TypeVar
 
 import toml
 from pydantic import BaseModel as PydanticBaseModel
@@ -34,6 +34,7 @@ __all__ = (
     'SettingsIn',
     'SettingsOut',
     'BiliApiSettings',
+    'LiveMonitorSettings',
     'HeaderOptions',
     'HeaderSettings',
     'DanmakuOptions',
@@ -122,6 +123,13 @@ class BiliApiSettings(BaseModel):
     base_api_urls: List[str] = ['https://api.bilibili.com']
     base_live_api_urls: List[str] = ['https://api.live.bilibili.com']
     base_play_info_api_urls: List[str] = ['https://api.live.bilibili.com']
+
+
+class LiveMonitorSettings(BaseModel):
+    mode: Literal['batch', 'legacy'] = 'batch'
+    interval_seconds: Annotated[int, Field(ge=30, le=60)] = 30
+    batch_size: Annotated[int, Field(ge=1, le=29)] = 29
+    fallback_cooldown_seconds: Annotated[int, Field(ge=600, le=3600)] = 600
 
 
 class HeaderOptions(BaseModel):
@@ -642,6 +650,7 @@ class Settings(BaseModel):
     output: OutputSettings = OutputSettings()  # type: ignore
     logging: LoggingSettings = LoggingSettings()  # type: ignore
     bili_api: BiliApiSettings = BiliApiSettings()
+    live_monitor: LiveMonitorSettings = LiveMonitorSettings()
     header: HeaderSettings = HeaderSettings()
     danmaku: DanmakuSettings = DanmakuSettings()
     recorder: RecorderSettings = RecorderSettings()
@@ -693,6 +702,7 @@ class SettingsIn(BaseModel):
     output: Optional[OutputSettings] = None
     logging: Optional[LoggingSettings] = None
     bili_api: Optional[BiliApiSettings] = None
+    live_monitor: Optional[LiveMonitorSettings] = None
     header: Optional[HeaderSettings] = None
     danmaku: Optional[DanmakuSettings] = None
     recorder: Optional[RecorderSettings] = None

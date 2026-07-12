@@ -3,16 +3,16 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Optional, cast
 
-from ..exception import NotFoundError
+from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
 from ..notification import (
+    Bark,
     EmailService,
     Notifier,
     Pushdeer,
     Pushplus,
     Serverchan,
     Telegram,
-    Bark,
 )
 from ..webhook import WebHook
 from .helpers import shadow_settings, update_settings
@@ -51,6 +51,16 @@ class SettingsManager:
 
     async def change_settings(self, settings: SettingsIn) -> SettingsOut:
         changed = False
+        live_monitor = settings.live_monitor
+        mode_changed = (
+            'live_monitor' in settings.__fields_set__
+            and live_monitor is not None
+            and live_monitor.mode != self._settings.live_monitor.mode
+        )
+        if mode_changed and self._app.has_recording_task():
+            raise ForbiddenError(
+                'Cannot change live monitor mode while a task is recording'
+            )
 
         for name in settings.__fields_set__:
             src_sub_settings = getattr(settings, name)
@@ -74,8 +84,13 @@ class SettingsManager:
 
         if changed:
             await self.dump_settings()
+        if mode_changed:
+            await self._app.restart()
 
         return self.get_settings(cast(KeySetOfSettings, settings.__fields_set__))
+
+    def apply_live_monitor_settings(self) -> None:
+        pass
 
     def get_task_options(self, room_id: int) -> TaskOptions:
         if settings := self.find_task_settings(room_id):

@@ -18,7 +18,15 @@ from blrec.web.middlewares.route_redirect import RouteRedirectMiddleware
 
 from ..application import Application
 from . import security
-from .routers import application, settings, tasks, update, validation, websockets
+from .routers import (
+    application,
+    live_status,
+    settings,
+    tasks,
+    update,
+    validation,
+    websockets,
+)
 from .schemas import ResponseMessage
 
 _env_settings = EnvSettings()
@@ -112,12 +120,14 @@ application.app = app
 validation.app = app
 websockets.app = app
 update.app = app
+live_status.app = app
 api.include_router(tasks.router)
 api.include_router(settings.router)
 api.include_router(application.router)
 api.include_router(validation.router)
 api.include_router(websockets.router)
 api.include_router(update.router)
+api.include_router(live_status.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

@@ -1,37 +1,30 @@
+from __future__ import annotations
+
 import asyncio
 import os
+import time
 from contextlib import suppress
-from typing import Iterator, List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
+import aiohttp
 import attr
 import psutil
 from loguru import logger
+from pydantic import BaseModel as PydanticBaseModel
 
 from . import __prog__, __version__
-from .bili.helpers import ensure_room_id
-from .core.typing import MetaData
+from .bili.live_status import BreakerState
 from .disk_space import SpaceMonitor, SpaceReclaimer
-from .event.event_submitters import SpaceEventSubmitter
 from .exception import ExceptionHandler, ExistsError, exception_callback
-from .flv.operators import StreamProfile
-from .notification import (
-    BarkNotifier,
-    EmailNotifier,
-    PushdeerNotifier,
-    PushplusNotifier,
-    ServerchanNotifier,
-    TelegramNotifier,
-)
 from .setting import Settings, SettingsIn, SettingsManager, SettingsOut, TaskOptions
 from .setting.typing import KeySetOfSettings
-from .task import (
-    DanmakuFileDetail,
-    RecordTaskManager,
-    TaskData,
-    TaskParam,
-    VideoFileDetail,
-)
-from .webhook import WebHookEmitter
+from .utils.string import camel_case
+
+if TYPE_CHECKING:
+    from .bili.live_status_coordinator import LiveStatusCoordinator
+    from .core.typing import MetaData
+    from .flv.operators import StreamProfile
+    from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)
@@ -53,11 +46,32 @@ class AppStatus:
     num_threads: int
 
 
+class CoordinatorMetrics(PydanticBaseModel):
+    mode: str
+    interval_seconds: int
+    batch_size: int
+    registered_rooms: int
+    active_websockets: int
+    last_success_at: Optional[float]
+    snapshot_max_age_seconds: Optional[float]
+    missing_results: int
+    fallback_requests: int
+    breaker_state: BreakerState
+    breaker_reason: Optional[str]
+
+    class Config:
+        alias_generator = camel_case
+        allow_population_by_field_name = True
+        frozen = True
+
+
 class Application:
     def __init__(self, settings: Settings) -> None:
+        self._settings = settings
         self._out_dir = settings.output.out_dir
         self._settings_manager = SettingsManager(self, settings)
-        self._task_manager = RecordTaskManager(self._settings_manager)
+        self._live_status_session: Optional[aiohttp.ClientSession] = None
+        self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
 
     @property
     def info(self) -> AppInfo:
@@ -100,6 +114,7 @@ class Application:
     async def launch(self) -> None:
         self._setup_logger()
         logger.info('Launching Application...')
+        await self._setup_live_status_monitor()
         self._setup()
         logger.debug(f'Default umask {os.umask(0o000)}')
         logger.info(f'Launched Application v{__version__}')
@@ -128,6 +143,12 @@ class Application:
                 await self._loading_task
         await self._task_manager.stop_all_tasks(force=force)
         await self._task_manager.destroy_all_tasks()
+        coordinator = getattr(self, '_live_status_coordinator', None)
+        if coordinator is not None:
+            await coordinator.stop()
+        session = getattr(self, '_live_status_session', None)
+        if session is not None:
+            await session.close()
         self._destroy()
 
     async def restart(self) -> None:
@@ -139,7 +160,41 @@ class Application:
     def has_task(self, room_id: int) -> bool:
         return self._task_manager.has_task(room_id)
 
+    def has_recording_task(self) -> bool:
+        from .task import RunningStatus
+
+        return any(
+            data.task_status.running_status is RunningStatus.RECORDING
+            for data in self._task_manager.get_all_task_data()
+        )
+
+    def get_live_status_metrics(self) -> CoordinatorMetrics:
+        if self._live_status_coordinator is not None:
+            metrics = self._live_status_coordinator.metrics(time.monotonic())
+            return CoordinatorMetrics(**vars(metrics))
+
+        settings = self._settings.live_monitor
+        return CoordinatorMetrics(
+            mode='legacy',
+            interval_seconds=settings.interval_seconds,
+            batch_size=settings.batch_size,
+            registered_rooms=len(tuple(self._task_manager.get_all_task_data())),
+            active_websockets=0,
+            last_success_at=None,
+            snapshot_max_age_seconds=None,
+            missing_results=0,
+            fallback_requests=0,
+            breaker_state=BreakerState.CLOSED,
+            breaker_reason=None,
+        )
+
+    def resume_live_status_coordinator(self) -> None:
+        if self._live_status_coordinator is not None:
+            self._live_status_coordinator.resume()
+
     async def add_task(self, room_id: int) -> int:
+        from .bili.helpers import ensure_room_id
+
         room_id = await ensure_room_id(room_id)
 
         if self._task_manager.has_task(room_id):
@@ -294,6 +349,40 @@ class Application:
     ) -> TaskOptions:
         return await self._settings_manager.change_task_options(room_id, options)
 
+    async def _setup_live_status_monitor(self) -> None:
+        from .bili.anonymous_room_client import AnonymousRoomClient
+        from .bili.batch_status_client import BatchStatusClient
+        from .bili.live_status_coordinator import LiveStatusCoordinator
+        from .bili.net import connector, timeout
+        from .task import RecordTaskManager
+
+        settings = self._settings.live_monitor
+        self._live_status_session = None
+        self._live_status_coordinator = None
+        if settings.mode == 'legacy':
+            self._task_manager = RecordTaskManager(self._settings_manager)
+            return
+
+        session = aiohttp.ClientSession(
+            connector=connector,
+            connector_owner=False,
+            cookie_jar=aiohttp.DummyCookieJar(),
+            timeout=timeout,
+            trust_env=False,
+        )
+        coordinator = LiveStatusCoordinator(
+            BatchStatusClient(session),
+            interval_seconds=settings.interval_seconds,
+            batch_size=settings.batch_size,
+            fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
+        )
+        self._live_status_session = session
+        self._live_status_coordinator = coordinator
+        self._task_manager = RecordTaskManager(
+            self._settings_manager, coordinator, AnonymousRoomClient(session)
+        )
+        await coordinator.start()
+
     def _setup(self) -> None:
         self._setup_exception_handler()
         self._setup_space_monitor()
@@ -315,6 +404,8 @@ class Application:
         self._space_monitor.enable()
 
     def _setup_space_event_submitter(self) -> None:
+        from .event.event_submitters import SpaceEventSubmitter
+
         self._space_event_submitter = SpaceEventSubmitter(self._space_monitor)
 
     def _setup_space_reclaimer(self) -> None:
@@ -323,6 +414,15 @@ class Application:
         self._space_reclaimer.enable()
 
     def _setup_notifiers(self) -> None:
+        from .notification import (
+            BarkNotifier,
+            EmailNotifier,
+            PushdeerNotifier,
+            PushplusNotifier,
+            ServerchanNotifier,
+            TelegramNotifier,
+        )
+
         self._email_notifier = EmailNotifier()
         self._serverchan_notifier = ServerchanNotifier()
         self._pushdeer_notifier = PushdeerNotifier()
@@ -337,6 +437,8 @@ class Application:
         self._settings_manager.apply_bark_notification_settings()
 
     def _setup_webhooks(self) -> None:
+        from .webhook import WebHookEmitter
+
         self._webhook_emitter = WebHookEmitter()
         self._settings_manager.apply_webhooks_settings()
         self._webhook_emitter.enable()
