@@ -62,11 +62,23 @@ def _parse_nonnegative_int(value: object) -> int:
         raise ValueError('invalid integer')
     if isinstance(value, int):
         parsed = value
-    elif isinstance(value, str) and value.isascii() and value.isdecimal():
-        parsed = int(value)
+    elif isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise ValueError('invalid integer') from exc
+        if value != str(parsed):
+            raise ValueError('invalid integer')
     else:
         raise ValueError('invalid integer')
     if parsed < 0:
+        raise ValueError('invalid integer')
+    return parsed
+
+
+def _parse_positive_int(value: object) -> int:
+    parsed = _parse_nonnegative_int(value)
+    if parsed == 0:
         raise ValueError('invalid integer')
     return parsed
 
@@ -104,8 +116,8 @@ def _parse_status_snapshot(
     item: Mapping[str, Any], observed_at: float, source: StatusSource
 ) -> Optional[StatusSnapshot]:
     try:
-        uid = _parse_nonnegative_int(item['uid'])
-        room_id = _parse_nonnegative_int(item['room_id'])
+        uid = _parse_positive_int(item['uid'])
+        room_id = _parse_positive_int(item['room_id'])
         raw_status = _parse_nonnegative_int(item['live_status'])
         live_time = _parse_live_time(item.get('live_time'))
     except (KeyError, TypeError, ValueError):
@@ -167,7 +179,7 @@ class BatchStatusClient:
             if not isinstance(item, Mapping):
                 continue
             try:
-                response_uid = _parse_nonnegative_int(key)
+                response_uid = _parse_positive_int(key)
             except ValueError:
                 continue
             snapshot = _parse_status_snapshot(

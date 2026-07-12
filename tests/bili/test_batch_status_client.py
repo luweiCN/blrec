@@ -153,6 +153,45 @@ async def test_fetch_treats_lossy_numeric_fields_as_missing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('field', 'value', 'requested_uid', 'response_key'),
+    [
+        ('live_status', '00', 1, '1'),
+        ('uid', 0, 0, '0'),
+        ('room_id', 0, 1, '1'),
+        ('uid', '01', 1, '1'),
+        ('room_id', '020', 1, '1'),
+        ('live_time', '01000', 1, '1'),
+    ],
+)
+async def test_fetch_treats_noncanonical_or_nonpositive_fields_as_missing(
+    field: str, value: object, requested_uid: int, response_key: str
+) -> None:
+    item = room_data(uid=requested_uid, room_id=20, short_id=0, live_time=1000)
+    item[field] = value
+    session = FakeSession(FakeResponse({'code': 0, 'data': {response_key: item}}))
+    client = BatchStatusClient(session)  # type: ignore[arg-type]
+
+    result = await client.fetch([requested_uid], observed_at=100.0)
+
+    assert result.snapshots == {}
+    assert result.missing_uids == frozenset({requested_uid})
+
+
+@pytest.mark.asyncio
+async def test_fetch_ignores_noncanonical_response_uid_key() -> None:
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'01': room_data(uid=1, room_id=20)}})
+    )
+    client = BatchStatusClient(session)  # type: ignore[arg-type]
+
+    result = await client.fetch([1], observed_at=100.0)
+
+    assert result.snapshots == {}
+    assert result.missing_uids == frozenset({1})
+
+
+@pytest.mark.asyncio
 async def test_fetch_ignores_item_whose_uid_does_not_match_response_key() -> None:
     session = FakeSession(
         FakeResponse(
@@ -256,6 +295,51 @@ async def test_uid_mapping_ignores_lossy_numeric_fields(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('field', 'value', 'requested_room_id', 'response_key'),
+    [('room_id', 0, 123, '0'), ('uid', 0, 200, '200')],
+)
+async def test_uid_mapping_ignores_nonpositive_identity_fields(
+    field: str, value: object, requested_room_id: int, response_key: str
+) -> None:
+    item = room_data()
+    item[field] = value
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'by_room_ids': {response_key: item}}})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    mapping = await client.fetch_uid_mappings([requested_room_id])
+
+    assert mapping == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('field', 'value', 'requested_room_id', 'response_key'),
+    [
+        ('room_id', '0200', 200, '200'),
+        ('short_id', '0123', 123, '200'),
+        ('uid', '042', 200, '200'),
+        ('room_id', 200, 200, '0200'),
+    ],
+)
+async def test_uid_mapping_ignores_noncanonical_decimal_strings(
+    field: str, value: object, requested_room_id: int, response_key: str
+) -> None:
+    item = room_data()
+    item[field] = value
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'by_room_ids': {response_key: item}}})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    mapping = await client.fetch_uid_mappings([requested_room_id])
+
+    assert mapping == {}
+
+
+@pytest.mark.asyncio
 async def test_uid_mapping_ignores_item_whose_room_id_does_not_match_key() -> None:
     session = FakeSession(
         FakeResponse(
@@ -327,6 +411,79 @@ async def test_load_room_info_uses_anonymous_base_info_read() -> None:
 async def test_load_room_info_normalizes_model_parsing_failure() -> None:
     data = room_data(live_status=0, live_time='0000-00-00 00:00:00')
     data['cover'] = 123
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'by_room_ids': {'200': data}}})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    with pytest.raises(BatchProtocolError) as error:
+        await client.load_room_info(123)
+
+    assert str(error.value) == 'invalid room item'
+
+
+@pytest.mark.asyncio
+async def test_load_room_info_normalizes_canonical_numeric_strings() -> None:
+    data = room_data()
+    data.update(
+        {
+            'uid': '42',
+            'room_id': '200',
+            'short_id': '123',
+            'area_id': '1',
+            'area_name': 'Area 001',
+            'parent_area_id': '2',
+            'parent_area_name': 'Parent 002',
+            'live_status': '2',
+            'live_time': '1000',
+            'online': '3',
+            'title': 'Title 003',
+            'tags': 'Tags 004',
+            'description': 'Description 005',
+        }
+    )
+    session = FakeSession(
+        FakeResponse({'code': 0, 'data': {'by_room_ids': {'200': data}}})
+    )
+    client = AnonymousRoomClient(session)  # type: ignore[arg-type]
+
+    room_info = await client.load_room_info(123)
+
+    assert room_info.uid == 42
+    assert room_info.room_id == 200
+    assert room_info.short_room_id == 123
+    assert room_info.area_id == 1
+    assert room_info.parent_area_id == 2
+    assert room_info.live_status is LiveStatus.ROUND
+    assert room_info.live_start_time == 1000
+    assert room_info.online == 3
+    assert room_info.area_name == 'Area 001'
+    assert room_info.parent_area_name == 'Parent 002'
+    assert room_info.title == 'Title 003'
+    assert room_info.tags == 'Tags 004'
+    assert room_info.description == 'Description 005'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('area_id', True),
+        ('parent_area_id', 2.5),
+        ('online', '03'),
+        ('live_status', 1.0),
+        ('live_status', 3),
+        ('live_start_time', True),
+        ('live_start_time', 1000.5),
+        ('live_start_time', '01000'),
+        ('live_time', '2026-07-12 08:00:00.500000'),
+    ],
+)
+async def test_load_room_info_rejects_invalid_numeric_fields(
+    field: str, value: object
+) -> None:
+    data = room_data()
+    data[field] = value
     session = FakeSession(
         FakeResponse({'code': 0, 'data': {'by_room_ids': {'200': data}}})
     )

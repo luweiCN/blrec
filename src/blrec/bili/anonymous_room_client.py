@@ -6,7 +6,9 @@ import aiohttp
 from .batch_status_client import (
     BatchProtocolError,
     _decode_response_data,
+    _parse_live_time,
     _parse_nonnegative_int,
+    _parse_positive_int,
     _parse_status_snapshot,
     _raise_for_http_status,
     _validate_anonymous_session,
@@ -52,7 +54,7 @@ class AnonymousRoomClient:
                 continue
             real_room_id, short_room_id, uid = parsed
             try:
-                response_room_id = _parse_nonnegative_int(key)
+                response_room_id = _parse_positive_int(key)
             except ValueError:
                 continue
             if response_room_id != real_room_id:
@@ -85,7 +87,27 @@ class AnonymousRoomClient:
         if item is None:
             raise BatchProtocolError('room info is missing')
         try:
-            return RoomInfo.from_data(dict(item))
+            data = dict(item)
+            data['uid'] = _parse_positive_int(data['uid'])
+            data['room_id'] = _parse_positive_int(data['room_id'])
+            data['short_id'] = _parse_nonnegative_int(data['short_id'])
+            data['area_id'] = _parse_nonnegative_int(data['area_id'])
+            data['parent_area_id'] = _parse_nonnegative_int(data['parent_area_id'])
+            data['online'] = _parse_nonnegative_int(data['online'])
+
+            live_status = _parse_nonnegative_int(data['live_status'])
+            if live_status not in (0, 1, 2):
+                raise ValueError('invalid live_status')
+            data['live_status'] = live_status
+
+            if data.get('live_start_time') is not None:
+                raw_live_time = data['live_start_time']
+            elif data.get('live_time') is not None:
+                raw_live_time = data['live_time']
+            else:
+                raise ValueError('invalid live_time')
+            data['live_start_time'] = _parse_live_time(raw_live_time)
+            return RoomInfo.from_data(data)
         except Exception as exc:
             raise BatchProtocolError('invalid room item') from exc
 
@@ -114,9 +136,9 @@ class AnonymousRoomClient:
         if not isinstance(value, Mapping):
             return None
         try:
-            real_room_id = _parse_nonnegative_int(value['room_id'])
+            real_room_id = _parse_positive_int(value['room_id'])
             short_room_id = _parse_nonnegative_int(value.get('short_id', 0))
-            uid = _parse_nonnegative_int(value['uid'])
+            uid = _parse_positive_int(value['uid'])
         except (KeyError, TypeError, ValueError):
             return None
         return real_room_id, short_room_id, uid
@@ -131,7 +153,7 @@ class AnonymousRoomClient:
                 continue
             real_room_id, short_room_id, _ = parsed
             try:
-                response_room_id = _parse_nonnegative_int(key)
+                response_room_id = _parse_positive_int(key)
             except ValueError:
                 continue
             if response_room_id != real_room_id:
