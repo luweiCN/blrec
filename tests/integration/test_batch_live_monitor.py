@@ -304,3 +304,5 @@ async def test_58_room_batch_live_monitor_rollout_scenario() -> None:
     assert fake_batch.rate_limits == 1
     assert final_metrics.registered_rooms == 58
     assert final_metrics.active_websockets == 0
+    assert final_metrics.missing_results == 1
+    assert final_metrics.fallback_requests == 5
