@@ -1,4 +1,5 @@
-from typing import List
+import asyncio
+from typing import List, Optional
 
 import aiohttp
 import pytest
@@ -11,22 +12,42 @@ from blrec.setting.setting_manager import SettingsManager
 
 
 class OrderedTaskManager:
-    def __init__(self, calls: List[str]) -> None:
+    def __init__(self, calls: List[str], failure_stage: Optional[str] = None) -> None:
         self._calls = calls
+        self._failure_stage = failure_stage
 
     async def stop_all_tasks(self, force: bool = False) -> None:
         self._calls.append('tasks.stop')
+        if self._failure_stage == 'tasks.stop':
+            raise RuntimeError('tasks.stop')
 
     async def destroy_all_tasks(self) -> None:
         self._calls.append('tasks.destroy')
+        if self._failure_stage == 'tasks.destroy':
+            raise RuntimeError('tasks.destroy')
 
 
 class OrderedCoordinator:
-    def __init__(self, calls: List[str]) -> None:
+    def __init__(
+        self, calls: List[str], failure: Optional[BaseException] = None
+    ) -> None:
         self._calls = calls
+        self._failure = failure
 
     async def stop(self) -> None:
         self._calls.append('coordinator.stop')
+        if self._failure is not None:
+            raise self._failure
+
+
+class OrderedSession:
+    def __init__(self, calls: List[str]) -> None:
+        self._calls = calls
+        self.closed = False
+
+    async def close(self) -> None:
+        self._calls.append('session.close')
+        self.closed = True
 
 
 class SettingsApplication:
@@ -95,6 +116,127 @@ async def test_application_stops_coordinator_after_tasks() -> None:
         'coordinator.stop',
         'application.destroy',
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'failure_stage', ['tasks.stop', 'tasks.destroy', 'coordinator.stop']
+)
+async def test_application_exit_continues_cleanup_after_failure(
+    failure_stage: str,
+) -> None:
+    calls: List[str] = []
+    app = object.__new__(Application)
+    app._task_manager = OrderedTaskManager(calls, failure_stage)
+    coordinator_failure = (
+        RuntimeError('coordinator.stop')
+        if failure_stage == 'coordinator.stop'
+        else None
+    )
+    app._live_status_coordinator = OrderedCoordinator(calls, coordinator_failure)
+    app._live_status_session = OrderedSession(calls)
+    app._destroy = lambda: calls.append('application.destroy')
+
+    with pytest.raises(RuntimeError, match=failure_stage):
+        await app._exit()
+
+    assert calls == [
+        'tasks.stop',
+        'tasks.destroy',
+        'coordinator.stop',
+        'session.close',
+        'application.destroy',
+    ]
+    assert app._live_status_coordinator is None
+    assert app._live_status_session is None
+
+
+@pytest.mark.asyncio
+async def test_application_exit_does_not_swallow_cancellation() -> None:
+    calls: List[str] = []
+    app = object.__new__(Application)
+    app._task_manager = OrderedTaskManager(calls)
+    app._live_status_coordinator = OrderedCoordinator(calls, asyncio.CancelledError())
+    app._live_status_session = OrderedSession(calls)
+    app._destroy = lambda: calls.append('application.destroy')
+
+    with pytest.raises(asyncio.CancelledError):
+        await app._exit()
+
+    assert calls == [
+        'tasks.stop',
+        'tasks.destroy',
+        'coordinator.stop',
+        'session.close',
+        'application.destroy',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_application_launch_cleans_batch_monitor_when_setup_fails() -> None:
+    calls: List[str] = []
+    app = Application(Settings())
+    coordinator = OrderedCoordinator(calls)
+    session = OrderedSession(calls)
+    app._setup_logger = lambda: None
+    app._destroy = lambda: None
+
+    async def setup_live_status_monitor() -> None:
+        calls.append('coordinator.start')
+        app._live_status_coordinator = coordinator  # type: ignore[assignment]
+        app._live_status_session = session  # type: ignore[assignment]
+
+    def fail_setup() -> None:
+        raise RuntimeError('application.setup')
+
+    app._setup_live_status_monitor = setup_live_status_monitor  # type: ignore
+    app._setup = fail_setup
+
+    try:
+        with pytest.raises(RuntimeError, match='application.setup'):
+            await app.launch()
+
+        assert calls == ['coordinator.start', 'coordinator.stop', 'session.close']
+        assert session.closed
+        assert app._live_status_coordinator is None
+        assert app._live_status_session is None
+    finally:
+        if app._live_status_coordinator is not None:
+            await app._live_status_coordinator.stop()
+        if app._live_status_session is not None:
+            await app._live_status_session.close()
+
+
+@pytest.mark.asyncio
+async def test_application_closes_session_when_coordinator_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from blrec.bili.live_status_coordinator import LiveStatusCoordinator
+
+    calls: List[str] = []
+    session = OrderedSession(calls)
+    session.cookie_jar = aiohttp.DummyCookieJar()  # type: ignore[attr-defined]
+    session.headers = {}  # type: ignore[attr-defined]
+    session.auth = None  # type: ignore[attr-defined]
+    session.trust_env = False  # type: ignore[attr-defined]
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: session)
+
+    async def fail_start(coordinator: LiveStatusCoordinator) -> None:
+        raise RuntimeError('coordinator.start')
+
+    monkeypatch.setattr(LiveStatusCoordinator, 'start', fail_start)
+    app = Application(Settings())
+
+    try:
+        with pytest.raises(RuntimeError, match='coordinator.start'):
+            await app._setup_live_status_monitor()
+
+        assert session.closed
+        assert app._live_status_coordinator is None
+        assert app._live_status_session is None
+    finally:
+        if not session.closed:
+            await session.close()
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Iterator, List, Optional
+from typing import TYPE_CHECKING, Awaitable, Iterator, List, Optional
 
 import aiohttp
 import attr
@@ -65,6 +65,28 @@ class CoordinatorMetrics(PydanticBaseModel):
         frozen = True
 
 
+def _raise_teardown_errors(errors: List[BaseException]) -> None:
+    if not errors:
+        return
+    primary = next(
+        (error for error in errors if isinstance(error, asyncio.CancelledError)),
+        errors[0],
+    )
+    for error in errors:
+        if error is not primary:
+            logger.error('Additional teardown error: {!r}', error)
+    raise primary
+
+
+async def _collect_teardown_error(
+    operation: Awaitable[None], errors: List[BaseException]
+) -> None:
+    try:
+        await operation
+    except BaseException as error:
+        errors.append(error)
+
+
 class Application:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -115,7 +137,11 @@ class Application:
         self._setup_logger()
         logger.info('Launching Application...')
         await self._setup_live_status_monitor()
-        self._setup()
+        try:
+            self._setup()
+        except BaseException as error:
+            await self._teardown_live_status_monitor_after_failure(error)
+            raise
         logger.debug(f'Default umask {os.umask(0o000)}')
         logger.info(f'Launched Application v{__version__}')
         self._loading_task = asyncio.create_task(self._task_manager.load_all_tasks())
@@ -137,19 +163,24 @@ class Application:
         logger.info('Aborted Application')
 
     async def _exit(self, force: bool = False) -> None:
+        errors: List[BaseException] = []
         if hasattr(self, '_loading_task'):
             self._loading_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._loading_task
-        await self._task_manager.stop_all_tasks(force=force)
-        await self._task_manager.destroy_all_tasks()
-        coordinator = getattr(self, '_live_status_coordinator', None)
-        if coordinator is not None:
-            await coordinator.stop()
-        session = getattr(self, '_live_status_session', None)
-        if session is not None:
-            await session.close()
-        self._destroy()
+            try:
+                with suppress(asyncio.CancelledError):
+                    await self._loading_task
+            except BaseException as error:
+                errors.append(error)
+        await _collect_teardown_error(
+            self._task_manager.stop_all_tasks(force=force), errors
+        )
+        await _collect_teardown_error(self._task_manager.destroy_all_tasks(), errors)
+        await _collect_teardown_error(self._teardown_live_status_monitor(), errors)
+        try:
+            self._destroy()
+        except BaseException as error:
+            errors.append(error)
+        _raise_teardown_errors(errors)
 
     async def restart(self) -> None:
         logger.info('Restarting Application...')
@@ -370,18 +401,44 @@ class Application:
             timeout=timeout,
             trust_env=False,
         )
-        coordinator = LiveStatusCoordinator(
-            BatchStatusClient(session),
-            interval_seconds=settings.interval_seconds,
-            batch_size=settings.batch_size,
-            fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
-        )
         self._live_status_session = session
-        self._live_status_coordinator = coordinator
-        self._task_manager = RecordTaskManager(
-            self._settings_manager, coordinator, AnonymousRoomClient(session)
-        )
-        await coordinator.start()
+        try:
+            coordinator = LiveStatusCoordinator(
+                BatchStatusClient(session),
+                interval_seconds=settings.interval_seconds,
+                batch_size=settings.batch_size,
+                fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
+            )
+            self._live_status_coordinator = coordinator
+            self._task_manager = RecordTaskManager(
+                self._settings_manager, coordinator, AnonymousRoomClient(session)
+            )
+            await coordinator.start()
+        except BaseException as error:
+            await self._teardown_live_status_monitor_after_failure(error)
+            raise
+
+    async def _teardown_live_status_monitor_after_failure(
+        self, original_error: BaseException
+    ) -> None:
+        try:
+            await self._teardown_live_status_monitor()
+        except asyncio.CancelledError as cleanup_error:
+            raise cleanup_error from original_error
+        except BaseException as cleanup_error:
+            raise original_error from cleanup_error
+
+    async def _teardown_live_status_monitor(self) -> None:
+        coordinator = getattr(self, '_live_status_coordinator', None)
+        session = getattr(self, '_live_status_session', None)
+        self._live_status_coordinator = None
+        self._live_status_session = None
+        errors: List[BaseException] = []
+        if coordinator is not None:
+            await _collect_teardown_error(coordinator.stop(), errors)
+        if session is not None:
+            await _collect_teardown_error(session.close(), errors)
+        _raise_teardown_errors(errors)
 
     def _setup(self) -> None:
         self._setup_exception_handler()

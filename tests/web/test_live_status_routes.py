@@ -33,6 +33,22 @@ class StatusApplication:
         self.resumed = True
 
 
+@pytest.fixture(autouse=True)
+def restore_security_state() -> Iterator[None]:
+    api_key = security.api_key
+    whitelist = security.whitelist.copy()
+    blacklist = security.blacklist.copy()
+    attempting_clients = security.attempting_clients.copy()
+    yield
+    security.api_key = api_key
+    security.whitelist.clear()
+    security.whitelist.update(whitelist)
+    security.blacklist.clear()
+    security.blacklist.update(blacklist)
+    security.attempting_clients.clear()
+    security.attempting_clients.update(attempting_clients)
+
+
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     application = StatusApplication()
@@ -61,6 +77,20 @@ def test_get_live_status(client: TestClient) -> None:
 def test_resume_live_status_requires_api_key(client: TestClient) -> None:
     response = client.post('/api/v1/live-status/resume')
     assert response.status_code == 401
+
+
+def test_resume_live_status_rejects_when_api_key_is_not_configured() -> None:
+    application = StatusApplication()
+    api = FastAPI()
+    api.dependency_overrides[live_status.get_application] = lambda: application
+    api.include_router(live_status.router, prefix='/api/v1')
+    security.api_key = ''
+
+    with TestClient(api, raise_server_exceptions=False) as test_client:
+        response = test_client.post('/api/v1/live-status/resume')
+
+    assert response.status_code == 401
+    assert not application.resumed
 
 
 def test_resume_live_status_accepts_existing_api_key(client: TestClient) -> None:
