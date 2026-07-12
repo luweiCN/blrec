@@ -142,6 +142,9 @@ cython_debug/
 # private folders
 _*/
 
+# local git worktrees
+.worktrees/
+
 # vscode
 .vscode/
 .history/
