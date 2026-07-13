@@ -300,16 +300,16 @@ class AccountManager:
             identity = await self._validate_identity(bundle)
         async with self._account_create_lock:
             if account_id is None:
-                row = await self._database.fetchone(
+                existing_row = await self._database.fetchone(
                     'SELECT id FROM bili_accounts WHERE uid=?', (bundle.mid,)
                 )
-                if row is None:
+                if existing_row is None:
                     value = await self._database.scalar(
                         'SELECT COALESCE(MAX(id),0)+1 FROM bili_accounts'
                     )
                     account_id = int(value)
                 else:
-                    account_id = int(row['id'])
+                    account_id = int(existing_row['id'])
             version = await self._store.put(
                 account_id=account_id,
                 account_uid=bundle.mid,
@@ -319,9 +319,9 @@ class AccountManager:
                 cipher=self._cipher,
                 now=int(self._clock()),
             )
-        row = await self._account_row(account_id)
-        assert int(row['credential_version']) == version
-        return self._account_view(row)
+        account_row = await self._account_row(account_id)
+        assert int(account_row['credential_version']) == version
+        return self._account_view(account_row)
 
     async def list_accounts(self) -> List[AccountView]:
         rows = await self._database.fetchall(
@@ -329,7 +329,7 @@ class AccountManager:
             'credential_expires_at,created_at,state '
             'FROM bili_accounts ORDER BY id'
         )
-        return [self._account_view(row) for row in rows]
+        return [self._account_view(dict(row)) for row in rows]
 
     async def refresh_account(self, account_id: int) -> int:
         row = await self._account_row(account_id)
