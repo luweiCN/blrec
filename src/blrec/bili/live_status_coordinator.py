@@ -274,6 +274,14 @@ class LiveStatusCoordinator:
             )
             await self._poll_uids(uids)
 
+    async def reconfigure(
+        self, *, interval_seconds: int, batch_size: int, fallback_cooldown_seconds: int
+    ) -> None:
+        async with self._poll_lock:
+            self._interval_seconds = interval_seconds
+            self._batch_size = batch_size
+            self._fallback_cooldown_seconds = fallback_cooldown_seconds
+
     async def start(self) -> None:
         if self._polling_task is not None and not self._polling_task.done():
             return

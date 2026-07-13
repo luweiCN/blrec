@@ -1,11 +1,21 @@
 import asyncio
-from typing import List, Optional
+from types import SimpleNamespace
+from typing import Iterator, List, Optional, Sequence
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 from pydantic import ValidationError
 
 from blrec.application import Application
+from blrec.bili.batch_status_client import BatchStatusClient
+from blrec.bili.live_status import (
+    BatchStatusResult,
+    ObservedStatus,
+    StatusSnapshot,
+    StatusSource,
+)
+from blrec.bili.live_status_coordinator import LiveStatusCoordinator
 from blrec.exception import ForbiddenError
 from blrec.setting.models import LiveMonitorSettings, Settings, SettingsIn
 from blrec.setting.setting_manager import SettingsManager
@@ -60,6 +70,49 @@ class SettingsApplication:
 
     async def restart(self) -> None:
         self.restart_count += 1
+
+
+class BlockingStatusClient(BatchStatusClient):
+    def __init__(self) -> None:
+        self.calls: List[List[int]] = []
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def fetch(
+        self, uids: Sequence[int], *, observed_at: float
+    ) -> BatchStatusResult:
+        self.calls.append(list(uids))
+        if len(self.calls) == 1:
+            self.entered.set()
+            await self.release.wait()
+        return BatchStatusResult(
+            {
+                uid: StatusSnapshot(
+                    uid=uid,
+                    room_id=uid + 1000,
+                    status=ObservedStatus.PREPARING,
+                    observed_at=observed_at,
+                    source=StatusSource.BATCH,
+                    live_time=0,
+                    observation_key=None,
+                )
+                for uid in uids
+            },
+            frozenset(),
+        )
+
+
+class LegacyTaskManager:
+    def __init__(self, monitor_states: Sequence[bool]) -> None:
+        self._monitor_states = monitor_states
+        self.iterations = 0
+
+    def get_all_task_data(self) -> Iterator[SimpleNamespace]:
+        self.iterations += 1
+        for monitor_enabled in self._monitor_states:
+            yield SimpleNamespace(
+                task_status=SimpleNamespace(monitor_enabled=monitor_enabled)
+            )
 
 
 def test_live_monitor_settings_reject_unsafe_interval() -> None:
@@ -135,6 +188,70 @@ async def test_partial_live_monitor_update_preserves_legacy_mode() -> None:
     assert result.live_monitor == current.live_monitor
     assert application.restart_count == 0
     assert dump_count == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_settings_reconfigure_running_coordinator() -> None:
+    current = Settings(
+        live_monitor=LiveMonitorSettings(
+            mode='batch',
+            interval_seconds=30,
+            batch_size=29,
+            fallback_cooldown_seconds=600,
+        )
+    )
+    client = BlockingStatusClient()
+    coordinator = LiveStatusCoordinator(client)
+    for uid in range(1, 31):
+        coordinator.register(uid, uid + 1000, AsyncMock(), AsyncMock())
+    application = object.__new__(Application)
+    application._settings = current
+    application._live_status_coordinator = coordinator
+    manager = SettingsManager(application, current)
+
+    async def skip_dump() -> None:
+        return None
+
+    manager.dump_settings = skip_dump  # type: ignore[assignment]
+    polling = asyncio.create_task(coordinator.poll_once())
+    await client.entered.wait()
+    update = SettingsIn.parse_obj(
+        {
+            'liveMonitor': {
+                'intervalSeconds': 45,
+                'batchSize': 10,
+                'fallbackCooldownSeconds': 1200,
+            }
+        }
+    )
+    changing = asyncio.create_task(manager.change_settings(update))
+    await asyncio.sleep(0)
+    changed_during_poll = changing.done()
+
+    client.release.set()
+    await polling
+    result = await changing
+    client.calls.clear()
+    await coordinator.poll_once()
+
+    assert changed_during_poll is False
+    assert result.live_monitor == current.live_monitor
+    assert coordinator.metrics(100.0).interval_seconds == 45
+    assert coordinator.metrics(100.0).batch_size == 10
+    assert coordinator._fallback_cooldown_seconds == 1200
+    assert [len(call) for call in client.calls] == [10, 10, 10]
+
+
+def test_legacy_metrics_count_monitor_enabled_tasks_with_one_iteration() -> None:
+    application = Application(Settings(live_monitor=LiveMonitorSettings(mode='legacy')))
+    task_manager = LegacyTaskManager([True, False])
+    application._task_manager = task_manager  # type: ignore[assignment]
+
+    metrics = application.get_live_status_metrics()
+
+    assert metrics.registered_rooms == 2
+    assert metrics.active_websockets == 1
+    assert task_manager.iterations == 1
 
 
 @pytest.mark.asyncio

@@ -90,8 +90,16 @@ class SettingsManager:
 
         return self.get_settings(cast(KeySetOfSettings, settings.__fields_set__))
 
-    def apply_live_monitor_settings(self) -> None:
-        pass
+    async def apply_live_monitor_settings(self) -> None:
+        coordinator = getattr(self._app, '_live_status_coordinator', None)
+        if coordinator is None:
+            return
+        settings = self._settings.live_monitor
+        await coordinator.reconfigure(
+            interval_seconds=settings.interval_seconds,
+            batch_size=settings.batch_size,
+            fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
+        )
 
     def get_task_options(self, room_id: int) -> TaskOptions:
         if settings := self.find_task_settings(room_id):

@@ -205,12 +205,17 @@ class Application:
             return CoordinatorMetrics(**vars(metrics))
 
         settings = self._settings.live_monitor
+        registered_rooms = 0
+        active_websockets = 0
+        for task_data in self._task_manager.get_all_task_data():
+            registered_rooms += 1
+            active_websockets += task_data.task_status.monitor_enabled
         return CoordinatorMetrics(
             mode='legacy',
             interval_seconds=settings.interval_seconds,
             batch_size=settings.batch_size,
-            registered_rooms=len(tuple(self._task_manager.get_all_task_data())),
-            active_websockets=0,
+            registered_rooms=registered_rooms,
+            active_websockets=active_websockets,
             last_success_at=None,
             snapshot_max_age_seconds=None,
             missing_results=0,
