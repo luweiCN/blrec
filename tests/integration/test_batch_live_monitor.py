@@ -1,9 +1,13 @@
-from typing import Callable, Dict, List, Sequence, Set
+import asyncio
+import importlib
+from typing import TYPE_CHECKING, Callable, Dict, List, Sequence, Set, Tuple
 
 import pytest
 
 from blrec.bili.batch_status_client import BatchProtocolError, BatchStatusClient
+from blrec.bili.live import Live
 from blrec.bili.live_connection_controller import LiveConnectionController
+from blrec.bili.live_monitor import LiveEventListener, LiveMonitor
 from blrec.bili.live_status import (
     BatchStatusResult,
     BreakerState,
@@ -12,7 +16,10 @@ from blrec.bili.live_status import (
     StatusSource,
 )
 from blrec.bili.live_status_coordinator import LiveStatusCoordinator
-from blrec.bili.models import LiveStatus, RoomInfo
+from blrec.bili.models import LiveStatus, RoomInfo, UserInfo
+
+if TYPE_CHECKING:
+    from blrec.task.task import RecordTask
 
 LIVE_UIDS = frozenset(range(1, 6))
 LIVE_TIMES = {uid: 1_700_000_000 + uid for uid in LIVE_UIDS}
@@ -119,7 +126,13 @@ class FakeSingleRoom:
         self.live_uids: Set[int] = set()
         self.confirmation_times: List[float] = []
 
-    async def confirm_status(self, uid: int) -> StatusSnapshot:
+    async def fetch_uid_mappings(
+        self, room_ids: Sequence[int]
+    ) -> Dict[int, Tuple[int, int]]:
+        return {room_id: (room_id, room_id - 1000) for room_id in room_ids}
+
+    async def confirm_status(self, room_id: int) -> StatusSnapshot:
+        uid = room_id - 1000
         self.confirmation_times.append(self.clock())
         status = (
             ObservedStatus.LIVE if uid in self.live_uids else ObservedStatus.PREPARING
@@ -144,9 +157,12 @@ class FakeDanmaku:
         self.total_start_calls = 0
         self.max_concurrent_connections = 0
         self.active_connections = 0
+        self.connections: List['FakeDanmakuConnection'] = []
 
     def connection(self) -> 'FakeDanmakuConnection':
-        return FakeDanmakuConnection(self)
+        connection = FakeDanmakuConnection(self)
+        self.connections.append(connection)
+        return connection
 
 
 class FakeDanmakuConnection:
@@ -154,6 +170,15 @@ class FakeDanmakuConnection:
         self.fleet = fleet
         self.active = False
         self.room_id = 0
+        self.listeners: List[object] = []
+
+    def add_listener(self, listener: object) -> None:
+        if listener not in self.listeners:
+            self.listeners.append(listener)
+
+    def remove_listener(self, listener: object) -> None:
+        if listener in self.listeners:
+            self.listeners.remove(listener)
 
     def set_room_id(self, room_id: int) -> None:
         assert not self.active
@@ -174,7 +199,7 @@ class FakeDanmakuConnection:
         self.fleet.active_connections -= 1
 
 
-class FakeRecorder:
+class FakeRecorder(LiveEventListener):
     def __init__(self, breaker_state: Callable[[], BreakerState]) -> None:
         self.breaker_state = breaker_state
         self.active_uids: Set[int] = set()
@@ -188,121 +213,132 @@ class FakeRecorder:
             state is not BreakerState.CLOSED for state in self.stop_breaker_states
         )
 
-    def start(self, uid: int) -> None:
+    async def on_live_began(self, live: Live) -> None:
+        uid = live.room_info.uid
         assert uid not in self.active_uids
         self.active_uids.add(uid)
         self.started_broadcasts += 1
 
-    def stop(self, uid: int) -> None:
+    async def on_live_ended(self, live: Live) -> None:
+        uid = live.room_info.uid
         assert uid in self.active_uids
         self.active_uids.remove(uid)
         self.stopped_broadcasts += 1
         self.stop_breaker_states.append(self.breaker_state())
 
 
-class FakeMonitor:
-    def __init__(self, uid: int, recorder: FakeRecorder) -> None:
-        self.uid = uid
-        self.recorder = recorder
-        self.enabled = False
-
-    def enable(self) -> None:
-        self.enabled = True
-
-    def disable(self) -> None:
-        self.enabled = False
-
-    async def apply_confirmed_status(self, status: ObservedStatus) -> None:
-        if status is ObservedStatus.LIVE:
-            self.recorder.start(self.uid)
-        elif status in (ObservedStatus.PREPARING, ObservedStatus.ROUND):
-            self.recorder.stop(self.uid)
-
-
 class FakeLive:
-    def __init__(self, uid: int) -> None:
-        self.room_id = uid + 1000
+    def __init__(self, room_id: int, user_agent: str = '', cookie: str = '') -> None:
+        uid = room_id - 1000
+        self.room_id = room_id
         self.room_info = room_info(uid, LiveStatus.PREPARING)
+        self.user_info = UserInfo('', '', '', uid)
 
     def replace_room_info(self, value: RoomInfo) -> None:
         self.room_info = value
 
+    async def get_live_streams(self) -> List[Dict[str, object]]:
+        return [{'format': [{'format_name': 'flv'}]}]
+
 
 @pytest.mark.asyncio
-async def test_58_room_batch_live_monitor_rollout_scenario() -> None:
+async def test_58_room_batch_live_monitor_rollout_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    importlib.import_module('blrec.setting')
+    task_module = importlib.import_module('blrec.task.task')
+    monkeypatch.setattr(task_module, 'Live', FakeLive)
     clock = MutableClock()
     fake_batch = FakeBatchClient(clock)
     coordinator = LiveStatusCoordinator(fake_batch, clock=clock)
     fake_danmaku = FakeDanmaku()
     fake_single_room = FakeSingleRoom(clock)
     fake_recorder = FakeRecorder(lambda: coordinator.metrics(clock()).breaker_state)
+    tasks: List['RecordTask'] = []
     controllers: Dict[int, LiveConnectionController] = {}
 
     for uid in range(1, 59):
-        live = FakeLive(uid)
-        controller = LiveConnectionController(
-            live,  # type: ignore[arg-type]
-            fake_danmaku.connection(),  # type: ignore[arg-type]
-            FakeMonitor(uid, fake_recorder),  # type: ignore[arg-type]
-            fake_single_room.load_room_info,
-            status_sink=coordinator.observe_wss,
-            registration_key=uid + 1000,
-        )
-        coordinator.register(
-            uid,
+        task = task_module.RecordTask(
             uid + 1000,
-            controller.on_confirmed_status,
-            lambda uid=uid: fake_single_room.confirm_status(uid),
+            live_status_coordinator=coordinator,
+            anonymous_room_client=fake_single_room,  # type: ignore[arg-type]
         )
-        controllers[uid] = controller
+        task._danmaku_client = fake_danmaku.connection()
+        task._setup_live_monitor()
+        assert isinstance(task._live_monitor, LiveMonitor)
+        assert isinstance(task._connection_controller, LiveConnectionController)
+        task._live_monitor.add_listener(fake_recorder)
+        tasks.append(task)
+        await task.enable_monitor()
+        controllers[uid] = task._connection_controller
+
+    async def drain_notifications() -> None:
+        while coordinator._notification_tasks:
+            await asyncio.gather(*tuple(coordinator._notification_tasks))
 
     async def poll(phase: str) -> None:
         fake_batch.begin_poll(phase)
         try:
             await coordinator.poll_once()
+            await drain_notifications()
         finally:
             fake_batch.end_poll()
 
-    await poll('offline')
-    assert coordinator.metrics(clock()).active_websockets == 0
+    try:
+        await poll('offline')
+        assert coordinator.metrics(clock()).active_websockets == 0
 
-    fake_single_room.live_uids.update(LIVE_UIDS)
-    await poll('live')
-    assert coordinator.metrics(clock()).active_websockets == 5
+        fake_single_room.live_uids.update(LIVE_UIDS)
+        await poll('live')
+        assert coordinator.metrics(clock()).active_websockets == 5
 
-    await poll('missing')
-    assert coordinator.metrics(clock()).active_websockets == 5
+        await poll('missing')
+        assert coordinator.metrics(clock()).active_websockets == 5
 
-    await poll('rate_limit')
-    assert coordinator.metrics(clock()).breaker_state is BreakerState.OPEN
+        await poll('rate_limit')
+        assert coordinator.metrics(clock()).breaker_state is BreakerState.OPEN
 
-    await controllers[1].on_wss_hint(ObservedStatus.PREPARING)
-    assert fake_recorder.stops_during_breaker == 0
-    await poll('rate_limit')
+        await controllers[1].on_wss_hint(ObservedStatus.PREPARING)
+        await drain_notifications()
+        assert fake_recorder.stops_during_breaker == 0
+        await poll('rate_limit')
 
-    clock.advance(30)
-    await poll('live')
-    assert coordinator.metrics(clock()).breaker_state is BreakerState.HALF_OPEN
-    await poll('live')
-    assert coordinator.metrics(clock()).breaker_state is BreakerState.CLOSED
+        clock.advance(30)
+        await poll('live')
+        assert coordinator.metrics(clock()).breaker_state is BreakerState.HALF_OPEN
+        await poll('live')
+        assert coordinator.metrics(clock()).breaker_state is BreakerState.HALF_OPEN
+        await poll('live')
+        assert coordinator.metrics(clock()).breaker_state is BreakerState.CLOSED
 
-    fake_single_room.live_uids.clear()
-    await poll('offline')
-    await poll('offline')
+        fake_single_room.live_uids.clear()
+        await poll('offline')
+        await poll('offline')
 
-    final_metrics = coordinator.metrics(clock())
+        final_metrics = coordinator.metrics(clock())
 
-    assert fake_danmaku.total_start_calls == 5
-    assert fake_danmaku.max_concurrent_connections == 5
-    assert fake_danmaku.active_connections == 0
-    assert fake_recorder.started_broadcasts == 5
-    assert fake_recorder.stopped_broadcasts == 5
-    assert fake_recorder.stops_during_breaker == 0
-    assert fake_batch.max_requests_per_poll == 2
-    assert fake_single_room.max_requests_in_window(600) <= 5
-    assert fake_batch.missing_items == 1
-    assert fake_batch.rate_limits == 1
-    assert final_metrics.registered_rooms == 58
-    assert final_metrics.active_websockets == 0
-    assert final_metrics.missing_results == 1
-    assert final_metrics.fallback_requests == 5
+        assert fake_danmaku.total_start_calls == 5
+        assert fake_danmaku.max_concurrent_connections == 5
+        assert fake_danmaku.active_connections == 0
+        assert fake_recorder.started_broadcasts == 5
+        assert fake_recorder.stopped_broadcasts == 5
+        assert fake_recorder.stops_during_breaker == 0
+        assert fake_batch.max_requests_per_poll == 2
+        assert fake_single_room.max_requests_in_window(600) <= 5
+        assert fake_batch.missing_items == 1
+        assert fake_batch.rate_limits == 1
+        assert final_metrics.registered_rooms == 58
+        assert final_metrics.active_websockets == 0
+        assert final_metrics.missing_results == 1
+        assert final_metrics.fallback_requests == 5
+    finally:
+        for task in tasks:
+            await task._live_monitor._stop_checking()
+        for task in tasks:
+            await task.disable_monitor()
+            task._live_monitor.remove_listener(fake_recorder)
+        await coordinator.stop()
+
+    assert coordinator.metrics(clock()).registered_rooms == 0
+    assert all(not connection.active for connection in fake_danmaku.connections)
+    assert all(not connection.listeners for connection in fake_danmaku.connections)
