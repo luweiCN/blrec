@@ -63,8 +63,14 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 1
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 2
         assert REQUIRED_TABLES == await database.table_names()
+
+        account_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(bili_accounts)')
+        }
+        assert {'avatar_url', 'credential_expires_at'} <= account_columns
 
         indexes = {
             row['name']
@@ -112,6 +118,52 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             await database.execute(
                 'UPDATE upload_jobs SET lease_generation=-1 WHERE id=1'
             )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration = (
+        Path(__file__).parents[2]
+        / 'src'
+        / 'blrec'
+        / 'bili_upload'
+        / 'migrations'
+        / '0001_initial.sql'
+    ).read_text(encoding='utf8')
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.executescript(migration)
+        connection.execute(
+            'INSERT INTO schema_migrations(version,applied_at) VALUES(1,1)'
+        )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',10,20)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        row = await database.fetchone(
+            'SELECT display_name,avatar_url,credential_expires_at,created_at '
+            'FROM bili_accounts WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'display_name': 'existing',
+            'avatar_url': '',
+            'credential_expires_at': 0,
+            'created_at': 10,
+        }
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 2
     finally:
         await database.close()
 

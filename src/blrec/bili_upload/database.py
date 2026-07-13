@@ -376,17 +376,18 @@ class BiliUploadDatabase:
                 ).fetchone()
                 assert row is not None
                 current_version = int(row[0])
-            if current_version > 1:
+            latest_version = 2
+            if current_version > latest_version:
                 raise sqlite3.DatabaseError(
                     'database schema is newer than this application'
                 )
-            if current_version < 1:
+            for version in range(current_version + 1, latest_version + 1):
                 self._execute_migration_script(
-                    connection, self._migration_path(1).read_text(encoding='utf8')
+                    connection, self._migration_path(version).read_text(encoding='utf8')
                 )
                 connection.execute(
                     'INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)',
-                    (1, int(time.time())),
+                    (version, int(time.time())),
                 )
             connection.execute('COMMIT')
         except BaseException:

@@ -187,6 +187,7 @@ async def test_store_put_get_and_replace_are_atomic(tmp_path) -> None:
             account_id=1,
             account_uid=42,
             display_name='first',
+            avatar_url='https://i0.hdslb.com/first.jpg',
             bundle=credential_fixture(),
             cipher=cipher,
             now=100,
@@ -197,21 +198,25 @@ async def test_store_put_get_and_replace_are_atomic(tmp_path) -> None:
             account_id=1,
             account_uid=42,
             display_name='second',
+            avatar_url='https://i0.hdslb.com/second.jpg',
             bundle=second_bundle,
             cipher=cipher,
             now=200,
         )
 
         row = await database.fetchone(
-            'SELECT uid,display_name,credential_version,key_id,state,'
-            'created_at,updated_at FROM bili_accounts WHERE id=?',
+            'SELECT uid,display_name,avatar_url,credential_version,'
+            'credential_expires_at,key_id,state,created_at,updated_at '
+            'FROM bili_accounts WHERE id=?',
             (1,),
         )
         assert row is not None
         assert dict(row) == {
             'uid': 42,
             'display_name': 'second',
+            'avatar_url': 'https://i0.hdslb.com/second.jpg',
             'credential_version': 2,
+            'credential_expires_at': 400,
             'key_id': 'current',
             'state': 'active',
             'created_at': 100,
@@ -221,6 +226,54 @@ async def test_store_put_get_and_replace_are_atomic(tmp_path) -> None:
         assert second_version == 2
         assert await store.get(account_id=1, cipher=cipher) == second_bundle
         assert await store.raw_ciphertext(account_id=1) != first_ciphertext
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_metadata_update_does_not_replace_or_reversion_credentials(
+    tmp_path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    store = CredentialStore(database)
+    cipher = CredentialCipher({'current': b'a' * 32}, current_key_id='current')
+    try:
+        await store.put(
+            account_id=1,
+            account_uid=42,
+            display_name='first',
+            avatar_url='',
+            bundle=credential_fixture(),
+            cipher=cipher,
+            now=100,
+        )
+        original = await store.raw_ciphertext(account_id=1)
+
+        await store.update_metadata(
+            account_id=1,
+            account_uid=42,
+            display_name='updated',
+            avatar_url='https://i0.hdslb.com/face.jpg',
+            credential_expires_at=200,
+            now=150,
+        )
+
+        row = await database.fetchone(
+            'SELECT display_name,avatar_url,credential_expires_at,'
+            'credential_version,created_at,updated_at '
+            'FROM bili_accounts WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'display_name': 'updated',
+            'avatar_url': 'https://i0.hdslb.com/face.jpg',
+            'credential_expires_at': 200,
+            'credential_version': 1,
+            'created_at': 100,
+            'updated_at': 150,
+        }
+        assert await store.raw_ciphertext(account_id=1) == original
     finally:
         await database.close()
 
