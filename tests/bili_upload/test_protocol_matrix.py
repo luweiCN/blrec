@@ -110,6 +110,7 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         ('complete_upload', 'upos_session', '<server-returned>'),
         ('submit_archive', 'bilitv_token_sign', '/x/vu/app/add'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
+        ('web_nav', 'web_cookie', '/x/web-interface/nav'),
         ('list_replies', 'web_cookie_wbi', '/x/v2/reply/main'),
         ('reply_detail', 'web_cookie_wbi', '/x/v2/reply/detail'),
         ('add_reply', 'web_cookie_csrf', '/x/v2/reply/add'),
@@ -192,6 +193,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     )
     await client.submit_archive(bundle, {'title': 'fixture', 'videos': 'fixture.mp4'})
     await client.list_archives(bundle, {'pn': 1})
+    await client.web_nav(bundle)
     await client.list_replies(bundle, {'oid': 303, 'type': 1})
     await client.reply_detail(bundle, {'oid': 303, 'root': 101, 'type': 1})
     await client.add_reply(bundle, {'oid': 303, 'message': 'fixture', 'type': 1})
@@ -213,6 +215,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     for name in (
         'preupload',
         'list_archives',
+        'web_nav',
         'list_replies',
         'reply_detail',
         'add_reply',

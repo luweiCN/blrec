@@ -13,5 +13,6 @@
   "reply_detail": {"code": 0, "data": {"replies": []}},
   "submit_archive": {"code": 0, "data": {"aid": 303, "bvid": "BVfixture"}},
   "top_reply": {"code": 0},
-  "upload_chunk": {"OK": 1, "etag": "fixture-etag"}
+  "upload_chunk": {"OK": 1, "etag": "fixture-etag"},
+  "web_nav": {"code": 0, "data": {"isLogin": true, "mid": 42, "uname": "fixture"}}
 }
