@@ -34,7 +34,10 @@ class AccountResponse(ApiModel):
     id: int
     uid: int
     display_name: str
+    avatar_url: str
     credential_version: int
+    credential_expires_at: int
+    created_at: int
     state: str
 
 
@@ -48,6 +51,7 @@ class QrSessionResponse(ApiModel):
 
 class RefreshResponse(ApiModel):
     credential_version: int
+    refreshed: bool
 
 
 def get_account_manager() -> AccountManager:
@@ -139,7 +143,7 @@ async def refresh_account(
     account_manager: AccountManager = Depends(get_account_manager),
 ) -> RefreshResponse:
     try:
-        credential_version = await account_manager.refresh_account(account_id)
+        result = await account_manager.check_account_renewal(account_id)
     except AccountNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Bilibili account not found'
@@ -154,4 +158,6 @@ async def refresh_account(
             status_code=status.HTTP_409_CONFLICT,
             detail='Bilibili account refresh requires operator recovery',
         ) from None
-    return RefreshResponse(credential_version=credential_version)
+    return RefreshResponse(
+        credential_version=result.credential_version, refreshed=result.refreshed
+    )

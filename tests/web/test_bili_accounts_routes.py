@@ -15,6 +15,12 @@ from blrec.web import security
 from blrec.web.routers import bili_accounts
 
 
+@dataclass(frozen=True)
+class FakeRenewalCheckResult:
+    credential_version: int
+    refreshed: bool
+
+
 @dataclass
 class FakeAccountManager:
     missing_session: bool = False
@@ -60,15 +66,18 @@ class FakeAccountManager:
                 id=7,
                 uid=42,
                 display_name='fixture',
+                avatar_url='https://i0.hdslb.com/face.jpg',
                 credential_version=3,
+                credential_expires_at=2_000_000,
+                created_at=100,
                 state='active',
             )
         ]
 
-    async def refresh_account(self, account_id: int) -> int:
+    async def check_account_renewal(self, account_id: int) -> FakeRenewalCheckResult:
         if self.missing_account:
             raise AccountNotFound('Bilibili account not found')
-        return 4
+        return FakeRenewalCheckResult(credential_version=4, refreshed=True)
 
 
 @pytest.fixture(autouse=True)
@@ -172,7 +181,10 @@ def test_list_accounts_is_redacted(client: TestClient) -> None:
             'id': 7,
             'uid': 42,
             'displayName': 'fixture',
+            'avatarUrl': 'https://i0.hdslb.com/face.jpg',
             'credentialVersion': 3,
+            'credentialExpiresAt': 2_000_000,
+            'createdAt': 100,
             'state': 'active',
         }
     ]
@@ -196,4 +208,4 @@ def test_manual_refresh_returns_new_credential_version(client: TestClient) -> No
     response = client.post('/api/v1/bili-accounts/7/refresh', headers=auth_headers())
 
     assert response.status_code == 200
-    assert response.json() == {'credentialVersion': 4}
+    assert response.json() == {'credentialVersion': 4, 'refreshed': True}

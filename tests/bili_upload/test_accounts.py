@@ -17,7 +17,11 @@ from blrec.bili_upload.accounts import (
 from blrec.bili_upload.credentials import CredentialStore
 from blrec.bili_upload.crypto import CookieRecord, CredentialBundle, CredentialCipher
 from blrec.bili_upload.database import BiliUploadDatabase
-from blrec.bili_upload.errors import BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown
+from blrec.bili_upload.errors import (
+    BiliApiError,
+    DefinitelyNotSent,
+    RemoteOutcomeUnknown,
+)
 
 
 class FakeClock:
@@ -116,12 +120,14 @@ class ScriptedProtocol:
         *,
         token_mid: int = 42,
         web_uid: int = 42,
+        avatar_url: str = 'https://i0.hdslb.com/face.jpg',
         poll_results: Optional[List[Mapping[str, Any]]] = None,
         refresh_results: Optional[List[Any]] = None,
         oauth_results: Optional[List[Any]] = None,
     ) -> None:
         self.token_mid = token_mid
         self.web_uid = web_uid
+        self.avatar_url = avatar_url
         self.poll_results = list(poll_results or [])
         self.refresh_results = list(refresh_results or [])
         self.oauth_results = list(oauth_results or [])
@@ -168,7 +174,12 @@ class ScriptedProtocol:
         self.web_nav_calls += 1
         return {
             'code': 0,
-            'data': {'isLogin': True, 'mid': self.web_uid, 'uname': 'fixture'},
+            'data': {
+                'isLogin': True,
+                'mid': self.web_uid,
+                'uname': 'fixture',
+                'face': self.avatar_url,
+            },
         }
 
     async def refresh_token(self, _bundle: CredentialBundle) -> Mapping[str, Any]:
@@ -352,12 +363,23 @@ async def test_confirm_saves_one_validated_credential_bundle(tmp_path: Path) -> 
         account = await manager.finish_confirmed_login(confirmed_response())
         bundle = await store.get(account_id=account.id, cipher=cipher)
         row = await database.fetchone(
-            'SELECT uid,state,credential_version FROM bili_accounts WHERE id=?',
+            'SELECT uid,avatar_url,credential_version,credential_expires_at,'
+            'created_at,state FROM bili_accounts WHERE id=?',
             (account.id,),
         )
 
         assert row is not None
-        assert dict(row) == {'uid': 42, 'state': 'active', 'credential_version': 1}
+        assert dict(row) == {
+            'uid': 42,
+            'avatar_url': 'https://i0.hdslb.com/face.jpg',
+            'credential_version': 1,
+            'credential_expires_at': clock.value + 180 * 24 * 3600,
+            'created_at': clock.value,
+            'state': 'active',
+        }
+        assert account.avatar_url == 'https://i0.hdslb.com/face.jpg'
+        assert account.credential_expires_at == clock.value + 180 * 24 * 3600
+        assert account.created_at == clock.value
         assert bundle.mid == 42
         assert bundle.access_token == 'access-new'
         assert bundle.refresh_token == 'refresh-new'
@@ -419,6 +441,65 @@ async def test_refresh_replaces_the_whole_bundle_atomically(tmp_path: Path) -> N
         assert version == 2
         assert refreshed.access_token == 'access-2'
         assert refreshed.refresh_token == 'refresh-2'
+        assert protocol.refresh_calls == 1
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_renewal_check_keeps_valid_credentials_and_updates_metadata(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        expires_at = clock.value + 73 * 3600
+        await seed_account(store, cipher, expires_at=expires_at)
+
+        result = await manager.check_account_renewal(1)
+
+        row = await database.fetchone(
+            'SELECT display_name,avatar_url,credential_expires_at,'
+            'credential_version FROM bili_accounts WHERE id=1'
+        )
+        assert result.credential_version == 1
+        assert result.refreshed is False
+        assert protocol.refresh_calls == 0
+        assert row is not None
+        assert dict(row) == {
+            'display_name': 'fixture',
+            'avatar_url': 'https://i0.hdslb.com/face.jpg',
+            'credential_expires_at': expires_at,
+            'credential_version': 1,
+        }
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('refresh_requested', (False, True))
+async def test_renewal_check_refreshes_only_when_due_or_requested(
+    tmp_path: Path, refresh_requested: bool
+) -> None:
+    clock = FakeClock()
+    expires_at = clock.value + (71 if not refresh_requested else 73) * 3600
+    oauth_results = (
+        [{'code': 0, 'data': {'mid': 42, 'refresh': True}}] if refresh_requested else []
+    )
+    protocol = ScriptedProtocol(
+        oauth_results=oauth_results, refresh_results=[confirmed_response()]
+    )
+    database, store, cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        await seed_account(store, cipher, expires_at=expires_at)
+
+        result = await manager.check_account_renewal(1)
+
+        assert result.credential_version == 2
+        assert result.refreshed is True
         assert protocol.refresh_calls == 1
     finally:
         await manager.close()

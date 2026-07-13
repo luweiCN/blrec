@@ -36,6 +36,7 @@ __all__ = (
     'QrSessionForbidden',
     'QrSessionNotFound',
     'QrSessionView',
+    'RenewalCheckResult',
 )
 
 
@@ -68,8 +69,24 @@ class AccountView:
     id: int
     uid: int
     display_name: str
+    avatar_url: str
     credential_version: int
+    credential_expires_at: int
+    created_at: int
     state: str
+
+
+@dataclass(frozen=True)
+class RenewalCheckResult:
+    credential_version: int
+    refreshed: bool
+
+
+@dataclass(frozen=True)
+class _IdentityView:
+    display_name: str
+    avatar_url: str
+    refresh_requested: bool
 
 
 @dataclass(frozen=True, repr=False)
@@ -278,9 +295,9 @@ class AccountManager:
             response, app_device_id=app_device_id, previous_bundle=previous_bundle
         )
         try:
-            display_name = await self._validate_identity(bundle)
+            identity = await self._validate_identity(bundle)
         except DefinitelyNotSent:
-            display_name = await self._validate_identity(bundle)
+            identity = await self._validate_identity(bundle)
         async with self._account_create_lock:
             if account_id is None:
                 row = await self._database.fetchone(
@@ -296,34 +313,23 @@ class AccountManager:
             version = await self._store.put(
                 account_id=account_id,
                 account_uid=bundle.mid,
-                display_name=display_name,
+                display_name=identity.display_name,
+                avatar_url=identity.avatar_url,
                 bundle=bundle,
                 cipher=self._cipher,
                 now=int(self._clock()),
             )
-        return AccountView(
-            id=account_id,
-            uid=bundle.mid,
-            display_name=display_name,
-            credential_version=version,
-            state='active',
-        )
+        row = await self._account_row(account_id)
+        assert int(row['credential_version']) == version
+        return self._account_view(row)
 
     async def list_accounts(self) -> List[AccountView]:
         rows = await self._database.fetchall(
-            'SELECT id,uid,display_name,credential_version,state '
+            'SELECT id,uid,display_name,avatar_url,credential_version,'
+            'credential_expires_at,created_at,state '
             'FROM bili_accounts ORDER BY id'
         )
-        return [
-            AccountView(
-                id=int(row['id']),
-                uid=int(row['uid']),
-                display_name=str(row['display_name']),
-                credential_version=int(row['credential_version']),
-                state=str(row['state']),
-            )
-            for row in rows
-        ]
+        return [self._account_view(row) for row in rows]
 
     async def refresh_account(self, account_id: int) -> int:
         row = await self._account_row(account_id)
@@ -331,24 +337,33 @@ class AccountManager:
         gate = self._write_gates.for_account(account_id)
         async with gate.hold(version):
             previous = await self._store.get(account_id=account_id, cipher=self._cipher)
+            return await self._refresh_locked(account_id, row, previous)
+
+    async def check_account_renewal(self, account_id: int) -> RenewalCheckResult:
+        row = await self._account_row(account_id)
+        version = int(row['credential_version'])
+        gate = self._write_gates.for_account(account_id)
+        async with gate.hold(version):
+            bundle = await self._store.get(account_id=account_id, cipher=self._cipher)
             try:
-                try:
-                    response = await self._protocol.refresh_token(previous)
-                except DefinitelyNotSent:
-                    response = await self._protocol.refresh_token(previous)
-            except (DefinitelyNotSent, RemoteOutcomeUnknown):
-                await self._mark_refresh_unknown(account_id)
-                raise
-            try:
-                account = await self.finish_confirmed_login(
-                    response, previous_bundle=previous, account_id=account_id
+                identity = await self._validate_identity(bundle)
+            except DefinitelyNotSent:
+                identity = await self._validate_identity(bundle)
+            due = bundle.expires_at - int(self._clock()) < self._REFRESH_WINDOW_SECONDS
+            if due or identity.refresh_requested:
+                refreshed_version = await self._refresh_locked(account_id, row, bundle)
+                return RenewalCheckResult(
+                    credential_version=refreshed_version, refreshed=True
                 )
-            except (DefinitelyNotSent, RemoteOutcomeUnknown):
-                await self._mark_refresh_unknown(account_id)
-                raise
-            if account.uid != int(row['uid']):
-                raise AccountIdentityMismatch('refreshed credential uid differs')
-            return account.credential_version
+            await self._store.update_metadata(
+                account_id=account_id,
+                account_uid=bundle.mid,
+                display_name=identity.display_name,
+                avatar_url=identity.avatar_url,
+                credential_expires_at=bundle.expires_at,
+                now=int(self._clock()),
+            )
+            return RenewalCheckResult(credential_version=version, refreshed=False)
 
     async def refresh_due_accounts(self) -> List[int]:
         day = int(self._clock()) // 86400
@@ -358,31 +373,39 @@ class AccountManager:
             self._last_health_check_day = day
         refreshed = []
         rows = await self._database.fetchall(
-            "SELECT id,credential_version FROM bili_accounts WHERE state='active' "
-            'ORDER BY id'
+            "SELECT id FROM bili_accounts WHERE state='active' ORDER BY id"
         )
         for row in rows:
             account_id = int(row['id'])
-            version = int(row['credential_version'])
             try:
-                async with self._write_gates.for_account(account_id).hold(version):
-                    bundle = await self._store.get(
-                        account_id=account_id, cipher=self._cipher
-                    )
-                    health = await self._protocol.oauth_info(bundle)
-                    refresh_requested = bool(
-                        self._response_data(health, 'OAuth info').get('refresh')
-                    )
-                    due = (
-                        bundle.expires_at - int(self._clock())
-                        < self._REFRESH_WINDOW_SECONDS
-                    )
-                if due or refresh_requested:
-                    await self.refresh_account(account_id)
+                result = await self.check_account_renewal(account_id)
+                if result.refreshed:
                     refreshed.append(account_id)
             except (AccountPaused, CredentialVersionChanged, AccountNotFound):
                 continue
         return refreshed
+
+    async def _refresh_locked(
+        self, account_id: int, row: Mapping[str, Any], previous: CredentialBundle
+    ) -> int:
+        try:
+            try:
+                response = await self._protocol.refresh_token(previous)
+            except DefinitelyNotSent:
+                response = await self._protocol.refresh_token(previous)
+        except (DefinitelyNotSent, RemoteOutcomeUnknown):
+            await self._mark_refresh_unknown(account_id)
+            raise
+        try:
+            account = await self.finish_confirmed_login(
+                response, previous_bundle=previous, account_id=account_id
+            )
+        except (DefinitelyNotSent, RemoteOutcomeUnknown):
+            await self._mark_refresh_unknown(account_id)
+            raise
+        if account.uid != int(row['uid']):
+            raise AccountIdentityMismatch('refreshed credential uid differs')
+        return account.credential_version
 
     async def _poll(self, runtime: _QrRuntime) -> None:
         stage = 'poll'
@@ -459,7 +482,7 @@ class AccountManager:
             runtime.raw_auth_code = ''
             runtime.qr_url = None
 
-    async def _validate_identity(self, bundle: CredentialBundle) -> str:
+    async def _validate_identity(self, bundle: CredentialBundle) -> _IdentityView:
         cookie_values = [
             cookie.value for cookie in bundle.cookies if cookie.name == 'DedeUserID'
         ]
@@ -487,7 +510,12 @@ class AccountManager:
         ):
             raise AccountIdentityMismatch('token, cookie, and account uid differ')
         display_name = nav.get('uname')
-        return str(display_name) if display_name else str(bundle.mid)
+        avatar_url = nav.get('face')
+        return _IdentityView(
+            display_name=str(display_name) if display_name else str(bundle.mid),
+            avatar_url=str(avatar_url) if avatar_url else '',
+            refresh_requested=bool(oauth.get('refresh')),
+        )
 
     def _build_bundle(
         self,
@@ -581,13 +609,27 @@ class AccountManager:
 
     async def _account_row(self, account_id: int) -> Mapping[str, Any]:
         row = await self._database.fetchone(
-            'SELECT id,uid,display_name,credential_version,state '
+            'SELECT id,uid,display_name,avatar_url,credential_version,'
+            'credential_expires_at,created_at,state '
             'FROM bili_accounts WHERE id=?',
             (account_id,),
         )
         if row is None:
             raise AccountNotFound('Bilibili account not found')
         return dict(row)
+
+    @staticmethod
+    def _account_view(row: Mapping[str, Any]) -> AccountView:
+        return AccountView(
+            id=int(row['id']),
+            uid=int(row['uid']),
+            display_name=str(row['display_name']),
+            avatar_url=str(row['avatar_url']),
+            credential_version=int(row['credential_version']),
+            credential_expires_at=int(row['credential_expires_at']),
+            created_at=int(row['created_at']),
+            state=str(row['state']),
+        )
 
     async def _mark_refresh_unknown(self, account_id: int) -> None:
         await self._database.execute(
