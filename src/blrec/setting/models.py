@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
 import os
 import re
-from typing import ClassVar, Collection, Final, List, Literal, Optional, TypeVar
+import stat
+from typing import (
+    ClassVar,
+    Collection,
+    Dict,
+    Final,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 
 import toml
 from pydantic import BaseModel as PydanticBaseModel
-from pydantic import BaseSettings, Field, PrivateAttr, validator
+from pydantic import BaseSettings, Field, PrivateAttr, root_validator, validator
 from pydantic.networks import EmailStr, HttpUrl
 from typing_extensions import Annotated
 
@@ -34,6 +49,7 @@ __all__ = (
     'SettingsIn',
     'SettingsOut',
     'BiliApiSettings',
+    'BiliUploadSettings',
     'LiveMonitorSettings',
     'HeaderOptions',
     'HeaderSettings',
@@ -79,6 +95,82 @@ DEFAULT_SETTINGS_FILE: Final[str] = os.environ.get(
 )
 
 
+def _decode_credential_key(value: str) -> bytes:
+    try:
+        key = base64.b64decode(value.strip(), altchars=b'-_', validate=True)
+    except (binascii.Error, ValueError):
+        key = b''
+    if len(key) != 32:
+        raise ValueError('credential key must decode to 32 bytes')
+    return key
+
+
+def _load_credential_key_file(path: str) -> bytes:
+    try:
+        file_stat = os.lstat(path)
+    except OSError as error:
+        raise ValueError(f'credential key file cannot be read: {path}') from error
+    if stat.S_ISLNK(file_stat.st_mode):
+        raise ValueError('credential key file must not be a symlink')
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError('credential key file must be a regular file')
+    if file_stat.st_mode & 0o077:
+        raise ValueError('credential key file must use 0600 permissions')
+
+    flags = os.O_RDONLY
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f'credential key file cannot be read: {path}') from error
+    try:
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ValueError('credential key file must be a regular file')
+        if opened_stat.st_mode & 0o077:
+            raise ValueError('credential key file must use 0600 permissions')
+        with os.fdopen(descriptor, 'rt', encoding='ascii') as file:
+            descriptor = -1
+            value = file.read()
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f'credential key file cannot be read: {path}') from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return _decode_credential_key(value)
+
+
+def _parse_old_credential_key_files(value: object) -> Dict[str, str]:
+    if value is None:
+        return {}
+    entries: List[Tuple[object, object]]
+    if isinstance(value, dict):
+        entries = list(value.items())
+    elif isinstance(value, str):
+        entries = []
+        for item in value.split(','):
+            if '=' not in item:
+                raise ValueError(
+                    'old credential keys must use key_id=/absolute/path pairs'
+                )
+            key_id, path = item.split('=', 1)
+            entries.append((key_id, path))
+    else:
+        raise ValueError('old credential keys must use key_id=/absolute/path pairs')
+
+    result: Dict[str, str] = {}
+    for raw_key_id, raw_path in entries:
+        key_id = str(raw_key_id).strip()
+        path = str(raw_path).strip()
+        if not key_id or not os.path.isabs(path):
+            raise ValueError('old credential keys must use key_id=/absolute/path pairs')
+        if key_id in result:
+            raise ValueError(f'duplicate old credential key id: {key_id}')
+        result[key_id] = path
+    return result
+
+
 class EnvSettings(BaseSettings):
     settings_file: Annotated[str, Field(env='BLREC_CONFIG')] = DEFAULT_SETTINGS_FILE
     out_dir: Annotated[Optional[str], Field(env='BLREC_OUT_DIR')] = None
@@ -92,9 +184,74 @@ class EnvSettings(BaseSettings):
             regex=r'[a-zA-Z\d\-]{8,80}',
         ),
     ] = None
+    credential_key: Annotated[Optional[str], Field(env='BLREC_CREDENTIAL_KEY')] = None
+    credential_key_file: Annotated[
+        Optional[str], Field(env='BLREC_CREDENTIAL_KEY_FILE')
+    ] = None
+    credential_old_key_files: Annotated[
+        Dict[str, str], Field(env='BLREC_CREDENTIAL_OLD_KEY_FILES')
+    ] = {}
+
+    @root_validator(pre=True)
+    def _parse_credential_sources(cls, values: Dict[str, object]) -> Dict[str, object]:
+        if (
+            values.get('credential_key') is not None
+            and values.get('credential_key_file') is not None
+        ):
+            raise ValueError(
+                'BLREC_CREDENTIAL_KEY and BLREC_CREDENTIAL_KEY_FILE '
+                'must not both be set'
+            )
+        values['credential_old_key_files'] = _parse_old_credential_key_files(
+            values.get('credential_old_key_files')
+        )
+        return values
+
+    @root_validator
+    def _validate_credential_sources(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        credential_key = values.get('credential_key')
+        credential_key_file = values.get('credential_key_file')
+        current_key: Optional[bytes] = None
+        if isinstance(credential_key, str):
+            current_key = _decode_credential_key(credential_key)
+        elif isinstance(credential_key_file, str):
+            current_key = _load_credential_key_file(credential_key_file)
+
+        old_key_files = values.get('credential_old_key_files', {})
+        assert isinstance(old_key_files, dict)
+        for path in old_key_files.values():
+            _load_credential_key_file(path)
+        if current_key is not None:
+            current_key_id = hashlib.sha256(current_key).hexdigest()
+            if current_key_id in old_key_files:
+                raise ValueError(
+                    'old credential key id duplicates current credential key id'
+                )
+        return values
+
+    def load_credential_key(self) -> Optional[bytes]:
+        if self.credential_key is not None:
+            return _decode_credential_key(self.credential_key)
+        if self.credential_key_file is not None:
+            return _load_credential_key_file(self.credential_key_file)
+        return None
+
+    def load_old_credential_keys(self) -> Dict[str, bytes]:
+        return {
+            key_id: _load_credential_key_file(path)
+            for key_id, path in self.credential_old_key_files.items()
+        }
 
     class Config:
         anystr_strip_whitespace = True
+
+        @classmethod
+        def parse_env_var(cls, field_name: str, raw_value: str) -> object:
+            if field_name == 'credential_old_key_files':
+                return raw_value
+            return json.loads(raw_value)
 
 
 _V = TypeVar('_V')
@@ -123,6 +280,20 @@ class BiliApiSettings(BaseModel):
     base_api_urls: List[str] = ['https://api.bilibili.com']
     base_live_api_urls: List[str] = ['https://api.live.bilibili.com']
     base_play_info_api_urls: List[str] = ['https://api.live.bilibili.com']
+
+
+class BiliUploadSettings(BaseModel):
+    enabled: bool = False
+    database_path: str = '/cfg/blrec.sqlite3'
+    auto_upload_enabled: bool = False
+    auto_comment_enabled: bool = False
+    danmaku_backfill_enabled: bool = False
+    upload_chunk_size: Annotated[int, Field(ge=1024 * 1024, le=32 * 1024 * 1024)] = (
+        4 * 1024 * 1024
+    )
+    upload_chunk_concurrency: Annotated[int, Field(ge=1, le=3)] = 2
+    danmaku_interval_seconds: Annotated[int, Field(ge=25, le=3600)] = 25
+    import_high_watermark: Annotated[int, Field(ge=10000)] = 1000000
 
 
 class LiveMonitorSettings(BaseModel):
@@ -650,6 +821,7 @@ class Settings(BaseModel):
     output: OutputSettings = OutputSettings()  # type: ignore
     logging: LoggingSettings = LoggingSettings()  # type: ignore
     bili_api: BiliApiSettings = BiliApiSettings()
+    bili_upload: BiliUploadSettings = BiliUploadSettings()
     live_monitor: LiveMonitorSettings = LiveMonitorSettings()
     header: HeaderSettings = HeaderSettings()
     danmaku: DanmakuSettings = DanmakuSettings()
@@ -702,6 +874,7 @@ class SettingsIn(BaseModel):
     output: Optional[OutputSettings] = None
     logging: Optional[LoggingSettings] = None
     bili_api: Optional[BiliApiSettings] = None
+    bili_upload: Optional[BiliUploadSettings] = None
     live_monitor: Optional[LiveMonitorSettings] = None
     header: Optional[HeaderSettings] = None
     danmaku: Optional[DanmakuSettings] = None
