@@ -56,4 +56,14 @@ describe('AppComponent', () => {
       'B 站直播录制'
     );
   });
+
+  it('labels the uploads navigation as Bilibili accounts', () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.detectChanges();
+
+    const link = fixture.nativeElement.querySelector(
+      'a[href="/uploads"]'
+    ) as HTMLAnchorElement;
+    expect(link.textContent?.trim()).toBe('投稿账号');
+  });
 });
