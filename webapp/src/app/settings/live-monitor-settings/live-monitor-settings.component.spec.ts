@@ -10,13 +10,14 @@ import {
   tick,
 } from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
+import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
 import { Observable, Subject, of, throwError } from 'rxjs';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
-import { NzFormModule } from 'ng-zorro-antd/form';
+import { NzFormLabelComponent, NzFormModule } from 'ng-zorro-antd/form';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzSelectModule } from 'ng-zorro-antd/select';
@@ -194,6 +195,23 @@ describe('LiveMonitorSettingsComponent', () => {
 
     expect(component.settingsForm.invalid).toBeTrue();
     expect(fixture.nativeElement.querySelector('[formControlName="cookie"]')).toBeNull();
+  });
+
+  it('explains every live monitor option with the standard form tooltip', () => {
+    createComponent();
+
+    const tooltips = fixture.debugElement
+      .queryAll(By.directive(NzFormLabelComponent))
+      .map(
+        (label) => label.injector.get(NzFormLabelComponent).nzTooltipTitle
+      );
+
+    expect(tooltips).toEqual([
+      '批量模式会合并查询多个房间的直播状态，只为确认开播的房间建立弹幕连接，可减少请求次数和空闲连接。旧模式会分别监控每个房间，仅用于兼容或紧急回退，通常产生更多请求和连接。切换模式会重启应用，录制期间不能切换。',
+      '系统每隔指定秒数查询一次所有已登记房间的直播状态。数值越小，发现开播越快，但请求更频繁；数值越大，请求更少，但发现开播可能更慢。允许设置为 30–60 秒。',
+      '一次批量状态请求包含的最大房间数。房间总数超过该值时会拆成多次请求；数值越小，每轮产生的请求越多。允许设置为 1–29；例如 58 个房间设置为 29 时，正常每轮需要 2 次批量请求。',
+      '当批量结果缺少原本已确认开播的房间时，系统会使用单房间匿名请求再次确认，避免误判下播。该值表示同一房间两次兜底确认的最短间隔；数值越大，请求越少，但异常状态恢复可能更慢。允许设置为 600–3600 秒。',
+    ]);
   });
 
   it('shows legacy risk and the read-only health details', () => {
