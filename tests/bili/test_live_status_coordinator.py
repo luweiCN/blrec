@@ -456,6 +456,117 @@ async def test_wss_negative_uses_one_shared_http_confirmation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_waiter_does_not_cancel_shared_confirmation() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def confirm_once() -> StatusSnapshot:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return confirmation(1, ObservedStatus.PREPARING)
+
+    coordinator = LiveStatusCoordinator(ScriptedBatchClient(), clock=lambda: 100.0)
+    registration = coordinator.register(1, 1001, AsyncMock(), confirm_once)
+    first = asyncio.create_task(coordinator._confirm(registration))
+    await entered.wait()
+    second = asyncio.create_task(coordinator._confirm(registration))
+    await asyncio.sleep(0)
+
+    try:
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        result = await asyncio.gather(second, return_exceptions=True)
+
+        assert result == [confirmation(1, ObservedStatus.PREPARING)]
+        assert calls == 1
+        assert coordinator.fallback_count == 1
+    finally:
+        release.set()
+        await coordinator.stop()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cached_confirmation_is_rebuilt() -> None:
+    entered = asyncio.Event()
+    never_release = asyncio.Event()
+    calls = 0
+
+    async def confirm_with_cancelled_first_call() -> StatusSnapshot:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await never_release.wait()
+        return confirmation(1, ObservedStatus.ROUND)
+
+    coordinator = LiveStatusCoordinator(ScriptedBatchClient(), clock=lambda: 100.0)
+    registration = coordinator.register(
+        1, 1001, AsyncMock(), confirm_with_cancelled_first_call
+    )
+    first = asyncio.create_task(coordinator._confirm(registration))
+    await entered.wait()
+    coordinator._fallback_tasks[1001].task.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        retry = await asyncio.gather(
+            coordinator._confirm(registration), return_exceptions=True
+        )
+
+        assert retry == [confirmation(1, ObservedStatus.ROUND)]
+        assert calls == 2
+        assert coordinator.fallback_count == 2
+    finally:
+        never_release.set()
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_unregistered_confirmation_task() -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def confirm_until_cancelled() -> StatusSnapshot:
+        entered.set()
+        try:
+            await never_release.wait()
+        finally:
+            cancelled.set()
+        return confirmation(1, ObservedStatus.LIVE)
+
+    coordinator = LiveStatusCoordinator(ScriptedBatchClient(), clock=lambda: 100.0)
+    registration = coordinator.register(1, 1001, AsyncMock(), confirm_until_cancelled)
+    waiter = asyncio.create_task(coordinator._confirm(registration))
+    await entered.wait()
+    entry = coordinator._fallback_tasks[1001]
+    coordinator.unregister(1001)
+    assert 1001 not in coordinator._fallback_tasks
+
+    try:
+        await coordinator.stop()
+        await asyncio.sleep(0)
+
+        assert cancelled.is_set()
+        assert entry.task.cancelled()
+        assert waiter.done()
+        result = await asyncio.gather(waiter, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+        assert coordinator._fallback_tasks == {}
+    finally:
+        entry.task.cancel()
+        waiter.cancel()
+        await asyncio.gather(entry.task, waiter, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_live_wss_confirmation_clears_negative_hint_without_emitting() -> None:
     listener = AsyncMock()
     confirmer = AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE))

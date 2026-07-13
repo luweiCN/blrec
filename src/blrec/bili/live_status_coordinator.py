@@ -181,6 +181,7 @@ class LiveStatusCoordinator:
         self._clock = clock
         self._registrations: Dict[int, _Registration] = {}
         self._fallback_tasks: Dict[int, _FallbackEntry] = {}
+        self._running_fallback_tasks: Set[asyncio.Task[StatusSnapshot]] = set()
         self._notification_tasks: Set[asyncio.Task[None]] = set()
         self._breaker = StatusCircuitBreaker(clock=clock)
         self._polling_task: Optional[asyncio.Task[None]] = None
@@ -308,6 +309,7 @@ class LiveStatusCoordinator:
             with suppress(asyncio.CancelledError):
                 await task
         await self._stop_notifications()
+        await self._stop_fallbacks()
 
     def metrics(self, now: float) -> CoordinatorMetrics:
         if self._last_success_at is None:
@@ -635,6 +637,15 @@ class LiveStatusCoordinator:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def _stop_fallbacks(self) -> None:
+        tasks = tuple(self._running_fallback_tasks)
+        self._fallback_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._running_fallback_tasks.difference_update(tasks)
+
     async def _confirm(self, registration: _Registration) -> StatusSnapshot:
         now = self._clock()
         entry = self._fallback_tasks.get(registration.room_id)
@@ -650,11 +661,16 @@ class LiveStatusCoordinator:
         )
         if (
             entry is None
+            or entry.task.cancelled()
             or expired
             or generation is None
             or generation is not registration
         ):
             task = asyncio.create_task(self._call_confirmer(registration))
+            self._running_fallback_tasks.add(task)
+            task.add_done_callback(
+                lambda completed: self._running_fallback_tasks.discard(completed)
+            )
             entry = _FallbackEntry(
                 task=task,
                 started_at=now,
@@ -674,7 +690,7 @@ class LiveStatusCoordinator:
         ):
             return self._unknown_snapshot(registration)
         try:
-            snapshot = await entry.task
+            snapshot = await asyncio.shield(entry.task)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
