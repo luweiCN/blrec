@@ -34,10 +34,46 @@
         ></nz-empty>
         <ul class="account-list" *ngIf="accounts.length > 0">
           <li *ngFor="let account of accounts; trackBy: trackAccount">
-            <div>
-              <strong>{{ account.displayName }}</strong>
-              <span class="account-meta">UID {{ account.uid }}</span>
-              <span class="account-meta">凭据版本 {{ account.credentialVersion }}</span>
+            <div class="account-main">
+              <nz-avatar
+                data-testid="account-avatar"
+                [nzSize]="48"
+                [nzSrc]="account.avatarUrl || undefined"
+                [nzText]="accountInitial(account.displayName)"
+                [nzAlt]="account.displayName + '的头像'"
+              ></nz-avatar>
+              <div class="account-details">
+                <strong>{{ account.displayName }}</strong>
+                <div class="account-meta-grid">
+                  <span>UID {{ account.uid }}</span>
+                  <span>
+                    添加时间
+                    {{ account.createdAt * 1000 | date : 'yyyy-MM-dd HH:mm' }}
+                  </span>
+                  <span>
+                    凭据过期时间
+                    <ng-container *ngIf="account.credentialExpiresAt > 0; else unknownExpiry">
+                      {{
+                        account.credentialExpiresAt * 1000
+                          | date : 'yyyy-MM-dd HH:mm'
+                      }}
+                    </ng-container>
+                    <ng-template #unknownExpiry>暂未获取</ng-template>
+                  </span>
+                  <span>
+                    凭据版本 {{ account.credentialVersion }}
+                    <span
+                      class="help-mark"
+                      data-testid="credential-version-help"
+                      nz-tooltip
+                      [nzTooltipTitle]="credentialVersionTip"
+                      tabindex="0"
+                      role="img"
+                      [attr.aria-label]="credentialVersionTip"
+                    >?</span>
+                  </span>
+                </div>
+              </div>
             </div>
             <div class="account-actions">
               <nz-tag [nzColor]="accountStateColor(account.state)">
@@ -46,15 +82,22 @@
               <button
                 nz-button
                 type="button"
-                [nzLoading]="isRefreshing(account.id)"
+                data-testid="check-renewal"
+                [nzLoading]="isChecking(account.id)"
                 [disabled]="account.state !== 'active'"
-                (click)="refreshAccount(account)"
+                (click)="checkRenewal(account)"
               >
-                立即检查续期
+                检查并按需续期
               </button>
             </div>
           </li>
         </ul>
+        <nz-alert
+          *ngIf="actionMessage"
+          nzType="success"
+          nzShowIcon
+          [nzMessage]="actionMessage"
+        ></nz-alert>
         <nz-alert
           *ngIf="actionError"
           nzType="error"

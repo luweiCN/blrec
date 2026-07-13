@@ -34,7 +34,7 @@ export class BiliAccountService {
     return this.http.delete<QrSession>(url);
   }
 
-  refreshAccount(accountId: number): Observable<RefreshResult> {
+  checkRenewal(accountId: number): Observable<RefreshResult> {
     const url = this.url.makeApiUrl(
       `/api/v1/bili-accounts/${accountId}/refresh`
     );

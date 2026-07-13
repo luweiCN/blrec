@@ -57,12 +57,12 @@ describe('BiliAccountService', () => {
     request.flush({});
   });
 
-  it('requests a bounded manual credential refresh', () => {
-    service.refreshAccount(7).subscribe();
+  it('requests a bounded credential renewal check', () => {
+    service.checkRenewal(7).subscribe();
 
     const request = http.expectOne('/api/v1/bili-accounts/7/refresh');
     expect(request.request.method).toBe('POST');
     expect(request.request.body).toBeNull();
-    request.flush({ credentialVersion: 4 });
+    request.flush({ credentialVersion: 4, refreshed: true });
   });
 });

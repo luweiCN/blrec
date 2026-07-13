@@ -31,9 +31,37 @@
   }
 }
 
-.account-meta {
-  display: block;
+.account-main {
+  display: flex;
+  min-width: 0;
+  gap: 12px;
+  align-items: center;
+}
+
+.account-details {
+  min-width: 0;
+}
+
+.account-meta-grid {
+  display: grid;
+  margin-top: 4px;
   color: #595959;
+  column-gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  row-gap: 2px;
+}
+
+.help-mark {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #8c8c8c;
+  border-radius: 50%;
+  cursor: help;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .account-actions {
@@ -67,5 +95,9 @@
   .account-actions {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .account-meta-grid {
+    grid-template-columns: 1fr;
   }
 }

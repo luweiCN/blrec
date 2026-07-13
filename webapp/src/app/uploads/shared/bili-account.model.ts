@@ -23,7 +23,10 @@ export interface BiliAccount {
   id: number;
   uid: number;
   displayName: string;
+  avatarUrl: string;
   credentialVersion: number;
+  credentialExpiresAt: number;
+  createdAt: number;
   state: AccountState;
 }
 
@@ -37,6 +40,7 @@ export interface QrSession {
 
 export interface RefreshResult {
   credentialVersion: number;
+  refreshed: boolean;
 }
 
 export type AccountsView =

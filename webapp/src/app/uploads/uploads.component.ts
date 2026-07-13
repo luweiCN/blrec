@@ -31,10 +31,13 @@ export class UploadsComponent implements OnInit, OnDestroy {
   accountsView: AccountsView = { state: 'loading' };
   loginView: LoginView = { state: 'idle' };
   actionError: string | null = null;
+  actionMessage: string | null = null;
+  readonly credentialVersionTip =
+    '每次成功更换登录凭据后递增，用于防止旧任务覆盖新凭据；它不是账号等级或软件版本。';
 
   private readonly destroy$ = new Subject<void>();
   private readonly stopQrPolling$ = new Subject<void>();
-  private readonly refreshingAccountIds = new Set<number>();
+  private readonly checkingAccountIds = new Set<number>();
 
   constructor(
     private accountService: BiliAccountService,
@@ -89,6 +92,7 @@ export class UploadsComponent implements OnInit, OnDestroy {
   startLogin(): void {
     this.stopQrPolling$.next();
     this.actionError = null;
+    this.actionMessage = null;
     this.loginView = { state: 'creating' };
     this.changeDetector.markForCheck();
     this.accountService
@@ -146,31 +150,39 @@ export class UploadsComponent implements OnInit, OnDestroy {
       });
   }
 
-  refreshAccount(account: BiliAccount): void {
-    if (this.refreshingAccountIds.has(account.id)) {
+  checkRenewal(account: BiliAccount): void {
+    if (this.checkingAccountIds.has(account.id)) {
       return;
     }
-    this.refreshingAccountIds.add(account.id);
+    this.checkingAccountIds.add(account.id);
     this.actionError = null;
+    this.actionMessage = null;
     this.changeDetector.markForCheck();
     this.accountService
-      .refreshAccount(account.id)
+      .checkRenewal(account.id)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
-        next: () => {
-          this.refreshingAccountIds.delete(account.id);
+        next: (result) => {
+          this.checkingAccountIds.delete(account.id);
+          this.actionMessage = result.refreshed
+            ? `凭据已续期，当前版本 ${result.credentialVersion}`
+            : '凭据当前有效，暂不需要续期';
           this.loadAccounts();
         },
         error: (error: unknown) => {
-          this.refreshingAccountIds.delete(account.id);
+          this.checkingAccountIds.delete(account.id);
           this.actionError = this.errorMessage(error);
           this.changeDetector.markForCheck();
         },
       });
   }
 
-  isRefreshing(accountId: number): boolean {
-    return this.refreshingAccountIds.has(accountId);
+  isChecking(accountId: number): boolean {
+    return this.checkingAccountIds.has(accountId);
+  }
+
+  accountInitial(displayName: string): string {
+    return displayName.trim().charAt(0) || '?';
   }
 
   accountStateLabel(state: AccountState): string {

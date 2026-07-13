@@ -5,12 +5,14 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
 import { Subject, of, throwError } from 'rxjs';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
+import { NzAvatarModule } from 'ng-zorro-antd/avatar';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
 import { NzEmptyModule } from 'ng-zorro-antd/empty';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzTagModule } from 'ng-zorro-antd/tag';
+import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { BiliAccountService } from './shared/bili-account.service';
 import { QrCodeRenderer } from './shared/qr-code-renderer.service';
@@ -39,7 +41,7 @@ describe('UploadsComponent', () => {
         'createQrSession',
         'getQrSession',
         'cancelQrSession',
-        'refreshAccount',
+        'checkRenewal',
       ]
     );
     qrRenderer = jasmine.createSpyObj<QrCodeRenderer>('QrCodeRenderer', [
@@ -51,8 +53,8 @@ describe('UploadsComponent', () => {
     accountService.cancelQrSession.and.returnValue(
       of({ ...pending, state: 'cancelled', qrUrl: null })
     );
-    accountService.refreshAccount.and.returnValue(
-      of({ credentialVersion: 2 })
+    accountService.checkRenewal.and.returnValue(
+      of({ credentialVersion: 2, refreshed: false })
     );
     qrRenderer.toDataUrl.and.resolveTo('data:image/png;base64,fixture');
 
@@ -62,12 +64,14 @@ describe('UploadsComponent', () => {
         CommonModule,
         NoopAnimationsModule,
         NzAlertModule,
+        NzAvatarModule,
         NzButtonModule,
         NzCardModule,
         NzEmptyModule,
         NzPageHeaderModule,
         NzSpinModule,
         NzTagModule,
+        NzToolTipModule,
       ],
       providers: [
         { provide: BiliAccountService, useValue: accountService },
@@ -86,7 +90,10 @@ describe('UploadsComponent', () => {
           id: 7,
           uid: 42,
           displayName: 'fixture',
+          avatarUrl: 'https://i0.hdslb.com/face.jpg',
           credentialVersion: 3,
+          credentialExpiresAt: 1_800_000_000,
+          createdAt: 1_700_000_000,
           state: 'active',
         },
       ])
@@ -97,10 +104,76 @@ describe('UploadsComponent', () => {
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('fixture');
     expect(text).toContain('UID 42');
+    expect(text).toContain('添加时间');
+    expect(text).toContain('凭据过期时间');
+    expect(text).toContain('凭据版本 3');
+    expect(text).toContain('检查并按需续期');
+    expect(component.credentialVersionTip).toContain(
+      '每次成功更换登录凭据后递增'
+    );
+    const avatar = fixture.nativeElement.querySelector(
+      '[data-testid="account-avatar"]'
+    );
+    expect(avatar).not.toBeNull();
+    expect(avatar.querySelector('img').src).toContain('i0.hdslb.com/face.jpg');
     expect(text).toContain('不会替代直播间匿名录制');
     expect(text).not.toContain('access_token');
     expect(text).not.toContain('Cookie=');
   });
+
+  it('falls back to the account initial when the avatar fails', () => {
+    accountService.listAccounts.and.returnValue(
+      of([
+        {
+          id: 7,
+          uid: 42,
+          displayName: 'fixture',
+          avatarUrl: 'https://i0.hdslb.com/missing.jpg',
+          credentialVersion: 1,
+          credentialExpiresAt: 0,
+          createdAt: 1_700_000_000,
+          state: 'active',
+        },
+      ])
+    );
+    fixture.detectChanges();
+
+    const avatar = fixture.nativeElement.querySelector(
+      '[data-testid="account-avatar"]'
+    );
+    avatar.querySelector('img').dispatchEvent(new Event('error'));
+    fixture.detectChanges();
+
+    expect(avatar.textContent).toContain('f');
+    expect(fixture.nativeElement.textContent).toContain('暂未获取');
+  });
+
+  it('checks renewal without replacing a still-valid credential', fakeAsync(() => {
+    const account = {
+      id: 7,
+      uid: 42,
+      displayName: 'fixture',
+      avatarUrl: '',
+      credentialVersion: 1,
+      credentialExpiresAt: 1_800_000_000,
+      createdAt: 1_700_000_000,
+      state: 'active' as const,
+    };
+    accountService.listAccounts.and.returnValue(of([account]));
+    fixture.detectChanges();
+
+    const button = fixture.nativeElement.querySelector(
+      '[data-testid="check-renewal"]'
+    ) as HTMLButtonElement;
+    button.click();
+    tick();
+    fixture.detectChanges();
+
+    expect(accountService.checkRenewal).toHaveBeenCalledOnceWith(7);
+    expect(fixture.nativeElement.textContent).toContain(
+      '凭据当前有效，暂不需要续期'
+    );
+  }));
 
   it('renders the QR locally and announces scan confirmation', fakeAsync(() => {
     accountService.getQrSession.and.returnValues(
