@@ -5,13 +5,13 @@ import struct
 import zlib
 from contextlib import suppress
 from enum import Enum, IntEnum
-from typing import Any, Dict, Final, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Final, List, NoReturn, Optional, Tuple, Union, cast
 
 import aiohttp
 import brotli
 from aiohttp import ClientSession
 from loguru import logger
-from tenacity import retry, retry_if_exception_type, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
 
 from blrec.logging.context import async_task_with_logger_context
 
@@ -127,8 +127,13 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
     @async_task_with_logger_context
     async def restart(self) -> None:
         self._logger.debug('Restarting danmaku client...')
-        await self.stop()
-        await self.start()
+        try:
+            await self.stop()
+            await self.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._raise_retries_exhausted(exc)
         self._logger.debug('Restarted danmaku client')
 
     async def reconnect(self) -> None:
@@ -141,6 +146,8 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         await self._emit('client_reconnected')
 
     @retry(
+        reraise=True,
+        stop=stop_after_delay(30),
         wait=wait_exponential(multiplier=0.1, max=10),
         retry=retry_if_exception_type(
             (asyncio.TimeoutError, aiohttp.ClientError, ConnectionError)
@@ -367,13 +374,21 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
                     )
                 )
                 await asyncio.sleep(self._retry_delay)
-            await self.reconnect()
+            try:
+                await self.reconnect()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._raise_retries_exhausted(exc)
             self._retry_count += 1
             self._retry_delay += 1
         else:
             error = aiohttp.WebSocketError(1006, 'Over the maximum of retries')
-            await self._emit('client_retries_exhausted', error)
-            raise error
+            await self._raise_retries_exhausted(error)
+
+    async def _raise_retries_exhausted(self, error: Exception) -> NoReturn:
+        await self._emit('client_retries_exhausted', error)
+        raise error
 
 
 class Frame:
