@@ -1,0 +1,17 @@
+{
+  "add_reply": {"code": 0, "data": {"rpid": 101}},
+  "complete_upload": {"OK": 1},
+  "create_qr": {"code": 0, "data": {"auth_code": "fixture-auth-code", "url": "https://example.invalid/qr"}},
+  "list_archives": {"code": 0, "data": {"arc_audits": []}},
+  "list_replies": {"code": 0, "data": {"replies": []}},
+  "oauth_info": {"code": 0, "data": {"mid": 42}},
+  "poll_qr": {"code": 0, "data": {"status": "pending"}},
+  "post_danmaku": {"code": 0, "data": {"dmid": 202}},
+  "preupload": {"OK": 1, "auth": "fixture-upos-auth", "biz_id": 42, "chunk_size": 4194304, "endpoint": "//upos.example.invalid", "upos_uri": "upos://bucket/fixture.mp4"},
+  "preupload_init": {"OK": 1, "upload_id": "fixture-upload-id"},
+  "refresh_token": {"code": 0, "data": {"expires_in": 15552000}},
+  "reply_detail": {"code": 0, "data": {"replies": []}},
+  "submit_archive": {"code": 0, "data": {"aid": 303, "bvid": "BVfixture"}},
+  "top_reply": {"code": 0},
+  "upload_chunk": {"OK": 1, "etag": "fixture-etag"}
+}
