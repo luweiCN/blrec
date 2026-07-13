@@ -28,6 +28,7 @@ __all__ = (
     'BiliUploadDatabase',
     'DatabaseLocked',
     'LeaseClaim',
+    'LeaseLost',
     'UnsupportedDatabaseFilesystem',
 )
 
@@ -37,6 +38,10 @@ class DatabaseLocked(RuntimeError):
 
 
 class UnsupportedDatabaseFilesystem(RuntimeError):
+    pass
+
+
+class LeaseLost(RuntimeError):
     pass
 
 
@@ -161,7 +166,7 @@ class BiliUploadDatabase:
         lease_owner: str,
         lease_generation: int,
         values: Mapping[str, Any],
-    ) -> int:
+    ) -> None:
         self._validate_claim_table(table)
         if not values:
             raise ValueError('fenced update values must not be empty')
@@ -336,7 +341,7 @@ class BiliUploadDatabase:
         lease_owner: str,
         lease_generation: int,
         values: Dict[str, Any],
-    ) -> int:
+    ) -> None:
         columns = self._table_columns_sync(table)
         forbidden = {'id', 'lease_owner', 'lease_generation'}
         for column in values:
@@ -349,8 +354,9 @@ class BiliUploadDatabase:
             'AND lease_generation=?'.format(table, assignments),
             parameters,
         )
+        if cursor.rowcount != 1:
+            raise LeaseLost('database lease is no longer owned')
         self._secure_database_files()
-        return cursor.rowcount
 
     def _table_columns_sync(self, table: str) -> Set[str]:
         rows = self._require_connection().execute('PRAGMA table_info({})'.format(table))

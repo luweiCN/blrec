@@ -11,6 +11,7 @@ import pytest
 from blrec.bili_upload import (
     BiliUploadDatabase,
     DatabaseLocked,
+    LeaseLost,
     UnsupportedDatabaseFilesystem,
 )
 
@@ -209,7 +210,7 @@ async def test_claim_is_unique_and_stale_generation_cannot_update(
         assert first.lease_until == 1120
         assert first.attempt == 1
 
-        assert (
+        with pytest.raises(LeaseLost):
             await database.fenced_update(
                 'upload_jobs',
                 first.id,
@@ -217,7 +218,8 @@ async def test_claim_is_unique_and_stale_generation_cannot_update(
                 first.lease_generation,
                 {'state': 'uploading'},
             )
-            == 0
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'ready'
         )
         assert (
             await database.fenced_update(
@@ -227,7 +229,7 @@ async def test_claim_is_unique_and_stale_generation_cannot_update(
                 first.lease_generation,
                 {'state': 'uploading'},
             )
-            == 1
+            is None
         )
 
         second = await database.claim(
@@ -235,7 +237,7 @@ async def test_claim_is_unique_and_stale_generation_cannot_update(
         )
         assert second is not None
         assert second.lease_generation == 2
-        assert (
+        with pytest.raises(LeaseLost):
             await database.fenced_update(
                 'upload_jobs',
                 first.id,
@@ -243,7 +245,8 @@ async def test_claim_is_unique_and_stale_generation_cannot_update(
                 first.lease_generation,
                 {'state': 'submitting'},
             )
-            == 0
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'uploading'
         )
     finally:
         await database.close()
