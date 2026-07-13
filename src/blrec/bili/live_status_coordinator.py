@@ -32,7 +32,7 @@ from .live_status import (
 
 __all__ = ('LiveStatusCoordinator', 'StatusCircuitBreaker')
 
-_RegistrationState = Tuple[ObservedStatus, Optional[str], int, bool]
+_RegistrationState = Tuple[ObservedStatus, Optional[str], int, bool, bool, bool]
 _RoomMappingLoader = Callable[[Sequence[int]], Awaitable[Dict[int, Tuple[int, int]]]]
 _RoomStatusConfirmer = Callable[[int], Awaitable[StatusSnapshot]]
 _RegistrationConfirmer = Union[StatusConfirmer, _RoomStatusConfirmer]
@@ -53,6 +53,8 @@ class _Registration:
     observation_key: Optional[str] = None
     negative_count: int = 0
     wss_negative: bool = False
+    wss_active: bool = False
+    retry_pending: bool = False
     last_mapping_at: float = float('-inf')
     notification_task: Optional[asyncio.Task[None]] = None
 
@@ -185,6 +187,7 @@ class LiveStatusCoordinator:
         self._poll_lock = asyncio.Lock()
         self._fallback_count = 0
         self._missing_results = 0
+        self._stale_confirmation_cursor = 0
         self._last_success_at: Optional[float] = None
 
     @property
@@ -254,10 +257,19 @@ class LiveStatusCoordinator:
         self._breaker.resume()
 
     async def observe_wss(self, registration_key: int, status: ObservedStatus) -> None:
-        if status not in (ObservedStatus.PREPARING, ObservedStatus.ROUND):
-            return
         registration = self._registrations.get(registration_key)
         if registration is None:
+            return
+        if status is ObservedStatus.LIVE:
+            if registration.current is ObservedStatus.LIVE:
+                registration.wss_active = True
+                registration.retry_pending = False
+            return
+        if status is ObservedStatus.STALE:
+            registration.wss_active = False
+            registration.retry_pending = registration.current is ObservedStatus.LIVE
+            return
+        if status not in (ObservedStatus.PREPARING, ObservedStatus.ROUND):
             return
         if self._notification_pending(registration):
             return
@@ -308,8 +320,7 @@ class LiveStatusCoordinator:
             batch_size=self._batch_size,
             registered_rooms=len(self._registrations),
             active_websockets=sum(
-                item.current is ObservedStatus.LIVE
-                for item in self._registrations.values()
+                item.wss_active for item in self._registrations.values()
             ),
             last_success_at=self._last_success_at,
             snapshot_max_age_seconds=snapshot_age,
@@ -446,6 +457,7 @@ class LiveStatusCoordinator:
             self._breaker.record_failure(failure_reason)
             return False
 
+        await self._confirm_one_stale(pending_results)
         for pending_batch, result, missing in pending_results:
             await self._apply_batch_result(pending_batch, result, missing)
 
@@ -473,6 +485,38 @@ class LiveStatusCoordinator:
                     continue
                 await self._apply_snapshot(registration, snapshot)
 
+    async def _confirm_one_stale(
+        self,
+        pending_results: Sequence[Tuple[Sequence[int], BatchStatusResult, Set[int]]],
+    ) -> None:
+        missing_uids = {uid for _, _, missing in pending_results for uid in missing}
+        candidates = [
+            registration
+            for registration in sorted(
+                self._registrations.values(), key=lambda item: item.registration_key
+            )
+            if registration.uid in missing_uids
+            and registration.current is ObservedStatus.LIVE
+            and not self._notification_pending(registration)
+        ]
+        if not candidates:
+            return
+        index = self._stale_confirmation_cursor % len(candidates)
+        self._stale_confirmation_cursor = (index + 1) % len(candidates)
+        await self._apply_stale(candidates[index])
+
+    async def _apply_stale(self, registration: _Registration) -> None:
+        if (
+            registration.current is not ObservedStatus.LIVE
+            or self._notification_pending(registration)
+            or self._registrations.get(registration.registration_key)
+            is not registration
+        ):
+            return
+        confirmed = await self._confirm(registration)
+        if self._registrations.get(registration.registration_key) is registration:
+            await self._apply_snapshot(registration, confirmed)
+
     async def _apply_snapshot(
         self, registration: _Registration, snapshot: StatusSnapshot
     ) -> None:
@@ -489,6 +533,9 @@ class LiveStatusCoordinator:
                 or registration.observation_key == snapshot.observation_key
             )
             if same_broadcast:
+                if registration.retry_pending:
+                    registration.retry_pending = False
+                    await self._schedule_notification(registration, snapshot, previous)
                 return
             confirmed = await self._confirm(registration)
             if (
@@ -500,6 +547,8 @@ class LiveStatusCoordinator:
             if confirmed.status is not ObservedStatus.LIVE:
                 return
             registration.current = ObservedStatus.LIVE
+            registration.wss_active = False
+            registration.retry_pending = False
             registration.observation_key = (
                 confirmed.observation_key
                 or snapshot.observation_key
@@ -521,6 +570,8 @@ class LiveStatusCoordinator:
         registration.current = snapshot.status
         registration.negative_count = 0
         registration.wss_negative = False
+        registration.wss_active = False
+        registration.retry_pending = False
         await self._schedule_notification(registration, snapshot, previous)
 
     async def _schedule_notification(
@@ -545,6 +596,13 @@ class LiveStatusCoordinator:
     ) -> None:
         try:
             await registration.listener(snapshot)
+            if (
+                snapshot.status is ObservedStatus.LIVE
+                and self._registrations.get(registration.registration_key)
+                is registration
+                and not registration.retry_pending
+            ):
+                registration.wss_active = True
         except asyncio.CancelledError:
             self._restore_registration_state(registration, previous)
             raise
@@ -662,6 +720,8 @@ class LiveStatusCoordinator:
             registration.observation_key,
             registration.negative_count,
             registration.wss_negative,
+            registration.wss_active,
+            registration.retry_pending,
         )
 
     @staticmethod
@@ -673,6 +733,8 @@ class LiveStatusCoordinator:
             registration.observation_key,
             registration.negative_count,
             registration.wss_negative,
+            registration.wss_active,
+            registration.retry_pending,
         ) = previous
 
     @staticmethod

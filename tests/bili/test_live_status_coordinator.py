@@ -233,6 +233,86 @@ async def test_contradictory_missing_snapshot_does_not_emit_offline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repeated_small_missing_live_result_uses_cooled_safe_confirmation() -> (
+    None
+):
+    clock = MutableClock()
+    listener = AsyncMock()
+    confirmer = AsyncMock(
+        side_effect=[
+            confirmation(1, ObservedStatus.PREPARING),
+            confirmation(1, ObservedStatus.PREPARING),
+        ]
+    )
+    missing_live = BatchStatusResult(
+        {2: snapshot(2, ObservedStatus.PREPARING)}, frozenset({1})
+    )
+    client = ScriptedBatchClient(results=[missing_live, missing_live, missing_live])
+    coordinator = LiveStatusCoordinator(client, clock=clock)
+    registration = coordinator.register(1, 1001, listener, confirmer)
+    coordinator.register(2, 1002, AsyncMock(), AsyncMock())
+    registration.current = ObservedStatus.LIVE
+    registration.observation_key = '1:1'
+
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+
+    assert registration.current is ObservedStatus.LIVE
+    assert registration.negative_count == 1
+    assert confirmer.await_count == 1
+    assert listener.await_count == 0
+
+    clock.advance(600)
+    await coordinator.poll_once()
+
+    assert registration.current is ObservedStatus.PREPARING
+    assert confirmer.await_count == 2
+    assert [item.args[0].status for item in listener.await_args_list] == [
+        ObservedStatus.PREPARING
+    ]
+
+
+@pytest.mark.asyncio
+async def test_small_missing_non_live_result_does_not_fan_out_confirmation() -> None:
+    confirmer = AsyncMock()
+    client = ScriptedBatchClient(
+        results=[
+            BatchStatusResult(
+                {2: snapshot(2, ObservedStatus.PREPARING)}, frozenset({1})
+            )
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    coordinator.register(1, 1001, AsyncMock(), confirmer)
+    coordinator.register(2, 1002, AsyncMock(), AsyncMock())
+
+    await coordinator.poll_once()
+
+    confirmer.assert_not_awaited()
+    assert coordinator.fallback_count == 0
+
+
+@pytest.mark.asyncio
+async def test_one_cycle_confirms_at_most_one_missing_live_room() -> None:
+    uids = list(range(1, 7))
+    result = batch_for(uids, ObservedStatus.LIVE, missing=[1, 2], live_time=1)
+    client = ScriptedBatchClient(results=[result])
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+    confirmers: List[AsyncMock] = []
+    for uid in uids:
+        confirmer = AsyncMock(return_value=confirmation(uid, ObservedStatus.LIVE))
+        confirmers.append(confirmer)
+        registration = coordinator.register(uid, uid + 1000, AsyncMock(), confirmer)
+        registration.current = ObservedStatus.LIVE
+        registration.observation_key = '{}:1'.format(uid)
+
+    await coordinator.poll_once()
+
+    assert sum(item.await_count for item in confirmers) == 1
+    assert coordinator.fallback_count == 1
+
+
+@pytest.mark.asyncio
 async def test_unknown_and_stale_results_do_not_emit_offline() -> None:
     listener = AsyncMock()
     confirmer = AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE))
@@ -389,6 +469,37 @@ async def test_live_wss_confirmation_clears_negative_hint_without_emitting() -> 
     assert registration.current is ObservedStatus.LIVE
     assert registration.wss_negative is False
     assert listener.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_exhausted_wss_is_not_active_and_same_broadcast_retries_once() -> None:
+    client = ScriptedBatchClient(
+        results=[
+            batch_result(1, ObservedStatus.LIVE),
+            batch_result(1, ObservedStatus.LIVE),
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, clock=lambda: 100.0)
+
+    listener = AsyncMock()
+    registration = coordinator.register(1, 1001, listener, AsyncMock())
+    registration.current = ObservedStatus.LIVE
+    registration.observation_key = '1:1'
+    await coordinator.observe_wss(1001, ObservedStatus.LIVE)
+    listener.reset_mock()
+
+    await coordinator.observe_wss(1001, ObservedStatus.STALE)
+
+    assert coordinator.metrics(100.0).active_websockets == 0
+    assert registration.current is ObservedStatus.LIVE
+
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+
+    assert listener.await_count == 1
+    assert listener.await_args.args[0].status is ObservedStatus.LIVE
+    assert registration.current is ObservedStatus.LIVE
+    assert coordinator.metrics(100.0).active_websockets == 1
 
 
 @pytest.mark.asyncio

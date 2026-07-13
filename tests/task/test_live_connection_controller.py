@@ -116,9 +116,67 @@ async def test_confirmed_live_starts_once_and_offline_releases_wss() -> None:
     danmaku.start.assert_awaited_once()
     danmaku.stop.assert_awaited_once()
     room_info_loader.assert_awaited_once_with(1001)
-    assert live.room_info is validated_room_info
+    assert live.room_info.live_status is LiveStatus.PREPARING  # type: ignore
     assert monitor.confirmed == [ObservedStatus.LIVE, ObservedStatus.PREPARING]
     assert controller.active is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('status', 'expected'),
+    [
+        (ObservedStatus.PREPARING, LiveStatus.PREPARING),
+        (ObservedStatus.ROUND, LiveStatus.ROUND),
+    ],
+)
+async def test_confirmed_end_updates_room_info_before_monitor_event(
+    status: ObservedStatus, expected: LiveStatus
+) -> None:
+    live = FakeLive()
+    observed_room_statuses: List[LiveStatus] = []
+    monitor = FakeMonitor()
+
+    async def inspect_status(received: ObservedStatus) -> None:
+        observed_room_statuses.append(live.room_info.live_status)  # type: ignore
+        monitor.confirmed.append(received)
+
+    monitor.apply_confirmed_status = inspect_status  # type: ignore
+    controller = LiveConnectionController(
+        live, mocked_danmaku(), monitor, AsyncMock(return_value=room_info())
+    )
+    await controller.on_confirmed_status(live_snapshot())
+
+    await controller.on_confirmed_status(
+        StatusSnapshot(1, 1001, status, 130.0, StatusSource.BATCH, 10, '1:10')
+    )
+
+    assert live.room_info.live_status is expected  # type: ignore
+    assert observed_room_statuses[-1] is expected
+
+
+@pytest.mark.asyncio
+async def test_failed_confirmed_end_rolls_back_room_info() -> None:
+    live = FakeLive()
+    monitor = FakeMonitor()
+    controller = LiveConnectionController(
+        live, mocked_danmaku(), monitor, AsyncMock(return_value=room_info())
+    )
+    await controller.on_confirmed_status(live_snapshot())
+    original_room_info = live.room_info
+    observed_room_statuses: List[LiveStatus] = []
+
+    async def fail_event(status: ObservedStatus) -> None:
+        observed_room_statuses.append(live.room_info.live_status)  # type: ignore
+        raise RuntimeError('event failed')
+
+    monitor.apply_confirmed_status = fail_event  # type: ignore
+
+    with pytest.raises(RuntimeError, match='event failed'):
+        await controller.on_confirmed_status(preparing_snapshot())
+
+    assert live.room_info is original_room_info
+    assert observed_room_statuses == [LiveStatus.PREPARING]
+    assert controller.active is True
 
 
 @pytest.mark.asyncio
@@ -173,6 +231,117 @@ async def test_wss_hint_is_forwarded_with_room_id() -> None:
     await controller.on_wss_hint(ObservedStatus.PREPARING)
 
     status_sink.assert_awaited_once_with(1001, ObservedStatus.PREPARING)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_wss_rebuilds_without_duplicate_live_events() -> None:
+    from blrec.bili.live_monitor import LiveMonitor
+
+    class EventDanmaku:
+        def __init__(self) -> None:
+            self.stopped = True
+            self.start_count = 0
+            self.stop_count = 0
+            self.listeners: List[object] = []
+
+        def add_listener(self, listener: object) -> None:
+            if listener not in self.listeners:
+                self.listeners.append(listener)
+
+        def remove_listener(self, listener: object) -> None:
+            self.listeners.remove(listener)
+
+        def set_room_id(self, room_id: int) -> None:
+            assert self.stopped is True
+
+        async def start(self) -> None:
+            self.stopped = False
+            self.start_count += 1
+
+        async def stop(self) -> None:
+            self.stopped = True
+            self.stop_count += 1
+
+    live = FakeLive()
+    live.room_info = room_info()
+    live.get_live_streams = AsyncMock(return_value=[])  # type: ignore
+    danmaku = EventDanmaku()
+    monitor = LiveMonitor(danmaku, live, status_sink=AsyncMock())  # type: ignore
+    listener = AsyncMock()
+    monitor.add_listener(listener)
+    status_sink = AsyncMock()
+    controller = LiveConnectionController(
+        live,
+        danmaku,  # type: ignore
+        monitor,
+        AsyncMock(return_value=room_info()),
+        status_sink=status_sink,
+    )
+    monitor._status_sink = controller.on_wss_hint
+
+    await controller.on_confirmed_status(live_snapshot())
+    await monitor.on_client_retries_exhausted(
+        RuntimeError('websocket retries exhausted')
+    )
+
+    assert controller.active is False
+    assert danmaku.stop_count == 0
+    status_sink.assert_awaited_with(1001, ObservedStatus.STALE)
+
+    await controller.on_confirmed_status(live_snapshot())
+
+    assert controller.active is True
+    assert danmaku.start_count == 2
+    assert listener.on_live_began.await_count == 1
+    assert listener.on_live_ended.await_count == 0
+    assert listener.on_live_stream_reset.await_count == 0
+
+    await monitor.on_client_retries_exhausted(
+        RuntimeError('websocket retries exhausted again')
+    )
+    await controller.on_confirmed_status(live_snapshot())
+
+    assert danmaku.start_count == 3
+    assert listener.on_live_began.await_count == 1
+    assert listener.on_live_ended.await_count == 0
+    assert listener.on_live_stream_reset.await_count == 0
+
+    await controller.on_confirmed_status(preparing_snapshot())
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_pending_retry_receives_confirmed_end_once() -> None:
+    from blrec.bili.live_monitor import LiveMonitor
+
+    danmaku = mocked_danmaku()
+    danmaku.stopped = True
+    danmaku.add_listener = Mock()
+    danmaku.remove_listener = Mock()
+    live = FakeLive()
+    live.room_info = room_info()
+    live.get_live_streams = AsyncMock(return_value=[])  # type: ignore
+    monitor = LiveMonitor(danmaku, live, status_sink=AsyncMock())  # type: ignore
+    listener = AsyncMock()
+    monitor.add_listener(listener)
+    controller = LiveConnectionController(
+        live,
+        danmaku,
+        monitor,
+        AsyncMock(return_value=room_info()),
+        status_sink=AsyncMock(),
+    )
+    monitor._status_sink = controller.on_wss_hint
+
+    await controller.on_confirmed_status(live_snapshot())
+    await monitor.on_client_retries_exhausted(RuntimeError('exhausted'))
+    await controller.on_confirmed_status(preparing_snapshot())
+    await controller.on_confirmed_status(preparing_snapshot())
+
+    assert listener.on_live_began.await_count == 1
+    assert listener.on_live_ended.await_count == 1
+    assert controller.active is False
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -240,6 +409,68 @@ async def test_partially_started_danmaku_client_can_stop() -> None:
     await danmaku.stop()
 
     assert danmaku.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_danmaku_receive_retry_exhaustion_emits_terminal_signal() -> None:
+    from blrec.bili.danmaku_client import DanmakuClient
+
+    danmaku = object.__new__(DanmakuClient)
+    danmaku._retry_count = 0
+    danmaku._retry_delay = 0
+    danmaku._MAX_RETRIES = 0
+    danmaku._listeners = [AsyncMock()]
+
+    with pytest.raises(Exception, match='maximum of retries'):
+        await danmaku._retry()
+
+    listener = danmaku._listeners[0]
+    listener.on_client_retries_exhausted.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_message_loop_error_does_not_block_disconnect() -> None:
+    import aiohttp
+
+    from blrec.bili.danmaku_client import DanmakuClient
+
+    async def fail_message_loop() -> None:
+        raise aiohttp.WebSocketError(1006, 'terminal receive error')
+
+    message_loop = asyncio.create_task(fail_message_loop())
+    await asyncio.sleep(0)
+    assert isinstance(message_loop.exception(), aiohttp.WebSocketError)
+    danmaku = object.__new__(DanmakuClient)
+    danmaku._message_loop_task = message_loop
+    danmaku._disconnect = AsyncMock()
+    danmaku._logger = Mock()
+
+    await danmaku._do_stop()
+
+    danmaku._disconnect.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_failed_stale_cleanup_does_not_stick_recovery_future() -> None:
+    danmaku = mocked_danmaku()
+    danmaku.stop.side_effect = RuntimeError('cleanup failed')
+    controller = LiveConnectionController(
+        FakeLive(),
+        danmaku,
+        FakeMonitor(),
+        AsyncMock(return_value=room_info()),
+        status_sink=AsyncMock(),
+    )
+    await controller.on_wss_hint(ObservedStatus.STALE)
+
+    with pytest.raises(RuntimeError, match='cleanup failed'):
+        await controller.on_confirmed_status(live_snapshot())
+
+    danmaku.stop.side_effect = None
+    await controller.on_confirmed_status(live_snapshot())
+
+    danmaku.start.assert_awaited_once_with()
+    assert controller.active is True
 
 
 @pytest.mark.asyncio

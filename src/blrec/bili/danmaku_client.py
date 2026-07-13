@@ -36,6 +36,9 @@ class DanmakuListener(EventListener):
     async def on_client_reconnected(self) -> None:
         pass
 
+    async def on_client_retries_exhausted(self, error: Exception) -> None:
+        pass
+
     async def on_danmaku_received(self, danmu: Danmaku) -> None:
         pass
 
@@ -293,7 +296,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         if not hasattr(self, '_message_loop_task'):
             return
         self._message_loop_task.cancel()
-        with suppress(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError, Exception):
             await self._message_loop_task
         self._logger.debug('Terminated message loop')
 
@@ -368,7 +371,9 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
             self._retry_count += 1
             self._retry_delay += 1
         else:
-            raise aiohttp.WebSocketError(1006, 'Over the maximum of retries')
+            error = aiohttp.WebSocketError(1006, 'Over the maximum of retries')
+            await self._emit('client_retries_exhausted', error)
+            raise error
 
 
 class Frame:

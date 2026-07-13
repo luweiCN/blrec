@@ -136,6 +136,10 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
                 self._logger.debug('Simulating live ended event')
                 await self._handle_status_change(current_status)
 
+    async def on_client_retries_exhausted(self, error: Exception) -> None:
+        if self._status_sink is not None:
+            await self._status_sink(ObservedStatus.STALE)
+
     async def apply_confirmed_status(self, status: ObservedStatus) -> None:
         live_status = {
             ObservedStatus.LIVE: LiveStatus.LIVE,
