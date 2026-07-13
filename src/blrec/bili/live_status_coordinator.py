@@ -11,6 +11,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Set,
     Tuple,
     Union,
     cast,
@@ -399,6 +400,7 @@ class LiveStatusCoordinator:
             ]
 
         failure_reason: Optional[str] = None
+        pending_results: List[Tuple[Sequence[int], BatchStatusResult, Set[int]]] = []
         for batch in batches:
             try:
                 result = await self._client.fetch(batch, observed_at=self._clock())
@@ -408,7 +410,12 @@ class LiveStatusCoordinator:
                 failure_reason = self._failure_reason(exc)
                 break
 
-            large_missing = await self._apply_batch_result(batch, result)
+            requested = set(batch)
+            missing = requested - set(result.snapshots)
+            missing.update(requested & set(result.missing_uids))
+            self._missing_results += len(missing)
+            pending_results.append((batch, result, missing))
+            large_missing = len(missing) > len(batch) / 2
             if large_missing and failure_reason is None:
                 failure_reason = (
                     'batch response missing more than half of requested UIDs'
@@ -420,18 +427,16 @@ class LiveStatusCoordinator:
             self._breaker.record_failure(failure_reason)
             return False
 
+        for pending_batch, result, missing in pending_results:
+            await self._apply_batch_result(pending_batch, result, missing)
+
         self._breaker.record_success(self._batch_size)
         self._last_success_at = self._clock()
         return True
 
     async def _apply_batch_result(
-        self, batch: Sequence[int], result: BatchStatusResult
-    ) -> bool:
-        requested = set(batch)
-        missing = requested - set(result.snapshots)
-        missing.update(requested & set(result.missing_uids))
-        self._missing_results += len(missing)
-
+        self, batch: Sequence[int], result: BatchStatusResult, missing: Set[int]
+    ) -> None:
         registrations = list(self._registrations.values())
         for uid in batch:
             if uid in missing:
@@ -448,7 +453,6 @@ class LiveStatusCoordinator:
                 ):
                     continue
                 await self._apply_snapshot(registration, snapshot)
-        return len(missing) > len(batch) / 2
 
     async def _apply_snapshot(
         self, registration: _Registration, snapshot: StatusSnapshot

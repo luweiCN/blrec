@@ -21,6 +21,7 @@ KeyOfSettings = Literal[
     'output',
     'logging',
     'bili_api',
+    'live_monitor',
     'header',
     'danmaku',
     'recorder',

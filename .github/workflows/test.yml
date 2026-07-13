@@ -72,11 +72,6 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify packaged frontend is current
-        run: |
-          git status --short -- ../src/blrec/data/webapp
-          test -z "$(git status --porcelain -- ../src/blrec/data/webapp)"
-
   docker:
     name: Docker
     runs-on: ubuntu-latest

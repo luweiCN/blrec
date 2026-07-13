@@ -604,6 +604,8 @@ async def test_batch_failures_open_breaker_without_stopping_live(
 async def test_large_missing_result_opens_breaker_after_planned_batches() -> None:
     first = list(range(1, 30))
     second = list(range(30, 59))
+    first_listener = AsyncMock()
+    second_listener = AsyncMock()
     client = ScriptedBatchClient(
         results=[
             batch_for(first, ObservedStatus.PREPARING, missing=list(range(15, 30))),
@@ -612,13 +614,56 @@ async def test_large_missing_result_opens_breaker_after_planned_batches() -> Non
     )
     coordinator = LiveStatusCoordinator(client, batch_size=29, clock=lambda: 100.0)
     for uid in range(1, 59):
-        coordinator.register(uid, uid + 1000, AsyncMock(), AsyncMock())
+        listener = (
+            first_listener
+            if uid == 1
+            else second_listener if uid == 30 else AsyncMock()
+        )
+        registration = coordinator.register(uid, uid + 1000, listener, AsyncMock())
+        if uid in (1, 30):
+            registration.current = ObservedStatus.LIVE
+            registration.negative_count = 1
 
     await coordinator.poll_once()
 
     assert client.calls == [first, second]
     assert coordinator.metrics(100.0).breaker_state is BreakerState.OPEN
     assert coordinator.metrics(100.0).missing_results == 15
+    assert coordinator._registrations[1001].current is ObservedStatus.LIVE
+    assert coordinator._registrations[1001].negative_count == 1
+    assert coordinator._registrations[1030].current is ObservedStatus.LIVE
+    assert coordinator._registrations[1030].negative_count == 1
+    assert first_listener.await_count == 0
+    assert second_listener.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_later_batch_failure_discards_earlier_status_updates() -> None:
+    first = list(range(1, 30))
+    second = list(range(30, 59))
+    listener = AsyncMock()
+    client = ScriptedBatchClient(
+        results=[
+            batch_for(first, ObservedStatus.PREPARING),
+            BatchProtocolError('HTTP 429'),
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, batch_size=29, clock=lambda: 100.0)
+    for uid in range(1, 59):
+        registration = coordinator.register(
+            uid, uid + 1000, listener if uid == 1 else AsyncMock(), AsyncMock()
+        )
+        if uid == 1:
+            registration.current = ObservedStatus.LIVE
+            registration.negative_count = 1
+
+    await coordinator.poll_once()
+
+    assert client.calls == [first, second]
+    assert coordinator.metrics(100.0).breaker_state is BreakerState.OPEN
+    assert coordinator._registrations[1001].current is ObservedStatus.LIVE
+    assert coordinator._registrations[1001].negative_count == 1
+    assert listener.await_count == 0
 
 
 def test_breaker_uses_exponential_canary_delay() -> None:

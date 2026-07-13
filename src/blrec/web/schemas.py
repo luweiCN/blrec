@@ -40,6 +40,7 @@ AliasKeyOfSettings = Literal[
     'output',
     'logging',
     'biliApi',
+    'liveMonitor',
     'header',
     'danmaku',
     'recorder',
