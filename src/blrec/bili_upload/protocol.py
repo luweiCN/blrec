@@ -185,24 +185,33 @@ class BiliProtocolClient:
 
     async def create_qr(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
         values = {'local_id': '0', 'ts': int(self._clock()), **params}
-        return await self._standard_request('create_qr', form=self._tv.sign(values))
+        return await self._standard_request(
+            'create_qr', headers=self._tv_headers(), form=self._tv.sign(values)
+        )
 
     async def poll_qr(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
         values = {'local_id': '0', 'ts': int(self._clock()), **params}
         return await self._standard_request(
-            'poll_qr', form=self._tv.sign(values), check_code=False
+            'poll_qr',
+            headers=self._tv_headers(),
+            form=self._tv.sign(values),
+            check_code=False,
         )
 
     async def oauth_info(self, bundle: CredentialBundle) -> Mapping[str, Any]:
         values = self._tv_token_values(bundle)
-        return await self._standard_request('oauth_info', query=self._tv.sign(values))
+        return await self._standard_request(
+            'oauth_info', headers=self._tv_headers(), query=self._tv.sign(values)
+        )
 
     async def refresh_token(self, bundle: CredentialBundle) -> Mapping[str, Any]:
         values = {
             **self._tv_token_values(bundle),
             'refresh_token': bundle.refresh_token,
         }
-        return await self._standard_request('refresh_token', form=self._tv.sign(values))
+        return await self._standard_request(
+            'refresh_token', headers=self._tv_headers(), form=self._tv.sign(values)
+        )
 
     async def preupload(
         self, bundle: CredentialBundle, params: Mapping[str, Any]
@@ -442,6 +451,16 @@ class BiliProtocolClient:
         if not cookie:
             raise ProtocolContractError('web credential has no matching cookies')
         return {'Cookie': cookie}
+
+    @staticmethod
+    def _tv_headers() -> Headers:
+        return {
+            'Referer': 'https://www.bilibili.com/',
+            'User-Agent': (
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+                'Chrome/63.0.3239.108'
+            ),
+        }
 
     def _tv_token_values(self, bundle: CredentialBundle) -> Dict[str, Any]:
         if bundle.signing_family.lower() not in ('tv', 'bilitv'):

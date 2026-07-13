@@ -212,6 +212,14 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert 'Cookie' not in request.headers
         assert 'csrf' not in dict(request.query)
         assert 'csrf' not in dict(request.form)
+    for name in ('create_qr', 'poll_qr', 'oauth_info', 'refresh_token'):
+        assert requests[name].headers == {
+            'Referer': 'https://www.bilibili.com/',
+            'User-Agent': (
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+                'Chrome/63.0.3239.108'
+            ),
+        }
     for name in (
         'preupload',
         'list_archives',
