@@ -139,16 +139,27 @@ class CredentialCipher:
         }
         return self._encode_json(envelope)
 
-    def decrypt(self, envelope: bytes, *, account_uid: int) -> CredentialBundle:
+    def decrypt(
+        self,
+        envelope: bytes,
+        *,
+        account_uid: int,
+        expected_version: Optional[int] = None,
+        expected_key_id: Optional[str] = None,
+    ) -> CredentialBundle:
         document = self._decode_envelope(envelope)
         key_id = document['key_id']
         assert isinstance(key_id, str)
+        version = document['credential_version']
+        assert isinstance(version, int)
+        if expected_version is not None and version != expected_version:
+            raise InvalidCredentialBundle('credential envelope metadata mismatch')
+        if expected_key_id is not None and key_id != expected_key_id:
+            raise InvalidCredentialBundle('credential envelope metadata mismatch')
         key = self._keys.get(key_id)
         if key is None:
             raise InvalidCredentialKey('credential key is unavailable')
 
-        version = document['credential_version']
-        assert isinstance(version, int)
         self._validate_identity(account_uid, version)
         nonce = self._decode_base64(document['nonce'])
         ciphertext = self._decode_base64(document['ciphertext'])

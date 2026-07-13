@@ -226,6 +226,85 @@ async def test_store_put_get_and_replace_are_atomic(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_rejects_a_replayed_older_envelope(tmp_path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    store = CredentialStore(database)
+    cipher = CredentialCipher({'current': b'a' * 32}, current_key_id='current')
+    try:
+        await store.put(
+            account_id=1,
+            account_uid=42,
+            display_name='account',
+            bundle=credential_fixture(),
+            cipher=cipher,
+            now=100,
+        )
+        version_one = await store.raw_ciphertext(account_id=1)
+        await store.put(
+            account_id=1,
+            account_uid=42,
+            display_name='account',
+            bundle=replace(credential_fixture(), expires_at=400),
+            cipher=cipher,
+            now=200,
+        )
+        await database.execute(
+            'UPDATE bili_accounts SET credential_ciphertext=? WHERE id=?',
+            (version_one, 1),
+        )
+
+        with pytest.raises(InvalidCredentialBundle, match='metadata mismatch'):
+            await store.get(account_id=1, cipher=cipher)
+        with pytest.raises(InvalidCredentialBundle, match='metadata mismatch'):
+            await store.rotate(account_id=1, cipher=cipher, now=300)
+
+        assert await store.raw_ciphertext(account_id=1) == version_one
+        assert (
+            await database.scalar(
+                'SELECT credential_version FROM bili_accounts WHERE id=?', (1,)
+            )
+            == 2
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_a_database_key_id_mismatch(tmp_path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    store = CredentialStore(database)
+    cipher = CredentialCipher({'current': b'a' * 32}, current_key_id='current')
+    try:
+        await store.put(
+            account_id=1,
+            account_uid=42,
+            display_name='account',
+            bundle=credential_fixture(),
+            cipher=cipher,
+            now=100,
+        )
+        original = await store.raw_ciphertext(account_id=1)
+        await database.execute(
+            'UPDATE bili_accounts SET key_id=? WHERE id=?', ('different', 1)
+        )
+
+        with pytest.raises(InvalidCredentialBundle, match='metadata mismatch'):
+            await store.get(account_id=1, cipher=cipher)
+        with pytest.raises(InvalidCredentialBundle, match='metadata mismatch'):
+            await store.rotate(account_id=1, cipher=cipher, now=200)
+
+        assert await store.raw_ciphertext(account_id=1) == original
+        assert (
+            await database.scalar('SELECT key_id FROM bili_accounts WHERE id=?', (1,))
+            == 'different'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_store_rejects_uid_mismatch_without_creating_an_account(tmp_path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

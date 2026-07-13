@@ -41,7 +41,12 @@ class CredentialStore:
                 raise InvalidCredentialBundle('credential uid mismatch')
             version = 1 if row is None else int(row['credential_version']) + 1
             envelope = cipher.encrypt(bundle, account_uid=account_uid, version=version)
-            restored = cipher.decrypt(envelope, account_uid=account_uid)
+            restored = cipher.decrypt(
+                envelope,
+                account_uid=account_uid,
+                expected_version=version,
+                expected_key_id=cipher.current_key_id,
+            )
             if restored != bundle or restored.mid != account_uid:
                 raise InvalidCredentialBundle('credential verification failed')
 
@@ -90,7 +95,10 @@ class CredentialStore:
             row = self._select_account(connection, account_id)
             uid = int(row['uid'])
             bundle = cipher.decrypt(
-                self._ciphertext_bytes(row['credential_ciphertext']), account_uid=uid
+                self._ciphertext_bytes(row['credential_ciphertext']),
+                account_uid=uid,
+                expected_version=int(row['credential_version']),
+                expected_key_id=str(row['key_id']),
             )
             if bundle.mid != uid:
                 raise InvalidCredentialBundle('credential uid mismatch')
@@ -108,14 +116,22 @@ class CredentialStore:
             uid = int(row['uid'])
             current_version = int(row['credential_version'])
             bundle = cipher.decrypt(
-                self._ciphertext_bytes(row['credential_ciphertext']), account_uid=uid
+                self._ciphertext_bytes(row['credential_ciphertext']),
+                account_uid=uid,
+                expected_version=current_version,
+                expected_key_id=str(row['key_id']),
             )
             if bundle.mid != uid:
                 raise InvalidCredentialBundle('credential uid mismatch')
 
             version = current_version + 1
             envelope = cipher.encrypt(bundle, account_uid=uid, version=version)
-            restored = cipher.decrypt(envelope, account_uid=uid)
+            restored = cipher.decrypt(
+                envelope,
+                account_uid=uid,
+                expected_version=version,
+                expected_key_id=cipher.current_key_id,
+            )
             if restored != bundle or restored.mid != uid:
                 raise InvalidCredentialBundle('credential verification failed')
             cursor = connection.execute(
@@ -148,7 +164,7 @@ class CredentialStore:
     @staticmethod
     def _select_account(connection: sqlite3.Connection, account_id: int) -> sqlite3.Row:
         row = connection.execute(
-            'SELECT uid,credential_ciphertext,credential_version '
+            'SELECT uid,credential_ciphertext,credential_version,key_id '
             'FROM bili_accounts WHERE id=?',
             (account_id,),
         ).fetchone()
