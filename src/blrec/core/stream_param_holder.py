@@ -62,6 +62,10 @@ class StreamParamHolder:
     def real_quality_number(self) -> QualityNumber:
         return self._real_quality_number or self._quality_number
 
+    @real_quality_number.setter
+    def real_quality_number(self, value: QualityNumber) -> None:
+        self._real_quality_number = value
+
     @property
     def use_alternative_stream(self) -> bool:
         return self._use_alternative_stream

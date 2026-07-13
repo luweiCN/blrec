@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, cast
 
 import aiohttp
 from jsonpath import jsonpath
@@ -57,6 +57,7 @@ class Live:
         self._room_info: RoomInfo
         self._user_info: UserInfo
         self._no_flv_stream: bool
+        self._real_quality_number: Optional[QualityNumber] = None
 
     @property
     def base_api_urls(self) -> List[str]:
@@ -134,6 +135,10 @@ class Live:
     @property
     def room_id(self) -> int:
         return self._room_id
+
+    @property
+    def real_quality_number(self) -> Optional[QualityNumber]:
+        return self._real_quality_number
 
     @property
     def room_info(self) -> RoomInfo:
@@ -301,8 +306,13 @@ class Live:
 
         accept_qns = jsonpath(codecs, '$[*].accept_qn[*]')
         current_qns = jsonpath(codecs, '$[*].current_qn')
-        if qn not in accept_qns or not all(map(lambda q: q == qn, current_qns)):
+        if (
+            not current_qns
+            or not all(map(lambda value: value == current_qns[0], current_qns))
+            or current_qns[0] not in accept_qns
+        ):
             raise NoStreamQualityAvailable(stream_format, stream_codec, qn)
+        self._real_quality_number = cast(QualityNumber, current_qns[0])
 
         def sort_by_host(info: Any) -> int:
             host = info['host']
