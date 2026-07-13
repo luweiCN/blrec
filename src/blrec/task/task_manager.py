@@ -125,8 +125,28 @@ class RecordTaskManager:
                 await task.enable_recorder()
         except BaseException as e:
             logger.error(f'Failed to add task {settings.room_id} due to: {repr(e)}')
-            await task.destroy()
-            del self._tasks[settings.room_id]
+            try:
+                await task.disable_recorder(force=True)
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Failed to disable recorder while cleaning up task '
+                    f'{settings.room_id}: {repr(cleanup_error)}'
+                )
+            try:
+                await task.disable_monitor()
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Failed to disable monitor while cleaning up task '
+                    f'{settings.room_id}: {repr(cleanup_error)}'
+                )
+            try:
+                await task.destroy()
+            except BaseException as cleanup_error:
+                logger.error(
+                    f'Failed to destroy task {settings.room_id}: '
+                    f'{repr(cleanup_error)}'
+                )
+            self._tasks.pop(settings.room_id, None)
             raise
 
         logger.info(f'Successfully added task {settings.room_id}')
