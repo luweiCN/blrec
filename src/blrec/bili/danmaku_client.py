@@ -270,7 +270,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         await self._emit('client_disconnected')
 
     async def _close_websocket(self) -> None:
-        with suppress(BaseException):
+        with suppress(Exception):
             await self._ws.close()
 
     def _create_heartbeat_task(self) -> None:

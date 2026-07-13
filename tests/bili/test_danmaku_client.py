@@ -133,6 +133,56 @@ async def test_connect_auth_cancellation_closes_socket_and_propagates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_failed_auth_close_stops_retry_and_host_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = bare_client()
+    close_entered = asyncio.Event()
+    never_finish_close = asyncio.Event()
+    close_count = 0
+    socket = Mock()
+
+    async def block_close() -> None:
+        nonlocal close_count
+        close_count += 1
+        if close_count > 1:
+            return
+        close_entered.set()
+        await never_finish_close.wait()
+
+    socket.close = AsyncMock(side_effect=block_close)
+    client._ws = socket
+    client._host_index = 0
+    client._danmu_info = {'host_list': [{}, {}]}
+    client._connect_websocket = AsyncMock(
+        side_effect=[None, AssertionError('unexpected websocket retry')]
+    )
+    client._send_auth = AsyncMock(side_effect=aiohttp.ClientError('auth failed'))
+    client._recieve_auth_reply = AsyncMock()
+    client._handle_auth_reply = AsyncMock()
+    client._update_danmu_info = AsyncMock()
+    retrying = DanmakuClient._connect.retry
+    monkeypatch.setattr(retrying, 'stop', stop_after_attempt(2))
+    monkeypatch.setattr(retrying, 'wait', wait_none())
+    connecting = asyncio.create_task(client._connect())
+    await close_entered.wait()
+
+    connecting.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(connecting, timeout=0.1)
+
+        assert client._connect_websocket.await_count == 1
+        assert client._host_index == 0
+        socket.close.assert_awaited_once_with()
+        client._update_danmu_info.assert_not_awaited()
+    finally:
+        never_finish_close.set()
+        connecting.cancel()
+        await asyncio.gather(connecting, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_receive_reconnect_failure_emits_terminal_once() -> None:
     client = bare_client()
     failure = aiohttp.ClientError('reconnect exhausted')
