@@ -6,6 +6,7 @@ import { NzAvatarModule } from 'ng-zorro-antd/avatar';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
 import { NzEmptyModule } from 'ng-zorro-antd/empty';
+import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzTagModule } from 'ng-zorro-antd/tag';
@@ -24,6 +25,7 @@ import { UploadsComponent } from './uploads.component';
     NzButtonModule,
     NzCardModule,
     NzEmptyModule,
+    NzModalModule,
     NzPageHeaderModule,
     NzSpinModule,
     NzTagModule,

@@ -30,14 +30,18 @@ import { QrCodeRenderer } from './shared/qr-code-renderer.service';
 export class UploadsComponent implements OnInit, OnDestroy {
   accountsView: AccountsView = { state: 'loading' };
   loginView: LoginView = { state: 'idle' };
+  loginDialogVisible = false;
   actionError: string | null = null;
   actionMessage: string | null = null;
   readonly credentialVersionTip =
     '每次成功更换登录凭据后递增，用于防止旧任务覆盖新凭据；它不是账号等级或软件版本。';
+  readonly credentialExpiryTip =
+    '这是 B 站扫码接口返回的 TV access token 预计失效时间，不代表账号本身或 Web Cookie 会在此刻同时失效；系统会在接近过期或 B 站要求时自动续期。';
 
   private readonly destroy$ = new Subject<void>();
   private readonly stopQrPolling$ = new Subject<void>();
   private readonly checkingAccountIds = new Set<number>();
+  private readonly failedAvatarUrls = new Set<string>();
 
   constructor(
     private accountService: BiliAccountService,
@@ -89,6 +93,36 @@ export class UploadsComponent implements OnInit, OnDestroy {
     this.loadAccounts();
   }
 
+  openLoginDialog(): void {
+    this.stopQrPolling$.next();
+    this.loginView = { state: 'idle' };
+    this.loginDialogVisible = true;
+    this.actionError = null;
+    this.actionMessage = null;
+    this.changeDetector.markForCheck();
+  }
+
+  closeLoginDialog(): void {
+    const display = this.visibleQr;
+    const shouldCancel = display !== null && this.canCancelLogin;
+    this.stopQrPolling$.next();
+    this.loginDialogVisible = false;
+    this.loginView = { state: 'idle' };
+    this.changeDetector.markForCheck();
+    if (!display || !shouldCancel) {
+      return;
+    }
+    this.accountService
+      .cancelQrSession(display.session.id)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        error: (error: unknown) => {
+          this.actionError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
   startLogin(): void {
     this.stopQrPolling$.next();
     this.actionError = null;
@@ -106,6 +140,7 @@ export class UploadsComponent implements OnInit, OnDestroy {
             map((qrDataUrl) => ({ session, qrDataUrl }))
           );
         }),
+        takeUntil(this.stopQrPolling$),
         takeUntil(this.destroy$)
       )
       .subscribe({
@@ -183,6 +218,14 @@ export class UploadsComponent implements OnInit, OnDestroy {
 
   accountInitial(displayName: string): string {
     return displayName.trim().charAt(0) || '?';
+  }
+
+  hasAvatarError(avatarUrl: string): boolean {
+    return this.failedAvatarUrls.has(avatarUrl);
+  }
+
+  markAvatarError(avatarUrl: string): void {
+    this.failedAvatarUrls.add(avatarUrl);
   }
 
   accountStateLabel(state: AccountState): string {
@@ -310,6 +353,8 @@ export class UploadsComponent implements OnInit, OnDestroy {
       case 'confirmed':
         this.stopQrPolling$.next();
         this.loginView = { state: 'confirmed', accountId: session.accountId };
+        this.loginDialogVisible = false;
+        this.actionMessage = '账号添加成功';
         this.loadAccounts();
         break;
       case 'expired':

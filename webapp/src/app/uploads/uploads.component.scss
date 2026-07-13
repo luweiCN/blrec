@@ -9,13 +9,6 @@
   margin-bottom: 12px;
 }
 
-.card-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
-  gap: 12px;
-  align-items: start;
-}
-
 .account-list {
   margin: 0;
   padding: 0;
@@ -40,6 +33,26 @@
 
 .account-details {
   min-width: 0;
+}
+
+.account-avatar {
+  width: 48px;
+  height: 48px;
+  flex: none;
+}
+
+.account-avatar-image {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.account-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .account-meta-grid {
@@ -87,10 +100,6 @@
 }
 
 @media (max-width: 760px) {
-  .card-grid {
-    grid-template-columns: 1fr;
-  }
-
   .account-list li,
   .account-actions {
     align-items: flex-start;

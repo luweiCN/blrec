@@ -1,5 +1,20 @@
 <div class="uploads-page">
-  <nz-page-header nzTitle="投稿管理" nzSubtitle="B 站账号与自动续期"></nz-page-header>
+  <nz-page-header
+    nzTitle="投稿账号管理"
+    nzSubtitle="B 站账号与自动续期"
+  >
+    <nz-page-header-extra>
+      <button
+        nz-button
+        nzType="primary"
+        type="button"
+        data-testid="add-account"
+        (click)="openLoginDialog()"
+      >
+        添加账号
+      </button>
+    </nz-page-header-extra>
+  </nz-page-header>
 
   <nz-alert
     class="scope-note"
@@ -9,8 +24,7 @@
     nzDescription="扫码后系统会把 TV token 与 Web Cookie 作为同一组凭据加密保存，用于账号校验、投稿、评论和视频弹幕；它不会替代直播间匿名录制，也不会按房间重复登录。"
   ></nz-alert>
 
-  <div class="card-grid">
-    <nz-card nzTitle="已登录账号">
+  <nz-card nzTitle="已登录账号">
       <div aria-live="polite" [attr.aria-busy]="accountsView.state === 'loading'">
         <nz-spin *ngIf="accountsView.state === 'loading'" nzSimple></nz-spin>
         <nz-alert
@@ -35,15 +49,37 @@
         <ul class="account-list" *ngIf="accounts.length > 0">
           <li *ngFor="let account of accounts; trackBy: trackAccount">
             <div class="account-main">
-              <nz-avatar
+              <div
+                class="account-avatar"
                 data-testid="account-avatar"
-                [nzSize]="48"
-                [nzSrc]="account.avatarUrl || undefined"
-                [nzText]="accountInitial(account.displayName)"
-                [nzAlt]="account.displayName + '的头像'"
-              ></nz-avatar>
+              >
+                <img
+                  *ngIf="
+                    account.avatarUrl && !hasAvatarError(account.avatarUrl);
+                    else avatarFallback
+                  "
+                  class="account-avatar-image"
+                  [src]="account.avatarUrl"
+                  width="48"
+                  height="48"
+                  referrerpolicy="no-referrer"
+                  [alt]="account.displayName + '的头像'"
+                  (error)="markAvatarError(account.avatarUrl)"
+                />
+                <ng-template #avatarFallback>
+                  <nz-avatar
+                    [nzSize]="48"
+                    [nzText]="accountInitial(account.displayName)"
+                  ></nz-avatar>
+                </ng-template>
+              </div>
               <div class="account-details">
-                <strong>{{ account.displayName }}</strong>
+                <div class="account-heading">
+                  <strong>{{ account.displayName }}</strong>
+                  <nz-tag [nzColor]="accountStateColor(account.state)">
+                    {{ accountStateLabel(account.state) }}
+                  </nz-tag>
+                </div>
                 <div class="account-meta-grid">
                   <span>UID {{ account.uid }}</span>
                   <span>
@@ -51,7 +87,16 @@
                     {{ account.createdAt * 1000 | date : 'yyyy-MM-dd HH:mm' }}
                   </span>
                   <span>
-                    凭据过期时间
+                    TV Token 预计过期时间
+                    <span
+                      class="help-mark"
+                      data-testid="credential-expiry-help"
+                      nz-tooltip
+                      [nzTooltipTitle]="credentialExpiryTip"
+                      tabindex="0"
+                      role="img"
+                      [attr.aria-label]="credentialExpiryTip"
+                    >?</span>
                     <ng-container *ngIf="account.credentialExpiresAt > 0; else unknownExpiry">
                       {{
                         account.credentialExpiresAt * 1000
@@ -76,9 +121,6 @@
               </div>
             </div>
             <div class="account-actions">
-              <nz-tag [nzColor]="accountStateColor(account.state)">
-                {{ accountStateLabel(account.state) }}
-              </nz-tag>
               <button
                 nz-button
                 type="button"
@@ -105,9 +147,16 @@
           [nzMessage]="actionError"
         ></nz-alert>
       </div>
-    </nz-card>
+  </nz-card>
 
-    <nz-card nzTitle="扫码登录">
+  <nz-modal
+    nzTitle="添加账号"
+    nzCentered
+    [nzVisible]="loginDialogVisible"
+    [nzFooter]="null"
+    (nzOnCancel)="closeLoginDialog()"
+  >
+    <ng-container *nzModalContent>
       <div class="login-state" aria-live="polite">
         <p class="status-text">{{ loginStatusText() }}</p>
 
@@ -116,6 +165,7 @@
           nz-button
           nzType="primary"
           type="button"
+          data-testid="generate-login-qr"
           (click)="startLogin()"
         >
           生成登录二维码
@@ -159,6 +209,6 @@
           重新生成二维码
         </button>
       </div>
-    </nz-card>
-  </div>
+    </ng-container>
+  </nz-modal>
 </div>

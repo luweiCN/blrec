@@ -9,6 +9,7 @@ import { NzAvatarModule } from 'ng-zorro-antd/avatar';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
 import { NzEmptyModule } from 'ng-zorro-antd/empty';
+import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzTagModule } from 'ng-zorro-antd/tag';
@@ -68,6 +69,7 @@ describe('UploadsComponent', () => {
         NzButtonModule,
         NzCardModule,
         NzEmptyModule,
+        NzModalModule,
         NzPageHeaderModule,
         NzSpinModule,
         NzTagModule,
@@ -102,20 +104,40 @@ describe('UploadsComponent', () => {
     fixture.detectChanges();
 
     const text = fixture.nativeElement.textContent;
+    expect(text).toContain('投稿账号管理');
     expect(text).toContain('fixture');
     expect(text).toContain('UID 42');
     expect(text).toContain('添加时间');
-    expect(text).toContain('凭据过期时间');
+    expect(text).toContain('TV Token 预计过期时间');
     expect(text).toContain('凭据版本 3');
     expect(text).toContain('检查并按需续期');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="add-account"]')
+    ).not.toBeNull();
     expect(component.credentialVersionTip).toContain(
       '每次成功更换登录凭据后递增'
     );
+    expect(component.credentialExpiryTip).toContain(
+      '不代表账号本身或 Web Cookie'
+    );
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="credential-expiry-help"]'
+      )
+    ).not.toBeNull();
     const avatar = fixture.nativeElement.querySelector(
       '[data-testid="account-avatar"]'
     );
     expect(avatar).not.toBeNull();
-    expect(avatar.querySelector('img').src).toContain('i0.hdslb.com/face.jpg');
+    const avatarImage = avatar.querySelector('img') as HTMLImageElement;
+    expect(avatarImage.src).toContain('i0.hdslb.com/face.jpg');
+    expect(avatarImage.referrerPolicy).toBe('no-referrer');
+    const heading = fixture.nativeElement.querySelector('.account-heading');
+    expect(heading.querySelector('strong').textContent).toContain('fixture');
+    expect(heading.querySelector('nz-tag').textContent).toContain('可用');
+    expect(
+      fixture.nativeElement.querySelector('.account-actions nz-tag')
+    ).toBeNull();
     expect(text).toContain('不会替代直播间匿名录制');
     expect(text).not.toContain('access_token');
     expect(text).not.toContain('Cookie=');
@@ -175,6 +197,35 @@ describe('UploadsComponent', () => {
     );
   }));
 
+  it('opens account login without creating a QR code automatically', () => {
+    fixture.detectChanges();
+
+    const addButton = fixture.nativeElement.querySelector(
+      '[data-testid="add-account"]'
+    ) as HTMLButtonElement;
+    addButton.click();
+    fixture.detectChanges();
+
+    expect(component.loginDialogVisible).toBeTrue();
+    expect(accountService.createQrSession).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('生成登录二维码');
+  });
+
+  it('cancels a pending login when the dialog closes', fakeAsync(() => {
+    fixture.detectChanges();
+    component.openLoginDialog();
+    component.startLogin();
+    tick();
+
+    component.closeLoginDialog();
+    tick();
+
+    expect(accountService.cancelQrSession).toHaveBeenCalledOnceWith(
+      'session-1'
+    );
+    expect(component.loginDialogVisible).toBeFalse();
+  }));
+
   it('renders the QR locally and announces scan confirmation', fakeAsync(() => {
     accountService.getQrSession.and.returnValues(
       of({ ...pending, state: 'scanned' }),
@@ -187,29 +238,32 @@ describe('UploadsComponent', () => {
     );
     fixture.detectChanges();
 
+    component.openLoginDialog();
     component.startLogin();
     tick();
     fixture.detectChanges();
 
     expect(qrRenderer.toDataUrl).toHaveBeenCalledOnceWith(pending.qrUrl!);
-    const image: HTMLImageElement = fixture.nativeElement.querySelector(
+    const image = document.body.querySelector(
       '[data-testid="login-qr"]'
-    );
+    ) as HTMLImageElement;
     expect(image.src).toContain('data:image/png;base64,fixture');
     expect(image.alt).toContain('B站扫码登录二维码');
 
     tick(1000);
     fixture.detectChanges();
-    expect(fixture.nativeElement.textContent).toContain('已扫码，请在手机确认');
+    expect(document.body.textContent).toContain('已扫码，请在手机确认');
 
     tick(1000);
     fixture.detectChanges();
-    expect(fixture.nativeElement.textContent).toContain('登录成功');
+    expect(component.loginDialogVisible).toBeFalse();
+    expect(component.actionMessage).toBe('账号添加成功');
     expect(accountService.listAccounts).toHaveBeenCalledTimes(2);
   }));
 
   it('cancels the server poller from a semantic button', fakeAsync(() => {
     fixture.detectChanges();
+    component.openLoginDialog();
     component.startLogin();
     tick();
     fixture.detectChanges();
@@ -224,7 +278,7 @@ describe('UploadsComponent', () => {
     expect(accountService.cancelQrSession).toHaveBeenCalledOnceWith(
       'session-1'
     );
-    expect(fixture.nativeElement.textContent).toContain('已取消');
+    expect(document.body.textContent).toContain('已取消');
   }));
 
   it('shows a fail-closed configuration error and offers retry', () => {
