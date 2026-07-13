@@ -194,6 +194,55 @@ async def test_failed_websocket_start_rolls_back_monitor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_websocket_activation_timeout_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered_tasks: List[asyncio.Task[None]] = []
+    never_connect = asyncio.Event()
+
+    async def block_start() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        entered_tasks.append(task)
+        await never_connect.wait()
+
+    danmaku = mocked_danmaku()
+    danmaku.start.side_effect = block_start
+    monitor = FakeMonitor()
+    controller = LiveConnectionController(
+        FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
+    )
+    monkeypatch.setattr(
+        LiveConnectionController, '_ACTIVATION_TIMEOUT_SECONDS', 0.01, raising=False
+    )
+
+    activation = asyncio.create_task(controller.on_confirmed_status(live_snapshot()))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(activation, timeout=0.1)
+
+    assert activation.cancelled() is False
+    assert entered_tasks[0] is not activation
+    danmaku.stop.assert_awaited_once()
+    assert monitor.enabled is False
+    assert controller.active is False
+
+
+@pytest.mark.asyncio
+async def test_partially_started_danmaku_client_can_stop() -> None:
+    from blrec.bili.danmaku_client import DanmakuClient
+
+    danmaku = object.__new__(DanmakuClient)
+    danmaku._stopped = False
+    danmaku._stopped_lock = asyncio.Lock()
+    danmaku._logger = Mock()
+    danmaku._listeners = []
+
+    await danmaku.stop()
+
+    assert danmaku.stopped is True
+
+
+@pytest.mark.asyncio
 async def test_external_monitor_enable_skips_legacy_polling() -> None:
     from blrec.bili.live_monitor import LiveMonitor
     from blrec.bili.models import LiveStatus
@@ -486,6 +535,10 @@ async def test_redirect_uses_canonical_room_with_stable_task_ownership(
 
     await task.enable_monitor()
     await coordinator.poll_once()
+    for _ in range(10):
+        if danmaku.started:
+            break
+        await asyncio.sleep(0)
 
     anonymous.fetch_uid_mappings.assert_awaited_once_with((123,))
     anonymous.confirm_status.assert_awaited_once_with(2002)

@@ -522,26 +522,26 @@ async def test_reregistered_room_does_not_reuse_previous_confirmation() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('lifecycle_change', ['unregister', 'replace'])
-async def test_later_stale_registration_is_skipped_after_listener_await(
-    lifecycle_change: str,
-) -> None:
+async def test_blocked_listener_does_not_block_other_rooms_or_polling() -> None:
     first_listener_entered = asyncio.Event()
-    release_first_listener = asyncio.Event()
+    first_listener_cancelled = asyncio.Event()
+    never_release_first_listener = asyncio.Event()
 
     async def block_first_listener(snapshot: StatusSnapshot) -> None:
         first_listener_entered.set()
-        await release_first_listener.wait()
+        try:
+            await never_release_first_listener.wait()
+        finally:
+            first_listener_cancelled.set()
 
     first_listener = AsyncMock(side_effect=block_first_listener)
-    old_second_listener = AsyncMock()
-    replacement_listener = AsyncMock()
+    second_listener = AsyncMock()
     client = ScriptedBatchClient(
         results=[
             BatchStatusResult(
                 {
                     1: snapshot(1, ObservedStatus.LIVE),
-                    2: snapshot(2, ObservedStatus.PREPARING),
+                    2: snapshot(2, ObservedStatus.LIVE),
                 },
                 frozenset(),
             )
@@ -554,24 +554,19 @@ async def test_later_stale_registration_is_skipped_after_listener_await(
         first_listener,
         AsyncMock(return_value=confirmation(1, ObservedStatus.LIVE)),
     )
-    old_second_registration = coordinator.register(
-        2, 1002, old_second_listener, AsyncMock()
+    coordinator.register(
+        2,
+        1002,
+        second_listener,
+        AsyncMock(return_value=confirmation(2, ObservedStatus.LIVE)),
     )
-    old_second_registration.current = ObservedStatus.LIVE
-    old_second_registration.negative_count = 1
 
-    polling = asyncio.create_task(coordinator.poll_once())
+    await asyncio.wait_for(coordinator.poll_once(), timeout=0.1)
     await first_listener_entered.wait()
-    if lifecycle_change == 'unregister':
-        coordinator.unregister(1002)
-    else:
-        coordinator.register(2, 1002, replacement_listener, AsyncMock())
-    release_first_listener.set()
-    await polling
+    await asyncio.wait_for(coordinator.stop(), timeout=0.1)
 
-    assert old_second_listener.await_count == 0
-    assert replacement_listener.await_count == 0
-    assert old_second_registration.current is ObservedStatus.LIVE
+    assert second_listener.await_count == 1
+    assert first_listener_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -709,10 +704,36 @@ async def test_breaker_recovers_one_then_five_then_full() -> None:
 
     await coordinator.poll_once()
     assert client.calls[-1] == list(range(1, 6))
-    assert coordinator.metrics(clock()).breaker_state is BreakerState.CLOSED
+    assert coordinator.metrics(clock()).breaker_state is BreakerState.HALF_OPEN
 
     await coordinator.poll_once()
     assert client.calls[-1] == list(range(1, 11))
+    assert coordinator.metrics(clock()).breaker_state is BreakerState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_full_recovery_probe_failure_reopens_breaker() -> None:
+    clock = MutableClock(0.0)
+    client = ScriptedBatchClient(
+        results=[
+            asyncio.TimeoutError(),
+            batch_for([1], ObservedStatus.PREPARING),
+            batch_for(list(range(1, 6)), ObservedStatus.PREPARING),
+            BatchProtocolError('HTTP 429'),
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, batch_size=10, clock=clock)
+    for uid in range(1, 11):
+        coordinator.register(uid, uid + 1000, AsyncMock(), AsyncMock())
+
+    await coordinator.poll_once()
+    clock.advance(30)
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+
+    assert [len(call) for call in client.calls] == [10, 1, 5, 10]
+    assert coordinator.metrics(clock()).breaker_state is BreakerState.OPEN
 
 
 @pytest.mark.asyncio

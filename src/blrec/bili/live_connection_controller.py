@@ -16,6 +16,8 @@ __all__ = ('LiveConnectionController',)
 
 
 class LiveConnectionController:
+    _ACTIVATION_TIMEOUT_SECONDS = 30
+
     def __init__(
         self,
         live: Live,
@@ -54,7 +56,9 @@ class LiveConnectionController:
                 self._danmaku.set_room_id(room_info.room_id)
                 self._monitor.enable()
                 try:
-                    await self._danmaku.start()
+                    await asyncio.wait_for(
+                        self._danmaku.start(), timeout=self._ACTIVATION_TIMEOUT_SECONDS
+                    )
                     await self._monitor.apply_confirmed_status(ObservedStatus.LIVE)
                 except BaseException:
                     self._monitor.disable()

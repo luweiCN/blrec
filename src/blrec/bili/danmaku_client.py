@@ -264,6 +264,8 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._heartbeat_task.add_done_callback(exception_callback)
 
     async def _cancel_heartbeat_task(self) -> None:
+        if not hasattr(self, '_heartbeat_task'):
+            return
         self._heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await self._heartbeat_task
@@ -288,6 +290,8 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._logger.debug('Created message loop')
 
     async def _terminate_message_loop(self) -> None:
+        if not hasattr(self, '_message_loop_task'):
+            return
         self._message_loop_task.cancel()
         with suppress(asyncio.CancelledError):
             await self._message_loop_task

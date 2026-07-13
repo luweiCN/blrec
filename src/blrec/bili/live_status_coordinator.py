@@ -54,6 +54,7 @@ class _Registration:
     negative_count: int = 0
     wss_negative: bool = False
     last_mapping_at: float = float('-inf')
+    notification_task: Optional[asyncio.Task[None]] = None
 
 
 @dataclass
@@ -105,7 +106,9 @@ class StatusCircuitBreaker:
             return None
         if self._recovery_stage == 0:
             return 1
-        return min(5, batch_size)
+        if self._recovery_stage == 1:
+            return min(5, batch_size)
+        return batch_size
 
     def record_success(self, batch_size: int) -> None:
         self._failure_streak = 0
@@ -116,6 +119,9 @@ class StatusCircuitBreaker:
             return
         if self._recovery_stage == 0:
             self._recovery_stage = 1
+            return
+        if self._recovery_stage == 1:
+            self._recovery_stage = 2
             return
         self._state = BreakerState.CLOSED
         self._recovery_stage = 0
@@ -173,6 +179,7 @@ class LiveStatusCoordinator:
         self._clock = clock
         self._registrations: Dict[int, _Registration] = {}
         self._fallback_tasks: Dict[int, _FallbackEntry] = {}
+        self._notification_tasks: Set[asyncio.Task[None]] = set()
         self._breaker = StatusCircuitBreaker(clock=clock)
         self._polling_task: Optional[asyncio.Task[None]] = None
         self._poll_lock = asyncio.Lock()
@@ -213,6 +220,7 @@ class LiveStatusCoordinator:
         )
         previous = self._registrations.pop(registration_key, None)
         if previous is not None:
+            self._cancel_notification(previous)
             self._remove_fallback_owner(previous)
         self._registrations[registration_key] = registration
         return registration
@@ -220,6 +228,7 @@ class LiveStatusCoordinator:
     def unregister(self, registration_key: int) -> None:
         registration = self._registrations.pop(registration_key, None)
         if registration is not None:
+            self._cancel_notification(registration)
             self._remove_fallback_owner(registration)
 
     def _remove_fallback_owner(self, registration: _Registration) -> None:
@@ -250,6 +259,8 @@ class LiveStatusCoordinator:
         registration = self._registrations.get(registration_key)
         if registration is None:
             return
+        if self._notification_pending(registration):
+            return
         registration.wss_negative = True
         confirmed = await self._confirm(registration)
         if self._registrations.get(registration_key) is registration:
@@ -271,12 +282,12 @@ class LiveStatusCoordinator:
 
     async def stop(self) -> None:
         task = self._polling_task
-        if task is None:
-            return
-        self._polling_task = None
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        if task is not None:
+            self._polling_task = None
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await self._stop_notifications()
 
     def metrics(self, now: float) -> CoordinatorMetrics:
         if self._last_success_at is None:
@@ -457,6 +468,8 @@ class LiveStatusCoordinator:
     async def _apply_snapshot(
         self, registration: _Registration, snapshot: StatusSnapshot
     ) -> None:
+        if self._notification_pending(registration):
+            return
         if snapshot.status in (ObservedStatus.UNKNOWN, ObservedStatus.STALE):
             return
         if snapshot.status is ObservedStatus.LIVE:
@@ -484,7 +497,7 @@ class LiveStatusCoordinator:
                 or snapshot.observation_key
                 or '{}:local:{}'.format(registration.uid, int(self._clock()))
             )
-            await self._notify(registration, confirmed, previous)
+            await self._schedule_notification(registration, confirmed, previous)
             return
 
         if registration.current is not ObservedStatus.LIVE:
@@ -500,7 +513,21 @@ class LiveStatusCoordinator:
         registration.current = snapshot.status
         registration.negative_count = 0
         registration.wss_negative = False
-        await self._notify(registration, snapshot, previous)
+        await self._schedule_notification(registration, snapshot, previous)
+
+    async def _schedule_notification(
+        self,
+        registration: _Registration,
+        snapshot: StatusSnapshot,
+        previous: _RegistrationState,
+    ) -> None:
+        task = asyncio.create_task(self._notify(registration, snapshot, previous))
+        registration.notification_task = task
+        self._notification_tasks.add(task)
+        task.add_done_callback(
+            lambda completed: self._notification_finished(registration, completed)
+        )
+        await asyncio.sleep(0)
 
     async def _notify(
         self,
@@ -516,6 +543,31 @@ class LiveStatusCoordinator:
         except Exception as exc:
             self._restore_registration_state(registration, previous)
             submit_exception(exc)
+
+    def _notification_finished(
+        self, registration: _Registration, task: asyncio.Task[None]
+    ) -> None:
+        self._notification_tasks.discard(task)
+        if registration.notification_task is task:
+            registration.notification_task = None
+
+    @staticmethod
+    def _notification_pending(registration: _Registration) -> bool:
+        task = registration.notification_task
+        return task is not None and not task.done()
+
+    @staticmethod
+    def _cancel_notification(registration: _Registration) -> None:
+        task = registration.notification_task
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _stop_notifications(self) -> None:
+        tasks = tuple(self._notification_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _confirm(self, registration: _Registration) -> StatusSnapshot:
         now = self._clock()
