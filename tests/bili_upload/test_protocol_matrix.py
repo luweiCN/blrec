@@ -236,6 +236,8 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert 'access_key' not in material
         assert 'refresh_token' not in material
         assert 'Cookie' in request.headers
+        assert request.headers['Referer'] == 'https://www.bilibili.com/'
+        assert request.headers['User-Agent'].startswith('Mozilla/5.0 ')
     for name in ('preupload_init', 'upload_chunk', 'complete_upload'):
         request = requests[name]
         rendered = json.dumps(request.safe_shape(), sort_keys=True)
@@ -289,6 +291,19 @@ class StaticResponseTransport:
 
 
 @pytest.mark.asyncio
+async def test_http_client_error_retains_the_safe_operation_name() -> None:
+    client = protocol_client(
+        StaticResponseTransport(ProtocolResponse(status=412, headers={}, body=b''))
+    )
+
+    with pytest.raises(BiliApiError) as error:
+        await client.web_nav(credential_fixture())
+
+    assert error.value.code == 412
+    assert error.value.operation == 'web_nav'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     'response',
     [
@@ -337,6 +352,7 @@ async def test_api_business_error_is_code_only_when_message_contains_secrets() -
         await client.add_reply(credential_fixture(), {'oid': 303, 'message': 'x'})
 
     assert error.value.code == -412
+    assert error.value.operation == 'add_reply'
     rendered = str(error.value) + repr(error.value)
     assert 'leaked' not in rendered
     assert 'Cookie' not in rendered

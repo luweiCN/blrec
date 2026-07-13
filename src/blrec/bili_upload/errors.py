@@ -31,9 +31,16 @@ class RemoteOutcomeUnknown(RuntimeError):
 
 
 class BiliApiError(RuntimeError):
-    def __init__(self, code: int, public_message: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        code: int,
+        public_message: Optional[str] = None,
+        *,
+        operation: Optional[str] = None,
+    ) -> None:
         self.code = code
         self.public_message = public_message
+        self.operation = operation
         super().__init__('Bilibili API error {}'.format(code))
 
     def __repr__(self) -> str:

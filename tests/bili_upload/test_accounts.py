@@ -1,9 +1,11 @@
 import asyncio
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
+from unittest.mock import Mock
 
 import pytest
 
+import blrec.bili_upload.accounts as accounts_module
 from blrec.bili_upload.accounts import (
     AccountIdentityMismatch,
     AccountManager,
@@ -15,7 +17,7 @@ from blrec.bili_upload.accounts import (
 from blrec.bili_upload.credentials import CredentialStore
 from blrec.bili_upload.crypto import CookieRecord, CredentialBundle, CredentialCipher
 from blrec.bili_upload.database import BiliUploadDatabase
-from blrec.bili_upload.errors import DefinitelyNotSent, RemoteOutcomeUnknown
+from blrec.bili_upload.errors import BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown
 
 
 class FakeClock:
@@ -262,6 +264,40 @@ async def test_unknown_qr_code_fails_without_repeated_polling(tmp_path: Path) ->
 
         assert current.state == 'failed'
         assert protocol.poll_calls == 1
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_qr_confirmation_logs_safe_upstream_failure_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol(
+        poll_results=[confirmed_response()],
+        oauth_results=[BiliApiError(412, operation='oauth_info')],
+    )
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    fake_logger = Mock()
+    monkeypatch.setattr(accounts_module, 'logger', fake_logger, raising=False)
+    try:
+        session = await manager.create_qr(manager_subject='admin')
+        for _ in range(100):
+            current = await manager.status(session.id, manager_subject='admin')
+            if current.state == 'failed':
+                break
+            await asyncio.sleep(0.01)
+
+        assert current.state == 'failed'
+        fake_logger.error.assert_called_once_with(
+            'Bilibili QR login failed: stage={}, error_type={}, error_code={}',
+            'oauth_info',
+            'BiliApiError',
+            412,
+        )
+        assert 'access-new' not in repr(fake_logger.error.call_args)
+        assert 'sess-secret' not in repr(fake_logger.error.call_args)
     finally:
         await manager.close()
         await database.close()

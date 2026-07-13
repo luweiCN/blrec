@@ -421,7 +421,7 @@ class BiliProtocolClient:
         if response.status >= 500:
             raise RemoteOutcomeUnknown(request.operation)
         if response.status >= 400:
-            raise BiliApiError(response.status)
+            raise BiliApiError(response.status, operation=request.operation)
         try:
             payload = json.loads(response.body.decode('utf8'))
         except (UnicodeError, json.JSONDecodeError):
@@ -434,7 +434,11 @@ class BiliProtocolClient:
             raise RemoteOutcomeUnknown(request.operation)
         code = payload.get('code')
         if check_code and type(code) is int and code != 0:
-            raise BiliApiError(code, self._safe_message(payload))
+            raise BiliApiError(
+                code,
+                self._safe_message(payload),
+                operation=request.operation,
+            )
         if 'OK' in payload and payload['OK'] != 1:
             raise ProtocolContractError('UPOS operation failed')
         return payload
@@ -450,7 +454,7 @@ class BiliProtocolClient:
         cookie = self._web.cookie_header(bundle, url)
         if not cookie:
             raise ProtocolContractError('web credential has no matching cookies')
-        return {'Cookie': cookie}
+        return {**self._tv_headers(), 'Cookie': cookie}
 
     @staticmethod
     def _tv_headers() -> Headers:

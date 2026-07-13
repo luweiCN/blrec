@@ -18,10 +18,12 @@ from typing import (
     Optional,
 )
 
+from loguru import logger
+
 from .credentials import CredentialStore
 from .crypto import CookieRecord, CredentialBundle, CredentialCipher
 from .database import BiliUploadDatabase
-from .errors import DefinitelyNotSent, RemoteOutcomeUnknown
+from .errors import BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown
 
 __all__ = (
     'AccountIdentityMismatch',
@@ -383,6 +385,7 @@ class AccountManager:
         return refreshed
 
     async def _poll(self, runtime: _QrRuntime) -> None:
+        stage = 'poll'
         try:
             await self._transition(runtime, 'pending')
             while runtime.state not in self._TERMINAL_QR_STATES:
@@ -405,6 +408,7 @@ class AccountManager:
                     await self._transition(runtime, 'scanned')
                 elif code == 0 and isinstance(data, Mapping) and data.get('token_info'):
                     await self._transition(runtime, 'scanned')
+                    stage = 'credential_validation'
                     account = await self.finish_confirmed_login(
                         response, app_device_id=runtime.app_device_id
                     )
@@ -419,7 +423,19 @@ class AccountManager:
                 await self._sleeper(self._poll_interval_seconds)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            error_code = error.code if isinstance(error, BiliApiError) else None
+            error_stage = (
+                error.operation
+                if isinstance(error, BiliApiError) and error.operation
+                else stage
+            )
+            logger.error(
+                'Bilibili QR login failed: stage={}, error_type={}, error_code={}',
+                error_stage,
+                type(error).__name__,
+                error_code,
+            )
             if runtime.state not in self._TERMINAL_QR_STATES:
                 await self._transition(runtime, 'failed')
 
