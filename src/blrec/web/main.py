@@ -10,6 +10,7 @@ from pkg_resources import resource_filename
 from pydantic import ValidationError
 from starlette.responses import Response
 
+from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.exception import ExistsError, ForbiddenError, NotFoundError
 from blrec.path.helpers import create_file, file_exists
 from blrec.setting import EnvSettings, Settings
@@ -20,6 +21,7 @@ from ..application import Application
 from . import security
 from .routers import (
     application,
+    bili_accounts,
     live_status,
     settings,
     tasks,
@@ -39,6 +41,14 @@ _settings = Settings.load(_env_settings.settings_file)
 _settings.update_from_env_settings(_env_settings)
 
 app = Application(_settings)
+_bili_account_runtime = BiliAccountRuntime(
+    _settings.bili_upload,
+    api_key=_env_settings.api_key,
+    credential_key=_env_settings.load_credential_key(),
+    old_credential_keys=_env_settings.load_old_credential_keys(),
+)
+bili_accounts.manager = None
+bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 
 if _env_settings.api_key is None:
     _dependencies = None
@@ -106,12 +116,19 @@ async def validation_error_handler(
 @api.on_event('startup')
 async def on_startup() -> None:
     await app.launch()
+    await _bili_account_runtime.start()
+    bili_accounts.manager = _bili_account_runtime.manager
+    bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 
 
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
-    _settings.dump()
-    await app.exit()
+    bili_accounts.manager = None
+    try:
+        await _bili_account_runtime.close()
+    finally:
+        _settings.dump()
+        await app.exit()
 
 
 tasks.app = app
@@ -128,6 +145,7 @@ api.include_router(validation.router)
 api.include_router(websockets.router)
 api.include_router(update.router)
 api.include_router(live_status.router, prefix='/api/v1')
+api.include_router(bili_accounts.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

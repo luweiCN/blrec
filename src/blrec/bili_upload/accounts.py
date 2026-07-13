@@ -307,6 +307,22 @@ class AccountManager:
             state='active',
         )
 
+    async def list_accounts(self) -> List[AccountView]:
+        rows = await self._database.fetchall(
+            'SELECT id,uid,display_name,credential_version,state '
+            'FROM bili_accounts ORDER BY id'
+        )
+        return [
+            AccountView(
+                id=int(row['id']),
+                uid=int(row['uid']),
+                display_name=str(row['display_name']),
+                credential_version=int(row['credential_version']),
+                state=str(row['state']),
+            )
+            for row in rows
+        ]
+
     async def refresh_account(self, account_id: int) -> int:
         row = await self._account_row(account_id)
         version = int(row['credential_version'])

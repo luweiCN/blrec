@@ -334,6 +334,24 @@ async def test_confirm_saves_one_validated_credential_bundle(tmp_path: Path) -> 
         await database.close()
 
 
+@pytest.mark.asyncio
+async def test_list_accounts_returns_only_redacted_account_metadata(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        saved = await manager.finish_confirmed_login(confirmed_response())
+
+        assert await manager.list_accounts() == [saved]
+        assert 'access-new' not in repr(saved)
+        assert 'refresh-new' not in repr(saved)
+    finally:
+        await manager.close()
+        await database.close()
+
+
 async def seed_account(
     store: CredentialStore, cipher: CredentialCipher, *, expires_at: int
 ) -> None:
