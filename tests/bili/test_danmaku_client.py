@@ -46,6 +46,93 @@ async def test_connect_persistent_client_error_uses_bounded_retry_policy(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'failing_stage', ['send_auth', 'receive_auth_reply', 'handle_auth_reply']
+)
+async def test_connect_closes_each_socket_before_retrying_auth_failure(
+    monkeypatch: pytest.MonkeyPatch, failing_stage: str
+) -> None:
+    client = bare_client()
+    failure = aiohttp.ClientError('{} failed'.format(failing_stage))
+    events: List[str] = []
+    sockets = [Mock(), Mock()]
+    for index, socket in enumerate(sockets):
+
+        async def close_socket(index: int = index) -> None:
+            events.append('close{}'.format(index))
+            if index == 1:
+                raise OSError('socket close failed')
+
+        socket.close = AsyncMock(side_effect=close_socket)
+
+    async def connect_websocket() -> None:
+        index = len([event for event in events if event.startswith('open')])
+        client._ws = sockets[index]
+        events.append('open{}'.format(index))
+
+    async def fail_stage(*args: object) -> None:
+        events.append('fail')
+        raise failure
+
+    async def update_danmu_info() -> None:
+        events.append('update')
+
+    client._host_index = 0
+    client._danmu_info = {'host_list': [{}]}
+    client._connect_websocket = AsyncMock(side_effect=connect_websocket)
+    client._send_auth = AsyncMock()
+    client._recieve_auth_reply = AsyncMock(return_value=object())
+    client._handle_auth_reply = AsyncMock()
+    client._update_danmu_info = AsyncMock(side_effect=update_danmu_info)
+    if failing_stage == 'send_auth':
+        client._send_auth.side_effect = fail_stage
+    elif failing_stage == 'receive_auth_reply':
+        client._recieve_auth_reply.side_effect = fail_stage
+    else:
+        client._handle_auth_reply.side_effect = fail_stage
+    retrying = DanmakuClient._connect.retry
+    monkeypatch.setattr(retrying, 'stop', stop_after_attempt(2))
+    monkeypatch.setattr(retrying, 'wait', wait_none())
+
+    with pytest.raises(aiohttp.ClientError, match='{} failed'.format(failing_stage)):
+        await client._connect()
+
+    assert events == [
+        'open0',
+        'fail',
+        'close0',
+        'update',
+        'open1',
+        'fail',
+        'close1',
+        'update',
+    ]
+    for socket in sockets:
+        socket.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_connect_auth_cancellation_closes_socket_and_propagates() -> None:
+    client = bare_client()
+    socket = Mock()
+    socket.close = AsyncMock()
+    client._ws = socket
+    client._host_index = 0
+    client._danmu_info = {'host_list': [{}]}
+    client._connect_websocket = AsyncMock()
+    client._send_auth = AsyncMock(side_effect=asyncio.CancelledError())
+    client._recieve_auth_reply = AsyncMock()
+    client._handle_auth_reply = AsyncMock()
+    client._update_danmu_info = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await client._connect()
+
+    socket.close.assert_awaited_once_with()
+    client._update_danmu_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_receive_reconnect_failure_emits_terminal_once() -> None:
     client = bare_client()
     failure = aiohttp.ClientError('reconnect exhausted')

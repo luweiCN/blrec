@@ -160,7 +160,11 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
             await self._send_auth()
             reply = await self._recieve_auth_reply()
             await self._handle_auth_reply(reply)
+        except asyncio.CancelledError:
+            await self._close_websocket()
+            raise
         except Exception:
+            await self._close_websocket()
             self._host_index += 1
             if self._host_index >= len(self._danmu_info['host_list']):
                 self._host_index = 0
