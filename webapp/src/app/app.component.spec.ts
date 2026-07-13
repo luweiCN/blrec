@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import {
+  CloudUploadOutline,
   GithubOutline,
   InfoCircleOutline,
   MenuFoldOutline,
@@ -22,6 +23,7 @@ describe('AppComponent', () => {
         {
           provide: NZ_ICONS,
           useValue: [
+            CloudUploadOutline,
             GithubOutline,
             InfoCircleOutline,
             MenuFoldOutline,

@@ -19,6 +19,11 @@ const routes: Routes = [
     },
   },
   {
+    path: 'uploads',
+    loadChildren: () =>
+      import('./uploads/uploads.module').then((m) => m.UploadsModule),
+  },
+  {
     path: 'about',
     loadChildren: () =>
       import('./about/about.module').then((m) => m.AboutModule),

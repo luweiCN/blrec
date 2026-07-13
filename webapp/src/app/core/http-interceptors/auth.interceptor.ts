@@ -6,9 +6,9 @@ import {
   HttpInterceptor,
   HttpErrorResponse,
 } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { Observable, throwError } from 'rxjs';
 import { AuthService } from '../services/auth.service';
-import { catchError, retry } from 'rxjs/operators';
+import { catchError } from 'rxjs/operators';
 
 @Injectable()
 export class AuthInterceptor implements HttpInterceptor {
@@ -18,23 +18,26 @@ export class AuthInterceptor implements HttpInterceptor {
     request: HttpRequest<unknown>,
     next: HttpHandler
   ): Observable<HttpEvent<unknown>> {
-    return next
-      .handle(
-        request.clone({ setHeaders: { 'X-API-KEY': this.auth.getApiKey() } })
-      )
-      .pipe(
-        catchError((error: HttpErrorResponse) => {
-          if (error.status === 401) {
-            // Unauthorized
-            if (this.auth.hasApiKey()) {
-              this.auth.removeApiKey();
-            }
-            const apiKey = window.prompt('API Key:') ?? '';
-            this.auth.setApiKey(apiKey);
-          }
-          throw error;
-        }),
-        retry(3)
-      );
+    const authenticatedRequest = request.clone({
+      setHeaders: { 'X-API-KEY': this.auth.getApiKey() },
+    });
+    return next.handle(authenticatedRequest).pipe(
+      catchError((error: HttpErrorResponse) => {
+        if (error.status !== 401) {
+          return throwError(() => error);
+        }
+        if (this.auth.hasApiKey()) {
+          this.auth.removeApiKey();
+        }
+        const apiKey = window.prompt('API Key:') ?? '';
+        if (!apiKey) {
+          return throwError(() => error);
+        }
+        this.auth.setApiKey(apiKey);
+        return next.handle(
+          request.clone({ setHeaders: { 'X-API-KEY': apiKey } })
+        );
+      })
+    );
   }
 }

@@ -1,0 +1,121 @@
+<div class="uploads-page">
+  <nz-page-header nzTitle="投稿管理" nzSubtitle="B 站账号与自动续期"></nz-page-header>
+
+  <nz-alert
+    class="scope-note"
+    nzType="info"
+    nzShowIcon
+    nzMessage="扫码凭据的用途"
+    nzDescription="扫码后系统会把 TV token 与 Web Cookie 作为同一组凭据加密保存，用于账号校验、投稿、评论和视频弹幕；它不会替代直播间匿名录制，也不会按房间重复登录。"
+  ></nz-alert>
+
+  <div class="card-grid">
+    <nz-card nzTitle="已登录账号">
+      <div aria-live="polite" [attr.aria-busy]="accountsView.state === 'loading'">
+        <nz-spin *ngIf="accountsView.state === 'loading'" nzSimple></nz-spin>
+        <nz-alert
+          *ngIf="accountsError as message"
+          nzType="error"
+          nzShowIcon
+          [nzMessage]="message"
+        ></nz-alert>
+        <button
+          *ngIf="accountsError"
+          nz-button
+          type="button"
+          data-testid="retry-accounts"
+          (click)="retryAccounts()"
+        >
+          重试加载
+        </button>
+        <nz-empty
+          *ngIf="accountsView.state === 'ready' && accounts.length === 0"
+          nzNotFoundContent="还没有登录 B 站账号"
+        ></nz-empty>
+        <ul class="account-list" *ngIf="accounts.length > 0">
+          <li *ngFor="let account of accounts; trackBy: trackAccount">
+            <div>
+              <strong>{{ account.displayName }}</strong>
+              <span class="account-meta">UID {{ account.uid }}</span>
+              <span class="account-meta">凭据版本 {{ account.credentialVersion }}</span>
+            </div>
+            <div class="account-actions">
+              <nz-tag [nzColor]="accountStateColor(account.state)">
+                {{ accountStateLabel(account.state) }}
+              </nz-tag>
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="isRefreshing(account.id)"
+                [disabled]="account.state !== 'active'"
+                (click)="refreshAccount(account)"
+              >
+                立即检查续期
+              </button>
+            </div>
+          </li>
+        </ul>
+        <nz-alert
+          *ngIf="actionError"
+          nzType="error"
+          nzShowIcon
+          [nzMessage]="actionError"
+        ></nz-alert>
+      </div>
+    </nz-card>
+
+    <nz-card nzTitle="扫码登录">
+      <div class="login-state" aria-live="polite">
+        <p class="status-text">{{ loginStatusText() }}</p>
+
+        <button
+          *ngIf="loginView.state === 'idle'"
+          nz-button
+          nzType="primary"
+          type="button"
+          (click)="startLogin()"
+        >
+          生成登录二维码
+        </button>
+
+        <nz-spin *ngIf="loginView.state === 'creating'" nzSimple></nz-spin>
+
+        <ng-container *ngIf="visibleQr as qr">
+          <img
+            class="login-qr"
+            data-testid="login-qr"
+            [src]="qr.qrDataUrl"
+            width="256"
+            height="256"
+            alt="B站扫码登录二维码"
+          />
+          <p>请使用哔哩哔哩手机客户端扫码，并在手机上确认。</p>
+          <p>二维码剩余约 {{ secondsRemaining(qr.session) }} 秒。</p>
+          <button
+            *ngIf="canCancelLogin"
+            nz-button
+            type="button"
+            data-testid="cancel-login"
+            (click)="cancelLogin()"
+          >
+            取消本次登录
+          </button>
+        </ng-container>
+
+        <button
+          *ngIf="
+            loginView.state === 'expired' ||
+            loginView.state === 'cancelled' ||
+            loginView.state === 'failed' ||
+            loginView.state === 'error'
+          "
+          nz-button
+          type="button"
+          (click)="startLogin()"
+        >
+          重新生成二维码
+        </button>
+      </div>
+    </nz-card>
+  </div>
+</div>

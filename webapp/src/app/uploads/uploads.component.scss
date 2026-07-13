@@ -1,0 +1,71 @@
+.uploads-page {
+  height: 100%;
+  padding: 12px;
+  overflow: auto;
+}
+
+.scope-note {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.account-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+}
+
+.account-meta {
+  display: block;
+  color: #595959;
+}
+
+.account-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.login-state {
+  text-align: center;
+}
+
+.status-text {
+  font-weight: 600;
+}
+
+.login-qr {
+  display: block;
+  width: min(256px, 100%);
+  height: auto;
+  margin: 0 auto 12px;
+  image-rendering: pixelated;
+}
+
+@media (max-width: 760px) {
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .account-list li,
+  .account-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

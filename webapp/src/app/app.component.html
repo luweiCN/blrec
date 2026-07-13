@@ -50,6 +50,16 @@
             nzMatchRouter="true"
             nz-tooltip
             nzTooltipPlacement="right"
+            [nzTooltipTitle]="collapsed ? '投稿' : ''"
+          >
+            <i nz-icon nzType="cloud-upload" nzTheme="outline"></i>
+            <span><a routerLink="/uploads">投稿</a></span>
+          </li>
+          <li
+            nz-menu-item
+            nzMatchRouter="true"
+            nz-tooltip
+            nzTooltipPlacement="right"
             [nzTooltipTitle]="collapsed ? '关于' : ''"
           >
             <i nz-icon nzType="info-circle" nzTheme="outline"></i>
