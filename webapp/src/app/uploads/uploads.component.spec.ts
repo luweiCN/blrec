@@ -1,5 +1,4 @@
 import { CommonModule } from '@angular/common';
-import { Component } from '@angular/core';
 import { ComponentFixture, TestBed, fakeAsync, tick } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
 import { By } from '@angular/platform-browser';
@@ -24,9 +23,6 @@ import { BiliAccountService } from './shared/bili-account.service';
 import { QrCodeRenderer } from './shared/qr-code-renderer.service';
 import { QrSession } from './shared/bili-account.model';
 import { UploadsComponent } from './uploads.component';
-
-@Component({ selector: 'app-recording-sessions', template: '' })
-class RecordingSessionsStubComponent {}
 
 describe('UploadsComponent', () => {
   let fixture: ComponentFixture<UploadsComponent>;
@@ -98,7 +94,7 @@ describe('UploadsComponent', () => {
     qrRenderer.toDataUrl.and.resolveTo('data:image/png;base64,fixture');
 
     await TestBed.configureTestingModule({
-      declarations: [UploadsComponent, RecordingSessionsStubComponent],
+      declarations: [UploadsComponent],
       imports: [
         CommonModule,
         FormsModule,
@@ -125,6 +121,14 @@ describe('UploadsComponent', () => {
 
     fixture = TestBed.createComponent(UploadsComponent);
     component = fixture.componentInstance;
+  });
+
+  it('does not render upload tasks inside account management', () => {
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('app-recording-sessions')
+    ).toBeNull();
   });
 
   it('loads redacted account metadata and explains credential scope', () => {

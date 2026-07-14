@@ -19,6 +19,13 @@ const routes: Routes = [
     },
   },
   {
+    path: 'upload-tasks',
+    loadChildren: () =>
+      import('./upload-tasks/upload-tasks.module').then(
+        (m) => m.UploadTasksModule
+      ),
+  },
+  {
     path: 'uploads',
     loadChildren: () =>
       import('./uploads/uploads.module').then((m) => m.UploadsModule),

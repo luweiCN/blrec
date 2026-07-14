@@ -80,7 +80,7 @@ describe('RecordingSessionsComponent', () => {
 
     const text = fixture.nativeElement.textContent;
     expect(service.listSessions).toHaveBeenCalledOnceWith(50);
-    expect(text).toContain('录制会话与分 P');
+    expect(text).toContain('上传任务列表');
     expect(text).toContain('房间 100');
     expect(text).toContain('已归集');
     expect(text).toContain('P1');

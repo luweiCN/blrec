@@ -9,6 +9,7 @@ import {
   MenuUnfoldOutline,
   SettingOutline,
   UnorderedListOutline,
+  UserOutline,
 } from '@ant-design/icons-angular/icons';
 import { NZ_ICONS } from 'ng-zorro-antd/icon';
 
@@ -30,6 +31,7 @@ describe('AppComponent', () => {
             MenuUnfoldOutline,
             SettingOutline,
             UnorderedListOutline,
+            UserOutline,
           ],
         },
       ],
@@ -57,13 +59,19 @@ describe('AppComponent', () => {
     );
   });
 
-  it('labels the uploads navigation as Bilibili accounts', () => {
+  it('shows separate upload-task and Bilibili-account navigation', () => {
     const fixture = TestBed.createComponent(AppComponent);
     fixture.detectChanges();
 
-    const link = fixture.nativeElement.querySelector(
+    const uploadTasks = fixture.nativeElement.querySelector(
+      'a[href="/upload-tasks"]'
+    ) as HTMLAnchorElement;
+    const accounts = fixture.nativeElement.querySelector(
       'a[href="/uploads"]'
     ) as HTMLAnchorElement;
-    expect(link.textContent?.trim()).toBe('投稿账号');
+
+    expect(uploadTasks).not.toBeNull();
+    expect(uploadTasks?.textContent?.trim()).toBe('上传任务');
+    expect(accounts.textContent?.trim()).toBe('投稿账号');
   });
 });

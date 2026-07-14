@@ -40,10 +40,10 @@
             nzMatchRouter="true"
             nz-tooltip
             nzTooltipPlacement="right"
-            [nzTooltipTitle]="collapsed ? '设置' : ''"
+            [nzTooltipTitle]="collapsed ? '上传任务' : ''"
           >
-            <i nz-icon nzType="setting" nzTheme="outline"></i>
-            <span><a routerLink="/settings">设置</a></span>
+            <i nz-icon nzType="cloud-upload" nzTheme="outline"></i>
+            <span><a routerLink="/upload-tasks">上传任务</a></span>
           </li>
           <li
             nz-menu-item
@@ -52,8 +52,18 @@
             nzTooltipPlacement="right"
             [nzTooltipTitle]="collapsed ? '投稿账号' : ''"
           >
-            <i nz-icon nzType="cloud-upload" nzTheme="outline"></i>
+            <i nz-icon nzType="user" nzTheme="outline"></i>
             <span><a routerLink="/uploads">投稿账号</a></span>
+          </li>
+          <li
+            nz-menu-item
+            nzMatchRouter="true"
+            nz-tooltip
+            nzTooltipPlacement="right"
+            [nzTooltipTitle]="collapsed ? '设置' : ''"
+          >
+            <i nz-icon nzType="setting" nzTheme="outline"></i>
+            <span><a routerLink="/settings">设置</a></span>
           </li>
           <li
             nz-menu-item
