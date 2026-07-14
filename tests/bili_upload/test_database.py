@@ -22,6 +22,7 @@ REQUIRED_TABLES = {
     'bili_account_selection',
     'qr_sessions',
     'room_upload_policies',
+    'upload_category_cache',
     'recording_sessions',
     'recording_runs',
     'recording_parts',
@@ -65,7 +66,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 6
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 7
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -79,7 +80,17 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
                 'PRAGMA table_info(room_upload_policies)'
             )
         }
-        assert 'account_mode' in policy_columns
+        assert {
+            'account_mode',
+            'part_title_template',
+            'dynamic_template',
+            'is_only_self',
+            'publish_dynamic',
+            'no_reprint',
+            'up_selection_reply',
+            'up_close_reply',
+            'up_close_danmu',
+        } <= policy_columns
         session_columns = {
             row['name']
             for row in await database.fetchall('PRAGMA table_info(recording_sessions)')
@@ -235,11 +246,24 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             == 1
         )
         policy = await database.fetchone(
-            'SELECT account_mode,account_id FROM room_upload_policies '
+            'SELECT account_mode,account_id,part_title_template,dynamic_template,'
+            'is_only_self,publish_dynamic,no_reprint,up_selection_reply,'
+            'up_close_reply,up_close_danmu FROM room_upload_policies '
             'WHERE room_id=100'
         )
         assert policy is not None
-        assert dict(policy) == {'account_mode': 'fixed', 'account_id': 1}
+        assert dict(policy) == {
+            'account_mode': 'fixed',
+            'account_id': 1,
+            'part_title_template': 'P{{ part_index }}',
+            'dynamic_template': '',
+            'is_only_self': 0,
+            'publish_dynamic': 1,
+            'no_reprint': 1,
+            'up_selection_reply': 0,
+            'up_close_reply': 0,
+            'up_close_danmu': 0,
+        }
         session = await database.fetchone(
             'SELECT room_id,title,cover_url,anchor_name,area_name '
             'FROM recording_sessions WHERE id=1'
@@ -252,7 +276,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 6
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 7
     finally:
         await database.close()
 

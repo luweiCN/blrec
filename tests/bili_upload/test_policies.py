@@ -23,21 +23,31 @@ async def seed_accounts(database: BiliUploadDatabase) -> None:
     )
 
 
-def command(*, account_mode: str = 'primary', account_id=None):
-    return RoomUploadPolicyCommand(
+def command(*, account_mode: str = 'primary', account_id=None, **overrides):
+    values = dict(
         account_mode=account_mode,
         account_id=account_id,
         enabled=True,
         title_template='{{ title }} 录播',
         description_template='主播：{{ anchor_name }}',
+        part_title_template='第 {{ part_index }} P',
+        dynamic_template='{{ title }}｜{{ anchor_name }}',
         tid=17,
         tags='直播,录播',
         copyright=1,
         source='',
+        is_only_self=False,
+        publish_dynamic=True,
+        no_reprint=True,
+        up_selection_reply=False,
+        up_close_reply=False,
+        up_close_danmu=False,
         auto_comment=False,
         danmaku_backfill=False,
         filters={'blockedWords': []},
     )
+    values.update(overrides)
+    return RoomUploadPolicyCommand(**values)
 
 
 @pytest.mark.asyncio
@@ -117,5 +127,65 @@ async def test_policy_delete_only_affects_future_upload_jobs(tmp_path: Path) -> 
         await manager.delete(100)
 
         assert await manager.list() == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_policy_round_trips_archive_submission_settings(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+
+        policy = await manager.upsert(
+            100,
+            command(
+                is_only_self=True,
+                publish_dynamic=False,
+                no_reprint=False,
+                up_selection_reply=True,
+            ),
+        )
+
+        assert policy.part_title_template == '第 {{ part_index }} P'
+        assert policy.dynamic_template == '{{ title }}｜{{ anchor_name }}'
+        assert policy.is_only_self is True
+        assert policy.publish_dynamic is False
+        assert policy.no_reprint is False
+        assert policy.up_selection_reply is True
+        assert policy.up_close_reply is False
+        assert policy.up_close_danmu is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('overrides', 'message'),
+    (
+        ({'auto_comment': True, 'up_close_reply': True}, 'comments must remain open'),
+        (
+            {'danmaku_backfill': True, 'up_close_danmu': True},
+            'danmaku must remain open',
+        ),
+        (
+            {'up_selection_reply': True, 'up_close_reply': True},
+            'selected comments require open comments',
+        ),
+    ),
+)
+async def test_policy_rejects_conflicting_interaction_settings(
+    tmp_path: Path, overrides, message: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database)
+
+        with pytest.raises(InvalidRoomUploadPolicy, match=message):
+            await manager.upsert(100, command(**overrides))
     finally:
         await database.close()

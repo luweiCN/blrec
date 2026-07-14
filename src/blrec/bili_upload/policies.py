@@ -33,10 +33,18 @@ class RoomUploadPolicyCommand:
     enabled: bool
     title_template: str
     description_template: str
+    part_title_template: str
+    dynamic_template: str
     tid: int
     tags: str
     copyright: int
     source: str
+    is_only_self: bool
+    publish_dynamic: bool
+    no_reprint: bool
+    up_selection_reply: bool
+    up_close_reply: bool
+    up_close_danmu: bool
     auto_comment: bool
     danmaku_backfill: bool
     filters: Mapping[str, Any]
@@ -52,10 +60,18 @@ class RoomUploadPolicyView:
     enabled: bool
     title_template: str
     description_template: str
+    part_title_template: str
+    dynamic_template: str
     tid: int
     tags: str
     copyright: int
     source: str
+    is_only_self: bool
+    publish_dynamic: bool
+    no_reprint: bool
+    up_selection_reply: bool
+    up_close_reply: bool
+    up_close_danmu: bool
     auto_comment: bool
     danmaku_backfill: bool
     filters: Mapping[str, Any]
@@ -75,7 +91,9 @@ class RoomUploadPolicyManager:
     async def list(self) -> List[RoomUploadPolicyView]:
         rows = await self._database.fetchall(
             'SELECT room_id,account_mode,account_id,enabled,title_template,'
-            'description_template,tid,tags,copyright,source,auto_comment,'
+            'description_template,part_title_template,dynamic_template,tid,tags,'
+            'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+            'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at '
             'FROM room_upload_policies ORDER BY room_id'
         )
@@ -84,7 +102,9 @@ class RoomUploadPolicyManager:
     async def get(self, room_id: int) -> RoomUploadPolicyView:
         row = await self._database.fetchone(
             'SELECT room_id,account_mode,account_id,enabled,title_template,'
-            'description_template,tid,tags,copyright,source,auto_comment,'
+            'description_template,part_title_template,dynamic_template,tid,tags,'
+            'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+            'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at '
             'FROM room_upload_policies WHERE room_id=?',
             (room_id,),
@@ -108,15 +128,25 @@ class RoomUploadPolicyManager:
         await self._database.execute(
             'INSERT INTO room_upload_policies('
             'room_id,account_mode,account_id,enabled,title_template,'
-            'description_template,tid,tags,copyright,source,auto_comment,'
+            'description_template,part_title_template,dynamic_template,tid,tags,'
+            'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+            'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at) '
-            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(room_id) DO UPDATE SET '
             'account_mode=excluded.account_mode,account_id=excluded.account_id,'
             'enabled=excluded.enabled,title_template=excluded.title_template,'
-            'description_template=excluded.description_template,tid=excluded.tid,'
+            'description_template=excluded.description_template,'
+            'part_title_template=excluded.part_title_template,'
+            'dynamic_template=excluded.dynamic_template,tid=excluded.tid,'
             'tags=excluded.tags,copyright=excluded.copyright,'
-            'source=excluded.source,auto_comment=excluded.auto_comment,'
+            'source=excluded.source,is_only_self=excluded.is_only_self,'
+            'publish_dynamic=excluded.publish_dynamic,'
+            'no_reprint=excluded.no_reprint,'
+            'up_selection_reply=excluded.up_selection_reply,'
+            'up_close_reply=excluded.up_close_reply,'
+            'up_close_danmu=excluded.up_close_danmu,'
+            'auto_comment=excluded.auto_comment,'
             'danmaku_backfill=excluded.danmaku_backfill,'
             'filter_json=excluded.filter_json,updated_at=excluded.updated_at',
             (
@@ -126,10 +156,18 @@ class RoomUploadPolicyManager:
                 int(command.enabled),
                 command.title_template.strip(),
                 command.description_template.strip(),
+                command.part_title_template.strip(),
+                command.dynamic_template.strip(),
                 command.tid,
                 command.tags.strip(),
                 command.copyright,
                 command.source.strip(),
+                int(command.is_only_self),
+                int(command.publish_dynamic),
+                int(command.no_reprint),
+                int(command.up_selection_reply),
+                int(command.up_close_reply),
+                int(command.up_close_danmu),
                 int(command.auto_comment),
                 int(command.danmaku_backfill),
                 filter_json,
@@ -163,13 +201,21 @@ class RoomUploadPolicyManager:
             )
         title_template = command.title_template.strip()
         description_template = command.description_template.strip()
+        part_title_template = command.part_title_template.strip()
+        dynamic_template = command.dynamic_template.strip()
         if not title_template or len(title_template) > 500:
             raise InvalidRoomUploadPolicy('title template is invalid')
         if len(description_template) > 5000:
             raise InvalidRoomUploadPolicy('description template is too long')
+        if not part_title_template or len(part_title_template) > 500:
+            raise InvalidRoomUploadPolicy('part title template is invalid')
+        if len(dynamic_template) > 5000:
+            raise InvalidRoomUploadPolicy('dynamic template is too long')
         try:
             self._liquid.from_string(title_template)
             self._liquid.from_string(description_template)
+            self._liquid.from_string(part_title_template)
+            self._liquid.from_string(dynamic_template)
             self._liquid.from_string(command.source)
         except Exception as error:
             raise InvalidRoomUploadPolicy('template syntax is invalid') from error
@@ -181,6 +227,14 @@ class RoomUploadPolicyManager:
             raise InvalidRoomUploadPolicy('copyright must be 1 or 2')
         if command.copyright == 2 and not command.source.strip():
             raise InvalidRoomUploadPolicy('source is required for reposted archives')
+        if command.auto_comment and command.up_close_reply:
+            raise InvalidRoomUploadPolicy(
+                'comments must remain open for automatic comments'
+            )
+        if command.danmaku_backfill and command.up_close_danmu:
+            raise InvalidRoomUploadPolicy('danmaku must remain open for backfill')
+        if command.up_selection_reply and command.up_close_reply:
+            raise InvalidRoomUploadPolicy('selected comments require open comments')
         if not isinstance(command.filters, Mapping):
             raise InvalidRoomUploadPolicy('filters must be an object')
 
@@ -241,10 +295,18 @@ class RoomUploadPolicyManager:
             enabled=bool(row['enabled']),
             title_template=str(row['title_template']),
             description_template=str(row['description_template']),
+            part_title_template=str(row['part_title_template']),
+            dynamic_template=str(row['dynamic_template']),
             tid=int(row['tid']),
             tags=str(row['tags']),
             copyright=int(row['copyright']),
             source=str(row['source']),
+            is_only_self=bool(row['is_only_self']),
+            publish_dynamic=bool(row['publish_dynamic']),
+            no_reprint=bool(row['no_reprint']),
+            up_selection_reply=bool(row['up_selection_reply']),
+            up_close_reply=bool(row['up_close_reply']),
+            up_close_danmu=bool(row['up_close_danmu']),
             auto_comment=bool(row['auto_comment']),
             danmaku_backfill=bool(row['danmaku_backfill']),
             filters=filters,

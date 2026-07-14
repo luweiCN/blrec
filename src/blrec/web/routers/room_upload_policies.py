@@ -31,10 +31,18 @@ class RoomUploadPolicyRequest(ApiModel):
     enabled: bool
     title_template: str
     description_template: str
+    part_title_template: str
+    dynamic_template: str
     tid: int = Field(..., gt=0)
     tags: str
     copyright: Literal[1, 2]
     source: str
+    is_only_self: bool
+    publish_dynamic: bool
+    no_reprint: bool
+    up_selection_reply: bool
+    up_close_reply: bool
+    up_close_danmu: bool
     auto_comment: bool
     danmaku_backfill: bool
     filters: Dict[str, Any] = Field(default_factory=dict)
@@ -46,10 +54,18 @@ class RoomUploadPolicyRequest(ApiModel):
             enabled=self.enabled,
             title_template=self.title_template,
             description_template=self.description_template,
+            part_title_template=self.part_title_template,
+            dynamic_template=self.dynamic_template,
             tid=self.tid,
             tags=self.tags,
             copyright=self.copyright,
             source=self.source,
+            is_only_self=self.is_only_self,
+            publish_dynamic=self.publish_dynamic,
+            no_reprint=self.no_reprint,
+            up_selection_reply=self.up_selection_reply,
+            up_close_reply=self.up_close_reply,
+            up_close_danmu=self.up_close_danmu,
             auto_comment=self.auto_comment,
             danmaku_backfill=self.danmaku_backfill,
             filters=self.filters,
@@ -65,10 +81,18 @@ class RoomUploadPolicyResponse(ApiModel):
     enabled: bool
     title_template: str
     description_template: str
+    part_title_template: str
+    dynamic_template: str
     tid: int
     tags: str
     copyright: int
     source: str
+    is_only_self: bool
+    publish_dynamic: bool
+    no_reprint: bool
+    up_selection_reply: bool
+    up_close_reply: bool
+    up_close_danmu: bool
     auto_comment: bool
     danmaku_backfill: bool
     filters: Dict[str, Any]
@@ -95,6 +119,20 @@ async def list_room_upload_policies(
     policy_manager: RoomUploadPolicyManager = Depends(get_policy_manager),
 ) -> List[RoomUploadPolicyView]:
     return await policy_manager.list()
+
+
+@router.get('/{room_id}', response_model=RoomUploadPolicyResponse)
+async def get_room_upload_policy(
+    room_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    policy_manager: RoomUploadPolicyManager = Depends(get_policy_manager),
+) -> RoomUploadPolicyView:
+    try:
+        return await policy_manager.get(room_id)
+    except RoomUploadPolicyNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='Room upload policy not found'
+        ) from None
 
 
 @router.put('/{room_id}', response_model=RoomUploadPolicyResponse)

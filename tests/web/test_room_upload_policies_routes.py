@@ -25,10 +25,18 @@ def policy_view(room_id: int = 100) -> RoomUploadPolicyView:
         enabled=True,
         title_template='{{ title }} 录播',
         description_template='主播：{{ anchor_name }}',
+        part_title_template='第 {{ part_index }} P',
+        dynamic_template='{{ title }}｜{{ anchor_name }}',
         tid=17,
         tags='直播,录播',
         copyright=1,
         source='',
+        is_only_self=False,
+        publish_dynamic=True,
+        no_reprint=True,
+        up_selection_reply=False,
+        up_close_reply=False,
+        up_close_danmu=False,
         auto_comment=False,
         danmaku_backfill=False,
         filters={},
@@ -46,6 +54,11 @@ class FakePolicyManager:
 
     async def list(self) -> List[RoomUploadPolicyView]:
         return [policy_view()]
+
+    async def get(self, room_id: int) -> RoomUploadPolicyView:
+        if self.missing:
+            raise RoomUploadPolicyNotFound('room upload policy not found')
+        return policy_view(room_id)
 
     async def upsert(
         self, room_id: int, command: RoomUploadPolicyCommand
@@ -108,10 +121,18 @@ def test_list_room_upload_policies_returns_resolved_account(client: TestClient) 
         'enabled': True,
         'titleTemplate': '{{ title }} 录播',
         'descriptionTemplate': '主播：{{ anchor_name }}',
+        'partTitleTemplate': '第 {{ part_index }} P',
+        'dynamicTemplate': '{{ title }}｜{{ anchor_name }}',
         'tid': 17,
         'tags': '直播,录播',
         'copyright': 1,
         'source': '',
+        'isOnlySelf': False,
+        'publishDynamic': True,
+        'noReprint': True,
+        'upSelectionReply': False,
+        'upCloseReply': False,
+        'upCloseDanmu': False,
         'autoComment': False,
         'danmakuBackfill': False,
         'filters': {},
@@ -119,6 +140,13 @@ def test_list_room_upload_policies_returns_resolved_account(client: TestClient) 
         'createdAt': 1000,
         'updatedAt': 1000,
     }
+
+
+def test_get_room_upload_policy_returns_only_requested_room(client: TestClient) -> None:
+    response = client.get('/api/v1/room-upload-policies/200', headers=auth_headers())
+
+    assert response.status_code == 200
+    assert response.json()['roomId'] == 200
 
 
 def test_upsert_converts_request_to_domain_command(
@@ -133,10 +161,18 @@ def test_upsert_converts_request_to_domain_command(
             'enabled': True,
             'titleTemplate': '{{ title }} 录播',
             'descriptionTemplate': '主播：{{ anchor_name }}',
+            'partTitleTemplate': '第 {{ part_index }} P',
+            'dynamicTemplate': '{{ title }}｜{{ anchor_name }}',
             'tid': 17,
             'tags': '直播,录播',
             'copyright': 1,
             'source': '',
+            'isOnlySelf': True,
+            'publishDynamic': False,
+            'noReprint': False,
+            'upSelectionReply': True,
+            'upCloseReply': False,
+            'upCloseDanmu': False,
             'autoComment': False,
             'danmakuBackfill': True,
             'filters': {'blockedWords': ['抽奖']},
@@ -147,6 +183,9 @@ def test_upsert_converts_request_to_domain_command(
     assert manager.command is not None
     assert manager.command.account_mode == 'fixed'
     assert manager.command.account_id == 7
+    assert manager.command.part_title_template == '第 {{ part_index }} P'
+    assert manager.command.publish_dynamic is False
+    assert manager.command.is_only_self is True
     assert manager.command.danmaku_backfill is True
     assert manager.command.filters == {'blockedWords': ['抽奖']}
 
@@ -165,10 +204,18 @@ def test_invalid_policy_returns_conflict(
             'enabled': True,
             'titleTemplate': '录播',
             'descriptionTemplate': '',
+            'partTitleTemplate': 'P{{ part_index }}',
+            'dynamicTemplate': '',
             'tid': 17,
             'tags': '录播',
             'copyright': 1,
             'source': '',
+            'isOnlySelf': False,
+            'publishDynamic': True,
+            'noReprint': True,
+            'upSelectionReply': False,
+            'upCloseReply': False,
+            'upCloseDanmu': False,
             'autoComment': False,
             'danmakuBackfill': False,
             'filters': {},
