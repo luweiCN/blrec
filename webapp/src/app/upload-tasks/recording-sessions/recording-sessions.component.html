@@ -1,287 +1,357 @@
-<nz-card nzTitle="上传任务列表">
-  <button
-    nz-button
-    nzSize="small"
-    type="button"
-    data-testid="refresh-sessions"
-    (click)="load()"
-  >
-    刷新
-  </button>
+<nz-page-header
+  nzTitle="上传任务"
+  nzSubtitle="查看录制、上传、投稿和弹幕回灌进度"
+>
+  <nz-page-header-extra>
+    <button
+      nz-button
+      type="button"
+      data-testid="refresh-sessions"
+      [disabled]="view.state === 'loading'"
+      (click)="load()"
+    >
+      刷新
+    </button>
+  </nz-page-header-extra>
+</nz-page-header>
+
+<div class="task-list" aria-live="polite">
+  <ng-container *ngIf="errorMessage as message">
+    <nz-alert
+      nzType="error"
+      nzShowIcon
+      nzMessage="无法加载上传任务"
+      [nzDescription]="message"
+    ></nz-alert>
+    <button
+      class="retry-button"
+      nz-button
+      type="button"
+      data-testid="retry-sessions"
+      (click)="load()"
+    >
+      重试加载
+    </button>
+  </ng-container>
 
   <nz-alert
-    class="session-note"
-    nzType="info"
+    *ngIf="degradedReason as reason"
+    class="degraded-warning"
+    nzType="warning"
     nzShowIcon
-    nzMessage="这里按同一场直播归集录制文件"
-    nzDescription="录制进程重启后产生的新文件会继续编号为下一分 P；文件后处理完成后才会显示为制品就绪。"
+    nzMessage="自动处理已暂停"
+    [nzDescription]="reason"
   ></nz-alert>
 
-  <div aria-live="polite" [attr.aria-busy]="view.state === 'loading'">
-    <nz-spin *ngIf="view.state === 'loading'" nzSimple></nz-spin>
-
-    <ng-container *ngIf="errorMessage as message">
-      <nz-alert
-        nzType="error"
-        nzShowIcon
-        nzMessage="无法加载录制会话"
-        [nzDescription]="message"
-      ></nz-alert>
-      <button
-        class="retry-button"
-        nz-button
-        type="button"
-        data-testid="retry-sessions"
-        (click)="load()"
-      >
-        重试加载
-      </button>
-    </ng-container>
-
-    <nz-alert
-      *ngIf="degradedReason as reason"
-      class="degraded-warning"
-      nzType="warning"
-      nzShowIcon
-      nzMessage="自动处理已暂停"
-      [nzDescription]="reason"
-    ></nz-alert>
-
-    <nz-empty
-      *ngIf="view.state === 'ready' && sessions.length === 0"
-      nzNotFoundContent="还没有录制会话"
-    ></nz-empty>
-
-    <nz-collapse *ngIf="sessions.length > 0">
-      <nz-collapse-panel
-        *ngFor="let session of sessions; trackBy: trackSession"
-        [nzHeader]="sessionHeader(session)"
-        [nzActive]="session.state === 'open'"
-      >
-        <div class="session-overview">
-          <img
-            *ngIf="session.coverUrl"
-            class="session-cover"
-            [src]="session.coverUrl"
-            [alt]="coverAlt(session)"
-            loading="lazy"
-            referrerpolicy="no-referrer"
-          />
-          <div class="session-identity">
-            <h3>{{ session.title || '未记录直播标题' }}</h3>
-            <div>
-              主播 {{ session.anchorName || '未知' }} · 房间 {{ session.roomId }}
+  <nz-table
+    #taskTable
+    nzSize="middle"
+    nzTableLayout="fixed"
+    [nzData]="sessions"
+    [nzLoading]="view.state === 'loading'"
+    [nzFrontPagination]="false"
+    [nzPageIndex]="pageIndex"
+    [nzPageSize]="pageSize"
+    [nzTotal]="total"
+    [nzPageSizeOptions]="pageSizeOptions"
+    [nzShowSizeChanger]="true"
+    [nzShowPagination]="view.state === 'ready' && total > 0"
+    [nzScroll]="{ x: '1000px' }"
+    [nzNoResult]="'还没有上传任务'"
+    (nzPageIndexChange)="pageIndexChanged($event)"
+    (nzPageSizeChange)="pageSizeChanged($event)"
+  >
+    <thead>
+      <tr>
+        <th nzWidth="260px">直播与房间</th>
+        <th nzWidth="135px">开始时间</th>
+        <th nzWidth="170px">录制概要</th>
+        <th nzWidth="95px">录制状态</th>
+        <th nzWidth="145px">投稿状态</th>
+        <th nzWidth="115px">投稿账号</th>
+        <th nzWidth="80px">操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr *ngFor="let session of taskTable.data; trackBy: trackSession">
+        <td>
+          <div class="session-cell">
+            <img
+              *ngIf="session.coverUrl"
+              class="session-thumbnail"
+              [src]="session.coverUrl"
+              [alt]="coverAlt(session)"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
+            <div class="session-cell-text">
+              <strong>{{ session.title || '未记录直播标题' }}</strong>
+              <span>
+                {{ session.anchorName || '未知主播' }} · 房间
+                {{ session.roomId }}
+              </span>
             </div>
-            <div *ngIf="areaLabel(session) as area">{{ area }}</div>
           </div>
-        </div>
-
-        <div class="session-summary">
+        </td>
+        <td class="nowrap">
+          {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm' }}
+        </td>
+        <td>
+          <div>{{ session.partCount }} 个分 P</div>
+          <div class="secondary-text">
+            {{ formatDuration(session.recordDurationSeconds) }} ·
+            {{ formatBytes(session.totalFileSizeBytes) }}
+          </div>
+        </td>
+        <td>
           <nz-tag [nzColor]="sessionStateColor(session.state)">
             {{ sessionStateLabel(session.state) }}
           </nz-tag>
-          <span>
-            开始于
-            {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
-          </span>
-          <span>录制 {{ formatDuration(session.recordDurationSeconds) }}</span>
-          <span>{{ session.partCount }} 个分 P</span>
-          <span>{{ formatBytes(session.totalFileSizeBytes) }}</span>
-          <span>{{ session.danmakuCount }} 条弹幕</span>
-        </div>
-
-        <div class="upload-progress" *ngIf="session.uploadJob as job; else noJob">
-          <div class="upload-status-row">
+        </td>
+        <td>
+          <ng-container *ngIf="session.uploadJob as job; else noUploadJob">
             <nz-tag [nzColor]="uploadJobStateColor(job.state)">
               {{ uploadJobStateLabel(job.state) }}
             </nz-tag>
-            <nz-tag>{{ submitStateLabel(job.submitState) }}</nz-tag>
-            <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
-            <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
-          </div>
+            <div class="secondary-text">
+              {{ submitStateLabel(job.submitState) }}
+            </div>
+          </ng-container>
+          <ng-template #noUploadJob>
+            <span class="secondary-text">
+              {{ session.state === 'open' ? '等待录制结束' : '未创建任务' }}
+            </span>
+          </ng-template>
+        </td>
+        <td>
+          <ng-container *ngIf="session.uploadJob as job; else noAccount">
+            <div>{{ job.accountDisplayName }}</div>
+            <div class="secondary-text">UID {{ job.accountUid }}</div>
+          </ng-container>
+          <ng-template #noAccount>—</ng-template>
+        </td>
+        <td>
+          <button nz-button nzType="link" type="button" (click)="openDetails(session)">
+            查看详情
+          </button>
+        </td>
+      </tr>
+    </tbody>
+  </nz-table>
+</div>
+
+<nz-drawer
+  nzPlacement="right"
+  nzWidth="920px"
+  nzWrapClassName="upload-task-detail-drawer"
+  [nzTitle]="selectedSession ? sessionHeader(selectedSession) : '任务详情'"
+  [nzVisible]="detailVisible"
+  [nzBodyStyle]="{ padding: '20px 24px' }"
+  (nzOnClose)="closeDetails()"
+>
+  <ng-container *nzDrawerContent>
+    <ng-container *ngIf="selectedSession as session">
+      <div class="session-overview">
+        <img
+          *ngIf="session.coverUrl"
+          class="session-cover"
+          [src]="session.coverUrl"
+          [alt]="coverAlt(session)"
+          loading="lazy"
+          referrerpolicy="no-referrer"
+        />
+        <div class="session-identity">
+          <h3>{{ session.title || '未记录直播标题' }}</h3>
           <div>
-            投稿账号：{{ job.accountDisplayName }}（UID {{ job.accountUid }}）
+            主播 {{ session.anchorName || '未知' }} · 房间 {{ session.roomId }}
           </div>
-          <div *ngIf="job.aid || job.bvid">
-            稿件：
-            <span *ngIf="job.aid">AV{{ job.aid }}</span>
-            <span *ngIf="job.aid && job.bvid"> · </span>
-            <span *ngIf="job.bvid">{{ job.bvid }}</span>
-          </div>
-          <div class="upload-reason" *ngIf="job.reviewReason">
-            {{ job.reviewReason }}
-          </div>
+          <div *ngIf="areaLabel(session) as area">{{ area }}</div>
+        </div>
+      </div>
 
+      <div class="session-summary">
+        <nz-tag [nzColor]="sessionStateColor(session.state)">
+          {{ sessionStateLabel(session.state) }}
+        </nz-tag>
+        <span>
+          开始于 {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
+        </span>
+        <span>录制 {{ formatDuration(session.recordDurationSeconds) }}</span>
+        <span>{{ session.partCount }} 个分 P</span>
+        <span>{{ formatBytes(session.totalFileSizeBytes) }}</span>
+        <span>{{ session.danmakuCount }} 条弹幕</span>
+      </div>
+
+      <div class="upload-progress" *ngIf="session.uploadJob as job; else noJob">
+        <div class="upload-status-row">
+          <nz-tag [nzColor]="uploadJobStateColor(job.state)">
+            {{ uploadJobStateLabel(job.state) }}
+          </nz-tag>
+          <nz-tag>{{ submitStateLabel(job.submitState) }}</nz-tag>
+          <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
+          <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
+        </div>
+        <div>
+          投稿账号：{{ job.accountDisplayName }}（UID {{ job.accountUid }}）
+        </div>
+        <div *ngIf="job.aid || job.bvid">
+          稿件：
+          <span *ngIf="job.aid">AV{{ job.aid }}</span>
+          <span *ngIf="job.aid && job.bvid"> · </span>
+          <span *ngIf="job.bvid">{{ job.bvid }}</span>
+        </div>
+        <div class="upload-reason" *ngIf="job.reviewReason">
+          {{ job.reviewReason }}
+        </div>
+
+        <div class="danmaku-progress" *ngIf="job.danmakuTotal > 0">
+          <strong>弹幕回灌进度</strong>
+          <span>已发送 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}</span>
+          <span>待发送 {{ job.danmakuPending }}</span>
+          <span *ngIf="job.danmakuUnknown > 0">
+            结果未知 {{ job.danmakuUnknown }}
+          </span>
+          <span *ngIf="job.danmakuFailed > 0">
+            失败 {{ job.danmakuFailed }}
+          </span>
+        </div>
+
+        <div class="unknown-danmaku" *ngIf="job.unknownDanmakuItems?.length">
           <nz-alert
-            *ngIf="job.danmakuBranchState !== 'disabled'"
-            nzType="info"
+            nzType="warning"
             nzShowIcon
-            nzMessage="回灌弹幕会长期出现在投稿视频中，发送者显示为投稿账号，不是原直播观众账号。"
+            nzMessage="有弹幕的发送结果无法确认"
+            nzDescription="系统不会自动重发。请先到 B 站稿件中人工核对，再选择处理方式。"
           ></nz-alert>
-
-          <div class="danmaku-progress" *ngIf="job.danmakuTotal > 0">
-            <strong>弹幕回灌进度</strong>
-            <span>已发送 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}</span>
-            <span>待发送 {{ job.danmakuPending }}</span>
-            <span *ngIf="job.danmakuUnknown > 0">
-              结果未知 {{ job.danmakuUnknown }}
-            </span>
-            <span *ngIf="job.danmakuFailed > 0">
-              失败 {{ job.danmakuFailed }}
-            </span>
-          </div>
-
           <div
-            class="unknown-danmaku"
-            *ngIf="job.unknownDanmakuItems?.length"
+            class="unknown-danmaku-item"
+            *ngFor="let item of job.unknownDanmakuItems ?? []"
           >
-            <nz-alert
-              nzType="warning"
-              nzShowIcon
-              nzMessage="有弹幕的发送结果无法确认"
-              nzDescription="系统不会自动重发。请先到 B 站稿件中人工核对，再选择处理方式。"
-            ></nz-alert>
-            <div
-              class="unknown-danmaku-item"
-              *ngFor="let item of job.unknownDanmakuItems ?? []"
-            >
-              <div class="unknown-danmaku-target">
-                P{{ item.partIndex }} ·
-                {{ formatDanmakuProgress(item.progressMs) }}
-              </div>
-              <div class="unknown-danmaku-content">{{ item.content }}</div>
-              <div class="unknown-danmaku-error" *ngIf="item.errorMessage">
-                {{ item.errorMessage }}
-              </div>
-              <div class="unknown-danmaku-actions">
-                <button
-                  nz-button
-                  nzSize="small"
-                  type="button"
-                  (click)="openDanmakuDecision(item, 'assume_success')"
-                >
-                  视为已发送
-                </button>
-                <button
-                  nz-button
-                  nzSize="small"
-                  nzDanger
-                  type="button"
-                  (click)="
-                    openDanmakuDecision(
-                      item,
-                      'retry_accept_duplicate_risk'
-                    )
-                  "
-                >
-                  接受重复风险并重试
-                </button>
-              </div>
+            <div class="unknown-danmaku-target">
+              P{{ item.partIndex }} ·
+              {{ formatDanmakuProgress(item.progressMs) }}
+            </div>
+            <div class="unknown-danmaku-content">{{ item.content }}</div>
+            <div class="unknown-danmaku-error" *ngIf="item.errorMessage">
+              {{ item.errorMessage }}
+            </div>
+            <div class="unknown-danmaku-actions">
+              <button
+                nz-button
+                nzSize="small"
+                type="button"
+                (click)="openDanmakuDecision(item, 'assume_success')"
+              >
+                视为已发送
+              </button>
+              <button
+                nz-button
+                nzSize="small"
+                nzDanger
+                type="button"
+                (click)="openDanmakuDecision(item, 'retry_accept_duplicate_risk')"
+              >
+                接受重复风险并重试
+              </button>
             </div>
           </div>
         </div>
-        <ng-template #noJob>
-          <div class="upload-progress upload-progress-empty">
-            {{ noUploadJobReason(session) }}
-          </div>
-        </ng-template>
-
-        <div class="parts-table-wrap">
-          <table class="parts-table">
-            <caption>
-              房间 {{ session.roomId }} 的录制文件
-            </caption>
-            <thead>
-              <tr>
-                <th scope="col">分 P</th>
-                <th scope="col">状态</th>
-                <th scope="col">上传</th>
-                <th scope="col">CID / 回灌</th>
-                <th scope="col">录制时间</th>
-                <th scope="col">文件</th>
-                <th scope="col">弹幕</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr *ngFor="let part of session.parts; trackBy: trackPart">
-                <th scope="row">P{{ part.partIndex }}</th>
-                <td>
-                  <nz-tag [nzColor]="artifactStateColor(part.artifactState)">
-                    {{ artifactStateLabel(part.artifactState) }}
-                  </nz-tag>
-                  <div class="part-error" *ngIf="part.errorMessage">
-                    {{ part.errorMessage }}
-                  </div>
-                </td>
-                <td>
-                  <ng-container
-                    *ngIf="
-                      uploadPartFor(session, part.partIndex) as uploadPart;
-                      else notUploaded
-                    "
-                  >
-                    <nz-tag
-                      [nzColor]="uploadPartStateColor(uploadPart.uploadState)"
-                    >
-                      {{ uploadPartStateLabel(uploadPart.uploadState) }}
-                    </nz-tag>
-                    <div class="part-metric" *ngIf="uploadPart.remoteFilename">
-                      {{ uploadPart.remoteFilename }}
-                    </div>
-                  </ng-container>
-                  <ng-template #notUploaded>尚未进入上传</ng-template>
-                </td>
-                <td>
-                  <ng-container
-                    *ngIf="uploadPartFor(session, part.partIndex) as uploadPart"
-                  >
-                    <div>
-                      {{ uploadPart.cid ? 'CID ' + uploadPart.cid : 'CID 待回填' }}
-                    </div>
-                    <div class="part-metric">
-                      {{
-                        danmakuImportStateLabel(uploadPart.danmakuImportState)
-                      }}
-                    </div>
-                  </ng-container>
-                  <span *ngIf="!uploadPartFor(session, part.partIndex)">—</span>
-                </td>
-                <td>
-                  <div>
-                    {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
-                  </div>
-                  <div class="part-metric">
-                    {{ formatDuration(part.recordDurationSeconds) }}
-                  </div>
-                </td>
-                <td class="file-list">
-                  <div *ngIf="part.finalPath">
-                    <span class="file-label">成品</span>
-                    <code>{{ part.finalPath }}</code>
-                  </div>
-                  <div *ngIf="!part.finalPath">
-                    <span class="file-label">录制</span>
-                    <code>{{ part.sourcePath }}</code>
-                  </div>
-                  <div *ngIf="part.xmlPath">
-                    <span class="file-label">弹幕</span>
-                    <code>{{ part.xmlPath }}</code>
-                  </div>
-                  <div class="part-metric">
-                    大小 {{ formatBytes(part.fileSizeBytes) }}
-                  </div>
-                </td>
-                <td class="part-count">
-                  {{ part.danmakuCount }} 条
-                </td>
-              </tr>
-            </tbody>
-          </table>
+      </div>
+      <ng-template #noJob>
+        <div class="upload-progress upload-progress-empty">
+          {{ noUploadJobReason(session) }}
         </div>
-      </nz-collapse-panel>
-    </nz-collapse>
-  </div>
-</nz-card>
+      </ng-template>
+
+      <div class="parts-table-wrap">
+        <table class="parts-table">
+          <caption>
+            房间 {{ session.roomId }} 的录制文件
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">分 P</th>
+              <th scope="col">状态</th>
+              <th scope="col">上传</th>
+              <th scope="col">CID / 回灌</th>
+              <th scope="col">录制时间</th>
+              <th scope="col">文件</th>
+              <th scope="col">弹幕</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let part of session.parts; trackBy: trackPart">
+              <th scope="row">P{{ part.partIndex }}</th>
+              <td>
+                <nz-tag [nzColor]="artifactStateColor(part.artifactState)">
+                  {{ artifactStateLabel(part.artifactState) }}
+                </nz-tag>
+                <div class="part-error" *ngIf="part.errorMessage">
+                  {{ part.errorMessage }}
+                </div>
+              </td>
+              <td>
+                <ng-container
+                  *ngIf="
+                    uploadPartFor(session, part.partIndex) as uploadPart;
+                    else notUploaded
+                  "
+                >
+                  <nz-tag [nzColor]="uploadPartStateColor(uploadPart.uploadState)">
+                    {{ uploadPartStateLabel(uploadPart.uploadState) }}
+                  </nz-tag>
+                  <div class="part-metric" *ngIf="uploadPart.remoteFilename">
+                    {{ uploadPart.remoteFilename }}
+                  </div>
+                </ng-container>
+                <ng-template #notUploaded>尚未进入上传</ng-template>
+              </td>
+              <td>
+                <ng-container
+                  *ngIf="uploadPartFor(session, part.partIndex) as uploadPart"
+                >
+                  <div>
+                    {{ uploadPart.cid ? 'CID ' + uploadPart.cid : 'CID 待回填' }}
+                  </div>
+                  <div class="part-metric">
+                    {{ danmakuImportStateLabel(uploadPart.danmakuImportState) }}
+                  </div>
+                </ng-container>
+                <span *ngIf="!uploadPartFor(session, part.partIndex)">—</span>
+              </td>
+              <td>
+                <div>
+                  {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
+                </div>
+                <div class="part-metric">
+                  {{ formatDuration(part.recordDurationSeconds) }}
+                </div>
+              </td>
+              <td class="file-list">
+                <div *ngIf="part.finalPath">
+                  <span class="file-label">成品</span>
+                  <code>{{ part.finalPath }}</code>
+                </div>
+                <div *ngIf="!part.finalPath">
+                  <span class="file-label">录制</span>
+                  <code>{{ part.sourcePath }}</code>
+                </div>
+                <div *ngIf="part.xmlPath">
+                  <span class="file-label">弹幕</span>
+                  <code>{{ part.xmlPath }}</code>
+                </div>
+                <div class="part-metric">
+                  大小 {{ formatBytes(part.fileSizeBytes) }}
+                </div>
+              </td>
+              <td class="part-count">{{ part.danmakuCount }} 条</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </ng-container>
+  </ng-container>
+</nz-drawer>
 
 <nz-modal
   [nzTitle]="decisionTitle()"

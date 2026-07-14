@@ -61,6 +61,27 @@ async def test_restart_of_same_live_reuses_session_and_continues_part_numbers(
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_supports_offset_and_total(database) -> None:
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    for index in range(3):
+        await journal.recording_started(100 + index, live_start_time=900 + index)
+
+    sessions = await journal.list_sessions(limit=1, offset=1)
+
+    assert await journal.count_sessions() == 3
+    assert len(sessions) == 1
+    assert sessions[0].room_id == 101
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_rejects_negative_offset(database) -> None:
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+
+    with pytest.raises(ValueError, match='offset must not be negative'):
+        await journal.list_sessions(offset=-1)
+
+
+@pytest.mark.asyncio
 async def test_missing_live_start_time_reuses_open_surrogate_session(database) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
 

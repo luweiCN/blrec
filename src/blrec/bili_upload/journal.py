@@ -739,16 +739,24 @@ class RecordingJournalBridge:
             raise ValueError("unknown recording run '{}'".format(run_id))
         return self._make_session(row, await self.parts_for_session(int(row['id'])))
 
-    async def list_sessions(self, *, limit: int = 50) -> Tuple[RecordingSession, ...]:
+    async def count_sessions(self) -> int:
+        value = await self._database.scalar('SELECT COUNT(*) FROM recording_sessions')
+        return int(value or 0)
+
+    async def list_sessions(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> Tuple[RecordingSession, ...]:
         if limit < 1 or limit > 200:
             raise ValueError('limit must be between 1 and 200')
+        if offset < 0:
+            raise ValueError('offset must not be negative')
         rows = await self._database.fetchall(
             'SELECT id,room_id,broadcast_session_key,live_start_time,state,'
             'started_at,ended_at,title,cover_url,cover_path,anchor_uid,'
             'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
             'live_end_time FROM recording_sessions '
-            'ORDER BY started_at DESC,id DESC LIMIT ?',
-            (limit,),
+            'ORDER BY started_at DESC,id DESC LIMIT ? OFFSET ?',
+            (limit, offset),
         )
         sessions = []
         for row in rows:

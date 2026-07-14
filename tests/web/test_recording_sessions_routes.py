@@ -19,8 +19,14 @@ from blrec.web.routers import recording_sessions
 class FakeJournal:
     degraded_reason = None
 
-    async def list_sessions(self, *, limit: int = 50) -> Tuple[RecordingSession, ...]:
+    async def count_sessions(self) -> int:
+        return 41
+
+    async def list_sessions(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> Tuple[RecordingSession, ...]:
         assert limit == 20
+        assert offset == 40
         part = RecordingPart(
             id=2,
             session_id=1,
@@ -143,12 +149,14 @@ def test_list_recording_sessions_returns_redacted_part_state(
     client: TestClient,
 ) -> None:
     response = client.get(
-        '/api/v1/recording-sessions?limit=20', headers={'x-api-key': 'test-api-key'}
+        '/api/v1/recording-sessions?limit=20&offset=40',
+        headers={'x-api-key': 'test-api-key'},
     )
 
     assert response.status_code == 200
     assert response.json() == {
         'degradedReason': None,
+        'total': 41,
         'sessions': [
             {
                 'id': 1,

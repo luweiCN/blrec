@@ -10,6 +10,7 @@ import {
   Output,
 } from '@angular/core';
 
+import type { NzCascaderOption } from 'ng-zorro-antd/cascader';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { Observable, Subject, forkJoin, of, throwError } from 'rxjs';
 import { catchError, finalize, takeUntil } from 'rxjs/operators';
@@ -49,6 +50,13 @@ const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
   filters: {},
 };
 
+type PolicyValidationErrors = Partial<
+  Record<
+    'account' | 'title' | 'partTitle' | 'category' | 'tags' | 'source',
+    string
+  >
+>;
+
 @Component({
   selector: 'app-upload-policy-dialog',
   templateUrl: './upload-policy-dialog.component.html',
@@ -68,6 +76,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   existingPolicy = false;
   error: string | null = null;
   categoryError: string | null = null;
+  saveAttempted = false;
   accounts: readonly BiliAccount[] = [];
   catalog: UploadCategoryCatalog | null = null;
   categoryPath: number[] = [];
@@ -98,7 +107,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
           this.accounts = accounts;
           this.existingPolicy = policy !== null;
           this.draft = policy ? this.fromPolicy(policy) : this.newDraft();
-          this.loadCategories(false, true);
+          this.loading = false;
+          this.loadCategories();
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.loading = false;
@@ -121,6 +132,19 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return this.catalog?.categories ?? [];
   }
 
+  get categoryOptions(): NzCascaderOption[] {
+    return this.categories.map((parent) => ({
+      value: parent.id,
+      label: parent.name,
+      isLeaf: false,
+      children: parent.children.map((child) => ({
+        value: child.id,
+        label: child.name,
+        isLeaf: true,
+      })),
+    }));
+  }
+
   get selectedCategoryDescription(): string {
     const tid = this.draft.tid;
     if (tid === null) {
@@ -135,37 +159,20 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return '';
   }
 
-  get interactionError(): string | null {
-    if (this.draft.autoComment && this.draft.upCloseReply) {
-      return '开启“自动索引评论”时不能关闭评论。';
-    }
-    if (this.draft.upSelectionReply && this.draft.upCloseReply) {
-      return '开启“精选评论”时不能关闭评论。';
-    }
-    if (this.draft.danmakuBackfill && this.draft.upCloseDanmu) {
-      return '开启“弹幕回灌”时不能关闭弹幕。';
-    }
-    return null;
+  get allowReplies(): boolean {
+    return !this.draft.upCloseReply;
   }
 
-  get canSave(): boolean {
-    const hasCategory =
-      this.draft.tid !== null &&
-      (this.existingPolicy || this.categoryPath.length === 2);
-    const hasAccount =
-      this.draft.accountMode === 'primary' || this.draft.accountId !== null;
-    return Boolean(
-      !this.loading &&
-        !this.saving &&
-        !this.deleting &&
-        hasAccount &&
-        hasCategory &&
-        this.draft.titleTemplate.trim() &&
-        this.draft.partTitleTemplate.trim() &&
-        this.draft.tags.trim() &&
-        (this.draft.copyright === 1 || this.draft.source.trim()) &&
-        !this.interactionError,
-    );
+  get allowDanmaku(): boolean {
+    return !this.draft.upCloseDanmu;
+  }
+
+  get validationErrors(): PolicyValidationErrors {
+    return this.saveAttempted ? this.validateDraft() : {};
+  }
+
+  get saveDisabled(): boolean {
+    return this.loading || this.saving || this.deleting;
   }
 
   accountModeChanged(mode: UploadAccountMode): void {
@@ -176,7 +183,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.loadCategories();
   }
 
-  fixedAccountChanged(accountId: number): void {
+  fixedAccountChanged(accountId: number | null): void {
     this.draft.accountId = accountId;
     this.clearCategorySelectionForAccountChange();
     this.loadCategories();
@@ -184,7 +191,23 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   categoryChanged(path: number[] | null): void {
     this.categoryPath = path ?? [];
-    this.draft.tid = this.categoryPath.at(-1) ?? null;
+    this.draft.tid =
+      this.categoryPath.length === 2 ? this.categoryPath[1] : null;
+  }
+
+  allowRepliesChanged(allowed: boolean): void {
+    this.draft.upCloseReply = !allowed;
+    if (!allowed) {
+      this.draft.upSelectionReply = false;
+      this.draft.autoComment = false;
+    }
+  }
+
+  allowDanmakuChanged(allowed: boolean): void {
+    this.draft.upCloseDanmu = !allowed;
+    if (!allowed) {
+      this.draft.danmakuBackfill = false;
+    }
   }
 
   refreshCategories(): void {
@@ -192,8 +215,15 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   save(): void {
+    if (this.loading || this.saving || this.deleting) {
+      return;
+    }
+    this.saveAttempted = true;
+    this.error = null;
+    const validationErrors = this.validationErrors;
     const tid = this.draft.tid;
-    if (!this.canSave || tid === null) {
+    if (Object.keys(validationErrors).length > 0 || tid === null) {
+      this.changeDetector.markForCheck();
       return;
     }
     const request: RoomUploadPolicyRequest = {
@@ -289,7 +319,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     );
   }
 
-  private loadCategories(forceRefresh = false, initial = false): void {
+  private loadCategories(forceRefresh = false): void {
     if (this.draft.accountMode === 'fixed' && this.draft.accountId === null) {
       this.catalog = null;
       this.categoryError = '请选择一个可用的固定投稿账号。';
@@ -308,9 +338,6 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       .pipe(
         finalize(() => {
           this.categoryLoading = false;
-          if (initial) {
-            this.loading = false;
-          }
           this.changeDetector.markForCheck();
         }),
         takeUntil(this.destroy$),
@@ -346,9 +373,34 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   private clearCategorySelectionForAccountChange(): void {
     this.catalog = null;
     this.categoryPath = [];
-    if (!this.existingPolicy) {
-      this.draft.tid = null;
+    this.draft.tid = null;
+  }
+
+  private validateDraft(): PolicyValidationErrors {
+    const errors: PolicyValidationErrors = {};
+    if (this.draft.accountMode === 'fixed' && this.draft.accountId === null) {
+      errors.account = '请选择投稿账号';
     }
+    if (!this.draft.titleTemplate.trim()) {
+      errors.title = '请填写标题模板';
+    }
+    if (!this.draft.partTitleTemplate.trim()) {
+      errors.partTitle = '请填写分 P 标题模板';
+    }
+    if (
+      this.draft.tid === null ||
+      this.categoryPath.length !== 2 ||
+      this.categoryPath[1] !== this.draft.tid
+    ) {
+      errors.category = '请选择投稿分区';
+    }
+    if (!this.draft.tags.trim()) {
+      errors.tags = '请填写至少一个标签';
+    }
+    if (this.draft.copyright === 2 && !this.draft.source.trim()) {
+      errors.source = '转载稿件必须填写来源';
+    }
+    return errors;
   }
 
   private newDraft(): RoomUploadPolicyDraft {

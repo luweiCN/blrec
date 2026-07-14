@@ -27,6 +27,11 @@ import { RecordingSessionService } from '../shared/recording-session.service';
 })
 export class RecordingSessionsComponent implements OnInit {
   view: RecordingSessionsView = { state: 'loading' };
+  pageIndex = 1;
+  pageSize = 20;
+  readonly pageSizeOptions = [20, 50, 100];
+  selectedSession: RecordingSession | null = null;
+  detailVisible = false;
   decisionItem: DanmakuItemProgress | null = null;
   decisionAction: DanmakuDecisionAction | null = null;
   decisionReason = '';
@@ -52,6 +57,10 @@ export class RecordingSessionsComponent implements OnInit {
       : null;
   }
 
+  get total(): number {
+    return this.view.state === 'ready' ? this.view.response.total : 0;
+  }
+
   get errorMessage(): string | null {
     return this.view.state === 'error' ? this.view.message : null;
   }
@@ -66,9 +75,17 @@ export class RecordingSessionsComponent implements OnInit {
 
   load(): void {
     this.view = { state: 'loading' };
-    this.recordingSessions.listSessions(50).subscribe({
+    const offset = (this.pageIndex - 1) * this.pageSize;
+    this.recordingSessions.listSessions(this.pageSize, offset).subscribe({
       next: (response) => {
         this.view = { state: 'ready', response };
+        if (this.selectedSession) {
+          this.selectedSession =
+            response.sessions.find(
+              (session) => session.id === this.selectedSession?.id
+            ) ?? null;
+          this.detailVisible = this.selectedSession !== null;
+        }
         this.changeDetector.markForCheck();
       },
       error: (error: unknown) => {
@@ -76,6 +93,34 @@ export class RecordingSessionsComponent implements OnInit {
         this.changeDetector.markForCheck();
       },
     });
+  }
+
+  pageIndexChanged(pageIndex: number): void {
+    if (pageIndex === this.pageIndex) {
+      return;
+    }
+    this.pageIndex = pageIndex;
+    this.load();
+  }
+
+  pageSizeChanged(pageSize: number): void {
+    if (pageSize === this.pageSize) {
+      return;
+    }
+    this.pageSize = pageSize;
+    this.pageIndex = 1;
+    this.load();
+  }
+
+  openDetails(session: RecordingSession): void {
+    this.selectedSession = session;
+    this.detailVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  closeDetails(): void {
+    this.detailVisible = false;
+    this.changeDetector.markForCheck();
   }
 
   sessionStateLabel(state: RecordingSessionState): string {

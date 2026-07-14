@@ -23,11 +23,13 @@ describe('RecordingSessionService', () => {
   afterEach(() => http.verify());
 
   it('loads the newest recording sessions without a write request', () => {
-    service.listSessions(20).subscribe();
+    service.listSessions(20, 40).subscribe();
 
-    const request = http.expectOne('/api/v1/recording-sessions?limit=20');
+    const request = http.expectOne(
+      '/api/v1/recording-sessions?limit=20&offset=40'
+    );
     expect(request.request.method).toBe('GET');
-    request.flush({ degradedReason: null, sessions: [] });
+    request.flush({ degradedReason: null, total: 0, sessions: [] });
   });
 
   it('sends one explicit decision for an unknown danmaku item', () => {

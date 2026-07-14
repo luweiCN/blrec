@@ -130,6 +130,7 @@ class RecordingSessionResponse(ApiModel):
 
 class RecordingSessionsResponse(ApiModel):
     degraded_reason: Optional[str]
+    total: int
     sessions: List[RecordingSessionResponse]
 
 
@@ -257,16 +258,19 @@ router = APIRouter(prefix='/recording-sessions', tags=['recording-sessions'])
 
 @router.get('', response_model=RecordingSessionsResponse)
 async def list_recording_sessions(
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     _subject: str = Depends(authenticated_manager_subject),
     recording_journal: RecordingJournalBridge = Depends(get_recording_journal),
 ) -> RecordingSessionsResponse:
-    sessions = await recording_journal.list_sessions(limit=limit)
+    total = await recording_journal.count_sessions()
+    sessions = await recording_journal.list_sessions(limit=limit, offset=offset)
     upload_jobs = await recording_journal.upload_jobs_for_sessions(
         [session.id for session in sessions]
     )
     return RecordingSessionsResponse(
         degraded_reason=recording_journal.degraded_reason,
+        total=total,
         sessions=[
             _session_response(session, upload_jobs.get(session.id))
             for session in sessions

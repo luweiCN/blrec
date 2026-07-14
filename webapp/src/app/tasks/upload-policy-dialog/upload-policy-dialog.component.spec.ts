@@ -4,7 +4,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
 
 import { NzMessageService } from 'ng-zorro-antd/message';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 
 import { BiliAccountService } from '../../uploads/shared/bili-account.service';
 import {
@@ -144,6 +144,16 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.draft.tid).toBeNull();
   });
 
+  it('shows the form while the category request is still running', () => {
+    const pendingCategories = new Subject<UploadCategoryCatalog>();
+    policyService.categories.and.returnValue(pendingCategories);
+
+    create();
+
+    expect(component.loading).toBeFalse();
+    expect(component.categoryLoading).toBeTrue();
+  });
+
   it('preserves every value from an existing room policy', () => {
     policyService.get.and.returnValue(of(existingPolicy));
 
@@ -157,14 +167,42 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.categoryPath).toEqual([4, 17]);
   });
 
-  it('maps a category path and rejects conflicting interaction switches', () => {
+  it('marks parent categories as expandable and child categories as selectable', () => {
     create();
+
+    expect(component.categoryOptions[0].isLeaf).toBeFalse();
+    expect(component.categoryOptions[0].children?.[0].isLeaf).toBeTrue();
+
     component.categoryChanged([4, 17]);
-    component.draft.upCloseReply = true;
 
     expect(component.draft.tid).toBe(17);
-    expect(component.interactionError).toContain('自动索引评论');
-    expect(component.canSave).toBeFalse();
+    expect(component.categoryPath).toEqual([4, 17]);
+  });
+
+  it('keeps save available and reports missing fields after it is clicked', () => {
+    create();
+    expect(component.saveDisabled).toBeFalse();
+
+    component.save();
+
+    expect(policyService.save).not.toHaveBeenCalled();
+    expect(component.validationErrors.category).toBe('请选择投稿分区');
+  });
+
+  it('maps positive interaction switches and clears dependent options', () => {
+    create();
+    component.draft.upSelectionReply = true;
+    component.draft.autoComment = true;
+    component.draft.danmakuBackfill = true;
+
+    component.allowRepliesChanged(false);
+    component.allowDanmakuChanged(false);
+
+    expect(component.draft.upCloseReply).toBeTrue();
+    expect(component.draft.upSelectionReply).toBeFalse();
+    expect(component.draft.autoComment).toBeFalse();
+    expect(component.draft.upCloseDanmu).toBeTrue();
+    expect(component.draft.danmakuBackfill).toBeFalse();
   });
 
   it('submits the complete policy and deletes an existing policy', () => {

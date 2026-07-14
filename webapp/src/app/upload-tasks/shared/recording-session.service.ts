@@ -13,8 +13,8 @@ import {
 export class RecordingSessionService {
   constructor(private http: HttpClient, private url: UrlService) {}
 
-  listSessions(limit = 50): Observable<RecordingSessionsResponse> {
-    const path = `/api/v1/recording-sessions?limit=${limit}`;
+  listSessions(limit = 20, offset = 0): Observable<RecordingSessionsResponse> {
+    const path = `/api/v1/recording-sessions?limit=${limit}&offset=${offset}`;
     return this.http.get<RecordingSessionsResponse>(this.url.makeApiUrl(path));
   }
 

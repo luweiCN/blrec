@@ -192,9 +192,27 @@ async def upsert_room_upload_policy(
     payload: RoomUploadPolicyRequest,
     _subject: str = Depends(authenticated_manager_subject),
     policy_manager: RoomUploadPolicyManager = Depends(get_policy_manager),
+    catalog: UploadCategoryCatalog = Depends(get_category_catalog),
 ) -> RoomUploadPolicyView:
     try:
+        category_view = await catalog.list(payload.account_mode, payload.account_id)
+        if not any(
+            child.id == payload.tid
+            for parent in category_view.categories
+            for child in parent.children
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail='请选择有效的二级投稿分区'
+            )
         return await policy_manager.upsert(room_id, payload.to_command())
+    except InvalidUploadCategoryRequest as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+    except UploadCategoryUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
+        ) from None
     except InvalidRoomUploadPolicy as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)

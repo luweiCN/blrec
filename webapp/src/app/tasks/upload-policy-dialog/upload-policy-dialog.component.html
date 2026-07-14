@@ -25,16 +25,11 @@
         [nzMessage]="error"
       ></nz-alert>
 
-      <section class="form-section" aria-labelledby="policy-account-heading">
-        <div class="section-heading">
-          <h3 id="policy-account-heading">规则与账号</h3>
-          <p>决定新直播场次是否创建上传任务，以及任务绑定哪个账号。</p>
-        </div>
-
+      <div class="top-settings">
         <div class="switch-field">
           <div>
-            <label for="policy-enabled">启用投稿规则</label>
-            <p>关闭后仅保留设置，不会为以后结束的直播创建上传任务。</p>
+            <label for="policy-enabled">自动投稿</label>
+            <p>关闭后，新结束的直播不再创建上传任务；已有任务不受影响。</p>
           </div>
           <nz-switch
             id="policy-enabled"
@@ -44,30 +39,21 @@
         </div>
 
         <nz-form-item>
-          <nz-form-label nzRequired>
-            投稿账号策略
-            <span
-              class="help-mark"
-              nz-tooltip
-              nzTooltipTitle="跟随主账号会在创建上传任务时锁定当时的主账号；固定账号始终使用指定账号。已创建任务不会随之后的账号切换而改绑。"
-              tabindex="0"
-              >?</span
-            >
-          </nz-form-label>
+          <nz-form-label nzRequired>投稿账号</nz-form-label>
           <nz-form-control>
             <nz-radio-group
               name="accountMode"
               [ngModel]="draft.accountMode"
               (ngModelChange)="accountModeChanged($event)"
             >
-              <label nz-radio nzValue="primary">跟随主账号</label>
-              <label nz-radio nzValue="fixed">固定账号</label>
+              <label nz-radio nzValue="primary">使用主账号</label>
+              <label nz-radio nzValue="fixed">指定账号</label>
             </nz-radio-group>
           </nz-form-control>
         </nz-form-item>
 
         <nz-form-item *ngIf="draft.accountMode === 'fixed'">
-          <nz-form-label nzRequired>固定投稿账号</nz-form-label>
+          <nz-form-label nzRequired>选择账号</nz-form-label>
           <nz-form-control>
             <nz-select
               name="accountId"
@@ -81,16 +67,18 @@
                 [nzLabel]="account.displayName + ' · UID ' + account.uid"
               ></nz-option>
             </nz-select>
-            <span class="field-help">账号失效时任务会报错并暂停，不会改用其他账号。</span>
+            <span *ngIf="validationErrors.account" class="field-error">
+              {{ validationErrors.account }}
+            </span>
+            <span class="field-help">
+              账号失效时任务会暂停，不会自动换用其他账号。
+            </span>
           </nz-form-control>
         </nz-form-item>
-      </section>
+      </div>
 
-      <section class="form-section" aria-labelledby="archive-info-heading">
-        <div class="section-heading">
-          <h3 id="archive-info-heading">稿件信息</h3>
-          <p>这些内容会在直播结束、创建上传任务时渲染并锁定。</p>
-        </div>
+      <section class="form-section" aria-labelledby="archive-content-heading">
+        <h3 id="archive-content-heading">稿件内容</h3>
 
         <nz-form-item>
           <nz-form-label nzRequired>
@@ -110,6 +98,9 @@
               maxlength="500"
               [(ngModel)]="draft.titleTemplate"
             />
+            <span *ngIf="validationErrors.title" class="field-error">
+              {{ validationErrors.title }}
+            </span>
           </nz-form-control>
         </nz-form-item>
 
@@ -153,30 +144,22 @@
               maxlength="500"
               [(ngModel)]="draft.partTitleTemplate"
             />
+            <span *ngIf="validationErrors.partTitle" class="field-error">
+              {{ validationErrors.partTitle }}
+            </span>
           </nz-form-control>
         </nz-form-item>
 
         <nz-form-item>
-          <nz-form-label nzRequired>
-            投稿分区
-            <span
-              class="help-mark"
-              nz-tooltip
-              nzTooltipTitle="分区由当前投稿账号从 B 站创作中心实时读取，并缓存 24 小时。修改账号后会重新匹配。"
-              tabindex="0"
-              >?</span
-            >
-          </nz-form-label>
+          <nz-form-label nzRequired>投稿分区</nz-form-label>
           <nz-form-control>
             <div class="category-control">
               <nz-cascader
                 name="categoryPath"
                 nzPlaceHolder="搜索并选择一级 / 二级分区"
-                nzLabelProperty="name"
-                nzValueProperty="id"
                 [nzShowSearch]="true"
-                [nzOptions]="categories"
-                [nzDisabled]="categoryLoading || categories.length === 0"
+                [nzOptions]="categoryOptions"
+                [nzDisabled]="categoryLoading || categoryOptions.length === 0"
                 [ngModel]="categoryPath"
                 (ngModelChange)="categoryChanged($event)"
               ></nz-cascader>
@@ -190,6 +173,9 @@
                 刷新分区
               </button>
             </div>
+            <span *ngIf="validationErrors.category" class="field-error">
+              {{ validationErrors.category }}
+            </span>
             <nz-alert
               *ngIf="categoryError"
               class="inline-alert"
@@ -200,15 +186,8 @@
             <span *ngIf="selectedCategoryDescription" class="field-help">
               {{ selectedCategoryDescription }}
             </span>
-            <span
-              *ngIf="existingPolicy && categoryPath.length === 0 && draft.tid"
-              class="field-help"
-            >
-              当前保存的分区 ID 为 {{ draft.tid }}；分区目录恢复前不会自动替换。
-            </span>
-            <span *ngIf="catalog" class="field-help">
-              {{ catalog.stale ? "正在使用上次成功的分区缓存" : "分区目录已更新" }}，
-              更新时间 {{ catalog.fetchedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}。
+            <span *ngIf="catalog?.stale" class="field-help">
+              B 站分区暂时无法更新，当前显示上次成功获取的目录。
             </span>
           </nz-form-control>
         </nz-form-item>
@@ -226,6 +205,9 @@
           </nz-form-label>
           <nz-form-control>
             <input nz-input name="tags" [(ngModel)]="draft.tags" />
+            <span *ngIf="validationErrors.tags" class="field-error">
+              {{ validationErrors.tags }}
+            </span>
           </nz-form-control>
         </nz-form-item>
 
@@ -236,7 +218,6 @@
               <label nz-radio [nzValue]="1">自制</label>
               <label nz-radio [nzValue]="2">转载</label>
             </nz-radio-group>
-            <span class="field-help">转载稿件必须填写原始来源。</span>
           </nz-form-control>
         </nz-form-item>
 
@@ -244,33 +225,28 @@
           <nz-form-label nzRequired>转载来源</nz-form-label>
           <nz-form-control>
             <input nz-input name="source" [(ngModel)]="draft.source" />
+            <span *ngIf="validationErrors.source" class="field-error">
+              {{ validationErrors.source }}
+            </span>
           </nz-form-control>
         </nz-form-item>
       </section>
 
-      <section class="form-section" aria-labelledby="publish-heading">
-        <div class="section-heading">
-          <h3 id="publish-heading">发布与互动</h3>
-          <p>控制稿件可见范围、空间动态和 B 站评论区、弹幕区状态。</p>
-        </div>
+      <section class="form-section" aria-labelledby="publish-options-heading">
+        <h3 id="publish-options-heading">发布选项</h3>
+
+        <nz-form-item>
+          <nz-form-label>可见范围</nz-form-label>
+          <nz-form-control>
+            <nz-radio-group name="isOnlySelf" [(ngModel)]="draft.isOnlySelf">
+              <label nz-radio [nzValue]="false">公开</label>
+              <label nz-radio [nzValue]="true">仅自己可见</label>
+            </nz-radio-group>
+          </nz-form-control>
+        </nz-form-item>
 
         <div class="switch-field">
-          <div>
-            <label for="is-only-self">仅自己可见</label>
-            <p>开启后稿件不会公开展示，适合先自行检查。</p>
-          </div>
-          <nz-switch
-            id="is-only-self"
-            name="isOnlySelf"
-            [(ngModel)]="draft.isOnlySelf"
-          ></nz-switch>
-        </div>
-
-        <div class="switch-field">
-          <div>
-            <label for="publish-dynamic">投稿后发布动态</label>
-            <p>开启后投稿会同时推送一条空间动态；关闭后不会推送。</p>
-          </div>
+          <label for="publish-dynamic">投稿后发布动态</label>
           <nz-switch
             id="publish-dynamic"
             name="publishDynamic"
@@ -278,9 +254,9 @@
           ></nz-switch>
         </div>
 
-        <nz-form-item>
+        <nz-form-item *ngIf="draft.publishDynamic">
           <nz-form-label>
-            粉丝动态模板
+            动态内容
             <span
               class="help-mark"
               nz-tooltip
@@ -295,20 +271,13 @@
               name="dynamicTemplate"
               rows="3"
               maxlength="5000"
-              [disabled]="!draft.publishDynamic"
               [(ngModel)]="draft.dynamicTemplate"
             ></textarea>
-            <span *ngIf="!draft.publishDynamic" class="field-help">
-              开启“投稿后发布动态”后才会提交这段文案。
-            </span>
           </nz-form-control>
         </nz-form-item>
 
         <div class="switch-field">
-          <div>
-            <label for="no-reprint">未经允许禁止转载</label>
-            <p>在自制稿件上声明不允许其他用户转载。</p>
-          </div>
+          <label for="no-reprint">未经允许禁止转载</label>
           <nz-switch
             id="no-reprint"
             name="noReprint"
@@ -317,10 +286,19 @@
         </div>
 
         <div class="switch-field">
-          <div>
-            <label for="selection-reply">精选评论</label>
-            <p>开启后评论需要由投稿账号精选后展示。</p>
-          </div>
+          <label for="allow-replies">允许评论</label>
+          <nz-switch
+            id="allow-replies"
+            name="allowReplies"
+            [ngModel]="allowReplies"
+            (ngModelChange)="allowRepliesChanged($event)"
+          ></nz-switch>
+        </div>
+
+        <div *ngIf="allowReplies" class="switch-field nested-switch-field">
+          <label for="selection-reply">
+            仅展示投稿账号精选的评论
+          </label>
           <nz-switch
             id="selection-reply"
             name="upSelectionReply"
@@ -329,73 +307,44 @@
         </div>
 
         <div class="switch-field">
-          <div>
-            <label for="close-reply">关闭评论</label>
-            <p>关闭稿件评论区；与自动索引评论、精选评论不能同时开启。</p>
-          </div>
+          <label for="allow-danmaku">允许弹幕</label>
           <nz-switch
-            id="close-reply"
-            name="upCloseReply"
-            [(ngModel)]="draft.upCloseReply"
+            id="allow-danmaku"
+            name="allowDanmaku"
+            [ngModel]="allowDanmaku"
+            (ngModelChange)="allowDanmakuChanged($event)"
           ></nz-switch>
         </div>
-
-        <div class="switch-field">
-          <div>
-            <label for="close-danmu">关闭弹幕</label>
-            <p>关闭稿件弹幕区；与审核后的弹幕回灌不能同时开启。</p>
-          </div>
-          <nz-switch
-            id="close-danmu"
-            name="upCloseDanmu"
-            [(ngModel)]="draft.upCloseDanmu"
-          ></nz-switch>
-        </div>
-
-        <nz-alert
-          *ngIf="interactionError"
-          class="inline-alert"
-          nzType="error"
-          nzShowIcon
-          [nzMessage]="interactionError"
-        ></nz-alert>
       </section>
 
       <section class="form-section" aria-labelledby="after-review-heading">
-        <div class="section-heading">
-          <h3 id="after-review-heading">审核通过后</h3>
-          <p>只有稿件审核通过并可访问后，系统才会执行这些操作。</p>
-        </div>
+        <h3 id="after-review-heading">审核后处理</h3>
 
         <div class="switch-field">
           <div>
             <label for="auto-comment">发布 SC / 上舰索引评论</label>
-            <p>把录制期间的 SC 和上舰记录整理成评论，便于从时间点跳转。</p>
+            <p>把直播中的 SC 和上舰记录整理成带时间点的评论。</p>
           </div>
           <nz-switch
             id="auto-comment"
             name="autoComment"
+            [nzDisabled]="!allowReplies"
             [(ngModel)]="draft.autoComment"
           ></nz-switch>
         </div>
 
         <div class="switch-field">
           <div>
-            <label for="danmaku-backfill">回灌视频弹幕</label>
-            <p>把直播弹幕按原时间轴发送到已审核的视频中，并以投稿账号署名。</p>
+            <label for="danmaku-backfill">回灌直播弹幕</label>
+            <p>稿件审核通过后，按原时间轴把直播弹幕发送到视频。</p>
           </div>
           <nz-switch
             id="danmaku-backfill"
             name="danmakuBackfill"
+            [nzDisabled]="!allowDanmaku"
             [(ngModel)]="draft.danmakuBackfill"
           ></nz-switch>
         </div>
-
-        <nz-alert
-          nzType="info"
-          nzShowIcon
-          nzMessage="这两项还受全局紧急开关控制；关闭全局开关会暂停执行，但不会修改本房间设置。"
-        ></nz-alert>
       </section>
     </form>
   </ng-container>
@@ -408,12 +357,12 @@
         nzDanger
         type="button"
         nz-popconfirm
-        nzPopconfirmTitle="只删除以后场次的投稿规则；已创建的上传任务不受影响。确认删除吗？"
+        nzPopconfirmTitle="只删除以后场次的投稿设置；已创建的上传任务不受影响。确认删除吗？"
         [nzLoading]="deleting"
         [disabled]="saving || deleting"
         (nzOnConfirm)="deletePolicy()"
       >
-        删除规则
+        删除投稿设置
       </button>
       <span class="footer-spacer"></span>
       <button
@@ -428,8 +377,9 @@
         nz-button
         nzType="primary"
         type="button"
+        data-testid="save-policy"
         [nzLoading]="saving"
-        [disabled]="!canSave"
+        [disabled]="saveDisabled"
         (click)="save()"
       >
         保存设置

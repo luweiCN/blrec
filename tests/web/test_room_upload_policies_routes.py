@@ -299,6 +299,41 @@ def test_upsert_converts_request_to_domain_command(
     assert manager.command.filters == {'blockedWords': ['抽奖']}
 
 
+def test_upsert_rejects_parent_upload_category(
+    client: TestClient, manager: FakePolicyManager
+) -> None:
+    response = client.put(
+        '/api/v1/room-upload-policies/100',
+        headers=auth_headers(),
+        json={
+            'accountMode': 'primary',
+            'accountId': None,
+            'enabled': True,
+            'titleTemplate': '录播',
+            'descriptionTemplate': '',
+            'partTitleTemplate': 'P{{ part_index }}',
+            'dynamicTemplate': '',
+            'tid': 4,
+            'tags': '录播',
+            'copyright': 1,
+            'source': '',
+            'isOnlySelf': False,
+            'publishDynamic': True,
+            'noReprint': True,
+            'upSelectionReply': False,
+            'upCloseReply': False,
+            'upCloseDanmu': False,
+            'autoComment': False,
+            'danmakuBackfill': False,
+            'filters': {},
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == '请选择有效的二级投稿分区'
+    assert manager.command is None
+
+
 def test_invalid_policy_returns_conflict(
     client: TestClient, manager: FakePolicyManager
 ) -> None:

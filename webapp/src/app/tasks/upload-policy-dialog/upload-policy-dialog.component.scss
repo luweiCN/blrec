@@ -15,6 +15,11 @@
   margin-bottom: 1rem;
 }
 
+.top-settings {
+  border-bottom: 1px solid #f0f0f0;
+  padding-bottom: 0.75rem;
+}
+
 .form-section {
   border-bottom: 1px solid #f0f0f0;
   padding-bottom: 0.75rem;
@@ -23,22 +28,12 @@
     border-bottom: 0;
     padding-bottom: 0;
   }
-}
 
-.section-heading {
-  margin-bottom: 1.25rem;
-
-  h3 {
-    margin: 0 0 0.25rem;
+  > h3 {
+    margin: 0 0 1.25rem;
     color: rgba(0, 0, 0, 0.85);
     font-size: 1rem;
     font-weight: 600;
-  }
-
-  p {
-    margin: 0;
-    color: rgba(0, 0, 0, 0.45);
-    line-height: 1.6;
   }
 }
 
@@ -98,11 +93,24 @@ textarea[nz-input] {
   }
 }
 
+.nested-switch-field {
+  margin-left: 1rem;
+  border-left: 2px solid #f0f0f0;
+  padding-left: 1rem;
+}
+
 .field-help {
   display: block;
   margin-top: 0.45rem;
   color: rgba(0, 0, 0, 0.45);
   line-height: 1.55;
+}
+
+.field-error {
+  display: block;
+  margin-top: 0.4rem;
+  color: #cf1322;
+  line-height: 1.5;
 }
 
 .help-mark {

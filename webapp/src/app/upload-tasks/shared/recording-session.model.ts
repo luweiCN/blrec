@@ -179,6 +179,7 @@ export interface RecordingSession {
 
 export interface RecordingSessionsResponse {
   readonly degradedReason: string | null;
+  readonly total: number;
   readonly sessions: readonly RecordingSession[];
 }
 

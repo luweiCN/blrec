@@ -6,12 +6,11 @@ import { FormsModule } from '@angular/forms';
 import { of, throwError } from 'rxjs';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
-import { NzCardModule } from 'ng-zorro-antd/card';
-import { NzCollapseModule } from 'ng-zorro-antd/collapse';
-import { NzEmptyModule } from 'ng-zorro-antd/empty';
+import { NzDrawerModule } from 'ng-zorro-antd/drawer';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzModalModule } from 'ng-zorro-antd/modal';
-import { NzSpinModule } from 'ng-zorro-antd/spin';
+import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
+import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 
 import { RecordingSessionService } from '../shared/recording-session.service';
@@ -30,6 +29,7 @@ describe('RecordingSessionsComponent', () => {
     service.listSessions.and.returnValue(
       of({
         degradedReason: null,
+        total: 41,
         sessions: [
           {
             id: 1,
@@ -127,12 +127,11 @@ describe('RecordingSessionsComponent', () => {
         NoopAnimationsModule,
         NzAlertModule,
         NzButtonModule,
-        NzCardModule,
-        NzCollapseModule,
-        NzEmptyModule,
+        NzDrawerModule,
         NzInputModule,
         NzModalModule,
-        NzSpinModule,
+        NzPageHeaderModule,
+        NzTableModule,
         NzTagModule,
       ],
       providers: [{ provide: RecordingSessionService, useValue: service }],
@@ -141,43 +140,48 @@ describe('RecordingSessionsComponent', () => {
     fixture = TestBed.createComponent(RecordingSessionsComponent);
   });
 
-  it('shows persisted sessions, part order, final files, and XML state', () => {
+  it('shows a compact paginated upload-task table', () => {
     fixture.detectChanges();
 
     const text = fixture.nativeElement.textContent;
-    expect(service.listSessions).toHaveBeenCalledOnceWith(50);
-    expect(text).toContain('上传任务列表');
+    expect(service.listSessions).toHaveBeenCalledOnceWith(20, 0);
+    expect(text).toContain('上传任务');
+    expect(text).not.toContain('上传任务列表');
+    expect(text).toContain('直播与房间');
+    expect(text).toContain('录制概要');
+    expect(text).toContain('投稿状态');
     expect(text).toContain('房间 100');
     expect(text).toContain('已归集');
     expect(text).toContain('今晚挑战通关');
     expect(text).toContain('主播名');
-    expect(text).toContain('游戏 / 单机游戏');
     expect(text).toContain('59 秒');
     expect(text).toContain('1 MB');
-    expect(text).toContain('321 条');
     expect(text).toContain('等待审核');
     expect(text).toContain('投稿账号');
-    expect(text).toContain('UID 42');
-    expect(text).toContain('BV1test');
-    expect(text).toContain('等待 B 站审核');
-    expect(text).toContain('评论：待处理');
-    expect(text).toContain('回灌：待处理');
-    expect(text).toContain(
-      '回灌弹幕会长期出现在投稿视频中，发送者显示为投稿账号，不是原直播观众账号。'
-    );
-    expect(text).toContain('已发送 0 / 1');
-    expect(text).toContain('结果未知 1');
-    expect(text).toContain('需要确认的弹幕');
-    expect(text).toContain('P1');
-    expect(text).toContain('上传已完成');
-    expect(text).toContain('CID 待回填');
-    expect(text).toContain('/rec/p1.mp4');
-    expect(text).toContain('/rec/p1.xml');
-    const cover = fixture.nativeElement.querySelector('.session-cover');
-    expect(cover.getAttribute('src')).toBe(
-      'https://example.invalid/cover.jpg'
-    );
-    expect(cover.getAttribute('referrerpolicy')).toBe('no-referrer');
+    expect(text).not.toContain('/rec/p1.mp4');
+  });
+
+  it('requests the selected server page and page size', () => {
+    fixture.detectChanges();
+
+    fixture.componentInstance.pageIndexChanged(2);
+    expect(service.listSessions).toHaveBeenCalledWith(20, 20);
+
+    fixture.componentInstance.pageSizeChanged(50);
+    expect(fixture.componentInstance.pageIndex).toBe(1);
+    expect(service.listSessions).toHaveBeenCalledWith(50, 0);
+  });
+
+  it('opens full session details in a right drawer', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+
+    fixture.componentInstance.openDetails(session);
+
+    expect(fixture.componentInstance.detailVisible).toBeTrue();
+    expect(fixture.componentInstance.selectedSession).toBe(session);
+    fixture.componentInstance.closeDetails();
+    expect(fixture.componentInstance.detailVisible).toBeFalse();
   });
 
   it('marks the OnPush application tree after sessions load', () => {
