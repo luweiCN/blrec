@@ -121,6 +121,7 @@ async def test_relationships_classify_rooms_and_jobs(database) -> None:
     await seed_job(database, 6, 306, state='rejected', submit_state='confirmed')
 
     relationships = await AccountLifecycle(database).relationships(1)
+    standby_relationships = await AccountLifecycle(database).relationships(2)
 
     assert relationships.is_primary
     assert relationships.fixed_room_ids == (100,)
@@ -128,6 +129,8 @@ async def test_relationships_classify_rooms_and_jobs(database) -> None:
     assert [job.id for job in relationships.reassignable_jobs] == [1, 2]
     assert [job.id for job in relationships.blocking_jobs] == [3, 4]
     assert relationships.historical_job_count == 2
+    assert not standby_relationships.is_primary
+    assert standby_relationships.follow_primary_room_ids == (200,)
 
 
 @pytest.mark.asyncio

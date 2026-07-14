@@ -126,15 +126,13 @@ class AccountLifecycle:
                 (account_id,),
             ).fetchall()
         )
-        follow_primary_room_ids: Tuple[int, ...] = ()
-        if is_primary:
-            follow_primary_room_ids = tuple(
-                int(row['room_id'])
-                for row in connection.execute(
-                    "SELECT room_id FROM room_upload_policies "
-                    "WHERE account_mode='primary' ORDER BY room_id"
-                ).fetchall()
-            )
+        follow_primary_room_ids = tuple(
+            int(row['room_id'])
+            for row in connection.execute(
+                "SELECT room_id FROM room_upload_policies "
+                "WHERE account_mode='primary' ORDER BY room_id"
+            ).fetchall()
+        )
 
         reassignable: List[RelatedUploadJob] = []
         blocking: List[RelatedUploadJob] = []
