@@ -393,6 +393,54 @@ async def test_upos_session_is_bound_to_the_client_that_preuploaded_it() -> None
     assert second_transport.requests == []
 
 
+@pytest.mark.asyncio
+async def test_upos_session_can_be_restored_without_persisting_client_owner() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text())
+    first = protocol_client(ScriptedTransport(fixtures))
+    prepared = await first.preupload(
+        credential_fixture(), {'name': '/recordings/local-name.flv', 'size': 4}
+    )
+    persisted = first.export_upos_session(prepared.session)
+    second_transport = ScriptedTransport(fixtures)
+    second = protocol_client(second_transport)
+
+    restored = second.restore_upos_session(persisted)
+    await second.upload_chunk(
+        restored, chunk_no=0, chunks=1, start=0, total=4, body=b'data'
+    )
+
+    assert 'owner_token' not in persisted
+    assert restored.file_name == '/recordings/local-name.flv'
+    assert restored.remote_file_name == 'fixture'
+    assert [request.operation for request in second_transport.requests] == [
+        'upload_chunk'
+    ]
+
+
+@pytest.mark.asyncio
+async def test_upload_chunk_accepts_empty_success_response() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text())
+
+    class EmptyChunkTransport(ScriptedTransport):
+        async def send(self, request: ProtocolRequest) -> ProtocolResponse:
+            if request.operation == 'upload_chunk':
+                self.requests.append(request)
+                return ProtocolResponse(status=200, headers={}, body=b'')
+            return await super().send(request)
+
+    transport = EmptyChunkTransport(fixtures)
+    client = protocol_client(transport)
+    prepared = await client.preupload(
+        credential_fixture(), {'name': 'fixture.mp4', 'size': 4}
+    )
+
+    response = await client.upload_chunk(
+        prepared.session, chunk_no=0, chunks=1, start=0, total=4, body=b'data'
+    )
+
+    assert response == {}
+
+
 def test_request_repr_and_shape_are_redacted() -> None:
     request = ProtocolRequest(
         operation='fixture',

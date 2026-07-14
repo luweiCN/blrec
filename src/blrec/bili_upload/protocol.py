@@ -1,5 +1,6 @@
 import asyncio
 import json
+import posixpath
 import secrets
 import time
 from dataclasses import dataclass
@@ -145,6 +146,7 @@ class UposSession:
     upload_id: str
     biz_id: str
     file_name: str
+    remote_file_name: str
 
     def __repr__(self) -> str:
         return '<UposSession redacted>'
@@ -166,6 +168,17 @@ class BiliProtocolClient:
         'member_api': 'https://member.bilibili.com',
         'api': 'https://api.bilibili.com',
     }
+    _UPOS_SESSION_FIELDS = frozenset(
+        (
+            'format_version',
+            'target_url',
+            'auth',
+            'upload_id',
+            'biz_id',
+            'file_name',
+            'remote_file_name',
+        )
+    )
 
     def __init__(
         self,
@@ -239,8 +252,45 @@ class BiliProtocolClient:
             upload_id=upload_id,
             biz_id=str(response.get('biz_id', '')),
             file_name=str(params.get('name', '')),
+            remote_file_name=self._upos_remote_file_name(response),
         )
         return PreuploadResult(payload=response, session=session)
+
+    def export_upos_session(self, session: UposSession) -> Mapping[str, Any]:
+        self._validate_upos_session(session)
+        return {
+            'format_version': 1,
+            'target_url': session.target_url,
+            'auth': session.auth,
+            'upload_id': session.upload_id,
+            'biz_id': session.biz_id,
+            'file_name': session.file_name,
+            'remote_file_name': session.remote_file_name,
+        }
+
+    def restore_upos_session(self, payload: Mapping[str, Any]) -> UposSession:
+        if not isinstance(payload, dict) or set(payload) != self._UPOS_SESSION_FIELDS:
+            raise ProtocolContractError('invalid persisted UPOS session')
+        if payload['format_version'] != 1:
+            raise ProtocolContractError('invalid persisted UPOS session')
+        values = {
+            field: payload[field]
+            for field in self._UPOS_SESSION_FIELDS
+            if field != 'format_version'
+        }
+        if any(not isinstance(value, str) or not value for value in values.values()):
+            raise ProtocolContractError('invalid persisted UPOS session')
+        target_url = str(values['target_url'])
+        self._validate_upos_target_url(target_url)
+        return UposSession(
+            owner_token=self._owner_token,
+            target_url=target_url,
+            auth=str(values['auth']),
+            upload_id=str(values['upload_id']),
+            biz_id=str(values['biz_id']),
+            file_name=str(values['file_name']),
+            remote_file_name=str(values['remote_file_name']),
+        )
 
     async def upload_chunk(
         self,
@@ -271,7 +321,7 @@ class BiliProtocolClient:
             query=self._parameters(query),
             body=body,
         )
-        return await self._execute(request, idempotent=True)
+        return await self._execute(request, idempotent=True, allow_empty_success=True)
 
     async def complete_upload(
         self, session: UposSession, *, parts: Sequence[Mapping[str, Any]]
@@ -407,7 +457,12 @@ class BiliProtocolClient:
         )
 
     async def _execute(
-        self, request: ProtocolRequest, *, idempotent: bool, check_code: bool = True
+        self,
+        request: ProtocolRequest,
+        *,
+        idempotent: bool,
+        check_code: bool = True,
+        allow_empty_success: bool = False,
     ) -> Mapping[str, Any]:
         try:
             response = await self._transport.send(request)
@@ -422,6 +477,8 @@ class BiliProtocolClient:
             raise RemoteOutcomeUnknown(request.operation)
         if response.status >= 400:
             raise BiliApiError(response.status, operation=request.operation)
+        if allow_empty_success and not response.body.strip():
+            return {}
         try:
             payload = json.loads(response.body.decode('utf8'))
         except (UnicodeError, json.JSONDecodeError):
@@ -435,9 +492,7 @@ class BiliProtocolClient:
         code = payload.get('code')
         if check_code and type(code) is int and code != 0:
             raise BiliApiError(
-                code,
-                self._safe_message(payload),
-                operation=request.operation,
+                code, self._safe_message(payload), operation=request.operation
             )
         if 'OK' in payload and payload['OK'] != 1:
             raise ProtocolContractError('UPOS operation failed')
@@ -499,9 +554,34 @@ class BiliProtocolClient:
             raise ProtocolContractError('invalid UPOS target')
         object_path = '/' + upos_uri[len('upos://') :].lstrip('/')
         base_path = parsed.path.rstrip('/')
-        return urlunsplit(
+        target_url = urlunsplit(
             (parsed.scheme, parsed.netloc, base_path + object_path, '', '')
         )
+        cls._validate_upos_target_url(target_url)
+        return target_url
+
+    @staticmethod
+    def _validate_upos_target_url(target_url: str) -> None:
+        parsed = urlsplit(target_url)
+        if (
+            parsed.scheme != 'https'
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or not parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ProtocolContractError('invalid UPOS target')
+
+    @classmethod
+    def _upos_remote_file_name(cls, response: Mapping[str, Any]) -> str:
+        upos_uri = cls._required_text(response, 'upos_uri', 'UPOS preupload')
+        name = posixpath.basename(urlsplit(upos_uri).path)
+        remote_file_name = posixpath.splitext(name)[0]
+        if not remote_file_name:
+            raise ProtocolContractError('UPOS preupload response is incomplete')
+        return remote_file_name
 
     @staticmethod
     def _required_text(payload: Mapping[str, Any], field: str, context: str) -> str:

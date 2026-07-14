@@ -298,6 +298,11 @@ class SettingsManager:
                 task_settings.room_id, self._settings.bili_api
             )
 
+    def apply_bili_upload_settings(self) -> None:
+        # Emergency switches are read from the shared settings object by the
+        # upload worker. Database and chunk-shape changes require a restart.
+        pass
+
     async def apply_header_settings(self) -> None:
         for settings in self._settings.tasks:
             await self.apply_task_header_settings(settings.room_id, settings.header)

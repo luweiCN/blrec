@@ -17,6 +17,8 @@ from .journal import RecordingJournalBridge
 from .models import FeatureUnavailable, validate_feature_gate
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .signing import WbiSigner, WebSessionBuilder
+from .upload import UploadCoordinator
+from .upos import UposUploader
 
 __all__ = ('BiliAccountRuntime',)
 
@@ -36,10 +38,13 @@ class BiliAccountRuntime:
         protocol: Optional[Any] = None,
         clock: Callable[[], float] = time.time,
         refresh_interval_seconds: float = 3600,
+        upload_interval_seconds: float = 30,
         on_primary_credential_changed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         if refresh_interval_seconds <= 0:
             raise ValueError('refresh interval must be positive')
+        if upload_interval_seconds <= 0:
+            raise ValueError('upload interval must be positive')
         self._settings = settings
         self._api_key = api_key
         self._credential_key = credential_key
@@ -47,12 +52,16 @@ class BiliAccountRuntime:
         self._provided_protocol = protocol
         self._clock = clock
         self._refresh_interval_seconds = refresh_interval_seconds
+        self._upload_interval_seconds = upload_interval_seconds
         self._on_primary_credential_changed = on_primary_credential_changed
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
         self._journal: Optional[RecordingJournalBridge] = None
+        self._coordinator: Optional[UploadCoordinator] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
+        self._upload_task: Optional[asyncio.Task[Any]] = None
+        self._upload_stop_event: Optional[asyncio.Event] = None
         self._unavailable_reason: Optional[str] = (
             'Bilibili account management is not enabled'
         )
@@ -64,6 +73,10 @@ class BiliAccountRuntime:
     @property
     def journal(self) -> Optional[RecordingJournalBridge]:
         return self._journal
+
+    @property
+    def coordinator(self) -> Optional[UploadCoordinator]:
+        return self._coordinator
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -96,16 +109,54 @@ class BiliAccountRuntime:
             keys[key_id] = self._credential_key
             cipher = CredentialCipher(keys, current_key_id=key_id)
             protocol = self._provided_protocol or self._create_protocol()
+            store = CredentialStore(database)
+            write_gates = AccountWriteGate(database)
             manager = AccountManager(
                 protocol,
-                CredentialStore(database),
+                store,
                 database=database,
                 cipher=cipher,
                 clock=self._clock,
-                write_gates=AccountWriteGate(database),
+                write_gates=write_gates,
                 on_primary_credential_changed=self._on_primary_credential_changed,
             )
             await manager.start()
+            upload_stop_event = asyncio.Event()
+
+            def upload_enabled() -> bool:
+                return bool(
+                    self._settings.enabled and self._settings.auto_upload_enabled
+                )
+
+            def upload_stop_requested() -> bool:
+                return upload_stop_event.is_set() or not upload_enabled()
+
+            uploader = UposUploader(
+                database,
+                protocol,
+                chunk_size=self._settings.upload_chunk_size,
+                concurrency=self._settings.upload_chunk_concurrency,
+                clock=self._clock,
+                stop_requested=upload_stop_requested,
+            )
+
+            async def load_bundle(account_id: int) -> Any:
+                return await store.get(account_id=account_id, cipher=cipher)
+
+            coordinator = UploadCoordinator(
+                database,
+                protocol,
+                uploader,
+                bundle_loader=load_bundle,
+                account_gates=write_gates,
+                auto_upload_enabled=upload_enabled,
+                auto_comment_enabled=lambda: self._settings.auto_comment_enabled,
+                danmaku_backfill_enabled=(
+                    lambda: self._settings.danmaku_backfill_enabled
+                ),
+                clock=self._clock,
+                stop_requested=upload_stop_requested,
+            )
         except Exception:
             logger.exception('Bilibili account management failed to start')
             await self._close_partial(database)
@@ -115,8 +166,13 @@ class BiliAccountRuntime:
         self._database = database
         self._journal = journal
         self._manager = manager
+        self._coordinator = coordinator
+        self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
+        self._upload_task = asyncio.create_task(
+            self._run_uploads(coordinator, upload_stop_event)
+        )
         return True
 
     async def primary_cookie_header(self, url: str) -> Optional[str]:
@@ -134,6 +190,7 @@ class BiliAccountRuntime:
             await self._manager.report_primary_auth_failure()
 
     async def close(self) -> None:
+        await self._stop_upload_worker()
         refresh_task, self._refresh_task = self._refresh_task, None
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()
@@ -141,6 +198,7 @@ class BiliAccountRuntime:
         manager, self._manager = self._manager, None
         if manager is not None:
             await manager.close()
+        self._coordinator = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -169,7 +227,35 @@ class BiliAccountRuntime:
                 logger.exception('Bilibili account health check failed')
             await asyncio.sleep(self._refresh_interval_seconds)
 
+    async def _run_uploads(
+        self, coordinator: UploadCoordinator, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            processed = None
+            try:
+                await coordinator.create_ready_jobs()
+                processed = await coordinator.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Bilibili upload worker iteration failed')
+            delay = 1 if processed is not None else self._upload_interval_seconds
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _stop_upload_worker(self) -> None:
+        stop_event, self._upload_stop_event = self._upload_stop_event, None
+        if stop_event is not None:
+            stop_event.set()
+        upload_task, self._upload_task = self._upload_task, None
+        if upload_task is not None:
+            await upload_task
+
     async def _close_partial(self, database: BiliUploadDatabase) -> None:
+        await self._stop_upload_worker()
+        self._coordinator = None
         self._journal = None
         transport, self._transport = self._transport, None
         if transport is not None:

@@ -122,6 +122,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert await runtime.start()
         assert runtime.manager is not None
         assert runtime.journal is not None
+        assert runtime.coordinator is not None
 
         for _ in range(100):
             if protocol.oauth_calls:
@@ -148,6 +149,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     await runtime.close()
 
     assert runtime.manager is None
+    assert runtime.coordinator is None
 
 
 @pytest.mark.asyncio
