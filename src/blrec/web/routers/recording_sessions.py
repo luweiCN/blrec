@@ -25,6 +25,10 @@ from blrec.bili_upload.recording_content import (
     RecordingContentReader,
     RecordingContentUnavailable,
 )
+from blrec.bili_upload.task_actions import (
+    UploadTaskActionManager,
+    UploadTaskActionRejected,
+)
 from blrec.utils.string import camel_case
 
 from .. import security
@@ -33,6 +37,7 @@ from .bili_accounts import authenticated_manager_subject
 journal: Optional[RecordingJournalBridge] = None
 danmaku_publisher: Optional[DanmakuPublisher] = None
 content_reader: Optional[RecordingContentReader] = None
+task_actions: Optional[UploadTaskActionManager] = None
 unavailable_reason: Optional[str] = 'Recording journal is not enabled'
 
 _BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
@@ -75,6 +80,9 @@ class UploadPartProgressResponse(ApiModel):
     danmaku_import_state: str
     remote_filename: Optional[str]
     cid: Optional[int]
+    transcode_state: str
+    transcode_fail_code: Optional[int]
+    transcode_fail_desc: Optional[str]
 
 
 class DanmakuItemProgressResponse(ApiModel):
@@ -106,6 +114,11 @@ class UploadJobProgressResponse(ApiModel):
     danmaku_pending: int
     danmaku_unknown: int
     danmaku_failed: int
+    repair_state: str
+    repair_message: Optional[str]
+    repair_error: Optional[str]
+    can_retry: bool
+    can_repair: bool
     unknown_danmaku_items: List[DanmakuItemProgressResponse]
     parts: List[UploadPartProgressResponse]
 
@@ -120,6 +133,29 @@ class DanmakuDecisionRequest(ApiModel):
         if not normalized:
             raise ValueError('reason must not be blank')
         return normalized
+
+
+class UploadJobActionRequest(ApiModel):
+    action: Literal['retry_failed', 'repair_transcode']
+    job_ids: List[int] = Field(..., min_items=1, max_items=100)
+
+    @validator('job_ids')
+    def job_ids_must_be_unique(cls, value: List[int]) -> List[int]:
+        if any(job_id <= 0 for job_id in value):
+            raise ValueError('job IDs must be positive')
+        if len(set(value)) != len(value):
+            raise ValueError('job IDs must be unique')
+        return value
+
+
+class UploadJobActionResultResponse(ApiModel):
+    job_id: int
+    accepted: bool
+    message: str
+
+
+class UploadJobActionResponse(ApiModel):
+    results: List[UploadJobActionResultResponse]
 
 
 class RecordingSessionResponse(ApiModel):
@@ -198,6 +234,15 @@ def get_content_reader() -> RecordingContentReader:
             detail=unavailable_reason or 'Recording content is unavailable',
         )
     return content_reader
+
+
+def get_task_actions() -> UploadTaskActionManager:
+    if task_actions is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Upload task actions are unavailable',
+        )
+    return task_actions
 
 
 def parse_byte_range(value: str, size: int) -> Tuple[int, int]:
@@ -304,6 +349,9 @@ def _upload_part_response(part: UploadPartProgress) -> UploadPartProgressRespons
         danmaku_import_state=part.danmaku_import_state,
         remote_filename=part.remote_filename,
         cid=part.cid,
+        transcode_state=part.transcode_state,
+        transcode_fail_code=part.transcode_fail_code,
+        transcode_fail_desc=part.transcode_fail_desc,
     )
 
 
@@ -339,6 +387,11 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         danmaku_pending=job.danmaku_pending,
         danmaku_unknown=job.danmaku_unknown,
         danmaku_failed=job.danmaku_failed,
+        repair_state=job.repair_state,
+        repair_message=job.repair_message,
+        repair_error=job.repair_error,
+        can_retry=job.can_retry,
+        can_repair=job.can_repair,
         unknown_danmaku_items=[
             _danmaku_item_response(item) for item in job.unknown_danmaku_items
         ],
@@ -399,6 +452,36 @@ async def list_recording_sessions(
             for session in sessions
         ],
     )
+
+
+@router.post('/upload-jobs/actions', response_model=UploadJobActionResponse)
+async def run_upload_job_actions(
+    command: UploadJobActionRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    actions: UploadTaskActionManager = Depends(get_task_actions),
+) -> UploadJobActionResponse:
+    results = []
+    for job_id in command.job_ids:
+        try:
+            if command.action == 'retry_failed':
+                message = await actions.retry_failed(job_id, manager_subject=subject)
+            else:
+                message = await actions.request_transcode_repair(
+                    job_id, manager_subject=subject
+                )
+        except UploadTaskActionRejected as error:
+            results.append(
+                UploadJobActionResultResponse(
+                    job_id=job_id, accepted=False, message=str(error)
+                )
+            )
+        else:
+            results.append(
+                UploadJobActionResultResponse(
+                    job_id=job_id, accepted=True, message=message
+                )
+            )
+    return UploadJobActionResponse(results=results)
 
 
 @router.post('/parts/{part_id}/media-access', response_model=MediaAccessResponse)

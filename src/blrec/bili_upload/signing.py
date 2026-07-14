@@ -53,6 +53,9 @@ PROTOCOL_MATRIX = {
     'submit_archive': OperationSpec(
         'POST', 'member_api', '/x/vu/web/add/v3', 'web_cookie_csrf', False
     ),
+    'edit_archive': OperationSpec(
+        'POST', 'member_api', '/x/vu/web/edit', 'web_cookie_csrf', False
+    ),
     'upload_cover': OperationSpec(
         'POST', 'member_api', '/x/vu/web/cover/up', 'web_cookie_csrf', False
     ),

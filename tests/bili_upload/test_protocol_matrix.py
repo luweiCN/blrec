@@ -110,6 +110,7 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         ('upload_chunk', 'upos_session', '<server-returned>'),
         ('complete_upload', 'upos_session', '<server-returned>'),
         ('submit_archive', 'web_cookie_csrf', '/x/vu/web/add/v3'),
+        ('edit_archive', 'web_cookie_csrf', '/x/vu/web/edit'),
         ('upload_cover', 'web_cookie_csrf', '/x/vu/web/cover/up'),
         ('list_collections', 'web_cookie', '/x2/creative/web/seasons'),
         ('create_collection', 'web_cookie_csrf', '/x2/creative/web/season/add'),
@@ -203,6 +204,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         prepared.session, parts=({'partNumber': 1, 'eTag': 'fixture-etag'},)
     )
     await client.submit_archive(bundle, {'title': 'fixture', 'videos': 'fixture.mp4'})
+    await client.edit_archive(bundle, {'aid': 303, 'title': 'fixture'})
     await client.upload_cover(
         bundle, filename='fixture.jpg', mime_type='image/jpeg', content=b'fixture-cover'
     )
@@ -246,6 +248,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'list_archives',
         'archive_view',
         'submit_archive',
+        'edit_archive',
         'upload_cover',
         'list_collections',
         'create_collection',
@@ -265,6 +268,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert 'Cookie' in request.headers
         if name in (
             'submit_archive',
+            'edit_archive',
             'upload_cover',
             'list_collections',
             'create_collection',
@@ -294,6 +298,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'add_reply',
         'top_reply',
         'submit_archive',
+        'edit_archive',
         'upload_cover',
         'list_collections',
         'create_collection',
@@ -316,6 +321,15 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     }
     assert submit.headers['Content-Type'] == 'application/json'
     assert 'access_key' not in submit_query
+
+    edit = requests['edit_archive']
+    assert dict(edit.query) == {'csrf': 'csrf-secret', 't': '100000'}
+    assert json.loads((edit.body or b'{}').decode('utf8')) == {
+        'aid': 303,
+        'title': 'fixture',
+        'csrf': 'csrf-secret',
+    }
+    assert edit.headers['Content-Type'] == 'application/json'
 
     cover_request = requests['upload_cover']
     assert cover_request.method == 'POST'

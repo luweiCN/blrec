@@ -385,6 +385,42 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
 
 
 @pytest.mark.asyncio
+async def test_edit_payload_keeps_healthy_cids_and_replaces_only_selected_parts(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path, publish_delay_seconds=7_200)
+        covers = FakeCoverResolver()
+        worker = coordinator(
+            database,
+            FakeProtocol(),
+            FakeUploader(database),
+            MutableClock(1_000),
+            cover_resolver=covers,
+        )
+        await worker.create_ready_jobs()
+        await worker.run_once()
+
+        payload = await worker.build_edit_payload(
+            1, {1: 201}, 'https://archive.biliimg.com/current-cover.jpg'
+        )
+
+        assert payload['aid'] == 303
+        assert payload['recreate'] == -1
+        assert payload['cover'] == 'https://archive.biliimg.com/current-cover.jpg'
+        assert payload['videos'] == [
+            {'filename': 'remote-1', 'title': 'P1', 'desc': '', 'cid': 201},
+            {'filename': 'remote-2', 'title': 'P2', 'desc': ''},
+        ]
+        assert 'dtime' not in payload
+        assert covers.live_calls == [(1, None, 'https://i0.hdslb.com/cover.jpg')]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_custom_cover_schedule_and_collection_are_frozen_into_job(
     tmp_path: Path,
 ) -> None:

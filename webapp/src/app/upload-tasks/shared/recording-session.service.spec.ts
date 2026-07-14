@@ -51,6 +51,20 @@ describe('RecordingSessionService', () => {
     request.flush(null, { status: 204, statusText: 'No Content' });
   });
 
+  it('uses one endpoint for single and batch upload-job actions', () => {
+    service.runJobAction('repair_transcode', [9, 10]).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/recording-sessions/upload-jobs/actions'
+    );
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({
+      action: 'repair_transcode',
+      jobIds: [9, 10],
+    });
+    request.flush({ results: [] });
+  });
+
   it('creates a scoped media access URL and pages danmaku', () => {
     service.createMediaAccess(7).subscribe();
     const accessRequest = http.expectOne(

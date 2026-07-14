@@ -9,6 +9,8 @@ import {
   RecordingDanmakuPage,
   RecordingMediaAccess,
   RecordingSessionsResponse,
+  UploadJobAction,
+  UploadJobActionResponse,
 } from './recording-session.model';
 
 @Injectable({ providedIn: 'root' })
@@ -26,6 +28,17 @@ export class RecordingSessionService {
   ): Observable<void> {
     const path = `/api/v1/recording-sessions/danmaku-items/${itemId}/decision`;
     return this.http.post<void>(this.url.makeApiUrl(path), request);
+  }
+
+  runJobAction(
+    action: UploadJobAction,
+    jobIds: readonly number[]
+  ): Observable<UploadJobActionResponse> {
+    const path = '/api/v1/recording-sessions/upload-jobs/actions';
+    return this.http.post<UploadJobActionResponse>(
+      this.url.makeApiUrl(path),
+      { action, jobIds }
+    );
   }
 
   createMediaAccess(partId: number): Observable<RecordingMediaAccess> {

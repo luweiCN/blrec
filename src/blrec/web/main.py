@@ -85,6 +85,7 @@ bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_sessions.journal = None
 recording_sessions.danmaku_publisher = None
 recording_sessions.content_reader = None
+recording_sessions.task_actions = None
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_retention.manager = None
 recording_retention.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -170,6 +171,7 @@ async def on_startup() -> None:
         recording_sessions.journal = _bili_account_runtime.journal
         recording_sessions.danmaku_publisher = _bili_account_runtime.danmaku_publisher
         recording_sessions.content_reader = _bili_account_runtime.content_reader
+        recording_sessions.task_actions = _bili_account_runtime.task_actions
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_retention.manager = _bili_account_runtime.retention_manager
         recording_retention.unavailable_reason = (
@@ -194,6 +196,7 @@ async def on_startup() -> None:
         recording_sessions.journal = None
         recording_sessions.danmaku_publisher = None
         recording_sessions.content_reader = None
+        recording_sessions.task_actions = None
         recording_retention.manager = None
         room_upload_policies.manager = None
         room_upload_policies.category_catalog = None
@@ -215,6 +218,7 @@ async def on_shuntdown() -> None:
     recording_sessions.journal = None
     recording_sessions.danmaku_publisher = None
     recording_sessions.content_reader = None
+    recording_sessions.task_actions = None
     recording_retention.manager = None
     room_upload_policies.manager = None
     room_upload_policies.category_catalog = None

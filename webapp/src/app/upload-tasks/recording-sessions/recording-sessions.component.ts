@@ -15,6 +15,9 @@ import {
   RecordingSession,
   RecordingSessionState,
   RecordingSessionsView,
+  TranscodeState,
+  UploadJobAction,
+  UploadJobProgress,
   UploadJobState,
   UploadPartProgress,
   UploadPartState,
@@ -43,6 +46,11 @@ export class RecordingSessionsComponent implements OnInit {
   contentSession: RecordingSession | null = null;
   contentPart: RecordingPart | null = null;
   contentFocus: PartContentFocus = 'video';
+  readonly selectedJobIds = new Set<number>();
+  uploadAction: UploadJobAction | null = null;
+  uploadActionJobIds: readonly number[] = [];
+  uploadActionSubmitting = false;
+  uploadActionError: string | null = null;
 
   constructor(
     private recordingSessions: RecordingSessionService,
@@ -81,12 +89,54 @@ export class RecordingSessionsComponent implements OnInit {
     return !this.decisionSubmitting && this.decisionReason.trim().length > 0;
   }
 
+  get selectedJobCount(): number {
+    return this.selectedJobIds.size;
+  }
+
+  get selectedJobIdsArray(): readonly number[] {
+    return [...this.selectedJobIds];
+  }
+
+  get uploadActionVisible(): boolean {
+    return this.uploadAction !== null && this.uploadActionJobIds.length > 0;
+  }
+
+  get pageJobIds(): readonly number[] {
+    return this.sessions
+      .map((session) => session.uploadJob?.id)
+      .filter((jobId): jobId is number => jobId !== undefined);
+  }
+
+  get allPageJobsSelected(): boolean {
+    return (
+      this.pageJobIds.length > 0 &&
+      this.pageJobIds.every((jobId) => this.selectedJobIds.has(jobId))
+    );
+  }
+
+  get somePageJobsSelected(): boolean {
+    const selected = this.pageJobIds.filter((jobId) =>
+      this.selectedJobIds.has(jobId)
+    ).length;
+    return selected > 0 && selected < this.pageJobIds.length;
+  }
+
   load(): void {
     this.view = { state: 'loading' };
     const offset = (this.pageIndex - 1) * this.pageSize;
     this.recordingSessions.listSessions(this.pageSize, offset).subscribe({
       next: (response) => {
         this.view = { state: 'ready', response };
+        const currentJobIds = new Set(
+          response.sessions
+            .map((session) => session.uploadJob?.id)
+            .filter((jobId): jobId is number => jobId !== undefined)
+        );
+        for (const jobId of this.selectedJobIds) {
+          if (!currentJobIds.has(jobId)) {
+            this.selectedJobIds.delete(jobId);
+          }
+        }
         if (this.detailVisible && this.selectedSession) {
           this.selectedSession =
             response.sessions.find(
@@ -118,6 +168,112 @@ export class RecordingSessionsComponent implements OnInit {
     this.pageSize = pageSize;
     this.pageIndex = 1;
     this.load();
+  }
+
+  isJobSelected(jobId: number): boolean {
+    return this.selectedJobIds.has(jobId);
+  }
+
+  setJobSelected(jobId: number, selected: boolean): void {
+    if (selected) {
+      this.selectedJobIds.add(jobId);
+    } else {
+      this.selectedJobIds.delete(jobId);
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  setAllPageJobsSelected(selected: boolean): void {
+    for (const jobId of this.pageJobIds) {
+      if (selected) {
+        this.selectedJobIds.add(jobId);
+      } else {
+        this.selectedJobIds.delete(jobId);
+      }
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  openUploadAction(action: UploadJobAction, jobIds: readonly number[]): void {
+    const uniqueJobIds = [...new Set(jobIds.filter((jobId) => jobId > 0))];
+    if (uniqueJobIds.length === 0 || this.uploadActionSubmitting) {
+      return;
+    }
+    this.uploadAction = action;
+    this.uploadActionJobIds = uniqueJobIds;
+    this.uploadActionError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  closeUploadAction(): void {
+    if (this.uploadActionSubmitting) {
+      return;
+    }
+    this.uploadAction = null;
+    this.uploadActionJobIds = [];
+    this.uploadActionError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  submitUploadAction(): void {
+    const action = this.uploadAction;
+    const jobIds = [...this.uploadActionJobIds];
+    if (!action || jobIds.length === 0 || this.uploadActionSubmitting) {
+      return;
+    }
+    this.uploadActionSubmitting = true;
+    this.uploadActionError = null;
+    this.recordingSessions
+      .runJobAction(action, jobIds)
+      .pipe(
+        finalize(() => {
+          this.uploadActionSubmitting = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe({
+        next: (response) => {
+          const accepted = response.results.filter((result) => result.accepted);
+          const rejected = response.results.filter((result) => !result.accepted);
+          if (accepted.length === 0) {
+            this.uploadActionError = rejected
+              .map((result) => `任务 ${result.jobId}：${result.message}`)
+              .join('；');
+            this.changeDetector.markForCheck();
+            return;
+          }
+          if (rejected.length > 0) {
+            this.message.warning(
+              `已接受 ${accepted.length} 个任务，${rejected.length} 个未执行：${rejected[0].message}`
+            );
+          } else if (accepted.length === 1) {
+            this.message.success(accepted[0].message);
+          } else {
+            this.message.success(`已接受 ${accepted.length} 个任务`);
+          }
+          this.uploadAction = null;
+          this.uploadActionJobIds = [];
+          this.selectedJobIds.clear();
+          this.load();
+        },
+        error: (error: unknown) => {
+          this.uploadActionError = this.describeError(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  uploadActionTitle(): string {
+    return this.uploadAction === 'repair_transcode'
+      ? '检查并修复转码异常'
+      : '重试失败任务';
+  }
+
+  uploadActionDescription(): string {
+    if (this.uploadAction === 'repair_transcode') {
+      return '系统会先核对 B 站稿件状态；只有明确转码失败、本地原文件仍完整的分 P 才会重新上传，并继续使用原稿件。';
+    }
+    return '系统只会重新排队可以安全重试的失败任务；投稿或分 P 结果未知时不会自动重试。';
   }
 
   openDetails(session: RecordingSession): void {
@@ -237,6 +393,45 @@ export class RecordingSessionsComponent implements OnInit {
     }[state];
   }
 
+  uploadDisplayStateLabel(job: UploadJobProgress): string {
+    switch (job.repairState) {
+      case 'queued':
+        return '等待检查转码';
+      case 'checking':
+        return '检查转码中';
+      case 'reuploading':
+        return '重传异常分 P';
+      case 'editing':
+        return '更新原稿件';
+      case 'waiting_review':
+        return '等待修复审核';
+      case 'unknown_outcome':
+        return '修复结果待核对';
+      case 'failed':
+        return '转码修复失败';
+      default:
+        return this.uploadJobStateLabel(job.state);
+    }
+  }
+
+  uploadDisplayStateColor(job: UploadJobProgress): string {
+    if (
+      ['queued', 'checking', 'reuploading', 'editing'].includes(job.repairState)
+    ) {
+      return 'processing';
+    }
+    if (job.repairState === 'waiting_review') {
+      return 'gold';
+    }
+    if (job.repairState === 'failed') {
+      return 'error';
+    }
+    if (job.repairState === 'unknown_outcome') {
+      return 'warning';
+    }
+    return this.uploadJobStateColor(job.state);
+  }
+
   commentBranchLabel(state: CommentBranchState): string {
     return `评论：${
       {
@@ -300,6 +495,15 @@ export class RecordingSessionsComponent implements OnInit {
       missing_source: '弹幕文件缺失',
       completed: '弹幕导入完成',
       failed: '弹幕导入失败',
+    }[state];
+  }
+
+  transcodeStateLabel(state: TranscodeState): string {
+    return {
+      unknown: '尚未检查转码',
+      ready: '转码正常',
+      processing: 'B 站转码中',
+      failed: 'B 站转码失败',
     }[state];
   }
 

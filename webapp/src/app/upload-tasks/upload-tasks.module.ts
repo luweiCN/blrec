@@ -5,10 +5,13 @@ import { FormsModule } from '@angular/forms';
 
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
+import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
 import { NzDrawerModule } from 'ng-zorro-antd/drawer';
+import { NzDropDownModule } from 'ng-zorro-antd/dropdown';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzIconModule } from 'ng-zorro-antd/icon';
 import { NzModalModule } from 'ng-zorro-antd/modal';
+import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
 import { NzTableModule } from 'ng-zorro-antd/table';
@@ -33,10 +36,13 @@ import { UploadTasksComponent } from './upload-tasks.component';
     UploadTasksRoutingModule,
     NzAlertModule,
     NzButtonModule,
+    NzCheckboxModule,
     NzDrawerModule,
+    NzDropDownModule,
     NzInputModule,
     NzIconModule,
     NzModalModule,
+    NzMenuModule,
     NzPageHeaderModule,
     NzPaginationModule,
     NzTableModule,

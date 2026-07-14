@@ -8,8 +8,11 @@ import { of, throwError } from 'rxjs';
 import { CopyOutline } from '@ant-design/icons-angular/icons';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
+import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
 import { NzDrawerModule } from 'ng-zorro-antd/drawer';
+import { NzDropDownModule } from 'ng-zorro-antd/dropdown';
 import { NzInputModule } from 'ng-zorro-antd/input';
+import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
@@ -31,14 +34,16 @@ describe('RecordingSessionsComponent', () => {
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['listSessions', 'decideDanmakuItem']
+      ['listSessions', 'decideDanmakuItem', 'runJobAction']
     );
     clipboard = jasmine.createSpyObj<Clipboard>('Clipboard', ['copy']);
     message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
       'success',
       'error',
+      'warning',
     ]);
     service.decideDanmakuItem.and.returnValue(of(void 0));
+    service.runJobAction.and.returnValue(of({ results: [] }));
     service.listSessions.and.returnValue(
       of({
         degradedReason: null,
@@ -87,6 +92,11 @@ describe('RecordingSessionsComponent', () => {
               danmakuPending: 0,
               danmakuUnknown: 1,
               danmakuFailed: 0,
+              repairState: 'idle',
+              repairMessage: null,
+              repairError: null,
+              canRetry: false,
+              canRepair: true,
               unknownDanmakuItems: [
                 {
                   id: 11,
@@ -104,6 +114,9 @@ describe('RecordingSessionsComponent', () => {
                   danmakuImportState: 'pending',
                   remoteFilename: 'remote-p1',
                   cid: null,
+                  transcodeState: 'unknown',
+                  transcodeFailCode: null,
+                  transcodeFailDesc: null,
                 },
               ],
             },
@@ -140,8 +153,11 @@ describe('RecordingSessionsComponent', () => {
         NoopAnimationsModule,
         NzAlertModule,
         NzButtonModule,
+        NzCheckboxModule,
         NzDrawerModule,
+        NzDropDownModule,
         NzInputModule,
+        NzMenuModule,
         NzIconModule,
         NzModalModule,
         NzPageHeaderModule,
@@ -228,6 +244,74 @@ describe('RecordingSessionsComponent', () => {
     fixture.componentInstance.pageSizeChanged(50);
     expect(fixture.componentInstance.pageIndex).toBe(1);
     expect(service.listSessions).toHaveBeenCalledWith(50, 0);
+  });
+
+  it('selects current-page jobs and exposes batch actions', () => {
+    fixture.detectChanges();
+
+    fixture.componentInstance.setJobSelected(9, true);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.selectedJobCount).toBe(1);
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="batch-action-bar"]')
+    ).not.toBeNull();
+  });
+
+  it('keeps the operation header and cells fixed together', () => {
+    fixture.detectChanges();
+
+    const fixedHeader = fixture.nativeElement.querySelector(
+      'thead th.ant-table-cell-fix-right'
+    );
+    const fixedCell = fixture.nativeElement.querySelector(
+      'tbody td.ant-table-cell-fix-right'
+    );
+
+    expect(fixedHeader?.textContent).toContain('操作');
+    expect(fixedCell?.textContent).toContain('详情');
+  });
+
+  it('submits row actions through the same batch endpoint', () => {
+    service.runJobAction.and.returnValue(
+      of({
+        results: [
+          { jobId: 9, accepted: true, message: '已排队检查 B 站转码状态' },
+        ],
+      })
+    );
+    fixture.detectChanges();
+
+    fixture.componentInstance.openUploadAction('repair_transcode', [9]);
+    fixture.componentInstance.submitUploadAction();
+
+    expect(service.runJobAction).toHaveBeenCalledOnceWith(
+      'repair_transcode',
+      [9]
+    );
+    expect(message.success).toHaveBeenCalledWith('已排队检查 B 站转码状态');
+    expect(fixture.componentInstance.uploadActionVisible).toBeFalse();
+  });
+
+  it('keeps a rejected upload action visible with its exact reason', () => {
+    service.runJobAction.and.returnValue(
+      of({
+        results: [
+          {
+            jobId: 9,
+            accepted: false,
+            message: '投稿结果未知，自动重试可能产生重复稿件',
+          },
+        ],
+      })
+    );
+    fixture.detectChanges();
+
+    fixture.componentInstance.openUploadAction('retry_failed', [9]);
+    fixture.componentInstance.submitUploadAction();
+
+    expect(fixture.componentInstance.uploadActionVisible).toBeTrue();
+    expect(fixture.componentInstance.uploadActionError).toContain('投稿结果未知');
   });
 
   it('opens full session details in a right drawer', () => {

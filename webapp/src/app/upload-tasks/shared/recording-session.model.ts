@@ -77,6 +77,37 @@ export type DanmakuImportState =
   | 'completed'
   | 'failed';
 
+export type TranscodeState = 'unknown' | 'ready' | 'processing' | 'failed';
+
+export type UploadRepairState =
+  | 'idle'
+  | 'queued'
+  | 'checking'
+  | 'reuploading'
+  | 'editing'
+  | 'waiting_review'
+  | 'not_needed'
+  | 'completed'
+  | 'failed'
+  | 'unknown_outcome';
+
+export type UploadJobAction = 'retry_failed' | 'repair_transcode';
+
+export interface UploadJobActionRequest {
+  readonly action: UploadJobAction;
+  readonly jobIds: readonly number[];
+}
+
+export interface UploadJobActionResult {
+  readonly jobId: number;
+  readonly accepted: boolean;
+  readonly message: string;
+}
+
+export interface UploadJobActionResponse {
+  readonly results: readonly UploadJobActionResult[];
+}
+
 export interface UploadPartProgress {
   readonly id: number;
   readonly partIndex: number;
@@ -84,6 +115,9 @@ export interface UploadPartProgress {
   readonly danmakuImportState: DanmakuImportState;
   readonly remoteFilename: string | null;
   readonly cid: number | null;
+  readonly transcodeState: TranscodeState;
+  readonly transcodeFailCode: number | null;
+  readonly transcodeFailDesc: string | null;
 }
 
 export const DANMAKU_DECISION_ACTIONS = [
@@ -147,6 +181,11 @@ export interface UploadJobProgress {
   readonly danmakuPending: number;
   readonly danmakuUnknown: number;
   readonly danmakuFailed: number;
+  readonly repairState: UploadRepairState;
+  readonly repairMessage: string | null;
+  readonly repairError: string | null;
+  readonly canRetry: boolean;
+  readonly canRepair: boolean;
   readonly unknownDanmakuItems: readonly DanmakuItemProgress[];
   readonly parts: readonly UploadPartProgress[];
 }

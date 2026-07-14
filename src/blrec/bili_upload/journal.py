@@ -112,6 +112,9 @@ class UploadPartProgress:
     danmaku_import_state: str
     remote_filename: Optional[str]
     cid: Optional[int]
+    transcode_state: str = 'unknown'
+    transcode_fail_code: Optional[int] = None
+    transcode_fail_desc: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,11 @@ class UploadJobProgress:
     danmaku_unknown: int = 0
     danmaku_failed: int = 0
     unknown_danmaku_items: Tuple[DanmakuItemProgress, ...] = ()
+    repair_state: str = 'idle'
+    repair_message: Optional[str] = None
+    repair_error: Optional[str] = None
+    can_retry: bool = False
+    can_repair: bool = False
 
 
 @dataclass(frozen=True)
@@ -957,7 +965,8 @@ class RecordingJournalBridge:
             'account.display_name AS account_display_name,job.state,'
             'job.submit_state,job.comment_branch_state,job.danmaku_branch_state,'
             'job.aid,job.bvid,job.review_reason,job.attempt,job.next_attempt_at,'
-            'job.created_at,job.updated_at FROM upload_jobs job '
+            'job.created_at,job.updated_at,job.repair_state,job.repair_message,'
+            'job.repair_error FROM upload_jobs job '
             'JOIN bili_accounts account ON account.id=job.account_id '
             'WHERE job.session_id IN ({})'.format(placeholders),
             unique_session_ids,
@@ -968,7 +977,8 @@ class RecordingJournalBridge:
         job_placeholders = ','.join('?' for _ in job_ids)
         part_rows = await self._database.fetchall(
             'SELECT id,job_id,part_index,upload_state,danmaku_import_state,'
-            'remote_filename,cid FROM upload_parts WHERE job_id IN ({}) '
+            'remote_filename,cid,transcode_state,transcode_fail_code,'
+            'transcode_fail_desc FROM upload_parts WHERE job_id IN ({}) '
             'ORDER BY job_id,part_index'.format(job_placeholders),
             job_ids,
         )
@@ -1037,6 +1047,17 @@ class RecordingJournalBridge:
                         else str(row['remote_filename'])
                     ),
                     cid=None if row['cid'] is None else int(row['cid']),
+                    transcode_state=str(row['transcode_state']),
+                    transcode_fail_code=(
+                        None
+                        if row['transcode_fail_code'] is None
+                        else int(row['transcode_fail_code'])
+                    ),
+                    transcode_fail_desc=(
+                        None
+                        if row['transcode_fail_desc'] is None
+                        else str(row['transcode_fail_desc'])
+                    ),
                 )
             )
         result = {}
@@ -1070,8 +1091,41 @@ class RecordingJournalBridge:
                 danmaku_unknown=danmaku[3],
                 danmaku_failed=danmaku[4],
                 unknown_danmaku_items=tuple(unknown_by_job.get(job_id, ())),
+                repair_state=str(row['repair_state']),
+                repair_message=(
+                    None
+                    if row['repair_message'] is None
+                    else str(row['repair_message'])
+                ),
+                repair_error=(
+                    None if row['repair_error'] is None else str(row['repair_error'])
+                ),
+                can_retry=self._can_retry_upload_job(row),
+                can_repair=self._can_repair_upload_job(row),
             )
         return result
+
+    @staticmethod
+    def _can_retry_upload_job(row: sqlite3.Row) -> bool:
+        return (
+            str(row['state']) == 'paused'
+            and str(row['submit_state']) not in ('in_flight', 'unknown_outcome')
+            and str(row['repair_state'])
+            not in ('queued', 'checking', 'reuploading', 'editing')
+        )
+
+    @staticmethod
+    def _can_repair_upload_job(row: sqlite3.Row) -> bool:
+        state = str(row['state'])
+        repair_state = str(row['repair_state'])
+        return (
+            state in ('waiting_review', 'approved', 'rejected', 'paused', 'completed')
+            and str(row['submit_state']) == 'confirmed'
+            and row['aid'] is not None
+            and bool(row['bvid'])
+            and repair_state not in ('queued', 'checking', 'reuploading', 'editing')
+            and not (repair_state == 'waiting_review' and state == 'waiting_review')
+        )
 
     async def run_id_for_source(self, source_path: str) -> str:
         rows = await self._database.fetchall(

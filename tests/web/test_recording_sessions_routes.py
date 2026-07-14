@@ -20,6 +20,7 @@ from blrec.bili_upload.recording_content import (
     RecordingContentNotFound,
     RecordingContentUnavailable,
 )
+from blrec.bili_upload.task_actions import UploadTaskActionRejected
 from blrec.web import security
 from blrec.web.routers import recording_sessions
 
@@ -104,6 +105,7 @@ class FakeJournal:
                 danmaku_pending=0,
                 danmaku_unknown=1,
                 danmaku_failed=0,
+                can_repair=True,
                 unknown_danmaku_items=(
                     DanmakuItemProgress(
                         id=11,
@@ -179,6 +181,7 @@ def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
     old_reason = recording_sessions.unavailable_reason
     old_publisher = recording_sessions.danmaku_publisher
+    old_task_actions = getattr(recording_sessions, 'task_actions', None)
     had_content_reader = hasattr(recording_sessions, 'content_reader')
     old_content_reader = getattr(recording_sessions, 'content_reader', None)
     old_key = security.api_key
@@ -186,6 +189,7 @@ def restore_router_state() -> Iterator[None]:
     recording_sessions.journal = old_journal
     recording_sessions.unavailable_reason = old_reason
     recording_sessions.danmaku_publisher = old_publisher
+    recording_sessions.task_actions = old_task_actions
     if had_content_reader:
         recording_sessions.content_reader = old_content_reader
     elif hasattr(recording_sessions, 'content_reader'):
@@ -200,6 +204,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     security.api_key = 'test-api-key'
     recording_sessions.journal = FakeJournal()  # type: ignore[assignment]
     recording_sessions.danmaku_publisher = AsyncMock()
+    recording_sessions.task_actions = AsyncMock()
     media = tmp_path / 'part.flv'
     media.write_bytes(b'0123456789')
     recording_sessions.content_reader = FakeContentReader(media)
@@ -264,6 +269,11 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'danmakuPending': 0,
                     'danmakuUnknown': 1,
                     'danmakuFailed': 0,
+                    'repairState': 'idle',
+                    'repairMessage': None,
+                    'repairError': None,
+                    'canRetry': False,
+                    'canRepair': True,
                     'unknownDanmakuItems': [
                         {
                             'id': 11,
@@ -281,6 +291,9 @@ def test_list_recording_sessions_returns_redacted_part_state(
                             'danmakuImportState': 'pending',
                             'remoteFilename': 'remote-p1',
                             'cid': None,
+                            'transcodeState': 'unknown',
+                            'transcodeFailCode': None,
+                            'transcodeFailDesc': None,
                         }
                     ],
                 },
@@ -346,6 +359,49 @@ def test_unknown_danmaku_decision_requires_auth_and_reason(client: TestClient) -
         json={'action': 'retry_accept_duplicate_risk', 'reason': ''},
     )
     assert invalid.status_code == 422
+
+
+def test_upload_job_actions_return_partial_batch_results(client: TestClient) -> None:
+    actions = recording_sessions.task_actions
+    assert isinstance(actions, AsyncMock)
+    actions.retry_failed.side_effect = [
+        '失败任务已重新排队',
+        UploadTaskActionRejected('投稿结果未知，不能自动重试'),
+    ]
+
+    response = client.post(
+        '/api/v1/recording-sessions/upload-jobs/actions',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'retry_failed', 'jobIds': [9, 10]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'results': [
+            {'jobId': 9, 'accepted': True, 'message': '失败任务已重新排队'},
+            {'jobId': 10, 'accepted': False, 'message': '投稿结果未知，不能自动重试'},
+        ]
+    }
+    assert actions.retry_failed.await_count == 2
+    assert all(
+        call.kwargs['manager_subject'] for call in actions.retry_failed.await_args_list
+    )
+
+
+def test_upload_job_actions_validate_nonempty_unique_batch(client: TestClient) -> None:
+    empty = client.post(
+        '/api/v1/recording-sessions/upload-jobs/actions',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'repair_transcode', 'jobIds': []},
+    )
+    duplicate = client.post(
+        '/api/v1/recording-sessions/upload-jobs/actions',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'repair_transcode', 'jobIds': [9, 9]},
+    )
+
+    assert empty.status_code == 422
+    assert duplicate.status_code == 422
 
 
 def test_media_returns_the_fixed_file_snapshot(client: TestClient) -> None:

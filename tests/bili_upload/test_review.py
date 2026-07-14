@@ -245,6 +245,36 @@ async def test_private_archive_state_is_complete_and_binds_cid(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_review_finishes_a_waiting_transcode_repair(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='waiting_review',"
+            "repair_message='等待重新审核' WHERE id=1"
+        )
+        review = watcher(
+            database, archive_response(), detail=archive_detail([video('p1', 101, 1)])
+        )
+
+        await review.run_once()
+
+        row = await database.fetchone(
+            'SELECT state,repair_state,repair_message,repair_error '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'approved',
+            'repair_state': 'completed',
+            'repair_message': '转码修复已通过审核',
+            'repair_error': None,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_owner_mismatch_pauses_without_creating_children(tmp_path: Path) -> None:
     database = await open_database(tmp_path / 'upload.sqlite3')
     comment = FakeBranch()
@@ -332,6 +362,33 @@ async def test_rejected_archive_stores_public_reason(tmp_path: Path) -> None:
         assert dict(row) == {'state': 'rejected', 'review_reason': '画面内容不符合规范'}
         assert comment.calls == []
         assert danmaku.calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_repair_exposes_the_review_reason(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='waiting_review' WHERE id=1"
+        )
+        review = watcher(
+            database, archive_response(state=-2, reject_reason='修复后的分 P 仍未通过')
+        )
+
+        await review.run_once()
+
+        row = await database.fetchone(
+            'SELECT state,repair_state,repair_error FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'rejected',
+            'repair_state': 'failed',
+            'repair_error': '修复后的分 P 仍未通过',
+        }
     finally:
         await database.close()
 

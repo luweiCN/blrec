@@ -11,6 +11,22 @@
   margin: 12px 0;
 }
 
+.batch-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  color: #595959;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+
+  span {
+    margin-right: 4px;
+  }
+}
+
 .session-cell {
   display: flex;
   align-items: center;
@@ -100,6 +116,14 @@
 
 .upload-reason {
   color: #ad6800;
+}
+
+.repair-message {
+  color: #096dd9;
+}
+
+.repair-error {
+  color: #cf1322;
 }
 
 .danmaku-progress {

@@ -269,8 +269,16 @@ class ReviewWatcher:
                 )
             connection.execute(
                 "UPDATE upload_jobs SET state='approved',review_reason=NULL,"
-                'approved_at=?,updated_at=? WHERE id=?',
-                (now, now, job.id),
+                'approved_at=?,repair_message=CASE '
+                "WHEN repair_state='waiting_review' THEN '转码修复已通过审核' "
+                'ELSE repair_message END,repair_error=CASE '
+                "WHEN repair_state='waiting_review' THEN NULL ELSE repair_error END,"
+                'repair_completed_at=CASE '
+                "WHEN repair_state='waiting_review' THEN ? "
+                'ELSE repair_completed_at END,repair_state=CASE '
+                "WHEN repair_state='waiting_review' THEN 'completed' "
+                'ELSE repair_state END,updated_at=? WHERE id=?',
+                (now, now, now, job.id),
             )
             return True
 
@@ -339,9 +347,25 @@ class ReviewWatcher:
 
     async def _reject(self, job: _WaitingJob, reason: str) -> bool:
         updated = await self._database.execute(
-            "UPDATE upload_jobs SET state='rejected',review_reason=?,updated_at=? "
+            "UPDATE upload_jobs SET state='rejected',review_reason=?,"
+            'repair_error=CASE '
+            "WHEN repair_state='waiting_review' THEN ? ELSE repair_error END,"
+            'repair_message=CASE '
+            "WHEN repair_state='waiting_review' THEN NULL ELSE repair_message END,"
+            'repair_completed_at=CASE '
+            "WHEN repair_state='waiting_review' THEN ? ELSE repair_completed_at END,"
+            'repair_state=CASE '
+            "WHEN repair_state='waiting_review' THEN 'failed' "
+            'ELSE repair_state END,updated_at=? '
             "WHERE id=? AND state='waiting_review' AND account_id=?",
-            (reason, int(self._clock()), job.id, job.account_id),
+            (
+                reason,
+                reason,
+                int(self._clock()),
+                int(self._clock()),
+                job.id,
+                job.account_id,
+            ),
         )
         return updated == 1
 

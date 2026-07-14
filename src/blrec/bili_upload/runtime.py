@@ -29,6 +29,7 @@ from .recording_content import RecordingContentReader
 from .retention import RetentionManager
 from .review import ReviewWatcher
 from .signing import WbiSigner, WebSessionBuilder
+from .task_actions import UploadTaskActionManager
 from .upload import UploadCoordinator
 from .upos import UposUploader
 
@@ -97,6 +98,7 @@ class BiliAccountRuntime:
         self._danmaku_importer: Optional[DanmakuImporter] = None
         self._danmaku_publisher: Optional[DanmakuPublisher] = None
         self._retention_manager: Optional[RetentionManager] = None
+        self._task_actions: Optional[UploadTaskActionManager] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
@@ -167,6 +169,10 @@ class BiliAccountRuntime:
     @property
     def retention_manager(self) -> Optional[RetentionManager]:
         return self._retention_manager
+
+    @property
+    def task_actions(self) -> Optional[UploadTaskActionManager]:
+        return self._task_actions
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -259,6 +265,16 @@ class BiliAccountRuntime:
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
             )
+            task_actions = UploadTaskActionManager(
+                database,
+                protocol,
+                uploader,
+                bundle_loader=load_bundle,
+                account_gates=write_gates,
+                edit_payload_builder=coordinator.build_edit_payload,
+                clock=self._clock,
+            )
+            await task_actions.recover_interrupted()
             policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
             category_catalog = UploadCategoryCatalog(
                 database, protocol, bundle_loader=load_bundle, clock=self._clock
@@ -339,6 +355,7 @@ class BiliAccountRuntime:
         self._danmaku_importer = danmaku_importer
         self._danmaku_publisher = danmaku_publisher
         self._retention_manager = retention_manager
+        self._task_actions = task_actions
         self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
@@ -352,6 +369,7 @@ class BiliAccountRuntime:
                 danmaku_publisher,
                 upload_stop_event,
                 retention_manager,
+                task_actions,
             )
         )
         return True
@@ -392,6 +410,7 @@ class BiliAccountRuntime:
         self._danmaku_importer = None
         self._danmaku_publisher = None
         self._retention_manager = None
+        self._task_actions = None
         self._content_reader = None
         transport, self._transport = self._transport, None
         if transport is not None:
@@ -431,15 +450,19 @@ class BiliAccountRuntime:
         danmaku_publisher: DanmakuPublisher,
         stop_event: asyncio.Event,
         retention_manager: Optional[RetentionManager] = None,
+        task_actions: Optional[UploadTaskActionManager] = None,
     ) -> None:
         while not stop_event.is_set():
             upload_processed = None
             comment_processed = None
             danmaku_imported = None
             danmaku_published = None
+            repair_processed = None
             try:
                 await journal.finalize_cancelled_sessions()
                 await review_watcher.run_once()
+                if task_actions is not None:
+                    repair_processed = await task_actions.run_once()
                 await coordinator.create_ready_jobs()
                 upload_processed = await coordinator.run_once()
                 comment_processed = await comment_publisher.run_once()
@@ -456,7 +479,7 @@ class BiliAccountRuntime:
                 delay = _COMMENT_ACTION_INTERVAL_SECONDS
             elif danmaku_published is not None:
                 delay = _DANMAKU_ACTION_INTERVAL_SECONDS
-            elif upload_processed is not None:
+            elif upload_processed is not None or repair_processed is not None:
                 delay = 1
             elif danmaku_imported is not None:
                 delay = 1
@@ -490,6 +513,7 @@ class BiliAccountRuntime:
         self._danmaku_importer = None
         self._danmaku_publisher = None
         self._retention_manager = None
+        self._task_actions = None
         self._journal = None
         self._content_reader = None
         transport, self._transport = self._transport, None

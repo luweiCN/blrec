@@ -372,6 +372,24 @@ class BiliProtocolClient:
             'submit_archive', query=query, headers=headers, body=body
         )
 
+    async def edit_archive(
+        self, bundle: CredentialBundle, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        csrf = self._web.csrf(bundle)
+        url = self._url_for('edit_archive')
+        query = {'csrf': csrf, 't': int(self._clock() * 1000)}
+        body = json.dumps(
+            {**payload, 'csrf': csrf}, ensure_ascii=False, separators=(',', ':')
+        ).encode('utf8')
+        headers = {
+            **self._web_headers(bundle, url),
+            'Content-Type': 'application/json',
+            'Referer': 'https://member.bilibili.com/platform/upload/video/frame',
+        }
+        return await self._standard_request(
+            'edit_archive', query=query, headers=headers, body=body
+        )
+
     async def upload_cover(
         self, bundle: CredentialBundle, *, filename: str, mime_type: str, content: bytes
     ) -> str:

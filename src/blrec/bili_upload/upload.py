@@ -158,6 +158,61 @@ class UploadCoordinator:
             await self._process(claim)
             return claim.id
 
+    async def build_edit_payload(
+        self, job_id: int, healthy_cids: Mapping[int, int], cover_url: Optional[str]
+    ) -> Mapping[str, Any]:
+        row = await self._database.fetchone(
+            'SELECT id,account_id,policy_snapshot_json,state,submit_state,'
+            'upload_completed_at,aid FROM upload_jobs WHERE id=?',
+            (job_id,),
+        )
+        if row is None:
+            raise ProtocolContractError('upload job does not exist')
+        aid = row['aid']
+        if type(aid) is not int or aid <= 0:
+            raise ProtocolContractError('upload job has no confirmed AID')
+        job = _Job(
+            id=int(row['id']),
+            account_id=int(row['account_id']),
+            policy_snapshot_json=str(row['policy_snapshot_json']),
+            state=str(row['state']),
+            submit_state=str(row['submit_state']),
+            upload_completed_at=(
+                None
+                if row['upload_completed_at'] is None
+                else int(row['upload_completed_at'])
+            ),
+        )
+        if cover_url is not None and (
+            not isinstance(cover_url, str) or not cover_url.startswith('https://')
+        ):
+            raise ProtocolContractError('invalid archive cover URL')
+        payload = dict(await self._submit_payload(job, cover_override=cover_url))
+        payload.pop('dtime', None)
+        payload['aid'] = aid
+        payload['recreate'] = -1
+        payload['topic_grey'] = 1
+        payload['web_os'] = 1
+
+        parts = await self._database.fetchall(
+            'SELECT id FROM upload_parts WHERE job_id=? ORDER BY part_index', (job_id,)
+        )
+        videos = payload.get('videos')
+        if not isinstance(videos, list) or len(videos) != len(parts):
+            raise ProtocolContractError('upload parts are incomplete')
+        part_ids = {int(part['id']) for part in parts}
+        if not set(healthy_cids) <= part_ids or any(
+            type(cid) is not int or cid <= 0 for cid in healthy_cids.values()
+        ):
+            raise ProtocolContractError('healthy part CID mapping is invalid')
+        for part, video in zip(parts, videos):
+            if not isinstance(video, dict):
+                raise ProtocolContractError('upload part payload is invalid')
+            cid = healthy_cids.get(int(part['id']))
+            if cid is not None:
+                video['cid'] = cid
+        return payload
+
     async def _create_candidate(self, row: sqlite3.Row) -> Optional[int]:
         if bool(row['auto_comment']) and not self._enabled(self._auto_comment_enabled):
             return None
@@ -607,7 +662,9 @@ class UploadCoordinator:
             release=True,
         )
 
-    async def _submit_payload(self, job: _Job) -> Mapping[str, Any]:
+    async def _submit_payload(
+        self, job: _Job, *, cover_override: Optional[str] = None
+    ) -> Mapping[str, Any]:
         try:
             snapshot = json.loads(job.policy_snapshot_json)
         except json.JSONDecodeError:
@@ -685,7 +742,9 @@ class UploadCoordinator:
             creation_statement_id = -2 if copyright_value == 2 else -1
             if copyright_value == 2:
                 no_reprint = 0
-        if format_version == 4:
+        if cover_override is not None:
+            cover = cover_override
+        elif format_version == 4:
             cover = await self._resolve_cover(job, snapshot)
         else:
             cover = snapshot.get('cover_url', '')

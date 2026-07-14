@@ -6,6 +6,7 @@
   "complete_upload": {"OK": 1},
   "create_collection": {"code": 0, "data": 501},
   "create_qr": {"code": 0, "data": {"auth_code": "fixture-auth-code", "url": "https://example.invalid/qr"}},
+  "edit_archive": {"code": 0, "data": {"aid": 303, "bvid": "BVfixture"}},
   "list_archives": {"code": 0, "data": {"arc_audits": []}},
   "list_collections": {"code": 0, "data": {"seasons": [{"season": {"id": 501, "title": "fixture collection"}, "sections": {"sections": [{"id": 502, "title": "正片"}]}}], "page": {"pn": 1, "ps": 50, "total": 1}}},
   "list_replies": {"code": 0, "data": {"replies": []}},

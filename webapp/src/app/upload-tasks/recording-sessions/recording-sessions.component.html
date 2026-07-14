@@ -43,6 +43,30 @@
     [nzDescription]="reason"
   ></nz-alert>
 
+  <div
+    *ngIf="selectedJobCount > 0"
+    class="batch-action-bar"
+    data-testid="batch-action-bar"
+  >
+    <span>已选择 {{ selectedJobCount }} 个任务</span>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openUploadAction('retry_failed', selectedJobIdsArray)"
+    >
+      重试失败任务
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openUploadAction('repair_transcode', selectedJobIdsArray)"
+    >
+      检查并修复转码
+    </button>
+  </div>
+
   <nz-table
     #taskTable
     nzSize="middle"
@@ -51,22 +75,41 @@
     [nzLoading]="view.state === 'loading'"
     [nzFrontPagination]="false"
     [nzShowPagination]="false"
-    [nzScroll]="{ x: '1000px' }"
+    [nzScroll]="{ x: '1120px' }"
     [nzNoResult]="'还没有上传任务'"
   >
     <thead>
       <tr>
+        <th nzWidth="48px">
+          <label
+            nz-checkbox
+            aria-label="选择本页上传任务"
+            [ngModel]="allPageJobsSelected"
+            [nzIndeterminate]="somePageJobsSelected"
+            [nzDisabled]="pageJobIds.length === 0"
+            (ngModelChange)="setAllPageJobsSelected($event)"
+          ></label>
+        </th>
         <th nzWidth="260px">直播与房间</th>
         <th nzWidth="135px">开始时间</th>
         <th nzWidth="170px">录制概要</th>
         <th nzWidth="95px">录制状态</th>
         <th nzWidth="145px">投稿状态</th>
         <th nzWidth="115px">投稿账号</th>
-        <th nzWidth="80px">操作</th>
+        <th nzRight nzWidth="130px">操作</th>
       </tr>
     </thead>
     <tbody>
       <tr *ngFor="let session of taskTable.data; trackBy: trackSession">
+        <td>
+          <label
+            *ngIf="session.uploadJob as job"
+            nz-checkbox
+            [attr.aria-label]="'选择任务 ' + job.id"
+            [ngModel]="isJobSelected(job.id)"
+            (ngModelChange)="setJobSelected(job.id, $event)"
+          ></label>
+        </td>
         <td>
           <div class="session-cell">
             <img
@@ -116,8 +159,8 @@
         </td>
         <td>
           <ng-container *ngIf="session.uploadJob as job; else noUploadJob">
-            <nz-tag [nzColor]="uploadJobStateColor(job.state)">
-              {{ uploadJobStateLabel(job.state) }}
+            <nz-tag [nzColor]="uploadDisplayStateColor(job)">
+              {{ uploadDisplayStateLabel(job) }}
             </nz-tag>
           </ng-container>
           <ng-template #noUploadJob>
@@ -133,10 +176,47 @@
           </ng-container>
           <ng-template #noAccount>—</ng-template>
         </td>
-        <td>
+        <td nzRight>
           <button nz-button nzType="link" type="button" (click)="openDetails(session)">
-            查看详情
+            详情
           </button>
+          <ng-container *ngIf="session.uploadJob as job">
+            <button
+              nz-button
+              nzType="link"
+              type="button"
+              nz-dropdown
+              [nzDropdownMenu]="jobActions"
+            >
+              更多
+            </button>
+            <nz-dropdown-menu #jobActions="nzDropdownMenu">
+              <ul nz-menu>
+                <li
+                  nz-menu-item
+                  [nzDisabled]="!job.canRetry"
+                  (click)="
+                    job.canRetry
+                      ? openUploadAction('retry_failed', [job.id])
+                      : null
+                  "
+                >
+                  重试失败任务
+                </li>
+                <li
+                  nz-menu-item
+                  [nzDisabled]="!job.canRepair"
+                  (click)="
+                    job.canRepair
+                      ? openUploadAction('repair_transcode', [job.id])
+                      : null
+                  "
+                >
+                  检查并修复转码
+                </li>
+              </ul>
+            </nz-dropdown-menu>
+          </ng-container>
         </td>
       </tr>
     </tbody>
@@ -201,8 +281,8 @@
 
       <div class="upload-progress" *ngIf="session.uploadJob as job; else noJob">
         <div class="upload-status-row">
-          <nz-tag [nzColor]="uploadJobStateColor(job.state)">
-            {{ uploadJobStateLabel(job.state) }}
+          <nz-tag [nzColor]="uploadDisplayStateColor(job)">
+            {{ uploadDisplayStateLabel(job) }}
           </nz-tag>
           <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
           <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
@@ -224,6 +304,12 @@
         </div>
         <div class="upload-reason" *ngIf="job.reviewReason">
           {{ job.reviewReason }}
+        </div>
+        <div class="repair-message" *ngIf="job.repairMessage">
+          转码修复：{{ job.repairMessage }}
+        </div>
+        <div class="repair-error" *ngIf="job.repairError">
+          转码修复：{{ job.repairError }}
         </div>
 
         <div class="danmaku-progress" *ngIf="job.danmakuTotal > 0">
@@ -324,6 +410,15 @@
                   </nz-tag>
                   <div class="part-metric" *ngIf="uploadPart.remoteFilename">
                     {{ uploadPart.remoteFilename }}
+                  </div>
+                  <div
+                    class="part-metric"
+                    *ngIf="uploadPart.transcodeState !== 'unknown'"
+                  >
+                    {{ transcodeStateLabel(uploadPart.transcodeState) }}
+                    <span *ngIf="uploadPart.transcodeFailDesc">
+                      · {{ uploadPart.transcodeFailDesc }}
+                    </span>
                   </div>
                 </ng-container>
                 <ng-template #notUploaded>尚未进入上传</ng-template>
@@ -520,6 +615,29 @@
       nzType="error"
       nzShowIcon
       [nzMessage]="decisionError"
+    ></nz-alert>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [nzTitle]="uploadActionTitle()"
+  nzOkText="确认执行"
+  nzCancelText="取消"
+  [nzVisible]="uploadActionVisible"
+  [nzOkLoading]="uploadActionSubmitting"
+  [nzCancelDisabled]="uploadActionSubmitting"
+  (nzOnOk)="submitUploadAction()"
+  (nzOnCancel)="closeUploadAction()"
+>
+  <ng-container *nzModalContent>
+    <p>{{ uploadActionDescription() }}</p>
+    <p>本次将处理 {{ uploadActionJobIds.length }} 个任务。</p>
+    <nz-alert
+      *ngIf="uploadActionError"
+      nzType="error"
+      nzShowIcon
+      nzMessage="操作未执行"
+      [nzDescription]="uploadActionError"
     ></nz-alert>
   </ng-container>
 </nz-modal>
