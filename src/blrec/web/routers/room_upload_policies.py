@@ -53,6 +53,11 @@ class RoomUploadPolicyRequest(ApiModel):
     auto_comment: bool
     danmaku_backfill: bool
     filters: Dict[str, Any] = Field(default_factory=dict)
+    collection_season_id: Optional[int] = Field(None, gt=0)
+    collection_section_id: Optional[int] = Field(None, gt=0)
+    cover_mode: Literal['live', 'custom'] = 'live'
+    cover_asset_id: Optional[int] = Field(None, gt=0)
+    publish_delay_seconds: int = Field(0, ge=0)
 
     def to_command(self) -> RoomUploadPolicyCommand:
         return RoomUploadPolicyCommand(
@@ -76,6 +81,11 @@ class RoomUploadPolicyRequest(ApiModel):
             auto_comment=self.auto_comment,
             danmaku_backfill=self.danmaku_backfill,
             filters=self.filters,
+            collection_season_id=self.collection_season_id,
+            collection_section_id=self.collection_section_id,
+            cover_mode=self.cover_mode,
+            cover_asset_id=self.cover_asset_id,
+            publish_delay_seconds=self.publish_delay_seconds,
         )
 
 
@@ -106,6 +116,11 @@ class RoomUploadPolicyResponse(ApiModel):
     blocked_reason: Optional[str]
     created_at: int
     updated_at: int
+    collection_season_id: Optional[int]
+    collection_section_id: Optional[int]
+    cover_mode: str
+    cover_asset_id: Optional[int]
+    publish_delay_seconds: int
 
 
 class UploadCategoryNodeResponse(ApiModel):

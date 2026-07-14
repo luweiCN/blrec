@@ -165,6 +165,69 @@ async def test_policy_round_trips_archive_submission_settings(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_policy_round_trips_collection_cover_and_schedule_settings(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        await database.execute(
+            'INSERT INTO cover_assets('
+            'id,sha256,storage_path,filename,mime_type,width,height,byte_size,'
+            'created_at,updated_at) VALUES(7,?,?,?,?,?,?,?,?,?)',
+            ('a' * 64, '/covers/a.jpg', '封面.jpg', 'image/jpeg', 1600, 1000, 10, 1, 1),
+        )
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+
+        policy = await manager.upsert(
+            100,
+            command(
+                collection_season_id=20,
+                collection_section_id=21,
+                cover_mode='custom',
+                cover_asset_id=7,
+                publish_delay_seconds=7200,
+            ),
+        )
+
+        assert policy.collection_season_id == 20
+        assert policy.collection_section_id == 21
+        assert policy.cover_mode == 'custom'
+        assert policy.cover_asset_id == 7
+        assert policy.publish_delay_seconds == 7200
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('overrides', 'message'),
+    (
+        ({'collection_season_id': 20}, 'collection'),
+        ({'collection_section_id': 21}, 'collection'),
+        ({'cover_mode': 'custom', 'cover_asset_id': None}, 'cover'),
+        ({'cover_mode': 'live', 'cover_asset_id': 7}, 'cover'),
+        ({'publish_delay_seconds': 3600}, 'publish delay'),
+        ({'publish_delay_seconds': 15 * 24 * 60 * 60 + 1}, 'publish delay'),
+    ),
+)
+async def test_policy_rejects_invalid_collection_cover_and_schedule_settings(
+    tmp_path: Path, overrides, message: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database)
+
+        with pytest.raises(InvalidRoomUploadPolicy, match=message):
+            await manager.upsert(100, command(**overrides))
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ('overrides', 'message'),
     (

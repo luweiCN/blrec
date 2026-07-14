@@ -52,6 +52,11 @@ def policy_view(room_id: int = 100) -> RoomUploadPolicyView:
         blocked_reason=None,
         created_at=1000,
         updated_at=1000,
+        collection_season_id=20,
+        collection_section_id=21,
+        cover_mode='custom',
+        cover_asset_id=7,
+        publish_delay_seconds=7200,
     )
 
 
@@ -202,6 +207,11 @@ def test_list_room_upload_policies_returns_resolved_account(client: TestClient) 
         'blockedReason': None,
         'createdAt': 1000,
         'updatedAt': 1000,
+        'collectionSeasonId': 20,
+        'collectionSectionId': 21,
+        'coverMode': 'custom',
+        'coverAssetId': 7,
+        'publishDelaySeconds': 7200,
     }
 
 
@@ -298,6 +308,11 @@ def test_upsert_converts_request_to_domain_command(
             'autoComment': False,
             'danmakuBackfill': True,
             'filters': {'blockedWords': ['抽奖']},
+            'collectionSeasonId': 20,
+            'collectionSectionId': 21,
+            'coverMode': 'custom',
+            'coverAssetId': 7,
+            'publishDelaySeconds': 7200,
         },
     )
 
@@ -312,6 +327,11 @@ def test_upsert_converts_request_to_domain_command(
     assert manager.command.is_only_self is True
     assert manager.command.danmaku_backfill is True
     assert manager.command.filters == {'blockedWords': ['抽奖']}
+    assert manager.command.collection_season_id == 20
+    assert manager.command.collection_section_id == 21
+    assert manager.command.cover_mode == 'custom'
+    assert manager.command.cover_asset_id == 7
+    assert manager.command.publish_delay_seconds == 7200
 
 
 def test_upsert_rejects_parent_upload_category(

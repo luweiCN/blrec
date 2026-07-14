@@ -48,6 +48,11 @@ class RoomUploadPolicyCommand:
     auto_comment: bool
     danmaku_backfill: bool
     filters: Mapping[str, Any]
+    collection_season_id: Optional[int] = None
+    collection_section_id: Optional[int] = None
+    cover_mode: str = 'live'
+    cover_asset_id: Optional[int] = None
+    publish_delay_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,11 @@ class RoomUploadPolicyView:
     blocked_reason: Optional[str]
     created_at: int
     updated_at: int
+    collection_season_id: Optional[int] = None
+    collection_section_id: Optional[int] = None
+    cover_mode: str = 'live'
+    cover_asset_id: Optional[int] = None
+    publish_delay_seconds: int = 0
 
 
 class RoomUploadPolicyManager:
@@ -97,7 +107,9 @@ class RoomUploadPolicyManager:
             'creation_statement_id,original_authorization,copyright,source,'
             'is_only_self,publish_dynamic,no_reprint,'
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
-            'danmaku_backfill,filter_json,created_at,updated_at '
+            'danmaku_backfill,filter_json,created_at,updated_at,'
+            'collection_season_id,collection_section_id,cover_mode,'
+            'cover_asset_id,publish_delay_seconds '
             'FROM room_upload_policies ORDER BY room_id'
         )
         return [await self._view(row) for row in rows]
@@ -109,7 +121,9 @@ class RoomUploadPolicyManager:
             'creation_statement_id,original_authorization,copyright,source,'
             'is_only_self,publish_dynamic,no_reprint,'
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
-            'danmaku_backfill,filter_json,created_at,updated_at '
+            'danmaku_backfill,filter_json,created_at,updated_at,'
+            'collection_season_id,collection_section_id,cover_mode,'
+            'cover_asset_id,publish_delay_seconds '
             'FROM room_upload_policies WHERE room_id=?',
             (room_id,),
         )
@@ -122,6 +136,7 @@ class RoomUploadPolicyManager:
     ) -> RoomUploadPolicyView:
         self._validate(room_id, command)
         await self._require_account(command)
+        await self._require_cover_asset(command)
         now = int(self._clock())
         filter_json = json.dumps(
             dict(command.filters),
@@ -137,8 +152,10 @@ class RoomUploadPolicyManager:
             'creation_statement_id,original_authorization,copyright,source,'
             'is_only_self,publish_dynamic,no_reprint,'
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
-            'danmaku_backfill,filter_json,created_at,updated_at) '
-            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+            'danmaku_backfill,filter_json,created_at,updated_at,'
+            'collection_season_id,collection_section_id,cover_mode,'
+            'cover_asset_id,publish_delay_seconds) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(room_id) DO UPDATE SET '
             'account_mode=excluded.account_mode,account_id=excluded.account_id,'
             'enabled=excluded.enabled,title_template=excluded.title_template,'
@@ -157,7 +174,13 @@ class RoomUploadPolicyManager:
             'up_close_danmu=excluded.up_close_danmu,'
             'auto_comment=excluded.auto_comment,'
             'danmaku_backfill=excluded.danmaku_backfill,'
-            'filter_json=excluded.filter_json,updated_at=excluded.updated_at',
+            'filter_json=excluded.filter_json,'
+            'collection_season_id=excluded.collection_season_id,'
+            'collection_section_id=excluded.collection_section_id,'
+            'cover_mode=excluded.cover_mode,'
+            'cover_asset_id=excluded.cover_asset_id,'
+            'publish_delay_seconds=excluded.publish_delay_seconds,'
+            'updated_at=excluded.updated_at',
             (
                 room_id,
                 command.account_mode,
@@ -184,6 +207,11 @@ class RoomUploadPolicyManager:
                 filter_json,
                 now,
                 now,
+                command.collection_season_id,
+                command.collection_section_id,
+                command.cover_mode,
+                command.cover_asset_id,
+                command.publish_delay_seconds,
             ),
         )
         return await self.get(room_id)
@@ -250,6 +278,32 @@ class RoomUploadPolicyManager:
             raise InvalidRoomUploadPolicy('danmaku must remain open for backfill')
         if command.up_selection_reply and command.up_close_reply:
             raise InvalidRoomUploadPolicy('selected comments require open comments')
+        if (command.collection_season_id is None) != (
+            command.collection_section_id is None
+        ):
+            raise InvalidRoomUploadPolicy(
+                'collection season and section must be selected together'
+            )
+        if command.collection_season_id is not None and (
+            command.collection_season_id <= 0
+            or command.collection_section_id is None
+            or command.collection_section_id <= 0
+        ):
+            raise InvalidRoomUploadPolicy('collection selection is invalid')
+        if command.cover_mode not in ('live', 'custom'):
+            raise InvalidRoomUploadPolicy('cover mode is invalid')
+        if command.cover_mode == 'live' and command.cover_asset_id is not None:
+            raise InvalidRoomUploadPolicy('live cover cannot select a cover asset')
+        if command.cover_mode == 'custom' and (
+            command.cover_asset_id is None or command.cover_asset_id <= 0
+        ):
+            raise InvalidRoomUploadPolicy('custom cover requires a cover asset')
+        if command.publish_delay_seconds != 0 and not (
+            7200 <= command.publish_delay_seconds <= 15 * 24 * 60 * 60
+        ):
+            raise InvalidRoomUploadPolicy(
+                'publish delay must be zero or between 2 hours and 15 days'
+            )
         if not isinstance(command.filters, Mapping):
             raise InvalidRoomUploadPolicy('filters must be an object')
 
@@ -274,6 +328,15 @@ class RoomUploadPolicyManager:
             )
         if row is None or str(row['state']) != 'active':
             raise InvalidRoomUploadPolicy('an active upload account is required')
+
+    async def _require_cover_asset(self, command: RoomUploadPolicyCommand) -> None:
+        if command.cover_asset_id is None:
+            return
+        exists = await self._database.scalar(
+            'SELECT 1 FROM cover_assets WHERE id=?', (command.cover_asset_id,)
+        )
+        if exists != 1:
+            raise InvalidRoomUploadPolicy('custom cover asset was not found')
 
     async def _view(self, row: Any) -> RoomUploadPolicyView:
         account_mode = str(row['account_mode'])
@@ -338,4 +401,19 @@ class RoomUploadPolicyManager:
             blocked_reason=blocked_reason,
             created_at=int(row['created_at']),
             updated_at=int(row['updated_at']),
+            collection_season_id=(
+                None
+                if row['collection_season_id'] is None
+                else int(row['collection_season_id'])
+            ),
+            collection_section_id=(
+                None
+                if row['collection_section_id'] is None
+                else int(row['collection_section_id'])
+            ),
+            cover_mode=str(row['cover_mode']),
+            cover_asset_id=(
+                None if row['cover_asset_id'] is None else int(row['cover_asset_id'])
+            ),
+            publish_delay_seconds=int(row['publish_delay_seconds']),
         )

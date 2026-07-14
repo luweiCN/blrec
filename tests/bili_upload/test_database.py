@@ -23,6 +23,8 @@ REQUIRED_TABLES = {
     'qr_sessions',
     'room_upload_policies',
     'upload_category_cache',
+    'cover_assets',
+    'cover_asset_uploads',
     'recording_sessions',
     'recording_runs',
     'recording_parts',
@@ -66,7 +68,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 8
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 9
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -92,7 +94,21 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'up_selection_reply',
             'up_close_reply',
             'up_close_danmu',
+            'collection_season_id',
+            'collection_section_id',
+            'cover_mode',
+            'cover_asset_id',
+            'publish_delay_seconds',
         } <= policy_columns
+        job_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(upload_jobs)')
+        }
+        assert {
+            'scheduled_publish_at',
+            'collection_branch_state',
+            'collection_error',
+        } <= job_columns
         session_columns = {
             row['name']
             for row in await database.fetchall('PRAGMA table_info(recording_sessions)')
@@ -281,7 +297,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 8
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 9
     finally:
         await database.close()
 
