@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed, fakeAsync, tick } from '@angular/core/testing';
+import { FormsModule } from '@angular/forms';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
@@ -8,9 +9,12 @@ import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzAvatarModule } from 'ng-zorro-antd/avatar';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
+import { NzCollapseModule } from 'ng-zorro-antd/collapse';
 import { NzEmptyModule } from 'ng-zorro-antd/empty';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
+import { NzRadioModule } from 'ng-zorro-antd/radio';
+import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
@@ -44,6 +48,8 @@ describe('UploadsComponent', () => {
         'cancelQrSession',
         'checkRenewal',
         'setPrimaryAccount',
+        'getRelationships',
+        'removeAccount',
       ]
     );
     qrRenderer = jasmine.createSpyObj<QrCodeRenderer>('QrCodeRenderer', [
@@ -71,20 +77,38 @@ describe('UploadsComponent', () => {
         isPrimary: true,
       })
     );
+    accountService.getRelationships.and.returnValue(
+      of({
+        accountId: 7,
+        isPrimary: false,
+        followPrimaryRoomIds: [100],
+        fixedRoomIds: [],
+        reassignableJobs: [],
+        blockingJobs: [],
+        historicalJobCount: 0,
+      })
+    );
+    accountService.removeAccount.and.returnValue(
+      of({ accountId: 7, state: 'archived' })
+    );
     qrRenderer.toDataUrl.and.resolveTo('data:image/png;base64,fixture');
 
     await TestBed.configureTestingModule({
       declarations: [UploadsComponent],
       imports: [
         CommonModule,
+        FormsModule,
         NoopAnimationsModule,
         NzAlertModule,
         NzAvatarModule,
         NzButtonModule,
         NzCardModule,
+        NzCollapseModule,
         NzEmptyModule,
         NzModalModule,
         NzPageHeaderModule,
+        NzRadioModule,
+        NzSelectModule,
         NzSpinModule,
         NzTagModule,
         NzToolTipModule,
@@ -215,7 +239,7 @@ describe('UploadsComponent', () => {
     );
   }));
 
-  it('selects an active account as the primary account', fakeAsync(() => {
+  it('previews relationships before selecting the primary account', fakeAsync(() => {
     const first = {
       id: 7,
       uid: 42,
@@ -254,11 +278,170 @@ describe('UploadsComponent', () => {
     tick();
     fixture.detectChanges();
 
+    expect(accountService.getRelationships).toHaveBeenCalledOnceWith(8);
+    expect(accountService.setPrimaryAccount).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      '已创建的上传任务不会改绑'
+    );
+    expect(document.body.textContent).toContain(
+      '不会断开正在工作的弹幕连接'
+    );
+
+    component.confirmPrimaryAccount();
+    tick();
+    fixture.detectChanges();
+
     expect(accountService.setPrimaryAccount).toHaveBeenCalledOnceWith(8);
     expect(fixture.nativeElement.textContent).toContain(
       'second 已设为主账号'
     );
     expect(component.primaryAccountTip).toContain('房间信息和画质查询');
+  }));
+
+  it('shows relationship handling choices before removing an account', fakeAsync(() => {
+    const primary = {
+      id: 7,
+      uid: 42,
+      displayName: 'primary',
+      avatarUrl: '',
+      credentialVersion: 1,
+      credentialExpiresAt: 1_800_000_000,
+      createdAt: 1_700_000_000,
+      state: 'active' as const,
+      isPrimary: true,
+    };
+    const standby = {
+      ...primary,
+      id: 8,
+      uid: 43,
+      displayName: 'standby',
+      isPrimary: false,
+    };
+    accountService.listAccounts.and.returnValue(of([primary, standby]));
+    accountService.getRelationships.and.returnValue(
+      of({
+        accountId: 7,
+        isPrimary: true,
+        followPrimaryRoomIds: [100, 200],
+        fixedRoomIds: [300],
+        reassignableJobs: [{ id: 1, roomId: 300, state: 'ready' }],
+        blockingJobs: [],
+        historicalJobCount: 4,
+      })
+    );
+    fixture.detectChanges();
+
+    const removeButtons = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="remove-account"]')
+    ) as HTMLButtonElement[];
+    removeButtons[0].click();
+    tick();
+    fixture.detectChanges();
+
+    const text = document.body.textContent;
+    expect(accountService.getRelationships).toHaveBeenCalledOnceWith(7);
+    expect(text).toContain('改为跟随新主账号');
+    expect(text).toContain('固定切换到指定账号');
+    expect(text).toContain('不迁移，关闭房间并暂停任务');
+    expect(text).toContain('固定绑定房间（1）');
+    expect(text).toContain('可迁移上传任务（1）');
+    expect(accountService.removeAccount).not.toHaveBeenCalled();
+  }));
+
+  it('blocks account removal after an upload has remote side effects', fakeAsync(() => {
+    const account = {
+      id: 7,
+      uid: 42,
+      displayName: 'fixture',
+      avatarUrl: '',
+      credentialVersion: 1,
+      credentialExpiresAt: 1_800_000_000,
+      createdAt: 1_700_000_000,
+      state: 'active' as const,
+      isPrimary: false,
+    };
+    accountService.listAccounts.and.returnValue(of([account]));
+    accountService.getRelationships.and.returnValue(
+      of({
+        accountId: 7,
+        isPrimary: false,
+        followPrimaryRoomIds: [],
+        fixedRoomIds: [],
+        reassignableJobs: [],
+        blockingJobs: [{ id: 9, roomId: 100, state: 'uploading' }],
+        historicalJobCount: 0,
+      })
+    );
+    fixture.detectChanges();
+
+    const removeButton = fixture.nativeElement.querySelector(
+      '[data-testid="remove-account"]'
+    ) as HTMLButtonElement;
+    removeButton.click();
+    tick();
+    fixture.detectChanges();
+
+    expect(document.body.textContent).toContain('必须先处理以下任务');
+    expect(component.canConfirmRemoval).toBeFalse();
+    component.confirmRemoval();
+    expect(accountService.removeAccount).not.toHaveBeenCalled();
+  }));
+
+  it('submits explicit replacement and new primary accounts', fakeAsync(() => {
+    const primary = {
+      id: 7,
+      uid: 42,
+      displayName: 'primary',
+      avatarUrl: '',
+      credentialVersion: 1,
+      credentialExpiresAt: 1_800_000_000,
+      createdAt: 1_700_000_000,
+      state: 'active' as const,
+      isPrimary: true,
+    };
+    const replacement = {
+      ...primary,
+      id: 8,
+      uid: 43,
+      displayName: 'replacement',
+      isPrimary: false,
+    };
+    const nextPrimary = {
+      ...replacement,
+      id: 9,
+      uid: 44,
+      displayName: 'next-primary',
+    };
+    accountService.listAccounts.and.returnValue(
+      of([primary, replacement, nextPrimary])
+    );
+    accountService.getRelationships.and.returnValue(
+      of({
+        accountId: 7,
+        isPrimary: true,
+        followPrimaryRoomIds: [],
+        fixedRoomIds: [],
+        reassignableJobs: [],
+        blockingJobs: [],
+        historicalJobCount: 0,
+      })
+    );
+    fixture.detectChanges();
+
+    component.openRemovalDialog(primary);
+    tick();
+    component.removalMode = 'fixed';
+    component.replacementAccountId = 8;
+    component.newPrimaryAccountId = 9;
+    component.confirmRemoval();
+    tick();
+
+    expect(accountService.removeAccount).toHaveBeenCalledOnceWith(7, {
+      mode: 'fixed',
+      replacementAccountId: 8,
+      newPrimaryAccountId: 9,
+    });
+    expect(component.actionMessage).toBe('primary 已移除');
   }));
 
   it('opens account login without creating a QR code automatically', () => {

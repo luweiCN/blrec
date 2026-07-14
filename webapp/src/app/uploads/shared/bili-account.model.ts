@@ -44,6 +44,41 @@ export interface RefreshResult {
   refreshed: boolean;
 }
 
+export interface RelatedUploadJob {
+  id: number;
+  roomId: number;
+  state: string;
+}
+
+export interface AccountRelationships {
+  accountId: number;
+  isPrimary: boolean;
+  followPrimaryRoomIds: number[];
+  fixedRoomIds: number[];
+  reassignableJobs: RelatedUploadJob[];
+  blockingJobs: RelatedUploadJob[];
+  historicalJobCount: number;
+}
+
+export const REMOVAL_MODES = [
+  'follow_primary',
+  'fixed',
+  'disable',
+] as const;
+
+export type RemovalMode = (typeof REMOVAL_MODES)[number];
+
+export interface AccountRemovalRequest {
+  mode: RemovalMode;
+  replacementAccountId?: number;
+  newPrimaryAccountId?: number;
+}
+
+export interface AccountRemovalResult {
+  accountId: number;
+  state: 'archived';
+}
+
 export type AccountsView =
   | { state: 'loading' }
   | { state: 'ready'; accounts: readonly BiliAccount[] }

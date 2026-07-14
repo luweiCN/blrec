@@ -136,9 +136,8 @@
                 data-testid="set-primary"
                 nz-tooltip
                 [nzTooltipTitle]="primaryAccountTip"
-                [nzLoading]="isSelectingPrimary(account.id)"
                 [disabled]="account.state !== 'active'"
-                (click)="setPrimaryAccount(account)"
+                (click)="openPrimaryDialog(account)"
               >
                 设为主账号
               </button>
@@ -151,6 +150,15 @@
                 (click)="checkRenewal(account)"
               >
                 检查并按需续期
+              </button>
+              <button
+                nz-button
+                nzDanger
+                type="button"
+                data-testid="remove-account"
+                (click)="openRemovalDialog(account)"
+              >
+                移除账号
               </button>
             </div>
           </li>
@@ -169,6 +177,231 @@
         ></nz-alert>
       </div>
   </nz-card>
+
+  <nz-modal
+    nzTitle="设为主账号"
+    nzOkText="确认切换"
+    nzCancelText="取消"
+    nzCentered
+    [nzVisible]="primaryDialogVisible"
+    [nzOkDisabled]="primaryDialog.state !== 'ready'"
+    [nzOkLoading]="primaryDialog.state === 'submitting'"
+    [nzCancelDisabled]="primaryDialog.state === 'submitting'"
+    (nzOnOk)="confirmPrimaryAccount()"
+    (nzOnCancel)="closePrimaryDialog()"
+  >
+    <ng-container *nzModalContent>
+      <div aria-live="polite" [attr.aria-busy]="primaryDialog.state === 'loading'">
+        <nz-spin *ngIf="primaryDialog.state === 'loading'" nzSimple></nz-spin>
+        <nz-alert
+          *ngIf="primaryDialogError as message"
+          nzType="error"
+          nzShowIcon
+          [nzMessage]="message"
+        ></nz-alert>
+        <ng-container *ngIf="primaryDialogAccount as account">
+          <ng-container *ngIf="primaryRelationships as relationships">
+            <p>
+              确认将 <strong>{{ account.displayName }}</strong> 设为主账号吗？
+            </p>
+            <ul class="impact-list">
+              <li>
+                跟随主账号的房间共
+                {{ relationships.followPrimaryRoomIds.length }} 个，之后读取登录信息时使用新主账号。
+                <span *ngIf="relationships.followPrimaryRoomIds.length > 0">
+                  房间 ID：{{ relationships.followPrimaryRoomIds.join('、') }}。
+                </span>
+              </li>
+              <li>固定绑定账号的房间保持原账号，不受本次切换影响。</li>
+              <li>已创建的上传任务不会改绑，仍使用任务创建时保存的账号。</li>
+              <li>读取请求会使用新主账号的 Cookie。</li>
+              <li>不会断开正在工作的弹幕连接；以后自然重连时才使用新 Cookie。</li>
+            </ul>
+          </ng-container>
+        </ng-container>
+      </div>
+    </ng-container>
+  </nz-modal>
+
+  <nz-modal
+    nzTitle="移除账号"
+    nzOkText="确认移除"
+    nzCancelText="取消"
+    nzOkDanger
+    nzCentered
+    [nzVisible]="removalDialogVisible"
+    [nzOkDisabled]="!canConfirmRemoval"
+    [nzOkLoading]="removalDialog.state === 'submitting'"
+    [nzCancelDisabled]="removalDialog.state === 'submitting'"
+    (nzOnOk)="confirmRemoval()"
+    (nzOnCancel)="closeRemovalDialog()"
+  >
+    <ng-container *nzModalContent>
+      <div aria-live="polite" [attr.aria-busy]="removalDialog.state === 'loading'">
+        <nz-spin *ngIf="removalDialog.state === 'loading'" nzSimple></nz-spin>
+        <nz-alert
+          *ngIf="removalDialogError as message"
+          nzType="error"
+          nzShowIcon
+          [nzMessage]="message"
+        ></nz-alert>
+        <ng-container *ngIf="removalDialogAccount as account">
+          <ng-container *ngIf="removalRelationships as relationships">
+            <nz-alert
+              nzType="warning"
+              nzShowIcon
+              nzMessage="移除会清除登录凭据，但保留账号身份和历史记录"
+              nzDescription="以后使用同一个 B 站 UID 重新扫码，会恢复这条账号记录。"
+            ></nz-alert>
+
+            <nz-alert
+              *ngIf="relationships.blockingJobs.length > 0"
+              class="relationship-warning"
+              nzType="error"
+              nzShowIcon
+              nzMessage="必须先处理以下任务"
+              nzDescription="这些任务已经开始上传、投稿、评论或弹幕回灌，系统不会自动换号。"
+            ></nz-alert>
+
+            <nz-collapse class="relationship-groups">
+              <nz-collapse-panel
+                [nzHeader]="'固定绑定房间（' + relationships.fixedRoomIds.length + '）'"
+              >
+                <p *ngIf="relationships.fixedRoomIds.length > 0">
+                  房间 ID：{{ relationships.fixedRoomIds.join('、') }}
+                </p>
+                <p *ngIf="relationships.fixedRoomIds.length === 0">无</p>
+              </nz-collapse-panel>
+              <nz-collapse-panel
+                [nzHeader]="'跟随主账号房间（' + relationships.followPrimaryRoomIds.length + '）'"
+              >
+                <p *ngIf="relationships.followPrimaryRoomIds.length > 0">
+                  房间 ID：{{ relationships.followPrimaryRoomIds.join('、') }}
+                </p>
+                <p *ngIf="relationships.followPrimaryRoomIds.length === 0">无</p>
+                <p *ngIf="!relationships.isPrimary">
+                  当前账号不是主账号，移除它不会改变这些房间。
+                </p>
+              </nz-collapse-panel>
+              <nz-collapse-panel
+                [nzHeader]="'可迁移上传任务（' + relationships.reassignableJobs.length + '）'"
+              >
+                <ul *ngIf="relationships.reassignableJobs.length > 0">
+                  <li *ngFor="let job of relationships.reassignableJobs">
+                    任务 #{{ job.id }} · 房间 {{ job.roomId }} · {{ job.state }}
+                  </li>
+                </ul>
+                <p *ngIf="relationships.reassignableJobs.length === 0">无</p>
+              </nz-collapse-panel>
+              <nz-collapse-panel
+                [nzHeader]="'禁止自动迁移任务（' + relationships.blockingJobs.length + '）'"
+                [nzActive]="relationships.blockingJobs.length > 0"
+              >
+                <ul *ngIf="relationships.blockingJobs.length > 0">
+                  <li *ngFor="let job of relationships.blockingJobs">
+                    任务 #{{ job.id }} · 房间 {{ job.roomId }} · {{ job.state }}
+                  </li>
+                </ul>
+                <p *ngIf="relationships.blockingJobs.length === 0">无</p>
+              </nz-collapse-panel>
+              <nz-collapse-panel
+                [nzHeader]="'历史任务（' + relationships.historicalJobCount + '）'"
+              >
+                <p>历史任务只保留原账号记录，不会改绑。</p>
+              </nz-collapse-panel>
+            </nz-collapse>
+
+            <div class="removal-form" *ngIf="relationships.blockingJobs.length === 0">
+              <div
+                *ngIf="relationships.isPrimary && activeReplacementAccounts.length > 0"
+                class="form-row"
+              >
+                <label for="new-primary-account">移除后使用哪个主账号</label>
+                <nz-select
+                  id="new-primary-account"
+                  data-testid="new-primary-account"
+                  nzPlaceHolder="请选择新的主账号"
+                  [(ngModel)]="newPrimaryAccountId"
+                >
+                  <nz-option
+                    *ngFor="let candidate of activeReplacementAccounts"
+                    [nzValue]="candidate.id"
+                    [nzLabel]="candidate.displayName + '（UID ' + candidate.uid + '）'"
+                  ></nz-option>
+                </nz-select>
+              </div>
+
+              <nz-alert
+                *ngIf="relationships.isPrimary && activeReplacementAccounts.length === 0"
+                nzType="info"
+                nzShowIcon
+                nzMessage="没有其他可用账号，只能关闭关联房间并暂停任务"
+              ></nz-alert>
+
+              <fieldset>
+                <legend>如何处理关联房间和未开始的上传任务</legend>
+                <nz-radio-group
+                  [(ngModel)]="removalMode"
+                  (ngModelChange)="removalModeChanged($event)"
+                >
+                  <label
+                    nz-radio
+                    nzValue="follow_primary"
+                    [nzDisabled]="relationships.isPrimary && activeReplacementAccounts.length === 0"
+                  >
+                    <span class="removal-choice-copy">
+                      <strong>改为跟随新主账号</strong>
+                      <small>房间以后跟随主账号；未开始任务立即绑定移除后的主账号。</small>
+                    </span>
+                  </label>
+                  <label
+                    nz-radio
+                    nzValue="fixed"
+                    [nzDisabled]="activeReplacementAccounts.length === 0"
+                  >
+                    <span class="removal-choice-copy">
+                      <strong>固定切换到指定账号</strong>
+                      <small>房间和未开始任务都绑定到下面选择的账号。</small>
+                    </span>
+                  </label>
+                  <label nz-radio nzValue="disable">
+                    <span class="removal-choice-copy">
+                      <strong>不迁移，关闭房间并暂停任务</strong>
+                      <small>保留关联记录，之后由你手动选择账号再恢复。</small>
+                    </span>
+                  </label>
+                </nz-radio-group>
+              </fieldset>
+
+              <div *ngIf="removalMode === 'fixed'" class="form-row">
+                <label for="replacement-account">固定切换到</label>
+                <nz-select
+                  id="replacement-account"
+                  data-testid="replacement-account"
+                  nzPlaceHolder="请选择替代账号"
+                  [(ngModel)]="replacementAccountId"
+                >
+                  <nz-option
+                    *ngFor="let candidate of activeReplacementAccounts"
+                    [nzValue]="candidate.id"
+                    [nzLabel]="candidate.displayName + '（UID ' + candidate.uid + '）'"
+                  ></nz-option>
+                </nz-select>
+              </div>
+            </div>
+
+            <nz-alert
+              *ngIf="actionError"
+              class="relationship-warning"
+              nzType="error"
+              nzShowIcon
+              [nzMessage]="actionError"
+            ></nz-alert>
+          </ng-container>
+        </ng-container>
+      </div>
+    </ng-container>
+  </nz-modal>
 
   <nz-modal
     nzTitle="添加账号"

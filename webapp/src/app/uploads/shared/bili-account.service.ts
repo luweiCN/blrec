@@ -4,7 +4,14 @@ import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 
 import { UrlService } from 'src/app/core/services/url.service';
-import { BiliAccount, QrSession, RefreshResult } from './bili-account.model';
+import {
+  AccountRelationships,
+  AccountRemovalRequest,
+  AccountRemovalResult,
+  BiliAccount,
+  QrSession,
+  RefreshResult,
+} from './bili-account.model';
 
 @Injectable({ providedIn: 'root' })
 export class BiliAccountService {
@@ -46,5 +53,22 @@ export class BiliAccountService {
       `/api/v1/bili-accounts/${accountId}/primary`
     );
     return this.http.put<BiliAccount>(url, null);
+  }
+
+  getRelationships(accountId: number): Observable<AccountRelationships> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/${accountId}/relationships`
+    );
+    return this.http.get<AccountRelationships>(url);
+  }
+
+  removeAccount(
+    accountId: number,
+    request: AccountRemovalRequest
+  ): Observable<AccountRemovalResult> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/${accountId}/removal`
+    );
+    return this.http.post<AccountRemovalResult>(url, request);
   }
 }

@@ -74,4 +74,33 @@ describe('BiliAccountService', () => {
     expect(request.request.body).toBeNull();
     request.flush({ id: 7, isPrimary: true });
   });
+
+  it('loads account relationships before a destructive action', () => {
+    service.getRelationships(7).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/bili-accounts/7/relationships'
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush({ accountId: 7, blockingJobs: [] });
+  });
+
+  it('removes an account with one explicit relationship policy', () => {
+    service
+      .removeAccount(7, {
+        mode: 'fixed',
+        replacementAccountId: 8,
+        newPrimaryAccountId: 9,
+      })
+      .subscribe();
+
+    const request = http.expectOne('/api/v1/bili-accounts/7/removal');
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({
+      mode: 'fixed',
+      replacementAccountId: 8,
+      newPrimaryAccountId: 9,
+    });
+    request.flush({ accountId: 7, state: 'archived' });
+  });
 });

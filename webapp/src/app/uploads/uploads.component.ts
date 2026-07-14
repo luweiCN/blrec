@@ -11,15 +11,28 @@ import { Subject, from, timer } from 'rxjs';
 import { map, switchMap, takeUntil } from 'rxjs/operators';
 
 import {
+  AccountRelationships,
+  AccountRemovalRequest,
   AccountState,
   AccountsView,
   BiliAccount,
   LoginView,
   QrDisplay,
   QrSession,
+  RemovalMode,
 } from './shared/bili-account.model';
 import { BiliAccountService } from './shared/bili-account.service';
 import { QrCodeRenderer } from './shared/qr-code-renderer.service';
+
+type AccountDialogState =
+  | { state: 'closed' }
+  | { state: 'loading'; account: BiliAccount }
+  | {
+      state: 'ready' | 'submitting';
+      account: BiliAccount;
+      relationships: AccountRelationships;
+    }
+  | { state: 'error'; account: BiliAccount; message: string };
 
 @Component({
   selector: 'app-uploads',
@@ -31,6 +44,11 @@ export class UploadsComponent implements OnInit, OnDestroy {
   accountsView: AccountsView = { state: 'loading' };
   loginView: LoginView = { state: 'idle' };
   loginDialogVisible = false;
+  primaryDialog: AccountDialogState = { state: 'closed' };
+  removalDialog: AccountDialogState = { state: 'closed' };
+  removalMode: RemovalMode = 'follow_primary';
+  replacementAccountId: number | null = null;
+  newPrimaryAccountId: number | null = null;
   actionError: string | null = null;
   actionMessage: string | null = null;
   readonly credentialVersionTip =
@@ -43,7 +61,6 @@ export class UploadsComponent implements OnInit, OnDestroy {
   private readonly destroy$ = new Subject<void>();
   private readonly stopQrPolling$ = new Subject<void>();
   private readonly checkingAccountIds = new Set<number>();
-  private selectingPrimaryAccountId: number | null = null;
   private readonly failedAvatarUrls = new Set<string>();
 
   constructor(
@@ -90,6 +107,88 @@ export class UploadsComponent implements OnInit, OnDestroy {
     return (
       this.loginView.state === 'waiting' || this.loginView.state === 'scanned'
     );
+  }
+
+  get primaryDialogVisible(): boolean {
+    return this.primaryDialog.state !== 'closed';
+  }
+
+  get primaryDialogAccount(): BiliAccount | null {
+    return this.primaryDialog.state === 'closed'
+      ? null
+      : this.primaryDialog.account;
+  }
+
+  get primaryRelationships(): AccountRelationships | null {
+    return this.primaryDialog.state === 'ready' ||
+      this.primaryDialog.state === 'submitting'
+      ? this.primaryDialog.relationships
+      : null;
+  }
+
+  get primaryDialogError(): string | null {
+    return this.primaryDialog.state === 'error'
+      ? this.primaryDialog.message
+      : null;
+  }
+
+  get removalDialogVisible(): boolean {
+    return this.removalDialog.state !== 'closed';
+  }
+
+  get removalDialogAccount(): BiliAccount | null {
+    return this.removalDialog.state === 'closed'
+      ? null
+      : this.removalDialog.account;
+  }
+
+  get removalRelationships(): AccountRelationships | null {
+    return this.removalDialog.state === 'ready' ||
+      this.removalDialog.state === 'submitting'
+      ? this.removalDialog.relationships
+      : null;
+  }
+
+  get removalDialogError(): string | null {
+    return this.removalDialog.state === 'error'
+      ? this.removalDialog.message
+      : null;
+  }
+
+  get activeReplacementAccounts(): readonly BiliAccount[] {
+    const target = this.removalDialogAccount;
+    if (!target) {
+      return [];
+    }
+    return this.accounts.filter(
+      (account) => account.id !== target.id && account.state === 'active'
+    );
+  }
+
+  get canConfirmRemoval(): boolean {
+    if (this.removalDialog.state !== 'ready') {
+      return false;
+    }
+    const relationships = this.removalDialog.relationships;
+    if (relationships.blockingJobs.length > 0) {
+      return false;
+    }
+    const replacements = this.activeReplacementAccounts;
+    if (relationships.isPrimary) {
+      if (replacements.length === 0) {
+        return this.removalMode === 'disable';
+      }
+      if (!this.isActiveReplacement(this.newPrimaryAccountId)) {
+        return false;
+      }
+    }
+    if (this.removalMode === 'fixed') {
+      return this.isActiveReplacement(this.replacementAccountId);
+    }
+    if (this.removalMode === 'follow_primary' && !relationships.isPrimary) {
+      return replacements.some((account) => account.isPrimary);
+    }
+    return true;
   }
 
   retryAccounts(): void {
@@ -219,37 +318,138 @@ export class UploadsComponent implements OnInit, OnDestroy {
     return this.checkingAccountIds.has(accountId);
   }
 
-  setPrimaryAccount(account: BiliAccount): void {
-    if (
-      account.state !== 'active' ||
-      account.isPrimary ||
-      this.selectingPrimaryAccountId !== null
-    ) {
+  openPrimaryDialog(account: BiliAccount): void {
+    if (account.state !== 'active' || account.isPrimary) {
       return;
     }
-    this.selectingPrimaryAccountId = account.id;
     this.actionError = null;
     this.actionMessage = null;
+    this.primaryDialog = { state: 'loading', account };
     this.changeDetector.markForCheck();
+    this.accountService
+      .getRelationships(account.id)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (relationships) => {
+          this.primaryDialog = { state: 'ready', account, relationships };
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.primaryDialog = {
+            state: 'error',
+            account,
+            message: this.errorMessage(error),
+          };
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  closePrimaryDialog(): void {
+    if (this.primaryDialog.state !== 'submitting') {
+      this.primaryDialog = { state: 'closed' };
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  confirmPrimaryAccount(): void {
+    if (this.primaryDialog.state !== 'ready') {
+      return;
+    }
+    const { account, relationships } = this.primaryDialog;
+    this.primaryDialog = { state: 'submitting', account, relationships };
     this.accountService
       .setPrimaryAccount(account.id)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: () => {
-          this.selectingPrimaryAccountId = null;
+          this.primaryDialog = { state: 'closed' };
           this.actionMessage = `${account.displayName} 已设为主账号`;
           this.loadAccounts();
         },
         error: (error: unknown) => {
-          this.selectingPrimaryAccountId = null;
+          this.primaryDialog = { state: 'ready', account, relationships };
           this.actionError = this.errorMessage(error);
           this.changeDetector.markForCheck();
         },
       });
   }
 
-  isSelectingPrimary(accountId: number): boolean {
-    return this.selectingPrimaryAccountId === accountId;
+  openRemovalDialog(account: BiliAccount): void {
+    this.actionError = null;
+    this.actionMessage = null;
+    this.removalMode = 'follow_primary';
+    this.replacementAccountId = null;
+    this.newPrimaryAccountId = null;
+    this.removalDialog = { state: 'loading', account };
+    this.changeDetector.markForCheck();
+    this.accountService
+      .getRelationships(account.id)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (relationships) => {
+          this.removalDialog = { state: 'ready', account, relationships };
+          if (
+            relationships.isPrimary &&
+            this.activeReplacementAccounts.length === 0
+          ) {
+            this.removalMode = 'disable';
+          }
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.removalDialog = {
+            state: 'error',
+            account,
+            message: this.errorMessage(error),
+          };
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  closeRemovalDialog(): void {
+    if (this.removalDialog.state !== 'submitting') {
+      this.removalDialog = { state: 'closed' };
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  removalModeChanged(mode: RemovalMode): void {
+    this.removalMode = mode;
+    if (mode !== 'fixed') {
+      this.replacementAccountId = null;
+    }
+  }
+
+  confirmRemoval(): void {
+    if (!this.canConfirmRemoval || this.removalDialog.state !== 'ready') {
+      return;
+    }
+    const { account, relationships } = this.removalDialog;
+    const request: AccountRemovalRequest = { mode: this.removalMode };
+    if (this.removalMode === 'fixed') {
+      request.replacementAccountId = this.replacementAccountId!;
+    }
+    if (relationships.isPrimary && this.newPrimaryAccountId !== null) {
+      request.newPrimaryAccountId = this.newPrimaryAccountId;
+    }
+    this.removalDialog = { state: 'submitting', account, relationships };
+    this.accountService
+      .removeAccount(account.id, request)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: () => {
+          this.removalDialog = { state: 'closed' };
+          this.actionMessage = `${account.displayName} 已移除`;
+          this.loadAccounts();
+        },
+        error: (error: unknown) => {
+          this.removalDialog = { state: 'ready', account, relationships };
+          this.actionError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
   }
 
   accountInitial(displayName: string): string {
@@ -333,6 +533,12 @@ export class UploadsComponent implements OnInit, OnDestroy {
 
   trackAccount(_index: number, account: BiliAccount): number {
     return account.id;
+  }
+
+  private isActiveReplacement(accountId: number | null): boolean {
+    return this.activeReplacementAccounts.some(
+      (account) => account.id === accountId
+    );
   }
 
   private loadAccounts(): void {
