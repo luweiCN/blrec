@@ -12,10 +12,11 @@ from blrec.setting.models import BiliUploadSettings
 
 from .accounts import AccountManager, AccountWriteGate
 from .categories import UploadCategoryCatalog
-from .comments import CommentPlanner, CommentPublisher
+from .collection_publish import CollectionPublisher
 from .collections import CollectionManager
-from .credentials import CredentialStore
+from .comments import CommentPlanner, CommentPublisher
 from .covers import CoverLibrary, CoverResolver
+from .credentials import CredentialStore
 from .crypto import CredentialCipher
 from .danmaku_import import DanmakuImporter
 from .danmaku_publish import DanmakuPublisher
@@ -82,6 +83,7 @@ class BiliAccountRuntime:
         self._cover_library: Optional[CoverLibrary] = None
         self._cover_resolver: Optional[CoverResolver] = None
         self._collection_manager: Optional[CollectionManager] = None
+        self._collection_publisher: Optional[CollectionPublisher] = None
         self._review_watcher: Optional[ReviewWatcher] = None
         self._comment_planner: Optional[CommentPlanner] = None
         self._comment_publisher: Optional[CommentPublisher] = None
@@ -129,6 +131,10 @@ class BiliAccountRuntime:
     @property
     def collection_manager(self) -> Optional[CollectionManager]:
         return self._collection_manager
+
+    @property
+    def collection_publisher(self) -> Optional[CollectionPublisher]:
+        return self._collection_publisher
 
     @property
     def review_watcher(self) -> Optional[ReviewWatcher]:
@@ -216,6 +222,16 @@ class BiliAccountRuntime:
             async def load_bundle(account_id: int) -> Any:
                 return await store.get(account_id=account_id, cipher=cipher)
 
+            cover_library = CoverLibrary(
+                database, Path(database.path).parent / 'cover-assets', clock=self._clock
+            )
+            cover_resolver = CoverResolver(
+                database,
+                cover_library,
+                protocol,
+                bundle_loader=load_bundle,
+                clock=self._clock,
+            )
             coordinator = UploadCoordinator(
                 database,
                 protocol,
@@ -227,6 +243,7 @@ class BiliAccountRuntime:
                 danmaku_backfill_enabled=(
                     lambda: self._settings.danmaku_backfill_enabled
                 ),
+                cover_resolver=cover_resolver,
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
             )
@@ -234,19 +251,13 @@ class BiliAccountRuntime:
             category_catalog = UploadCategoryCatalog(
                 database, protocol, bundle_loader=load_bundle, clock=self._clock
             )
-            cover_library = CoverLibrary(
-                database, Path(database.path).parent / 'cover-assets', clock=self._clock
-            )
-            cover_resolver = CoverResolver(
-                database,
-                cover_library,
-                protocol,
-                bundle_loader=load_bundle,
-                clock=self._clock,
-            )
             collection_manager = CollectionManager(
                 database, protocol, cover_resolver, bundle_loader=load_bundle
             )
+            collection_publisher = CollectionPublisher(
+                database, protocol, bundle_loader=load_bundle, clock=self._clock
+            )
+            await collection_publisher.recover_interrupted()
             comment_planner = CommentPlanner(database, clock=self._clock)
             comment_publisher = CommentPublisher(
                 database,
@@ -279,6 +290,7 @@ class BiliAccountRuntime:
                 bundle_loader=load_bundle,
                 comment_branch=comment_planner,
                 danmaku_branch=danmaku_importer,
+                collection_branch=collection_publisher,
                 clock=self._clock,
             )
         except Exception:
@@ -297,6 +309,7 @@ class BiliAccountRuntime:
         self._cover_library = cover_library
         self._cover_resolver = cover_resolver
         self._collection_manager = collection_manager
+        self._collection_publisher = collection_publisher
         self._review_watcher = review_watcher
         self._comment_planner = comment_planner
         self._comment_publisher = comment_publisher
@@ -347,6 +360,7 @@ class BiliAccountRuntime:
         self._cover_library = None
         self._cover_resolver = None
         self._collection_manager = None
+        self._collection_publisher = None
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None
@@ -436,6 +450,11 @@ class BiliAccountRuntime:
         await self._stop_upload_worker()
         self._coordinator = None
         self._policy_manager = None
+        self._category_catalog = None
+        self._cover_library = None
+        self._cover_resolver = None
+        self._collection_manager = None
+        self._collection_publisher = None
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None

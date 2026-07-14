@@ -17,6 +17,13 @@ from .accounts import (
     AccountWriteGate,
     CredentialVersionChanged,
 )
+from .covers import (
+    CoverAssetNotFound,
+    CoverResolutionError,
+    CoverResolver,
+    InvalidCover,
+    StoredCoverUnavailable,
+)
 from .credentials import CredentialNotFound
 from .crypto import CredentialBundle, InvalidCredentialBundle, InvalidCredentialKey
 from .database import BiliUploadDatabase, LeaseClaim, LeaseLost
@@ -70,6 +77,7 @@ class UploadCoordinator:
         auto_upload_enabled: _FeatureSwitch,
         auto_comment_enabled: _FeatureSwitch,
         danmaku_backfill_enabled: _FeatureSwitch,
+        cover_resolver: CoverResolver,
         worker_id: Optional[str] = None,
         stability_seconds: int = 30,
         clock: Callable[[], float] = time.time,
@@ -85,6 +93,7 @@ class UploadCoordinator:
         self._auto_upload_enabled = auto_upload_enabled
         self._auto_comment_enabled = auto_comment_enabled
         self._danmaku_backfill_enabled = danmaku_backfill_enabled
+        self._cover_resolver = cover_resolver
         self._worker_id = worker_id or 'upload-{}'.format(uuid.uuid4().hex)
         self._stability_seconds = stability_seconds
         self._clock = clock
@@ -108,6 +117,8 @@ class UploadCoordinator:
             'policy.publish_dynamic,policy.no_reprint,policy.up_selection_reply,'
             'policy.up_close_reply,policy.up_close_danmu,policy.auto_comment,'
             'policy.danmaku_backfill,policy.filter_json,'
+            'policy.collection_season_id,policy.collection_section_id,'
+            'policy.cover_mode,policy.cover_asset_id,policy.publish_delay_seconds,'
             'policy.updated_at AS policy_updated_at,'
             'account.id AS resolved_account_id,'
             'account.uid AS resolved_account_uid,'
@@ -281,14 +292,20 @@ class UploadCoordinator:
             cursor = connection.execute(
                 'INSERT INTO upload_jobs('
                 'session_id,account_id,policy_snapshot_json,state,submit_state,'
-                'comment_branch_state,danmaku_branch_state,created_at,updated_at) '
-                'VALUES(?,?,?,\'ready\',\'prepared\',?,?,?,?)',
+                'comment_branch_state,danmaku_branch_state,'
+                'collection_branch_state,created_at,updated_at) '
+                'VALUES(?,?,?,\'ready\',\'prepared\',?,?,?,?,?)',
                 (
                     int(row['session_id']),
                     resolved_account_id,
                     snapshot_json,
                     'pending' if bool(row['auto_comment']) else 'disabled',
                     'pending' if bool(row['danmaku_backfill']) else 'disabled',
+                    (
+                        'pending'
+                        if row['collection_section_id'] is not None
+                        else 'disabled'
+                    ),
                     now,
                     now,
                 ),
@@ -378,6 +395,29 @@ class UploadCoordinator:
             raise InvalidUploadPolicy('creation statement settings are inconsistent')
         if not isinstance(filters, (dict, list)):
             raise InvalidUploadPolicy('upload filters must be structured JSON')
+        collection_season_id = row['collection_season_id']
+        collection_section_id = row['collection_section_id']
+        if (collection_season_id is None) != (collection_section_id is None):
+            raise InvalidUploadPolicy('collection selection is inconsistent')
+        if collection_season_id is not None and (
+            int(collection_season_id) <= 0 or int(collection_section_id) <= 0
+        ):
+            raise InvalidUploadPolicy('collection selection is invalid')
+        cover_mode = str(row['cover_mode'])
+        cover_asset_id = row['cover_asset_id']
+        if cover_mode == 'live':
+            if cover_asset_id is not None:
+                raise InvalidUploadPolicy('live cover selection is invalid')
+        elif cover_mode == 'custom':
+            if cover_asset_id is None or int(cover_asset_id) <= 0:
+                raise InvalidUploadPolicy('custom cover selection is invalid')
+        else:
+            raise InvalidUploadPolicy('cover selection is invalid')
+        publish_delay_seconds = int(row['publish_delay_seconds'])
+        if publish_delay_seconds != 0 and not (
+            7200 <= publish_delay_seconds <= 15 * 24 * 60 * 60
+        ):
+            raise InvalidUploadPolicy('publish delay is invalid')
         fingerprint_source = {
             'account_id': int(row['resolved_account_id']),
             'broadcast_session_key': str(row['broadcast_session_key']),
@@ -393,7 +433,7 @@ class UploadCoordinator:
             ).encode('utf8')
         ).hexdigest()
         return {
-            'format_version': 3,
+            'format_version': 4,
             'fingerprint': fingerprint,
             'session_id': int(row['session_id']),
             'room_id': int(row['room_id']),
@@ -418,6 +458,15 @@ class UploadCoordinator:
             'up_close_danmu': bool(row['up_close_danmu']),
             'cover_url': str(row['cover_url']),
             'cover_path': None if row['cover_path'] is None else str(row['cover_path']),
+            'cover_mode': cover_mode,
+            'cover_asset_id': (None if cover_asset_id is None else int(cover_asset_id)),
+            'collection_season_id': (
+                None if collection_season_id is None else int(collection_season_id)
+            ),
+            'collection_section_id': (
+                None if collection_section_id is None else int(collection_section_id)
+            ),
+            'publish_delay_seconds': publish_delay_seconds,
             'auto_comment': bool(row['auto_comment']),
             'danmaku_backfill': bool(row['danmaku_backfill']),
             'filters': filters,
@@ -470,11 +519,13 @@ class UploadCoordinator:
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
                 payload = await self._submit_payload(job)
+                scheduled_publish_at = payload.get('dtime')
                 await self._update_job(
                     claim,
                     {
                         'state': 'submitting',
                         'submit_state': 'in_flight',
+                        'scheduled_publish_at': scheduled_publish_at,
                         'updated_at': int(self._clock()),
                     },
                 )
@@ -506,6 +557,14 @@ class UploadCoordinator:
             return
         except (CredentialNotFound, InvalidCredentialBundle, InvalidCredentialKey):
             await self._pause_job(claim, '投稿账号凭据无法读取')
+            return
+        except (
+            CoverAssetNotFound,
+            CoverResolutionError,
+            InvalidCover,
+            StoredCoverUnavailable,
+        ):
+            await self._pause_job(claim, '投稿封面无法读取或上传')
             return
         except BiliApiError as error:
             await self._update_job(
@@ -553,6 +612,7 @@ class UploadCoordinator:
             1,
             2,
             3,
+            4,
         ):
             raise ProtocolContractError('invalid upload policy snapshot')
         format_version = int(snapshot['format_version'])
@@ -621,8 +681,12 @@ class UploadCoordinator:
             creation_statement_id = -2 if copyright_value == 2 else -1
             if copyright_value == 2:
                 no_reprint = 0
+        if format_version == 4:
+            cover = await self._resolve_cover(job, snapshot)
+        else:
+            cover = snapshot.get('cover_url', '')
         payload: Dict[str, Any] = {
-            'cover': snapshot.get('cover_url', ''),
+            'cover': cover,
             'title': snapshot.get('title'),
             'copyright': copyright_value,
             'tid': snapshot.get('tid'),
@@ -651,7 +715,37 @@ class UploadCoordinator:
             if not isinstance(source, str) or not source:
                 raise ProtocolContractError('invalid upload policy snapshot')
             payload['source'] = source
+        if format_version == 4:
+            publish_delay_seconds = snapshot.get('publish_delay_seconds')
+            if type(publish_delay_seconds) is not int or (
+                publish_delay_seconds != 0
+                and not 7200 <= publish_delay_seconds <= 15 * 24 * 60 * 60
+            ):
+                raise ProtocolContractError('invalid upload policy snapshot')
+            if publish_delay_seconds:
+                payload['dtime'] = int(self._clock()) + publish_delay_seconds
         return payload
+
+    async def _resolve_cover(self, job: _Job, snapshot: Mapping[str, Any]) -> str:
+        if snapshot.get('account_id') != job.account_id:
+            raise ProtocolContractError('invalid upload policy snapshot')
+        cover_mode = snapshot.get('cover_mode')
+        if cover_mode == 'custom':
+            asset_id = snapshot.get('cover_asset_id')
+            if type(asset_id) is not int or asset_id <= 0:
+                raise ProtocolContractError('invalid upload policy snapshot')
+            return await self._cover_resolver.remote_url(asset_id, job.account_id)
+        if cover_mode != 'live' or snapshot.get('cover_asset_id') is not None:
+            raise ProtocolContractError('invalid upload policy snapshot')
+        local_path = snapshot.get('cover_path')
+        source_url = snapshot.get('cover_url')
+        if local_path is not None and not isinstance(local_path, str):
+            raise ProtocolContractError('invalid upload policy snapshot')
+        if not isinstance(source_url, str) or not source_url:
+            raise ProtocolContractError('invalid upload policy snapshot')
+        return await self._cover_resolver.live_url(
+            job.account_id, local_path=local_path, source_url=source_url
+        )
 
     async def _load_job(self, claim: LeaseClaim) -> _Job:
         row = await self._database.fetchone(
@@ -717,6 +811,7 @@ class UploadCoordinator:
             'bvid',
             'next_attempt_at',
             'review_reason',
+            'scheduled_publish_at',
             'state',
             'submit_state',
             'updated_at',

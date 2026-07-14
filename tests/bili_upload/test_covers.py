@@ -6,6 +6,7 @@ import pytest
 
 from blrec.bili_upload.covers import (
     CoverLibrary,
+    CoverResolutionError,
     CoverResolver,
     InvalidCover,
     StoredCoverUnavailable,
@@ -180,3 +181,106 @@ async def test_cover_resolver_does_not_cache_failed_upload(tmp_path: Path) -> No
         assert await database.scalar('SELECT COUNT(*) FROM cover_asset_uploads') == 0
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_prefers_the_recorded_local_image(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        local_cover = tmp_path / 'recorded.png'
+        local_cover.write_bytes(png())
+        protocol = FakeProtocol()
+        remote_calls = []
+
+        async def load_remote(url: str) -> bytes:
+            remote_calls.append(url)
+            return jpeg()
+
+        resolver = CoverResolver(
+            database,
+            CoverLibrary(database, tmp_path / 'covers'),
+            protocol,
+            bundle_loader=lambda account_id: async_value(
+                'bundle-{}'.format(account_id)
+            ),
+            remote_loader=load_remote,
+        )
+
+        result = await resolver.live_url(
+            1, local_path=str(local_cover), source_url='https://i0.hdslb.com/live.jpg'
+        )
+
+        assert result.startswith('https://archive.biliimg.com/')
+        assert remote_calls == []
+        assert protocol.calls == [('bundle-1', 'recorded.png', 'image/png', png())]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_downloads_a_trusted_source_when_local_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        protocol = FakeProtocol()
+        remote_calls = []
+
+        async def load_remote(url: str) -> bytes:
+            remote_calls.append(url)
+            return jpeg()
+
+        resolver = CoverResolver(
+            database,
+            CoverLibrary(database, tmp_path / 'covers'),
+            protocol,
+            bundle_loader=lambda account_id: async_value(
+                'bundle-{}'.format(account_id)
+            ),
+            remote_loader=load_remote,
+        )
+
+        await resolver.live_url(
+            1,
+            local_path=str(tmp_path / 'missing.jpg'),
+            source_url='https://i0.hdslb.com/live.jpg',
+        )
+
+        assert remote_calls == ['https://i0.hdslb.com/live.jpg']
+        assert protocol.calls == [('bundle-1', 'live-cover.jpg', 'image/jpeg', jpeg())]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_rejects_an_untrusted_remote_source(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        remote_calls = []
+
+        async def load_remote(url: str) -> bytes:
+            remote_calls.append(url)
+            return jpeg()
+
+        resolver = CoverResolver(
+            database,
+            CoverLibrary(database, tmp_path / 'covers'),
+            FakeProtocol(),
+            bundle_loader=lambda account_id: async_value(account_id),
+            remote_loader=load_remote,
+        )
+
+        with pytest.raises(CoverResolutionError, match='trusted'):
+            await resolver.live_url(
+                1, local_path=None, source_url='https://example.com/cover.jpg'
+            )
+        assert remote_calls == []
+    finally:
+        await database.close()
+
+
+async def async_value(value: Any) -> Any:
+    return value

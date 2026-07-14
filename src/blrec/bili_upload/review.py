@@ -41,6 +41,7 @@ class _WaitingJob:
     bvid: Optional[str]
     comment_branch_state: str
     danmaku_branch_state: str
+    collection_branch_state: str
 
 
 class ReviewWatcher:
@@ -56,6 +57,7 @@ class ReviewWatcher:
         bundle_loader: Callable[[int], Awaitable[Any]],
         comment_branch: PostReviewBranch,
         danmaku_branch: PostReviewBranch,
+        collection_branch: PostReviewBranch,
         poll_interval_seconds: int = 900,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -66,6 +68,7 @@ class ReviewWatcher:
         self._bundle_loader = bundle_loader
         self._comment_branch = comment_branch
         self._danmaku_branch = danmaku_branch
+        self._collection_branch = collection_branch
         self._poll_interval_seconds = poll_interval_seconds
         self._clock = clock
         self._next_poll_at: Dict[int, int] = {}
@@ -74,6 +77,7 @@ class ReviewWatcher:
         rows = await self._database.fetchall(
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
             'job.comment_branch_state,job.danmaku_branch_state,'
+            'job.collection_branch_state,'
             'account.uid AS account_uid,account.state AS account_state '
             'FROM upload_jobs job JOIN bili_accounts account '
             'ON account.id=job.account_id '
@@ -142,6 +146,8 @@ class ReviewWatcher:
             return await self._reject(job, reason)
         if state not in self.APPROVED_STATES:
             waiting_reason = self._public_reason(archive)
+            if waiting_reason is None and state == -40:
+                waiting_reason = '等待定时发布'
             if waiting_reason:
                 await self._waiting_reason(job, waiting_reason)
             return False
@@ -274,6 +280,11 @@ class ReviewWatcher:
         branches = (
             ('comment_branch_state', job.comment_branch_state, self._comment_branch),
             ('danmaku_branch_state', job.danmaku_branch_state, self._danmaku_branch),
+            (
+                'collection_branch_state',
+                job.collection_branch_state,
+                self._collection_branch,
+            ),
         )
         for column, state, branch in branches:
             if state != 'pending':
@@ -288,6 +299,15 @@ class ReviewWatcher:
             reason = '审核已通过，但自动评论任务创建失败'
         elif column == 'danmaku_branch_state':
             reason = '审核已通过，但弹幕回灌任务创建失败'
+        elif column == 'collection_branch_state':
+            await self._database.execute(
+                "UPDATE upload_jobs SET collection_branch_state='failed',"
+                'collection_error=?,updated_at=? '
+                "WHERE id=? AND state='approved' "
+                "AND collection_branch_state='pending'",
+                ('审核已通过，但加入合集失败', int(self._clock()), job_id),
+            )
+            return
         else:
             raise ValueError('invalid post-review branch')
 
@@ -389,6 +409,7 @@ class ReviewWatcher:
             bvid=None if row['bvid'] is None else str(row['bvid']),
             comment_branch_state=str(row['comment_branch_state']),
             danmaku_branch_state=str(row['danmaku_branch_state']),
+            collection_branch_state=str(row['collection_branch_state']),
         )
 
     @staticmethod

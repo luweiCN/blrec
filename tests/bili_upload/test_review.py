@@ -68,6 +68,7 @@ async def seed_waiting_job(
     filenames: Sequence[str] = ('p1', 'p2'),
     comment_state: str = 'pending',
     danmaku_state: str = 'pending',
+    collection_state: str = 'disabled',
 ) -> None:
     await database.execute(
         'INSERT OR IGNORE INTO bili_accounts('
@@ -84,9 +85,19 @@ async def seed_waiting_job(
     await database.execute(
         'INSERT INTO upload_jobs('
         'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
-        'comment_branch_state,danmaku_branch_state,aid,bvid,created_at,updated_at) '
-        'VALUES(?,?,?,\'{}\',\'waiting_review\',\'confirmed\',?,?,?,?,1,1)',
-        (job_id, job_id, account_id, comment_state, danmaku_state, aid, bvid),
+        'comment_branch_state,danmaku_branch_state,collection_branch_state,'
+        'aid,bvid,created_at,updated_at) '
+        'VALUES(?,?,?,\'{}\',\'waiting_review\',\'confirmed\',?,?,?,?,?,1,1)',
+        (
+            job_id,
+            job_id,
+            account_id,
+            comment_state,
+            danmaku_state,
+            collection_state,
+            aid,
+            bvid,
+        ),
     )
     for part_index, filename in enumerate(filenames, 1):
         await database.execute(
@@ -148,6 +159,7 @@ def watcher(
     clock: Optional[Clock] = None,
     comment_branch: Optional[FakeBranch] = None,
     danmaku_branch: Optional[FakeBranch] = None,
+    collection_branch: Optional[FakeBranch] = None,
 ) -> ReviewWatcher:
     protocol = FakeProtocol(
         {1: response},
@@ -162,6 +174,7 @@ def watcher(
         bundle_loader=lambda account_id: async_value(account_id),
         comment_branch=comment_branch or FakeBranch(),
         danmaku_branch=danmaku_branch or FakeBranch(),
+        collection_branch=collection_branch or FakeBranch(),
         clock=clock or Clock(),
     )
 
@@ -334,6 +347,7 @@ async def test_still_reviewing_is_polled_at_most_once_per_interval(
             bundle_loader=lambda account_id: async_value(account_id),
             comment_branch=FakeBranch(),
             danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
             clock=clock,
         )
 
@@ -390,6 +404,92 @@ async def test_comment_branch_failure_does_not_suppress_danmaku_branch(
 
 
 @pytest.mark.asyncio
+async def test_collection_branch_starts_only_after_review_and_cid_binding(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    collection = FakeBranch()
+    try:
+        await seed_waiting_job(
+            database,
+            filenames=('p1',),
+            comment_state='disabled',
+            danmaku_state='disabled',
+            collection_state='pending',
+        )
+        review = watcher(
+            database,
+            archive_response(),
+            detail=archive_detail([video('p1', 101, 1)]),
+            collection_branch=collection,
+        )
+
+        assert await review.run_once() == 1
+
+        assert collection.calls == [1]
+        assert await database.scalar('SELECT cid FROM upload_parts WHERE job_id=1') == (
+            101
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_collection_branch_failure_does_not_fail_an_approved_archive(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    collection = FakeBranch(failing_jobs=(1,))
+    try:
+        await seed_waiting_job(
+            database,
+            filenames=('p1',),
+            comment_state='disabled',
+            danmaku_state='disabled',
+            collection_state='pending',
+        )
+        review = watcher(
+            database,
+            archive_response(),
+            detail=archive_detail([video('p1', 101, 1)]),
+            collection_branch=collection,
+        )
+
+        await review.run_once()
+
+        row = await database.fetchone(
+            'SELECT state,collection_branch_state,collection_error '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'approved',
+            'collection_branch_state': 'failed',
+            'collection_error': '审核已通过，但加入合集失败',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_archive_is_explained_while_waiting(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = watcher(database, archive_response(state=-40))
+
+        assert await review.run_once() == 0
+
+        row = await database.fetchone(
+            'SELECT state,review_reason FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {'state': 'waiting_review', 'review_reason': '等待定时发布'}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_identity_conflict_pauses_instead_of_binding_archive(
     tmp_path: Path,
 ) -> None:
@@ -435,6 +535,7 @@ async def test_waiting_jobs_are_grouped_into_one_read_per_account(
             bundle_loader=lambda account_id: async_value(account_id),
             comment_branch=FakeBranch(),
             danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
             clock=Clock(),
         )
 

@@ -44,6 +44,24 @@ class FakeProtocol:
         return {'code': 0, 'data': {'aid': 303, 'bvid': 'BVfixture'}}
 
 
+class FakeCoverResolver:
+    def __init__(self) -> None:
+        self.custom_calls = []
+        self.live_calls = []
+
+    async def remote_url(self, asset_id: int, account_id: int) -> str:
+        self.custom_calls.append((asset_id, account_id))
+        return 'https://archive.biliimg.com/custom-{}-{}.jpg'.format(
+            asset_id, account_id
+        )
+
+    async def live_url(
+        self, account_id: int, *, local_path: Optional[str], source_url: str
+    ) -> str:
+        self.live_calls.append((account_id, local_path, source_url))
+        return 'https://archive.biliimg.com/live.jpg'
+
+
 class MutableClock:
     def __init__(self, now: int) -> None:
         self.now = now
@@ -71,6 +89,12 @@ async def seed_ready_session(
     up_selection_reply: bool = False,
     up_close_reply: bool = False,
     up_close_danmu: bool = False,
+    collection_season_id: Optional[int] = None,
+    collection_section_id: Optional[int] = None,
+    cover_mode: str = 'live',
+    cover_asset_id: Optional[int] = None,
+    publish_delay_seconds: int = 0,
+    cover_path: Optional[str] = None,
 ) -> List[Path]:
     copyright_value = (
         2 if creation_statement_id == -2 else 1 if original_authorization else 3
@@ -82,6 +106,24 @@ async def seed_ready_session(
         "state,created_at,updated_at) "
         "VALUES(1,42,'投稿账号',X'00',3,'k','active',1,1)"
     )
+    if cover_asset_id is not None:
+        await database.execute(
+            'INSERT INTO cover_assets('
+            'id,sha256,storage_path,filename,mime_type,width,height,byte_size,'
+            'created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            (
+                cover_asset_id,
+                'a' * 64,
+                str(tmp_path / 'cover.jpg'),
+                'cover.jpg',
+                'image/jpeg',
+                1600,
+                1000,
+                1,
+                1,
+                1,
+            ),
+        )
     await database.execute(
         'INSERT INTO bili_account_selection(id,primary_account_id) VALUES(1,1)'
     )
@@ -92,9 +134,12 @@ async def seed_ready_session(
         'creation_statement_id,original_authorization,copyright,source,'
         'is_only_self,publish_dynamic,no_reprint,'
         'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
-        'danmaku_backfill,filter_json,created_at,updated_at) '
+        'danmaku_backfill,filter_json,created_at,updated_at,'
+        'collection_season_id,collection_section_id,cover_mode,cover_asset_id,'
+        'publish_delay_seconds) '
         "VALUES(100,'primary',NULL,1,'{{ title }} 录播',"
-        "'主播 {{ anchor_name }}',?,?,17,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}',1,1)",
+        "'主播 {{ anchor_name }}',?,?,17,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}',1,1,"
+        '?,?,?,?,?)',
         (
             part_title_template,
             dynamic_template,
@@ -111,16 +156,22 @@ async def seed_ready_session(
             int(up_close_danmu),
             int(auto_comment),
             int(danmaku_backfill),
+            collection_season_id,
+            collection_section_id,
+            cover_mode,
+            cover_asset_id,
+            publish_delay_seconds,
         ),
     )
     await database.execute(
         'INSERT INTO recording_sessions('
         'id,room_id,broadcast_session_key,live_start_time,state,started_at,'
-        'ended_at,title,cover_url,anchor_uid,anchor_name,area_id,area_name,'
+        'ended_at,title,cover_url,cover_path,anchor_uid,anchor_name,area_id,area_name,'
         'parent_area_id,parent_area_name,live_end_time) '
         "VALUES(1,100,'100:800',800,'closed',800,900,'测试直播',"
-        "'https://i0.hdslb.com/cover.jpg',42,'测试主播',17,'单机游戏',"
-        "1,'游戏',900)"
+        "'https://i0.hdslb.com/cover.jpg',?,42,'测试主播',17,'单机游戏',"
+        "1,'游戏',900)",
+        (cover_path,),
     )
     await database.execute(
         "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
@@ -162,6 +213,7 @@ def coordinator(
     *,
     auto_comment_enabled: bool = False,
     danmaku_backfill_enabled: bool = False,
+    cover_resolver: Optional[FakeCoverResolver] = None,
 ) -> UploadCoordinator:
     async def load_bundle(account_id: int) -> Any:
         assert account_id == 1
@@ -176,6 +228,7 @@ def coordinator(
         auto_upload_enabled=True,
         auto_comment_enabled=auto_comment_enabled,
         danmaku_backfill_enabled=danmaku_backfill_enabled,
+        cover_resolver=cover_resolver or FakeCoverResolver(),
         worker_id='test-worker',
         clock=clock,
     )
@@ -208,13 +261,15 @@ async def test_create_ready_job_locks_account_policy_and_part_order(
         assert str(job['submit_state']) == 'prepared'
         assert snapshot['account_id'] == 1
         assert snapshot['account_credential_version_at_creation'] == 3
-        assert snapshot['format_version'] == 3
+        assert snapshot['format_version'] == 4
         assert snapshot['title'] == '测试直播 录播'
         assert snapshot['description'] == '主播 测试主播'
         assert snapshot['dynamic'] == '测试直播｜测试主播'
         assert snapshot['creation_statement_id'] == -1
         assert snapshot['original_authorization'] is True
         assert snapshot['publish_dynamic'] is True
+        assert snapshot['cover_mode'] == 'live'
+        assert snapshot['publish_delay_seconds'] == 0
         assert snapshot['part_titles'] == ['P1', 'P2']
         parts = await database.fetchall(
             'SELECT part_index,artifact_state,upload_state,file_identity '
@@ -310,6 +365,8 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
         assert payload['up_selection_reply'] is False
         assert payload['up_close_reply'] is False
         assert payload['up_close_danmu'] is False
+        assert payload['cover'] == 'https://archive.biliimg.com/live.jpg'
+        assert 'dtime' not in payload
         job = await database.fetchone(
             'SELECT state,submit_state,aid,bvid FROM upload_jobs WHERE id=1'
         )
@@ -320,6 +377,88 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
             'aid': 303,
             'bvid': 'BVfixture',
         }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_custom_cover_schedule_and_collection_are_frozen_into_job(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(
+            database,
+            tmp_path,
+            collection_season_id=20,
+            collection_section_id=21,
+            cover_mode='custom',
+            cover_asset_id=7,
+            publish_delay_seconds=7200,
+        )
+        clock = MutableClock(1000)
+        covers = FakeCoverResolver()
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), clock, cover_resolver=covers
+        )
+
+        assert await worker.create_ready_jobs() == [1]
+        created = await database.fetchone(
+            'SELECT policy_snapshot_json,collection_branch_state,'
+            'scheduled_publish_at FROM upload_jobs WHERE id=1'
+        )
+        assert created is not None
+        snapshot = json.loads(str(created['policy_snapshot_json']))
+        assert snapshot['collection_season_id'] == 20
+        assert snapshot['collection_section_id'] == 21
+        assert snapshot['cover_mode'] == 'custom'
+        assert snapshot['cover_asset_id'] == 7
+        assert snapshot['publish_delay_seconds'] == 7200
+        assert created['collection_branch_state'] == 'pending'
+        assert created['scheduled_publish_at'] is None
+
+        await worker.run_once()
+
+        assert covers.custom_calls == [(7, 1)]
+        assert covers.live_calls == []
+        assert protocol.submit_calls[0]['cover'] == (
+            'https://archive.biliimg.com/custom-7-1.jpg'
+        )
+        assert protocol.submit_calls[0]['dtime'] == 8200
+        assert (
+            await database.scalar(
+                'SELECT scheduled_publish_at FROM upload_jobs WHERE id=1'
+            )
+            == 8200
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_uses_recorded_local_path_before_remote_url(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        local_cover = str(tmp_path / 'recorded-cover.jpg')
+        await seed_ready_session(database, tmp_path, cover_path=local_cover)
+        covers = FakeCoverResolver()
+        worker = coordinator(
+            database,
+            FakeProtocol(),
+            FakeUploader(database),
+            MutableClock(1000),
+            cover_resolver=covers,
+        )
+        await worker.create_ready_jobs()
+
+        await worker.run_once()
+
+        assert covers.live_calls == [(1, local_cover, 'https://i0.hdslb.com/cover.jpg')]
     finally:
         await database.close()
 

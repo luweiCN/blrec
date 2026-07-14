@@ -129,6 +129,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.cover_library is not None
         assert runtime.cover_resolver is not None
         assert runtime.collection_manager is not None
+        assert runtime.collection_publisher is not None
         assert runtime.review_watcher is not None
         assert runtime.comment_planner is not None
         assert runtime.comment_publisher is not None
@@ -166,6 +167,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.cover_library is None
     assert runtime.cover_resolver is None
     assert runtime.collection_manager is None
+    assert runtime.collection_publisher is None
     assert runtime.review_watcher is None
     assert runtime.comment_planner is None
     assert runtime.comment_publisher is None

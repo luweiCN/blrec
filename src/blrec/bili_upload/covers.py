@@ -8,6 +8,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from urllib.parse import urlsplit
+
+import aiohttp
 
 from .database import BiliUploadDatabase
 
@@ -17,6 +20,7 @@ __all__ = (
     'CoverAssetView',
     'CoverLibrary',
     'CoverResolver',
+    'CoverResolutionError',
     'InvalidCover',
     'StoredCoverUnavailable',
 )
@@ -31,6 +35,10 @@ class CoverAssetNotFound(RuntimeError):
 
 
 class StoredCoverUnavailable(RuntimeError):
+    pass
+
+
+class CoverResolutionError(RuntimeError):
     pass
 
 
@@ -267,12 +275,14 @@ class CoverResolver:
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
         clock: Callable[[], float] = time.time,
+        remote_loader: Optional[Callable[[str], Awaitable[bytes]]] = None,
     ) -> None:
         self._database = database
         self._library = library
         self._protocol = protocol
         self._bundle_loader = bundle_loader
         self._clock = clock
+        self._remote_loader = remote_loader or self._download
         self._locks: Dict[Tuple[int, int], asyncio.Lock] = {}
 
     async def remote_url(self, asset_id: int, account_id: int) -> str:
@@ -310,6 +320,39 @@ class CoverResolver:
             bundle, filename=filename, mime_type=mime_type, content=content
         )
 
+    async def live_url(
+        self, account_id: int, *, local_path: Optional[str], source_url: str
+    ) -> str:
+        content: Optional[bytes] = None
+        filename = 'live-cover.jpg'
+        if local_path:
+            path = Path(local_path)
+            if path.is_file():
+                loop = asyncio.get_running_loop()
+                content = await loop.run_in_executor(None, self._read_limited, path)
+                filename = path.name or filename
+        if content is None:
+            self._validate_live_cover_url(source_url)
+            try:
+                content = await self._remote_loader(source_url)
+            except CoverResolutionError:
+                raise
+            except Exception:
+                raise CoverResolutionError('live cover download failed') from None
+        if not content or len(content) > CoverLibrary.MAX_BYTES:
+            raise CoverResolutionError('live cover exceeds the supported size')
+        try:
+            mime_type, _width, _height, extension = CoverLibrary._image_info(content)
+        except InvalidCover:
+            raise CoverResolutionError(
+                'live cover is not a JPEG or PNG image'
+            ) from None
+        if filename == 'live-cover.jpg':
+            filename = 'live-cover.{}'.format(extension)
+        return await self.upload_transient(
+            account_id, filename=filename, mime_type=mime_type, content=content
+        )
+
     async def _cached(self, asset_id: int, account_id: int) -> Optional[str]:
         value = await self._database.scalar(
             'SELECT remote_url FROM cover_asset_uploads '
@@ -317,3 +360,40 @@ class CoverResolver:
             (asset_id, account_id),
         )
         return None if value is None else str(value)
+
+    @staticmethod
+    def _read_limited(path: Path) -> bytes:
+        if path.stat().st_size > CoverLibrary.MAX_BYTES:
+            raise CoverResolutionError('live cover exceeds the supported size')
+        return path.read_bytes()
+
+    @staticmethod
+    def _validate_live_cover_url(url: str) -> None:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or '').lower()
+        if (
+            parsed.scheme != 'https'
+            or parsed.username is not None
+            or parsed.password is not None
+            or not any(
+                host == suffix or host.endswith('.' + suffix)
+                for suffix in ('hdslb.com', 'biliimg.com')
+            )
+        ):
+            raise CoverResolutionError('live cover URL is not trusted')
+
+    @staticmethod
+    async def _download(url: str) -> bytes:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=False) as response:
+                if response.status != 200:
+                    raise CoverResolutionError('live cover download failed')
+                content = bytearray()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    content.extend(chunk)
+                    if len(content) > CoverLibrary.MAX_BYTES:
+                        raise CoverResolutionError(
+                            'live cover exceeds the supported size'
+                        )
+                return bytes(content)
