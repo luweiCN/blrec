@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Dict, Iterator, Sequence, Tuple
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,13 @@ from blrec.bili_upload.journal import (
     RecordingSession,
     UploadJobProgress,
     UploadPartProgress,
+)
+from blrec.bili_upload.recording_content import (
+    DanmakuLine,
+    DanmakuPage,
+    MediaResource,
+    RecordingContentNotFound,
+    RecordingContentUnavailable,
 )
 from blrec.web import security
 from blrec.web.routers import recording_sessions
@@ -120,26 +128,81 @@ class FakeJournal:
         }
 
 
+class FakeContentReader:
+    def __init__(self, media_path: Path) -> None:
+        self.media_path = media_path
+
+    async def media(self, part_id: int) -> MediaResource:
+        if part_id == 404:
+            raise RecordingContentNotFound('录制分 P 不存在')
+        if part_id == 409:
+            raise RecordingContentUnavailable('该分 P 的本地视频不可用')
+        return MediaResource(
+            path=str(self.media_path),
+            size=10,
+            content_type='video/x-flv',
+            recording=True,
+            part_index=1,
+            bvid=None,
+            remote_available=False,
+        )
+
+    async def danmaku(self, part_id: int, *, cursor: int, limit: int) -> DanmakuPage:
+        assert part_id == 2
+        assert cursor == 3
+        assert limit == 2
+        return DanmakuPage(
+            items=(
+                DanmakuLine(
+                    index=3,
+                    progress_ms=1_250,
+                    mode=1,
+                    font_size=25,
+                    color=16_777_215,
+                    content='第一条',
+                ),
+                DanmakuLine(
+                    index=4,
+                    progress_ms=2_500,
+                    mode=4,
+                    font_size=18,
+                    color=255,
+                    content='<script>不会执行</script>',
+                ),
+            ),
+            next_cursor=5,
+        )
+
+
 @pytest.fixture(autouse=True)
 def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
     old_reason = recording_sessions.unavailable_reason
     old_publisher = recording_sessions.danmaku_publisher
+    had_content_reader = hasattr(recording_sessions, 'content_reader')
+    old_content_reader = getattr(recording_sessions, 'content_reader', None)
     old_key = security.api_key
     yield
     recording_sessions.journal = old_journal
     recording_sessions.unavailable_reason = old_reason
     recording_sessions.danmaku_publisher = old_publisher
+    if had_content_reader:
+        recording_sessions.content_reader = old_content_reader
+    elif hasattr(recording_sessions, 'content_reader'):
+        delattr(recording_sessions, 'content_reader')
     security.api_key = old_key
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(tmp_path: Path) -> Iterator[TestClient]:
     api = FastAPI()
     api.include_router(recording_sessions.router, prefix='/api/v1')
     security.api_key = 'test-api-key'
     recording_sessions.journal = FakeJournal()  # type: ignore[assignment]
     recording_sessions.danmaku_publisher = AsyncMock()
+    media = tmp_path / 'part.flv'
+    media.write_bytes(b'0123456789')
+    recording_sessions.content_reader = FakeContentReader(media)
     recording_sessions.unavailable_reason = None
     with TestClient(api) as value:
         yield value
@@ -283,3 +346,102 @@ def test_unknown_danmaku_decision_requires_auth_and_reason(client: TestClient) -
         json={'action': 'retry_accept_duplicate_risk', 'reason': ''},
     )
     assert invalid.status_code == 422
+
+
+def test_media_returns_the_fixed_file_snapshot(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    assert response.content == b'0123456789'
+    assert response.headers['accept-ranges'] == 'bytes'
+    assert response.headers['content-length'] == '10'
+    assert response.headers['content-type'] == 'video/x-flv'
+
+
+def test_media_range_returns_the_requested_slice(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={'x-api-key': 'test-api-key', 'range': 'bytes=2-4'},
+    )
+
+    assert response.status_code == 206
+    assert response.headers['content-range'] == 'bytes 2-4/10'
+    assert response.headers['content-length'] == '3'
+    assert response.content == b'234'
+
+
+@pytest.mark.parametrize(
+    'value', ('bytes=20-30', 'bytes=4-2', 'bytes=0-1,4-5', 'items=0-1')
+)
+def test_media_rejects_invalid_or_unsatisfiable_ranges(
+    client: TestClient, value: str
+) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={'x-api-key': 'test-api-key', 'range': value},
+    )
+
+    assert response.status_code == 416
+    assert response.headers['content-range'] == 'bytes */10'
+
+
+def test_media_maps_missing_and_unavailable_parts(client: TestClient) -> None:
+    missing = client.get(
+        '/api/v1/recording-sessions/parts/404/media',
+        headers={'x-api-key': 'test-api-key'},
+    )
+    unavailable = client.get(
+        '/api/v1/recording-sessions/parts/409/media',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert missing.status_code == 404
+    assert unavailable.status_code == 409
+
+
+def test_media_requires_authentication(client: TestClient) -> None:
+    response = client.get('/api/v1/recording-sessions/parts/2/media')
+
+    assert response.status_code == 401
+
+
+def test_danmaku_returns_a_camel_case_page(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/danmaku?cursor=3&limit=2',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'items': [
+            {
+                'index': 3,
+                'progressMs': 1_250,
+                'mode': 1,
+                'fontSize': 25,
+                'color': 16_777_215,
+                'content': '第一条',
+            },
+            {
+                'index': 4,
+                'progressMs': 2_500,
+                'mode': 4,
+                'fontSize': 18,
+                'color': 255,
+                'content': '<script>不会执行</script>',
+            },
+        ],
+        'nextCursor': 5,
+    }
+
+
+def test_danmaku_rejects_pages_over_one_hundred(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/danmaku?cursor=0&limit=101',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 422

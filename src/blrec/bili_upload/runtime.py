@@ -21,6 +21,7 @@ from .journal import RecordingJournalBridge
 from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
+from .recording_content import RecordingContentReader
 from .review import ReviewWatcher
 from .signing import WbiSigner, WebSessionBuilder
 from .upload import UploadCoordinator
@@ -71,6 +72,7 @@ class BiliAccountRuntime:
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
         self._journal: Optional[RecordingJournalBridge] = None
+        self._content_reader: Optional[RecordingContentReader] = None
         self._coordinator: Optional[UploadCoordinator] = None
         self._policy_manager: Optional[RoomUploadPolicyManager] = None
         self._category_catalog: Optional[UploadCategoryCatalog] = None
@@ -93,6 +95,10 @@ class BiliAccountRuntime:
     @property
     def journal(self) -> Optional[RecordingJournalBridge]:
         return self._journal
+
+    @property
+    def content_reader(self) -> Optional[RecordingContentReader]:
+        return self._content_reader
 
     @property
     def coordinator(self) -> Optional[UploadCoordinator]:
@@ -151,6 +157,7 @@ class BiliAccountRuntime:
         try:
             await database.open()
             journal = RecordingJournalBridge(database, clock=self._clock)
+            content_reader = RecordingContentReader(database)
             await journal.reconcile_open_sessions()
             key_id = hashlib.sha256(self._credential_key).hexdigest()
             keys: Dict[str, bytes] = dict(self._old_credential_keys)
@@ -251,6 +258,7 @@ class BiliAccountRuntime:
 
         self._database = database
         self._journal = journal
+        self._content_reader = content_reader
         self._manager = manager
         self._coordinator = coordinator
         self._policy_manager = policy_manager
@@ -307,6 +315,7 @@ class BiliAccountRuntime:
         self._comment_publisher = None
         self._danmaku_importer = None
         self._danmaku_publisher = None
+        self._content_reader = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -396,6 +405,7 @@ class BiliAccountRuntime:
         self._danmaku_importer = None
         self._danmaku_publisher = None
         self._journal = None
+        self._content_reader = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()

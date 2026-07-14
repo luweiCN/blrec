@@ -1,9 +1,10 @@
-from typing import List, Literal, Optional
+import re
+from typing import BinaryIO, Iterator, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from blrec.bili_upload.danmaku_publish import DanmakuPublisher
 from blrec.bili_upload.journal import (
@@ -14,13 +15,27 @@ from blrec.bili_upload.journal import (
     UploadJobProgress,
     UploadPartProgress,
 )
+from blrec.bili_upload.recording_content import (
+    DanmakuPage,
+    RecordingContentInvalid,
+    RecordingContentNotFound,
+    RecordingContentReader,
+    RecordingContentUnavailable,
+)
 from blrec.utils.string import camel_case
 
 from .bili_accounts import authenticated_manager_subject
 
 journal: Optional[RecordingJournalBridge] = None
 danmaku_publisher: Optional[DanmakuPublisher] = None
+content_reader: Optional[RecordingContentReader] = None
 unavailable_reason: Optional[str] = 'Recording journal is not enabled'
+
+_BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
+
+
+class RangeNotSatisfiable(ValueError):
+    pass
 
 
 class ApiModel(BaseModel):
@@ -134,6 +149,20 @@ class RecordingSessionsResponse(ApiModel):
     sessions: List[RecordingSessionResponse]
 
 
+class DanmakuLineResponse(ApiModel):
+    index: int
+    progress_ms: int
+    mode: int
+    font_size: int
+    color: int
+    content: str
+
+
+class DanmakuPageResponse(ApiModel):
+    items: List[DanmakuLineResponse]
+    next_cursor: Optional[int]
+
+
 def get_recording_journal() -> RecordingJournalBridge:
     if journal is None:
         raise HTTPException(
@@ -150,6 +179,58 @@ def get_danmaku_publisher() -> DanmakuPublisher:
             detail=unavailable_reason or 'Danmaku backfill is unavailable',
         )
     return danmaku_publisher
+
+
+def get_content_reader() -> RecordingContentReader:
+    if content_reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Recording content is unavailable',
+        )
+    return content_reader
+
+
+def parse_byte_range(value: str, size: int) -> Tuple[int, int]:
+    if size <= 0 or ',' in value:
+        raise RangeNotSatisfiable()
+    match = _BYTE_RANGE.fullmatch(value.strip())
+    if match is None:
+        raise RangeNotSatisfiable()
+    first, last = match.groups()
+    if not first:
+        if not last:
+            raise RangeNotSatisfiable()
+        suffix = int(last)
+        if suffix <= 0:
+            raise RangeNotSatisfiable()
+        return max(0, size - suffix), size - 1
+    start = int(first)
+    end = size - 1 if not last else min(int(last), size - 1)
+    if start >= size or end < start:
+        raise RangeNotSatisfiable()
+    return start, end
+
+
+def _file_chunks(
+    file: BinaryIO, *, start: int, length: int, chunk_size: int = 64 * 1024
+) -> Iterator[bytes]:
+    try:
+        file.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = file.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        file.close()
+
+
+def _content_error(error: RuntimeError) -> HTTPException:
+    if isinstance(error, RecordingContentNotFound):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
 
 
 def _part_response(part: RecordingPart) -> RecordingPartResponse:
@@ -275,6 +356,88 @@ async def list_recording_sessions(
             _session_response(session, upload_jobs.get(session.id))
             for session in sessions
         ],
+    )
+
+
+@router.get('/parts/{part_id}/media')
+async def stream_recording_media(
+    part_id: int,
+    range_header: Optional[str] = Header(None, alias='Range'),
+    _subject: str = Depends(authenticated_manager_subject),
+    reader: RecordingContentReader = Depends(get_content_reader),
+) -> StreamingResponse:
+    try:
+        resource = await reader.media(part_id)
+    except (RecordingContentNotFound, RecordingContentUnavailable) as error:
+        raise _content_error(error) from None
+    if resource.path is None or resource.size is None or resource.content_type is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
+        )
+    size = resource.size
+    start, end = 0, size - 1
+    response_status = status.HTTP_200_OK
+    if range_header is not None:
+        try:
+            start, end = parse_byte_range(range_header, size)
+        except RangeNotSatisfiable:
+            raise HTTPException(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                detail='请求的视频范围不可用',
+                headers={'Content-Range': 'bytes */{}'.format(size)},
+            ) from None
+        response_status = status.HTTP_206_PARTIAL_CONTENT
+    try:
+        file = open(resource.path, 'rb')
+    except OSError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
+        ) from None
+    length = max(0, end - start + 1)
+    headers = {
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store',
+        'Content-Length': str(length),
+    }
+    if response_status == status.HTTP_206_PARTIAL_CONTENT:
+        headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)
+    return StreamingResponse(
+        _file_chunks(file, start=start, length=length),
+        status_code=response_status,
+        media_type=resource.content_type,
+        headers=headers,
+    )
+
+
+@router.get('/parts/{part_id}/danmaku', response_model=DanmakuPageResponse)
+async def list_recording_danmaku(
+    part_id: int,
+    cursor: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    _subject: str = Depends(authenticated_manager_subject),
+    reader: RecordingContentReader = Depends(get_content_reader),
+) -> DanmakuPageResponse:
+    try:
+        page: DanmakuPage = await reader.danmaku(part_id, cursor=cursor, limit=limit)
+    except (
+        RecordingContentNotFound,
+        RecordingContentUnavailable,
+        RecordingContentInvalid,
+    ) as error:
+        raise _content_error(error) from None
+    return DanmakuPageResponse(
+        items=[
+            DanmakuLineResponse(
+                index=item.index,
+                progress_ms=item.progress_ms,
+                mode=item.mode,
+                font_size=item.font_size,
+                color=item.color,
+                content=item.content,
+            )
+            for item in page.items
+        ],
+        next_cursor=page.next_cursor,
     )
 
 
