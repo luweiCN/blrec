@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import blrec.bili_upload.accounts as accounts_module
+from blrec.bili_upload.account_lifecycle import AccountRemovalCommand, RemovalMode
 from blrec.bili_upload.accounts import (
     AccountIdentityMismatch,
     AccountManager,
+    AccountNotFound,
     AccountPaused,
     AccountWriteGate,
     CredentialVersionChanged,
@@ -558,6 +560,45 @@ async def test_list_accounts_returns_only_redacted_account_metadata(
         assert await manager.list_accounts() == [saved]
         assert 'access-new' not in repr(saved)
         assert 'refresh-new' not in repr(saved)
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_removed_account_is_hidden_and_same_uid_login_reactivates_it(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    changed = AsyncMock()
+    database, _store, _cipher, manager = await components(
+        tmp_path, protocol, clock, on_primary_credential_changed=changed
+    )
+    try:
+        saved = await manager.finish_confirmed_login(confirmed_response())
+        changed.reset_mock()
+
+        relationships = await manager.account_relationships(saved.id)
+        removed = await manager.remove_account(
+            saved.id,
+            AccountRemovalCommand(RemovalMode.DISABLE),
+            manager_subject='admin',
+        )
+
+        assert relationships.is_primary
+        assert removed.account_id == saved.id
+        assert await manager.list_accounts() == []
+        changed.assert_awaited_once_with()
+        with pytest.raises(AccountNotFound):
+            await manager.account_relationships(999)
+
+        restored = await manager.finish_confirmed_login(confirmed_response())
+
+        assert restored.id == saved.id
+        assert restored.state == 'active'
+        assert restored.credential_version == saved.credential_version + 1
+        assert await manager.list_accounts() == [restored]
     finally:
         await manager.close()
         await database.close()

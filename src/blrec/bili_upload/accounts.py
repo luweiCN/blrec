@@ -20,6 +20,13 @@ from typing import (
 
 from loguru import logger
 
+from .account_lifecycle import (
+    AccountLifecycle,
+    AccountRelationships,
+    AccountRemovalCommand,
+    AccountRemovalResult,
+    LifecycleAccountNotFound,
+)
 from .credentials import CredentialStore
 from .crypto import CookieRecord, CredentialBundle, CredentialCipher
 from .database import BiliUploadDatabase
@@ -187,6 +194,7 @@ class AccountManager:
         self._poll_interval_seconds = poll_interval_seconds
         self._write_gates = write_gates or AccountWriteGate(database)
         self._web_session_builder = WebSessionBuilder(clock=clock)
+        self._lifecycle = AccountLifecycle(database, clock=clock)
         self._on_primary_credential_changed = on_primary_credential_changed
         self._runtimes: Dict[str, _QrRuntime] = {}
         self._started = False
@@ -349,7 +357,7 @@ class AccountManager:
             'EXISTS(SELECT 1 FROM bili_account_selection selection '
             'WHERE selection.id=1 AND selection.primary_account_id='
             'bili_accounts.id) AS is_primary '
-            'FROM bili_accounts ORDER BY id'
+            "FROM bili_accounts WHERE state!='archived' ORDER BY id"
         )
         return [self._account_view(dict(row)) for row in rows]
 
@@ -373,6 +381,24 @@ class AccountManager:
         account = self._account_view(await self._account_row(account_id))
         await self._notify_primary_credential_changed()
         return account
+
+    async def account_relationships(self, account_id: int) -> AccountRelationships:
+        try:
+            return await self._lifecycle.relationships(account_id)
+        except LifecycleAccountNotFound as error:
+            raise AccountNotFound(str(error)) from error
+
+    async def remove_account(
+        self, account_id: int, command: AccountRemovalCommand, *, manager_subject: str
+    ) -> AccountRemovalResult:
+        try:
+            result = await self._lifecycle.remove(
+                account_id, command, manager_subject=manager_subject
+            )
+        except LifecycleAccountNotFound as error:
+            raise AccountNotFound(str(error)) from error
+        await self._notify_primary_credential_changed()
+        return result
 
     async def primary_cookie_header(self, url: str) -> str:
         row = await self._database.fetchone(
