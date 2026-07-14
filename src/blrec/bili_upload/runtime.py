@@ -10,6 +10,7 @@ from loguru import logger
 from blrec.setting.models import BiliUploadSettings
 
 from .accounts import AccountManager, AccountWriteGate
+from .comments import CommentPlanner, CommentPublisher
 from .credentials import CredentialStore
 from .crypto import CredentialCipher
 from .database import BiliUploadDatabase
@@ -23,6 +24,8 @@ from .upload import UploadCoordinator
 from .upos import UposUploader
 
 __all__ = ('BiliAccountRuntime',)
+
+_COMMENT_ACTION_INTERVAL_SECONDS = 5
 
 
 async def _unavailable_wbi_keys() -> Tuple[str, str]:
@@ -68,6 +71,8 @@ class BiliAccountRuntime:
         self._coordinator: Optional[UploadCoordinator] = None
         self._policy_manager: Optional[RoomUploadPolicyManager] = None
         self._review_watcher: Optional[ReviewWatcher] = None
+        self._comment_planner: Optional[CommentPlanner] = None
+        self._comment_publisher: Optional[CommentPublisher] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
@@ -94,6 +99,14 @@ class BiliAccountRuntime:
     @property
     def review_watcher(self) -> Optional[ReviewWatcher]:
         return self._review_watcher
+
+    @property
+    def comment_planner(self) -> Optional[CommentPlanner]:
+        return self._comment_planner
+
+    @property
+    def comment_publisher(self) -> Optional[CommentPublisher]:
+        return self._comment_publisher
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -175,12 +188,21 @@ class BiliAccountRuntime:
                 stop_requested=upload_stop_requested,
             )
             policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
+            comment_planner = CommentPlanner(database, clock=self._clock)
+            comment_publisher = CommentPublisher(
+                database,
+                protocol,
+                bundle_loader=load_bundle,
+                account_gates=write_gates,
+                auto_comment_enabled=(lambda: self._settings.auto_comment_enabled),
+                clock=self._clock,
+            )
             deferred_branch = _DeferredPostReviewBranch()
             review_watcher = ReviewWatcher(
                 database,
                 protocol,
                 bundle_loader=load_bundle,
-                comment_branch=deferred_branch,
+                comment_branch=comment_planner,
                 danmaku_branch=deferred_branch,
                 clock=self._clock,
             )
@@ -196,11 +218,15 @@ class BiliAccountRuntime:
         self._coordinator = coordinator
         self._policy_manager = policy_manager
         self._review_watcher = review_watcher
+        self._comment_planner = comment_planner
+        self._comment_publisher = comment_publisher
         self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         self._upload_task = asyncio.create_task(
-            self._run_uploads(coordinator, review_watcher, upload_stop_event)
+            self._run_uploads(
+                coordinator, review_watcher, comment_publisher, upload_stop_event
+            )
         )
         return True
 
@@ -230,6 +256,8 @@ class BiliAccountRuntime:
         self._coordinator = None
         self._policy_manager = None
         self._review_watcher = None
+        self._comment_planner = None
+        self._comment_publisher = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -262,19 +290,28 @@ class BiliAccountRuntime:
         self,
         coordinator: UploadCoordinator,
         review_watcher: ReviewWatcher,
+        comment_publisher: CommentPublisher,
         stop_event: asyncio.Event,
     ) -> None:
         while not stop_event.is_set():
-            processed = None
+            upload_processed = None
+            comment_processed = None
             try:
                 await review_watcher.run_once()
                 await coordinator.create_ready_jobs()
-                processed = await coordinator.run_once()
+                upload_processed = await coordinator.run_once()
+                comment_processed = await comment_publisher.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception('Bilibili upload worker iteration failed')
-            delay = 1 if processed is not None else self._upload_interval_seconds
+            delay: float
+            if comment_processed is not None:
+                delay = _COMMENT_ACTION_INTERVAL_SECONDS
+            elif upload_processed is not None:
+                delay = 1
+            else:
+                delay = self._upload_interval_seconds
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -293,6 +330,8 @@ class BiliAccountRuntime:
         self._coordinator = None
         self._policy_manager = None
         self._review_watcher = None
+        self._comment_planner = None
+        self._comment_publisher = None
         self._journal = None
         transport, self._transport = self._transport, None
         if transport is not None:
