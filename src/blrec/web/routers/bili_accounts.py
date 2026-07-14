@@ -5,6 +5,14 @@ from fastapi import APIRouter, Depends, Header, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
 
+from blrec.bili_upload.account_lifecycle import (
+    AccountRelationships,
+    AccountRemovalBlocked,
+    AccountRemovalCommand,
+    AccountRemovalResult,
+    InvalidAccountReplacement,
+    RemovalMode,
+)
 from blrec.bili_upload.accounts import (
     AccountManager,
     AccountNotFound,
@@ -53,6 +61,40 @@ class QrSessionResponse(ApiModel):
 class RefreshResponse(ApiModel):
     credential_version: int
     refreshed: bool
+
+
+class RelatedUploadJobResponse(ApiModel):
+    id: int
+    room_id: int
+    state: str
+
+
+class AccountRelationshipsResponse(ApiModel):
+    account_id: int
+    is_primary: bool
+    follow_primary_room_ids: List[int]
+    fixed_room_ids: List[int]
+    reassignable_jobs: List[RelatedUploadJobResponse]
+    blocking_jobs: List[RelatedUploadJobResponse]
+    historical_job_count: int
+
+
+class AccountRemovalRequest(ApiModel):
+    mode: RemovalMode
+    replacement_account_id: Optional[int] = None
+    new_primary_account_id: Optional[int] = None
+
+    def to_command(self) -> AccountRemovalCommand:
+        return AccountRemovalCommand(
+            mode=self.mode,
+            replacement_account_id=self.replacement_account_id,
+            new_primary_account_id=self.new_primary_account_id,
+        )
+
+
+class AccountRemovalResponse(ApiModel):
+    account_id: int
+    state: str
 
 
 def get_account_manager() -> AccountManager:
@@ -105,6 +147,49 @@ async def select_primary_account(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail='Only an active Bilibili account can be selected',
+        ) from None
+
+
+@router.get('/{account_id}/relationships', response_model=AccountRelationshipsResponse)
+async def account_relationships(
+    account_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    account_manager: AccountManager = Depends(get_account_manager),
+) -> AccountRelationships:
+    try:
+        return await account_manager.account_relationships(account_id)
+    except AccountNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='Bilibili account not found'
+        ) from None
+
+
+@router.post('/{account_id}/removal', response_model=AccountRemovalResponse)
+async def remove_account(
+    account_id: int,
+    payload: AccountRemovalRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    account_manager: AccountManager = Depends(get_account_manager),
+) -> AccountRemovalResult:
+    try:
+        return await account_manager.remove_account(
+            account_id, payload.to_command(), manager_subject=subject
+        )
+    except AccountNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='Bilibili account not found'
+        ) from None
+    except AccountRemovalBlocked as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': 'blocking_upload_jobs',
+                'jobIds': [job.id for job in error.jobs],
+            },
+        ) from None
+    except InvalidAccountReplacement as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from None
 
 

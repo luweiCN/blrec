@@ -5,6 +5,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from blrec.bili_upload.account_lifecycle import (
+    AccountRelationships,
+    AccountRemovalBlocked,
+    AccountRemovalCommand,
+    AccountRemovalResult,
+    InvalidAccountReplacement,
+    RelatedUploadJob,
+    RemovalMode,
+)
 from blrec.bili_upload.accounts import (
     AccountNotFound,
     AccountView,
@@ -26,6 +35,8 @@ class FakeAccountManager:
     missing_session: bool = False
     missing_account: bool = False
     last_subject: Optional[str] = None
+    last_removal_command: Optional[AccountRemovalCommand] = None
+    removal_error: Optional[Exception] = None
 
     async def create_qr(self, *, manager_subject: str) -> QrSessionView:
         self.last_subject = manager_subject
@@ -79,6 +90,30 @@ class FakeAccountManager:
         if self.missing_account:
             raise AccountNotFound('Bilibili account not found')
         return (await self.list_accounts())[0]
+
+    async def account_relationships(self, account_id: int) -> AccountRelationships:
+        if self.missing_account:
+            raise AccountNotFound('Bilibili account not found')
+        return AccountRelationships(
+            account_id=account_id,
+            is_primary=True,
+            follow_primary_room_ids=(200,),
+            fixed_room_ids=(100,),
+            reassignable_jobs=(RelatedUploadJob(1, 100, 'ready'),),
+            blocking_jobs=(),
+            historical_job_count=2,
+        )
+
+    async def remove_account(
+        self, account_id: int, command: AccountRemovalCommand, *, manager_subject: str
+    ) -> AccountRemovalResult:
+        self.last_subject = manager_subject
+        self.last_removal_command = command
+        if self.missing_account:
+            raise AccountNotFound('Bilibili account not found')
+        if self.removal_error is not None:
+            raise self.removal_error
+        return AccountRemovalResult(account_id)
 
     async def check_account_renewal(self, account_id: int) -> FakeRenewalCheckResult:
         if self.missing_account:
@@ -225,3 +260,81 @@ def test_select_primary_account_returns_redacted_account(client: TestClient) -> 
     assert response.json()['id'] == 7
     assert response.json()['isPrimary'] is True
     assert 'cookie' not in response.text.lower()
+
+
+def test_relationships_preview_is_redacted(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/bili-accounts/7/relationships', headers=auth_headers()
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'accountId': 7,
+        'isPrimary': True,
+        'followPrimaryRoomIds': [200],
+        'fixedRoomIds': [100],
+        'reassignableJobs': [{'id': 1, 'roomId': 100, 'state': 'ready'}],
+        'blockingJobs': [],
+        'historicalJobCount': 2,
+    }
+    assert 'token' not in response.text.lower()
+    assert 'cookie' not in response.text.lower()
+
+
+def test_remove_account_passes_explicit_policy_and_manager_subject(
+    client: TestClient, manager: FakeAccountManager
+) -> None:
+    response = client.post(
+        '/api/v1/bili-accounts/7/removal',
+        headers=auth_headers(),
+        json={'mode': 'fixed', 'replacementAccountId': 8, 'newPrimaryAccountId': 9},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {'accountId': 7, 'state': 'archived'}
+    assert manager.last_removal_command == AccountRemovalCommand(
+        RemovalMode.FIXED, replacement_account_id=8, new_primary_account_id=9
+    )
+    assert manager.last_subject
+    assert 'test-api-key' not in manager.last_subject
+
+
+@pytest.mark.parametrize('path', ['relationships', 'removal'])
+def test_missing_account_lifecycle_route_returns_404(
+    path: str, client: TestClient, manager: FakeAccountManager
+) -> None:
+    manager.missing_account = True
+
+    if path == 'relationships':
+        response = client.get(
+            '/api/v1/bili-accounts/7/relationships', headers=auth_headers()
+        )
+    else:
+        response = client.post(
+            '/api/v1/bili-accounts/7/removal',
+            headers=auth_headers(),
+            json={'mode': 'disable'},
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        AccountRemovalBlocked((RelatedUploadJob(1, 100, 'uploading'),)),
+        InvalidAccountReplacement('replacement account is unavailable'),
+    ],
+)
+def test_unsafe_account_removal_returns_409(
+    error: Exception, client: TestClient, manager: FakeAccountManager
+) -> None:
+    manager.removal_error = error
+
+    response = client.post(
+        '/api/v1/bili-accounts/7/removal',
+        headers=auth_headers(),
+        json={'mode': 'disable'},
+    )
+
+    assert response.status_code == 409
