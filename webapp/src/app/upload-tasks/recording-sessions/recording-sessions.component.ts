@@ -79,7 +79,7 @@ export class RecordingSessionsComponent implements OnInit {
     this.recordingSessions.listSessions(this.pageSize, offset).subscribe({
       next: (response) => {
         this.view = { state: 'ready', response };
-        if (this.selectedSession) {
+        if (this.detailVisible && this.selectedSession) {
           this.selectedSession =
             response.sessions.find(
               (session) => session.id === this.selectedSession?.id
@@ -120,6 +120,7 @@ export class RecordingSessionsComponent implements OnInit {
 
   closeDetails(): void {
     this.detailVisible = false;
+    this.selectedSession = null;
     this.changeDetector.markForCheck();
   }
 
@@ -128,7 +129,7 @@ export class RecordingSessionsComponent implements OnInit {
       open: '录制中',
       closed: '已归集',
       cancelled: '已中断',
-      manual_review: '需要确认',
+      manual_review: '自动恢复中',
       skipped: '已跳过',
     }[state];
   }
@@ -138,7 +139,7 @@ export class RecordingSessionsComponent implements OnInit {
       open: 'processing',
       closed: 'success',
       cancelled: 'warning',
-      manual_review: 'error',
+      manual_review: 'processing',
       skipped: 'default',
     }[state];
   }
@@ -150,7 +151,7 @@ export class RecordingSessionsComponent implements OnInit {
       ready: '制品就绪',
       failed: '处理失败',
       missing: '文件缺失',
-      manual_review: '需要确认',
+      manual_review: '自动恢复中',
     }[state];
   }
 
@@ -161,7 +162,7 @@ export class RecordingSessionsComponent implements OnInit {
       ready: 'success',
       failed: 'error',
       missing: 'warning',
-      manual_review: 'warning',
+      manual_review: 'processing',
     }[state];
   }
 
@@ -406,6 +407,11 @@ export class RecordingSessionsComponent implements OnInit {
     }
     const precision = value < 10 && !Number.isInteger(value) ? 1 : 0;
     return `${value.toFixed(precision)} ${units[unitIndex]}`;
+  }
+
+  fileName(path: string): string {
+    const segments = path.split(/[\\/]/).filter(Boolean);
+    return segments[segments.length - 1] ?? path;
   }
 
   trackSession(_index: number, session: RecordingSession): number {

@@ -48,9 +48,21 @@ describe('UploadPolicyDialogComponent', () => {
             description: '单机内容',
             children: [],
           },
+          {
+            id: 21,
+            name: '日常',
+            description: '日常生活内容',
+            children: [],
+          },
         ],
       },
     ],
+    creationStatements: [
+      { id: -1, content: '内容无需标注' },
+      { id: 1, content: '含 AI 生成内容' },
+      { id: -2, content: '内容为转载' },
+    ],
+    creationStatementTip: '请根据内容选择',
   };
 
   const existingPolicy: RoomUploadPolicy = {
@@ -66,11 +78,11 @@ describe('UploadPolicyDialogComponent', () => {
     dynamicTemplate: '旧动态',
     tid: 17,
     tags: '旧标签',
-    copyright: 1,
+    creationStatementId: -1,
+    originalAuthorization: false,
     source: '',
     isOnlySelf: true,
     publishDynamic: false,
-    noReprint: false,
     upSelectionReply: true,
     upCloseReply: false,
     upCloseDanmu: false,
@@ -124,7 +136,7 @@ describe('UploadPolicyDialogComponent', () => {
     fixture.detectChanges();
   }
 
-  it('uses safe defaults for a new room and loads categories lazily', () => {
+  it('uses the reference project templates and repost defaults for a new room', () => {
     create();
 
     expect(policyService.get).toHaveBeenCalledOnceWith(100);
@@ -133,15 +145,33 @@ describe('UploadPolicyDialogComponent', () => {
       null,
       false,
     );
-    expect(component.draft.partTitleTemplate).toBe('P{{ part_index }}');
-    expect(component.draft.dynamicTemplate).toBe('{{ title }} 录播');
+    expect(component.draft.titleTemplate).toBe(
+      '【直播回放】【{{ anchor_name }}】{{ title }} {{ live_start_time | date: "%Y年%m月%d日%H点%M分" }}',
+    );
+    expect(component.draft.descriptionTemplate).toBe(
+      '直播录像\n{{ anchor_name }}直播间：https://live.bilibili.com/{{ room_id }}',
+    );
+    expect(component.draft.partTitleTemplate).toBe(
+      'P{{ part_index }}-{{ area_name }}-{{ live_start_time | date: "%m月%d日%H点%M分" }}',
+    );
+    expect(component.draft.dynamicTemplate).toBe(
+      '直播录像\n{{ anchor_name }}直播间：https://live.bilibili.com/{{ room_id }}',
+    );
+    expect(component.draft.tags).toBe(
+      '直播回放,{{ anchor_name }},{{ area_name }}',
+    );
     expect(component.draft.publishDynamic).toBeTrue();
-    expect(component.draft.noReprint).toBeTrue();
+    expect(component.draft.creationStatementId).toBe(-2);
+    expect(component.draft.originalAuthorization).toBeFalse();
+    expect(component.draft.source).toBe(
+      'https://live.bilibili.com/{{ room_id }}',
+    );
     expect(component.draft.autoComment).toBeTrue();
     expect(component.draft.danmakuBackfill).toBeTrue();
     expect(component.draft.upCloseReply).toBeFalse();
     expect(component.draft.upCloseDanmu).toBeFalse();
-    expect(component.draft.tid).toBeNull();
+    expect(component.draft.tid).toBe(21);
+    expect(component.categoryPath).toEqual([4, 21]);
   });
 
   it('shows the form while the category request is still running', () => {
@@ -162,7 +192,8 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.draft.titleTemplate).toBe('旧标题');
     expect(component.draft.partTitleTemplate).toBe('第 {{ part_index }} P');
     expect(component.draft.publishDynamic).toBeFalse();
-    expect(component.draft.noReprint).toBeFalse();
+    expect(component.draft.creationStatementId).toBe(-1);
+    expect(component.draft.originalAuthorization).toBeFalse();
     expect(component.draft.isOnlySelf).toBeTrue();
     expect(component.categoryPath).toEqual([4, 17]);
   });
@@ -182,6 +213,7 @@ describe('UploadPolicyDialogComponent', () => {
   it('keeps save available and reports missing fields after it is clicked', () => {
     create();
     expect(component.saveDisabled).toBeFalse();
+    component.categoryChanged(null);
 
     component.save();
 
@@ -205,6 +237,21 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.draft.danmakuBackfill).toBeFalse();
   });
 
+  it('keeps repost and original authorization mutually exclusive', () => {
+    create();
+    component.draft.originalAuthorization = true;
+
+    component.creationStatementChanged(-2);
+
+    expect(component.isRepost).toBeTrue();
+    expect(component.draft.originalAuthorization).toBeFalse();
+
+    component.creationStatementChanged(-1);
+    component.draft.originalAuthorization = true;
+    expect(component.isRepost).toBeFalse();
+    expect(component.draft.originalAuthorization).toBeTrue();
+  });
+
   it('submits the complete policy and deletes an existing policy', () => {
     policyService.get.and.returnValue(of(existingPolicy));
     create();
@@ -215,7 +262,8 @@ describe('UploadPolicyDialogComponent', () => {
       jasmine.objectContaining({
         partTitleTemplate: '第 {{ part_index }} P',
         publishDynamic: false,
-        noReprint: false,
+        creationStatementId: -1,
+        originalAuthorization: false,
         upSelectionReply: true,
       }),
     );

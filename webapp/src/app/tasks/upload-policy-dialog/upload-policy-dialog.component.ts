@@ -24,6 +24,7 @@ import {
   UploadAccountMode,
   UploadCategoryCatalog,
   UploadCategoryNode,
+  UploadCreationStatement,
 } from './room-upload-policy.model';
 import { RoomUploadPolicyService } from './room-upload-policy.service';
 
@@ -31,17 +32,21 @@ const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
   accountMode: 'primary',
   accountId: null,
   enabled: true,
-  titleTemplate: '{{ title }} 录播',
-  descriptionTemplate: '主播：{{ anchor_name }}',
-  partTitleTemplate: 'P{{ part_index }}',
-  dynamicTemplate: '{{ title }} 录播',
-  tid: null,
-  tags: '直播,录播',
-  copyright: 1,
-  source: '',
+  titleTemplate:
+    '【直播回放】【{{ anchor_name }}】{{ title }} {{ live_start_time | date: "%Y年%m月%d日%H点%M分" }}',
+  descriptionTemplate:
+    '直播录像\n{{ anchor_name }}直播间：https://live.bilibili.com/{{ room_id }}',
+  partTitleTemplate:
+    'P{{ part_index }}-{{ area_name }}-{{ live_start_time | date: "%m月%d日%H点%M分" }}',
+  dynamicTemplate:
+    '直播录像\n{{ anchor_name }}直播间：https://live.bilibili.com/{{ room_id }}',
+  tid: 21,
+  tags: '直播回放,{{ anchor_name }},{{ area_name }}',
+  creationStatementId: -2,
+  originalAuthorization: false,
+  source: 'https://live.bilibili.com/{{ room_id }}',
   isOnlySelf: false,
   publishDynamic: true,
-  noReprint: true,
   upSelectionReply: false,
   upCloseReply: false,
   upCloseDanmu: false,
@@ -52,7 +57,13 @@ const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
 
 type PolicyValidationErrors = Partial<
   Record<
-    'account' | 'title' | 'partTitle' | 'category' | 'tags' | 'source',
+    | 'account'
+    | 'title'
+    | 'partTitle'
+    | 'category'
+    | 'tags'
+    | 'creationStatement'
+    | 'source',
     string
   >
 >;
@@ -132,6 +143,14 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return this.catalog?.categories ?? [];
   }
 
+  get creationStatements(): readonly UploadCreationStatement[] {
+    return this.catalog?.creationStatements ?? [];
+  }
+
+  get isRepost(): boolean {
+    return this.draft.creationStatementId === -2;
+  }
+
   get categoryOptions(): NzCascaderOption[] {
     return this.categories.map((parent) => ({
       value: parent.id,
@@ -195,6 +214,13 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       this.categoryPath.length === 2 ? this.categoryPath[1] : null;
   }
 
+  creationStatementChanged(statementId: number): void {
+    this.draft.creationStatementId = statementId;
+    if (statementId === -2) {
+      this.draft.originalAuthorization = false;
+    }
+  }
+
   allowRepliesChanged(allowed: boolean): void {
     this.draft.upCloseReply = !allowed;
     if (!allowed) {
@@ -237,11 +263,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       dynamicTemplate: this.draft.dynamicTemplate.trim(),
       tid,
       tags: this.draft.tags.trim(),
-      copyright: this.draft.copyright,
+      creationStatementId: this.draft.creationStatementId,
+      originalAuthorization: this.draft.originalAuthorization,
       source: this.draft.source.trim(),
       isOnlySelf: this.draft.isOnlySelf,
       publishDynamic: this.draft.publishDynamic,
-      noReprint: this.draft.noReprint,
       upSelectionReply: this.draft.upSelectionReply,
       upCloseReply: this.draft.upCloseReply,
       upCloseDanmu: this.draft.upCloseDanmu,
@@ -397,7 +423,14 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     if (!this.draft.tags.trim()) {
       errors.tags = '请填写至少一个标签';
     }
-    if (this.draft.copyright === 2 && !this.draft.source.trim()) {
+    if (
+      !this.creationStatements.some(
+        (statement) => statement.id === this.draft.creationStatementId,
+      )
+    ) {
+      errors.creationStatement = '请选择创作声明';
+    }
+    if (this.isRepost && !this.draft.source.trim()) {
       errors.source = '转载稿件必须填写来源';
     }
     return errors;
@@ -418,11 +451,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       dynamicTemplate: policy.dynamicTemplate,
       tid: policy.tid,
       tags: policy.tags,
-      copyright: policy.copyright,
+      creationStatementId: policy.creationStatementId,
+      originalAuthorization: policy.originalAuthorization,
       source: policy.source,
       isOnlySelf: policy.isOnlySelf,
       publishDynamic: policy.publishDynamic,
-      noReprint: policy.noReprint,
       upSelectionReply: policy.upSelectionReply,
       upCloseReply: policy.upCloseReply,
       upCloseDanmu: policy.upCloseDanmu,

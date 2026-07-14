@@ -10,6 +10,7 @@ from blrec.bili_upload.categories import (
     UploadCategoryCatalogView,
     UploadCategoryNode,
     UploadCategoryUnavailable,
+    UploadCreationStatement,
 )
 from blrec.bili_upload.policies import (
     InvalidRoomUploadPolicy,
@@ -35,6 +36,8 @@ def policy_view(room_id: int = 100) -> RoomUploadPolicyView:
         dynamic_template='{{ title }}｜{{ anchor_name }}',
         tid=17,
         tags='直播,录播',
+        creation_statement_id=-1,
+        original_authorization=True,
         copyright=1,
         source='',
         is_only_self=False,
@@ -114,6 +117,11 @@ class FakeCategoryCatalog:
                     ),
                 ),
             ),
+            creation_statements=(
+                UploadCreationStatement(id=-1, content='内容无需标注'),
+                UploadCreationStatement(id=-2, content='内容为转载'),
+            ),
+            creation_statement_tip='请根据内容选择',
         )
 
 
@@ -180,11 +188,11 @@ def test_list_room_upload_policies_returns_resolved_account(client: TestClient) 
         'dynamicTemplate': '{{ title }}｜{{ anchor_name }}',
         'tid': 17,
         'tags': '直播,录播',
-        'copyright': 1,
+        'creationStatementId': -1,
+        'originalAuthorization': True,
         'source': '',
         'isOnlySelf': False,
         'publishDynamic': True,
-        'noReprint': True,
         'upSelectionReply': False,
         'upCloseReply': False,
         'upCloseDanmu': False,
@@ -235,6 +243,11 @@ def test_list_upload_categories_uses_selected_account_and_refresh_flag(
                 ],
             }
         ],
+        'creationStatements': [
+            {'id': -1, 'content': '内容无需标注'},
+            {'id': -2, 'content': '内容为转载'},
+        ],
+        'creationStatementTip': '请根据内容选择',
     }
 
 
@@ -274,11 +287,11 @@ def test_upsert_converts_request_to_domain_command(
             'dynamicTemplate': '{{ title }}｜{{ anchor_name }}',
             'tid': 17,
             'tags': '直播,录播',
-            'copyright': 1,
+            'creationStatementId': -1,
+            'originalAuthorization': False,
             'source': '',
             'isOnlySelf': True,
             'publishDynamic': False,
-            'noReprint': False,
             'upSelectionReply': True,
             'upCloseReply': False,
             'upCloseDanmu': False,
@@ -293,6 +306,8 @@ def test_upsert_converts_request_to_domain_command(
     assert manager.command.account_mode == 'fixed'
     assert manager.command.account_id == 7
     assert manager.command.part_title_template == '第 {{ part_index }} P'
+    assert manager.command.creation_statement_id == -1
+    assert manager.command.original_authorization is False
     assert manager.command.publish_dynamic is False
     assert manager.command.is_only_self is True
     assert manager.command.danmaku_backfill is True
@@ -315,11 +330,11 @@ def test_upsert_rejects_parent_upload_category(
             'dynamicTemplate': '',
             'tid': 4,
             'tags': '录播',
-            'copyright': 1,
+            'creationStatementId': -1,
+            'originalAuthorization': True,
             'source': '',
             'isOnlySelf': False,
             'publishDynamic': True,
-            'noReprint': True,
             'upSelectionReply': False,
             'upCloseReply': False,
             'upCloseDanmu': False,
@@ -331,6 +346,41 @@ def test_upsert_rejects_parent_upload_category(
 
     assert response.status_code == 409
     assert response.json()['detail'] == '请选择有效的二级投稿分区'
+    assert manager.command is None
+
+
+def test_upsert_rejects_creation_statement_missing_from_current_catalog(
+    client: TestClient, manager: FakePolicyManager
+) -> None:
+    response = client.put(
+        '/api/v1/room-upload-policies/100',
+        headers=auth_headers(),
+        json={
+            'accountMode': 'primary',
+            'accountId': None,
+            'enabled': True,
+            'titleTemplate': '录播',
+            'descriptionTemplate': '',
+            'partTitleTemplate': 'P{{ part_index }}',
+            'dynamicTemplate': '',
+            'tid': 17,
+            'tags': '录播',
+            'creationStatementId': 999,
+            'originalAuthorization': False,
+            'source': '',
+            'isOnlySelf': False,
+            'publishDynamic': True,
+            'upSelectionReply': False,
+            'upCloseReply': False,
+            'upCloseDanmu': False,
+            'autoComment': False,
+            'danmakuBackfill': False,
+            'filters': {},
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == '请选择当前账号支持的创作声明'
     assert manager.command is None
 
 
@@ -352,11 +402,11 @@ def test_invalid_policy_returns_conflict(
             'dynamicTemplate': '',
             'tid': 17,
             'tags': '录播',
-            'copyright': 1,
+            'creationStatementId': -1,
+            'originalAuthorization': True,
             'source': '',
             'isOnlySelf': False,
             'publishDynamic': True,
-            'noReprint': True,
             'upSelectionReply': False,
             'upCloseReply': False,
             'upCloseDanmu': False,

@@ -102,7 +102,9 @@ class UploadCoordinator:
             'session.parent_area_name,policy.account_mode,policy.account_id,'
             'policy.title_template,policy.description_template,'
             'policy.part_title_template,policy.dynamic_template,policy.tid,'
-            'policy.tags,policy.copyright,policy.source,policy.is_only_self,'
+            'policy.tags,policy.creation_statement_id,'
+            'policy.original_authorization,policy.copyright,policy.source,'
+            'policy.is_only_self,'
             'policy.publish_dynamic,policy.no_reprint,policy.up_selection_reply,'
             'policy.up_close_reply,policy.up_close_danmu,policy.auto_comment,'
             'policy.danmaku_backfill,policy.filter_json,'
@@ -154,7 +156,7 @@ class UploadCoordinator:
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path,final_path,xml_path,'
             'artifact_state,updated_at FROM recording_parts '
-            'WHERE session_id=? ORDER BY part_index',
+            "WHERE session_id=? AND artifact_state='ready' ORDER BY part_index",
             (int(row['session_id']),),
         )
         if not part_rows or any(
@@ -248,7 +250,8 @@ class UploadCoordinator:
                 return None
             current_parts = connection.execute(
                 'SELECT id,part_index,source_path,final_path,artifact_state,updated_at '
-                'FROM recording_parts WHERE session_id=? ORDER BY part_index',
+                "FROM recording_parts WHERE session_id=? AND artifact_state='ready' "
+                'ORDER BY part_index',
                 (int(row['session_id']),),
             ).fetchall()
             expected_parts = [
@@ -339,6 +342,7 @@ class UploadCoordinator:
                 **context
             )
             source = self._liquid.from_string(str(row['source'])).render(**context)
+            tags = self._liquid.from_string(str(row['tags'])).render(**context)
             part_template = self._liquid.from_string(str(row['part_title_template']))
             part_titles = [
                 part_template.render(**context, part_index=part.part_index).strip()
@@ -351,7 +355,9 @@ class UploadCoordinator:
         description = description.strip()
         dynamic = dynamic.strip()
         source = source.strip()
-        tags = str(row['tags']).strip()
+        tags = tags.strip()
+        creation_statement_id = int(row['creation_statement_id'])
+        original_authorization = bool(row['original_authorization'])
         copyright_value = int(row['copyright'])
         if not title or len(title) > 80:
             raise InvalidUploadPolicy('upload title must contain 1 to 80 characters')
@@ -363,6 +369,13 @@ class UploadCoordinator:
             raise InvalidUploadPolicy('upload tags must not be empty')
         if copyright_value == 2 and not source:
             raise InvalidUploadPolicy('reposted archive requires a source')
+        expected_copyright = (
+            2 if creation_statement_id == -2 else 1 if original_authorization else 3
+        )
+        if copyright_value != expected_copyright or (
+            creation_statement_id == -2 and original_authorization
+        ):
+            raise InvalidUploadPolicy('creation statement settings are inconsistent')
         if not isinstance(filters, (dict, list)):
             raise InvalidUploadPolicy('upload filters must be structured JSON')
         fingerprint_source = {
@@ -380,7 +393,7 @@ class UploadCoordinator:
             ).encode('utf8')
         ).hexdigest()
         return {
-            'format_version': 2,
+            'format_version': 3,
             'fingerprint': fingerprint,
             'session_id': int(row['session_id']),
             'room_id': int(row['room_id']),
@@ -393,6 +406,8 @@ class UploadCoordinator:
             'dynamic': dynamic,
             'tid': int(row['tid']),
             'tags': tags,
+            'creation_statement_id': creation_statement_id,
+            'original_authorization': original_authorization,
             'copyright': copyright_value,
             'source': source,
             'is_only_self': bool(row['is_only_self']),
@@ -537,6 +552,7 @@ class UploadCoordinator:
         if not isinstance(snapshot, dict) or snapshot.get('format_version') not in (
             1,
             2,
+            3,
         ):
             raise ProtocolContractError('invalid upload policy snapshot')
         format_version = int(snapshot['format_version'])
@@ -562,6 +578,9 @@ class UploadCoordinator:
             videos.append(
                 {'filename': remote_filename, 'title': title[:80], 'desc': ''}
             )
+        copyright_value = snapshot.get('copyright')
+        if type(copyright_value) is not int or copyright_value not in (1, 2, 3):
+            raise ProtocolContractError('invalid upload policy snapshot')
         if format_version == 1:
             dynamic = ''
             no_disturbance = 0
@@ -582,15 +601,35 @@ class UploadCoordinator:
             up_selection_reply = bool(snapshot.get('up_selection_reply'))
             up_close_reply = bool(snapshot.get('up_close_reply'))
             up_close_danmu = bool(snapshot.get('up_close_danmu'))
+        if format_version == 3:
+            creation_statement_id = snapshot.get('creation_statement_id')
+            original_authorization = snapshot.get('original_authorization')
+            if (
+                type(creation_statement_id) is not int
+                or type(original_authorization) is not bool
+            ):
+                raise ProtocolContractError('invalid upload policy snapshot')
+            expected_copyright = (
+                2 if creation_statement_id == -2 else 1 if original_authorization else 3
+            )
+            if copyright_value != expected_copyright or (
+                creation_statement_id == -2 and original_authorization
+            ):
+                raise ProtocolContractError('invalid upload policy snapshot')
+            no_reprint = 1 if original_authorization else 0
+        else:
+            creation_statement_id = -2 if copyright_value == 2 else -1
+            if copyright_value == 2:
+                no_reprint = 0
         payload: Dict[str, Any] = {
             'cover': snapshot.get('cover_url', ''),
             'title': snapshot.get('title'),
-            'copyright': snapshot.get('copyright'),
+            'copyright': copyright_value,
             'tid': snapshot.get('tid'),
             'tag': snapshot.get('tags'),
             'desc_format_id': 0,
             'desc': snapshot.get('description', ''),
-            'recreate': -1,
+            'recreate': 0,
             'dynamic': dynamic,
             'interactive': 0,
             'videos': videos,
@@ -605,9 +644,13 @@ class UploadCoordinator:
             'up_selection_reply': up_selection_reply,
             'up_close_reply': up_close_reply,
             'up_close_danmu': up_close_danmu,
+            'creation_statement': {'id': creation_statement_id},
         }
-        if snapshot.get('copyright') == 2:
-            payload['source'] = snapshot.get('source', '')
+        if copyright_value == 2:
+            source = snapshot.get('source', '')
+            if not isinstance(source, str) or not source:
+                raise ProtocolContractError('invalid upload policy snapshot')
+            payload['source'] = source
         return payload
 
     async def _load_job(self, claim: LeaseClaim) -> _Job:

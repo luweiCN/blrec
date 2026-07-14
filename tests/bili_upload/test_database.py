@@ -66,7 +66,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 7
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 8
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -87,6 +87,8 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'is_only_self',
             'publish_dynamic',
             'no_reprint',
+            'creation_statement_id',
+            'original_authorization',
             'up_selection_reply',
             'up_close_reply',
             'up_close_danmu',
@@ -248,7 +250,8 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
         policy = await database.fetchone(
             'SELECT account_mode,account_id,part_title_template,dynamic_template,'
             'is_only_self,publish_dynamic,no_reprint,up_selection_reply,'
-            'up_close_reply,up_close_danmu FROM room_upload_policies '
+            'up_close_reply,up_close_danmu,creation_statement_id,'
+            'original_authorization FROM room_upload_policies '
             'WHERE room_id=100'
         )
         assert policy is not None
@@ -263,6 +266,8 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'up_selection_reply': 0,
             'up_close_reply': 0,
             'up_close_danmu': 0,
+            'creation_statement_id': -1,
+            'original_authorization': 1,
         }
         session = await database.fetchone(
             'SELECT room_id,title,cover_url,anchor_name,area_name '
@@ -276,7 +281,79 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 7
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 8
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_eighth_migration_derives_current_creation_statement_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 8):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',10,20)"
+        )
+        for room_id, copyright_value, no_reprint in ((100, 1, 0), (101, 2, 1)):
+            connection.execute(
+                'INSERT INTO room_upload_policies('
+                'room_id,account_mode,account_id,enabled,title_template,'
+                'description_template,tid,tags,copyright,source,auto_comment,'
+                'danmaku_backfill,filter_json,created_at,updated_at,no_reprint) '
+                "VALUES(?,'fixed',1,1,'title','description',17,'tag',?,?,0,0,"
+                "'{}',10,20,?)",
+                (
+                    room_id,
+                    copyright_value,
+                    'https://example.com/source' if copyright_value == 2 else '',
+                    no_reprint,
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        rows = await database.fetchall(
+            'SELECT room_id,copyright,no_reprint,creation_statement_id,'
+            'original_authorization FROM room_upload_policies ORDER BY room_id'
+        )
+        assert [dict(row) for row in rows] == [
+            {
+                'room_id': 100,
+                'copyright': 3,
+                'no_reprint': 0,
+                'creation_statement_id': -1,
+                'original_authorization': 0,
+            },
+            {
+                'room_id': 101,
+                'copyright': 2,
+                'no_reprint': 0,
+                'creation_statement_id': -2,
+                'original_authorization': 0,
+            },
+        ]
     finally:
         await database.close()
 

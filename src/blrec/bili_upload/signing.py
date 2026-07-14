@@ -51,7 +51,7 @@ PROTOCOL_MATRIX = {
         'POST', 'server_returned', '<server-returned>', 'upos_session', False
     ),
     'submit_archive': OperationSpec(
-        'POST', 'member_api', '/x/vu/app/add', 'bilitv_token_sign', False
+        'POST', 'member_api', '/x/vu/web/add/v3', 'web_cookie_csrf', False
     ),
     'archive_pre': OperationSpec(
         'GET', 'member_api', '/x/vupre/web/archive/pre', 'web_cookie', True

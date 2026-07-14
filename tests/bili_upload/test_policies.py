@@ -34,11 +34,11 @@ def command(*, account_mode: str = 'primary', account_id=None, **overrides):
         dynamic_template='{{ title }}｜{{ anchor_name }}',
         tid=17,
         tags='直播,录播',
-        copyright=1,
+        creation_statement_id=-1,
+        original_authorization=True,
         source='',
         is_only_self=False,
         publish_dynamic=True,
-        no_reprint=True,
         up_selection_reply=False,
         up_close_reply=False,
         up_close_danmu=False,
@@ -144,7 +144,7 @@ async def test_policy_round_trips_archive_submission_settings(tmp_path: Path) ->
             command(
                 is_only_self=True,
                 publish_dynamic=False,
-                no_reprint=False,
+                original_authorization=False,
                 up_selection_reply=True,
             ),
         )
@@ -153,6 +153,9 @@ async def test_policy_round_trips_archive_submission_settings(tmp_path: Path) ->
         assert policy.dynamic_template == '{{ title }}｜{{ anchor_name }}'
         assert policy.is_only_self is True
         assert policy.publish_dynamic is False
+        assert policy.creation_statement_id == -1
+        assert policy.original_authorization is False
+        assert policy.copyright == 3
         assert policy.no_reprint is False
         assert policy.up_selection_reply is True
         assert policy.up_close_reply is False
@@ -177,6 +180,36 @@ async def test_policy_round_trips_archive_submission_settings(tmp_path: Path) ->
     ),
 )
 async def test_policy_rejects_conflicting_interaction_settings(
+    tmp_path: Path, overrides, message: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database)
+
+        with pytest.raises(InvalidRoomUploadPolicy, match=message):
+            await manager.upsert(100, command(**overrides))
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('overrides', 'message'),
+    (
+        ({'creation_statement_id': -2, 'source': ''}, 'source is required'),
+        (
+            {
+                'creation_statement_id': -2,
+                'source': 'https://live.bilibili.com/100',
+                'original_authorization': True,
+            },
+            'mutually exclusive',
+        ),
+    ),
+)
+async def test_policy_rejects_invalid_creation_statement_combinations(
     tmp_path: Path, overrides, message: str
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))

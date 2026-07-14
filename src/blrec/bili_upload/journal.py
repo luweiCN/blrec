@@ -20,6 +20,7 @@ from typing import (
     TypeVar,
 )
 
+from .artifact_recovery import RecoveredArtifact, probe_recording_artifact
 from .database import BiliUploadDatabase
 
 if TYPE_CHECKING:
@@ -149,6 +150,13 @@ class UploadJobProgress:
     unknown_danmaku_items: Tuple[DanmakuItemProgress, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ArtifactRecoveryDecision:
+    artifact: Optional[RecoveredArtifact]
+    any_path_exists: bool
+    used_source: bool
+
+
 _T = TypeVar('_T')
 
 
@@ -159,10 +167,14 @@ class RecordingJournalBridge:
         *,
         clock: Callable[[], float] = time.time,
         uuid_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
+        artifact_probe: Callable[
+            [str], Optional[RecoveredArtifact]
+        ] = probe_recording_artifact,
     ) -> None:
         self._database = database
         self._clock = clock
         self._uuid_factory = uuid_factory
+        self._artifact_probe = artifact_probe
         self._degraded_reason: Optional[str] = None
 
     @property
@@ -198,12 +210,29 @@ class RecordingJournalBridge:
                     )
                 return str(replayed['run_id'])
             if live_start_time > 0:
-                key = '{}:{}'.format(room_id, live_start_time)
                 row = connection.execute(
                     'SELECT id,broadcast_session_key FROM recording_sessions '
-                    'WHERE broadcast_session_key=?',
-                    (key,),
+                    'WHERE room_id=? AND live_start_time=? '
+                    "AND state IN ('open','cancelled') "
+                    'AND NOT EXISTS(SELECT 1 FROM upload_jobs '
+                    'WHERE upload_jobs.session_id=recording_sessions.id) '
+                    'ORDER BY id DESC LIMIT 1',
+                    (room_id, live_start_time),
                 ).fetchone()
+                if row is not None:
+                    key = str(row['broadcast_session_key'])
+                else:
+                    base_key = '{}:{}'.format(room_id, live_start_time)
+                    existing = connection.execute(
+                        'SELECT 1 FROM recording_sessions '
+                        'WHERE broadcast_session_key=?',
+                        (base_key,),
+                    ).fetchone()
+                    key = (
+                        base_key
+                        if existing is None
+                        else '{}:continuation:{}'.format(base_key, self._uuid_factory())
+                    )
             else:
                 row = connection.execute(
                     'SELECT id,broadcast_session_key FROM recording_sessions '
@@ -318,10 +347,37 @@ class RecordingJournalBridge:
     async def reconcile_open_sessions(self) -> None:
         now = int(self._clock())
 
+        sessions = await self._database.fetchall(
+            'SELECT id FROM recording_sessions '
+            "WHERE state IN ('open','cancelled','manual_review')"
+        )
+        recoveries: Dict[int, _ArtifactRecoveryDecision] = {}
+        loop = asyncio.get_running_loop()
+        for session in sessions:
+            parts = await self._database.fetchall(
+                'SELECT id,source_path,final_path,artifact_state '
+                'FROM recording_parts WHERE session_id=?',
+                (int(session['id']),),
+            )
+            for part in parts:
+                final_path = (
+                    None if part['final_path'] is None else str(part['final_path'])
+                )
+                decision = await loop.run_in_executor(
+                    None, self._recover_artifact, str(part['source_path']), final_path
+                )
+                if (
+                    str(part['artifact_state']) == 'ready'
+                    and decision.artifact is not None
+                    and decision.artifact.path == final_path
+                ):
+                    continue
+                recoveries[int(part['id'])] = decision
+
         def write(connection: sqlite3.Connection) -> None:
             sessions = connection.execute(
                 'SELECT id,state FROM recording_sessions '
-                "WHERE state IN ('open','cancelled')"
+                "WHERE state IN ('open','cancelled','manual_review')"
             ).fetchall()
             for session in sessions:
                 session_id = int(session['id'])
@@ -340,32 +396,58 @@ class RecordingJournalBridge:
                 )
 
                 parts = connection.execute(
-                    'SELECT id,source_path,final_path,artifact_state '
+                    'SELECT id,source_path,final_path,record_start_time,'
+                    'artifact_state '
                     'FROM recording_parts WHERE session_id=?',
                     (session_id,),
                 ).fetchall()
                 for part in parts:
-                    artifact_state = str(part['artifact_state'])
-                    reconciled_state: Optional[str] = None
-                    if artifact_state in ('recording', 'postprocessing'):
-                        source_exists = os.path.exists(str(part['source_path']))
-                        final_exists = part[
-                            'final_path'
-                        ] is not None and os.path.exists(str(part['final_path']))
-                        reconciled_state = (
-                            'manual_review'
-                            if source_exists or final_exists
-                            else 'missing'
+                    decision = recoveries.get(int(part['id']))
+                    if decision is None:
+                        continue
+                    artifact = decision.artifact
+                    if artifact is not None:
+                        duration = artifact.duration_seconds
+                        if duration is None:
+                            duration = max(0, now - int(part['record_start_time']))
+                        record_end_time = int(part['record_start_time']) + duration
+                        message = (
+                            '录制异常中断，已自动恢复原始文件'
+                            if decision.used_source
+                            else '录制异常中断，已自动恢复成品文件'
                         )
-                    elif artifact_state == 'ready':
-                        final_path = part['final_path']
-                        if final_path is None or not os.path.exists(str(final_path)):
-                            reconciled_state = 'missing'
-                    if reconciled_state is not None:
                         connection.execute(
-                            'UPDATE recording_parts SET artifact_state=?,updated_at=? '
+                            'UPDATE recording_parts SET artifact_state=?,final_path=?,'
+                            'file_size_bytes=?,record_end_time=?,'
+                            'record_duration_seconds=?,source_completed_at='
+                            'COALESCE(source_completed_at,?),postprocessed_at='
+                            'COALESCE(postprocessed_at,?),error_message=?,updated_at=? '
                             'WHERE id=?',
-                            (reconciled_state, now, int(part['id'])),
+                            (
+                                'ready',
+                                artifact.path,
+                                artifact.size_bytes,
+                                record_end_time,
+                                duration,
+                                now,
+                                now,
+                                message,
+                                now,
+                                int(part['id']),
+                            ),
+                        )
+                    else:
+                        state = 'failed' if decision.any_path_exists else 'missing'
+                        message = (
+                            '录制异常中断，文件无法解析，已自动排除'
+                            if decision.any_path_exists
+                            else '录制异常中断，文件缺失，已自动排除'
+                        )
+                        connection.execute(
+                            'UPDATE recording_parts SET artifact_state=?,'
+                            'final_path=NULL,file_size_bytes=NULL,'
+                            'error_message=?,updated_at=? WHERE id=?',
+                            (state, message, now, int(part['id'])),
                         )
 
                 if original_state == 'cancelled':
@@ -378,9 +460,7 @@ class RecordingJournalBridge:
                         (session_id,),
                     ).fetchall()
                 }
-                if part_states & {'manual_review', 'missing'}:
-                    state = 'manual_review'
-                elif stale_run_count:
+                if stale_run_count:
                     state = 'cancelled'
                 else:
                     run_states = {
@@ -390,20 +470,91 @@ class RecordingJournalBridge:
                             (session_id,),
                         ).fetchall()
                     }
-                    if (
-                        run_states
-                        and run_states <= {'finished'}
-                        and part_states <= {'ready', 'failed'}
-                    ):
+                    if 'ready' in part_states and part_states <= {
+                        'ready',
+                        'failed',
+                        'missing',
+                    }:
                         state = 'closed'
+                    elif part_states <= {'failed', 'missing'}:
+                        state = 'skipped'
                     else:
-                        state = 'manual_review'
+                        state = 'cancelled' if 'cancelled' in run_states else 'open'
                 connection.execute(
                     'UPDATE recording_sessions SET state=?,ended_at=? WHERE id=?',
                     (state, now, session_id),
                 )
 
         await self._database.write(write)
+
+    async def finalize_cancelled_sessions(self, *, grace_seconds: int = 600) -> int:
+        if grace_seconds < 0:
+            raise ValueError('resume grace must not be negative')
+        now = int(self._clock())
+        cutoff = now - grace_seconds
+
+        def write(connection: sqlite3.Connection) -> int:
+            sessions = connection.execute(
+                'SELECT id FROM recording_sessions '
+                "WHERE state='cancelled' AND ended_at IS NOT NULL AND ended_at<=?",
+                (cutoff,),
+            ).fetchall()
+            finalized = 0
+            for session in sessions:
+                session_id = int(session['id'])
+                active_runs = int(
+                    connection.execute(
+                        'SELECT COUNT(*) FROM recording_runs '
+                        "WHERE session_id=? AND state='recording'",
+                        (session_id,),
+                    ).fetchone()[0]
+                )
+                if active_runs:
+                    continue
+                states = {
+                    str(row['artifact_state'])
+                    for row in connection.execute(
+                        'SELECT artifact_state FROM recording_parts '
+                        'WHERE session_id=?',
+                        (session_id,),
+                    ).fetchall()
+                }
+                if not states <= {'ready', 'failed', 'missing'}:
+                    continue
+                state = 'closed' if 'ready' in states else 'skipped'
+                updated = connection.execute(
+                    'UPDATE recording_sessions SET state=?, '
+                    'live_end_time=COALESCE(live_end_time,ended_at) '
+                    "WHERE id=? AND state='cancelled'",
+                    (state, session_id),
+                ).rowcount
+                finalized += int(updated)
+            return finalized
+
+        return await self._database.write(write)
+
+    def _recover_artifact(
+        self, source_path: str, final_path: Optional[str]
+    ) -> _ArtifactRecoveryDecision:
+        candidates = []
+        if final_path:
+            candidates.append((final_path, False))
+        if not final_path or source_path != final_path:
+            candidates.append((source_path, True))
+        any_path_exists = False
+        for path, used_source in candidates:
+            any_path_exists = any_path_exists or os.path.exists(path)
+            try:
+                artifact = self._artifact_probe(path)
+            except Exception:
+                artifact = None
+            if artifact is not None:
+                return _ArtifactRecoveryDecision(
+                    artifact=artifact, any_path_exists=True, used_source=used_source
+                )
+        return _ArtifactRecoveryDecision(
+            artifact=None, any_path_exists=any_path_exists, used_source=True
+        )
 
     async def video_created(
         self,
@@ -640,6 +791,11 @@ class RecordingJournalBridge:
         source = self._normalize_path(source_path)
         journal_id = self._new_event_id(event_id)
         message = '{}: {}'.format(type(error).__name__, error)[:500]
+        loop = asyncio.get_running_loop()
+        recovery = await loop.run_in_executor(
+            None, self._recover_artifact, source, None
+        )
+        artifact = recovery.artifact
 
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(
@@ -647,12 +803,35 @@ class RecordingJournalBridge:
             ):
                 return
             room_id = self._room_id_for_run(connection, run_id)
-            cursor = connection.execute(
-                'UPDATE recording_parts SET artifact_state=?,error_message=?,'
-                'postprocessed_at=?,updated_at=? '
-                'WHERE run_id=? AND source_path=?',
-                ('failed', message, now, now, run_id, source),
-            )
+            if artifact is None:
+                cursor = connection.execute(
+                    'UPDATE recording_parts SET artifact_state=?,error_message=?,'
+                    'postprocessed_at=?,updated_at=? '
+                    'WHERE run_id=? AND source_path=?',
+                    ('failed', message, now, now, run_id, source),
+                )
+            else:
+                fallback_message = (
+                    '后处理失败，已自动使用原始录制文件：{}'.format(message)
+                )[:500]
+                cursor = connection.execute(
+                    'UPDATE recording_parts SET artifact_state=?,final_path=?,'
+                    'file_size_bytes=?,record_duration_seconds='
+                    'COALESCE(record_duration_seconds,?),error_message=?,'
+                    'postprocessed_at=?,updated_at=? '
+                    'WHERE run_id=? AND source_path=?',
+                    (
+                        'ready',
+                        artifact.path,
+                        artifact.size_bytes,
+                        artifact.duration_seconds,
+                        fallback_message,
+                        now,
+                        now,
+                        run_id,
+                        source,
+                    ),
+                )
             if cursor.rowcount != 1:
                 raise JournalConsistencyError(
                     "unknown recording part '{}'".format(source_path)
@@ -1068,7 +1247,7 @@ class RecordingJournalBridge:
             raise JournalConsistencyError(
                 "unknown recording session '{}'".format(session_id)
             )
-        if session['state'] in ('cancelled', 'manual_review', 'skipped'):
+        if session['state'] in ('cancelled', 'skipped'):
             return
         recording_runs = int(
             connection.execute(
@@ -1091,10 +1270,10 @@ class RecordingJournalBridge:
                 (session_id,),
             ).fetchall()
         }
-        if states & {'manual_review', 'missing'}:
-            state = 'manual_review'
-        elif states <= {'ready', 'failed'}:
+        if 'ready' in states and states <= {'ready', 'failed', 'missing'}:
             state = 'closed'
+        elif states <= {'failed', 'missing'}:
+            state = 'skipped'
         else:
             state = 'open'
         connection.execute(

@@ -350,26 +350,23 @@ class BiliProtocolClient:
     async def submit_archive(
         self, bundle: CredentialBundle, payload: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        query = self._tv.sign(
-            {
-                **self._tv_token_values(bundle),
-                'build': '7800300',
-                'c_locale': 'zh-Hans_CN',
-                'channel': 'bili',
-                'disable_rcmd': '0',
-                'mobi_app': 'android',
-                'platform': 'android',
-                's_locale': 'zh-Hans_CN',
-            }
-        )
-        body = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode(
-            'utf8'
-        )
+        csrf = self._web.csrf(bundle)
+        url = self._url_for('submit_archive')
+        query = {
+            'csrf': csrf,
+            't': int(self._clock() * 1000),
+            'web_location': '333.1024',
+        }
+        body = json.dumps(
+            {**payload, 'csrf': csrf}, ensure_ascii=False, separators=(',', ':')
+        ).encode('utf8')
+        headers = {
+            **self._web_headers(bundle, url),
+            'Content-Type': 'application/json',
+            'Referer': 'https://member.bilibili.com/platform/upload/video/frame',
+        }
         return await self._standard_request(
-            'submit_archive',
-            query=query,
-            headers={'Content-Type': 'application/json'},
-            body=body,
+            'submit_archive', query=query, headers=headers, body=body
         )
 
     async def list_archives(

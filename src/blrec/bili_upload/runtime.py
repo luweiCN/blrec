@@ -265,6 +265,7 @@ class BiliAccountRuntime:
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         self._upload_task = asyncio.create_task(
             self._run_uploads(
+                journal,
                 coordinator,
                 review_watcher,
                 comment_publisher,
@@ -336,6 +337,7 @@ class BiliAccountRuntime:
 
     async def _run_uploads(
         self,
+        journal: RecordingJournalBridge,
         coordinator: UploadCoordinator,
         review_watcher: ReviewWatcher,
         comment_publisher: CommentPublisher,
@@ -349,6 +351,7 @@ class BiliAccountRuntime:
             danmaku_imported = None
             danmaku_published = None
             try:
+                await journal.finalize_cancelled_sessions()
                 await review_watcher.run_once()
                 await coordinator.create_ready_jobs()
                 upload_processed = await coordinator.run_once()

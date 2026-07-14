@@ -91,6 +91,7 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         transport=transport,
         wbi_signer=WbiSigner(wbi_keys, clock=lambda: 1748867128),
         web_session_builder=WebSessionBuilder(clock=lambda: 100),
+        clock=lambda: 100,
     )
 
 
@@ -108,7 +109,7 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         ('preupload', 'web_cookie', '/preupload'),
         ('upload_chunk', 'upos_session', '<server-returned>'),
         ('complete_upload', 'upos_session', '<server-returned>'),
-        ('submit_archive', 'bilitv_token_sign', '/x/vu/app/add'),
+        ('submit_archive', 'web_cookie_csrf', '/x/vu/web/add/v3'),
         ('archive_pre', 'web_cookie', '/x/vupre/web/archive/pre'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
         ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
@@ -205,13 +206,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     await client.post_danmaku(bundle, {'oid': 202, 'msg': 'fixture', 'progress': 1})
 
     requests = {request.operation: request for request in transport.requests}
-    for name in (
-        'create_qr',
-        'poll_qr',
-        'oauth_info',
-        'refresh_token',
-        'submit_archive',
-    ):
+    for name in ('create_qr', 'poll_qr', 'oauth_info', 'refresh_token'):
         request = requests[name]
         assert 'Cookie' not in request.headers
         assert 'csrf' not in dict(request.query)
@@ -229,6 +224,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'archive_pre',
         'list_archives',
         'archive_view',
+        'submit_archive',
         'web_nav',
         'list_replies',
         'reply_detail',
@@ -242,7 +238,10 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert 'access_key' not in material
         assert 'refresh_token' not in material
         assert 'Cookie' in request.headers
-        assert request.headers['Referer'] == 'https://www.bilibili.com/'
+        if name == 'submit_archive':
+            assert request.headers['Referer'].startswith('https://member.bilibili.com/')
+        else:
+            assert request.headers['Referer'] == 'https://www.bilibili.com/'
         assert request.headers['User-Agent'].startswith('Mozilla/5.0 ')
     for name in ('preupload_init', 'upload_chunk', 'complete_upload'):
         request = requests[name]
@@ -263,8 +262,25 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'archive_view',
         'add_reply',
         'top_reply',
+        'submit_archive',
     ):
         assert 'w_rid' not in dict(requests[name].query)
+
+    submit = requests['submit_archive']
+    submit_query = dict(submit.query)
+    submit_body = json.loads((submit.body or b'{}').decode('utf8'))
+    assert submit_query == {
+        'csrf': 'csrf-secret',
+        't': '100000',
+        'web_location': '333.1024',
+    }
+    assert submit_body == {
+        'title': 'fixture',
+        'videos': 'fixture.mp4',
+        'csrf': 'csrf-secret',
+    }
+    assert submit.headers['Content-Type'] == 'application/json'
+    assert 'access_key' not in submit_query
 
 
 class FailingTransport:

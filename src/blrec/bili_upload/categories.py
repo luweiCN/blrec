@@ -14,6 +14,7 @@ __all__ = (
     'UploadCategoryCatalogView',
     'UploadCategoryNode',
     'UploadCategoryUnavailable',
+    'UploadCreationStatement',
 )
 
 
@@ -34,12 +35,20 @@ class UploadCategoryNode:
 
 
 @dataclass(frozen=True)
+class UploadCreationStatement:
+    id: int
+    content: str
+
+
+@dataclass(frozen=True)
 class UploadCategoryCatalogView:
     account_id: int
     credential_version: int
     fetched_at: int
     stale: bool
     categories: Tuple[UploadCategoryNode, ...]
+    creation_statements: Tuple[UploadCreationStatement, ...]
+    creation_statement_tip: str
 
 
 @dataclass(frozen=True)
@@ -92,7 +101,9 @@ class UploadCategoryCatalog:
             try:
                 bundle = await self._bundle_loader(account.id)
                 response = await self._protocol.archive_pre(bundle)
-                categories = self._normalize(response)
+                categories, creation_statements, creation_statement_tip = (
+                    self._normalize(response)
+                )
             except Exception:
                 if cached is not None:
                     return UploadCategoryCatalogView(
@@ -101,13 +112,22 @@ class UploadCategoryCatalog:
                         fetched_at=cached.fetched_at,
                         stale=True,
                         categories=cached.categories,
+                        creation_statements=cached.creation_statements,
+                        creation_statement_tip=cached.creation_statement_tip,
                     )
                 raise UploadCategoryUnavailable(
                     'upload categories are unavailable'
                 ) from None
 
             payload_json = json.dumps(
-                {'categories': [asdict(category) for category in categories]},
+                {
+                    'format_version': 2,
+                    'categories': [asdict(category) for category in categories],
+                    'creation_statements': [
+                        asdict(statement) for statement in creation_statements
+                    ],
+                    'creation_statement_tip': creation_statement_tip,
+                },
                 ensure_ascii=False,
                 separators=(',', ':'),
                 sort_keys=True,
@@ -126,6 +146,8 @@ class UploadCategoryCatalog:
                 fetched_at=now,
                 stale=False,
                 categories=categories,
+                creation_statements=creation_statements,
+                creation_statement_tip=creation_statement_tip,
             )
 
     async def _resolve_account(
@@ -168,11 +190,22 @@ class UploadCategoryCatalog:
             return None
         try:
             document = json.loads(str(row['payload_json']))
+            if document.get('format_version') != 2:
+                return None
             raw_categories = document['categories']
             categories = tuple(self._decode_node(value) for value in raw_categories)
+            creation_statements = tuple(
+                self._decode_statement(value)
+                for value in document['creation_statements']
+            )
+            creation_statement_tip = document['creation_statement_tip']
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
-        if not categories:
+        if (
+            not categories
+            or not creation_statements
+            or not isinstance(creation_statement_tip, str)
+        ):
             return None
         return UploadCategoryCatalogView(
             account_id=account_id,
@@ -180,6 +213,8 @@ class UploadCategoryCatalog:
             fetched_at=int(row['fetched_at']),
             stale=False,
             categories=categories,
+            creation_statements=creation_statements,
+            creation_statement_tip=creation_statement_tip,
         )
 
     def _is_fresh(
@@ -195,7 +230,11 @@ class UploadCategoryCatalog:
         )
 
     @classmethod
-    def _normalize(cls, response: Mapping[str, Any]) -> Tuple[UploadCategoryNode, ...]:
+    def _normalize(
+        cls, response: Mapping[str, Any]
+    ) -> Tuple[
+        Tuple[UploadCategoryNode, ...], Tuple[UploadCreationStatement, ...], str
+    ]:
         data = response.get('data')
         if not isinstance(data, Mapping):
             raise UploadCategoryUnavailable('upload categories are unavailable')
@@ -209,7 +248,36 @@ class UploadCategoryCatalog:
                 categories.append(parent)
         if not categories:
             raise UploadCategoryUnavailable('upload categories are unavailable')
-        return tuple(categories)
+        neutral_mark = data.get('neutral_mark')
+        if not isinstance(neutral_mark, Mapping):
+            raise UploadCategoryUnavailable('creation statements are unavailable')
+        raw_statements = neutral_mark.get('mark_list')
+        if not isinstance(raw_statements, list):
+            raise UploadCategoryUnavailable('creation statements are unavailable')
+        creation_statements = []
+        seen_ids = set()
+        for value in raw_statements:
+            if not isinstance(value, Mapping):
+                continue
+            statement_id = value.get('id')
+            content = value.get('content')
+            if (
+                type(statement_id) is not int
+                or statement_id in seen_ids
+                or not isinstance(content, str)
+                or not content.strip()
+            ):
+                continue
+            seen_ids.add(statement_id)
+            creation_statements.append(
+                UploadCreationStatement(id=statement_id, content=content.strip())
+            )
+        if not creation_statements:
+            raise UploadCategoryUnavailable('creation statements are unavailable')
+        tip = neutral_mark.get('tips', '')
+        if not isinstance(tip, str):
+            tip = ''
+        return tuple(categories), tuple(creation_statements), tip.strip()
 
     @classmethod
     def _normalize_node(
@@ -274,3 +342,13 @@ class UploadCategoryCatalog:
             description=description,
             children=tuple(cls._decode_node(child) for child in children),
         )
+
+    @staticmethod
+    def _decode_statement(value: Any) -> UploadCreationStatement:
+        if not isinstance(value, Mapping) or set(value) != {'id', 'content'}:
+            raise ValueError('invalid cached creation statement')
+        statement_id = value['id']
+        content = value['content']
+        if type(statement_id) is not int or not isinstance(content, str) or not content:
+            raise ValueError('invalid cached creation statement')
+        return UploadCreationStatement(id=statement_id, content=content)

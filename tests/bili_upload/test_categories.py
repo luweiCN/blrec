@@ -29,6 +29,14 @@ def category_response(*, child_id: int = 17) -> Mapping[str, Any]:
     return {
         'code': 0,
         'data': {
+            'neutral_mark': {
+                'tips': '请按内容选择创作声明',
+                'mark_list': [
+                    {'id': -1, 'content': '内容无需标注'},
+                    {'id': 1, 'content': '含 AI 生成内容'},
+                    {'id': -2, 'content': '内容为转载'},
+                ],
+            },
             'typelist': [
                 {
                     'id': 4,
@@ -44,7 +52,7 @@ def category_response(*, child_id: int = 17) -> Mapping[str, Any]:
                         {'id': 0, 'name': '无效分区', 'show': True},
                     ],
                 }
-            ]
+            ],
         },
     }
 
@@ -92,6 +100,9 @@ async def test_catalog_fetches_normalizes_and_reuses_fresh_cache(
         assert first.categories[0].id == 4
         assert first.categories[0].children[0].id == 17
         assert len(first.categories[0].children) == 1
+        assert [statement.id for statement in first.creation_statements] == [-1, 1, -2]
+        assert first.creation_statements[2].content == '内容为转载'
+        assert first.creation_statement_tip == '请按内容选择创作声明'
         assert loaded == [1]
         assert protocol.calls == ['bundle-1']
         cached = await database.fetchone(
@@ -101,6 +112,7 @@ async def test_catalog_fetches_normalizes_and_reuses_fresh_cache(
         assert cached is not None
         assert int(cached['credential_version']) == 3
         assert 'typelist' not in str(cached['payload_json'])
+        assert '"format_version":2' in str(cached['payload_json'])
         assert int(cached['fetched_at']) == 1000
     finally:
         await database.close()
@@ -158,7 +170,38 @@ async def test_catalog_returns_stale_cache_when_forced_refresh_fails(
 
         assert fallback.stale is True
         assert fallback.categories[0].children[0].id == 17
+        assert fallback.creation_statements[0].id == -1
         assert len(protocol.calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_catalog_ignores_legacy_cache_without_creation_statements(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        await database.execute(
+            'INSERT INTO upload_category_cache('
+            'account_id,credential_version,payload_json,fetched_at) '
+            "VALUES(1,3,'{\"categories\":[]}',1000)"
+        )
+        protocol = FakeProtocol(category_response())
+
+        async def load_bundle(account_id: int) -> Any:
+            return 'bundle-{}'.format(account_id)
+
+        catalog = UploadCategoryCatalog(
+            database, protocol, bundle_loader=load_bundle, clock=lambda: 1000
+        )
+
+        result = await catalog.list('primary', None)
+
+        assert result.creation_statements[0].id == -1
+        assert protocol.calls == ['bundle-1']
     finally:
         await database.close()
 

@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 from unittest.mock import AsyncMock
 
@@ -191,10 +192,52 @@ async def test_runtime_reconciles_crash_interrupted_recording_before_use(
         assert await runtime.start()
         assert runtime.journal is not None
         session = await runtime.journal.session_for_run(run_id)
-        assert session.state == 'manual_review'
-        assert session.parts[0].artifact_state == 'manual_review'
+        assert session.state == 'cancelled'
+        assert session.parts[0].artifact_state == 'failed'
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
+    tmp_path: Path,
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(
+            enabled=False, database_path=str(tmp_path / 'unused.sqlite3')
+        ),
+        api_key=None,
+        credential_key=None,
+    )
+    journal = SimpleNamespace(finalize_cancelled_sessions=AsyncMock(return_value=1))
+    coordinator = SimpleNamespace(
+        create_ready_jobs=AsyncMock(return_value=[1]),
+        run_once=AsyncMock(return_value=None),
+    )
+    review_watcher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    comment_publisher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    danmaku_importer = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    stop_event = asyncio.Event()
+
+    async def stop_after_iteration() -> None:
+        stop_event.set()
+
+    danmaku_publisher = SimpleNamespace(
+        run_once=AsyncMock(side_effect=stop_after_iteration)
+    )
+
+    await runtime._run_uploads(
+        journal,
+        coordinator,
+        review_watcher,
+        comment_publisher,
+        danmaku_importer,
+        danmaku_publisher,
+        stop_event,
+    )
+
+    journal.finalize_cancelled_sessions.assert_awaited_once_with()
+    coordinator.create_ready_jobs.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

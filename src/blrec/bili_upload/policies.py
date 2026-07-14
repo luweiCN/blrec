@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Mapping, Optional
+from typing import Any, Callable, List, Mapping, Optional, Tuple
 
 from liquid import Environment
 
@@ -37,11 +37,11 @@ class RoomUploadPolicyCommand:
     dynamic_template: str
     tid: int
     tags: str
-    copyright: int
+    creation_statement_id: int
+    original_authorization: bool
     source: str
     is_only_self: bool
     publish_dynamic: bool
-    no_reprint: bool
     up_selection_reply: bool
     up_close_reply: bool
     up_close_danmu: bool
@@ -64,6 +64,8 @@ class RoomUploadPolicyView:
     dynamic_template: str
     tid: int
     tags: str
+    creation_statement_id: int
+    original_authorization: bool
     copyright: int
     source: str
     is_only_self: bool
@@ -92,7 +94,8 @@ class RoomUploadPolicyManager:
         rows = await self._database.fetchall(
             'SELECT room_id,account_mode,account_id,enabled,title_template,'
             'description_template,part_title_template,dynamic_template,tid,tags,'
-            'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+            'creation_statement_id,original_authorization,copyright,source,'
+            'is_only_self,publish_dynamic,no_reprint,'
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at '
             'FROM room_upload_policies ORDER BY room_id'
@@ -103,7 +106,8 @@ class RoomUploadPolicyManager:
         row = await self._database.fetchone(
             'SELECT room_id,account_mode,account_id,enabled,title_template,'
             'description_template,part_title_template,dynamic_template,tid,tags,'
-            'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+            'creation_statement_id,original_authorization,copyright,source,'
+            'is_only_self,publish_dynamic,no_reprint,'
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at '
             'FROM room_upload_policies WHERE room_id=?',
@@ -125,21 +129,26 @@ class RoomUploadPolicyManager:
             separators=(',', ':'),
             sort_keys=True,
         )
+        copyright_value, no_reprint = self._submission_flags(command)
         await self._database.execute(
             'INSERT INTO room_upload_policies('
             'room_id,account_mode,account_id,enabled,title_template,'
             'description_template,part_title_template,dynamic_template,tid,tags,'
-            'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+            'creation_statement_id,original_authorization,copyright,source,'
+            'is_only_self,publish_dynamic,no_reprint,'
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at) '
-            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(room_id) DO UPDATE SET '
             'account_mode=excluded.account_mode,account_id=excluded.account_id,'
             'enabled=excluded.enabled,title_template=excluded.title_template,'
             'description_template=excluded.description_template,'
             'part_title_template=excluded.part_title_template,'
             'dynamic_template=excluded.dynamic_template,tid=excluded.tid,'
-            'tags=excluded.tags,copyright=excluded.copyright,'
+            'tags=excluded.tags,'
+            'creation_statement_id=excluded.creation_statement_id,'
+            'original_authorization=excluded.original_authorization,'
+            'copyright=excluded.copyright,'
             'source=excluded.source,is_only_self=excluded.is_only_self,'
             'publish_dynamic=excluded.publish_dynamic,'
             'no_reprint=excluded.no_reprint,'
@@ -160,11 +169,13 @@ class RoomUploadPolicyManager:
                 command.dynamic_template.strip(),
                 command.tid,
                 command.tags.strip(),
-                command.copyright,
+                command.creation_statement_id,
+                int(command.original_authorization),
+                copyright_value,
                 command.source.strip(),
                 int(command.is_only_self),
                 int(command.publish_dynamic),
-                int(command.no_reprint),
+                int(no_reprint),
                 int(command.up_selection_reply),
                 int(command.up_close_reply),
                 int(command.up_close_danmu),
@@ -223,10 +234,14 @@ class RoomUploadPolicyManager:
             raise InvalidRoomUploadPolicy('tid must be positive')
         if not command.tags.strip():
             raise InvalidRoomUploadPolicy('tags must not be empty')
-        if command.copyright not in (1, 2):
-            raise InvalidRoomUploadPolicy('copyright must be 1 or 2')
-        if command.copyright == 2 and not command.source.strip():
+        if type(command.creation_statement_id) is not int:
+            raise InvalidRoomUploadPolicy('creation statement is invalid')
+        if command.creation_statement_id == -2 and not command.source.strip():
             raise InvalidRoomUploadPolicy('source is required for reposted archives')
+        if command.creation_statement_id == -2 and command.original_authorization:
+            raise InvalidRoomUploadPolicy(
+                'repost and original authorization are mutually exclusive'
+            )
         if command.auto_comment and command.up_close_reply:
             raise InvalidRoomUploadPolicy(
                 'comments must remain open for automatic comments'
@@ -237,6 +252,14 @@ class RoomUploadPolicyManager:
             raise InvalidRoomUploadPolicy('selected comments require open comments')
         if not isinstance(command.filters, Mapping):
             raise InvalidRoomUploadPolicy('filters must be an object')
+
+    @staticmethod
+    def _submission_flags(command: RoomUploadPolicyCommand) -> Tuple[int, bool]:
+        if command.creation_statement_id == -2:
+            return 2, False
+        if command.original_authorization:
+            return 1, True
+        return 3, False
 
     async def _require_account(self, command: RoomUploadPolicyCommand) -> None:
         if command.account_mode == 'primary':
@@ -299,6 +322,8 @@ class RoomUploadPolicyManager:
             dynamic_template=str(row['dynamic_template']),
             tid=int(row['tid']),
             tags=str(row['tags']),
+            creation_statement_id=int(row['creation_statement_id']),
+            original_authorization=bool(row['original_authorization']),
             copyright=int(row['copyright']),
             source=str(row['source']),
             is_only_self=bool(row['is_only_self']),

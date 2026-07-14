@@ -5,6 +5,7 @@ from typing import AsyncIterator, List
 import pytest
 import pytest_asyncio
 
+from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.journal import RecordingJournalBridge, RecordingJournalListener
 
@@ -61,6 +62,24 @@ async def test_restart_of_same_live_reuses_session_and_continues_part_numbers(
 
 
 @pytest.mark.asyncio
+async def test_restart_of_frozen_live_creates_continuation_session(database) -> None:
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    first_run = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(first_run, '/rec/p1.flv', record_start_time=901)
+    await journal.video_completed(first_run, '/rec/p1.flv')
+    await journal.video_postprocessed(first_run, '/rec/p1.flv', '/rec/p1.flv')
+    await journal.recording_finished(first_run)
+
+    restarted_run = await journal.recording_started(100, live_start_time=900)
+
+    first_session = await journal.session_for_run(first_run)
+    restarted_session = await journal.session_for_run(restarted_run)
+    assert restarted_session.id != first_session.id
+    assert restarted_session.broadcast_session_key.startswith('100:900:continuation:')
+    assert first_session.state == 'closed'
+
+
+@pytest.mark.asyncio
 async def test_list_sessions_supports_offset_and_total(database) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
     for index in range(3):
@@ -98,12 +117,16 @@ async def test_missing_live_start_time_reuses_open_surrogate_session(database) -
 
 
 @pytest.mark.asyncio
-async def test_reconcile_marks_crash_interrupted_file_for_manual_review(
+async def test_reconcile_recovers_crash_interrupted_file_without_manual_review(
     database, tmp_path: Path
 ) -> None:
     source = tmp_path / 'interrupted.flv'
     source.write_bytes(b'partial recording')
-    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    journal = RecordingJournalBridge(
+        database,
+        clock=lambda: 1_000,
+        artifact_probe=lambda path: RecoveredArtifact(path, 17, 12),
+    )
     run_id = await journal.recording_started(100, live_start_time=900)
     await journal.video_created(run_id, str(source), record_start_time=901)
 
@@ -111,8 +134,13 @@ async def test_reconcile_marks_crash_interrupted_file_for_manual_review(
 
     session = await journal.session_for_run(run_id)
     part = (await journal.parts_for_run(run_id))[0]
-    assert session.state == 'manual_review'
-    assert part.artifact_state == 'manual_review'
+    assert session.state == 'cancelled'
+    assert part.artifact_state == 'ready'
+    assert part.final_path == str(source)
+    assert part.file_size_bytes == 17
+    assert part.record_duration_seconds == 12
+    assert part.record_end_time == 913
+    assert part.error_message == '录制异常中断，已自动恢复原始文件'
     assert (
         await database.scalar(
             'SELECT COUNT(*) FROM recording_runs '
@@ -120,6 +148,166 @@ async def test_reconcile_marks_crash_interrupted_file_for_manual_review(
             (run_id,),
         )
         == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_excludes_unreadable_interrupted_file(
+    database, tmp_path: Path
+) -> None:
+    source = tmp_path / 'broken.flv'
+    source.write_bytes(b'broken')
+    journal = RecordingJournalBridge(
+        database, clock=lambda: 1_000, artifact_probe=lambda _path: None
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+
+    await journal.reconcile_open_sessions()
+
+    part = (await journal.parts_for_run(run_id))[0]
+    assert part.artifact_state == 'failed'
+    assert part.final_path is None
+    assert part.error_message == '录制异常中断，文件无法解析，已自动排除'
+
+
+@pytest.mark.asyncio
+async def test_reconcile_falls_back_when_existing_ready_artifact_is_unreadable(
+    database, tmp_path: Path
+) -> None:
+    source = tmp_path / 'source.flv'
+    final = tmp_path / 'broken.mp4'
+    source.write_bytes(b'video')
+    final.write_bytes(b'broken')
+
+    def probe(path: str):
+        if path == str(source):
+            return RecoveredArtifact(path, 5, 20)
+        return None
+
+    journal = RecordingJournalBridge(
+        database, clock=lambda: 1_000, artifact_probe=probe
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await journal.video_completed(run_id, str(source))
+    await journal.video_postprocessed(run_id, str(source), str(final))
+    await database.execute(
+        "UPDATE recording_sessions SET state='manual_review' "
+        'WHERE id=(SELECT session_id FROM recording_runs WHERE id=?)',
+        (run_id,),
+    )
+
+    await journal.reconcile_open_sessions()
+
+    part = (await journal.parts_for_run(run_id))[0]
+    assert part.artifact_state == 'ready'
+    assert part.final_path == str(source)
+    assert part.error_message == '录制异常中断，已自动恢复原始文件'
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_is_finalized_after_resume_grace(
+    database, tmp_path: Path
+) -> None:
+    now = [1_000]
+    source = tmp_path / 'resumable.flv'
+    source.write_bytes(b'video')
+    journal = RecordingJournalBridge(database, clock=lambda: now[0])
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await journal.video_completed(run_id, str(source))
+    await journal.video_postprocessed(run_id, str(source), str(source))
+    await journal.recording_cancelled(run_id)
+
+    now[0] = 1_599
+    assert await journal.finalize_cancelled_sessions(grace_seconds=600) == 0
+    assert (await journal.session_for_run(run_id)).state == 'cancelled'
+
+    now[0] = 1_600
+    assert await journal.finalize_cancelled_sessions(grace_seconds=600) == 1
+    assert (await journal.session_for_run(run_id)).state == 'closed'
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_with_only_broken_parts_is_skipped(database) -> None:
+    now = [1_000]
+    journal = RecordingJournalBridge(
+        database, clock=lambda: now[0], artifact_probe=lambda _path: None
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, '/rec/broken.flv', record_start_time=901)
+    await journal.video_completed(run_id, '/rec/broken.flv')
+    await journal.video_postprocessing_failed(
+        run_id, '/rec/broken.flv', RuntimeError('invalid FLV')
+    )
+    await journal.recording_cancelled(run_id)
+
+    now[0] = 1_600
+    assert await journal.finalize_cancelled_sessions(grace_seconds=600) == 1
+    assert (await journal.session_for_run(run_id)).state == 'skipped'
+
+
+@pytest.mark.asyncio
+async def test_reconcile_consumes_legacy_manual_review_state(
+    database, tmp_path: Path
+) -> None:
+    source = tmp_path / 'legacy.flv'
+    source.write_bytes(b'video')
+    journal = RecordingJournalBridge(
+        database,
+        clock=lambda: 1_000,
+        artifact_probe=lambda path: RecoveredArtifact(path, 5, 9),
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await database.execute(
+        "UPDATE recording_runs SET state='finished',ended_at=910 WHERE id=?", (run_id,)
+    )
+    await database.execute(
+        "UPDATE recording_parts SET artifact_state='manual_review' WHERE run_id=?",
+        (run_id,),
+    )
+    await database.execute(
+        "UPDATE recording_sessions SET state='manual_review' "
+        'WHERE id=(SELECT session_id FROM recording_runs WHERE id=?)',
+        (run_id,),
+    )
+
+    await journal.reconcile_open_sessions()
+
+    session = await journal.session_for_run(run_id)
+    part = (await journal.parts_for_run(run_id))[0]
+    assert session.state == 'closed'
+    assert part.artifact_state == 'ready'
+
+
+@pytest.mark.asyncio
+async def test_postprocessing_failure_uses_valid_source_as_upload_artifact(
+    database, tmp_path: Path
+) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    journal = RecordingJournalBridge(
+        database,
+        clock=lambda: 1_000,
+        artifact_probe=lambda path: RecoveredArtifact(path, 5, 20),
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await journal.video_completed(run_id, str(source))
+
+    await journal.video_postprocessing_failed(
+        run_id, str(source), RuntimeError('remux failed')
+    )
+
+    part = (await journal.parts_for_run(run_id))[0]
+    assert part.artifact_state == 'ready'
+    assert part.final_path == str(source)
+    assert part.file_size_bytes == 5
+    assert (
+        part.error_message
+        == '后处理失败，已自动使用原始录制文件：RuntimeError: remux failed'
     )
 
 
@@ -166,7 +354,7 @@ async def test_session_closes_only_after_recording_and_postprocessing_finish(
 
 
 @pytest.mark.asyncio
-async def test_postprocessing_failure_is_a_terminal_visible_part_state(
+async def test_unrecoverable_postprocessing_failure_skips_empty_session(
     database,
 ) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
@@ -180,7 +368,7 @@ async def test_postprocessing_failure_is_a_terminal_visible_part_state(
     )
 
     session = await journal.session_for_run(run_id)
-    assert session.state == 'closed'
+    assert session.state == 'skipped'
     assert session.parts[0].artifact_state == 'failed'
     assert session.parts[0].error_message == 'RuntimeError: invalid FLV'
 

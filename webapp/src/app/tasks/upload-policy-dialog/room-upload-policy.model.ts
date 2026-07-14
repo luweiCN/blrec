@@ -10,11 +10,11 @@ export interface RoomUploadPolicyRequest {
   dynamicTemplate: string;
   tid: number;
   tags: string;
-  copyright: 1 | 2;
+  creationStatementId: number;
+  originalAuthorization: boolean;
   source: string;
   isOnlySelf: boolean;
   publishDynamic: boolean;
-  noReprint: boolean;
   upSelectionReply: boolean;
   upCloseReply: boolean;
   upCloseDanmu: boolean;
@@ -44,10 +44,17 @@ export interface UploadCategoryNode {
   children: UploadCategoryNode[];
 }
 
+export interface UploadCreationStatement {
+  id: number;
+  content: string;
+}
+
 export interface UploadCategoryCatalog {
   accountId: number;
   credentialVersion: number;
   fetchedAt: number;
   stale: boolean;
   categories: UploadCategoryNode[];
+  creationStatements: UploadCreationStatement[];
+  creationStatementTip: string;
 }

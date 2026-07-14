@@ -47,8 +47,12 @@ async def seed_policy(
         'INSERT INTO room_upload_policies('
         'room_id,account_mode,account_id,enabled,title_template,'
         'description_template,tid,tags,copyright,source,auto_comment,'
-        'danmaku_backfill,filter_json,created_at,updated_at) '
-        "VALUES(?,?,?,?,?,'description',17,'tag',1,'',0,0,'{}',1,1)",
+        'danmaku_backfill,filter_json,created_at,updated_at,'
+        'part_title_template,dynamic_template,is_only_self,publish_dynamic,'
+        'no_reprint,up_selection_reply,up_close_reply,up_close_danmu,'
+        'creation_statement_id,original_authorization) '
+        "VALUES(?,?,?,?,?,'description',17,'tag',1,'',0,0,'{}',1,1,"
+        "'P{{ part_index }}','',0,1,1,0,0,0,-1,1)",
         (room_id, account_mode, account_id, 1, 'title'),
     )
 

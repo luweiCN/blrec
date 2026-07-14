@@ -54,6 +54,15 @@
   white-space: nowrap;
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  padding: 16px 0 0;
+  color: #8c8c8c;
+}
+
 .nowrap {
   white-space: nowrap;
 }
@@ -206,8 +215,16 @@
   }
 
   code {
-    overflow-wrap: anywhere;
+    vertical-align: middle;
   }
+}
+
+.file-name {
+  display: inline-block;
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-label {
@@ -245,6 +262,12 @@
     width: 100%;
     max-width: none;
     margin-bottom: 12px;
+  }
+
+  .pagination-bar {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 8px;
   }
 }
 

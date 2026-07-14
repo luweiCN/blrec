@@ -10,8 +10,10 @@ import { NzDrawerModule } from 'ng-zorro-antd/drawer';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
+import { NzPaginationModule } from 'ng-zorro-antd/pagination';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
+import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
@@ -131,8 +133,10 @@ describe('RecordingSessionsComponent', () => {
         NzInputModule,
         NzModalModule,
         NzPageHeaderModule,
+        NzPaginationModule,
         NzTableModule,
         NzTagModule,
+        NzToolTipModule,
       ],
       providers: [{ provide: RecordingSessionService, useValue: service }],
     }).compileComponents();
@@ -159,6 +163,7 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('等待审核');
     expect(text).toContain('投稿账号');
     expect(text).not.toContain('/rec/p1.mp4');
+    expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
   });
 
   it('requests the selected server page and page size', () => {
@@ -182,6 +187,32 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.selectedSession).toBe(session);
     fixture.componentInstance.closeDetails();
     expect(fixture.componentInstance.detailVisible).toBeFalse();
+    expect(fixture.componentInstance.selectedSession).toBeNull();
+  });
+
+  it('does not reopen a closed detail drawer when the list refreshes', () => {
+    fixture.detectChanges();
+    fixture.componentInstance.openDetails(fixture.componentInstance.sessions[0]);
+    fixture.componentInstance.closeDetails();
+
+    fixture.componentInstance.load();
+
+    expect(fixture.componentInstance.detailVisible).toBeFalse();
+    expect(fixture.componentInstance.selectedSession).toBeNull();
+  });
+
+  it('shows only file names while retaining automatic recovery labels', () => {
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.fileName('/rec/path/very-long.flv')).toBe(
+      'very-long.flv'
+    );
+    expect(fixture.componentInstance.sessionStateLabel('manual_review')).toBe(
+      '自动恢复中'
+    );
+    expect(fixture.componentInstance.artifactStateLabel('manual_review')).toBe(
+      '自动恢复中'
+    );
   });
 
   it('marks the OnPush application tree after sessions load', () => {

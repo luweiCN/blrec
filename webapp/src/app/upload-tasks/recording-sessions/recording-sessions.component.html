@@ -50,16 +50,9 @@
     [nzData]="sessions"
     [nzLoading]="view.state === 'loading'"
     [nzFrontPagination]="false"
-    [nzPageIndex]="pageIndex"
-    [nzPageSize]="pageSize"
-    [nzTotal]="total"
-    [nzPageSizeOptions]="pageSizeOptions"
-    [nzShowSizeChanger]="true"
-    [nzShowPagination]="view.state === 'ready' && total > 0"
+    [nzShowPagination]="false"
     [nzScroll]="{ x: '1000px' }"
     [nzNoResult]="'还没有上传任务'"
-    (nzPageIndexChange)="pageIndexChanged($event)"
-    (nzPageSizeChange)="pageSizeChanged($event)"
   >
     <thead>
       <tr>
@@ -138,6 +131,20 @@
       </tr>
     </tbody>
   </nz-table>
+
+  <div *ngIf="view.state === 'ready' && total > 0" class="pagination-bar">
+    <span>共 {{ total }} 条</span>
+    <nz-pagination
+      nzSize="small"
+      [nzPageIndex]="pageIndex"
+      [nzPageSize]="pageSize"
+      [nzTotal]="total"
+      [nzPageSizeOptions]="pageSizeOptions"
+      [nzShowSizeChanger]="true"
+      (nzPageIndexChange)="pageIndexChanged($event)"
+      (nzPageSizeChange)="pageSizeChanged($event)"
+    ></nz-pagination>
+  </div>
 </div>
 
 <nz-drawer
@@ -330,15 +337,30 @@
               <td class="file-list">
                 <div *ngIf="part.finalPath">
                   <span class="file-label">成品</span>
-                  <code>{{ part.finalPath }}</code>
+                  <code
+                    class="file-name"
+                    nz-tooltip
+                    [nzTooltipTitle]="part.finalPath"
+                    >{{ fileName(part.finalPath) }}</code
+                  >
                 </div>
                 <div *ngIf="!part.finalPath">
                   <span class="file-label">录制</span>
-                  <code>{{ part.sourcePath }}</code>
+                  <code
+                    class="file-name"
+                    nz-tooltip
+                    [nzTooltipTitle]="part.sourcePath"
+                    >{{ fileName(part.sourcePath) }}</code
+                  >
                 </div>
                 <div *ngIf="part.xmlPath">
                   <span class="file-label">弹幕</span>
-                  <code>{{ part.xmlPath }}</code>
+                  <code
+                    class="file-name"
+                    nz-tooltip
+                    [nzTooltipTitle]="part.xmlPath"
+                    >{{ fileName(part.xmlPath) }}</code
+                  >
                 </div>
                 <div class="part-metric">
                   大小 {{ formatBytes(part.fileSizeBytes) }}

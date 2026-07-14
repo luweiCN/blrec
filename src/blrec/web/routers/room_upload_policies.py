@@ -42,11 +42,11 @@ class RoomUploadPolicyRequest(ApiModel):
     dynamic_template: str
     tid: int = Field(..., gt=0)
     tags: str
-    copyright: Literal[1, 2]
+    creation_statement_id: int
+    original_authorization: bool
     source: str
     is_only_self: bool
     publish_dynamic: bool
-    no_reprint: bool
     up_selection_reply: bool
     up_close_reply: bool
     up_close_danmu: bool
@@ -65,11 +65,11 @@ class RoomUploadPolicyRequest(ApiModel):
             dynamic_template=self.dynamic_template,
             tid=self.tid,
             tags=self.tags,
-            copyright=self.copyright,
+            creation_statement_id=self.creation_statement_id,
+            original_authorization=self.original_authorization,
             source=self.source,
             is_only_self=self.is_only_self,
             publish_dynamic=self.publish_dynamic,
-            no_reprint=self.no_reprint,
             up_selection_reply=self.up_selection_reply,
             up_close_reply=self.up_close_reply,
             up_close_danmu=self.up_close_danmu,
@@ -92,11 +92,11 @@ class RoomUploadPolicyResponse(ApiModel):
     dynamic_template: str
     tid: int
     tags: str
-    copyright: int
+    creation_statement_id: int
+    original_authorization: bool
     source: str
     is_only_self: bool
     publish_dynamic: bool
-    no_reprint: bool
     up_selection_reply: bool
     up_close_reply: bool
     up_close_danmu: bool
@@ -115,12 +115,19 @@ class UploadCategoryNodeResponse(ApiModel):
     children: List['UploadCategoryNodeResponse'] = Field(default_factory=list)
 
 
+class UploadCreationStatementResponse(ApiModel):
+    id: int
+    content: str
+
+
 class UploadCategoryCatalogResponse(ApiModel):
     account_id: int
     credential_version: int
     fetched_at: int
     stale: bool
     categories: List[UploadCategoryNodeResponse]
+    creation_statements: List[UploadCreationStatementResponse]
+    creation_statement_tip: str
 
 
 def get_policy_manager() -> RoomUploadPolicyManager:
@@ -203,6 +210,14 @@ async def upsert_room_upload_policy(
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail='请选择有效的二级投稿分区'
+            )
+        if not any(
+            statement.id == payload.creation_statement_id
+            for statement in category_view.creation_statements
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='请选择当前账号支持的创作声明',
             )
         return await policy_manager.upsert(room_id, payload.to_command())
     except InvalidUploadCategoryRequest as error:

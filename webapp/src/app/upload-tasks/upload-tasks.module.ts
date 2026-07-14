@@ -8,8 +8,10 @@ import { NzDrawerModule } from 'ng-zorro-antd/drawer';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
+import { NzPaginationModule } from 'ng-zorro-antd/pagination';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
+import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
@@ -27,8 +29,10 @@ import { UploadTasksComponent } from './upload-tasks.component';
     NzInputModule,
     NzModalModule,
     NzPageHeaderModule,
+    NzPaginationModule,
     NzTableModule,
     NzTagModule,
+    NzToolTipModule,
   ],
 })
 export class UploadTasksModule {}

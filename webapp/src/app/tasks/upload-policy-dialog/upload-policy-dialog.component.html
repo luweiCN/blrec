@@ -212,16 +212,46 @@
         </nz-form-item>
 
         <nz-form-item>
-          <nz-form-label nzRequired>稿件类型</nz-form-label>
+          <nz-form-label nzRequired>创作声明</nz-form-label>
           <nz-form-control>
-            <nz-radio-group name="copyright" [(ngModel)]="draft.copyright">
-              <label nz-radio [nzValue]="1">自制</label>
-              <label nz-radio [nzValue]="2">转载</label>
-            </nz-radio-group>
+            <nz-select
+              name="creationStatementId"
+              nzPlaceHolder="选择创作声明"
+              [nzLoading]="categoryLoading"
+              [nzDisabled]="categoryLoading || creationStatements.length === 0"
+              [ngModel]="draft.creationStatementId"
+              (ngModelChange)="creationStatementChanged($event)"
+            >
+              <nz-option
+                *ngFor="let statement of creationStatements"
+                [nzValue]="statement.id"
+                [nzLabel]="statement.content"
+              ></nz-option>
+            </nz-select>
+            <span
+              *ngIf="validationErrors.creationStatement"
+              class="field-error"
+            >
+              {{ validationErrors.creationStatement }}
+            </span>
+            <span *ngIf="catalog?.creationStatementTip" class="field-help">
+              {{ catalog?.creationStatementTip }}
+            </span>
           </nz-form-control>
         </nz-form-item>
 
-        <nz-form-item *ngIf="draft.copyright === 2">
+        <div *ngIf="!isRepost" class="switch-field compact-switch-field">
+          <label for="original-authorization">
+            内容为自制：未经作者允许，禁止转载
+          </label>
+          <nz-switch
+            id="original-authorization"
+            name="originalAuthorization"
+            [(ngModel)]="draft.originalAuthorization"
+          ></nz-switch>
+        </div>
+
+        <nz-form-item *ngIf="isRepost">
           <nz-form-label nzRequired>转载来源</nz-form-label>
           <nz-form-control>
             <input nz-input name="source" [(ngModel)]="draft.source" />
@@ -275,15 +305,6 @@
             ></textarea>
           </nz-form-control>
         </nz-form-item>
-
-        <div class="switch-field">
-          <label for="no-reprint">未经允许禁止转载</label>
-          <nz-switch
-            id="no-reprint"
-            name="noReprint"
-            [(ngModel)]="draft.noReprint"
-          ></nz-switch>
-        </div>
 
         <div class="switch-field">
           <label for="allow-replies">允许评论</label>
