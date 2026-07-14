@@ -28,6 +28,7 @@ from .routers import (
     settings,
     tasks,
     update,
+    upload_covers,
     validation,
     websockets,
 )
@@ -80,6 +81,8 @@ recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
 room_upload_policies.manager = None
 room_upload_policies.category_catalog = None
 room_upload_policies.unavailable_reason = _bili_account_runtime.unavailable_reason
+upload_covers.library = None
+upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
 
 if _env_settings.api_key is None:
     _dependencies = None
@@ -161,6 +164,8 @@ async def on_startup() -> None:
         room_upload_policies.unavailable_reason = (
             _bili_account_runtime.unavailable_reason
         )
+        upload_covers.library = _bili_account_runtime.cover_library
+        upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
         await app.launch()
         application_launched = True
         _application_started = True
@@ -173,6 +178,7 @@ async def on_startup() -> None:
         recording_sessions.content_reader = None
         room_upload_policies.manager = None
         room_upload_policies.category_catalog = None
+        upload_covers.library = None
         try:
             if application_launched:
                 await app.exit()
@@ -191,6 +197,7 @@ async def on_shuntdown() -> None:
     recording_sessions.content_reader = None
     room_upload_policies.manager = None
     room_upload_policies.category_catalog = None
+    upload_covers.library = None
     try:
         await app.exit()
     finally:
@@ -215,6 +222,7 @@ api.include_router(live_status.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
 api.include_router(recording_sessions.router, prefix='/api/v1')
 api.include_router(room_upload_policies.router, prefix='/api/v1')
+api.include_router(upload_covers.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

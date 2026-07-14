@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
 from loguru import logger
@@ -13,6 +14,7 @@ from .accounts import AccountManager, AccountWriteGate
 from .categories import UploadCategoryCatalog
 from .comments import CommentPlanner, CommentPublisher
 from .credentials import CredentialStore
+from .covers import CoverLibrary, CoverResolver
 from .crypto import CredentialCipher
 from .danmaku_import import DanmakuImporter
 from .danmaku_publish import DanmakuPublisher
@@ -76,6 +78,8 @@ class BiliAccountRuntime:
         self._coordinator: Optional[UploadCoordinator] = None
         self._policy_manager: Optional[RoomUploadPolicyManager] = None
         self._category_catalog: Optional[UploadCategoryCatalog] = None
+        self._cover_library: Optional[CoverLibrary] = None
+        self._cover_resolver: Optional[CoverResolver] = None
         self._review_watcher: Optional[ReviewWatcher] = None
         self._comment_planner: Optional[CommentPlanner] = None
         self._comment_publisher: Optional[CommentPublisher] = None
@@ -111,6 +115,14 @@ class BiliAccountRuntime:
     @property
     def category_catalog(self) -> Optional[UploadCategoryCatalog]:
         return self._category_catalog
+
+    @property
+    def cover_library(self) -> Optional[CoverLibrary]:
+        return self._cover_library
+
+    @property
+    def cover_resolver(self) -> Optional[CoverResolver]:
+        return self._cover_resolver
 
     @property
     def review_watcher(self) -> Optional[ReviewWatcher]:
@@ -216,6 +228,16 @@ class BiliAccountRuntime:
             category_catalog = UploadCategoryCatalog(
                 database, protocol, bundle_loader=load_bundle, clock=self._clock
             )
+            cover_library = CoverLibrary(
+                database, Path(database.path).parent / 'cover-assets', clock=self._clock
+            )
+            cover_resolver = CoverResolver(
+                database,
+                cover_library,
+                protocol,
+                bundle_loader=load_bundle,
+                clock=self._clock,
+            )
             comment_planner = CommentPlanner(database, clock=self._clock)
             comment_publisher = CommentPublisher(
                 database,
@@ -263,6 +285,8 @@ class BiliAccountRuntime:
         self._coordinator = coordinator
         self._policy_manager = policy_manager
         self._category_catalog = category_catalog
+        self._cover_library = cover_library
+        self._cover_resolver = cover_resolver
         self._review_watcher = review_watcher
         self._comment_planner = comment_planner
         self._comment_publisher = comment_publisher
@@ -310,6 +334,8 @@ class BiliAccountRuntime:
         self._coordinator = None
         self._policy_manager = None
         self._category_catalog = None
+        self._cover_library = None
+        self._cover_resolver = None
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None
