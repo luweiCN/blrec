@@ -60,6 +60,14 @@ async def seed_ready_session(
     stable: bool = True,
     auto_comment: bool = False,
     danmaku_backfill: bool = False,
+    part_title_template: str = 'P{{ part_index }}',
+    dynamic_template: str = '{{ title }}｜{{ anchor_name }}',
+    is_only_self: bool = False,
+    publish_dynamic: bool = True,
+    no_reprint: bool = True,
+    up_selection_reply: bool = False,
+    up_close_reply: bool = False,
+    up_close_danmu: bool = False,
 ) -> List[Path]:
     await database.execute(
         "INSERT INTO bili_accounts("
@@ -73,11 +81,24 @@ async def seed_ready_session(
     await database.execute(
         'INSERT INTO room_upload_policies('
         'room_id,account_mode,account_id,enabled,title_template,'
-        'description_template,tid,tags,copyright,source,auto_comment,'
+        'description_template,part_title_template,dynamic_template,tid,tags,'
+        'copyright,source,is_only_self,publish_dynamic,no_reprint,'
+        'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
         'danmaku_backfill,filter_json,created_at,updated_at) '
         "VALUES(100,'primary',NULL,1,'{{ title }} 录播',"
-        "'主播 {{ anchor_name }}',17,'直播,录播',1,'',?,?, '{}',1,1)",
-        (int(auto_comment), int(danmaku_backfill)),
+        "'主播 {{ anchor_name }}',?,?,17,'直播,录播',1,'',?,?,?,?,?,?,?,?,'{}',1,1)",
+        (
+            part_title_template,
+            dynamic_template,
+            int(is_only_self),
+            int(publish_dynamic),
+            int(no_reprint),
+            int(up_selection_reply),
+            int(up_close_reply),
+            int(up_close_danmu),
+            int(auto_comment),
+            int(danmaku_backfill),
+        ),
     )
     await database.execute(
         'INSERT INTO recording_sessions('
@@ -174,8 +195,11 @@ async def test_create_ready_job_locks_account_policy_and_part_order(
         assert str(job['submit_state']) == 'prepared'
         assert snapshot['account_id'] == 1
         assert snapshot['account_credential_version_at_creation'] == 3
+        assert snapshot['format_version'] == 2
         assert snapshot['title'] == '测试直播 录播'
         assert snapshot['description'] == '主播 测试主播'
+        assert snapshot['dynamic'] == '测试直播｜测试主播'
+        assert snapshot['publish_dynamic'] is True
         assert snapshot['part_titles'] == ['P1', 'P2']
         parts = await database.fetchall(
             'SELECT part_index,artifact_state,upload_state,file_identity '
@@ -229,6 +253,11 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
             {'filename': 'remote-1', 'title': 'P1', 'desc': ''},
             {'filename': 'remote-2', 'title': 'P2', 'desc': ''},
         ]
+        assert payload['dynamic'] == '测试直播｜测试主播'
+        assert payload['no_disturbance'] == 0
+        assert payload['no_reprint'] == 1
+        assert payload['is_only_self'] == 0
+        assert payload['up_selection_reply'] is False
         assert payload['up_close_reply'] is False
         assert payload['up_close_danmu'] is False
         job = await database.fetchone(
@@ -241,6 +270,102 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
             'aid': 303,
             'bvid': 'BVfixture',
         }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_uses_room_visibility_interaction_and_part_settings(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(
+            database,
+            tmp_path,
+            part_title_template='第 {{ part_index }} P',
+            dynamic_template='{{ title }} 的直播回放',
+            is_only_self=True,
+            publish_dynamic=False,
+            no_reprint=False,
+            up_selection_reply=True,
+        )
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+
+        await worker.create_ready_jobs()
+        row = await database.fetchone(
+            'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        snapshot = json.loads(str(row['policy_snapshot_json']))
+        assert snapshot['part_titles'] == ['第 1 P', '第 2 P']
+        assert snapshot['dynamic'] == '测试直播 的直播回放'
+        assert snapshot['is_only_self'] is True
+        assert snapshot['publish_dynamic'] is False
+        assert snapshot['no_reprint'] is False
+        assert snapshot['up_selection_reply'] is True
+
+        await worker.run_once()
+
+        payload = protocol.submit_calls[0]
+        assert payload['videos'][0]['title'] == '第 1 P'
+        assert payload['dynamic'] == ''
+        assert payload['no_disturbance'] == 1
+        assert payload['no_reprint'] == 0
+        assert payload['is_only_self'] == 1
+        assert payload['up_selection_reply'] is True
+        assert payload['up_close_reply'] is False
+        assert payload['up_close_danmu'] is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_format_one_snapshot_keeps_previous_submit_defaults(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+        row = await database.fetchone(
+            'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        snapshot = json.loads(str(row['policy_snapshot_json']))
+        snapshot['format_version'] = 1
+        for field in (
+            'dynamic',
+            'is_only_self',
+            'publish_dynamic',
+            'no_reprint',
+            'up_selection_reply',
+            'up_close_reply',
+            'up_close_danmu',
+        ):
+            snapshot.pop(field, None)
+        await database.execute(
+            'UPDATE upload_jobs SET policy_snapshot_json=? WHERE id=1',
+            (json.dumps(snapshot),),
+        )
+
+        await worker.run_once()
+
+        payload = protocol.submit_calls[0]
+        assert payload['dynamic'] == ''
+        assert payload['no_disturbance'] == 0
+        assert payload['no_reprint'] == 1
+        assert payload['is_only_self'] == 0
+        assert payload['up_selection_reply'] is False
     finally:
         await database.close()
 

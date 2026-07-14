@@ -100,8 +100,11 @@ class UploadCoordinator:
             'session.cover_path,session.anchor_uid,session.anchor_name,'
             'session.area_id,session.area_name,session.parent_area_id,'
             'session.parent_area_name,policy.account_mode,policy.account_id,'
-            'policy.title_template,policy.description_template,policy.tid,'
-            'policy.tags,policy.copyright,policy.source,policy.auto_comment,'
+            'policy.title_template,policy.description_template,'
+            'policy.part_title_template,policy.dynamic_template,policy.tid,'
+            'policy.tags,policy.copyright,policy.source,policy.is_only_self,'
+            'policy.publish_dynamic,policy.no_reprint,policy.up_selection_reply,'
+            'policy.up_close_reply,policy.up_close_danmu,policy.auto_comment,'
             'policy.danmaku_backfill,policy.filter_json,'
             'policy.updated_at AS policy_updated_at,'
             'account.id AS resolved_account_id,'
@@ -332,12 +335,21 @@ class UploadCoordinator:
             description = self._liquid.from_string(
                 str(row['description_template'])
             ).render(**context)
+            dynamic = self._liquid.from_string(str(row['dynamic_template'])).render(
+                **context
+            )
             source = self._liquid.from_string(str(row['source'])).render(**context)
+            part_template = self._liquid.from_string(str(row['part_title_template']))
+            part_titles = [
+                part_template.render(**context, part_index=part.part_index).strip()
+                for part in parts
+            ]
             filters = json.loads(str(row['filter_json']))
         except Exception as error:
             raise InvalidUploadPolicy('upload policy cannot be rendered') from error
         title = title.strip()
         description = description.strip()
+        dynamic = dynamic.strip()
         source = source.strip()
         tags = str(row['tags']).strip()
         copyright_value = int(row['copyright'])
@@ -345,6 +357,8 @@ class UploadCoordinator:
             raise InvalidUploadPolicy('upload title must contain 1 to 80 characters')
         if len(description) > 2000:
             raise InvalidUploadPolicy('upload description is too long')
+        if any(not part_title for part_title in part_titles):
+            raise InvalidUploadPolicy('upload part titles must not be empty')
         if not tags:
             raise InvalidUploadPolicy('upload tags must not be empty')
         if copyright_value == 2 and not source:
@@ -366,7 +380,7 @@ class UploadCoordinator:
             ).encode('utf8')
         ).hexdigest()
         return {
-            'format_version': 1,
+            'format_version': 2,
             'fingerprint': fingerprint,
             'session_id': int(row['session_id']),
             'room_id': int(row['room_id']),
@@ -376,16 +390,23 @@ class UploadCoordinator:
             'account_credential_version_at_creation': int(row['credential_version']),
             'title': title,
             'description': description,
+            'dynamic': dynamic,
             'tid': int(row['tid']),
             'tags': tags,
             'copyright': copyright_value,
             'source': source,
+            'is_only_self': bool(row['is_only_self']),
+            'publish_dynamic': bool(row['publish_dynamic']),
+            'no_reprint': bool(row['no_reprint']),
+            'up_selection_reply': bool(row['up_selection_reply']),
+            'up_close_reply': bool(row['up_close_reply']),
+            'up_close_danmu': bool(row['up_close_danmu']),
             'cover_url': str(row['cover_url']),
             'cover_path': None if row['cover_path'] is None else str(row['cover_path']),
             'auto_comment': bool(row['auto_comment']),
             'danmaku_backfill': bool(row['danmaku_backfill']),
             'filters': filters,
-            'part_titles': ['P{}'.format(part.part_index) for part in parts],
+            'part_titles': part_titles,
         }
 
     async def _process(self, claim: LeaseClaim) -> None:
@@ -513,8 +534,12 @@ class UploadCoordinator:
             snapshot = json.loads(job.policy_snapshot_json)
         except json.JSONDecodeError:
             raise ProtocolContractError('invalid upload policy snapshot') from None
-        if not isinstance(snapshot, dict) or snapshot.get('format_version') != 1:
+        if not isinstance(snapshot, dict) or snapshot.get('format_version') not in (
+            1,
+            2,
+        ):
             raise ProtocolContractError('invalid upload policy snapshot')
+        format_version = int(snapshot['format_version'])
         parts = await self._database.fetchall(
             'SELECT part_index,remote_filename FROM upload_parts '
             'WHERE job_id=? ORDER BY part_index',
@@ -537,6 +562,26 @@ class UploadCoordinator:
             videos.append(
                 {'filename': remote_filename, 'title': title[:80], 'desc': ''}
             )
+        if format_version == 1:
+            dynamic = ''
+            no_disturbance = 0
+            no_reprint = 1
+            is_only_self = 0
+            up_selection_reply = False
+            up_close_reply = False
+            up_close_danmu = False
+        else:
+            rendered_dynamic = snapshot.get('dynamic', '')
+            if not isinstance(rendered_dynamic, str):
+                raise ProtocolContractError('invalid upload policy snapshot')
+            publish_dynamic = bool(snapshot.get('publish_dynamic'))
+            dynamic = rendered_dynamic if publish_dynamic else ''
+            no_disturbance = 0 if publish_dynamic else 1
+            no_reprint = 1 if bool(snapshot.get('no_reprint')) else 0
+            is_only_self = 1 if bool(snapshot.get('is_only_self')) else 0
+            up_selection_reply = bool(snapshot.get('up_selection_reply'))
+            up_close_reply = bool(snapshot.get('up_close_reply'))
+            up_close_danmu = bool(snapshot.get('up_close_danmu'))
         payload: Dict[str, Any] = {
             'cover': snapshot.get('cover_url', ''),
             'title': snapshot.get('title'),
@@ -546,19 +591,20 @@ class UploadCoordinator:
             'desc_format_id': 0,
             'desc': snapshot.get('description', ''),
             'recreate': -1,
-            'dynamic': '',
+            'dynamic': dynamic,
             'interactive': 0,
             'videos': videos,
             'act_reserve_create': 0,
-            'no_disturbance': 0,
-            'no_reprint': 1,
+            'no_disturbance': no_disturbance,
+            'no_reprint': no_reprint,
+            'is_only_self': is_only_self,
             'open_elec': 0,
             'subtitle': {'open': 0, 'lan': ''},
             'dolby': 0,
             'lossless_music': 0,
-            'up_selection_reply': False,
-            'up_close_reply': False,
-            'up_close_danmu': False,
+            'up_selection_reply': up_selection_reply,
+            'up_close_reply': up_close_reply,
+            'up_close_danmu': up_close_danmu,
         }
         if snapshot.get('copyright') == 2:
             payload['source'] = snapshot.get('source', '')
