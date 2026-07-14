@@ -109,6 +109,7 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         ('upload_chunk', 'upos_session', '<server-returned>'),
         ('complete_upload', 'upos_session', '<server-returned>'),
         ('submit_archive', 'bilitv_token_sign', '/x/vu/app/add'),
+        ('archive_pre', 'web_cookie', '/x/vupre/web/archive/pre'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
         ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
         ('web_nav', 'web_cookie', '/x/web-interface/nav'),
@@ -193,6 +194,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         prepared.session, parts=({'partNumber': 1, 'eTag': 'fixture-etag'},)
     )
     await client.submit_archive(bundle, {'title': 'fixture', 'videos': 'fixture.mp4'})
+    await client.archive_pre(bundle)
     await client.list_archives(bundle, {'pn': 1})
     await client.archive_view(bundle, {'bvid': 'BVfixture'})
     await client.web_nav(bundle)
@@ -224,6 +226,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         }
     for name in (
         'preupload',
+        'archive_pre',
         'list_archives',
         'archive_view',
         'web_nav',
@@ -255,6 +258,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert 'w_rid' in dict(requests[name].query)
     for name in (
         'preupload',
+        'archive_pre',
         'list_archives',
         'archive_view',
         'add_reply',

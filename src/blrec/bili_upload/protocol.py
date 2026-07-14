@@ -377,6 +377,9 @@ class BiliProtocolClient:
     ) -> Mapping[str, Any]:
         return await self._web_request('list_archives', bundle, query=params)
 
+    async def archive_pre(self, bundle: CredentialBundle) -> Mapping[str, Any]:
+        return await self._web_request('archive_pre', bundle)
+
     async def archive_view(
         self, bundle: CredentialBundle, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:

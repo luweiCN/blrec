@@ -1,9 +1,15 @@
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field
 
+from blrec.bili_upload.categories import (
+    InvalidUploadCategoryRequest,
+    UploadCategoryCatalog,
+    UploadCategoryCatalogView,
+    UploadCategoryUnavailable,
+)
 from blrec.bili_upload.policies import (
     InvalidRoomUploadPolicy,
     RoomUploadPolicyCommand,
@@ -16,6 +22,7 @@ from blrec.utils.string import camel_case
 from .bili_accounts import authenticated_manager_subject
 
 manager: Optional[RoomUploadPolicyManager] = None
+category_catalog: Optional[UploadCategoryCatalog] = None
 unavailable_reason: Optional[str] = 'Room upload policies are not enabled'
 
 
@@ -101,6 +108,21 @@ class RoomUploadPolicyResponse(ApiModel):
     updated_at: int
 
 
+class UploadCategoryNodeResponse(ApiModel):
+    id: int
+    name: str
+    description: str
+    children: List['UploadCategoryNodeResponse'] = Field(default_factory=list)
+
+
+class UploadCategoryCatalogResponse(ApiModel):
+    account_id: int
+    credential_version: int
+    fetched_at: int
+    stale: bool
+    categories: List[UploadCategoryNodeResponse]
+
+
 def get_policy_manager() -> RoomUploadPolicyManager:
     if manager is None:
         raise HTTPException(
@@ -108,6 +130,15 @@ def get_policy_manager() -> RoomUploadPolicyManager:
             detail=unavailable_reason or 'Room upload policies are unavailable',
         )
     return manager
+
+
+def get_category_catalog() -> UploadCategoryCatalog:
+    if category_catalog is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Upload categories are unavailable',
+        )
+    return category_catalog
 
 
 router = APIRouter(prefix='/room-upload-policies', tags=['room-upload-policies'])
@@ -119,6 +150,26 @@ async def list_room_upload_policies(
     policy_manager: RoomUploadPolicyManager = Depends(get_policy_manager),
 ) -> List[RoomUploadPolicyView]:
     return await policy_manager.list()
+
+
+@router.get('/categories', response_model=UploadCategoryCatalogResponse)
+async def list_upload_categories(
+    account_mode: Literal['primary', 'fixed'] = Query(..., alias='accountMode'),
+    account_id: Optional[int] = Query(None, alias='accountId'),
+    refresh: bool = False,
+    _subject: str = Depends(authenticated_manager_subject),
+    catalog: UploadCategoryCatalog = Depends(get_category_catalog),
+) -> UploadCategoryCatalogView:
+    try:
+        return await catalog.list(account_mode, account_id, force_refresh=refresh)
+    except InvalidUploadCategoryRequest as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+    except UploadCategoryUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
+        ) from None
 
 
 @router.get('/{room_id}', response_model=RoomUploadPolicyResponse)

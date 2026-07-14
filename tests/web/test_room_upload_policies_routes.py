@@ -5,6 +5,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from blrec.bili_upload.categories import (
+    InvalidUploadCategoryRequest,
+    UploadCategoryCatalogView,
+    UploadCategoryNode,
+    UploadCategoryUnavailable,
+)
 from blrec.bili_upload.policies import (
     InvalidRoomUploadPolicy,
     RoomUploadPolicyCommand,
@@ -73,13 +79,53 @@ class FakePolicyManager:
             raise RoomUploadPolicyNotFound('room upload policy not found')
 
 
+@dataclass
+class FakeCategoryCatalog:
+    invalid: bool = False
+    unavailable: bool = False
+    request: Optional[tuple] = None
+
+    async def list(
+        self,
+        account_mode: str,
+        account_id: Optional[int],
+        *,
+        force_refresh: bool = False,
+    ) -> UploadCategoryCatalogView:
+        if self.invalid:
+            raise InvalidUploadCategoryRequest('an active upload account is required')
+        if self.unavailable:
+            raise UploadCategoryUnavailable('upload categories are unavailable')
+        self.request = (account_mode, account_id, force_refresh)
+        return UploadCategoryCatalogView(
+            account_id=7,
+            credential_version=3,
+            fetched_at=1000,
+            stale=False,
+            categories=(
+                UploadCategoryNode(
+                    id=4,
+                    name='游戏',
+                    description='',
+                    children=(
+                        UploadCategoryNode(
+                            id=17, name='单机游戏', description='单机内容', children=()
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+
 @pytest.fixture(autouse=True)
 def restore_router_state() -> Iterator[None]:
     old_manager = room_upload_policies.manager
+    old_catalog = room_upload_policies.category_catalog
     old_reason = room_upload_policies.unavailable_reason
     old_key = security.api_key
     yield
     room_upload_policies.manager = old_manager
+    room_upload_policies.category_catalog = old_catalog
     room_upload_policies.unavailable_reason = old_reason
     security.api_key = old_key
 
@@ -93,7 +139,16 @@ def manager() -> FakePolicyManager:
 
 
 @pytest.fixture
-def client(manager: FakePolicyManager) -> Iterator[TestClient]:
+def category_catalog() -> FakeCategoryCatalog:
+    value = FakeCategoryCatalog()
+    room_upload_policies.category_catalog = value  # type: ignore[assignment]
+    return value
+
+
+@pytest.fixture
+def client(
+    manager: FakePolicyManager, category_catalog: FakeCategoryCatalog
+) -> Iterator[TestClient]:
     api = FastAPI()
     api.include_router(room_upload_policies.router, prefix='/api/v1')
     security.api_key = 'test-api-key'
@@ -147,6 +202,60 @@ def test_get_room_upload_policy_returns_only_requested_room(client: TestClient) 
 
     assert response.status_code == 200
     assert response.json()['roomId'] == 200
+
+
+def test_list_upload_categories_uses_selected_account_and_refresh_flag(
+    client: TestClient, category_catalog: FakeCategoryCatalog
+) -> None:
+    response = client.get(
+        '/api/v1/room-upload-policies/categories',
+        headers=auth_headers(),
+        params={'accountMode': 'fixed', 'accountId': 7, 'refresh': 'true'},
+    )
+
+    assert response.status_code == 200
+    assert category_catalog.request == ('fixed', 7, True)
+    assert response.json() == {
+        'accountId': 7,
+        'credentialVersion': 3,
+        'fetchedAt': 1000,
+        'stale': False,
+        'categories': [
+            {
+                'id': 4,
+                'name': '游戏',
+                'description': '',
+                'children': [
+                    {
+                        'id': 17,
+                        'name': '单机游戏',
+                        'description': '单机内容',
+                        'children': [],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ('failure', 'status_code'), (('invalid', 409), ('unavailable', 503))
+)
+def test_list_upload_categories_maps_catalog_errors(
+    client: TestClient,
+    category_catalog: FakeCategoryCatalog,
+    failure: str,
+    status_code: int,
+) -> None:
+    setattr(category_catalog, failure, True)
+
+    response = client.get(
+        '/api/v1/room-upload-policies/categories',
+        headers=auth_headers(),
+        params={'accountMode': 'primary'},
+    )
+
+    assert response.status_code == status_code
 
 
 def test_upsert_converts_request_to_domain_command(

@@ -10,6 +10,7 @@ from loguru import logger
 from blrec.setting.models import BiliUploadSettings
 
 from .accounts import AccountManager, AccountWriteGate
+from .categories import UploadCategoryCatalog
 from .comments import CommentPlanner, CommentPublisher
 from .credentials import CredentialStore
 from .crypto import CredentialCipher
@@ -72,6 +73,7 @@ class BiliAccountRuntime:
         self._journal: Optional[RecordingJournalBridge] = None
         self._coordinator: Optional[UploadCoordinator] = None
         self._policy_manager: Optional[RoomUploadPolicyManager] = None
+        self._category_catalog: Optional[UploadCategoryCatalog] = None
         self._review_watcher: Optional[ReviewWatcher] = None
         self._comment_planner: Optional[CommentPlanner] = None
         self._comment_publisher: Optional[CommentPublisher] = None
@@ -99,6 +101,10 @@ class BiliAccountRuntime:
     @property
     def policy_manager(self) -> Optional[RoomUploadPolicyManager]:
         return self._policy_manager
+
+    @property
+    def category_catalog(self) -> Optional[UploadCategoryCatalog]:
+        return self._category_catalog
 
     @property
     def review_watcher(self) -> Optional[ReviewWatcher]:
@@ -200,6 +206,9 @@ class BiliAccountRuntime:
                 stop_requested=upload_stop_requested,
             )
             policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
+            category_catalog = UploadCategoryCatalog(
+                database, protocol, bundle_loader=load_bundle, clock=self._clock
+            )
             comment_planner = CommentPlanner(database, clock=self._clock)
             comment_publisher = CommentPublisher(
                 database,
@@ -245,6 +254,7 @@ class BiliAccountRuntime:
         self._manager = manager
         self._coordinator = coordinator
         self._policy_manager = policy_manager
+        self._category_catalog = category_catalog
         self._review_watcher = review_watcher
         self._comment_planner = comment_planner
         self._comment_publisher = comment_publisher
@@ -290,6 +300,7 @@ class BiliAccountRuntime:
             await manager.close()
         self._coordinator = None
         self._policy_manager = None
+        self._category_catalog = None
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None

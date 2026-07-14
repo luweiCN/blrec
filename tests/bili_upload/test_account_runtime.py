@@ -124,6 +124,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.journal is not None
         assert runtime.coordinator is not None
         assert runtime.policy_manager is not None
+        assert runtime.category_catalog is not None
         assert runtime.review_watcher is not None
         assert runtime.comment_planner is not None
         assert runtime.comment_publisher is not None
@@ -157,6 +158,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.manager is None
     assert runtime.coordinator is None
     assert runtime.policy_manager is None
+    assert runtime.category_catalog is None
     assert runtime.review_watcher is None
     assert runtime.comment_planner is None
     assert runtime.comment_publisher is None

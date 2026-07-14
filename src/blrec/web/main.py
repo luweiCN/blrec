@@ -77,6 +77,7 @@ recording_sessions.journal = None
 recording_sessions.danmaku_publisher = None
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
 room_upload_policies.manager = None
+room_upload_policies.category_catalog = None
 room_upload_policies.unavailable_reason = _bili_account_runtime.unavailable_reason
 
 if _env_settings.api_key is None:
@@ -154,6 +155,7 @@ async def on_startup() -> None:
         recording_sessions.danmaku_publisher = _bili_account_runtime.danmaku_publisher
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
         room_upload_policies.manager = _bili_account_runtime.policy_manager
+        room_upload_policies.category_catalog = _bili_account_runtime.category_catalog
         room_upload_policies.unavailable_reason = (
             _bili_account_runtime.unavailable_reason
         )
@@ -167,6 +169,7 @@ async def on_startup() -> None:
         recording_sessions.journal = None
         recording_sessions.danmaku_publisher = None
         room_upload_policies.manager = None
+        room_upload_policies.category_catalog = None
         try:
             if application_launched:
                 await app.exit()
@@ -183,6 +186,7 @@ async def on_shuntdown() -> None:
     recording_sessions.journal = None
     recording_sessions.danmaku_publisher = None
     room_upload_policies.manager = None
+    room_upload_policies.category_catalog = None
     try:
         await app.exit()
     finally:
