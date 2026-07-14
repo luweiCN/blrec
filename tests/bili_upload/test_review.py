@@ -206,6 +206,28 @@ async def test_review_binds_cids_by_remote_filename_not_array_position(
 
 
 @pytest.mark.asyncio
+async def test_private_archive_state_is_complete_and_binds_cid(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = watcher(
+            database,
+            archive_response(state=-50, state_desc='稿件仅自己可见'),
+            detail=archive_detail([{'filename': 'p1', 'cid': 101, 'index': 1}]),
+        )
+
+        assert await review.run_once() == 1
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'approved'
+        )
+        assert (
+            await database.scalar('SELECT cid FROM upload_parts WHERE job_id=1') == 101
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_owner_mismatch_pauses_without_creating_children(tmp_path: Path) -> None:
     database = await open_database(tmp_path / 'upload.sqlite3')
     comment = FakeBranch()

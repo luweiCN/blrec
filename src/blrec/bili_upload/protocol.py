@@ -321,7 +321,9 @@ class BiliProtocolClient:
             query=self._parameters(query),
             body=body,
         )
-        return await self._execute(request, idempotent=True, allow_empty_success=True)
+        return await self._execute(
+            request, idempotent=True, allow_unstructured_success=True
+        )
 
     async def complete_upload(
         self, session: UposSession, *, parts: Sequence[Mapping[str, Any]]
@@ -467,7 +469,7 @@ class BiliProtocolClient:
         *,
         idempotent: bool,
         check_code: bool = True,
-        allow_empty_success: bool = False,
+        allow_unstructured_success: bool = False,
     ) -> Mapping[str, Any]:
         try:
             response = await self._transport.send(request)
@@ -482,11 +484,13 @@ class BiliProtocolClient:
             raise RemoteOutcomeUnknown(request.operation)
         if response.status >= 400:
             raise BiliApiError(response.status, operation=request.operation)
-        if allow_empty_success and not response.body.strip():
+        if allow_unstructured_success and not response.body.strip():
             return {}
         try:
             payload = json.loads(response.body.decode('utf8'))
         except (UnicodeError, json.JSONDecodeError):
+            if allow_unstructured_success:
+                return {}
             if idempotent:
                 raise ProtocolContractError('invalid upstream response') from None
             raise RemoteOutcomeUnknown(request.operation) from None

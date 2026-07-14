@@ -44,7 +44,8 @@ class _WaitingJob:
 
 
 class ReviewWatcher:
-    APPROVED_STATES = frozenset((0, 1))
+    # Bilibili uses -50 for a completed archive that is only visible to its owner.
+    APPROVED_STATES = frozenset((-50, 0, 1))
     REJECTED_STATES = frozenset((-2, -3, -4, -5, -12, -14, -16, -100))
 
     def __init__(
@@ -207,6 +208,8 @@ class ReviewWatcher:
             filename = self._text(video.get('filename'))
             cid = self._positive_int(video.get('cid'))
             page = self._positive_int(video.get('page'))
+            if page is None:
+                page = self._positive_int(video.get('index'))
             if (
                 filename is None
                 or cid is None

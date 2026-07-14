@@ -470,6 +470,34 @@ async def test_upload_chunk_accepts_empty_success_response() -> None:
     assert response == {}
 
 
+@pytest.mark.asyncio
+async def test_upload_chunk_accepts_non_json_success_response() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text())
+
+    class PlainTextChunkTransport(ScriptedTransport):
+        async def send(self, request: ProtocolRequest) -> ProtocolResponse:
+            if request.operation == 'upload_chunk':
+                self.requests.append(request)
+                return ProtocolResponse(
+                    status=200,
+                    headers={'Content-Type': 'application/octet-stream'},
+                    body=b'fixture-upos-success',
+                )
+            return await super().send(request)
+
+    transport = PlainTextChunkTransport(fixtures)
+    client = protocol_client(transport)
+    prepared = await client.preupload(
+        credential_fixture(), {'name': 'fixture.mp4', 'size': 4}
+    )
+
+    response = await client.upload_chunk(
+        prepared.session, chunk_no=0, chunks=1, start=0, total=4, body=b'data'
+    )
+
+    assert response == {}
+
+
 def test_request_repr_and_shape_are_redacted() -> None:
     request = ProtocolRequest(
         operation='fixture',
