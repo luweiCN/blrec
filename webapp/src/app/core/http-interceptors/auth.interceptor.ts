@@ -34,6 +34,9 @@ export class AuthInterceptor implements HttpInterceptor {
           return throwError(() => error);
         }
         this.auth.setApiKey(apiKey);
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+          return throwError(() => error);
+        }
         return next.handle(
           request.clone({ setHeaders: { 'X-API-KEY': apiKey } })
         );

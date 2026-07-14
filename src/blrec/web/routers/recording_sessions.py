@@ -1,10 +1,13 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.exceptions import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
+from starlette.responses import Response
 
+from blrec.bili_upload.danmaku_publish import DanmakuPublisher
 from blrec.bili_upload.journal import (
+    DanmakuItemProgress,
     RecordingJournalBridge,
     RecordingPart,
     RecordingSession,
@@ -16,6 +19,7 @@ from blrec.utils.string import camel_case
 from .bili_accounts import authenticated_manager_subject
 
 journal: Optional[RecordingJournalBridge] = None
+danmaku_publisher: Optional[DanmakuPublisher] = None
 unavailable_reason: Optional[str] = 'Recording journal is not enabled'
 
 
@@ -53,6 +57,14 @@ class UploadPartProgressResponse(ApiModel):
     cid: Optional[int]
 
 
+class DanmakuItemProgressResponse(ApiModel):
+    id: int
+    part_index: int
+    progress_ms: int
+    content: str
+    error_message: Optional[str]
+
+
 class UploadJobProgressResponse(ApiModel):
     id: int
     account_id: int
@@ -69,7 +81,25 @@ class UploadJobProgressResponse(ApiModel):
     next_attempt_at: int
     created_at: int
     updated_at: int
+    danmaku_total: int
+    danmaku_confirmed: int
+    danmaku_pending: int
+    danmaku_unknown: int
+    danmaku_failed: int
+    unknown_danmaku_items: List[DanmakuItemProgressResponse]
     parts: List[UploadPartProgressResponse]
+
+
+class DanmakuDecisionRequest(ApiModel):
+    action: Literal['assume_success', 'retry_accept_duplicate_risk']
+    reason: str = Field(..., min_length=1, max_length=500)
+
+    @validator('reason')
+    def reason_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError('reason must not be blank')
+        return normalized
 
 
 class RecordingSessionResponse(ApiModel):
@@ -112,6 +142,15 @@ def get_recording_journal() -> RecordingJournalBridge:
     return journal
 
 
+def get_danmaku_publisher() -> DanmakuPublisher:
+    if danmaku_publisher is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Danmaku backfill is unavailable',
+        )
+    return danmaku_publisher
+
+
 def _part_response(part: RecordingPart) -> RecordingPartResponse:
     return RecordingPartResponse(
         id=part.id,
@@ -144,6 +183,16 @@ def _upload_part_response(part: UploadPartProgress) -> UploadPartProgressRespons
     )
 
 
+def _danmaku_item_response(item: DanmakuItemProgress) -> DanmakuItemProgressResponse:
+    return DanmakuItemProgressResponse(
+        id=item.id,
+        part_index=item.part_index,
+        progress_ms=item.progress_ms,
+        content=item.content,
+        error_message=item.error_message,
+    )
+
+
 def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
     return UploadJobProgressResponse(
         id=job.id,
@@ -161,6 +210,14 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         next_attempt_at=job.next_attempt_at,
         created_at=job.created_at,
         updated_at=job.updated_at,
+        danmaku_total=job.danmaku_total,
+        danmaku_confirmed=job.danmaku_confirmed,
+        danmaku_pending=job.danmaku_pending,
+        danmaku_unknown=job.danmaku_unknown,
+        danmaku_failed=job.danmaku_failed,
+        unknown_danmaku_items=[
+            _danmaku_item_response(item) for item in job.unknown_danmaku_items
+        ],
         parts=[_upload_part_response(part) for part in job.parts],
     )
 
@@ -215,3 +272,31 @@ async def list_recording_sessions(
             for session in sessions
         ],
     )
+
+
+@router.post(
+    '/danmaku-items/{item_id}/decision', status_code=status.HTTP_204_NO_CONTENT
+)
+async def decide_unknown_danmaku(
+    item_id: int,
+    command: DanmakuDecisionRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    publisher: DanmakuPublisher = Depends(get_danmaku_publisher),
+) -> Response:
+    try:
+        if command.action == 'assume_success':
+            await publisher.assume_success(
+                item_id, manager_subject=subject, reason=command.reason
+            )
+        else:
+            await publisher.retry_accept_duplicate_risk(
+                item_id, manager_subject=subject, reason=command.reason
+            )
+    except ValueError as error:
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if str(error).startswith('unknown danmaku item')
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=str(error)) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

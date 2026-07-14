@@ -111,6 +111,74 @@
           <div class="upload-reason" *ngIf="job.reviewReason">
             {{ job.reviewReason }}
           </div>
+
+          <nz-alert
+            *ngIf="job.danmakuBranchState !== 'disabled'"
+            nzType="info"
+            nzShowIcon
+            nzMessage="回灌弹幕会长期出现在投稿视频中，发送者显示为投稿账号，不是原直播观众账号。"
+          ></nz-alert>
+
+          <div class="danmaku-progress" *ngIf="job.danmakuTotal > 0">
+            <strong>弹幕回灌进度</strong>
+            <span>已发送 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}</span>
+            <span>待发送 {{ job.danmakuPending }}</span>
+            <span *ngIf="job.danmakuUnknown > 0">
+              结果未知 {{ job.danmakuUnknown }}
+            </span>
+            <span *ngIf="job.danmakuFailed > 0">
+              失败 {{ job.danmakuFailed }}
+            </span>
+          </div>
+
+          <div
+            class="unknown-danmaku"
+            *ngIf="job.unknownDanmakuItems?.length"
+          >
+            <nz-alert
+              nzType="warning"
+              nzShowIcon
+              nzMessage="有弹幕的发送结果无法确认"
+              nzDescription="系统不会自动重发。请先到 B 站稿件中人工核对，再选择处理方式。"
+            ></nz-alert>
+            <div
+              class="unknown-danmaku-item"
+              *ngFor="let item of job.unknownDanmakuItems ?? []"
+            >
+              <div class="unknown-danmaku-target">
+                P{{ item.partIndex }} ·
+                {{ formatDanmakuProgress(item.progressMs) }}
+              </div>
+              <div class="unknown-danmaku-content">{{ item.content }}</div>
+              <div class="unknown-danmaku-error" *ngIf="item.errorMessage">
+                {{ item.errorMessage }}
+              </div>
+              <div class="unknown-danmaku-actions">
+                <button
+                  nz-button
+                  nzSize="small"
+                  type="button"
+                  (click)="openDanmakuDecision(item, 'assume_success')"
+                >
+                  视为已发送
+                </button>
+                <button
+                  nz-button
+                  nzSize="small"
+                  nzDanger
+                  type="button"
+                  (click)="
+                    openDanmakuDecision(
+                      item,
+                      'retry_accept_duplicate_risk'
+                    )
+                  "
+                >
+                  接受重复风险并重试
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         <ng-template #noJob>
           <div class="upload-progress upload-progress-empty">
@@ -214,3 +282,58 @@
     </nz-collapse>
   </div>
 </nz-card>
+
+<nz-modal
+  [nzTitle]="decisionTitle()"
+  nzOkText="确认处理"
+  nzCancelText="取消"
+  [nzVisible]="decisionVisible"
+  [nzOkDisabled]="!canSubmitDecision"
+  [nzOkLoading]="decisionSubmitting"
+  [nzCancelDisabled]="decisionSubmitting"
+  (nzOnOk)="submitDanmakuDecision()"
+  (nzOnCancel)="closeDanmakuDecision()"
+>
+  <ng-container *nzModalContent>
+    <nz-alert
+      *ngIf="decisionAction === 'retry_accept_duplicate_risk'"
+      nzType="error"
+      nzShowIcon
+      nzMessage="这次操作可能产生一条重复弹幕"
+      nzDescription="只有在人工核对后仍决定重试时才应继续；系统不会替你判断远端是否已经收到。"
+    ></nz-alert>
+    <nz-alert
+      *ngIf="decisionAction === 'assume_success'"
+      nzType="info"
+      nzShowIcon
+      nzMessage="该弹幕将记为已发送"
+      nzDescription="此操作不会再次请求 B 站。请确认你已经在稿件页面找到这条弹幕。"
+    ></nz-alert>
+
+    <div class="decision-target" *ngIf="decisionItem as item">
+      <div>P{{ item.partIndex }} · {{ formatDanmakuProgress(item.progressMs) }}</div>
+      <div>{{ item.content }}</div>
+    </div>
+
+    <label class="decision-reason-label" for="danmaku-decision-reason">
+      处理原因
+    </label>
+    <textarea
+      id="danmaku-decision-reason"
+      nz-input
+      rows="3"
+      maxlength="500"
+      name="danmakuDecisionReason"
+      [(ngModel)]="decisionReason"
+      placeholder="填写人工核对结果，不能为空"
+    ></textarea>
+
+    <nz-alert
+      *ngIf="decisionError"
+      class="decision-error"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="decisionError"
+    ></nz-alert>
+  </ng-container>
+</nz-modal>

@@ -114,6 +114,15 @@ class UploadPartProgress:
 
 
 @dataclass(frozen=True)
+class DanmakuItemProgress:
+    id: int
+    part_index: int
+    progress_ms: int
+    content: str
+    error_message: Optional[str]
+
+
+@dataclass(frozen=True)
 class UploadJobProgress:
     id: int
     session_id: int
@@ -132,6 +141,12 @@ class UploadJobProgress:
     created_at: int
     updated_at: int
     parts: Tuple[UploadPartProgress, ...]
+    danmaku_total: int = 0
+    danmaku_confirmed: int = 0
+    danmaku_pending: int = 0
+    danmaku_unknown: int = 0
+    danmaku_failed: int = 0
+    unknown_danmaku_items: Tuple[DanmakuItemProgress, ...] = ()
 
 
 _T = TypeVar('_T')
@@ -770,6 +785,55 @@ class RecordingJournalBridge:
             'ORDER BY job_id,part_index'.format(job_placeholders),
             job_ids,
         )
+        danmaku_rows = await self._database.fetchall(
+            'SELECT part.job_id,COUNT(*) AS total,'
+            "SUM(CASE WHEN item.state='confirmed' THEN 1 ELSE 0 END) AS confirmed,"
+            "SUM(CASE WHEN item.state IN ('prepared','in_flight') "
+            'THEN 1 ELSE 0 END) AS pending,'
+            "SUM(CASE WHEN item.state='unknown_outcome' THEN 1 ELSE 0 END) "
+            'AS unknown_count,'
+            "SUM(CASE WHEN item.state='failed_permanent' THEN 1 ELSE 0 END) "
+            'AS failed FROM danmaku_items item '
+            'JOIN upload_parts part ON part.id=item.part_id '
+            'WHERE part.job_id IN ({}) GROUP BY part.job_id'.format(job_placeholders),
+            job_ids,
+        )
+        danmaku_by_job = {
+            int(row['job_id']): (
+                int(row['total']),
+                int(row['confirmed']),
+                int(row['pending']),
+                int(row['unknown_count']),
+                int(row['failed']),
+            )
+            for row in danmaku_rows
+        }
+        unknown_rows = await self._database.fetchall(
+            'SELECT item.id,part.job_id,part.part_index,item.progress_ms,'
+            'item.content,item.error_message FROM danmaku_items item '
+            'JOIN upload_parts part ON part.id=item.part_id '
+            'WHERE part.job_id IN ({}) AND item.state=\'unknown_outcome\' '
+            'ORDER BY part.job_id,part.part_index,item.progress_ms,item.id'.format(
+                job_placeholders
+            ),
+            job_ids,
+        )
+        unknown_by_job: Dict[int, List[DanmakuItemProgress]] = {}
+        for row in unknown_rows:
+            job_id = int(row['job_id'])
+            unknown_by_job.setdefault(job_id, []).append(
+                DanmakuItemProgress(
+                    id=int(row['id']),
+                    part_index=int(row['part_index']),
+                    progress_ms=int(row['progress_ms']),
+                    content=str(row['content']),
+                    error_message=(
+                        None
+                        if row['error_message'] is None
+                        else str(row['error_message'])
+                    ),
+                )
+            )
         parts_by_job: Dict[int, List[UploadPartProgress]] = {}
         for row in part_rows:
             job_id = int(row['job_id'])
@@ -792,6 +856,7 @@ class RecordingJournalBridge:
         for row in jobs:
             job_id = int(row['id'])
             session_id = int(row['session_id'])
+            danmaku = danmaku_by_job.get(job_id, (0, 0, 0, 0, 0))
             result[session_id] = UploadJobProgress(
                 id=job_id,
                 session_id=session_id,
@@ -812,6 +877,12 @@ class RecordingJournalBridge:
                 created_at=int(row['created_at']),
                 updated_at=int(row['updated_at']),
                 parts=tuple(parts_by_job.get(job_id, ())),
+                danmaku_total=danmaku[0],
+                danmaku_confirmed=danmaku[1],
+                danmaku_pending=danmaku[2],
+                danmaku_unknown=danmaku[3],
+                danmaku_failed=danmaku[4],
+                unknown_danmaku_items=tuple(unknown_by_job.get(job_id, ())),
             )
         return result
 

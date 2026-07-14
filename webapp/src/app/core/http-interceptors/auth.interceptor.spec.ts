@@ -76,4 +76,23 @@ describe('AuthInterceptor', () => {
     expect(auth.removeApiKey).toHaveBeenCalledTimes(1);
     expect(auth.setApiKey).toHaveBeenCalledOnceWith('new-api-key');
   });
+
+  it('stores a replacement key but never replays a mutation after 401', () => {
+    spyOn(window, 'prompt').and.returnValue('new-api-key');
+    let calls = 0;
+    const next: HttpHandler = {
+      handle: () =>
+        defer(() => {
+          calls += 1;
+          return throwError(() => new HttpErrorResponse({ status: 401 }));
+        }),
+    };
+
+    interceptor
+      .intercept(new HttpRequest('POST', '/api/v1/write', {}), next)
+      .subscribe({ error: () => undefined });
+
+    expect(calls).toBe(1);
+    expect(auth.setApiKey).toHaveBeenCalledOnceWith('new-api-key');
+  });
 });

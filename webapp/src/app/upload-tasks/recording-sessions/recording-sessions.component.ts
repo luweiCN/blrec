@@ -1,7 +1,11 @@
 import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
 
+import { finalize } from 'rxjs/operators';
+
 import {
   CommentBranchState,
+  DanmakuDecisionAction,
+  DanmakuItemProgress,
   DanmakuBranchState,
   DanmakuImportState,
   RecordingArtifactState,
@@ -23,6 +27,11 @@ import { RecordingSessionService } from '../shared/recording-session.service';
 })
 export class RecordingSessionsComponent implements OnInit {
   view: RecordingSessionsView = { state: 'loading' };
+  decisionItem: DanmakuItemProgress | null = null;
+  decisionAction: DanmakuDecisionAction | null = null;
+  decisionReason = '';
+  decisionSubmitting = false;
+  decisionError: string | null = null;
 
   constructor(
     private recordingSessions: RecordingSessionService,
@@ -45,6 +54,14 @@ export class RecordingSessionsComponent implements OnInit {
 
   get errorMessage(): string | null {
     return this.view.state === 'error' ? this.view.message : null;
+  }
+
+  get decisionVisible(): boolean {
+    return this.decisionItem !== null && this.decisionAction !== null;
+  }
+
+  get canSubmitDecision(): boolean {
+    return !this.decisionSubmitting && this.decisionReason.trim().length > 0;
   }
 
   load(): void {
@@ -202,9 +219,78 @@ export class RecordingSessionsComponent implements OnInit {
       importing: '弹幕导入中',
       waiting_capacity: '等待发送额度',
       missing_source: '弹幕文件缺失',
-      completed: '弹幕已回灌',
+      completed: '弹幕导入完成',
       failed: '弹幕导入失败',
     }[state];
+  }
+
+  openDanmakuDecision(
+    item: DanmakuItemProgress,
+    action: DanmakuDecisionAction
+  ): void {
+    this.decisionItem = item;
+    this.decisionAction = action;
+    this.decisionReason = '';
+    this.decisionError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  closeDanmakuDecision(): void {
+    if (this.decisionSubmitting) {
+      return;
+    }
+    this.decisionItem = null;
+    this.decisionAction = null;
+    this.decisionReason = '';
+    this.decisionError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  submitDanmakuDecision(): void {
+    const item = this.decisionItem;
+    const action = this.decisionAction;
+    const reason = this.decisionReason.trim();
+    if (!item || !action || !reason || this.decisionSubmitting) {
+      return;
+    }
+    this.decisionSubmitting = true;
+    this.decisionError = null;
+    this.recordingSessions
+      .decideDanmakuItem(item.id, { action, reason })
+      .pipe(
+        finalize(() => {
+          this.decisionSubmitting = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe({
+        next: () => {
+          this.decisionItem = null;
+          this.decisionAction = null;
+          this.decisionReason = '';
+          this.load();
+        },
+        error: (error: unknown) => {
+          this.decisionError = this.describeError(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  decisionTitle(): string {
+    return this.decisionAction === 'assume_success'
+      ? '将弹幕视为已发送'
+      : '接受重复风险并重试';
+  }
+
+  formatDanmakuProgress(progressMs: number): string {
+    const totalSeconds = Math.floor(progressMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return [hours, minutes, seconds]
+      .map((value) => value.toString().padStart(2, '0'))
+      .join(':');
   }
 
   uploadPartFor(

@@ -1,10 +1,12 @@
 from typing import Dict, Iterator, Sequence, Tuple
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from blrec.bili_upload.journal import (
+    DanmakuItemProgress,
     RecordingPart,
     RecordingSession,
     UploadJobProgress,
@@ -83,6 +85,20 @@ class FakeJournal:
                 next_attempt_at=1_100,
                 created_at=1_001,
                 updated_at=1_050,
+                danmaku_total=1,
+                danmaku_confirmed=0,
+                danmaku_pending=0,
+                danmaku_unknown=1,
+                danmaku_failed=0,
+                unknown_danmaku_items=(
+                    DanmakuItemProgress(
+                        id=11,
+                        part_index=1,
+                        progress_ms=12_000,
+                        content='需要确认的弹幕',
+                        error_message='远端结果未知',
+                    ),
+                ),
                 parts=(
                     UploadPartProgress(
                         id=10,
@@ -102,10 +118,12 @@ class FakeJournal:
 def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
     old_reason = recording_sessions.unavailable_reason
+    old_publisher = recording_sessions.danmaku_publisher
     old_key = security.api_key
     yield
     recording_sessions.journal = old_journal
     recording_sessions.unavailable_reason = old_reason
+    recording_sessions.danmaku_publisher = old_publisher
     security.api_key = old_key
 
 
@@ -115,6 +133,7 @@ def client() -> Iterator[TestClient]:
     api.include_router(recording_sessions.router, prefix='/api/v1')
     security.api_key = 'test-api-key'
     recording_sessions.journal = FakeJournal()  # type: ignore[assignment]
+    recording_sessions.danmaku_publisher = AsyncMock()
     recording_sessions.unavailable_reason = None
     with TestClient(api) as value:
         yield value
@@ -169,6 +188,20 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'nextAttemptAt': 1_100,
                     'createdAt': 1_001,
                     'updatedAt': 1_050,
+                    'danmakuTotal': 1,
+                    'danmakuConfirmed': 0,
+                    'danmakuPending': 0,
+                    'danmakuUnknown': 1,
+                    'danmakuFailed': 0,
+                    'unknownDanmakuItems': [
+                        {
+                            'id': 11,
+                            'partIndex': 1,
+                            'progressMs': 12_000,
+                            'content': '需要确认的弹幕',
+                            'errorMessage': '远端结果未知',
+                        }
+                    ],
                     'parts': [
                         {
                             'id': 10,
@@ -217,3 +250,28 @@ def test_unavailable_journal_returns_503(client: TestClient) -> None:
 
     assert response.status_code == 503
     assert response.json()['detail'] == 'upload database is unavailable'
+
+
+def test_unknown_danmaku_decision_requires_auth_and_reason(client: TestClient) -> None:
+    publisher = recording_sessions.danmaku_publisher
+    assert isinstance(publisher, AsyncMock)
+
+    response = client.post(
+        '/api/v1/recording-sessions/danmaku-items/11/decision',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'assume_success', 'reason': '已在稿件页面确认存在'},
+    )
+
+    assert response.status_code == 204
+    publisher.assume_success.assert_awaited_once()
+    assert (
+        publisher.assume_success.await_args.kwargs['reason'] == '已在稿件页面确认存在'
+    )
+    assert publisher.assume_success.await_args.kwargs['manager_subject']
+
+    invalid = client.post(
+        '/api/v1/recording-sessions/danmaku-items/11/decision',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'retry_accept_duplicate_risk', 'reason': ''},
+    )
+    assert invalid.status_code == 422

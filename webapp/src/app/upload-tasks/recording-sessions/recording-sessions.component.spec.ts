@@ -1,6 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { FormsModule } from '@angular/forms';
 
 import { of, throwError } from 'rxjs';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
@@ -8,6 +9,8 @@ import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
 import { NzCollapseModule } from 'ng-zorro-antd/collapse';
 import { NzEmptyModule } from 'ng-zorro-antd/empty';
+import { NzInputModule } from 'ng-zorro-antd/input';
+import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 
@@ -21,8 +24,9 @@ describe('RecordingSessionsComponent', () => {
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['listSessions']
+      ['listSessions', 'decideDanmakuItem']
     );
+    service.decideDanmakuItem.and.returnValue(of(void 0));
     service.listSessions.and.returnValue(
       of({
         degradedReason: null,
@@ -65,6 +69,20 @@ describe('RecordingSessionsComponent', () => {
               nextAttemptAt: 1_100,
               createdAt: 1_001,
               updatedAt: 1_050,
+              danmakuTotal: 1,
+              danmakuConfirmed: 0,
+              danmakuPending: 0,
+              danmakuUnknown: 1,
+              danmakuFailed: 0,
+              unknownDanmakuItems: [
+                {
+                  id: 11,
+                  partIndex: 1,
+                  progressMs: 12_000,
+                  content: '需要确认的弹幕',
+                  errorMessage: '远端结果未知',
+                },
+              ],
               parts: [
                 {
                   id: 10,
@@ -105,12 +123,15 @@ describe('RecordingSessionsComponent', () => {
       declarations: [RecordingSessionsComponent],
       imports: [
         CommonModule,
+        FormsModule,
         NoopAnimationsModule,
         NzAlertModule,
         NzButtonModule,
         NzCardModule,
         NzCollapseModule,
         NzEmptyModule,
+        NzInputModule,
+        NzModalModule,
         NzSpinModule,
         NzTagModule,
       ],
@@ -141,6 +162,12 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('等待 B 站审核');
     expect(text).toContain('评论：待处理');
     expect(text).toContain('回灌：待处理');
+    expect(text).toContain(
+      '回灌弹幕会长期出现在投稿视频中，发送者显示为投稿账号，不是原直播观众账号。'
+    );
+    expect(text).toContain('已发送 0 / 1');
+    expect(text).toContain('结果未知 1');
+    expect(text).toContain('需要确认的弹幕');
     expect(text).toContain('P1');
     expect(text).toContain('上传已完成');
     expect(text).toContain('CID 待回填');
@@ -175,5 +202,27 @@ describe('RecordingSessionsComponent', () => {
     expect(
       fixture.nativeElement.querySelector('[data-testid="retry-sessions"]')
     ).not.toBeNull();
+  });
+
+  it('requires a reason before accepting duplicate danmaku risk', () => {
+    fixture.detectChanges();
+    const item = fixture.componentInstance.sessions[0].uploadJob!
+      .unknownDanmakuItems[0];
+
+    fixture.componentInstance.openDanmakuDecision(
+      item,
+      'retry_accept_duplicate_risk'
+    );
+    fixture.componentInstance.decisionReason = '';
+    fixture.componentInstance.submitDanmakuDecision();
+    expect(service.decideDanmakuItem).not.toHaveBeenCalled();
+
+    fixture.componentInstance.decisionReason = '已人工核对，接受重复风险';
+    fixture.componentInstance.submitDanmakuDecision();
+
+    expect(service.decideDanmakuItem).toHaveBeenCalledOnceWith(11, {
+      action: 'retry_accept_duplicate_risk',
+      reason: '已人工核对，接受重复风险',
+    });
   });
 });

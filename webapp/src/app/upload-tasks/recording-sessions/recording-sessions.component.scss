@@ -48,6 +48,35 @@
   color: #ad6800;
 }
 
+.danmaku-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 8px;
+}
+
+.unknown-danmaku-content {
+  overflow-wrap: anywhere;
+}
+
+.unknown-danmaku-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.decision-target {
+  padding: 10px;
+  margin: 12px 0;
+  background: #fafafa;
+  overflow-wrap: anywhere;
+}
+
+.decision-reason-label {
+  display: block;
+}
+
 .session-overview {
   display: flex;
   gap: 16px;

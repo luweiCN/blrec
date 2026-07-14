@@ -294,6 +294,28 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
         "VALUES(10,9,1,'/rec/p1.flv','/rec/p1.mp4','/rec/p1.xml','ready',"
         "'confirmed','pending','remote-p1',NULL)"
     )
+    for index, state in enumerate(
+        ('confirmed', 'prepared', 'in_flight', 'unknown_outcome', 'failed_permanent')
+    ):
+        await database.execute(
+            'INSERT INTO danmaku_items('
+            'part_id,xml_identity,original_index,progress_ms,mode,fontsize,color,'
+            'content,priority,request_fingerprint,state,error_message) '
+            'VALUES(10,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                'xml-1',
+                index,
+                index * 1000,
+                1,
+                25,
+                16_777_215,
+                '弹幕 {}'.format(index),
+                0,
+                'fingerprint-{}'.format(index),
+                state,
+                '远端结果未知' if state == 'unknown_outcome' else None,
+            ),
+        )
 
     jobs = await journal.upload_jobs_for_sessions((session.id, 999))
 
@@ -307,6 +329,16 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert (job.parts[0].part_index, job.parts[0].upload_state) == (1, 'confirmed')
     assert job.parts[0].remote_filename == 'remote-p1'
     assert job.parts[0].cid is None
+    assert (
+        job.danmaku_total,
+        job.danmaku_confirmed,
+        job.danmaku_pending,
+        job.danmaku_unknown,
+        job.danmaku_failed,
+    ) == (5, 1, 2, 1, 1)
+    assert len(job.unknown_danmaku_items) == 1
+    assert job.unknown_danmaku_items[0].content == '弹幕 3'
+    assert job.unknown_danmaku_items[0].part_index == 1
 
 
 class FakeEmitter:

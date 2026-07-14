@@ -86,6 +86,27 @@ export interface UploadPartProgress {
   readonly cid: number | null;
 }
 
+export const DANMAKU_DECISION_ACTIONS = [
+  'assume_success',
+  'retry_accept_duplicate_risk',
+] as const;
+
+export type DanmakuDecisionAction =
+  (typeof DANMAKU_DECISION_ACTIONS)[number];
+
+export interface DanmakuItemProgress {
+  readonly id: number;
+  readonly partIndex: number;
+  readonly progressMs: number;
+  readonly content: string;
+  readonly errorMessage: string | null;
+}
+
+export interface DanmakuDecisionRequest {
+  readonly action: DanmakuDecisionAction;
+  readonly reason: string;
+}
+
 export interface UploadJobProgress {
   readonly id: number;
   readonly accountId: number;
@@ -102,6 +123,12 @@ export interface UploadJobProgress {
   readonly nextAttemptAt: number;
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly danmakuTotal: number;
+  readonly danmakuConfirmed: number;
+  readonly danmakuPending: number;
+  readonly danmakuUnknown: number;
+  readonly danmakuFailed: number;
+  readonly unknownDanmakuItems: readonly DanmakuItemProgress[];
   readonly parts: readonly UploadPartProgress[];
 }
 
