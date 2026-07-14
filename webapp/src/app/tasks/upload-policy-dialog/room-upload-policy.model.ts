@@ -1,4 +1,5 @@
 export type UploadAccountMode = 'primary' | 'fixed';
+export type UploadCoverMode = 'live' | 'custom';
 
 export interface RoomUploadPolicyRequest {
   accountMode: UploadAccountMode;
@@ -21,6 +22,11 @@ export interface RoomUploadPolicyRequest {
   autoComment: boolean;
   danmakuBackfill: boolean;
   filters: Record<string, unknown>;
+  collectionSeasonId: number | null;
+  collectionSectionId: number | null;
+  coverMode: UploadCoverMode;
+  coverAssetId: number | null;
+  publishDelaySeconds: number;
 }
 
 export interface RoomUploadPolicy extends RoomUploadPolicyRequest {
@@ -57,4 +63,49 @@ export interface UploadCategoryCatalog {
   categories: UploadCategoryNode[];
   creationStatements: UploadCreationStatement[];
   creationStatementTip: string;
+}
+
+export interface CoverAsset {
+  id: number;
+  filename: string;
+  mimeType: 'image/jpeg' | 'image/png';
+  width: number;
+  height: number;
+  byteSize: number;
+  createdAt: number;
+  contentUrl: string;
+}
+
+export interface BiliCollectionSection {
+  id: number;
+  title: string;
+}
+
+export interface BiliCollection {
+  id: number;
+  title: string;
+  description: string;
+  coverUrl: string;
+  state: number;
+  rejectReason: string;
+  selectable: boolean;
+  sections: BiliCollectionSection[];
+}
+
+export interface BiliCollectionCatalog {
+  accountId: number;
+  collections: BiliCollection[];
+}
+
+export interface BiliCollectionCreateRequest {
+  accountMode: UploadAccountMode;
+  accountId: number | null;
+  title: string;
+  description: string;
+  coverAssetId: number;
+}
+
+export interface BiliCollectionCreation {
+  accountId: number;
+  collection: BiliCollection;
 }

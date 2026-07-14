@@ -8,6 +8,8 @@ import { Subject, of, throwError } from 'rxjs';
 
 import { BiliAccountService } from '../../uploads/shared/bili-account.service';
 import {
+  BiliCollectionCatalog,
+  CoverAsset,
   RoomUploadPolicy,
   UploadCategoryCatalog,
 } from './room-upload-policy.model';
@@ -89,20 +91,73 @@ describe('UploadPolicyDialogComponent', () => {
     autoComment: false,
     danmakuBackfill: false,
     filters: {},
+    collectionSeasonId: 20,
+    collectionSectionId: 21,
+    coverMode: 'custom',
+    coverAssetId: 3,
+    publishDelaySeconds: 21_600,
     blockedReason: null,
     createdAt: 1000,
     updatedAt: 1000,
   };
 
+  const covers: CoverAsset[] = [
+    {
+      id: 3,
+      filename: '主播封面.png',
+      mimeType: 'image/png',
+      width: 1600,
+      height: 1000,
+      byteSize: 100,
+      createdAt: 1000,
+      contentUrl: '/api/v1/upload-covers/3/content',
+    },
+  ];
+
+  const collectionCatalog: BiliCollectionCatalog = {
+    accountId: 7,
+    collections: [
+      {
+        id: 20,
+        title: '主播录播',
+        description: '',
+        coverUrl: '',
+        state: 0,
+        rejectReason: '',
+        selectable: true,
+        sections: [{ id: 21, title: '正片' }],
+      },
+    ],
+  };
+
   beforeEach(async () => {
     policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
       'RoomUploadPolicyService',
-      ['get', 'save', 'delete', 'categories'],
+      [
+        'get',
+        'save',
+        'delete',
+        'categories',
+        'covers',
+        'coverContent',
+        'uploadCover',
+        'collections',
+        'createCollection',
+      ],
     );
     policyService.get.and.returnValue(
       throwError(() => new HttpErrorResponse({ status: 404 })),
     );
     policyService.categories.and.returnValue(of(categories));
+    policyService.covers.and.returnValue(of(covers));
+    policyService.coverContent.and.returnValue(
+      of(new Blob(['image'], { type: 'image/png' })),
+    );
+    policyService.collections.and.returnValue(of(collectionCatalog));
+    policyService.uploadCover.and.returnValue(of(covers[0]));
+    policyService.createCollection.and.returnValue(
+      of({ accountId: 7, collection: collectionCatalog.collections[0] }),
+    );
     policyService.save.and.returnValue(of(existingPolicy));
     policyService.delete.and.returnValue(of(undefined));
 
@@ -172,6 +227,11 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.draft.upCloseDanmu).toBeFalse();
     expect(component.draft.tid).toBe(21);
     expect(component.categoryPath).toEqual([4, 21]);
+    expect(component.draft.coverMode).toBe('live');
+    expect(component.draft.coverAssetId).toBeNull();
+    expect(component.draft.collectionSeasonId).toBeNull();
+    expect(component.draft.collectionSectionId).toBeNull();
+    expect(component.publishMode).toBe('immediate');
   });
 
   it('shows the form while the category request is still running', () => {
@@ -196,6 +256,11 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.draft.originalAuthorization).toBeFalse();
     expect(component.draft.isOnlySelf).toBeTrue();
     expect(component.categoryPath).toEqual([4, 17]);
+    expect(component.draft.coverMode).toBe('custom');
+    expect(component.draft.coverAssetId).toBe(3);
+    expect(component.collectionSelection).toBe('20:21');
+    expect(component.publishMode).toBe('scheduled');
+    expect(component.publishDelayHours).toBe(6);
   });
 
   it('marks parent categories as expandable and child categories as selectable', () => {
@@ -265,10 +330,68 @@ describe('UploadPolicyDialogComponent', () => {
         creationStatementId: -1,
         originalAuthorization: false,
         upSelectionReply: true,
+        collectionSeasonId: 20,
+        collectionSectionId: 21,
+        coverMode: 'custom',
+        coverAssetId: 3,
+        publishDelaySeconds: 21_600,
       }),
     );
 
     component.deletePolicy();
     expect(policyService.delete).toHaveBeenCalledOnceWith(100);
+  });
+
+  it('clears account-specific collection selection when the account changes', () => {
+    policyService.get.and.returnValue(of(existingPolicy));
+    create();
+
+    component.accountModeChanged('primary');
+
+    expect(component.collectionSelection).toBeNull();
+    expect(component.draft.collectionSeasonId).toBeNull();
+    expect(component.draft.collectionSectionId).toBeNull();
+    expect(policyService.collections).toHaveBeenCalledWith('primary', null);
+  });
+
+  it('submits a newly selected cover collection and native publish delay', () => {
+    create();
+    component.coverModeChanged('custom');
+    component.customCoverChanged(3);
+    component.collectionChanged('20:21');
+    component.publishModeChanged('scheduled');
+    component.publishDelayHours = 4;
+
+    component.save();
+
+    expect(policyService.save).toHaveBeenCalledOnceWith(
+      100,
+      jasmine.objectContaining({
+        coverMode: 'custom',
+        coverAssetId: 3,
+        collectionSeasonId: 20,
+        collectionSectionId: 21,
+        publishDelaySeconds: 14_400,
+      }),
+    );
+  });
+
+  it('creates a collection for the currently selected upload account', () => {
+    create();
+    component.openCreateCollection();
+    component.newCollectionTitle = '主播录播合集';
+    component.newCollectionDescription = '直播录像';
+    component.newCollectionCoverAssetId = 3;
+
+    component.createCollection();
+
+    expect(policyService.createCollection).toHaveBeenCalledOnceWith({
+      accountMode: 'primary',
+      accountId: null,
+      title: '主播录播合集',
+      description: '直播录像',
+      coverAssetId: 3,
+    });
+    expect(component.newCollectionVisible).toBeFalse();
   });
 });

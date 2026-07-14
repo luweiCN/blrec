@@ -18,12 +18,16 @@ import { catchError, finalize, takeUntil } from 'rxjs/operators';
 import { BiliAccount } from '../../uploads/shared/bili-account.model';
 import { BiliAccountService } from '../../uploads/shared/bili-account.service';
 import {
+  BiliCollection,
+  BiliCollectionCatalog,
+  CoverAsset,
   RoomUploadPolicy,
   RoomUploadPolicyDraft,
   RoomUploadPolicyRequest,
   UploadAccountMode,
   UploadCategoryCatalog,
   UploadCategoryNode,
+  UploadCoverMode,
   UploadCreationStatement,
 } from './room-upload-policy.model';
 import { RoomUploadPolicyService } from './room-upload-policy.service';
@@ -53,7 +57,14 @@ const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
   autoComment: true,
   danmakuBackfill: true,
   filters: {},
+  collectionSeasonId: null,
+  collectionSectionId: null,
+  coverMode: 'live',
+  coverAssetId: null,
+  publishDelaySeconds: 0,
 };
+
+type PublishMode = 'immediate' | 'scheduled';
 
 type PolicyValidationErrors = Partial<
   Record<
@@ -63,7 +74,10 @@ type PolicyValidationErrors = Partial<
     | 'category'
     | 'tags'
     | 'creationStatement'
-    | 'source',
+    | 'source'
+    | 'cover'
+    | 'collection'
+    | 'schedule',
     string
   >
 >;
@@ -87,10 +101,27 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   existingPolicy = false;
   error: string | null = null;
   categoryError: string | null = null;
+  coverError: string | null = null;
+  collectionError: string | null = null;
   saveAttempted = false;
   accounts: readonly BiliAccount[] = [];
   catalog: UploadCategoryCatalog | null = null;
+  coverAssets: readonly CoverAsset[] = [];
+  selectedCoverPreviewUrl: string | null = null;
+  collectionCatalog: BiliCollectionCatalog | null = null;
   categoryPath: number[] = [];
+  collectionSelection: string | null = null;
+  publishMode: PublishMode = 'immediate';
+  publishDelayHours = 2;
+  coverLoading = false;
+  coverUploading = false;
+  collectionLoading = false;
+  newCollectionVisible = false;
+  creatingCollection = false;
+  newCollectionTitle = '';
+  newCollectionDescription = '';
+  newCollectionCoverAssetId: number | null = null;
+  newCollectionError: string | null = null;
   draft: RoomUploadPolicyDraft = this.newDraft();
 
   readonly templateTip =
@@ -99,6 +130,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     '每个录制分段分别渲染。{{ part_index }} 是从 1 开始的分 P 序号，例如 P1、P2。';
 
   private readonly destroy$ = new Subject<void>();
+  private coverPreviewObjectUrl: string | null = null;
+  private coverPreviewGeneration = 0;
+  private collectionLoadGeneration = 0;
 
   constructor(
     private policyService: RoomUploadPolicyService,
@@ -118,8 +152,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
           this.accounts = accounts;
           this.existingPolicy = policy !== null;
           this.draft = policy ? this.fromPolicy(policy) : this.newDraft();
+          this.syncDependentControls();
           this.loading = false;
           this.loadCategories();
+          this.loadCovers();
+          this.loadCollections();
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
@@ -133,6 +170,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
+    this.replaceCoverPreview(null);
   }
 
   get activeAccounts(): readonly BiliAccount[] {
@@ -145,6 +183,32 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   get creationStatements(): readonly UploadCreationStatement[] {
     return this.catalog?.creationStatements ?? [];
+  }
+
+  get collections(): readonly BiliCollection[] {
+    return this.collectionCatalog?.collections ?? [];
+  }
+
+  get selectableCollectionSections(): readonly {
+    value: string;
+    label: string;
+  }[] {
+    return this.collections.flatMap((collection) =>
+      collection.selectable
+        ? collection.sections.map((section) => ({
+            value: `${collection.id}:${section.id}`,
+            label: `${collection.title} / ${section.title}`,
+          }))
+        : [],
+    );
+  }
+
+  get selectedCover(): CoverAsset | null {
+    return (
+      this.coverAssets.find(
+        (asset) => asset.id === this.draft.coverAssetId,
+      ) ?? null
+    );
   }
 
   get isRepost(): boolean {
@@ -191,7 +255,13 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   get saveDisabled(): boolean {
-    return this.loading || this.saving || this.deleting;
+    return (
+      this.loading ||
+      this.saving ||
+      this.deleting ||
+      this.coverUploading ||
+      this.creatingCollection
+    );
   }
 
   accountModeChanged(mode: UploadAccountMode): void {
@@ -200,12 +270,16 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       mode === 'primary' ? null : (this.activeAccounts[0]?.id ?? null);
     this.clearCategorySelectionForAccountChange();
     this.loadCategories();
+    this.clearCollectionSelectionForAccountChange();
+    this.loadCollections();
   }
 
   fixedAccountChanged(accountId: number | null): void {
     this.draft.accountId = accountId;
     this.clearCategorySelectionForAccountChange();
     this.loadCategories();
+    this.clearCollectionSelectionForAccountChange();
+    this.loadCollections();
   }
 
   categoryChanged(path: number[] | null): void {
@@ -219,6 +293,142 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     if (statementId === -2) {
       this.draft.originalAuthorization = false;
     }
+  }
+
+  coverModeChanged(mode: UploadCoverMode): void {
+    this.draft.coverMode = mode;
+    this.draft.coverAssetId =
+      mode === 'custom'
+        ? (this.draft.coverAssetId ?? this.coverAssets[0]?.id ?? null)
+        : null;
+    this.loadSelectedCoverPreview();
+  }
+
+  customCoverChanged(assetId: number | null): void {
+    this.draft.coverAssetId = assetId;
+    this.loadSelectedCoverPreview();
+  }
+
+  coverFileSelected(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.item(0) ?? null;
+    input.value = '';
+    if (file === null || this.coverUploading) {
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      this.coverError = '封面不能超过 2 MiB。';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.coverUploading = true;
+    this.coverError = null;
+    this.policyService
+      .uploadCover(file)
+      .pipe(
+        finalize(() => {
+          this.coverUploading = false;
+          this.changeDetector.markForCheck();
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe({
+        next: (asset) => {
+          this.coverAssets = [
+            asset,
+            ...this.coverAssets.filter((item) => item.id !== asset.id),
+          ];
+          this.draft.coverMode = 'custom';
+          this.draft.coverAssetId = asset.id;
+          this.loadSelectedCoverPreview();
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.coverError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  collectionChanged(selection: string | null): void {
+    this.collectionSelection = selection;
+    if (selection === null) {
+      this.draft.collectionSeasonId = null;
+      this.draft.collectionSectionId = null;
+      return;
+    }
+    const match = /^(\d+):(\d+)$/.exec(selection);
+    this.draft.collectionSeasonId = match ? Number(match[1]) : null;
+    this.draft.collectionSectionId = match ? Number(match[2]) : null;
+  }
+
+  publishModeChanged(mode: PublishMode): void {
+    this.publishMode = mode;
+    if (mode === 'immediate') {
+      this.draft.publishDelaySeconds = 0;
+    } else if (this.publishDelayHours < 2) {
+      this.publishDelayHours = 2;
+    }
+  }
+
+  openCreateCollection(): void {
+    this.newCollectionTitle = '';
+    this.newCollectionDescription = '';
+    this.newCollectionCoverAssetId = this.coverAssets[0]?.id ?? null;
+    this.newCollectionError = null;
+    this.newCollectionVisible = true;
+  }
+
+  closeCreateCollection(): void {
+    if (!this.creatingCollection) {
+      this.newCollectionVisible = false;
+    }
+  }
+
+  createCollection(): void {
+    const title = this.newCollectionTitle.trim();
+    const coverAssetId = this.newCollectionCoverAssetId;
+    if (!title || coverAssetId === null || this.creatingCollection) {
+      this.newCollectionError = !title
+        ? '请填写合集名称。'
+        : '请选择一张手动上传的合集封面。';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.creatingCollection = true;
+    this.newCollectionError = null;
+    this.policyService
+      .createCollection({
+        accountMode: this.draft.accountMode,
+        accountId:
+          this.draft.accountMode === 'fixed' ? this.draft.accountId : null,
+        title,
+        description: this.newCollectionDescription.trim(),
+        coverAssetId,
+      })
+      .pipe(
+        finalize(() => {
+          this.creatingCollection = false;
+          this.changeDetector.markForCheck();
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe({
+        next: (result) => {
+          this.newCollectionVisible = false;
+          this.message.success(
+            result.collection.selectable
+              ? '合集已创建'
+              : '合集已提交 B 站审核，通过后即可选择',
+          );
+          this.loadCollections();
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.newCollectionError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
   }
 
   allowRepliesChanged(allowed: boolean): void {
@@ -238,6 +448,10 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   refreshCategories(): void {
     this.loadCategories(true);
+  }
+
+  refreshCollections(): void {
+    this.loadCollections();
   }
 
   save(): void {
@@ -274,6 +488,15 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       autoComment: this.draft.autoComment,
       danmakuBackfill: this.draft.danmakuBackfill,
       filters: { ...this.draft.filters },
+      collectionSeasonId: this.draft.collectionSeasonId,
+      collectionSectionId: this.draft.collectionSectionId,
+      coverMode: this.draft.coverMode,
+      coverAssetId:
+        this.draft.coverMode === 'custom' ? this.draft.coverAssetId : null,
+      publishDelaySeconds:
+        this.publishMode === 'scheduled'
+          ? Math.round(this.publishDelayHours * 3600)
+          : 0,
     };
     this.saving = true;
     this.error = null;
@@ -382,6 +605,111 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       });
   }
 
+  private loadCovers(): void {
+    this.coverLoading = true;
+    this.coverError = null;
+    this.policyService
+      .covers()
+      .pipe(
+        finalize(() => {
+          this.coverLoading = false;
+          this.changeDetector.markForCheck();
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe({
+        next: (assets) => {
+          this.coverAssets = assets;
+          this.loadSelectedCoverPreview();
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.coverAssets = [];
+          this.coverError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private loadCollections(): void {
+    const generation = ++this.collectionLoadGeneration;
+    if (this.draft.accountMode === 'fixed' && this.draft.accountId === null) {
+      this.collectionCatalog = null;
+      this.collectionError = '请选择一个可用的固定投稿账号。';
+      this.collectionLoading = false;
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.collectionLoading = true;
+    this.collectionError = null;
+    this.policyService
+      .collections(this.draft.accountMode, this.draft.accountId)
+      .pipe(
+        finalize(() => {
+          if (generation === this.collectionLoadGeneration) {
+            this.collectionLoading = false;
+            this.changeDetector.markForCheck();
+          }
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe({
+        next: (catalog) => {
+          if (generation !== this.collectionLoadGeneration) {
+            return;
+          }
+          this.collectionCatalog = catalog;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          if (generation !== this.collectionLoadGeneration) {
+            return;
+          }
+          this.collectionCatalog = null;
+          this.collectionError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private loadSelectedCoverPreview(): void {
+    const assetId =
+      this.draft.coverMode === 'custom' ? this.draft.coverAssetId : null;
+    const generation = ++this.coverPreviewGeneration;
+    if (assetId === null) {
+      this.replaceCoverPreview(null);
+      return;
+    }
+    this.policyService
+      .coverContent(assetId)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (blob) => {
+          if (generation !== this.coverPreviewGeneration) {
+            return;
+          }
+          this.replaceCoverPreview(URL.createObjectURL(blob));
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          if (generation !== this.coverPreviewGeneration) {
+            return;
+          }
+          this.replaceCoverPreview(null);
+          this.coverError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private replaceCoverPreview(url: string | null): void {
+    if (this.coverPreviewObjectUrl !== null) {
+      URL.revokeObjectURL(this.coverPreviewObjectUrl);
+    }
+    this.coverPreviewObjectUrl = url;
+    this.selectedCoverPreviewUrl = url;
+  }
+
   private syncCategoryPath(): void {
     const tid = this.draft.tid;
     this.categoryPath = [];
@@ -400,6 +728,13 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.catalog = null;
     this.categoryPath = [];
     this.draft.tid = null;
+  }
+
+  private clearCollectionSelectionForAccountChange(): void {
+    this.collectionCatalog = null;
+    this.collectionSelection = null;
+    this.draft.collectionSeasonId = null;
+    this.draft.collectionSectionId = null;
   }
 
   private validateDraft(): PolicyValidationErrors {
@@ -433,6 +768,26 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     if (this.isRepost && !this.draft.source.trim()) {
       errors.source = '转载稿件必须填写来源';
     }
+    if (
+      (this.draft.collectionSeasonId === null) !==
+      (this.draft.collectionSectionId === null)
+    ) {
+      errors.collection = '请重新选择合集';
+    }
+    if (
+      this.draft.coverMode === 'custom' &&
+      this.draft.coverAssetId === null
+    ) {
+      errors.cover = '请选择或上传一张封面';
+    }
+    if (
+      this.publishMode === 'scheduled' &&
+      (!Number.isInteger(this.publishDelayHours) ||
+        this.publishDelayHours < 2 ||
+        this.publishDelayHours > 360)
+    ) {
+      errors.schedule = '定时发布需设置为 2～360 个整小时';
+    }
     return errors;
   }
 
@@ -462,7 +817,27 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       autoComment: policy.autoComment,
       danmakuBackfill: policy.danmakuBackfill,
       filters: { ...policy.filters },
+      collectionSeasonId: policy.collectionSeasonId,
+      collectionSectionId: policy.collectionSectionId,
+      coverMode: policy.coverMode,
+      coverAssetId: policy.coverAssetId,
+      publishDelaySeconds: policy.publishDelaySeconds,
     };
+  }
+
+  private syncDependentControls(): void {
+    const seasonId = this.draft.collectionSeasonId;
+    const sectionId = this.draft.collectionSectionId;
+    this.collectionSelection =
+      seasonId !== null && sectionId !== null
+        ? `${seasonId}:${sectionId}`
+        : null;
+    this.publishMode =
+      this.draft.publishDelaySeconds > 0 ? 'scheduled' : 'immediate';
+    this.publishDelayHours =
+      this.draft.publishDelaySeconds > 0
+        ? this.draft.publishDelaySeconds / 3600
+        : 2;
   }
 
   private errorMessage(error: unknown): string {

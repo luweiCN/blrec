@@ -63,6 +63,61 @@ textarea[nz-input] {
   }
 }
 
+.asset-control {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-top: 0.875rem;
+
+  nz-select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  button {
+    flex: none;
+  }
+}
+
+.cover-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.875rem;
+  color: rgba(0, 0, 0, 0.65);
+
+  img {
+    width: 7.5rem;
+    aspect-ratio: 16 / 10;
+    border: 1px solid #f0f0f0;
+    border-radius: 0.25rem;
+    object-fit: cover;
+  }
+}
+
+.schedule-control {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin-top: 0.875rem;
+
+  input {
+    width: 6rem;
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 .switch-field {
   display: flex;
   align-items: center;
@@ -153,6 +208,11 @@ textarea[nz-input] {
   }
 
   .category-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .asset-control {
     align-items: stretch;
     flex-direction: column;
   }
