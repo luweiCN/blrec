@@ -50,4 +50,26 @@ describe('RecordingSessionService', () => {
     });
     request.flush(null, { status: 204, statusText: 'No Content' });
   });
+
+  it('creates a scoped media access URL and pages danmaku', () => {
+    service.createMediaAccess(7).subscribe();
+    const accessRequest = http.expectOne(
+      '/api/v1/recording-sessions/parts/7/media-access'
+    );
+    expect(accessRequest.request.method).toBe('POST');
+    accessRequest.flush({ token: 'signed token', expiresAt: 123 });
+
+    expect(
+      service.mediaUrl(7, { token: 'signed token', expiresAt: 123 })
+    ).toBe(
+      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123'
+    );
+
+    service.listDanmaku(7, 100, 50).subscribe();
+    const danmakuRequest = http.expectOne(
+      '/api/v1/recording-sessions/parts/7/danmaku?cursor=100&limit=50'
+    );
+    expect(danmakuRequest.request.method).toBe('GET');
+    danmakuRequest.flush({ items: [], nextCursor: null });
+  });
 });

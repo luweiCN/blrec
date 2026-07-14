@@ -16,11 +16,16 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
+import { PartContentDialogComponent } from './part-content-dialog/part-content-dialog.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
 import { UploadTasksComponent } from './upload-tasks.component';
 
 @NgModule({
-  declarations: [UploadTasksComponent, RecordingSessionsComponent],
+  declarations: [
+    UploadTasksComponent,
+    RecordingSessionsComponent,
+    PartContentDialogComponent,
+  ],
   imports: [
     CommonModule,
     ClipboardModule,

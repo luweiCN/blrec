@@ -1,7 +1,10 @@
+import hashlib
+import hmac
 import re
+import time
 from typing import BinaryIO, Iterator, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Header, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
 from starlette.responses import Response, StreamingResponse
@@ -24,6 +27,7 @@ from blrec.bili_upload.recording_content import (
 )
 from blrec.utils.string import camel_case
 
+from .. import security
 from .bili_accounts import authenticated_manager_subject
 
 journal: Optional[RecordingJournalBridge] = None
@@ -32,6 +36,7 @@ content_reader: Optional[RecordingContentReader] = None
 unavailable_reason: Optional[str] = 'Recording journal is not enabled'
 
 _BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
+_MEDIA_ACCESS_TTL_SECONDS = 2 * 60 * 60
 
 
 class RangeNotSatisfiable(ValueError):
@@ -163,6 +168,11 @@ class DanmakuPageResponse(ApiModel):
     next_cursor: Optional[int]
 
 
+class MediaAccessResponse(ApiModel):
+    token: str
+    expires_at: int
+
+
 def get_recording_journal() -> RecordingJournalBridge:
     if journal is None:
         raise HTTPException(
@@ -231,6 +241,38 @@ def _content_error(error: RuntimeError) -> HTTPException:
     if isinstance(error, RecordingContentNotFound):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+
+
+def _media_access_token(part_id: int, expires_at: int) -> str:
+    value = '{}:{}'.format(int(part_id), int(expires_at)).encode('ascii')
+    return hmac.new(security.api_key.encode('utf8'), value, hashlib.sha256).hexdigest()
+
+
+def _valid_media_access(part_id: int, expires_at: int, token: str) -> bool:
+    if not security.api_key or expires_at < int(time.time()):
+        return False
+    expected = _media_access_token(part_id, expires_at)
+    return hmac.compare_digest(token, expected)
+
+
+async def authenticated_media_subject(
+    request: Request,
+    part_id: int,
+    media_token: Optional[str] = Query(None),
+    media_expires: Optional[int] = Query(None),
+    x_api_key: Optional[str] = Header(None),
+) -> str:
+    if media_token is not None or media_expires is not None:
+        if (
+            media_token is not None
+            and media_expires is not None
+            and _valid_media_access(part_id, media_expires, media_token)
+        ):
+            return 'recording-media-access'
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail='播放凭据无效或已过期'
+        )
+    return await authenticated_manager_subject(request, x_api_key)
 
 
 def _part_response(part: RecordingPart) -> RecordingPartResponse:
@@ -359,11 +401,31 @@ async def list_recording_sessions(
     )
 
 
+@router.post('/parts/{part_id}/media-access', response_model=MediaAccessResponse)
+async def create_recording_media_access(
+    part_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    reader: RecordingContentReader = Depends(get_content_reader),
+) -> MediaAccessResponse:
+    try:
+        resource = await reader.media(part_id)
+    except (RecordingContentNotFound, RecordingContentUnavailable) as error:
+        raise _content_error(error) from None
+    if resource.path is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
+        )
+    expires_at = int(time.time()) + _MEDIA_ACCESS_TTL_SECONDS
+    return MediaAccessResponse(
+        token=_media_access_token(part_id, expires_at), expires_at=expires_at
+    )
+
+
 @router.get('/parts/{part_id}/media')
 async def stream_recording_media(
     part_id: int,
     range_header: Optional[str] = Header(None, alias='Range'),
-    _subject: str = Depends(authenticated_manager_subject),
+    _subject: str = Depends(authenticated_media_subject),
     reader: RecordingContentReader = Depends(get_content_reader),
 ) -> StreamingResponse:
     try:

@@ -107,6 +107,25 @@ export interface DanmakuDecisionRequest {
   readonly reason: string;
 }
 
+export interface RecordingMediaAccess {
+  readonly token: string;
+  readonly expiresAt: number;
+}
+
+export interface RecordingDanmakuLine {
+  readonly index: number;
+  readonly progressMs: number;
+  readonly mode: number;
+  readonly fontSize: number;
+  readonly color: number;
+  readonly content: string;
+}
+
+export interface RecordingDanmakuPage {
+  readonly items: readonly RecordingDanmakuLine[];
+  readonly nextCursor: number | null;
+}
+
 export interface UploadJobProgress {
   readonly id: number;
   readonly accountId: number;

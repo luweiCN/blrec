@@ -422,8 +422,36 @@
                 <div class="part-metric">
                   大小 {{ formatBytes(part.fileSizeBytes) }}
                 </div>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  data-testid="open-part-video"
+                  [disabled]="
+                    !part.sourceExists &&
+                    !part.finalExists &&
+                    !archiveUrl(session, part.partIndex)
+                  "
+                  (click)="openPartContent(session, part, 'video')"
+                >
+                  播放
+                </button>
               </td>
-              <td class="part-count">{{ part.danmakuCount }} 条</td>
+              <td class="part-count">
+                <div>{{ part.danmakuCount }} 条</div>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  data-testid="open-part-danmaku"
+                  [disabled]="!part.xmlPath"
+                  (click)="openPartContent(session, part, 'danmaku')"
+                >
+                  查看
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -431,6 +459,15 @@
     </ng-container>
   </ng-container>
 </nz-drawer>
+
+<app-part-content-dialog
+  *ngIf="contentSession && contentPart"
+  [visible]="contentVisible"
+  [session]="contentSession"
+  [part]="contentPart"
+  [focus]="contentFocus"
+  (visibleChange)="contentVisibilityChanged($event)"
+></app-part-content-dialog>
 
 <nz-modal
   [nzTitle]="decisionTitle()"

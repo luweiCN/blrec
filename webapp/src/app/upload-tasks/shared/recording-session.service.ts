@@ -6,6 +6,8 @@ import { Observable } from 'rxjs';
 import { UrlService } from 'src/app/core/services/url.service';
 import {
   DanmakuDecisionRequest,
+  RecordingDanmakuPage,
+  RecordingMediaAccess,
   RecordingSessionsResponse,
 } from './recording-session.model';
 
@@ -24,5 +26,32 @@ export class RecordingSessionService {
   ): Observable<void> {
     const path = `/api/v1/recording-sessions/danmaku-items/${itemId}/decision`;
     return this.http.post<void>(this.url.makeApiUrl(path), request);
+  }
+
+  createMediaAccess(partId: number): Observable<RecordingMediaAccess> {
+    const path = `/api/v1/recording-sessions/parts/${partId}/media-access`;
+    return this.http.post<RecordingMediaAccess>(
+      this.url.makeApiUrl(path),
+      null
+    );
+  }
+
+  mediaUrl(partId: number, access: RecordingMediaAccess): string {
+    const token = encodeURIComponent(access.token);
+    const path =
+      `/api/v1/recording-sessions/parts/${partId}/media` +
+      `?media_token=${token}&media_expires=${access.expiresAt}`;
+    return this.url.makeApiUrl(path);
+  }
+
+  listDanmaku(
+    partId: number,
+    cursor = 0,
+    limit = 100
+  ): Observable<RecordingDanmakuPage> {
+    const path =
+      `/api/v1/recording-sessions/parts/${partId}/danmaku` +
+      `?cursor=${cursor}&limit=${limit}`;
+    return this.http.get<RecordingDanmakuPage>(this.url.makeApiUrl(path));
   }
 }

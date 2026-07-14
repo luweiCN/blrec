@@ -20,6 +20,7 @@ import {
   UploadPartState,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
+import { PartContentFocus } from '../part-content-dialog/part-content-dialog.component';
 
 @Component({
   selector: 'app-recording-sessions',
@@ -38,6 +39,10 @@ export class RecordingSessionsComponent implements OnInit {
   decisionReason = '';
   decisionSubmitting = false;
   decisionError: string | null = null;
+  contentVisible = false;
+  contentSession: RecordingSession | null = null;
+  contentPart: RecordingPart | null = null;
+  contentFocus: PartContentFocus = 'video';
 
   constructor(
     private recordingSessions: RecordingSessionService,
@@ -124,6 +129,27 @@ export class RecordingSessionsComponent implements OnInit {
   closeDetails(): void {
     this.detailVisible = false;
     this.selectedSession = null;
+    this.changeDetector.markForCheck();
+  }
+
+  openPartContent(
+    session: RecordingSession,
+    part: RecordingPart,
+    focus: PartContentFocus
+  ): void {
+    this.contentSession = session;
+    this.contentPart = part;
+    this.contentFocus = focus;
+    this.contentVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  contentVisibilityChanged(visible: boolean): void {
+    this.contentVisible = visible;
+    if (!visible) {
+      this.contentSession = null;
+      this.contentPart = null;
+    }
     this.changeDetector.markForCheck();
   }
 

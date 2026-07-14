@@ -243,6 +243,25 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.selectedSession).toBeNull();
   });
 
+  it('opens and clears a selected part content dialog', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    const part = session.parts[0];
+
+    fixture.componentInstance.openPartContent(session, part, 'danmaku');
+
+    expect(fixture.componentInstance.contentVisible).toBeTrue();
+    expect(fixture.componentInstance.contentSession).toBe(session);
+    expect(fixture.componentInstance.contentPart).toBe(part);
+    expect(fixture.componentInstance.contentFocus).toBe('danmaku');
+
+    fixture.componentInstance.contentVisibilityChanged(false);
+
+    expect(fixture.componentInstance.contentVisible).toBeFalse();
+    expect(fixture.componentInstance.contentSession).toBeNull();
+    expect(fixture.componentInstance.contentPart).toBeNull();
+  });
+
   it('does not reopen a closed detail drawer when the list refreshes', () => {
     fixture.detectChanges();
     fixture.componentInstance.openDetails(fixture.componentInstance.sessions[0]);

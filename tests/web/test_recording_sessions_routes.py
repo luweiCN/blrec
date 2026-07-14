@@ -408,6 +408,48 @@ def test_media_requires_authentication(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_media_access_token_authorizes_range_requests_without_exposing_api_key(
+    client: TestClient,
+) -> None:
+    access = client.post(
+        '/api/v1/recording-sessions/parts/2/media-access',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert access.status_code == 200
+    assert access.json()['token']
+    assert access.json()['expiresAt'] > 0
+    assert 'test-api-key' not in access.text
+
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        params={
+            'media_token': access.json()['token'],
+            'media_expires': access.json()['expiresAt'],
+        },
+        headers={'range': 'bytes=5-'},
+    )
+    assert response.status_code == 206
+    assert response.content == b'56789'
+
+
+def test_media_access_rejects_a_tampered_token(client: TestClient) -> None:
+    access = client.post(
+        '/api/v1/recording-sessions/parts/2/media-access',
+        headers={'x-api-key': 'test-api-key'},
+    ).json()
+
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        params={
+            'media_token': access['token'] + 'tampered',
+            'media_expires': access['expiresAt'],
+        },
+    )
+
+    assert response.status_code == 401
+
+
 def test_danmaku_returns_a_camel_case_page(client: TestClient) -> None:
     response = client.get(
         '/api/v1/recording-sessions/parts/2/danmaku?cursor=3&limit=2',

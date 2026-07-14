@@ -1,0 +1,108 @@
+<nz-modal
+  [nzTitle]="title"
+  [nzVisible]="visible"
+  [nzFooter]="null"
+  nzWidth="900px"
+  (nzOnCancel)="handleClose()"
+>
+  <ng-container *nzModalContent>
+    <div class="content-tabs" role="tablist" aria-label="分 P 内容">
+      <button
+        nz-button
+        type="button"
+        role="tab"
+        [nzType]="focus === 'video' ? 'primary' : 'default'"
+        [attr.aria-selected]="focus === 'video'"
+        (click)="switchFocus('video')"
+      >
+        视频
+      </button>
+      <button
+        nz-button
+        type="button"
+        role="tab"
+        [nzType]="focus === 'danmaku' ? 'primary' : 'default'"
+        [attr.aria-selected]="focus === 'danmaku'"
+        (click)="switchFocus('danmaku')"
+      >
+        弹幕（{{ part.danmakuCount }}）
+      </button>
+    </div>
+
+    <section *ngIf="focus === 'video'" class="video-panel" aria-live="polite">
+      <div *ngIf="mediaLoading" class="loading-state">正在打开本地视频…</div>
+      <nz-alert
+        *ngIf="mediaError"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="mediaError"
+      ></nz-alert>
+      <video
+        *ngIf="mediaUrlValue && !mediaError"
+        #videoElement
+        data-testid="part-video"
+        controls
+        preload="metadata"
+        [attr.src]="isFlv ? null : mediaUrlValue"
+      ></video>
+      <p *ngIf="mediaUrlValue && part.artifactState === 'recording'" class="hint">
+        当前播放范围固定在打开文件时的大小；重新打开可读取新增内容。
+      </p>
+      <ng-container *ngIf="!hasLocalMedia && !mediaLoading">
+        <a
+          *ngIf="remotePartUrl as url; else noVideo"
+          nz-button
+          nzType="primary"
+          data-testid="remote-part-link"
+          [href]="url"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          在 B 站打开 P{{ part.partIndex }}
+        </a>
+        <ng-template #noVideo>
+          <nz-alert
+            nzType="info"
+            nzShowIcon
+            nzMessage="本地视频已不存在，稿件暂时也不可访问"
+          ></nz-alert>
+        </ng-template>
+      </ng-container>
+    </section>
+
+    <section
+      *ngIf="focus === 'danmaku'"
+      class="danmaku-panel"
+      aria-live="polite"
+    >
+      <nz-alert
+        *ngIf="danmakuError"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="danmakuError"
+      ></nz-alert>
+      <ol *ngIf="danmakuItems.length > 0" class="danmaku-list">
+        <li *ngFor="let item of danmakuItems">
+          <time>{{ formatProgress(item.progressMs) }}</time>
+          <span class="danmaku-content">{{ item.content }}</span>
+        </li>
+      </ol>
+      <div
+        *ngIf="!danmakuLoading && !danmakuError && danmakuItems.length === 0"
+        class="empty-state"
+      >
+        该分 P 没有弹幕
+      </div>
+      <div *ngIf="danmakuLoading" class="loading-state">正在加载弹幕…</div>
+      <button
+        *ngIf="nextDanmakuCursor !== null"
+        nz-button
+        type="button"
+        [disabled]="!canLoadMoreDanmaku"
+        (click)="loadMoreDanmaku()"
+      >
+        加载更多
+      </button>
+    </section>
+  </ng-container>
+</nz-modal>
