@@ -71,8 +71,14 @@ class FakeAccountManager:
                 credential_expires_at=2_000_000,
                 created_at=100,
                 state='active',
+                is_primary=True,
             )
         ]
+
+    async def set_primary_account(self, account_id: int) -> AccountView:
+        if self.missing_account:
+            raise AccountNotFound('Bilibili account not found')
+        return (await self.list_accounts())[0]
 
     async def check_account_renewal(self, account_id: int) -> FakeRenewalCheckResult:
         if self.missing_account:
@@ -186,6 +192,7 @@ def test_list_accounts_is_redacted(client: TestClient) -> None:
             'credentialExpiresAt': 2_000_000,
             'createdAt': 100,
             'state': 'active',
+            'isPrimary': True,
         }
     ]
     assert 'token' not in response.text.lower()
@@ -209,3 +216,12 @@ def test_manual_refresh_returns_new_credential_version(client: TestClient) -> No
 
     assert response.status_code == 200
     assert response.json() == {'credentialVersion': 4, 'refreshed': True}
+
+
+def test_select_primary_account_returns_redacted_account(client: TestClient) -> None:
+    response = client.put('/api/v1/bili-accounts/7/primary', headers=auth_headers())
+
+    assert response.status_code == 200
+    assert response.json()['id'] == 7
+    assert response.json()['isPrimary'] is True
+    assert 'cookie' not in response.text.lower()

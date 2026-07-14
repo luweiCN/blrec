@@ -43,6 +43,7 @@ describe('UploadsComponent', () => {
         'getQrSession',
         'cancelQrSession',
         'checkRenewal',
+        'setPrimaryAccount',
       ]
     );
     qrRenderer = jasmine.createSpyObj<QrCodeRenderer>('QrCodeRenderer', [
@@ -56,6 +57,19 @@ describe('UploadsComponent', () => {
     );
     accountService.checkRenewal.and.returnValue(
       of({ credentialVersion: 2, refreshed: false })
+    );
+    accountService.setPrimaryAccount.and.returnValue(
+      of({
+        id: 7,
+        uid: 42,
+        displayName: 'fixture',
+        avatarUrl: '',
+        credentialVersion: 1,
+        credentialExpiresAt: 1_800_000_000,
+        createdAt: 1_700_000_000,
+        state: 'active',
+        isPrimary: true,
+      })
     );
     qrRenderer.toDataUrl.and.resolveTo('data:image/png;base64,fixture');
 
@@ -97,6 +111,7 @@ describe('UploadsComponent', () => {
           credentialExpiresAt: 1_800_000_000,
           createdAt: 1_700_000_000,
           state: 'active',
+          isPrimary: true,
         },
       ])
     );
@@ -135,10 +150,11 @@ describe('UploadsComponent', () => {
     const heading = fixture.nativeElement.querySelector('.account-heading');
     expect(heading.querySelector('strong').textContent).toContain('fixture');
     expect(heading.querySelector('nz-tag').textContent).toContain('可用');
+    expect(text).toContain('主账号');
     expect(
       fixture.nativeElement.querySelector('.account-actions nz-tag')
     ).toBeNull();
-    expect(text).toContain('不会替代直播间匿名录制');
+    expect(text).toContain('批量开播状态仍匿名查询');
     expect(text).not.toContain('access_token');
     expect(text).not.toContain('Cookie=');
   });
@@ -155,6 +171,7 @@ describe('UploadsComponent', () => {
           credentialExpiresAt: 0,
           createdAt: 1_700_000_000,
           state: 'active',
+          isPrimary: false,
         },
       ])
     );
@@ -180,6 +197,7 @@ describe('UploadsComponent', () => {
       credentialExpiresAt: 1_800_000_000,
       createdAt: 1_700_000_000,
       state: 'active' as const,
+      isPrimary: true,
     };
     accountService.listAccounts.and.returnValue(of([account]));
     fixture.detectChanges();
@@ -195,6 +213,52 @@ describe('UploadsComponent', () => {
     expect(fixture.nativeElement.textContent).toContain(
       '凭据当前有效，暂不需要续期'
     );
+  }));
+
+  it('selects an active account as the primary account', fakeAsync(() => {
+    const first = {
+      id: 7,
+      uid: 42,
+      displayName: 'first',
+      avatarUrl: '',
+      credentialVersion: 1,
+      credentialExpiresAt: 1_800_000_000,
+      createdAt: 1_700_000_000,
+      state: 'active' as const,
+      isPrimary: true,
+    };
+    const second = {
+      ...first,
+      id: 8,
+      uid: 43,
+      displayName: 'second',
+      isPrimary: false,
+    };
+    accountService.listAccounts.and.returnValues(
+      of([first, second]),
+      of([
+        { ...first, isPrimary: false },
+        { ...second, isPrimary: true },
+      ])
+    );
+    accountService.setPrimaryAccount.and.returnValue(
+      of({ ...second, isPrimary: true })
+    );
+    fixture.detectChanges();
+
+    const buttons = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="set-primary"]')
+    ) as HTMLButtonElement[];
+    expect(buttons.length).toBe(1);
+    buttons[0].click();
+    tick();
+    fixture.detectChanges();
+
+    expect(accountService.setPrimaryAccount).toHaveBeenCalledOnceWith(8);
+    expect(fixture.nativeElement.textContent).toContain(
+      'second 已设为主账号'
+    );
+    expect(component.primaryAccountTip).toContain('房间信息和画质查询');
   }));
 
   it('opens account login without creating a QR code automatically', () => {

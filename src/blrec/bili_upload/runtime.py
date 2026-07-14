@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
 from loguru import logger
 
@@ -35,6 +35,7 @@ class BiliAccountRuntime:
         protocol: Optional[Any] = None,
         clock: Callable[[], float] = time.time,
         refresh_interval_seconds: float = 3600,
+        on_primary_credential_changed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         if refresh_interval_seconds <= 0:
             raise ValueError('refresh interval must be positive')
@@ -45,6 +46,7 @@ class BiliAccountRuntime:
         self._provided_protocol = protocol
         self._clock = clock
         self._refresh_interval_seconds = refresh_interval_seconds
+        self._on_primary_credential_changed = on_primary_credential_changed
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
@@ -93,6 +95,7 @@ class BiliAccountRuntime:
                 cipher=cipher,
                 clock=self._clock,
                 write_gates=AccountWriteGate(database),
+                on_primary_credential_changed=self._on_primary_credential_changed,
             )
             await manager.start()
         except Exception:
@@ -106,6 +109,20 @@ class BiliAccountRuntime:
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         return True
+
+    async def primary_cookie_header(self, url: str) -> Optional[str]:
+        if self._manager is None:
+            return None
+        return await self._manager.primary_cookie_header(url)
+
+    async def recording_cookie_header(self, url: str) -> Optional[str]:
+        if self._manager is None:
+            return None
+        return await self._manager.recording_cookie_header(url)
+
+    async def report_primary_auth_failure(self) -> None:
+        if self._manager is not None:
+            await self._manager.report_primary_auth_failure()
 
     async def close(self) -> None:
         refresh_task, self._refresh_task = self._refresh_task, None

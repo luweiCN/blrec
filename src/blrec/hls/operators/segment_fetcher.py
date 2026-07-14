@@ -181,7 +181,9 @@ class SegmentFetcher:
     )
     def _fetch_segment(self, url: str) -> bytes:
         try:
-            response = self._session.get(url, headers=self._live.headers, timeout=5)
+            response = self._session.get(
+                url, headers=self._live.stream_headers, timeout=5
+            )
             response.raise_for_status()
         except Exception as e:
             logger.debug(f'Failed to fetch segment {url}: {repr(e)}')

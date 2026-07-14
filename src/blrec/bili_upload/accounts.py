@@ -23,7 +23,13 @@ from loguru import logger
 from .credentials import CredentialStore
 from .crypto import CookieRecord, CredentialBundle, CredentialCipher
 from .database import BiliUploadDatabase
-from .errors import BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown
+from .errors import (
+    BiliApiError,
+    DefinitelyNotSent,
+    ProtocolContractError,
+    RemoteOutcomeUnknown,
+)
+from .signing import WebSessionBuilder
 
 __all__ = (
     'AccountIdentityMismatch',
@@ -74,6 +80,7 @@ class AccountView:
     credential_expires_at: int
     created_at: int
     state: str
+    is_primary: bool
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,7 @@ class AccountManager:
     _NONTERMINAL_QR_STATES = ('created', 'pending', 'scanned')
     _TERMINAL_QR_STATES = ('confirmed', 'expired', 'cancelled', 'failed')
     _REFRESH_WINDOW_SECONDS = 72 * 3600
+    _HEALTH_CHECK_INTERVAL_SECONDS = 12 * 3600
 
     def __init__(
         self,
@@ -167,6 +175,7 @@ class AccountManager:
         qr_ttl_seconds: int = 180,
         poll_interval_seconds: float = 1,
         write_gates: Optional[AccountWriteGate] = None,
+        on_primary_credential_changed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._protocol = protocol
         self._store = store
@@ -177,13 +186,16 @@ class AccountManager:
         self._qr_ttl_seconds = qr_ttl_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._write_gates = write_gates or AccountWriteGate(database)
+        self._web_session_builder = WebSessionBuilder(clock=clock)
+        self._on_primary_credential_changed = on_primary_credential_changed
         self._runtimes: Dict[str, _QrRuntime] = {}
         self._started = False
         self._closed = False
         self._start_lock = asyncio.Lock()
         self._account_create_lock = asyncio.Lock()
         self._health_lock = asyncio.Lock()
-        self._last_health_check_day: Optional[int] = None
+        self._last_health_check_at: Optional[int] = None
+        self._auth_failure_lock = asyncio.Lock()
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -319,17 +331,66 @@ class AccountManager:
                 cipher=self._cipher,
                 now=int(self._clock()),
             )
+            await self._database.execute(
+                'INSERT OR IGNORE INTO bili_account_selection('
+                'id,primary_account_id) VALUES(1,?)',
+                (account_id,),
+            )
         account_row = await self._account_row(account_id)
         assert int(account_row['credential_version']) == version
-        return self._account_view(account_row)
+        account = self._account_view(account_row)
+        await self._notify_primary_credential_changed()
+        return account
 
     async def list_accounts(self) -> List[AccountView]:
         rows = await self._database.fetchall(
             'SELECT id,uid,display_name,avatar_url,credential_version,'
-            'credential_expires_at,created_at,state '
+            'credential_expires_at,created_at,state,'
+            'EXISTS(SELECT 1 FROM bili_account_selection selection '
+            'WHERE selection.id=1 AND selection.primary_account_id='
+            'bili_accounts.id) AS is_primary '
             'FROM bili_accounts ORDER BY id'
         )
         return [self._account_view(dict(row)) for row in rows]
+
+    async def set_primary_account(self, account_id: int) -> AccountView:
+        def select(connection: Any) -> None:
+            row = connection.execute(
+                'SELECT state FROM bili_accounts WHERE id=?', (account_id,)
+            ).fetchone()
+            if row is None:
+                raise AccountNotFound('Bilibili account not found')
+            if str(row['state']) != 'active':
+                raise AccountPaused('Bilibili account is not active')
+            connection.execute(
+                'INSERT INTO bili_account_selection(id,primary_account_id) '
+                'VALUES(1,?) ON CONFLICT(id) DO UPDATE SET '
+                'primary_account_id=excluded.primary_account_id',
+                (account_id,),
+            )
+
+        await self._database.write(select)
+        account = self._account_view(await self._account_row(account_id))
+        await self._notify_primary_credential_changed()
+        return account
+
+    async def primary_cookie_header(self, url: str) -> str:
+        row = await self._database.fetchone(
+            'SELECT account.id FROM bili_account_selection selection '
+            'JOIN bili_accounts account ON account.id=selection.primary_account_id '
+            "WHERE selection.id=1 AND account.state='active'"
+        )
+        if row is None:
+            return ''
+        bundle = await self._store.get(account_id=int(row['id']), cipher=self._cipher)
+        return self._web_session_builder.cookie_header(bundle, url)
+
+    async def recording_cookie_header(self, url: str) -> str:
+        account_id = await self._recording_account_id()
+        if account_id is None:
+            return ''
+        bundle = await self._store.get(account_id=account_id, cipher=self._cipher)
+        return self._web_session_builder.cookie_header(bundle, url)
 
     async def refresh_account(self, account_id: int) -> int:
         row = await self._account_row(account_id)
@@ -346,9 +407,14 @@ class AccountManager:
         async with gate.hold(version):
             bundle = await self._store.get(account_id=account_id, cipher=self._cipher)
             try:
-                identity = await self._validate_identity(bundle)
-            except DefinitelyNotSent:
-                identity = await self._validate_identity(bundle)
+                identity = await self._validate_identity_with_retry(bundle)
+            except AccountIdentityMismatch:
+                await self._mark_credential_invalid(account_id)
+                raise
+            except BiliApiError as error:
+                if error.code == -101:
+                    await self._mark_credential_invalid(account_id)
+                raise
             due = bundle.expires_at - int(self._clock()) < self._REFRESH_WINDOW_SECONDS
             if due or identity.refresh_requested:
                 refreshed_version = await self._refresh_locked(account_id, row, bundle)
@@ -366,11 +432,15 @@ class AccountManager:
             return RenewalCheckResult(credential_version=version, refreshed=False)
 
     async def refresh_due_accounts(self) -> List[int]:
-        day = int(self._clock()) // 86400
+        now = int(self._clock())
         async with self._health_lock:
-            if self._last_health_check_day == day:
+            if (
+                self._last_health_check_at is not None
+                and now - self._last_health_check_at
+                < self._HEALTH_CHECK_INTERVAL_SECONDS
+            ):
                 return []
-            self._last_health_check_day = day
+            self._last_health_check_at = now
         refreshed = []
         rows = await self._database.fetchall(
             "SELECT id FROM bili_accounts WHERE state='active' ORDER BY id"
@@ -383,7 +453,51 @@ class AccountManager:
                     refreshed.append(account_id)
             except (AccountPaused, CredentialVersionChanged, AccountNotFound):
                 continue
+            except (
+                AccountIdentityMismatch,
+                BiliApiError,
+                DefinitelyNotSent,
+                ProtocolContractError,
+                RemoteOutcomeUnknown,
+            ) as error:
+                logger.warning(
+                    'Bilibili account {} health check ended with {}',
+                    account_id,
+                    type(error).__name__,
+                )
         return refreshed
+
+    async def report_primary_auth_failure(self) -> None:
+        async with self._auth_failure_lock:
+            account_id = await self._recording_account_id()
+            if account_id is None:
+                return
+            try:
+                await self.check_account_renewal(account_id)
+            except (
+                AccountIdentityMismatch,
+                AccountNotFound,
+                AccountPaused,
+                BiliApiError,
+                CredentialVersionChanged,
+                DefinitelyNotSent,
+                RemoteOutcomeUnknown,
+            ) as error:
+                logger.warning(
+                    'Primary Bilibili account validation after authentication '
+                    'failure ended with {}',
+                    type(error).__name__,
+                )
+
+    async def _recording_account_id(self) -> Optional[int]:
+        row = await self._database.fetchone(
+            'SELECT account.id FROM bili_accounts account '
+            'LEFT JOIN bili_account_selection selection ON selection.id=1 '
+            "WHERE account.state='active' "
+            'ORDER BY CASE WHEN account.id=selection.primary_account_id '
+            'THEN 0 ELSE 1 END,account.id LIMIT 1'
+        )
+        return None if row is None else int(row['id'])
 
     async def _refresh_locked(
         self, account_id: int, row: Mapping[str, Any], previous: CredentialBundle
@@ -517,6 +631,14 @@ class AccountManager:
             refresh_requested=bool(oauth.get('refresh')),
         )
 
+    async def _validate_identity_with_retry(
+        self, bundle: CredentialBundle
+    ) -> _IdentityView:
+        try:
+            return await self._validate_identity(bundle)
+        except DefinitelyNotSent:
+            return await self._validate_identity(bundle)
+
     def _build_bundle(
         self,
         response: Mapping[str, Any],
@@ -610,7 +732,10 @@ class AccountManager:
     async def _account_row(self, account_id: int) -> Mapping[str, Any]:
         row = await self._database.fetchone(
             'SELECT id,uid,display_name,avatar_url,credential_version,'
-            'credential_expires_at,created_at,state '
+            'credential_expires_at,created_at,state,'
+            'EXISTS(SELECT 1 FROM bili_account_selection selection '
+            'WHERE selection.id=1 AND selection.primary_account_id='
+            'bili_accounts.id) AS is_primary '
             'FROM bili_accounts WHERE id=?',
             (account_id,),
         )
@@ -629,6 +754,7 @@ class AccountManager:
             credential_expires_at=int(row['credential_expires_at']),
             created_at=int(row['created_at']),
             state=str(row['state']),
+            is_primary=bool(row['is_primary']),
         )
 
     async def _mark_refresh_unknown(self, account_id: int) -> None:
@@ -637,6 +763,23 @@ class AccountManager:
             "pause_reason='refresh outcome unknown',updated_at=? WHERE id=?",
             (int(self._clock()), account_id),
         )
+        await self._notify_primary_credential_changed()
+
+    async def _mark_credential_invalid(self, account_id: int) -> None:
+        await self._database.execute(
+            "UPDATE bili_accounts SET state='paused',pause_reason=?,updated_at=? "
+            "WHERE id=? AND state='active'",
+            ('credential is no longer authenticated', int(self._clock()), account_id),
+        )
+        await self._notify_primary_credential_changed()
+
+    async def _notify_primary_credential_changed(self) -> None:
+        if self._on_primary_credential_changed is None:
+            return
+        try:
+            await self._on_primary_credential_changed()
+        except Exception:
+            logger.exception('Failed to apply primary Bilibili account credential')
 
     @staticmethod
     def _response_data(response: Mapping[str, Any], context: str) -> Mapping[str, Any]:

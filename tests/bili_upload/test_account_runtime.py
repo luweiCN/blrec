@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -63,6 +64,7 @@ async def test_disabled_runtime_uses_no_database_or_protocol(tmp_path: Path) -> 
     assert runtime.manager is None
     assert runtime.unavailable_reason == 'Bilibili account management is not enabled'
     assert not (tmp_path / 'unused.sqlite3').exists()
+    assert await runtime.primary_cookie_header('https://api.bilibili.com/') is None
 
 
 @pytest.mark.asyncio
@@ -142,3 +144,33 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     await runtime.close()
 
     assert runtime.manager is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_exposes_primary_cookie_and_forwards_auth_failures(
+    tmp_path: Path,
+) -> None:
+    changed = AsyncMock()
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(enabled=True, database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+        on_primary_credential_changed=changed,
+    )
+    try:
+        assert await runtime.start()
+        assert runtime.manager is not None
+        await runtime.manager.finish_confirmed_login(confirmed_response())
+
+        header = await runtime.primary_cookie_header(
+            'https://api.live.bilibili.com/x/test'
+        )
+        assert 'SESSDATA=sess-secret' in header
+        changed.assert_awaited_once_with()
+
+        runtime.manager.report_primary_auth_failure = AsyncMock()
+        await runtime.report_primary_auth_failure()
+        runtime.manager.report_primary_auth_failure.assert_awaited_once_with()
+    finally:
+        await runtime.close()

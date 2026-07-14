@@ -1,1 +1,11 @@
 @use '../shared/styles/setting';
+
+.managed-cookie-note {
+  display: block;
+  margin-top: 8px;
+}
+
+.managed-cookie-link {
+  display: inline-block;
+  margin-top: 8px;
+}

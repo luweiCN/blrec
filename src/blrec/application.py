@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Awaitable, Iterator, List, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterator, List, Optional
 
 import aiohttp
 import attr
@@ -88,12 +88,22 @@ async def _collect_teardown_error(
 
 
 class Application:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        managed_cookie_provider: Optional[
+            Callable[[str], Awaitable[Optional[str]]]
+        ] = None,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
         self._settings = settings
         self._out_dir = settings.output.out_dir
         self._settings_manager = SettingsManager(self, settings)
         self._live_status_session: Optional[aiohttp.ClientSession] = None
         self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
+        self._managed_cookie_provider = managed_cookie_provider
+        self._auth_failure_reporter = auth_failure_reporter
 
     @property
     def info(self) -> AppInfo:
@@ -385,6 +395,9 @@ class Application:
     ) -> TaskOptions:
         return await self._settings_manager.change_task_options(room_id, options)
 
+    async def refresh_managed_cookie(self) -> None:
+        await self._task_manager.refresh_managed_cookie()
+
     async def _setup_live_status_monitor(self) -> None:
         from .bili.anonymous_room_client import AnonymousRoomClient
         from .bili.batch_status_client import BatchStatusClient
@@ -396,7 +409,11 @@ class Application:
         self._live_status_session = None
         self._live_status_coordinator = None
         if settings.mode == 'legacy':
-            self._task_manager = RecordTaskManager(self._settings_manager)
+            self._task_manager = RecordTaskManager(
+                self._settings_manager,
+                managed_cookie_provider=self._managed_cookie_provider,
+                auth_failure_reporter=self._auth_failure_reporter,
+            )
             return
 
         session = aiohttp.ClientSession(
@@ -416,7 +433,11 @@ class Application:
             )
             self._live_status_coordinator = coordinator
             self._task_manager = RecordTaskManager(
-                self._settings_manager, coordinator, AnonymousRoomClient(session)
+                self._settings_manager,
+                coordinator,
+                AnonymousRoomClient(session),
+                managed_cookie_provider=self._managed_cookie_provider,
+                auth_failure_reporter=self._auth_failure_reporter,
             )
             await coordinator.start()
         except BaseException as error:

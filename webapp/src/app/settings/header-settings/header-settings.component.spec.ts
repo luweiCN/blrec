@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { RouterTestingModule } from '@angular/router/testing';
 
 import { of } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
@@ -29,7 +30,7 @@ describe('HeaderSettingsComponent', () => {
     );
 
     await TestBed.configureTestingModule({
-      imports: [NoopAnimationsModule, SettingsModule],
+      imports: [NoopAnimationsModule, RouterTestingModule, SettingsModule],
       providers: [
         { provide: SettingsSyncService, useValue: settingsSyncService },
         { provide: ValidationService, useValue: validationService },
@@ -53,5 +54,15 @@ describe('HeaderSettingsComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('moves cookie editing to managed posting accounts', () => {
+    const text = fixture.nativeElement.textContent;
+
+    expect(text).toContain('Cookie 已由投稿账号管理');
+    expect(text).toContain('前往投稿账号管理');
+    expect(
+      fixture.nativeElement.querySelector('app-cookie-edit-dialog')
+    ).toBeNull();
   });
 });

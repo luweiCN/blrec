@@ -3,7 +3,7 @@ import hashlib
 import time
 from abc import ABC
 from datetime import datetime
-from typing import Any, Dict, Final, List, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Final, List, Mapping, Optional
 from urllib.parse import urlencode
 
 import aiohttp
@@ -36,6 +36,7 @@ class BaseApi(ABC):
         headers: Optional[Dict[str, str]] = None,
         *,
         room_id: Optional[int] = None,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self._logger = logger.bind(room_id=room_id or '')
 
@@ -44,6 +45,7 @@ class BaseApi(ABC):
         self.base_play_info_api_urls: List[str] = ['https://api.live.bilibili.com']
 
         self._session = session
+        self._auth_failure_reporter = auth_failure_reporter
         self.headers = headers or {}
         self.timeout = 10
 
@@ -55,12 +57,14 @@ class BaseApi(ABC):
     def headers(self, value: Dict[str, str]) -> None:
         self._headers = {**BASE_HEADERS, **value}
 
-    @staticmethod
-    def _check_response(json_res: JsonResponse) -> None:
+    async def _check_response(self, json_res: JsonResponse) -> None:
         if json_res['code'] != 0:
-            raise ApiRequestError(
+            error = ApiRequestError(
                 json_res['code'], json_res.get('message') or json_res.get('msg') or ''
             )
+            if error.code == -101 and self._auth_failure_reporter is not None:
+                await self._auth_failure_reporter()
+            raise error
 
     @retry(reraise=True, stop=stop_after_delay(5), wait=wait_exponential(0.1))
     async def _get_json_res(self, url: str, *args: Any, **kwds: Any) -> JsonResponse:
@@ -76,7 +80,7 @@ class BaseApi(ABC):
                 self._logger.debug(f'Response text: {text_res[:200]}')
                 raise
             if should_check_response:
-                self._check_response(json_res)
+                await self._check_response(json_res)
             return json_res
 
     async def _get_json(

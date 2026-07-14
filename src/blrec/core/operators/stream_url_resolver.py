@@ -139,7 +139,10 @@ class StreamURLResolver(AsyncCooperationMixin):
         if params == self._stream_params and self._stream_url:
             try:
                 response = self._session.get(
-                    self._stream_url, stream=True, headers=self._live.headers, timeout=3
+                    self._stream_url,
+                    stream=True,
+                    headers=self._live.stream_headers,
+                    timeout=3,
                 )
                 response.raise_for_status()
             except Exception:

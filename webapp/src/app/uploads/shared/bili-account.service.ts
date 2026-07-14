@@ -40,4 +40,11 @@ export class BiliAccountService {
     );
     return this.http.post<RefreshResult>(url, null);
   }
+
+  setPrimaryAccount(accountId: number): Observable<BiliAccount> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/${accountId}/primary`
+    );
+    return this.http.put<BiliAccount>(url, null);
+  }
 }

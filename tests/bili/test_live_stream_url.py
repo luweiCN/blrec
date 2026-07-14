@@ -37,6 +37,19 @@ def downgraded_stream() -> list[dict[str, Any]]:
     ]
 
 
+def test_cookie_is_kept_out_of_media_stream_headers() -> None:
+    live = object.__new__(Live)
+    live._room_id = 100
+    live._user_agent = 'fixture-agent'
+    live._cookie = 'SESSDATA=secret'
+
+    live._update_headers()
+
+    assert live.headers['Cookie'] == 'SESSDATA=secret'
+    assert live.stream_headers['User-Agent'] == 'fixture-agent'
+    assert 'Cookie' not in live.stream_headers
+
+
 @pytest.mark.asyncio
 async def test_get_live_stream_url_accepts_server_selected_lower_quality(
     monkeypatch: pytest.MonkeyPatch,

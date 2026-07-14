@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -42,6 +42,7 @@ def confirmed_response(
     access_token: str = 'access-new',
     refresh_token: str = 'refresh-new',
     expires_in: int = 180 * 24 * 3600,
+    sessdata: str = 'sess-secret',
 ) -> Mapping[str, Any]:
     return {
         'code': 0,
@@ -55,7 +56,7 @@ def confirmed_response(
             'cookie_info': {
                 'cookies': [
                     {'name': 'DedeUserID', 'value': str(cookie_uid)},
-                    {'name': 'SESSDATA', 'value': 'sess-secret', 'http_only': 1},
+                    {'name': 'SESSDATA', 'value': sessdata, 'http_only': 1},
                     {'name': 'bili_jct', 'value': 'csrf-secret'},
                     {'name': 'buvid3', 'value': 'web-buvid3'},
                 ]
@@ -198,7 +199,13 @@ async def never_wake(_seconds: float) -> None:
     await asyncio.Event().wait()
 
 
-async def components(tmp_path: Path, protocol: ScriptedProtocol, clock: FakeClock):
+async def components(
+    tmp_path: Path,
+    protocol: ScriptedProtocol,
+    clock: FakeClock,
+    *,
+    on_primary_credential_changed: Optional[Any] = None,
+):
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
     store = CredentialStore(database)
@@ -210,6 +217,7 @@ async def components(tmp_path: Path, protocol: ScriptedProtocol, clock: FakeCloc
         cipher=cipher,
         clock=clock,
         sleeper=never_wake,
+        on_primary_credential_changed=on_primary_credential_changed,
     )
     return database, store, cipher, manager
 
@@ -380,6 +388,7 @@ async def test_confirm_saves_one_validated_credential_bundle(tmp_path: Path) -> 
         assert account.avatar_url == 'https://i0.hdslb.com/face.jpg'
         assert account.credential_expires_at == clock.value + 180 * 24 * 3600
         assert account.created_at == clock.value
+        assert account.is_primary
         assert bundle.mid == 42
         assert bundle.access_token == 'access-new'
         assert bundle.refresh_token == 'refresh-new'
@@ -387,6 +396,150 @@ async def test_confirm_saves_one_validated_credential_bundle(tmp_path: Path) -> 
         assert bundle.web_buvid3 == 'web-buvid3'
         assert protocol.oauth_calls == 1
         assert protocol.web_nav_calls == 1
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_primary_account_is_sticky_and_can_be_selected_explicitly(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        first = await manager.finish_confirmed_login(confirmed_response())
+        protocol.token_mid = 43
+        protocol.web_uid = 43
+        second = await manager.finish_confirmed_login(
+            confirmed_response(mid=43, cookie_uid=43)
+        )
+
+        assert first.is_primary
+        assert not second.is_primary
+
+        selected = await manager.set_primary_account(second.id)
+        accounts = await manager.list_accounts()
+
+        assert selected.id == second.id
+        assert selected.is_primary
+        assert [account.is_primary for account in accounts] == [False, True]
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_primary_cookie_header_honours_cookie_domain_and_account_state(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        assert (
+            await manager.primary_cookie_header('https://api.bilibili.com/x/test') == ''
+        )
+
+        account = await manager.finish_confirmed_login(confirmed_response())
+
+        header = await manager.primary_cookie_header(
+            'https://api.live.bilibili.com/x/test'
+        )
+        assert 'SESSDATA=sess-secret' in header
+        assert 'bili_jct=csrf-secret' in header
+        assert await manager.primary_cookie_header('https://example.invalid/x') == ''
+
+        await database.execute(
+            "UPDATE bili_accounts SET state='paused' WHERE id=?", (account.id,)
+        )
+        assert (
+            await manager.primary_cookie_header('https://api.bilibili.com/x/test') == ''
+        )
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_recording_cookie_falls_back_without_changing_upload_account(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        primary = await manager.finish_confirmed_login(
+            confirmed_response(sessdata='primary-secret')
+        )
+        protocol.token_mid = 43
+        protocol.web_uid = 43
+        standby = await manager.finish_confirmed_login(
+            confirmed_response(mid=43, cookie_uid=43, sessdata='standby-secret')
+        )
+        await database.execute(
+            "UPDATE bili_accounts SET state='paused' WHERE id=?", (primary.id,)
+        )
+
+        header = await manager.recording_cookie_header(
+            'https://api.live.bilibili.com/x/test'
+        )
+        accounts = await manager.list_accounts()
+
+        assert 'SESSDATA=standby-secret' in header
+        assert next(
+            account for account in accounts if account.id == primary.id
+        ).is_primary
+        assert not next(
+            account for account in accounts if account.id == standby.id
+        ).is_primary
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_standby_notifies_recording_cookie_to_use_next_account(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    changed = AsyncMock()
+    database, _store, _cipher, manager = await components(
+        tmp_path, protocol, clock, on_primary_credential_changed=changed
+    )
+    try:
+        primary = await manager.finish_confirmed_login(confirmed_response())
+        protocol.token_mid = 43
+        protocol.web_uid = 43
+        standby = await manager.finish_confirmed_login(
+            confirmed_response(mid=43, cookie_uid=43, sessdata='standby-secret')
+        )
+        protocol.token_mid = 44
+        protocol.web_uid = 44
+        await manager.finish_confirmed_login(
+            confirmed_response(mid=44, cookie_uid=44, sessdata='next-secret')
+        )
+        await database.execute(
+            "UPDATE bili_accounts SET state='paused' WHERE id=?", (primary.id,)
+        )
+        protocol.token_mid = 43
+        protocol.web_uid = 43
+        protocol.oauth_results.append(BiliApiError(-101, operation='oauth_info'))
+        changed.reset_mock()
+
+        await manager.report_primary_auth_failure()
+
+        assert (
+            await database.scalar(
+                'SELECT state FROM bili_accounts WHERE id=?', (standby.id,)
+            )
+            == 'paused'
+        )
+        changed.assert_awaited_once_with()
+        header = await manager.recording_cookie_header('https://api.bilibili.com/')
+        assert 'SESSDATA=next-secret' in header
     finally:
         await manager.close()
         await database.close()
@@ -606,24 +759,102 @@ async def test_refresh_validation_retries_once_then_pauses_without_saving(
 
 
 @pytest.mark.asyncio
-async def test_due_refresh_and_health_check_run_at_most_once_per_utc_day(
-    tmp_path: Path,
-) -> None:
-    clock = FakeClock()
-    protocol = ScriptedProtocol(refresh_results=[confirmed_response()])
+async def test_health_check_runs_at_most_once_per_twelve_hours(tmp_path: Path) -> None:
+    clock = FakeClock(10 * 86400 + 100)
+    protocol = ScriptedProtocol()
     database, store, cipher, manager = await components(tmp_path, protocol, clock)
     try:
-        await seed_account(store, cipher, expires_at=clock.value + 71 * 3600)
+        await seed_account(store, cipher, expires_at=clock.value + 200 * 3600)
 
         first = await manager.refresh_due_accounts()
         second = await manager.refresh_due_accounts()
+        clock.advance(12 * 3600 - 1)
+        before_due = await manager.refresh_due_accounts()
+        clock.advance(1)
+        after_due = await manager.refresh_due_accounts()
 
-        assert first == [1]
+        assert first == []
         assert second == []
+        assert before_due == []
+        assert after_due == []
+        assert protocol.oauth_calls == 2
+        assert protocol.refresh_calls == 0
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_health_check_continues_after_one_account_is_invalid(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        first = await manager.finish_confirmed_login(confirmed_response())
+        protocol.token_mid = 43
+        protocol.web_uid = 43
+        second = await manager.finish_confirmed_login(
+            confirmed_response(mid=43, cookie_uid=43)
+        )
+        protocol.oauth_results.extend(
+            [
+                BiliApiError(-101, operation='oauth_info'),
+                {'code': 0, 'data': {'mid': 43, 'refresh': False}},
+            ]
+        )
+
+        await manager.refresh_due_accounts()
+
         assert (
-            protocol.oauth_calls == 2
-        )  # health check, then refreshed-bundle validation
-        assert protocol.refresh_calls == 1
+            await database.scalar(
+                'SELECT state FROM bili_accounts WHERE id=?', (first.id,)
+            )
+            == 'paused'
+        )
+        assert (
+            await database.scalar(
+                'SELECT state FROM bili_accounts WHERE id=?', (second.id,)
+            )
+            == 'active'
+        )
+        assert protocol.oauth_calls == 4  # two logins and two health checks
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_auth_failure_pauses_primary_account_and_notifies_once(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    changed = AsyncMock()
+    database, _store, _cipher, manager = await components(
+        tmp_path, protocol, clock, on_primary_credential_changed=changed
+    )
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+        changed.reset_mock()
+        protocol.oauth_results.append(BiliApiError(-101, operation='oauth_info'))
+
+        await asyncio.gather(
+            manager.report_primary_auth_failure(), manager.report_primary_auth_failure()
+        )
+
+        row = await database.fetchone(
+            'SELECT state,pause_reason FROM bili_accounts WHERE id=?', (account.id,)
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'paused',
+            'pause_reason': 'credential is no longer authenticated',
+        }
+        assert protocol.oauth_calls == 2  # login validation, then failure confirmation
+        changed.assert_awaited_once_with()
+        assert await manager.primary_cookie_header('https://api.bilibili.com/') == ''
     finally:
         await manager.close()
         await database.close()

@@ -18,23 +18,12 @@
       ></app-user-agent-edit-dialog>
     </nz-form-control>
   </nz-form-item>
-  <nz-form-item
-    class="setting-item actionable"
-    (click)="cookieEditDialog.open()"
-  >
-    <nz-form-label class="setting-label">Cookie</nz-form-label>
-    <nz-form-control
-      [nzWarningTip]="syncFailedWarningTip"
-      [nzValidateStatus]="syncStatus.cookie ? cookieControl : 'warning'"
-    >
-      <nz-form-text class="setting-value"
-        >{{ cookieControl.value }}
-      </nz-form-text>
-      <app-cookie-edit-dialog
-        #cookieEditDialog
-        [value]="cookieControl.value"
-        (confirm)="cookieControl.setValue($event)"
-      ></app-cookie-edit-dialog>
-    </nz-form-control>
-  </nz-form-item>
+  <nz-alert
+    class="managed-cookie-note"
+    nzType="info"
+    nzShowIcon
+    nzMessage="Cookie 已由投稿账号管理"
+    nzDescription="系统使用所选主账号的加密凭据，不再需要从浏览器复制 Cookie。"
+  ></nz-alert>
+  <a class="managed-cookie-link" routerLink="/uploads">前往投稿账号管理</a>
 </form>

@@ -1,7 +1,7 @@
 import os
 from contextlib import suppress
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Iterator, List, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterator, List, Optional
 
 from blrec.bili.danmaku_client import DanmakuClient
 from blrec.bili.live import Live
@@ -54,6 +54,7 @@ class RecordTask:
         delete_source: DeleteStrategy = DeleteStrategy.AUTO,
         live_status_coordinator: Optional['LiveStatusCoordinator'] = None,
         anonymous_room_client: Optional['AnonymousRoomClient'] = None,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         super().__init__()
 
@@ -63,7 +64,12 @@ class RecordTask:
                 'must be provided together'
             )
 
-        self._live = Live(room_id, user_agent, cookie)
+        if auth_failure_reporter is None:
+            self._live = Live(room_id, user_agent, cookie)
+        else:
+            self._live = Live(
+                room_id, user_agent, cookie, auth_failure_reporter=auth_failure_reporter
+            )
 
         self._room_id = room_id
         self._out_dir = out_dir

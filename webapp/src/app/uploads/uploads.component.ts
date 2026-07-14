@@ -37,10 +37,13 @@ export class UploadsComponent implements OnInit, OnDestroy {
     '每次成功更换登录凭据后递增，用于防止旧任务覆盖新凭据；它不是账号等级或软件版本。';
   readonly credentialExpiryTip =
     '这是 B 站扫码接口返回的 TV access token 预计失效时间，不代表账号本身或 Web Cookie 会在此刻同时失效；系统会在接近过期或 B 站要求时自动续期。';
+  readonly primaryAccountTip =
+    '主账号的 Cookie 用于需要登录的房间信息和画质查询；后续投稿、评论和视频弹幕也固定使用这个账号，不会逐请求轮换。';
 
   private readonly destroy$ = new Subject<void>();
   private readonly stopQrPolling$ = new Subject<void>();
   private readonly checkingAccountIds = new Set<number>();
+  private selectingPrimaryAccountId: number | null = null;
   private readonly failedAvatarUrls = new Set<string>();
 
   constructor(
@@ -214,6 +217,39 @@ export class UploadsComponent implements OnInit, OnDestroy {
 
   isChecking(accountId: number): boolean {
     return this.checkingAccountIds.has(accountId);
+  }
+
+  setPrimaryAccount(account: BiliAccount): void {
+    if (
+      account.state !== 'active' ||
+      account.isPrimary ||
+      this.selectingPrimaryAccountId !== null
+    ) {
+      return;
+    }
+    this.selectingPrimaryAccountId = account.id;
+    this.actionError = null;
+    this.actionMessage = null;
+    this.changeDetector.markForCheck();
+    this.accountService
+      .setPrimaryAccount(account.id)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: () => {
+          this.selectingPrimaryAccountId = null;
+          this.actionMessage = `${account.displayName} 已设为主账号`;
+          this.loadAccounts();
+        },
+        error: (error: unknown) => {
+          this.selectingPrimaryAccountId = null;
+          this.actionError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  isSelectingPrimary(accountId: number): boolean {
+    return this.selectingPrimaryAccountId === accountId;
   }
 
   accountInitial(displayName: string): string {

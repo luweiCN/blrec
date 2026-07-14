@@ -437,3 +437,29 @@ async def test_application_legacy_mode_does_not_start_batch_monitor() -> None:
     assert app.get_live_status_metrics().mode == 'legacy'
 
     await app._exit()
+
+
+@pytest.mark.asyncio
+async def test_application_refreshes_managed_cookie_on_loaded_tasks() -> None:
+    app = object.__new__(Application)
+    app._task_manager = AsyncMock()
+
+    await app.refresh_managed_cookie()
+
+    app._task_manager.refresh_managed_cookie.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_application_wires_managed_account_into_legacy_tasks() -> None:
+    provider = AsyncMock(return_value='SESSDATA=managed')
+    reporter = AsyncMock()
+    app = Application(
+        Settings(live_monitor=LiveMonitorSettings(mode='legacy')),
+        managed_cookie_provider=provider,
+        auth_failure_reporter=reporter,
+    )
+
+    await app._setup_live_status_monitor()
+
+    assert app._task_manager._managed_cookie_provider is provider
+    assert app._task_manager._auth_failure_reporter is reporter

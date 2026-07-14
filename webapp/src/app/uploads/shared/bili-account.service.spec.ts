@@ -65,4 +65,13 @@ describe('BiliAccountService', () => {
     expect(request.request.body).toBeNull();
     request.flush({ credentialVersion: 4, refreshed: true });
   });
+
+  it('selects one account as the primary account', () => {
+    service.setPrimaryAccount(7).subscribe();
+
+    const request = http.expectOne('/api/v1/bili-accounts/7/primary');
+    expect(request.request.method).toBe('PUT');
+    expect(request.request.body).toBeNull();
+    request.flush({ id: 7, isPrimary: true });
+  });
 });

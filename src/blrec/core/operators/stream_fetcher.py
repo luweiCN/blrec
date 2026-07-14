@@ -40,7 +40,7 @@ class StreamFetcher(AsyncCooperationMixin):
                     response = self._session.get(
                         url,
                         stream=True,
-                        headers=self._live.headers,
+                        headers=self._live.stream_headers,
                         timeout=self.read_timeout,
                     )
                     logger.info('Response received')

@@ -28,6 +28,7 @@ export interface BiliAccount {
   credentialExpiresAt: number;
   createdAt: number;
   state: AccountState;
+  isPrimary: boolean;
 }
 
 export interface QrSession {

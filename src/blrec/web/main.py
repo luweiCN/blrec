@@ -40,12 +40,30 @@ _env_settings.settings_file = _path
 _settings = Settings.load(_env_settings.settings_file)
 _settings.update_from_env_settings(_env_settings)
 
-app = Application(_settings)
+
+async def _managed_cookie_provider(url: str) -> Optional[str]:
+    return await _bili_account_runtime.recording_cookie_header(url)
+
+
+async def _report_primary_auth_failure() -> None:
+    await _bili_account_runtime.report_primary_auth_failure()
+
+
+async def _apply_primary_credential() -> None:
+    await app.refresh_managed_cookie()
+
+
+app = Application(
+    _settings,
+    managed_cookie_provider=_managed_cookie_provider,
+    auth_failure_reporter=_report_primary_auth_failure,
+)
 _bili_account_runtime = BiliAccountRuntime(
     _settings.bili_upload,
     api_key=_env_settings.api_key,
     credential_key=_env_settings.load_credential_key(),
     old_credential_keys=_env_settings.load_old_credential_keys(),
+    on_primary_credential_changed=_apply_primary_credential,
 )
 bili_accounts.manager = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -119,6 +137,7 @@ async def on_startup() -> None:
     await _bili_account_runtime.start()
     bili_accounts.manager = _bili_account_runtime.manager
     bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
+    await app.refresh_managed_cookie()
 
 
 @api.on_event('shutdown')

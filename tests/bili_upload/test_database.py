@@ -19,6 +19,7 @@ REQUIRED_TABLES = {
     'schema_migrations',
     'event_journal',
     'bili_accounts',
+    'bili_account_selection',
     'qr_sessions',
     'room_upload_policies',
     'recording_sessions',
@@ -63,7 +64,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 2
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 3
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -163,7 +164,13 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'credential_expires_at': 0,
             'created_at': 10,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 2
+        assert (
+            await database.scalar(
+                'SELECT primary_account_id FROM bili_account_selection WHERE id=1'
+            )
+            == 1
+        )
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 3
     finally:
         await database.close()
 

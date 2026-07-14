@@ -39,6 +39,7 @@ class AccountResponse(ApiModel):
     credential_expires_at: int
     created_at: int
     state: str
+    is_primary: bool
 
 
 class QrSessionResponse(ApiModel):
@@ -86,6 +87,25 @@ async def list_accounts(
     account_manager: AccountManager = Depends(get_account_manager),
 ) -> List[AccountView]:
     return await account_manager.list_accounts()
+
+
+@router.put('/{account_id}/primary', response_model=AccountResponse)
+async def select_primary_account(
+    account_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    account_manager: AccountManager = Depends(get_account_manager),
+) -> AccountView:
+    try:
+        return await account_manager.set_primary_account(account_id)
+    except AccountNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='Bilibili account not found'
+        ) from None
+    except AccountPaused:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Only an active Bilibili account can be selected',
+        ) from None
 
 
 @router.post(

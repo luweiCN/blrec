@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Awaitable, Callable, Dict, List, Optional, cast
 
 import aiohttp
 from jsonpath import jsonpath
@@ -35,7 +35,14 @@ _LIVE_STATUS_PATTERN = re.compile(rb'"live_status"\s*:\s*(\d)')
 
 
 class Live:
-    def __init__(self, room_id: int, user_agent: str = '', cookie: str = '') -> None:
+    def __init__(
+        self,
+        room_id: int,
+        user_agent: str = '',
+        cookie: str = '',
+        *,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
         self._logger = logger.bind(room_id=room_id)
 
         self._room_id = room_id
@@ -51,8 +58,18 @@ class Live:
             trust_env=True,
             timeout=timeout,
         )
-        self._appapi = AppApi(self._session, self.headers, room_id=room_id)
-        self._webapi = WebApi(self._session, self.headers, room_id=room_id)
+        self._appapi = AppApi(
+            self._session,
+            self.headers,
+            room_id=room_id,
+            auth_failure_reporter=auth_failure_reporter,
+        )
+        self._webapi = WebApi(
+            self._session,
+            self.headers,
+            room_id=room_id,
+            auth_failure_reporter=auth_failure_reporter,
+        )
 
         self._room_info: RoomInfo
         self._user_info: UserInfo
@@ -112,12 +129,21 @@ class Live:
     def headers(self) -> Dict[str, str]:
         return self._headers
 
+    @property
+    def stream_headers(self) -> Dict[str, str]:
+        return self._stream_headers
+
     def _update_headers(self) -> None:
         self._headers = {
             **BASE_HEADERS,
             'Referer': f'https://live.bilibili.com/{self._room_id}',
             'User-Agent': self._user_agent,
             'Cookie': self._cookie,
+        }
+        self._stream_headers = {
+            **BASE_HEADERS,
+            'Referer': f'https://live.bilibili.com/{self._room_id}',
+            'User-Agent': self._user_agent,
         }
 
     @property

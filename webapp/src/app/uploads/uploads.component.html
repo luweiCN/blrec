@@ -21,7 +21,7 @@
     nzType="info"
     nzShowIcon
     nzMessage="扫码凭据的用途"
-    nzDescription="扫码后系统会把 TV token 与 Web Cookie 作为同一组凭据加密保存，用于账号校验、投稿、评论和视频弹幕；它不会替代直播间匿名录制，也不会按房间重复登录。"
+    nzDescription="扫码后系统会把 TV token 与 Web Cookie 作为同一组凭据加密保存。批量开播状态仍匿名查询；主账号用于需要登录的房间详情、画质查询，以及后续投稿、评论和视频弹幕。"
   ></nz-alert>
 
   <nz-card nzTitle="已登录账号">
@@ -79,6 +79,14 @@
                   <nz-tag [nzColor]="accountStateColor(account.state)">
                     {{ accountStateLabel(account.state) }}
                   </nz-tag>
+                  <nz-tag
+                    *ngIf="account.isPrimary"
+                    nzColor="gold"
+                    nz-tooltip
+                    [nzTooltipTitle]="primaryAccountTip"
+                  >
+                    主账号
+                  </nz-tag>
                 </div>
                 <div class="account-meta-grid">
                   <span>UID {{ account.uid }}</span>
@@ -121,6 +129,19 @@
               </div>
             </div>
             <div class="account-actions">
+              <button
+                *ngIf="!account.isPrimary"
+                nz-button
+                type="button"
+                data-testid="set-primary"
+                nz-tooltip
+                [nzTooltipTitle]="primaryAccountTip"
+                [nzLoading]="isSelectingPrimary(account.id)"
+                [disabled]="account.state !== 'active'"
+                (click)="setPrimaryAccount(account)"
+              >
+                设为主账号
+              </button>
               <button
                 nz-button
                 type="button"
