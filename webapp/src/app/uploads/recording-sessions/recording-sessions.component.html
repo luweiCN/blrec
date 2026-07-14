@@ -1,0 +1,117 @@
+<nz-card nzTitle="录制会话与分 P">
+  <button
+    nz-button
+    nzSize="small"
+    type="button"
+    data-testid="refresh-sessions"
+    (click)="load()"
+  >
+    刷新
+  </button>
+
+  <nz-alert
+    class="session-note"
+    nzType="info"
+    nzShowIcon
+    nzMessage="这里按同一场直播归集录制文件"
+    nzDescription="录制进程重启后产生的新文件会继续编号为下一分 P；文件后处理完成后才会显示为制品就绪。"
+  ></nz-alert>
+
+  <div aria-live="polite" [attr.aria-busy]="view.state === 'loading'">
+    <nz-spin *ngIf="view.state === 'loading'" nzSimple></nz-spin>
+
+    <ng-container *ngIf="errorMessage as message">
+      <nz-alert
+        nzType="error"
+        nzShowIcon
+        nzMessage="无法加载录制会话"
+        [nzDescription]="message"
+      ></nz-alert>
+      <button
+        class="retry-button"
+        nz-button
+        type="button"
+        data-testid="retry-sessions"
+        (click)="load()"
+      >
+        重试加载
+      </button>
+    </ng-container>
+
+    <nz-alert
+      *ngIf="degradedReason as reason"
+      class="degraded-warning"
+      nzType="warning"
+      nzShowIcon
+      nzMessage="自动处理已暂停"
+      [nzDescription]="reason"
+    ></nz-alert>
+
+    <nz-empty
+      *ngIf="view.state === 'ready' && sessions.length === 0"
+      nzNotFoundContent="还没有录制会话"
+    ></nz-empty>
+
+    <nz-collapse *ngIf="sessions.length > 0">
+      <nz-collapse-panel
+        *ngFor="let session of sessions; trackBy: trackSession"
+        [nzHeader]="sessionHeader(session)"
+        [nzActive]="session.state === 'open'"
+      >
+        <div class="session-summary">
+          <nz-tag [nzColor]="sessionStateColor(session.state)">
+            {{ sessionStateLabel(session.state) }}
+          </nz-tag>
+          <span>开始于 {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}</span>
+          <span>{{ session.parts.length }} 个分 P</span>
+        </div>
+
+        <div class="parts-table-wrap">
+          <table class="parts-table">
+            <caption>
+              房间 {{ session.roomId }} 的录制文件
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">分 P</th>
+                <th scope="col">状态</th>
+                <th scope="col">录制时间</th>
+                <th scope="col">文件</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let part of session.parts; trackBy: trackPart">
+                <th scope="row">P{{ part.partIndex }}</th>
+                <td>
+                  <nz-tag [nzColor]="artifactStateColor(part.artifactState)">
+                    {{ artifactStateLabel(part.artifactState) }}
+                  </nz-tag>
+                  <div class="part-error" *ngIf="part.errorMessage">
+                    {{ part.errorMessage }}
+                  </div>
+                </td>
+                <td>
+                  {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
+                </td>
+                <td class="file-list">
+                  <div *ngIf="part.finalPath">
+                    <span class="file-label">成品</span>
+                    <code>{{ part.finalPath }}</code>
+                  </div>
+                  <div *ngIf="!part.finalPath">
+                    <span class="file-label">录制</span>
+                    <code>{{ part.sourcePath }}</code>
+                  </div>
+                  <div *ngIf="part.xmlPath">
+                    <span class="file-label">弹幕</span>
+                    <code>{{ part.xmlPath }}</code>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </nz-collapse-panel>
+    </nz-collapse>
+  </div>
+</nz-card>

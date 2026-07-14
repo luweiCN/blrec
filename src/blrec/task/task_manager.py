@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Awaitable, Callable, Dict, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterator, Optional
 
 import aiohttp
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
@@ -18,6 +18,7 @@ from .task import RecordTask
 if TYPE_CHECKING:
     from ..bili.anonymous_room_client import AnonymousRoomClient
     from ..bili.live_status_coordinator import LiveStatusCoordinator
+    from ..bili_upload.journal import RecordingJournalBridge
     from ..setting import SettingsManager
 
 from loguru import logger
@@ -47,6 +48,7 @@ class RecordTaskManager:
             Callable[[str], Awaitable[Optional[str]]]
         ] = None,
         auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        recording_journal: Optional[RecordingJournalBridge] = None,
     ) -> None:
         if (live_status_coordinator is None) != (anonymous_room_client is None):
             raise ValueError(
@@ -58,6 +60,7 @@ class RecordTaskManager:
         self._anonymous_room_client = anonymous_room_client
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
+        self._recording_journal = recording_journal
         self._tasks: Dict[int, RecordTask] = {}
 
     async def load_all_tasks(self) -> None:
@@ -98,19 +101,15 @@ class RecordTaskManager:
     async def add_task(self, settings: TaskSettings) -> None:
         logger.info(f'Adding task {settings.room_id}...')
 
-        if self._auth_failure_reporter is None:
-            task = RecordTask(
-                settings.room_id,
-                live_status_coordinator=self._live_status_coordinator,
-                anonymous_room_client=self._anonymous_room_client,
-            )
-        else:
-            task = RecordTask(
-                settings.room_id,
-                live_status_coordinator=self._live_status_coordinator,
-                anonymous_room_client=self._anonymous_room_client,
-                auth_failure_reporter=self._auth_failure_reporter,
-            )
+        task_options: Dict[str, Any] = {
+            'live_status_coordinator': self._live_status_coordinator,
+            'anonymous_room_client': self._anonymous_room_client,
+        }
+        if self._auth_failure_reporter is not None:
+            task_options['auth_failure_reporter'] = self._auth_failure_reporter
+        if self._recording_journal is not None:
+            task_options['recording_journal'] = self._recording_journal
+        task = RecordTask(settings.room_id, **task_options)
         self._tasks[settings.room_id] = task
 
         try:

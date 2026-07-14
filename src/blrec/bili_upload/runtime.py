@@ -13,6 +13,7 @@ from .accounts import AccountManager, AccountWriteGate
 from .credentials import CredentialStore
 from .crypto import CredentialCipher
 from .database import BiliUploadDatabase
+from .journal import RecordingJournalBridge
 from .models import FeatureUnavailable, validate_feature_gate
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .signing import WbiSigner, WebSessionBuilder
@@ -50,6 +51,7 @@ class BiliAccountRuntime:
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
+        self._journal: Optional[RecordingJournalBridge] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._unavailable_reason: Optional[str] = (
             'Bilibili account management is not enabled'
@@ -58,6 +60,10 @@ class BiliAccountRuntime:
     @property
     def manager(self) -> Optional[AccountManager]:
         return self._manager
+
+    @property
+    def journal(self) -> Optional[RecordingJournalBridge]:
+        return self._journal
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -83,6 +89,8 @@ class BiliAccountRuntime:
         database = BiliUploadDatabase(self._settings.database_path)
         try:
             await database.open()
+            journal = RecordingJournalBridge(database, clock=self._clock)
+            await journal.reconcile_open_sessions()
             key_id = hashlib.sha256(self._credential_key).hexdigest()
             keys: Dict[str, bytes] = dict(self._old_credential_keys)
             keys[key_id] = self._credential_key
@@ -105,6 +113,7 @@ class BiliAccountRuntime:
             return False
 
         self._database = database
+        self._journal = journal
         self._manager = manager
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
@@ -135,6 +144,7 @@ class BiliAccountRuntime:
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
+        self._journal = None
         database, self._database = self._database, None
         if database is not None:
             await database.close()
@@ -160,6 +170,7 @@ class BiliAccountRuntime:
             await asyncio.sleep(self._refresh_interval_seconds)
 
     async def _close_partial(self, database: BiliUploadDatabase) -> None:
+        self._journal = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()

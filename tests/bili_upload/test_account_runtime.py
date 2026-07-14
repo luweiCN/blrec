@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.setting.models import BiliUploadSettings
 
@@ -62,6 +64,7 @@ async def test_disabled_runtime_uses_no_database_or_protocol(tmp_path: Path) -> 
 
     assert not await runtime.start()
     assert runtime.manager is None
+    assert runtime.journal is None
     assert runtime.unavailable_reason == 'Bilibili account management is not enabled'
     assert not (tmp_path / 'unused.sqlite3').exists()
     assert await runtime.primary_cookie_header('https://api.bilibili.com/') is None
@@ -118,6 +121,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
     try:
         assert await runtime.start()
         assert runtime.manager is not None
+        assert runtime.journal is not None
 
         for _ in range(100):
             if protocol.oauth_calls:
@@ -144,6 +148,37 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     await runtime.close()
 
     assert runtime.manager is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconciles_crash_interrupted_recording_before_use(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'interrupted.flv'
+    source.write_bytes(b'partial recording')
+    database_path = str(tmp_path / 'blrec.sqlite3')
+    database = BiliUploadDatabase(database_path)
+    await database.open()
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await database.close()
+
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(enabled=True, database_path=database_path),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+        clock=lambda: 2_000,
+    )
+    try:
+        assert await runtime.start()
+        assert runtime.journal is not None
+        session = await runtime.journal.session_for_run(run_id)
+        assert session.state == 'manual_review'
+        assert session.parts[0].artifact_state == 'manual_review'
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio

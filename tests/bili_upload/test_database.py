@@ -24,6 +24,7 @@ REQUIRED_TABLES = {
     'room_upload_policies',
     'recording_sessions',
     'recording_runs',
+    'recording_parts',
     'upload_jobs',
     'upload_parts',
     'upload_chunks',
@@ -64,7 +65,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 4
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 5
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -208,7 +209,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
         )
         assert policy is not None
         assert dict(policy) == {'account_mode': 'fixed', 'account_id': 1}
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 4
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 5
     finally:
         await database.close()
 

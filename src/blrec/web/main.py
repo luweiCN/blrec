@@ -23,6 +23,7 @@ from .routers import (
     application,
     bili_accounts,
     live_status,
+    recording_sessions,
     settings,
     tasks,
     update,
@@ -39,6 +40,7 @@ _env_settings.settings_file = _path
 
 _settings = Settings.load(_env_settings.settings_file)
 _settings.update_from_env_settings(_env_settings)
+_application_started = False
 
 
 async def _managed_cookie_provider(url: str) -> Optional[str]:
@@ -50,14 +52,10 @@ async def _report_primary_auth_failure() -> None:
 
 
 async def _apply_primary_credential() -> None:
-    await app.refresh_managed_cookie()
+    if _application_started:
+        await app.refresh_managed_cookie()
 
 
-app = Application(
-    _settings,
-    managed_cookie_provider=_managed_cookie_provider,
-    auth_failure_reporter=_report_primary_auth_failure,
-)
 _bili_account_runtime = BiliAccountRuntime(
     _settings.bili_upload,
     api_key=_env_settings.api_key,
@@ -65,8 +63,16 @@ _bili_account_runtime = BiliAccountRuntime(
     old_credential_keys=_env_settings.load_old_credential_keys(),
     on_primary_credential_changed=_apply_primary_credential,
 )
+app = Application(
+    _settings,
+    managed_cookie_provider=_managed_cookie_provider,
+    auth_failure_reporter=_report_primary_auth_failure,
+    recording_journal_provider=lambda: _bili_account_runtime.journal,
+)
 bili_accounts.manager = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
+recording_sessions.journal = None
+recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
 
 if _env_settings.api_key is None:
     _dependencies = None
@@ -133,21 +139,41 @@ async def validation_error_handler(
 
 @api.on_event('startup')
 async def on_startup() -> None:
-    await app.launch()
-    await _bili_account_runtime.start()
-    bili_accounts.manager = _bili_account_runtime.manager
-    bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
-    await app.refresh_managed_cookie()
+    global _application_started
+    application_launched = False
+    try:
+        await _bili_account_runtime.start()
+        bili_accounts.manager = _bili_account_runtime.manager
+        bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
+        recording_sessions.journal = _bili_account_runtime.journal
+        recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+        await app.launch()
+        application_launched = True
+        _application_started = True
+        await app.refresh_managed_cookie()
+    except BaseException:
+        _application_started = False
+        bili_accounts.manager = None
+        recording_sessions.journal = None
+        try:
+            if application_launched:
+                await app.exit()
+        finally:
+            await _bili_account_runtime.close()
+        raise
 
 
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
+    global _application_started
+    _application_started = False
     bili_accounts.manager = None
+    recording_sessions.journal = None
     try:
-        await _bili_account_runtime.close()
+        await app.exit()
     finally:
         _settings.dump()
-        await app.exit()
+        await _bili_account_runtime.close()
 
 
 tasks.app = app
@@ -165,6 +191,7 @@ api.include_router(websockets.router)
 api.include_router(update.router)
 api.include_router(live_status.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
+api.include_router(recording_sessions.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

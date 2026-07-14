@@ -48,6 +48,16 @@ class PostprocessorEventListener(EventListener):
     ) -> None:
         pass
 
+    async def on_video_postprocessing_result(
+        self, postprocessor: Postprocessor, source_path: str, result_path: str
+    ) -> None:
+        pass
+
+    async def on_video_postprocessing_failed(
+        self, postprocessor: Postprocessor, source_path: str, error: BaseException
+    ) -> None:
+        pass
+
     async def on_postprocessing_completed(
         self, postprocessor: Postprocessor, files: List[str]
     ) -> None:
@@ -170,11 +180,15 @@ class Postprocessor(
 
                 if result_path != video_path:
                     self._completed_files.append(result_path)
+                await self._emit(
+                    'video_postprocessing_result', self, video_path, result_path
+                )
                 await self._emit('video_postprocessing_completed', self, result_path)
 
                 files = [result_path, *files_related(result_path)]
                 await self._emit('postprocessing_completed', self, files)
             except Exception as exc:
+                await self._emit('video_postprocessing_failed', self, video_path, exc)
                 submit_exception(exc)
             finally:
                 self._queue.task_done()

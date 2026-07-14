@@ -17,10 +17,11 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { UploadsRoutingModule } from './uploads-routing.module';
+import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
 import { UploadsComponent } from './uploads.component';
 
 @NgModule({
-  declarations: [UploadsComponent],
+  declarations: [UploadsComponent, RecordingSessionsComponent],
   imports: [
     CommonModule,
     FormsModule,

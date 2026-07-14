@@ -22,6 +22,7 @@ from .utils.string import camel_case
 
 if TYPE_CHECKING:
     from .bili.live_status_coordinator import LiveStatusCoordinator
+    from .bili_upload.journal import RecordingJournalBridge
     from .core.typing import MetaData
     from .flv.operators import StreamProfile
     from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
@@ -96,6 +97,9 @@ class Application:
             Callable[[str], Awaitable[Optional[str]]]
         ] = None,
         auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        recording_journal_provider: Optional[
+            Callable[[], Optional[RecordingJournalBridge]]
+        ] = None,
     ) -> None:
         self._settings = settings
         self._out_dir = settings.output.out_dir
@@ -104,6 +108,7 @@ class Application:
         self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
+        self._recording_journal_provider = recording_journal_provider
 
     @property
     def info(self) -> AppInfo:
@@ -406,6 +411,11 @@ class Application:
         from .task import RecordTaskManager
 
         settings = self._settings.live_monitor
+        recording_journal = (
+            None
+            if self._recording_journal_provider is None
+            else self._recording_journal_provider()
+        )
         self._live_status_session = None
         self._live_status_coordinator = None
         if settings.mode == 'legacy':
@@ -413,6 +423,7 @@ class Application:
                 self._settings_manager,
                 managed_cookie_provider=self._managed_cookie_provider,
                 auth_failure_reporter=self._auth_failure_reporter,
+                recording_journal=recording_journal,
             )
             return
 
@@ -438,6 +449,7 @@ class Application:
                 AnonymousRoomClient(session),
                 managed_cookie_provider=self._managed_cookie_provider,
                 auth_failure_reporter=self._auth_failure_reporter,
+                recording_journal=recording_journal,
             )
             await coordinator.start()
         except BaseException as error:

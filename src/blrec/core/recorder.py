@@ -112,6 +112,7 @@ class Recorder(
 
         self._recording: bool = False
         self._stream_available: bool = False
+        self._record_start_time: Optional[int] = None
 
         self._stream_recorder = StreamRecorder(
             live,
@@ -159,6 +160,10 @@ class Recorder(
     @property
     def recording(self) -> bool:
         return self._recording
+
+    @property
+    def record_start_time(self) -> Optional[int]:
+        return self._record_start_time
 
     @property
     def stream_format(self) -> StreamFormat:
@@ -407,6 +412,7 @@ class Recorder(
         self._stream_recorder.update_progress_bar_info()
 
     async def on_video_file_created(self, path: str, record_start_time: int) -> None:
+        self._record_start_time = int(record_start_time)
         await self._emit('video_file_created', self, path)
 
     async def on_video_file_completed(self, path: str) -> None:
@@ -467,11 +473,11 @@ class Recorder(
         self._stream_recorder.add_listener(self)
 
         await self._prepare()
+        await self._emit('recording_started', self)
         if self._stream_available:
             await self._stream_recorder.start()
 
         self._logger.info('Started recording')
-        await self._emit('recording_started', self)
 
     async def _stop_recording(self) -> None:
         if not self._recording:

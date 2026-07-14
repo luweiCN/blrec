@@ -10,6 +10,7 @@ from blrec.bili.live_monitor import LiveMonitor
 from blrec.bili.live_status import ObservedStatus
 from blrec.bili.models import RoomInfo, UserInfo
 from blrec.bili.typing import QualityNumber, StreamFormat
+from blrec.bili_upload.journal import RecordingJournalBridge, RecordingJournalListener
 from blrec.core import Recorder
 from blrec.core.cover_downloader import CoverSaveStrategy
 from blrec.core.typing import MetaData
@@ -55,6 +56,7 @@ class RecordTask:
         live_status_coordinator: Optional['LiveStatusCoordinator'] = None,
         anonymous_room_client: Optional['AnonymousRoomClient'] = None,
         auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        recording_journal: Optional[RecordingJournalBridge] = None,
     ) -> None:
         super().__init__()
 
@@ -81,6 +83,7 @@ class RecordTask:
         self._delete_source = delete_source
         self._live_status_coordinator = live_status_coordinator
         self._anonymous_room_client = anonymous_room_client
+        self._recording_journal = recording_journal
         self._batch_monitoring = live_status_coordinator is not None
 
         self._ready = False
@@ -543,8 +546,9 @@ class RecordTask:
         self._setup_live_monitor()
         self._setup_live_event_submitter()
         self._setup_recorder()
-        self._setup_recorder_event_submitter()
         self._setup_postprocessor()
+        self._setup_recording_journal_listener()
+        self._setup_recorder_event_submitter()
         self._setup_postprocessor_event_submitter()
 
     def _setup_danmaku_client(self) -> None:
@@ -604,6 +608,13 @@ class RecordTask:
             delete_source=self._delete_source,
         )
 
+    def _setup_recording_journal_listener(self) -> None:
+        if self._recording_journal is None:
+            return
+        self._recording_journal_listener = RecordingJournalListener(
+            self._recording_journal, self._recorder, self._postprocessor
+        )
+
     def _setup_postprocessor_event_submitter(self) -> None:
         self._postprocessor_event_submitter = PostprocessorEventSubmitter(
             self._postprocessor
@@ -611,8 +622,9 @@ class RecordTask:
 
     async def _destroy(self) -> None:
         self._destroy_postprocessor_event_submitter()
-        self._destroy_postprocessor()
         self._destroy_recorder_event_submitter()
+        self._destroy_recording_journal_listener()
+        self._destroy_postprocessor()
         self._destroy_recorder()
         self._destroy_live_event_submitter()
         self._destroy_live_monitor()
@@ -637,6 +649,11 @@ class RecordTask:
     def _destroy_recorder_event_submitter(self) -> None:
         with suppress(AttributeError):
             del self._recorder_event_submitter
+
+    def _destroy_recording_journal_listener(self) -> None:
+        with suppress(AttributeError):
+            self._recording_journal_listener.close()
+            del self._recording_journal_listener
 
     def _destroy_postprocessor(self) -> None:
         with suppress(AttributeError):
