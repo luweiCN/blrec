@@ -90,6 +90,34 @@
           <span>{{ session.danmakuCount }} 条弹幕</span>
         </div>
 
+        <div class="upload-progress" *ngIf="session.uploadJob as job; else noJob">
+          <div class="upload-status-row">
+            <nz-tag [nzColor]="uploadJobStateColor(job.state)">
+              {{ uploadJobStateLabel(job.state) }}
+            </nz-tag>
+            <nz-tag>{{ submitStateLabel(job.submitState) }}</nz-tag>
+            <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
+            <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
+          </div>
+          <div>
+            投稿账号：{{ job.accountDisplayName }}（UID {{ job.accountUid }}）
+          </div>
+          <div *ngIf="job.aid || job.bvid">
+            稿件：
+            <span *ngIf="job.aid">AV{{ job.aid }}</span>
+            <span *ngIf="job.aid && job.bvid"> · </span>
+            <span *ngIf="job.bvid">{{ job.bvid }}</span>
+          </div>
+          <div class="upload-reason" *ngIf="job.reviewReason">
+            {{ job.reviewReason }}
+          </div>
+        </div>
+        <ng-template #noJob>
+          <div class="upload-progress upload-progress-empty">
+            {{ noUploadJobReason(session) }}
+          </div>
+        </ng-template>
+
         <div class="parts-table-wrap">
           <table class="parts-table">
             <caption>
@@ -99,6 +127,8 @@
               <tr>
                 <th scope="col">分 P</th>
                 <th scope="col">状态</th>
+                <th scope="col">上传</th>
+                <th scope="col">CID / 回灌</th>
                 <th scope="col">录制时间</th>
                 <th scope="col">文件</th>
                 <th scope="col">弹幕</th>
@@ -114,6 +144,39 @@
                   <div class="part-error" *ngIf="part.errorMessage">
                     {{ part.errorMessage }}
                   </div>
+                </td>
+                <td>
+                  <ng-container
+                    *ngIf="
+                      uploadPartFor(session, part.partIndex) as uploadPart;
+                      else notUploaded
+                    "
+                  >
+                    <nz-tag
+                      [nzColor]="uploadPartStateColor(uploadPart.uploadState)"
+                    >
+                      {{ uploadPartStateLabel(uploadPart.uploadState) }}
+                    </nz-tag>
+                    <div class="part-metric" *ngIf="uploadPart.remoteFilename">
+                      {{ uploadPart.remoteFilename }}
+                    </div>
+                  </ng-container>
+                  <ng-template #notUploaded>尚未进入上传</ng-template>
+                </td>
+                <td>
+                  <ng-container
+                    *ngIf="uploadPartFor(session, part.partIndex) as uploadPart"
+                  >
+                    <div>
+                      {{ uploadPart.cid ? 'CID ' + uploadPart.cid : 'CID 待回填' }}
+                    </div>
+                    <div class="part-metric">
+                      {{
+                        danmakuImportStateLabel(uploadPart.danmakuImportState)
+                      }}
+                    </div>
+                  </ng-container>
+                  <span *ngIf="!uploadPartFor(session, part.partIndex)">—</span>
                 </td>
                 <td>
                   <div>

@@ -1,11 +1,18 @@
 import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
 
 import {
+  CommentBranchState,
+  DanmakuBranchState,
+  DanmakuImportState,
   RecordingArtifactState,
   RecordingPart,
   RecordingSession,
   RecordingSessionState,
   RecordingSessionsView,
+  UploadJobState,
+  UploadPartProgress,
+  UploadPartState,
+  UploadSubmitState,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 
@@ -94,6 +101,127 @@ export class RecordingSessionsComponent implements OnInit {
       missing: 'warning',
       manual_review: 'warning',
     }[state];
+  }
+
+  uploadJobStateLabel(state: UploadJobState): string {
+    return {
+      waiting_artifacts: '等待制品',
+      ready: '待上传',
+      uploading: '上传中',
+      submitting: '投稿中',
+      waiting_review: '等待审核',
+      approved: '审核通过',
+      rejected: '审核未通过',
+      paused: '已暂停',
+      completed: '已完成',
+    }[state];
+  }
+
+  uploadJobStateColor(state: UploadJobState): string {
+    return {
+      waiting_artifacts: 'default',
+      ready: 'blue',
+      uploading: 'processing',
+      submitting: 'processing',
+      waiting_review: 'gold',
+      approved: 'success',
+      rejected: 'error',
+      paused: 'warning',
+      completed: 'success',
+    }[state];
+  }
+
+  submitStateLabel(state: UploadSubmitState): string {
+    return {
+      prepared: '投稿：尚未提交',
+      in_flight: '投稿：提交中',
+      confirmed: '投稿：已确认',
+      unknown_outcome: '投稿：结果未知',
+      failed_permanent: '投稿：失败',
+    }[state];
+  }
+
+  commentBranchLabel(state: CommentBranchState): string {
+    return `评论：${
+      {
+        disabled: '未启用',
+        pending: '待处理',
+        running: '处理中',
+        skipped_no_content: '无 SC/上舰内容',
+        skipped_source_missing: '弹幕文件缺失',
+        completed: '已完成',
+        paused: '已暂停',
+        failed: '失败',
+      }[state]
+    }`;
+  }
+
+  danmakuBranchLabel(state: DanmakuBranchState): string {
+    return `回灌：${
+      {
+        disabled: '未启用',
+        pending: '待处理',
+        importing: '导入中',
+        publishing: '发送中',
+        skipped_source_missing: '弹幕文件缺失',
+        completed: '已完成',
+        paused: '已暂停',
+        failed: '失败',
+      }[state]
+    }`;
+  }
+
+  uploadPartStateLabel(state: UploadPartState): string {
+    return {
+      prepared: '等待上传',
+      preupload: '正在准备',
+      uploading: '上传中',
+      completing: '正在确认',
+      confirmed: '上传已完成',
+      unknown_outcome: '上传结果未知',
+      failed: '上传失败',
+    }[state];
+  }
+
+  uploadPartStateColor(state: UploadPartState): string {
+    return {
+      prepared: 'default',
+      preupload: 'processing',
+      uploading: 'processing',
+      completing: 'processing',
+      confirmed: 'success',
+      unknown_outcome: 'warning',
+      failed: 'error',
+    }[state];
+  }
+
+  danmakuImportStateLabel(state: DanmakuImportState): string {
+    return {
+      disabled: '回灌未启用',
+      pending: '弹幕待导入',
+      importing: '弹幕导入中',
+      waiting_capacity: '等待发送额度',
+      missing_source: '弹幕文件缺失',
+      completed: '弹幕已回灌',
+      failed: '弹幕导入失败',
+    }[state];
+  }
+
+  uploadPartFor(
+    session: RecordingSession,
+    partIndex: number
+  ): UploadPartProgress | null {
+    return (
+      session.uploadJob?.parts.find((part) => part.partIndex === partIndex) ??
+      null
+    );
+  }
+
+  noUploadJobReason(session: RecordingSession): string {
+    if (session.state === 'open') {
+      return '本场仍在录制，结束并归集后才会创建投稿任务。';
+    }
+    return '尚未创建投稿任务；请检查投稿规则、账号状态和分 P 制品是否就绪。';
   }
 
   sessionHeader(session: RecordingSession): string {

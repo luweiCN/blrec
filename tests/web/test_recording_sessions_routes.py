@@ -1,10 +1,15 @@
-from typing import Iterator, Tuple
+from typing import Dict, Iterator, Sequence, Tuple
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from blrec.bili_upload.journal import RecordingPart, RecordingSession
+from blrec.bili_upload.journal import (
+    RecordingPart,
+    RecordingSession,
+    UploadJobProgress,
+    UploadPartProgress,
+)
 from blrec.web import security
 from blrec.web.routers import recording_sessions
 
@@ -55,6 +60,42 @@ class FakeJournal:
                 parts=(part,),
             ),
         )
+
+    async def upload_jobs_for_sessions(
+        self, session_ids: Sequence[int]
+    ) -> Dict[int, UploadJobProgress]:
+        assert tuple(session_ids) == (1,)
+        return {
+            1: UploadJobProgress(
+                id=9,
+                session_id=1,
+                account_id=7,
+                account_uid=42,
+                account_display_name='投稿账号',
+                state='waiting_review',
+                submit_state='confirmed',
+                comment_branch_state='pending',
+                danmaku_branch_state='pending',
+                aid=123,
+                bvid='BV1test',
+                review_reason='等待 B 站审核',
+                attempt=2,
+                next_attempt_at=1_100,
+                created_at=1_001,
+                updated_at=1_050,
+                parts=(
+                    UploadPartProgress(
+                        id=10,
+                        job_id=9,
+                        part_index=1,
+                        upload_state='confirmed',
+                        danmaku_import_state='pending',
+                        remote_filename='remote-p1',
+                        cid=None,
+                    ),
+                ),
+            )
+        }
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +153,33 @@ def test_list_recording_sessions_returns_redacted_part_state(
                 'danmakuCount': 321,
                 'totalFileSizeBytes': 1_048_576,
                 'recordDurationSeconds': 59,
+                'uploadJob': {
+                    'id': 9,
+                    'accountId': 7,
+                    'accountUid': 42,
+                    'accountDisplayName': '投稿账号',
+                    'state': 'waiting_review',
+                    'submitState': 'confirmed',
+                    'commentBranchState': 'pending',
+                    'danmakuBranchState': 'pending',
+                    'aid': 123,
+                    'bvid': 'BV1test',
+                    'reviewReason': '等待 B 站审核',
+                    'attempt': 2,
+                    'nextAttemptAt': 1_100,
+                    'createdAt': 1_001,
+                    'updatedAt': 1_050,
+                    'parts': [
+                        {
+                            'id': 10,
+                            'partIndex': 1,
+                            'uploadState': 'confirmed',
+                            'danmakuImportState': 'pending',
+                            'remoteFilename': 'remote-p1',
+                            'cid': None,
+                        }
+                    ],
+                },
                 'parts': [
                     {
                         'id': 2,

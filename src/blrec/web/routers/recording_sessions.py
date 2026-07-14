@@ -8,6 +8,8 @@ from blrec.bili_upload.journal import (
     RecordingJournalBridge,
     RecordingPart,
     RecordingSession,
+    UploadJobProgress,
+    UploadPartProgress,
 )
 from blrec.utils.string import camel_case
 
@@ -42,6 +44,34 @@ class RecordingPartResponse(ApiModel):
     error_message: Optional[str]
 
 
+class UploadPartProgressResponse(ApiModel):
+    id: int
+    part_index: int
+    upload_state: str
+    danmaku_import_state: str
+    remote_filename: Optional[str]
+    cid: Optional[int]
+
+
+class UploadJobProgressResponse(ApiModel):
+    id: int
+    account_id: int
+    account_uid: int
+    account_display_name: str
+    state: str
+    submit_state: str
+    comment_branch_state: str
+    danmaku_branch_state: str
+    aid: Optional[int]
+    bvid: Optional[str]
+    review_reason: Optional[str]
+    attempt: int
+    next_attempt_at: int
+    created_at: int
+    updated_at: int
+    parts: List[UploadPartProgressResponse]
+
+
 class RecordingSessionResponse(ApiModel):
     id: int
     room_id: int
@@ -64,6 +94,7 @@ class RecordingSessionResponse(ApiModel):
     danmaku_count: int
     total_file_size_bytes: int
     record_duration_seconds: int
+    upload_job: Optional[UploadJobProgressResponse]
     parts: List[RecordingPartResponse]
 
 
@@ -102,7 +133,41 @@ def _part_response(part: RecordingPart) -> RecordingPartResponse:
     )
 
 
-def _session_response(session: RecordingSession) -> RecordingSessionResponse:
+def _upload_part_response(part: UploadPartProgress) -> UploadPartProgressResponse:
+    return UploadPartProgressResponse(
+        id=part.id,
+        part_index=part.part_index,
+        upload_state=part.upload_state,
+        danmaku_import_state=part.danmaku_import_state,
+        remote_filename=part.remote_filename,
+        cid=part.cid,
+    )
+
+
+def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
+    return UploadJobProgressResponse(
+        id=job.id,
+        account_id=job.account_id,
+        account_uid=job.account_uid,
+        account_display_name=job.account_display_name,
+        state=job.state,
+        submit_state=job.submit_state,
+        comment_branch_state=job.comment_branch_state,
+        danmaku_branch_state=job.danmaku_branch_state,
+        aid=job.aid,
+        bvid=job.bvid,
+        review_reason=job.review_reason,
+        attempt=job.attempt,
+        next_attempt_at=job.next_attempt_at,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        parts=[_upload_part_response(part) for part in job.parts],
+    )
+
+
+def _session_response(
+    session: RecordingSession, upload_job: Optional[UploadJobProgress]
+) -> RecordingSessionResponse:
     return RecordingSessionResponse(
         id=session.id,
         room_id=session.room_id,
@@ -125,6 +190,7 @@ def _session_response(session: RecordingSession) -> RecordingSessionResponse:
         danmaku_count=session.danmaku_count,
         total_file_size_bytes=session.total_file_size_bytes,
         record_duration_seconds=session.record_duration_seconds,
+        upload_job=(None if upload_job is None else _upload_job_response(upload_job)),
         parts=[_part_response(part) for part in session.parts],
     )
 
@@ -139,7 +205,13 @@ async def list_recording_sessions(
     recording_journal: RecordingJournalBridge = Depends(get_recording_journal),
 ) -> RecordingSessionsResponse:
     sessions = await recording_journal.list_sessions(limit=limit)
+    upload_jobs = await recording_journal.upload_jobs_for_sessions(
+        [session.id for session in sessions]
+    )
     return RecordingSessionsResponse(
         degraded_reason=recording_journal.degraded_reason,
-        sessions=[_session_response(session) for session in sessions],
+        sessions=[
+            _session_response(session, upload_jobs.get(session.id))
+            for session in sessions
+        ],
     )

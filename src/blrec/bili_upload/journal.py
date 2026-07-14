@@ -15,6 +15,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Sequence,
     Tuple,
     TypeVar,
 )
@@ -99,6 +100,38 @@ class RecordingSession:
     @property
     def record_duration_seconds(self) -> int:
         return sum(part.record_duration_seconds or 0 for part in self.parts)
+
+
+@dataclass(frozen=True)
+class UploadPartProgress:
+    id: int
+    job_id: int
+    part_index: int
+    upload_state: str
+    danmaku_import_state: str
+    remote_filename: Optional[str]
+    cid: Optional[int]
+
+
+@dataclass(frozen=True)
+class UploadJobProgress:
+    id: int
+    session_id: int
+    account_id: int
+    account_uid: int
+    account_display_name: str
+    state: str
+    submit_state: str
+    comment_branch_state: str
+    danmaku_branch_state: str
+    aid: Optional[int]
+    bvid: Optional[str]
+    review_reason: Optional[str]
+    attempt: int
+    next_attempt_at: int
+    created_at: int
+    updated_at: int
+    parts: Tuple[UploadPartProgress, ...]
 
 
 _T = TypeVar('_T')
@@ -709,6 +742,78 @@ class RecordingJournalBridge:
                 self._make_session(row, await self.parts_for_session(session_id))
             )
         return tuple(sessions)
+
+    async def upload_jobs_for_sessions(
+        self, session_ids: Sequence[int]
+    ) -> Dict[int, UploadJobProgress]:
+        unique_session_ids = tuple(dict.fromkeys(int(value) for value in session_ids))
+        if not unique_session_ids:
+            return {}
+        placeholders = ','.join('?' for _ in unique_session_ids)
+        jobs = await self._database.fetchall(
+            'SELECT job.id,job.session_id,job.account_id,account.uid AS account_uid,'
+            'account.display_name AS account_display_name,job.state,'
+            'job.submit_state,job.comment_branch_state,job.danmaku_branch_state,'
+            'job.aid,job.bvid,job.review_reason,job.attempt,job.next_attempt_at,'
+            'job.created_at,job.updated_at FROM upload_jobs job '
+            'JOIN bili_accounts account ON account.id=job.account_id '
+            'WHERE job.session_id IN ({})'.format(placeholders),
+            unique_session_ids,
+        )
+        if not jobs:
+            return {}
+        job_ids = tuple(int(row['id']) for row in jobs)
+        job_placeholders = ','.join('?' for _ in job_ids)
+        part_rows = await self._database.fetchall(
+            'SELECT id,job_id,part_index,upload_state,danmaku_import_state,'
+            'remote_filename,cid FROM upload_parts WHERE job_id IN ({}) '
+            'ORDER BY job_id,part_index'.format(job_placeholders),
+            job_ids,
+        )
+        parts_by_job: Dict[int, List[UploadPartProgress]] = {}
+        for row in part_rows:
+            job_id = int(row['job_id'])
+            parts_by_job.setdefault(job_id, []).append(
+                UploadPartProgress(
+                    id=int(row['id']),
+                    job_id=job_id,
+                    part_index=int(row['part_index']),
+                    upload_state=str(row['upload_state']),
+                    danmaku_import_state=str(row['danmaku_import_state']),
+                    remote_filename=(
+                        None
+                        if row['remote_filename'] is None
+                        else str(row['remote_filename'])
+                    ),
+                    cid=None if row['cid'] is None else int(row['cid']),
+                )
+            )
+        result = {}
+        for row in jobs:
+            job_id = int(row['id'])
+            session_id = int(row['session_id'])
+            result[session_id] = UploadJobProgress(
+                id=job_id,
+                session_id=session_id,
+                account_id=int(row['account_id']),
+                account_uid=int(row['account_uid']),
+                account_display_name=str(row['account_display_name']),
+                state=str(row['state']),
+                submit_state=str(row['submit_state']),
+                comment_branch_state=str(row['comment_branch_state']),
+                danmaku_branch_state=str(row['danmaku_branch_state']),
+                aid=None if row['aid'] is None else int(row['aid']),
+                bvid=None if row['bvid'] is None else str(row['bvid']),
+                review_reason=(
+                    None if row['review_reason'] is None else str(row['review_reason'])
+                ),
+                attempt=int(row['attempt']),
+                next_attempt_at=int(row['next_attempt_at']),
+                created_at=int(row['created_at']),
+                updated_at=int(row['updated_at']),
+                parts=tuple(parts_by_job.get(job_id, ())),
+            )
+        return result
 
     async def run_id_for_source(self, source_path: str) -> str:
         rows = await self._database.fetchall(

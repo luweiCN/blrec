@@ -49,6 +49,33 @@ describe('RecordingSessionsComponent', () => {
             danmakuCount: 321,
             totalFileSizeBytes: 1_048_576,
             recordDurationSeconds: 59,
+            uploadJob: {
+              id: 9,
+              accountId: 7,
+              accountUid: 42,
+              accountDisplayName: '投稿账号',
+              state: 'waiting_review',
+              submitState: 'confirmed',
+              commentBranchState: 'pending',
+              danmakuBranchState: 'pending',
+              aid: 123,
+              bvid: 'BV1test',
+              reviewReason: '等待 B 站审核',
+              attempt: 2,
+              nextAttemptAt: 1_100,
+              createdAt: 1_001,
+              updatedAt: 1_050,
+              parts: [
+                {
+                  id: 10,
+                  partIndex: 1,
+                  uploadState: 'confirmed',
+                  danmakuImportState: 'pending',
+                  remoteFilename: 'remote-p1',
+                  cid: null,
+                },
+              ],
+            },
             parts: [
               {
                 id: 2,
@@ -107,7 +134,16 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('59 秒');
     expect(text).toContain('1 MB');
     expect(text).toContain('321 条');
+    expect(text).toContain('等待审核');
+    expect(text).toContain('投稿账号');
+    expect(text).toContain('UID 42');
+    expect(text).toContain('BV1test');
+    expect(text).toContain('等待 B 站审核');
+    expect(text).toContain('评论：待处理');
+    expect(text).toContain('回灌：待处理');
     expect(text).toContain('P1');
+    expect(text).toContain('上传已完成');
+    expect(text).toContain('CID 待回填');
     expect(text).toContain('/rec/p1.mp4');
     expect(text).toContain('/rec/p1.xml');
     const cover = fixture.nativeElement.querySelector('.session-cover');

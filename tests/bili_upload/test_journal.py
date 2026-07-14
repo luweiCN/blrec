@@ -265,6 +265,50 @@ async def test_session_snapshot_and_part_metrics_are_persisted(
     assert part.danmaku_count == 2
 
 
+@pytest.mark.asyncio
+async def test_upload_progress_is_joined_to_its_recording_session(database) -> None:
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, '/rec/p1.flv', record_start_time=901)
+    session = await journal.session_for_run(run_id)
+    await database.execute(
+        'INSERT INTO bili_accounts('
+        'id,uid,display_name,credential_ciphertext,credential_version,key_id,state,'
+        'pause_reason,created_at,updated_at,avatar_url,credential_expires_at) '
+        "VALUES(7,42,'投稿账号',?,1,'key','active',NULL,900,900,'',0)",
+        (b'encrypted',),
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'comment_branch_state,danmaku_branch_state,aid,bvid,review_reason,'
+        'attempt,next_attempt_at,created_at,updated_at) '
+        "VALUES(9,?,7,'{}','waiting_review','confirmed','pending','pending',"
+        "123,'BV1test','等待 B 站审核',2,1100,1001,1050)",
+        (session.id,),
+    )
+    await database.execute(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,final_path,xml_path,artifact_state,'
+        'upload_state,danmaku_import_state,remote_filename,cid) '
+        "VALUES(10,9,1,'/rec/p1.flv','/rec/p1.mp4','/rec/p1.xml','ready',"
+        "'confirmed','pending','remote-p1',NULL)"
+    )
+
+    jobs = await journal.upload_jobs_for_sessions((session.id, 999))
+
+    assert set(jobs) == {session.id}
+    job = jobs[session.id]
+    assert (job.state, job.submit_state, job.account_display_name) == (
+        'waiting_review',
+        'confirmed',
+        '投稿账号',
+    )
+    assert (job.parts[0].part_index, job.parts[0].upload_state) == (1, 'confirmed')
+    assert job.parts[0].remote_filename == 'remote-p1'
+    assert job.parts[0].cid is None
+
+
 class FakeEmitter:
     def __init__(self) -> None:
         self.listeners: List[object] = []

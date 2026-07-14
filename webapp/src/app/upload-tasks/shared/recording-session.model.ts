@@ -21,6 +21,90 @@ export const RECORDING_ARTIFACT_STATES = [
 export type RecordingArtifactState =
   (typeof RECORDING_ARTIFACT_STATES)[number];
 
+export type UploadJobState =
+  | 'waiting_artifacts'
+  | 'ready'
+  | 'uploading'
+  | 'submitting'
+  | 'waiting_review'
+  | 'approved'
+  | 'rejected'
+  | 'paused'
+  | 'completed';
+
+export type UploadSubmitState =
+  | 'prepared'
+  | 'in_flight'
+  | 'confirmed'
+  | 'unknown_outcome'
+  | 'failed_permanent';
+
+export type CommentBranchState =
+  | 'disabled'
+  | 'pending'
+  | 'running'
+  | 'skipped_no_content'
+  | 'skipped_source_missing'
+  | 'completed'
+  | 'paused'
+  | 'failed';
+
+export type DanmakuBranchState =
+  | 'disabled'
+  | 'pending'
+  | 'importing'
+  | 'publishing'
+  | 'skipped_source_missing'
+  | 'completed'
+  | 'paused'
+  | 'failed';
+
+export type UploadPartState =
+  | 'prepared'
+  | 'preupload'
+  | 'uploading'
+  | 'completing'
+  | 'confirmed'
+  | 'unknown_outcome'
+  | 'failed';
+
+export type DanmakuImportState =
+  | 'disabled'
+  | 'pending'
+  | 'importing'
+  | 'waiting_capacity'
+  | 'missing_source'
+  | 'completed'
+  | 'failed';
+
+export interface UploadPartProgress {
+  readonly id: number;
+  readonly partIndex: number;
+  readonly uploadState: UploadPartState;
+  readonly danmakuImportState: DanmakuImportState;
+  readonly remoteFilename: string | null;
+  readonly cid: number | null;
+}
+
+export interface UploadJobProgress {
+  readonly id: number;
+  readonly accountId: number;
+  readonly accountUid: number;
+  readonly accountDisplayName: string;
+  readonly state: UploadJobState;
+  readonly submitState: UploadSubmitState;
+  readonly commentBranchState: CommentBranchState;
+  readonly danmakuBranchState: DanmakuBranchState;
+  readonly aid: number | null;
+  readonly bvid: string | null;
+  readonly reviewReason: string | null;
+  readonly attempt: number;
+  readonly nextAttemptAt: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly parts: readonly UploadPartProgress[];
+}
+
 export interface RecordingPart {
   readonly id: number;
   readonly runId: string;
@@ -62,6 +146,7 @@ export interface RecordingSession {
   readonly danmakuCount: number;
   readonly totalFileSizeBytes: number;
   readonly recordDurationSeconds: number;
+  readonly uploadJob: UploadJobProgress | null;
   readonly parts: readonly RecordingPart[];
 }
 
