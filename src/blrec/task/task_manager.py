@@ -368,7 +368,6 @@ class RecordTaskManager:
             if not task.ready or task.cookie == cookie:
                 continue
             task.cookie = cookie
-            await task.restart_danmaku_client()
 
     def apply_task_output_settings(
         self, room_id: int, settings: OutputSettings

@@ -34,7 +34,7 @@ async def test_managed_primary_cookie_overrides_manual_header_setting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_managed_cookie_updates_every_loaded_task() -> None:
+async def test_refresh_managed_cookie_keeps_active_danmaku_connections() -> None:
     provider = AsyncMock(return_value='SESSDATA=first')
     manager = RecordTaskManager(
         object(), managed_cookie_provider=provider  # type: ignore[arg-type]
@@ -49,8 +49,8 @@ async def test_refresh_managed_cookie_updates_every_loaded_task() -> None:
 
     assert first.cookie == 'SESSDATA=first'
     assert second.cookie == 'SESSDATA=first'
-    first.restart_danmaku_client.assert_awaited_once_with()
-    second.restart_danmaku_client.assert_awaited_once_with()
+    first.restart_danmaku_client.assert_not_awaited()
+    second.restart_danmaku_client.assert_not_awaited()
 
 
 @pytest.mark.asyncio
