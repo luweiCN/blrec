@@ -13,6 +13,7 @@ from blrec.setting.models import BiliUploadSettings
 from .accounts import AccountManager, AccountWriteGate
 from .categories import UploadCategoryCatalog
 from .comments import CommentPlanner, CommentPublisher
+from .collections import CollectionManager
 from .credentials import CredentialStore
 from .covers import CoverLibrary, CoverResolver
 from .crypto import CredentialCipher
@@ -80,6 +81,7 @@ class BiliAccountRuntime:
         self._category_catalog: Optional[UploadCategoryCatalog] = None
         self._cover_library: Optional[CoverLibrary] = None
         self._cover_resolver: Optional[CoverResolver] = None
+        self._collection_manager: Optional[CollectionManager] = None
         self._review_watcher: Optional[ReviewWatcher] = None
         self._comment_planner: Optional[CommentPlanner] = None
         self._comment_publisher: Optional[CommentPublisher] = None
@@ -123,6 +125,10 @@ class BiliAccountRuntime:
     @property
     def cover_resolver(self) -> Optional[CoverResolver]:
         return self._cover_resolver
+
+    @property
+    def collection_manager(self) -> Optional[CollectionManager]:
+        return self._collection_manager
 
     @property
     def review_watcher(self) -> Optional[ReviewWatcher]:
@@ -238,6 +244,9 @@ class BiliAccountRuntime:
                 bundle_loader=load_bundle,
                 clock=self._clock,
             )
+            collection_manager = CollectionManager(
+                database, protocol, cover_resolver, bundle_loader=load_bundle
+            )
             comment_planner = CommentPlanner(database, clock=self._clock)
             comment_publisher = CommentPublisher(
                 database,
@@ -287,6 +296,7 @@ class BiliAccountRuntime:
         self._category_catalog = category_catalog
         self._cover_library = cover_library
         self._cover_resolver = cover_resolver
+        self._collection_manager = collection_manager
         self._review_watcher = review_watcher
         self._comment_planner = comment_planner
         self._comment_publisher = comment_publisher
@@ -336,6 +346,7 @@ class BiliAccountRuntime:
         self._category_catalog = None
         self._cover_library = None
         self._cover_resolver = None
+        self._collection_manager = None
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None
