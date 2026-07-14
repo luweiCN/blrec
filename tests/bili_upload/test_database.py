@@ -64,7 +64,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 3
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 4
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -72,6 +72,13 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             for row in await database.fetchall('PRAGMA table_info(bili_accounts)')
         }
         assert {'avatar_url', 'credential_expires_at'} <= account_columns
+        policy_columns = {
+            row['name']
+            for row in await database.fetchall(
+                'PRAGMA table_info(room_upload_policies)'
+            )
+        }
+        assert 'account_mode' in policy_columns
 
         indexes = {
             row['name']
@@ -91,6 +98,24 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             "state,created_at,updated_at) "
             "VALUES(1,42,'u',X'00',1,'k','active',1,1)"
         )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "INSERT INTO room_upload_policies("
+                "room_id,account_mode,account_id,enabled,title_template,"
+                "description_template,tid,tags,copyright,source,auto_comment,"
+                "danmaku_backfill,filter_json,created_at,updated_at) "
+                "VALUES(100,'primary',1,1,'title','description',17,'tag',1,'',"
+                "0,0,'{}',1,1)"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "INSERT INTO room_upload_policies("
+                "room_id,account_mode,account_id,enabled,title_template,"
+                "description_template,tid,tags,copyright,source,auto_comment,"
+                "danmaku_backfill,filter_json,created_at,updated_at) "
+                "VALUES(100,'fixed',NULL,1,'title','description',17,'tag',1,'',"
+                "0,0,'{}',1,1)"
+            )
         await database.execute(
             "INSERT INTO recording_sessions("
             "id,room_id,broadcast_session_key,state,started_at) "
@@ -146,6 +171,13 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'state,created_at,updated_at) '
             "VALUES(1,42,'existing',X'00',1,'key','active',10,20)"
         )
+        connection.execute(
+            'INSERT INTO room_upload_policies('
+            'room_id,account_id,enabled,title_template,description_template,tid,'
+            'tags,copyright,source,auto_comment,danmaku_backfill,filter_json,'
+            'created_at,updated_at) '
+            "VALUES(100,1,1,'title','description',17,'tag',1,'',0,0,'{}',10,20)"
+        )
         connection.commit()
     finally:
         connection.close()
@@ -170,7 +202,13 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             )
             == 1
         )
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 3
+        policy = await database.fetchone(
+            'SELECT account_mode,account_id FROM room_upload_policies '
+            'WHERE room_id=100'
+        )
+        assert policy is not None
+        assert dict(policy) == {'account_mode': 'fixed', 'account_id': 1}
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 4
     finally:
         await database.close()
 
