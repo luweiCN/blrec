@@ -17,6 +17,7 @@ from .journal import RecordingJournalBridge
 from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
+from .review import ReviewWatcher
 from .signing import WbiSigner, WebSessionBuilder
 from .upload import UploadCoordinator
 from .upos import UposUploader
@@ -26,6 +27,11 @@ __all__ = ('BiliAccountRuntime',)
 
 async def _unavailable_wbi_keys() -> Tuple[str, str]:
     raise RuntimeError('WBI key provider is not configured')
+
+
+class _DeferredPostReviewBranch:
+    async def create(self, _job_id: int) -> None:
+        return None
 
 
 class BiliAccountRuntime:
@@ -61,6 +67,7 @@ class BiliAccountRuntime:
         self._journal: Optional[RecordingJournalBridge] = None
         self._coordinator: Optional[UploadCoordinator] = None
         self._policy_manager: Optional[RoomUploadPolicyManager] = None
+        self._review_watcher: Optional[ReviewWatcher] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
@@ -83,6 +90,10 @@ class BiliAccountRuntime:
     @property
     def policy_manager(self) -> Optional[RoomUploadPolicyManager]:
         return self._policy_manager
+
+    @property
+    def review_watcher(self) -> Optional[ReviewWatcher]:
+        return self._review_watcher
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -164,6 +175,15 @@ class BiliAccountRuntime:
                 stop_requested=upload_stop_requested,
             )
             policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
+            deferred_branch = _DeferredPostReviewBranch()
+            review_watcher = ReviewWatcher(
+                database,
+                protocol,
+                bundle_loader=load_bundle,
+                comment_branch=deferred_branch,
+                danmaku_branch=deferred_branch,
+                clock=self._clock,
+            )
         except Exception:
             logger.exception('Bilibili account management failed to start')
             await self._close_partial(database)
@@ -175,11 +195,12 @@ class BiliAccountRuntime:
         self._manager = manager
         self._coordinator = coordinator
         self._policy_manager = policy_manager
+        self._review_watcher = review_watcher
         self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         self._upload_task = asyncio.create_task(
-            self._run_uploads(coordinator, upload_stop_event)
+            self._run_uploads(coordinator, review_watcher, upload_stop_event)
         )
         return True
 
@@ -208,6 +229,7 @@ class BiliAccountRuntime:
             await manager.close()
         self._coordinator = None
         self._policy_manager = None
+        self._review_watcher = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -237,11 +259,15 @@ class BiliAccountRuntime:
             await asyncio.sleep(self._refresh_interval_seconds)
 
     async def _run_uploads(
-        self, coordinator: UploadCoordinator, stop_event: asyncio.Event
+        self,
+        coordinator: UploadCoordinator,
+        review_watcher: ReviewWatcher,
+        stop_event: asyncio.Event,
     ) -> None:
         while not stop_event.is_set():
             processed = None
             try:
+                await review_watcher.run_once()
                 await coordinator.create_ready_jobs()
                 processed = await coordinator.run_once()
             except asyncio.CancelledError:
@@ -266,6 +292,7 @@ class BiliAccountRuntime:
         await self._stop_upload_worker()
         self._coordinator = None
         self._policy_manager = None
+        self._review_watcher = None
         self._journal = None
         transport, self._transport = self._transport, None
         if transport is not None:

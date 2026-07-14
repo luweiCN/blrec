@@ -110,6 +110,7 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         ('complete_upload', 'upos_session', '<server-returned>'),
         ('submit_archive', 'bilitv_token_sign', '/x/vu/app/add'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
+        ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
         ('web_nav', 'web_cookie', '/x/web-interface/nav'),
         ('list_replies', 'web_cookie_wbi', '/x/v2/reply/main'),
         ('reply_detail', 'web_cookie_wbi', '/x/v2/reply/detail'),
@@ -193,6 +194,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     )
     await client.submit_archive(bundle, {'title': 'fixture', 'videos': 'fixture.mp4'})
     await client.list_archives(bundle, {'pn': 1})
+    await client.archive_view(bundle, {'bvid': 'BVfixture'})
     await client.web_nav(bundle)
     await client.list_replies(bundle, {'oid': 303, 'type': 1})
     await client.reply_detail(bundle, {'oid': 303, 'root': 101, 'type': 1})
@@ -223,6 +225,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     for name in (
         'preupload',
         'list_archives',
+        'archive_view',
         'web_nav',
         'list_replies',
         'reply_detail',
@@ -250,7 +253,13 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         )
     for name in ('list_replies', 'reply_detail', 'post_danmaku'):
         assert 'w_rid' in dict(requests[name].query)
-    for name in ('preupload', 'list_archives', 'add_reply', 'top_reply'):
+    for name in (
+        'preupload',
+        'list_archives',
+        'archive_view',
+        'add_reply',
+        'top_reply',
+    ):
         assert 'w_rid' not in dict(requests[name].query)
 
 

@@ -56,6 +56,9 @@ PROTOCOL_MATRIX = {
     'list_archives': OperationSpec(
         'GET', 'member_api', '/x/web/archives', 'web_cookie', True
     ),
+    'archive_view': OperationSpec(
+        'GET', 'member_api', '/x/vupre/web/archive/view', 'web_cookie', True
+    ),
     'web_nav': OperationSpec('GET', 'api', '/x/web-interface/nav', 'web_cookie', True),
     'list_replies': OperationSpec(
         'GET', 'api', '/x/v2/reply/main', 'web_cookie_wbi', True

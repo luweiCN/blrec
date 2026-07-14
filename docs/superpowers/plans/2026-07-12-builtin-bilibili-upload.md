@@ -898,7 +898,7 @@ git commit -m "feat: add recoverable multi-part uploads"
 - Create: `tests/bili_upload/test_review.py`
 
 **Interfaces:**
-- Consumes: waiting-review jobs, `list_archives`, policy snapshot, account UID, remote filenames, and part order.
+- Consumes: waiting-review jobs, `list_archives`, one approved-archive `archive_view`, policy snapshot, account UID, remote filenames, and part order.
 - Produces: `PostReviewBranch.create(job_id)`, `ReviewWatcher(database, protocol, account_uid, comment_branch, danmaku_branch)`, `run_once`, approved/rejected job state, verified per-part CID, and independent branch creation.
 
 - [ ] **Step 1: Write failing owner/order/rejection tests**
@@ -945,7 +945,7 @@ Expected: FAIL because `ReviewWatcher` does not exist.
 
 - [ ] **Step 3: Implement 15-minute grouped reads and strict matching**
 
-Group waiting jobs by account and call `list_archives` no more than once per account per 900 seconds. Match first by known AID/BVID or job fingerprint, then require owner UID and an exact one-to-one mapping between local `remote_filename` and remote pages. Never bind CID by list index alone. Missing, duplicate, or extra pages pause with a public mismatch reason.
+Group waiting jobs by account and call `list_archives` no more than once per account per 900 seconds. Match first by known AID/BVID or job fingerprint. Because the list response may return `Videos: null` and `mid: 0`, use the already UID-bound account Cookie as the owner scope and, only after approval, call `archive_view` once for that job. Require an exact one-to-one mapping between local `remote_filename` and detail pages. Never bind CID by list index alone. Missing, duplicate, or extra pages pause with a public mismatch reason.
 
 - [ ] **Step 4: Create post-review branches independently**
 

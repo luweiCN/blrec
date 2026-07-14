@@ -1,5 +1,6 @@
 {
   "add_reply": {"code": 0, "data": {"rpid": 101}},
+  "archive_view": {"code": 0, "data": {"archive": {"aid": 303, "bvid": "BVfixture"}, "videos": [{"aid": 303, "bvid": "BVfixture", "filename": "fixture", "cid": 202, "page": 1}]}},
   "complete_upload": {"OK": 1},
   "create_qr": {"code": 0, "data": {"auth_code": "fixture-auth-code", "url": "https://example.invalid/qr"}},
   "list_archives": {"code": 0, "data": {"arc_audits": []}},
