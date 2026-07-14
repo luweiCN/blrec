@@ -121,4 +121,17 @@ describe('TaskItemComponent', () => {
     expect(component).toBeTruthy();
     expect(component.stopped).toBeTrue();
   });
+
+  it('creates the upload settings dialog only after its card action is used', () => {
+    expect(
+      fixture.nativeElement.querySelector('app-upload-policy-dialog')
+    ).toBeNull();
+
+    component.openUploadPolicyDialog();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('app-upload-policy-dialog')
+    ).not.toBeNull();
+  });
 });

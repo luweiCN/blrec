@@ -1,7 +1,13 @@
 <nz-card
   [nzCover]="coverTemplate"
   [nzHoverable]="true"
-  [nzActions]="[actionDelete, actionSetting, actionSwitch, actionMore]"
+  [nzActions]="[
+    actionDelete,
+    actionSetting,
+    actionUploadPolicy,
+    actionSwitch,
+    actionMore
+  ]"
   [nzBodyStyle]="{ padding: '0.5rem' }"
 >
   <nz-skeleton
@@ -43,6 +49,20 @@
       <app-status-display [status]="data.task_status"></app-status-display>
     </div>
   </a>
+</ng-template>
+
+<ng-template #actionUploadPolicy>
+  <button
+    class="card-action"
+    type="button"
+    aria-label="打开投稿设置"
+    data-testid="upload-policy"
+    nz-tooltip
+    nzTooltipTitle="投稿设置"
+    (click)="openUploadPolicyDialog()"
+  >
+    <i nz-icon nzType="cloud-upload" class="action-icon"></i>
+  </button>
 </ng-template>
 
 <ng-template #avatarTemplate>
@@ -224,3 +244,10 @@
     </div>
   </ng-container>
 </nz-drawer>
+
+<app-upload-policy-dialog
+  *ngIf="uploadPolicyDialogVisible"
+  [roomId]="roomId"
+  [roomName]="data.user_info.name"
+  (closed)="uploadPolicyDialogVisible = false"
+></app-upload-policy-dialog>

@@ -46,6 +46,7 @@ export class TaskItemComponent implements OnChanges, OnDestroy {
   menuDrawerVisible = false;
   switchPending = false;
   settingsDialogVisible = false;
+  uploadPolicyDialogVisible = false;
 
   readonly RunningStatus = RunningStatus;
 
@@ -202,6 +203,11 @@ export class TaskItemComponent implements OnChanges, OnDestroy {
         this.message.error(`获取任务设置出错: ${error.message}`);
       }
     );
+  }
+
+  openUploadPolicyDialog(): void {
+    this.uploadPolicyDialogVisible = true;
+    this.changeDetector.markForCheck();
   }
 
   cleanSettingsData(): void {

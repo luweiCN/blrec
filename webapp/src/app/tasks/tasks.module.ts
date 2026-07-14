@@ -18,6 +18,7 @@ import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzFormModule } from 'ng-zorro-antd/form';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
+import { NzCascaderModule } from 'ng-zorro-antd/cascader';
 import { NzPopconfirmModule } from 'ng-zorro-antd/popconfirm';
 import { NzRadioModule } from 'ng-zorro-antd/radio';
 import { NzDividerModule } from 'ng-zorro-antd/divider';
@@ -51,6 +52,7 @@ import { TaskRecordingDetailComponent } from './task-detail/task-recording-detai
 import { TaskNetworkDetailComponent } from './task-detail/task-network-detail/task-network-detail.component';
 import { InfoPanelComponent } from './info-panel/info-panel.component';
 import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component';
+import { UploadPolicyDialogComponent } from './upload-policy-dialog/upload-policy-dialog.component';
 
 @NgModule({
   declarations: [
@@ -71,6 +73,7 @@ import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component
     TaskNetworkDetailComponent,
     InfoPanelComponent,
     WaveGraphComponent,
+    UploadPolicyDialogComponent,
   ],
   imports: [
     CommonModule,
@@ -94,6 +97,7 @@ import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component
     NzFormModule,
     NzInputModule,
     NzCheckboxModule,
+    NzCascaderModule,
     NzPopconfirmModule,
     NzRadioModule,
     NzDividerModule,
