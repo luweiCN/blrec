@@ -53,6 +53,22 @@ PROTOCOL_MATRIX = {
     'submit_archive': OperationSpec(
         'POST', 'member_api', '/x/vu/web/add/v3', 'web_cookie_csrf', False
     ),
+    'upload_cover': OperationSpec(
+        'POST', 'member_api', '/x/vu/web/cover/up', 'web_cookie_csrf', False
+    ),
+    'list_collections': OperationSpec(
+        'GET', 'member_api', '/x2/creative/web/seasons', 'web_cookie', True
+    ),
+    'create_collection': OperationSpec(
+        'POST', 'member_api', '/x2/creative/web/season/add', 'web_cookie_csrf', False
+    ),
+    'add_collection_episode': OperationSpec(
+        'POST',
+        'member_api',
+        '/x2/creative/web/season/section/episodes/add',
+        'web_cookie_csrf',
+        False,
+    ),
     'archive_pre': OperationSpec(
         'GET', 'member_api', '/x/vupre/web/archive/pre', 'web_cookie', True
     ),

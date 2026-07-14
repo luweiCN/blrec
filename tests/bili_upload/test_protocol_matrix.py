@@ -110,6 +110,14 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         ('upload_chunk', 'upos_session', '<server-returned>'),
         ('complete_upload', 'upos_session', '<server-returned>'),
         ('submit_archive', 'web_cookie_csrf', '/x/vu/web/add/v3'),
+        ('upload_cover', 'web_cookie_csrf', '/x/vu/web/cover/up'),
+        ('list_collections', 'web_cookie', '/x2/creative/web/seasons'),
+        ('create_collection', 'web_cookie_csrf', '/x2/creative/web/season/add'),
+        (
+            'add_collection_episode',
+            'web_cookie_csrf',
+            '/x2/creative/web/season/section/episodes/add',
+        ),
         ('archive_pre', 'web_cookie', '/x/vupre/web/archive/pre'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
         ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
@@ -195,6 +203,19 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         prepared.session, parts=({'partNumber': 1, 'eTag': 'fixture-etag'},)
     )
     await client.submit_archive(bundle, {'title': 'fixture', 'videos': 'fixture.mp4'})
+    await client.upload_cover(
+        bundle, filename='fixture.jpg', mime_type='image/jpeg', content=b'fixture-cover'
+    )
+    await client.list_collections(bundle)
+    await client.create_collection(
+        bundle,
+        title='fixture collection',
+        description='fixture description',
+        cover_url='https://archive.biliimg.com/bfs/archive/fixture.jpg',
+    )
+    await client.add_collection_episode(
+        bundle, section_id=502, aid=303, cid=202, title='fixture title'
+    )
     await client.archive_pre(bundle)
     await client.list_archives(bundle, {'pn': 1})
     await client.archive_view(bundle, {'bvid': 'BVfixture'})
@@ -225,6 +246,10 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'list_archives',
         'archive_view',
         'submit_archive',
+        'upload_cover',
+        'list_collections',
+        'create_collection',
+        'add_collection_episode',
         'web_nav',
         'list_replies',
         'reply_detail',
@@ -238,7 +263,13 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert 'access_key' not in material
         assert 'refresh_token' not in material
         assert 'Cookie' in request.headers
-        if name == 'submit_archive':
+        if name in (
+            'submit_archive',
+            'upload_cover',
+            'list_collections',
+            'create_collection',
+            'add_collection_episode',
+        ):
             assert request.headers['Referer'].startswith('https://member.bilibili.com/')
         else:
             assert request.headers['Referer'] == 'https://www.bilibili.com/'
@@ -263,6 +294,10 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'add_reply',
         'top_reply',
         'submit_archive',
+        'upload_cover',
+        'list_collections',
+        'create_collection',
+        'add_collection_episode',
     ):
         assert 'w_rid' not in dict(requests[name].query)
 
@@ -281,6 +316,69 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     }
     assert submit.headers['Content-Type'] == 'application/json'
     assert 'access_key' not in submit_query
+
+    cover_request = requests['upload_cover']
+    assert cover_request.method == 'POST'
+    assert dict(cover_request.query) == {'ts': '100000'}
+    cover_form = dict(cover_request.form)
+    assert cover_form['csrf'] == 'csrf-secret'
+    assert cover_form['cover'].startswith('data:image/jpeg;base64,')
+    assert 'fixture-cover' not in cover_form['cover']
+
+    collection_list = requests['list_collections']
+    assert collection_list.method == 'GET'
+    assert dict(collection_list.query) == {
+        'pn': '1',
+        'ps': '50',
+        'order': 'mtime',
+        'sort': 'desc',
+        'draft': '1',
+    }
+
+    collection_create = requests['create_collection']
+    assert collection_create.method == 'POST'
+    assert dict(collection_create.form) == {
+        'title': 'fixture collection',
+        'desc': 'fixture description',
+        'cover': 'https://archive.biliimg.com/bfs/archive/fixture.jpg',
+        'season_price': '0',
+        'csrf': 'csrf-secret',
+    }
+
+    episode_request = requests['add_collection_episode']
+    assert episode_request.method == 'POST'
+    assert dict(episode_request.query) == {'csrf': 'csrf-secret'}
+    assert json.loads((episode_request.body or b'{}').decode('utf8')) == {
+        'sectionId': 502,
+        'episodes': [
+            {'aid': 303, 'cid': 202, 'title': 'fixture title', 'charging_pay': 0}
+        ],
+        'csrf': 'csrf-secret',
+    }
+
+
+@pytest.mark.asyncio
+async def test_upload_cover_returns_only_a_validated_https_url() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text())
+    client = protocol_client(ScriptedTransport(fixtures))
+
+    url = await client.upload_cover(
+        credential_fixture(),
+        filename='fixture.jpg',
+        mime_type='image/jpeg',
+        content=b'fixture-cover',
+    )
+
+    assert url == 'https://archive.biliimg.com/bfs/archive/fixture.jpg'
+
+    fixtures['upload_cover'] = {'code': 0, 'data': {'url': 'http://bad.invalid/x'}}
+    with pytest.raises(ProtocolContractError, match='cover'):
+        await protocol_client(ScriptedTransport(fixtures)).upload_cover(
+            credential_fixture(),
+            filename='fixture.jpg',
+            mime_type='image/jpeg',
+            content=b'fixture-cover',
+        )
 
 
 class FailingTransport:

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import posixpath
 import secrets
@@ -371,6 +372,78 @@ class BiliProtocolClient:
             'submit_archive', query=query, headers=headers, body=body
         )
 
+    async def upload_cover(
+        self, bundle: CredentialBundle, *, filename: str, mime_type: str, content: bytes
+    ) -> str:
+        if not filename or mime_type not in ('image/jpeg', 'image/png') or not content:
+            raise ProtocolContractError('invalid cover upload')
+        encoded = base64.b64encode(content).decode('ascii')
+        payload = await self._member_request(
+            'upload_cover',
+            bundle,
+            query={'ts': int(self._clock() * 1000)},
+            form={
+                'cover': 'data:{};base64,{}'.format(mime_type, encoded),
+                'csrf': self._web.csrf(bundle),
+            },
+        )
+        data = payload.get('data')
+        if not isinstance(data, dict):
+            raise ProtocolContractError('cover upload response is incomplete')
+        return self._https_url(data.get('url'), 'cover upload')
+
+    async def list_collections(self, bundle: CredentialBundle) -> Mapping[str, Any]:
+        return await self._member_request(
+            'list_collections',
+            bundle,
+            query={'pn': 1, 'ps': 50, 'order': 'mtime', 'sort': 'desc', 'draft': 1},
+        )
+
+    async def create_collection(
+        self, bundle: CredentialBundle, *, title: str, description: str, cover_url: str
+    ) -> Mapping[str, Any]:
+        cover = self._https_url(cover_url, 'collection cover')
+        return await self._member_request(
+            'create_collection',
+            bundle,
+            form={
+                'title': title,
+                'desc': description,
+                'cover': cover,
+                'season_price': 0,
+                'csrf': self._web.csrf(bundle),
+            },
+        )
+
+    async def add_collection_episode(
+        self,
+        bundle: CredentialBundle,
+        *,
+        section_id: int,
+        aid: int,
+        cid: int,
+        title: str,
+    ) -> Mapping[str, Any]:
+        csrf = self._web.csrf(bundle)
+        body = json.dumps(
+            {
+                'sectionId': section_id,
+                'episodes': [
+                    {'aid': aid, 'cid': cid, 'title': title, 'charging_pay': 0}
+                ],
+                'csrf': csrf,
+            },
+            ensure_ascii=False,
+            separators=(',', ':'),
+        ).encode('utf8')
+        return await self._member_request(
+            'add_collection_episode',
+            bundle,
+            query={'csrf': csrf},
+            body=body,
+            content_type='application/json; charset=UTF-8',
+        )
+
     async def list_archives(
         self, bundle: CredentialBundle, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
@@ -423,6 +496,27 @@ class BiliProtocolClient:
     ) -> Mapping[str, Any]:
         form = {**params, 'csrf': self._web.csrf(bundle)}
         return await self._web_request(operation, bundle, form=form)
+
+    async def _member_request(
+        self,
+        operation: str,
+        bundle: CredentialBundle,
+        *,
+        query: Optional[Mapping[str, Any]] = None,
+        form: Optional[Mapping[str, Any]] = None,
+        body: Optional[bytes] = None,
+        content_type: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        url = self._url_for(operation)
+        headers = {
+            **self._web_headers(bundle, url),
+            'Referer': 'https://member.bilibili.com/platform/upload/video/frame',
+        }
+        if content_type is not None:
+            headers['Content-Type'] = content_type
+        return await self._standard_request(
+            operation, headers=headers, query=query, form=form, body=body
+        )
 
     async def _web_request(
         self,
@@ -597,6 +691,20 @@ class BiliProtocolClient:
         value = payload.get(field)
         if not isinstance(value, str) or not value:
             raise ProtocolContractError('{} response is incomplete'.format(context))
+        return value
+
+    @staticmethod
+    def _https_url(value: Any, context: str) -> str:
+        if not isinstance(value, str):
+            raise ProtocolContractError('{} response is incomplete'.format(context))
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != 'https'
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ProtocolContractError('{} URL is invalid'.format(context))
         return value
 
     @staticmethod
