@@ -18,7 +18,6 @@ import {
   UploadJobState,
   UploadPartProgress,
   UploadPartState,
-  UploadSubmitState,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 
@@ -177,11 +176,25 @@ export class RecordingSessionsComponent implements OnInit {
       uploading: '上传中',
       submitting: '投稿中',
       waiting_review: '等待审核',
-      approved: '审核通过',
+      approved: '投稿完成',
       rejected: '审核未通过',
       paused: '已暂停',
-      completed: '已完成',
+      completed: '投稿完成',
     }[state];
+  }
+
+  archiveUrl(
+    session: RecordingSession,
+    partIndex?: number
+  ): string | null {
+    const job = session.uploadJob;
+    if (!job?.bvid || (job.state !== 'approved' && job.state !== 'completed')) {
+      return null;
+    }
+    const part = partIndex === undefined ? '' : `?p=${partIndex}`;
+    return `https://www.bilibili.com/video/${encodeURIComponent(
+      job.bvid
+    )}${part}`;
   }
 
   uploadJobStateColor(state: UploadJobState): string {
@@ -195,16 +208,6 @@ export class RecordingSessionsComponent implements OnInit {
       rejected: 'error',
       paused: 'warning',
       completed: 'success',
-    }[state];
-  }
-
-  submitStateLabel(state: UploadSubmitState): string {
-    return {
-      prepared: '投稿：尚未提交',
-      in_flight: '投稿：提交中',
-      confirmed: '投稿：已确认',
-      unknown_outcome: '投稿：结果未知',
-      failed_permanent: '投稿：失败',
     }[state];
   }
 

@@ -183,6 +183,42 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
   });
 
+  it('shows one completed status and links an approved archive title', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready recording-session view');
+    }
+    const response = fixture.componentInstance.view.response;
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...response,
+        sessions: [
+          {
+            ...session,
+            uploadJob: {
+              ...session.uploadJob!,
+              state: 'approved',
+            },
+          },
+        ],
+      },
+    };
+
+    fixture.detectChanges();
+
+    const archiveLink = fixture.nativeElement.querySelector(
+      '[data-testid="archive-link"]'
+    ) as HTMLAnchorElement | null;
+    expect(fixture.nativeElement.textContent).toContain('投稿完成');
+    expect(fixture.nativeElement.textContent).not.toContain('投稿：已确认');
+    expect(archiveLink?.textContent).toContain('今晚挑战通关');
+    expect(archiveLink?.href).toBe(
+      'https://www.bilibili.com/video/BV1test'
+    );
+  });
+
   it('requests the selected server page and page size', () => {
     fixture.detectChanges();
 

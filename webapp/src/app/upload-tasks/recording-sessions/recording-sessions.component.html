@@ -78,7 +78,20 @@
               referrerpolicy="no-referrer"
             />
             <div class="session-cell-text">
-              <strong>{{ session.title || '未记录直播标题' }}</strong>
+              <ng-container *ngIf="archiveUrl(session) as url; else plainTitle">
+                <a
+                  class="archive-title"
+                  data-testid="archive-link"
+                  [href]="url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <strong>{{ session.title || '未记录直播标题' }}</strong>
+                </a>
+              </ng-container>
+              <ng-template #plainTitle>
+                <strong>{{ session.title || '未记录直播标题' }}</strong>
+              </ng-template>
               <span>
                 {{ session.anchorName || '未知主播' }} · 房间
                 {{ session.roomId }}
@@ -106,9 +119,6 @@
             <nz-tag [nzColor]="uploadJobStateColor(job.state)">
               {{ uploadJobStateLabel(job.state) }}
             </nz-tag>
-            <div class="secondary-text">
-              {{ submitStateLabel(job.submitState) }}
-            </div>
           </ng-container>
           <ng-template #noUploadJob>
             <span class="secondary-text">
@@ -194,7 +204,6 @@
           <nz-tag [nzColor]="uploadJobStateColor(job.state)">
             {{ uploadJobStateLabel(job.state) }}
           </nz-tag>
-          <nz-tag>{{ submitStateLabel(job.submitState) }}</nz-tag>
           <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
           <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
         </div>
@@ -205,7 +214,13 @@
           稿件：
           <span *ngIf="job.aid">AV{{ job.aid }}</span>
           <span *ngIf="job.aid && job.bvid"> · </span>
-          <span *ngIf="job.bvid">{{ job.bvid }}</span>
+          <a
+            *ngIf="archiveUrl(session) as url"
+            [href]="url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >{{ job.bvid }}</a>
+          <span *ngIf="job.bvid && !archiveUrl(session)">{{ job.bvid }}</span>
         </div>
         <div class="upload-reason" *ngIf="job.reviewReason">
           {{ job.reviewReason }}
