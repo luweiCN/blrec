@@ -15,6 +15,7 @@ from .crypto import CredentialCipher
 from .database import BiliUploadDatabase
 from .journal import RecordingJournalBridge
 from .models import FeatureUnavailable, validate_feature_gate
+from .policies import RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .signing import WbiSigner, WebSessionBuilder
 from .upload import UploadCoordinator
@@ -59,6 +60,7 @@ class BiliAccountRuntime:
         self._manager: Optional[AccountManager] = None
         self._journal: Optional[RecordingJournalBridge] = None
         self._coordinator: Optional[UploadCoordinator] = None
+        self._policy_manager: Optional[RoomUploadPolicyManager] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
@@ -77,6 +79,10 @@ class BiliAccountRuntime:
     @property
     def coordinator(self) -> Optional[UploadCoordinator]:
         return self._coordinator
+
+    @property
+    def policy_manager(self) -> Optional[RoomUploadPolicyManager]:
+        return self._policy_manager
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -157,6 +163,7 @@ class BiliAccountRuntime:
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
             )
+            policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
         except Exception:
             logger.exception('Bilibili account management failed to start')
             await self._close_partial(database)
@@ -167,6 +174,7 @@ class BiliAccountRuntime:
         self._journal = journal
         self._manager = manager
         self._coordinator = coordinator
+        self._policy_manager = policy_manager
         self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
@@ -199,6 +207,7 @@ class BiliAccountRuntime:
         if manager is not None:
             await manager.close()
         self._coordinator = None
+        self._policy_manager = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -256,6 +265,7 @@ class BiliAccountRuntime:
     async def _close_partial(self, database: BiliUploadDatabase) -> None:
         await self._stop_upload_worker()
         self._coordinator = None
+        self._policy_manager = None
         self._journal = None
         transport, self._transport = self._transport, None
         if transport is not None:

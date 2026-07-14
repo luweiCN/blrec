@@ -24,6 +24,7 @@ from .routers import (
     bili_accounts,
     live_status,
     recording_sessions,
+    room_upload_policies,
     settings,
     tasks,
     update,
@@ -73,6 +74,8 @@ bili_accounts.manager = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_sessions.journal = None
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+room_upload_policies.manager = None
+room_upload_policies.unavailable_reason = _bili_account_runtime.unavailable_reason
 
 if _env_settings.api_key is None:
     _dependencies = None
@@ -147,6 +150,10 @@ async def on_startup() -> None:
         bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_sessions.journal = _bili_account_runtime.journal
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+        room_upload_policies.manager = _bili_account_runtime.policy_manager
+        room_upload_policies.unavailable_reason = (
+            _bili_account_runtime.unavailable_reason
+        )
         await app.launch()
         application_launched = True
         _application_started = True
@@ -155,6 +162,7 @@ async def on_startup() -> None:
         _application_started = False
         bili_accounts.manager = None
         recording_sessions.journal = None
+        room_upload_policies.manager = None
         try:
             if application_launched:
                 await app.exit()
@@ -169,6 +177,7 @@ async def on_shuntdown() -> None:
     _application_started = False
     bili_accounts.manager = None
     recording_sessions.journal = None
+    room_upload_policies.manager = None
     try:
         await app.exit()
     finally:
@@ -192,6 +201,7 @@ api.include_router(update.router)
 api.include_router(live_status.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
 api.include_router(recording_sessions.router, prefix='/api/v1')
+api.include_router(room_upload_policies.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

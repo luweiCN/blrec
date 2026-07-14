@@ -1,0 +1,321 @@
+<div class="upload-policies-page">
+  <nz-page-header
+    nzTitle="投稿规则"
+    nzSubtitle="为直播间指定投稿账号和稿件信息"
+  >
+    <nz-page-header-extra>
+      <button
+        nz-button
+        nzType="primary"
+        type="button"
+        data-testid="add-policy"
+        [disabled]="activeAccounts.length === 0 || availableTasks.length === 0"
+        (click)="openCreate()"
+      >
+        添加规则
+      </button>
+    </nz-page-header-extra>
+  </nz-page-header>
+
+  <nz-alert
+    class="scope-note"
+    nzType="info"
+    nzShowIcon
+    nzMessage="规则只影响以后创建的上传任务"
+    nzDescription="一场直播结束并生成上传任务时，系统会锁定当时的投稿账号和稿件参数。之后切换主账号、修改或删除规则，都不会改绑已经创建的任务。自动投稿总开关关闭时只保存规则，不会上传。"
+  ></nz-alert>
+
+  <nz-alert
+    *ngIf="activeAccounts.length === 0 && !loading"
+    class="scope-note"
+    nzType="warning"
+    nzShowIcon
+    nzMessage="请先在“投稿账号”页面添加一个可用账号"
+  ></nz-alert>
+
+  <div aria-live="polite" [attr.aria-busy]="loading">
+    <nz-spin *ngIf="loading" nzSimple></nz-spin>
+    <nz-alert
+      *ngIf="loadError as message"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="message"
+    ></nz-alert>
+    <button *ngIf="loadError" nz-button type="button" (click)="load()">
+      重试加载
+    </button>
+
+    <nz-alert
+      *ngIf="actionMessage"
+      nzType="success"
+      nzShowIcon
+      [nzMessage]="actionMessage"
+    ></nz-alert>
+    <nz-alert
+      *ngIf="actionError && !dialogVisible"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="actionError"
+    ></nz-alert>
+
+    <nz-empty
+      *ngIf="!loading && !loadError && policies.length === 0"
+      nzNotFoundContent="还没有配置房间投稿规则"
+    ></nz-empty>
+
+    <div class="policy-grid" *ngIf="policies.length > 0">
+      <nz-card
+        *ngFor="let policy of policies; trackBy: trackPolicy"
+        [nzTitle]="roomLabel(policy.roomId)"
+      >
+        <div class="policy-heading">
+          <nz-tag
+            [nzColor]="
+              policy.blockedReason
+                ? 'red'
+                : policy.enabled
+                  ? 'green'
+                  : 'default'
+            "
+          >
+            {{ policy.blockedReason || (policy.enabled ? "已启用" : "已停用") }}
+          </nz-tag>
+          <span>{{ policyAccountLabel(policy) }}</span>
+        </div>
+        <dl class="policy-details">
+          <div>
+            <dt>标题模板</dt>
+            <dd>{{ policy.titleTemplate }}</dd>
+          </div>
+          <div>
+            <dt>分区 / 标签</dt>
+            <dd>{{ policy.tid }} / {{ policy.tags }}</dd>
+          </div>
+          <div>
+            <dt>后续处理</dt>
+            <dd>
+              <nz-tag *ngIf="policy.autoComment" nzColor="blue"
+                >自动评论</nz-tag
+              >
+              <nz-tag *ngIf="policy.danmakuBackfill" nzColor="purple"
+                >弹幕回灌</nz-tag
+              >
+              <span *ngIf="!policy.autoComment && !policy.danmakuBackfill"
+                >无</span
+              >
+            </dd>
+          </div>
+        </dl>
+        <div class="policy-actions">
+          <button nz-button type="button" (click)="openEdit(policy)">
+            编辑
+          </button>
+          <button
+            nz-button
+            nzDanger
+            type="button"
+            nz-popconfirm
+            nzPopconfirmTitle="只删除未来规则；已创建任务保持不变。确认删除吗？"
+            [nzLoading]="deletingRoomId === policy.roomId"
+            (nzOnConfirm)="deletePolicy(policy.roomId)"
+          >
+            删除
+          </button>
+        </div>
+      </nz-card>
+    </div>
+  </div>
+
+  <nz-modal
+    [nzTitle]="editing ? '编辑投稿规则' : '添加投稿规则'"
+    nzOkText="保存规则"
+    nzCancelText="取消"
+    nzWidth="680px"
+    [nzVisible]="dialogVisible"
+    [nzOkDisabled]="!canSave"
+    [nzOkLoading]="saving"
+    [nzCancelDisabled]="saving"
+    (nzOnOk)="save()"
+    (nzOnCancel)="closeDialog()"
+  >
+    <ng-container *nzModalContent>
+      <form nz-form class="policy-form">
+        <nz-alert
+          *ngIf="actionError"
+          nzType="error"
+          nzShowIcon
+          [nzMessage]="actionError"
+        ></nz-alert>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>直播间</nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="roomId"
+              [(ngModel)]="draft.roomId"
+              [nzDisabled]="editing"
+              nzPlaceHolder="选择已添加的直播间"
+            >
+              <nz-option
+                *ngFor="let task of availableTasks; trackBy: trackTask"
+                [nzValue]="task.room_info.room_id"
+                [nzLabel]="task.user_info.name + ' · ' + task.room_info.room_id"
+              ></nz-option>
+            </nz-select>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>
+            投稿账号策略
+            <span
+              class="help-mark"
+              nz-tooltip
+              [nzTooltipTitle]="
+                draft.accountMode === 'primary'
+                  ? primaryAccountTip
+                  : fixedAccountTip
+              "
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="accountMode"
+              [ngModel]="draft.accountMode"
+              (ngModelChange)="accountModeChanged($event)"
+            >
+              <nz-option nzValue="primary" nzLabel="跟随主账号"></nz-option>
+              <nz-option nzValue="fixed" nzLabel="固定账号"></nz-option>
+            </nz-select>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item *ngIf="draft.accountMode === 'fixed'">
+          <nz-form-label nzRequired>固定投稿账号</nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="accountId"
+              [(ngModel)]="draft.accountId"
+              nzPlaceHolder="选择账号"
+            >
+              <nz-option
+                *ngFor="let account of activeAccounts; trackBy: trackAccount"
+                [nzValue]="account.id"
+                [nzLabel]="account.displayName + ' · UID ' + account.uid"
+              ></nz-option>
+            </nz-select>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label>启用规则</nz-form-label>
+          <nz-form-control>
+            <nz-switch name="enabled" [(ngModel)]="draft.enabled"></nz-switch>
+            <span class="field-help"
+              >关闭后不会为新的直播场次创建上传任务。</span
+            >
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>
+            标题模板
+            <span
+              class="help-mark"
+              nz-tooltip
+              [nzTooltipTitle]="templateTip"
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <input
+              nz-input
+              name="titleTemplate"
+              required
+              maxlength="500"
+              [(ngModel)]="draft.titleTemplate"
+            />
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label>简介模板</nz-form-label>
+          <nz-form-control>
+            <textarea
+              nz-input
+              name="descriptionTemplate"
+              rows="4"
+              maxlength="5000"
+              [(ngModel)]="draft.descriptionTemplate"
+            ></textarea>
+            <span class="field-help">{{ templateTip }}</span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <div class="form-row">
+          <nz-form-item>
+            <nz-form-label nzRequired>投稿分区 ID</nz-form-label>
+            <nz-form-control>
+              <nz-input-number
+                name="tid"
+                [nzMin]="1"
+                [(ngModel)]="draft.tid"
+              ></nz-input-number>
+              <span class="field-help">填写 B 站创作中心使用的分区 ID。</span>
+            </nz-form-control>
+          </nz-form-item>
+          <nz-form-item>
+            <nz-form-label nzRequired>标签</nz-form-label>
+            <nz-form-control>
+              <input nz-input name="tags" [(ngModel)]="draft.tags" />
+              <span class="field-help">多个标签用英文逗号分隔。</span>
+            </nz-form-control>
+          </nz-form-item>
+        </div>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>稿件类型</nz-form-label>
+          <nz-form-control>
+            <nz-select name="copyright" [(ngModel)]="draft.copyright">
+              <nz-option [nzValue]="1" nzLabel="自制"></nz-option>
+              <nz-option [nzValue]="2" nzLabel="转载"></nz-option>
+            </nz-select>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item *ngIf="draft.copyright === 2">
+          <nz-form-label nzRequired>转载来源</nz-form-label>
+          <nz-form-control>
+            <input nz-input name="source" [(ngModel)]="draft.source" />
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label>审核通过后</nz-form-label>
+          <nz-form-control class="post-actions">
+            <label
+              nz-checkbox
+              name="autoComment"
+              [(ngModel)]="draft.autoComment"
+            >
+              自动发布 SC / 上舰索引评论
+            </label>
+            <label
+              nz-checkbox
+              name="danmakuBackfill"
+              [(ngModel)]="draft.danmakuBackfill"
+            >
+              回灌视频弹幕
+            </label>
+            <span class="field-help">
+              两项还受全局紧急开关控制。弹幕回灌会以投稿账号名义长期显示在视频中。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+      </form>
+    </ng-container>
+  </nz-modal>
+</div>

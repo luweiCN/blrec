@@ -50,6 +50,16 @@
             nzMatchRouter="true"
             nz-tooltip
             nzTooltipPlacement="right"
+            [nzTooltipTitle]="collapsed ? '投稿规则' : ''"
+          >
+            <i nz-icon nzType="form" nzTheme="outline"></i>
+            <span><a routerLink="/upload-policies">投稿规则</a></span>
+          </li>
+          <li
+            nz-menu-item
+            nzMatchRouter="true"
+            nz-tooltip
+            nzTooltipPlacement="right"
             [nzTooltipTitle]="collapsed ? '投稿账号' : ''"
           >
             <i nz-icon nzType="user" nzTheme="outline"></i>

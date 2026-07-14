@@ -3,6 +3,7 @@ import { RouterTestingModule } from '@angular/router/testing';
 
 import {
   CloudUploadOutline,
+  FormOutline,
   GithubOutline,
   InfoCircleOutline,
   MenuFoldOutline,
@@ -25,6 +26,7 @@ describe('AppComponent', () => {
           provide: NZ_ICONS,
           useValue: [
             CloudUploadOutline,
+            FormOutline,
             GithubOutline,
             InfoCircleOutline,
             MenuFoldOutline,
@@ -55,7 +57,7 @@ describe('AppComponent', () => {
     fixture.detectChanges();
     const compiled = fixture.nativeElement;
     expect(compiled.querySelector('.app-title').textContent).toContain(
-      'B 站直播录制'
+      'B 站直播录制',
     );
   });
 
@@ -64,14 +66,19 @@ describe('AppComponent', () => {
     fixture.detectChanges();
 
     const uploadTasks = fixture.nativeElement.querySelector(
-      'a[href="/upload-tasks"]'
+      'a[href="/upload-tasks"]',
     ) as HTMLAnchorElement;
     const accounts = fixture.nativeElement.querySelector(
-      'a[href="/uploads"]'
+      'a[href="/uploads"]',
+    ) as HTMLAnchorElement;
+    const policies = fixture.nativeElement.querySelector(
+      'a[href="/upload-policies"]',
     ) as HTMLAnchorElement;
 
     expect(uploadTasks).not.toBeNull();
     expect(uploadTasks?.textContent?.trim()).toBe('上传任务');
+    expect(policies).not.toBeNull();
+    expect(policies?.textContent?.trim()).toBe('投稿规则');
     expect(accounts.textContent?.trim()).toBe('投稿账号');
   });
 });

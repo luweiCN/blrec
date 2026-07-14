@@ -22,7 +22,14 @@ const routes: Routes = [
     path: 'upload-tasks',
     loadChildren: () =>
       import('./upload-tasks/upload-tasks.module').then(
-        (m) => m.UploadTasksModule
+        (m) => m.UploadTasksModule,
+      ),
+  },
+  {
+    path: 'upload-policies',
+    loadChildren: () =>
+      import('./upload-policies/upload-policies.module').then(
+        (m) => m.UploadPoliciesModule,
       ),
   },
   {

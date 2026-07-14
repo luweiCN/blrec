@@ -1,3 +1,3 @@
-from . import bili_accounts, live_status, recording_sessions
+from . import bili_accounts, live_status, recording_sessions, room_upload_policies
 
-__all__ = ('bili_accounts', 'live_status', 'recording_sessions')
+__all__ = ('bili_accounts', 'live_status', 'recording_sessions', 'room_upload_policies')
