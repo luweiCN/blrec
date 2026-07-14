@@ -1,4 +1,5 @@
 import { CommonModule } from '@angular/common';
+import { ClipboardModule } from '@angular/cdk/clipboard';
 import { NgModule } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
@@ -6,6 +7,7 @@ import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzDrawerModule } from 'ng-zorro-antd/drawer';
 import { NzInputModule } from 'ng-zorro-antd/input';
+import { NzIconModule } from 'ng-zorro-antd/icon';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
@@ -21,12 +23,14 @@ import { UploadTasksComponent } from './upload-tasks.component';
   declarations: [UploadTasksComponent, RecordingSessionsComponent],
   imports: [
     CommonModule,
+    ClipboardModule,
     FormsModule,
     UploadTasksRoutingModule,
     NzAlertModule,
     NzButtonModule,
     NzDrawerModule,
     NzInputModule,
+    NzIconModule,
     NzModalModule,
     NzPageHeaderModule,
     NzPaginationModule,

@@ -1,6 +1,8 @@
+import { Clipboard } from '@angular/cdk/clipboard';
 import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
 
 import { finalize } from 'rxjs/operators';
+import { NzMessageService } from 'ng-zorro-antd/message';
 
 import {
   CommentBranchState,
@@ -40,7 +42,9 @@ export class RecordingSessionsComponent implements OnInit {
 
   constructor(
     private recordingSessions: RecordingSessionService,
-    private changeDetector: ChangeDetectorRef
+    private changeDetector: ChangeDetectorRef,
+    private clipboard: Clipboard,
+    private message: NzMessageService
   ) {}
 
   ngOnInit(): void {
@@ -412,6 +416,14 @@ export class RecordingSessionsComponent implements OnInit {
   fileName(path: string): string {
     const segments = path.split(/[\\/]/).filter(Boolean);
     return segments[segments.length - 1] ?? path;
+  }
+
+  copyPath(path: string): void {
+    if (this.clipboard.copy(path)) {
+      this.message.success('已复制完整路径');
+      return;
+    }
+    this.message.error('复制失败，请重试');
   }
 
   trackSession(_index: number, session: RecordingSession): number {

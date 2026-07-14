@@ -335,7 +335,7 @@
                 </div>
               </td>
               <td class="file-list">
-                <div *ngIf="part.finalPath">
+                <div class="file-path-row" *ngIf="part.finalPath">
                   <span class="file-label">成品</span>
                   <code
                     class="file-name"
@@ -343,8 +343,22 @@
                     [nzTooltipTitle]="part.finalPath"
                     >{{ fileName(part.finalPath) }}</code
                   >
+                  <button
+                    nz-button
+                    nzType="text"
+                    nzSize="small"
+                    type="button"
+                    class="copy-path-button"
+                    data-testid="copy-final-path"
+                    nz-tooltip
+                    nzTooltipTitle="复制完整路径"
+                    aria-label="复制完整路径"
+                    (click)="copyPath(part.finalPath)"
+                  >
+                    <span nz-icon nzType="copy"></span>
+                  </button>
                 </div>
-                <div *ngIf="!part.finalPath">
+                <div class="file-path-row" *ngIf="!part.finalPath">
                   <span class="file-label">录制</span>
                   <code
                     class="file-name"
@@ -352,8 +366,22 @@
                     [nzTooltipTitle]="part.sourcePath"
                     >{{ fileName(part.sourcePath) }}</code
                   >
+                  <button
+                    nz-button
+                    nzType="text"
+                    nzSize="small"
+                    type="button"
+                    class="copy-path-button"
+                    data-testid="copy-source-path"
+                    nz-tooltip
+                    nzTooltipTitle="复制完整路径"
+                    aria-label="复制完整路径"
+                    (click)="copyPath(part.sourcePath)"
+                  >
+                    <span nz-icon nzType="copy"></span>
+                  </button>
                 </div>
-                <div *ngIf="part.xmlPath">
+                <div class="file-path-row" *ngIf="part.xmlPath">
                   <span class="file-label">弹幕</span>
                   <code
                     class="file-name"
@@ -361,6 +389,20 @@
                     [nzTooltipTitle]="part.xmlPath"
                     >{{ fileName(part.xmlPath) }}</code
                   >
+                  <button
+                    nz-button
+                    nzType="text"
+                    nzSize="small"
+                    type="button"
+                    class="copy-path-button"
+                    data-testid="copy-xml-path"
+                    nz-tooltip
+                    nzTooltipTitle="复制完整路径"
+                    aria-label="复制完整路径"
+                    (click)="copyPath(part.xmlPath)"
+                  >
+                    <span nz-icon nzType="copy"></span>
+                  </button>
                 </div>
                 <div class="part-metric">
                   大小 {{ formatBytes(part.fileSizeBytes) }}

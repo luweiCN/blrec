@@ -1,14 +1,18 @@
 import { CommonModule } from '@angular/common';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule } from '@angular/forms';
 
 import { of, throwError } from 'rxjs';
+import { CopyOutline } from '@ant-design/icons-angular/icons';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzDrawerModule } from 'ng-zorro-antd/drawer';
 import { NzInputModule } from 'ng-zorro-antd/input';
+import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 import { NzModalModule } from 'ng-zorro-antd/modal';
+import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
 import { NzTableModule } from 'ng-zorro-antd/table';
@@ -21,12 +25,19 @@ import { RecordingSessionsComponent } from './recording-sessions.component';
 describe('RecordingSessionsComponent', () => {
   let fixture: ComponentFixture<RecordingSessionsComponent>;
   let service: jasmine.SpyObj<RecordingSessionService>;
+  let clipboard: jasmine.SpyObj<Clipboard>;
+  let message: jasmine.SpyObj<NzMessageService>;
 
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
       ['listSessions', 'decideDanmakuItem']
     );
+    clipboard = jasmine.createSpyObj<Clipboard>('Clipboard', ['copy']);
+    message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+      'success',
+      'error',
+    ]);
     service.decideDanmakuItem.and.returnValue(of(void 0));
     service.listSessions.and.returnValue(
       of({
@@ -131,6 +142,7 @@ describe('RecordingSessionsComponent', () => {
         NzButtonModule,
         NzDrawerModule,
         NzInputModule,
+        NzIconModule,
         NzModalModule,
         NzPageHeaderModule,
         NzPaginationModule,
@@ -138,7 +150,12 @@ describe('RecordingSessionsComponent', () => {
         NzTagModule,
         NzToolTipModule,
       ],
-      providers: [{ provide: RecordingSessionService, useValue: service }],
+      providers: [
+        { provide: RecordingSessionService, useValue: service },
+        { provide: Clipboard, useValue: clipboard },
+        { provide: NzMessageService, useValue: message },
+        { provide: NZ_ICONS, useValue: [CopyOutline] },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(RecordingSessionsComponent);
@@ -213,6 +230,49 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.artifactStateLabel('manual_review')).toBe(
       '自动恢复中'
     );
+  });
+
+  it('copies the exact full path and reports success', () => {
+    clipboard.copy.and.returnValue(true);
+
+    fixture.componentInstance.copyPath('/rec/path/very-long.flv');
+
+    expect(clipboard.copy).toHaveBeenCalledOnceWith(
+      '/rec/path/very-long.flv'
+    );
+    expect(message.success).toHaveBeenCalledOnceWith('已复制完整路径');
+    expect(message.error).not.toHaveBeenCalled();
+  });
+
+  it('shows explicit copy controls beside every visible file path', () => {
+    fixture.detectChanges();
+    fixture.componentInstance.openDetails(fixture.componentInstance.sessions[0]);
+    fixture.detectChanges();
+
+    const finalButton = document.body.querySelector(
+      '[data-testid="copy-final-path"]'
+    );
+    const xmlButton = document.body.querySelector(
+      '[data-testid="copy-xml-path"]'
+    );
+
+    expect(finalButton?.getAttribute('aria-label')).toBe('复制完整路径');
+    expect(xmlButton?.getAttribute('aria-label')).toBe('复制完整路径');
+    expect(
+      document.body.querySelector('[data-testid="copy-source-path"]')
+    ).toBeNull();
+  });
+
+  it('reports a clipboard failure instead of hiding it', () => {
+    clipboard.copy.and.returnValue(false);
+
+    fixture.componentInstance.copyPath('/rec/path/very-long.xml');
+
+    expect(clipboard.copy).toHaveBeenCalledOnceWith(
+      '/rec/path/very-long.xml'
+    );
+    expect(message.error).toHaveBeenCalledOnceWith('复制失败，请重试');
+    expect(message.success).not.toHaveBeenCalled();
   });
 
   it('marks the OnPush application tree after sessions load', () => {
