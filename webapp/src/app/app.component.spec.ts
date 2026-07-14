@@ -1,9 +1,9 @@
 import { TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import {
   CloudUploadOutline,
-  FormOutline,
   GithubOutline,
   InfoCircleOutline,
   MenuFoldOutline,
@@ -26,7 +26,6 @@ describe('AppComponent', () => {
           provide: NZ_ICONS,
           useValue: [
             CloudUploadOutline,
-            FormOutline,
             GithubOutline,
             InfoCircleOutline,
             MenuFoldOutline,
@@ -61,7 +60,7 @@ describe('AppComponent', () => {
     );
   });
 
-  it('shows separate upload-task and Bilibili-account navigation', () => {
+  it('shows recording, upload-task, and Bilibili-account navigation', () => {
     const fixture = TestBed.createComponent(AppComponent);
     fixture.detectChanges();
 
@@ -74,11 +73,24 @@ describe('AppComponent', () => {
     const policies = fixture.nativeElement.querySelector(
       'a[href="/upload-policies"]',
     ) as HTMLAnchorElement;
+    const recordingTasks = fixture.nativeElement.querySelector(
+      'a[href="/tasks"]',
+    ) as HTMLAnchorElement;
 
+    expect(recordingTasks?.textContent?.trim()).toBe('录制任务');
     expect(uploadTasks).not.toBeNull();
     expect(uploadTasks?.textContent?.trim()).toBe('上传任务');
-    expect(policies).not.toBeNull();
-    expect(policies?.textContent?.trim()).toBe('投稿规则');
+    expect(policies).toBeNull();
     expect(accounts.textContent?.trim()).toBe('投稿账号');
+  });
+
+  it('redirects the retired upload-policy page to recording tasks', () => {
+    const router = TestBed.inject(Router);
+    const route = router.config.find(
+      (candidate) => candidate.path === 'upload-policies',
+    );
+
+    expect(route?.redirectTo).toBe('tasks');
+    expect(route?.pathMatch).toBe('full');
   });
 });

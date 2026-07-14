@@ -27,10 +27,8 @@ const routes: Routes = [
   },
   {
     path: 'upload-policies',
-    loadChildren: () =>
-      import('./upload-policies/upload-policies.module').then(
-        (m) => m.UploadPoliciesModule,
-      ),
+    pathMatch: 'full',
+    redirectTo: 'tasks',
   },
   {
     path: 'uploads',

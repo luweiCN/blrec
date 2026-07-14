@@ -307,7 +307,7 @@ export class RecordingSessionsComponent implements OnInit {
     if (session.state === 'open') {
       return '本场仍在录制，结束并归集后才会创建投稿任务。';
     }
-    return '尚未创建投稿任务；请检查投稿规则、账号状态和分 P 制品是否就绪。';
+    return '尚未创建投稿任务；请检查房间投稿设置、账号状态和分 P 制品是否就绪。';
   }
 
   sessionHeader(session: RecordingSession): string {

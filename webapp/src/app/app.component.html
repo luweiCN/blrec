@@ -30,10 +30,10 @@
             nzMatchRouter="true"
             nz-tooltip
             nzTooltipPlacement="right"
-            [nzTooltipTitle]="collapsed ? '任务' : ''"
+            [nzTooltipTitle]="collapsed ? '录制任务' : ''"
           >
             <i nz-icon nzType="unordered-list" nzTheme="outline"></i>
-            <span><a routerLink="/tasks">任务</a></span>
+            <span><a routerLink="/tasks">录制任务</a></span>
           </li>
           <li
             nz-menu-item
@@ -44,16 +44,6 @@
           >
             <i nz-icon nzType="cloud-upload" nzTheme="outline"></i>
             <span><a routerLink="/upload-tasks">上传任务</a></span>
-          </li>
-          <li
-            nz-menu-item
-            nzMatchRouter="true"
-            nz-tooltip
-            nzTooltipPlacement="right"
-            [nzTooltipTitle]="collapsed ? '投稿规则' : ''"
-          >
-            <i nz-icon nzType="form" nzTheme="outline"></i>
-            <span><a routerLink="/upload-policies">投稿规则</a></span>
           </li>
           <li
             nz-menu-item

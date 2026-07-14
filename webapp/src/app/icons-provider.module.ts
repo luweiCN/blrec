@@ -4,7 +4,6 @@ import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 import {
   CloudUploadOutline,
   DashboardOutline,
-  FormOutline,
   MenuFoldOutline,
   MenuUnfoldOutline,
   UserOutline,
@@ -14,7 +13,6 @@ const icons = [
   MenuFoldOutline,
   MenuUnfoldOutline,
   DashboardOutline,
-  FormOutline,
   CloudUploadOutline,
   UserOutline,
 ];
