@@ -262,6 +262,12 @@ class DanmakuDumper(
             uname=msg.uname,
             dmid=msg.dmid,
             text=text,
+            source_event_id=msg.source_event_id,
+            is_system=msg.is_system,
+            is_lottery=msg.is_lottery,
+            user_level=msg.user_level,
+            fan_medal_name=msg.fan_medal_name,
+            fan_medal_level=msg.fan_medal_level,
         )
 
     def _make_gift_send_record(self, msg: GiftSendMsg) -> GiftSendRecord:

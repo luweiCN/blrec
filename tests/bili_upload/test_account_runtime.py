@@ -127,6 +127,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.review_watcher is not None
         assert runtime.comment_planner is not None
         assert runtime.comment_publisher is not None
+        assert runtime.danmaku_importer is not None
 
         for _ in range(100):
             if protocol.oauth_calls:
@@ -158,6 +159,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.review_watcher is None
     assert runtime.comment_planner is None
     assert runtime.comment_publisher is None
+    assert runtime.danmaku_importer is None
 
 
 @pytest.mark.asyncio

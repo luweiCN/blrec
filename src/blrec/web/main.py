@@ -62,6 +62,7 @@ _bili_account_runtime = BiliAccountRuntime(
     api_key=_env_settings.api_key,
     credential_key=_env_settings.load_credential_key(),
     old_credential_keys=_env_settings.load_old_credential_keys(),
+    space_threshold_bytes=_settings.space.space_threshold,
     on_primary_credential_changed=_apply_primary_credential,
 )
 app = Application(

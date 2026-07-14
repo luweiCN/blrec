@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 import attr
 
@@ -28,6 +28,12 @@ class Danmu:
     uname: str
     dmid: int
     text: str
+    source_event_id: Optional[str] = None
+    is_system: Optional[bool] = None
+    is_lottery: Optional[bool] = None
+    user_level: Optional[int] = None
+    fan_medal_name: Optional[str] = None
+    fan_medal_level: Optional[int] = None
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)

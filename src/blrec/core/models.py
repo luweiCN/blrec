@@ -1,4 +1,5 @@
-from typing import Literal
+import json
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 import attr
 
@@ -17,22 +18,91 @@ class DanmuMsg:
     uid: int
     uname: str  # sender name
     text: str
+    source_event_id: Optional[str] = None
+    is_system: Optional[bool] = None
+    is_lottery: Optional[bool] = None
+    user_level: Optional[int] = None
+    fan_medal_name: Optional[str] = None
+    fan_medal_level: Optional[int] = None
 
     @staticmethod
     def from_danmu(danmu: Danmaku) -> 'DanmuMsg':
         info = danmu['info']
+        head = info[0]
+        sender = info[2]
+        uid = int(sender[0])
+        source_event_id = _nonempty_text(danmu.get('msg_id'))
+        if source_event_id is None and len(head) > 15:
+            source_event_id = _event_id_from_extra(head[15])
         return DanmuMsg(
-            mode=int(info[0][1]),
-            size=int(info[0][2]),
-            color=int(info[0][3]),
-            date=int(info[0][4]),
-            dmid=int(info[0][5]),
-            pool=int(info[0][6]),
-            uid_hash=info[0][7],
-            uid=int(info[2][0]),
-            uname=info[2][1],
+            mode=int(head[1]),
+            size=int(head[2]),
+            color=int(head[3]),
+            date=int(head[4]),
+            dmid=int(head[5]),
+            pool=int(head[6]),
+            uid_hash=head[7],
+            uid=uid,
+            uname=sender[1],
             text=info[1],
+            source_event_id=source_event_id,
+            is_system=uid == 0,
+            is_lottery=_optional_bool(head, 9),
+            user_level=_optional_int(info[4] if len(info) > 4 else (), 0),
+            fan_medal_name=_optional_text(info[3] if len(info) > 3 else (), 1),
+            fan_medal_level=_optional_int(info[3] if len(info) > 3 else (), 0),
         )
+
+
+def _optional_int(values: Any, index: int) -> Optional[int]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return None
+    if len(values) <= index:
+        return None
+    value = values[index]
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _optional_bool(values: Any, index: int) -> Optional[bool]:
+    value = _optional_int(values, index)
+    return None if value is None else value != 0
+
+
+def _optional_text(values: Any, index: int) -> Optional[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return None
+    if len(values) <= index:
+        return None
+    return _nonempty_text(values[index])
+
+
+def _nonempty_text(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _event_id_from_extra(value: Any) -> Optional[str]:
+    if not isinstance(value, Mapping):
+        return None
+    extra = value.get('extra')
+    if not isinstance(extra, str):
+        return None
+    try:
+        parsed = json.loads(extra)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    return _nonempty_text(parsed.get('id_str'))
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)

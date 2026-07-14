@@ -13,6 +13,7 @@ from .accounts import AccountManager, AccountWriteGate
 from .comments import CommentPlanner, CommentPublisher
 from .credentials import CredentialStore
 from .crypto import CredentialCipher
+from .danmaku_import import DanmakuImporter
 from .database import BiliUploadDatabase
 from .journal import RecordingJournalBridge
 from .models import FeatureUnavailable, validate_feature_gate
@@ -32,11 +33,6 @@ async def _unavailable_wbi_keys() -> Tuple[str, str]:
     raise RuntimeError('WBI key provider is not configured')
 
 
-class _DeferredPostReviewBranch:
-    async def create(self, _job_id: int) -> None:
-        return None
-
-
 class BiliAccountRuntime:
     def __init__(
         self,
@@ -49,12 +45,15 @@ class BiliAccountRuntime:
         clock: Callable[[], float] = time.time,
         refresh_interval_seconds: float = 3600,
         upload_interval_seconds: float = 30,
+        space_threshold_bytes: int = 1024**3,
         on_primary_credential_changed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         if refresh_interval_seconds <= 0:
             raise ValueError('refresh interval must be positive')
         if upload_interval_seconds <= 0:
             raise ValueError('upload interval must be positive')
+        if space_threshold_bytes < 0:
+            raise ValueError('space threshold must not be negative')
         self._settings = settings
         self._api_key = api_key
         self._credential_key = credential_key
@@ -63,6 +62,7 @@ class BiliAccountRuntime:
         self._clock = clock
         self._refresh_interval_seconds = refresh_interval_seconds
         self._upload_interval_seconds = upload_interval_seconds
+        self._space_threshold_bytes = space_threshold_bytes
         self._on_primary_credential_changed = on_primary_credential_changed
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
@@ -73,6 +73,7 @@ class BiliAccountRuntime:
         self._review_watcher: Optional[ReviewWatcher] = None
         self._comment_planner: Optional[CommentPlanner] = None
         self._comment_publisher: Optional[CommentPublisher] = None
+        self._danmaku_importer: Optional[DanmakuImporter] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
@@ -107,6 +108,10 @@ class BiliAccountRuntime:
     @property
     def comment_publisher(self) -> Optional[CommentPublisher]:
         return self._comment_publisher
+
+    @property
+    def danmaku_importer(self) -> Optional[DanmakuImporter]:
+        return self._danmaku_importer
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -197,13 +202,19 @@ class BiliAccountRuntime:
                 auto_comment_enabled=(lambda: self._settings.auto_comment_enabled),
                 clock=self._clock,
             )
-            deferred_branch = _DeferredPostReviewBranch()
+            danmaku_importer = DanmakuImporter(
+                database,
+                import_high_watermark=self._settings.import_high_watermark,
+                space_threshold_bytes=self._space_threshold_bytes,
+                enabled=lambda: self._settings.danmaku_backfill_enabled,
+                clock=self._clock,
+            )
             review_watcher = ReviewWatcher(
                 database,
                 protocol,
                 bundle_loader=load_bundle,
                 comment_branch=comment_planner,
-                danmaku_branch=deferred_branch,
+                danmaku_branch=danmaku_importer,
                 clock=self._clock,
             )
         except Exception:
@@ -220,12 +231,17 @@ class BiliAccountRuntime:
         self._review_watcher = review_watcher
         self._comment_planner = comment_planner
         self._comment_publisher = comment_publisher
+        self._danmaku_importer = danmaku_importer
         self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         self._upload_task = asyncio.create_task(
             self._run_uploads(
-                coordinator, review_watcher, comment_publisher, upload_stop_event
+                coordinator,
+                review_watcher,
+                comment_publisher,
+                danmaku_importer,
+                upload_stop_event,
             )
         )
         return True
@@ -258,6 +274,7 @@ class BiliAccountRuntime:
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None
+        self._danmaku_importer = None
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -291,16 +308,19 @@ class BiliAccountRuntime:
         coordinator: UploadCoordinator,
         review_watcher: ReviewWatcher,
         comment_publisher: CommentPublisher,
+        danmaku_importer: DanmakuImporter,
         stop_event: asyncio.Event,
     ) -> None:
         while not stop_event.is_set():
             upload_processed = None
             comment_processed = None
+            danmaku_imported = None
             try:
                 await review_watcher.run_once()
                 await coordinator.create_ready_jobs()
                 upload_processed = await coordinator.run_once()
                 comment_processed = await comment_publisher.run_once()
+                danmaku_imported = await danmaku_importer.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -309,6 +329,8 @@ class BiliAccountRuntime:
             if comment_processed is not None:
                 delay = _COMMENT_ACTION_INTERVAL_SECONDS
             elif upload_processed is not None:
+                delay = 1
+            elif danmaku_imported is not None:
                 delay = 1
             else:
                 delay = self._upload_interval_seconds
@@ -332,6 +354,7 @@ class BiliAccountRuntime:
         self._review_watcher = None
         self._comment_planner = None
         self._comment_publisher = None
+        self._danmaku_importer = None
         self._journal = None
         transport, self._transport = self._transport, None
         if transport is not None:
