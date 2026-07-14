@@ -269,8 +269,8 @@ class ReviewWatcher:
                 )
             connection.execute(
                 "UPDATE upload_jobs SET state='approved',review_reason=NULL,"
-                'updated_at=? WHERE id=?',
-                (now, job.id),
+                'approved_at=?,updated_at=? WHERE id=?',
+                (now, now, job.id),
             )
             return True
 

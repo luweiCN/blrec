@@ -188,6 +188,8 @@ async def test_policy_round_trips_collection_cover_and_schedule_settings(
                 cover_mode='custom',
                 cover_asset_id=7,
                 publish_delay_seconds=7200,
+                retention_mode='approved',
+                retention_days=14,
             ),
         )
 
@@ -196,6 +198,8 @@ async def test_policy_round_trips_collection_cover_and_schedule_settings(
         assert policy.cover_mode == 'custom'
         assert policy.cover_asset_id == 7
         assert policy.publish_delay_seconds == 7200
+        assert policy.retention_mode == 'approved'
+        assert policy.retention_days == 14
     finally:
         await database.close()
 
@@ -210,6 +214,9 @@ async def test_policy_round_trips_collection_cover_and_schedule_settings(
         ({'cover_mode': 'live', 'cover_asset_id': 7}, 'cover'),
         ({'publish_delay_seconds': 3600}, 'publish delay'),
         ({'publish_delay_seconds': 15 * 24 * 60 * 60 + 1}, 'publish delay'),
+        ({'retention_mode': 'invalid'}, 'retention mode'),
+        ({'retention_days': -1}, 'retention days'),
+        ({'retention_days': 3651}, 'retention days'),
     ),
 )
 async def test_policy_rejects_invalid_collection_cover_and_schedule_settings(

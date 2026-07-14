@@ -96,6 +96,8 @@ describe('UploadPolicyDialogComponent', () => {
     coverMode: 'custom',
     coverAssetId: 3,
     publishDelaySeconds: 21_600,
+    retentionMode: 'approved',
+    retentionDays: 14,
     blockedReason: null,
     createdAt: 1000,
     updatedAt: 1000,
@@ -335,6 +337,8 @@ describe('UploadPolicyDialogComponent', () => {
         coverMode: 'custom',
         coverAssetId: 3,
         publishDelaySeconds: 21_600,
+        retentionMode: 'approved',
+        retentionDays: 14,
       }),
     );
 
@@ -361,6 +365,8 @@ describe('UploadPolicyDialogComponent', () => {
     component.collectionChanged('20:21');
     component.publishModeChanged('scheduled');
     component.publishDelayHours = 4;
+    component.draft.retentionMode = 'approved';
+    component.draft.retentionDays = 14;
 
     component.save();
 
@@ -372,6 +378,8 @@ describe('UploadPolicyDialogComponent', () => {
         collectionSeasonId: 20,
         collectionSectionId: 21,
         publishDelaySeconds: 14_400,
+        retentionMode: 'approved',
+        retentionDays: 14,
       }),
     );
   });

@@ -152,6 +152,8 @@ export interface SpaceSettings {
   checkInterval: number;
   spaceThreshold: number;
   recycleRecords: boolean;
+  recordingCapacity: number;
+  capacityWarningThreshold: number;
 }
 
 export interface EmailSettings {

@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Iterable, List
+from typing import Awaitable, Callable, Iterable, List, Optional
 
 from loguru import logger
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_none
@@ -18,19 +18,7 @@ __all__ = ('SpaceReclaimer',)
 
 class SpaceReclaimer(SpaceEventListener, SwitchableMixin):
     _SUFFIX_SET = frozenset(
-        (
-            '.flv',
-            '.mp4',
-            '.ts',
-            '.m4s',
-            '.m3u8',
-            '.xml',
-            '.json',
-            '.meta',
-            '.jsonl',
-            '.jpg',
-            '.png',
-        )
+        ('.flv', '.mp4', '.ts', '.m4s', '.m3u8', '.mkv', '.mov', '.webm')
     )
 
     def __init__(
@@ -40,6 +28,7 @@ class SpaceReclaimer(SpaceEventListener, SwitchableMixin):
         *,
         rec_ttl: int = 60 * 60 * 24,
         recycle_records: bool = False,
+        managed_reclaimer: Optional[Callable[[int], Awaitable[bool]]] = None,
     ) -> None:
         super().__init__()
         self._space_monitor = space_monitor
@@ -51,6 +40,7 @@ class SpaceReclaimer(SpaceEventListener, SwitchableMixin):
                 logger.warning(repr(exc))
         self.rec_ttl = rec_ttl
         self.recycle_records = recycle_records
+        self._managed_reclaimer = managed_reclaimer
 
     async def on_space_no_enough(
         self, path: str, threshold: int, disk_usage: DiskUsage
@@ -75,6 +65,8 @@ class SpaceReclaimer(SpaceEventListener, SwitchableMixin):
 
     async def _free_space_from_records(self, size: int) -> bool:
         logger.info('Free space from records ...')
+        if self._managed_reclaimer is not None:
+            return await self._managed_reclaimer(size)
         ts = datetime.now().timestamp() - self.rec_ttl
         for path in await self._get_record_file_paths(ts):
             await delete_file(path)

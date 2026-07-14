@@ -57,6 +57,8 @@ def policy_view(room_id: int = 100) -> RoomUploadPolicyView:
         cover_mode='custom',
         cover_asset_id=7,
         publish_delay_seconds=7200,
+        retention_mode='approved',
+        retention_days=14,
     )
 
 
@@ -212,6 +214,8 @@ def test_list_room_upload_policies_returns_resolved_account(client: TestClient) 
         'coverMode': 'custom',
         'coverAssetId': 7,
         'publishDelaySeconds': 7200,
+        'retentionMode': 'approved',
+        'retentionDays': 14,
     }
 
 

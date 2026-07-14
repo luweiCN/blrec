@@ -68,7 +68,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 9
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 10
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -99,6 +99,8 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'cover_mode',
             'cover_asset_id',
             'publish_delay_seconds',
+            'retention_mode',
+            'retention_days',
         } <= policy_columns
         job_columns = {
             row['name']
@@ -108,6 +110,9 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'scheduled_publish_at',
             'collection_branch_state',
             'collection_error',
+            'upload_completed_at',
+            'submitted_at',
+            'approved_at',
         } <= job_columns
         session_columns = {
             row['name']
@@ -134,6 +139,9 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'record_duration_seconds',
             'file_size_bytes',
             'danmaku_count',
+            'video_deleted_at',
+            'video_delete_reason',
+            'video_delete_error',
         } <= part_columns
 
         indexes = {
@@ -297,7 +305,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 9
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 10
     finally:
         await database.close()
 

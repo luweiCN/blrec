@@ -58,6 +58,10 @@ class RoomUploadPolicyRequest(ApiModel):
     cover_mode: Literal['live', 'custom'] = 'live'
     cover_asset_id: Optional[int] = Field(None, gt=0)
     publish_delay_seconds: int = Field(0, ge=0)
+    retention_mode: Literal[
+        'never', 'upload_completed', 'submitted', 'approved', 'capacity'
+    ] = 'submitted'
+    retention_days: int = Field(5, ge=0, le=3650)
 
     def to_command(self) -> RoomUploadPolicyCommand:
         return RoomUploadPolicyCommand(
@@ -86,6 +90,8 @@ class RoomUploadPolicyRequest(ApiModel):
             cover_mode=self.cover_mode,
             cover_asset_id=self.cover_asset_id,
             publish_delay_seconds=self.publish_delay_seconds,
+            retention_mode=self.retention_mode,
+            retention_days=self.retention_days,
         )
 
 
@@ -121,6 +127,8 @@ class RoomUploadPolicyResponse(ApiModel):
     cover_mode: str
     cover_asset_id: Optional[int]
     publish_delay_seconds: int
+    retention_mode: str
+    retention_days: int
 
 
 class UploadCategoryNodeResponse(ApiModel):

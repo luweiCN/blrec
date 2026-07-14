@@ -63,6 +63,7 @@ class _Job:
     policy_snapshot_json: str
     state: str
     submit_state: str
+    upload_completed_at: Optional[int]
 
 
 class UploadCoordinator:
@@ -520,13 +521,15 @@ class UploadCoordinator:
                     raise UposUploadStopped('upload stopped before archive submission')
                 payload = await self._submit_payload(job)
                 scheduled_publish_at = payload.get('dtime')
+                now = int(self._clock())
                 await self._update_job(
                     claim,
                     {
                         'state': 'submitting',
                         'submit_state': 'in_flight',
                         'scheduled_publish_at': scheduled_publish_at,
-                        'updated_at': int(self._clock()),
+                        'upload_completed_at': job.upload_completed_at or now,
+                        'updated_at': now,
                     },
                 )
                 submit_started = True
@@ -597,6 +600,7 @@ class UploadCoordinator:
                 'submit_state': 'confirmed',
                 'aid': aid,
                 'bvid': bvid,
+                'submitted_at': int(self._clock()),
                 'review_reason': None,
                 'updated_at': int(self._clock()),
             },
@@ -749,7 +753,8 @@ class UploadCoordinator:
 
     async def _load_job(self, claim: LeaseClaim) -> _Job:
         row = await self._database.fetchone(
-            'SELECT id,account_id,policy_snapshot_json,state,submit_state '
+            'SELECT id,account_id,policy_snapshot_json,state,submit_state,'
+            'upload_completed_at '
             'FROM upload_jobs WHERE id=? AND lease_owner=? AND lease_generation=?',
             (claim.id, claim.lease_owner, claim.lease_generation),
         )
@@ -761,6 +766,11 @@ class UploadCoordinator:
             policy_snapshot_json=str(row['policy_snapshot_json']),
             state=str(row['state']),
             submit_state=str(row['submit_state']),
+            upload_completed_at=(
+                None
+                if row['upload_completed_at'] is None
+                else int(row['upload_completed_at'])
+            ),
         )
 
     async def _retry_not_sent(self, claim: LeaseClaim, *, submit_started: bool) -> None:
@@ -814,6 +824,8 @@ class UploadCoordinator:
             'scheduled_publish_at',
             'state',
             'submit_state',
+            'submitted_at',
+            'upload_completed_at',
             'updated_at',
         }
         if not values or not set(values) <= allowed:

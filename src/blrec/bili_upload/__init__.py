@@ -14,6 +14,7 @@ from .database import (
     LeaseLost,
     UnsupportedDatabaseFilesystem,
 )
+from .retention import RetentionManager, RetentionStatus
 from .models import FeatureUnavailable, JobState, WriteState, validate_feature_gate
 
 __all__ = (
@@ -31,6 +32,8 @@ __all__ = (
     'RelatedUploadJob',
     'RemovalMode',
     'UnsupportedDatabaseFilesystem',
+    'RetentionManager',
+    'RetentionStatus',
     'WriteState',
     'validate_feature_gate',
 )

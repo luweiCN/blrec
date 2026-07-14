@@ -38,6 +38,8 @@ describe('RoomUploadPolicyService', () => {
     coverMode: 'live',
     coverAssetId: null,
     publishDelaySeconds: 0,
+    retentionMode: 'submitted',
+    retentionDays: 5,
   };
 
   beforeEach(() => {

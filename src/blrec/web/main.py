@@ -24,6 +24,7 @@ from .routers import (
     bili_accounts,
     bili_collections,
     live_status,
+    recording_retention,
     recording_sessions,
     room_upload_policies,
     settings,
@@ -65,6 +66,11 @@ _bili_account_runtime = BiliAccountRuntime(
     credential_key=_env_settings.load_credential_key(),
     old_credential_keys=_env_settings.load_old_credential_keys(),
     space_threshold_bytes=_settings.space.space_threshold,
+    recording_root=_settings.output.out_dir,
+    recording_capacity_bytes=lambda: _settings.space.recording_capacity,
+    capacity_warning_threshold_bytes=(
+        lambda: _settings.space.capacity_warning_threshold
+    ),
     on_primary_credential_changed=_apply_primary_credential,
 )
 app = Application(
@@ -72,6 +78,7 @@ app = Application(
     managed_cookie_provider=_managed_cookie_provider,
     auth_failure_reporter=_report_primary_auth_failure,
     recording_journal_provider=lambda: _bili_account_runtime.journal,
+    recording_retention_provider=(lambda: _bili_account_runtime.retention_manager),
 )
 bili_accounts.manager = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -79,6 +86,8 @@ recording_sessions.journal = None
 recording_sessions.danmaku_publisher = None
 recording_sessions.content_reader = None
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+recording_retention.manager = None
+recording_retention.unavailable_reason = _bili_account_runtime.unavailable_reason
 room_upload_policies.manager = None
 room_upload_policies.category_catalog = None
 room_upload_policies.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -162,6 +171,10 @@ async def on_startup() -> None:
         recording_sessions.danmaku_publisher = _bili_account_runtime.danmaku_publisher
         recording_sessions.content_reader = _bili_account_runtime.content_reader
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+        recording_retention.manager = _bili_account_runtime.retention_manager
+        recording_retention.unavailable_reason = (
+            _bili_account_runtime.unavailable_reason
+        )
         room_upload_policies.manager = _bili_account_runtime.policy_manager
         room_upload_policies.category_catalog = _bili_account_runtime.category_catalog
         room_upload_policies.unavailable_reason = (
@@ -181,6 +194,7 @@ async def on_startup() -> None:
         recording_sessions.journal = None
         recording_sessions.danmaku_publisher = None
         recording_sessions.content_reader = None
+        recording_retention.manager = None
         room_upload_policies.manager = None
         room_upload_policies.category_catalog = None
         upload_covers.library = None
@@ -201,6 +215,7 @@ async def on_shuntdown() -> None:
     recording_sessions.journal = None
     recording_sessions.danmaku_publisher = None
     recording_sessions.content_reader = None
+    recording_retention.manager = None
     room_upload_policies.manager = None
     room_upload_policies.category_catalog = None
     upload_covers.library = None
@@ -228,6 +243,7 @@ api.include_router(update.router)
 api.include_router(live_status.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
 api.include_router(recording_sessions.router, prefix='/api/v1')
+api.include_router(recording_retention.router, prefix='/api/v1')
 api.include_router(room_upload_policies.router, prefix='/api/v1')
 api.include_router(upload_covers.router, prefix='/api/v1')
 api.include_router(bili_collections.router, prefix='/api/v1')

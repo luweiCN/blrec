@@ -29,6 +29,7 @@ import {
   UploadCategoryNode,
   UploadCoverMode,
   UploadCreationStatement,
+  UploadRetentionMode,
 } from './room-upload-policy.model';
 import { RoomUploadPolicyService } from './room-upload-policy.service';
 
@@ -62,6 +63,8 @@ const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
   coverMode: 'live',
   coverAssetId: null,
   publishDelaySeconds: 0,
+  retentionMode: 'submitted',
+  retentionDays: 5,
 };
 
 type PublishMode = 'immediate' | 'scheduled';
@@ -77,7 +80,8 @@ type PolicyValidationErrors = Partial<
     | 'source'
     | 'cover'
     | 'collection'
-    | 'schedule',
+    | 'schedule'
+    | 'retention',
     string
   >
 >;
@@ -113,6 +117,16 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   collectionSelection: string | null = null;
   publishMode: PublishMode = 'immediate';
   publishDelayHours = 2;
+  readonly retentionModeOptions: {
+    label: string;
+    value: UploadRetentionMode;
+  }[] = [
+    { label: '投稿成功后删除', value: 'submitted' },
+    { label: '审核通过后删除', value: 'approved' },
+    { label: '上传完成后删除', value: 'upload_completed' },
+    { label: '容量超限时清理', value: 'capacity' },
+    { label: '从不删除', value: 'never' },
+  ];
   coverLoading = false;
   coverUploading = false;
   collectionLoading = false;
@@ -248,6 +262,14 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   get allowDanmaku(): boolean {
     return !this.draft.upCloseDanmu;
+  }
+
+  get retentionUsesDays(): boolean {
+    return (
+      this.draft.retentionMode === 'upload_completed' ||
+      this.draft.retentionMode === 'submitted' ||
+      this.draft.retentionMode === 'approved'
+    );
   }
 
   get validationErrors(): PolicyValidationErrors {
@@ -497,6 +519,8 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
         this.publishMode === 'scheduled'
           ? Math.round(this.publishDelayHours * 3600)
           : 0,
+      retentionMode: this.draft.retentionMode,
+      retentionDays: this.draft.retentionDays,
     };
     this.saving = true;
     this.error = null;
@@ -788,6 +812,13 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     ) {
       errors.schedule = '定时发布需设置为 2～360 个整小时';
     }
+    if (
+      !Number.isInteger(this.draft.retentionDays) ||
+      this.draft.retentionDays < 0 ||
+      this.draft.retentionDays > 3650
+    ) {
+      errors.retention = '保留天数需填写 0～3650 的整数';
+    }
     return errors;
   }
 
@@ -822,6 +853,8 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       coverMode: policy.coverMode,
       coverAssetId: policy.coverAssetId,
       publishDelaySeconds: policy.publishDelaySeconds,
+      retentionMode: policy.retentionMode,
+      retentionDays: policy.retentionDays,
     };
   }
 

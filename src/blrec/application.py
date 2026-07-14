@@ -23,6 +23,7 @@ from .utils.string import camel_case
 if TYPE_CHECKING:
     from .bili.live_status_coordinator import LiveStatusCoordinator
     from .bili_upload.journal import RecordingJournalBridge
+    from .bili_upload.retention import RetentionManager
     from .core.typing import MetaData
     from .flv.operators import StreamProfile
     from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
@@ -100,6 +101,9 @@ class Application:
         recording_journal_provider: Optional[
             Callable[[], Optional[RecordingJournalBridge]]
         ] = None,
+        recording_retention_provider: Optional[
+            Callable[[], Optional[RetentionManager]]
+        ] = None,
     ) -> None:
         self._settings = settings
         self._out_dir = settings.output.out_dir
@@ -109,6 +113,7 @@ class Application:
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
         self._recording_journal_provider = recording_journal_provider
+        self._recording_retention_provider = recording_retention_provider
 
     @property
     def info(self) -> AppInfo:
@@ -504,7 +509,21 @@ class Application:
         self._space_event_submitter = SpaceEventSubmitter(self._space_monitor)
 
     def _setup_space_reclaimer(self) -> None:
-        self._space_reclaimer = SpaceReclaimer(self._space_monitor, self._out_dir)
+        async def reclaim(size: int) -> bool:
+            if self._recording_retention_provider is None:
+                return False
+            manager = self._recording_retention_provider()
+            if manager is None:
+                return False
+            return await manager.reclaim_for_low_space(size)
+
+        self._space_reclaimer = SpaceReclaimer(
+            self._space_monitor,
+            self._out_dir,
+            managed_reclaimer=(
+                reclaim if self._recording_retention_provider is not None else None
+            ),
+        )
         self._settings_manager.apply_space_reclaimer_settings()
         self._space_reclaimer.enable()
 

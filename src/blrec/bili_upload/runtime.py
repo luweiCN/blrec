@@ -26,6 +26,7 @@ from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .recording_content import RecordingContentReader
+from .retention import RetentionManager
 from .review import ReviewWatcher
 from .signing import WbiSigner, WebSessionBuilder
 from .upload import UploadCoordinator
@@ -54,6 +55,9 @@ class BiliAccountRuntime:
         refresh_interval_seconds: float = 3600,
         upload_interval_seconds: float = 30,
         space_threshold_bytes: int = 1024**3,
+        recording_root: Optional[str] = None,
+        recording_capacity_bytes: Callable[[], int] = lambda: 0,
+        capacity_warning_threshold_bytes: Callable[[], int] = lambda: 0,
         on_primary_credential_changed: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         if refresh_interval_seconds <= 0:
@@ -71,6 +75,9 @@ class BiliAccountRuntime:
         self._refresh_interval_seconds = refresh_interval_seconds
         self._upload_interval_seconds = upload_interval_seconds
         self._space_threshold_bytes = space_threshold_bytes
+        self._recording_root = recording_root
+        self._recording_capacity_bytes = recording_capacity_bytes
+        self._capacity_warning_threshold_bytes = capacity_warning_threshold_bytes
         self._on_primary_credential_changed = on_primary_credential_changed
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
@@ -89,6 +96,7 @@ class BiliAccountRuntime:
         self._comment_publisher: Optional[CommentPublisher] = None
         self._danmaku_importer: Optional[DanmakuImporter] = None
         self._danmaku_publisher: Optional[DanmakuPublisher] = None
+        self._retention_manager: Optional[RetentionManager] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
@@ -155,6 +163,10 @@ class BiliAccountRuntime:
     @property
     def danmaku_publisher(self) -> Optional[DanmakuPublisher]:
         return self._danmaku_publisher
+
+    @property
+    def retention_manager(self) -> Optional[RetentionManager]:
+        return self._retention_manager
 
     @property
     def unavailable_reason(self) -> Optional[str]:
@@ -293,6 +305,17 @@ class BiliAccountRuntime:
                 collection_branch=collection_publisher,
                 clock=self._clock,
             )
+            retention_manager = (
+                None
+                if self._recording_root is None
+                else RetentionManager(
+                    database,
+                    Path(self._recording_root),
+                    capacity_bytes=self._recording_capacity_bytes,
+                    warning_threshold_bytes=(self._capacity_warning_threshold_bytes),
+                    clock=self._clock,
+                )
+            )
         except Exception:
             logger.exception('Bilibili account management failed to start')
             await self._close_partial(database)
@@ -315,6 +338,7 @@ class BiliAccountRuntime:
         self._comment_publisher = comment_publisher
         self._danmaku_importer = danmaku_importer
         self._danmaku_publisher = danmaku_publisher
+        self._retention_manager = retention_manager
         self._upload_stop_event = upload_stop_event
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
@@ -327,6 +351,7 @@ class BiliAccountRuntime:
                 danmaku_importer,
                 danmaku_publisher,
                 upload_stop_event,
+                retention_manager,
             )
         )
         return True
@@ -366,6 +391,7 @@ class BiliAccountRuntime:
         self._comment_publisher = None
         self._danmaku_importer = None
         self._danmaku_publisher = None
+        self._retention_manager = None
         self._content_reader = None
         transport, self._transport = self._transport, None
         if transport is not None:
@@ -404,6 +430,7 @@ class BiliAccountRuntime:
         danmaku_importer: DanmakuImporter,
         danmaku_publisher: DanmakuPublisher,
         stop_event: asyncio.Event,
+        retention_manager: Optional[RetentionManager] = None,
     ) -> None:
         while not stop_event.is_set():
             upload_processed = None
@@ -418,6 +445,8 @@ class BiliAccountRuntime:
                 comment_processed = await comment_publisher.run_once()
                 danmaku_imported = await danmaku_importer.run_once()
                 danmaku_published = await danmaku_publisher.run_once()
+                if retention_manager is not None:
+                    await retention_manager.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -460,6 +489,7 @@ class BiliAccountRuntime:
         self._comment_publisher = None
         self._danmaku_importer = None
         self._danmaku_publisher = None
+        self._retention_manager = None
         self._journal = None
         self._content_reader = None
         transport, self._transport = self._transport, None

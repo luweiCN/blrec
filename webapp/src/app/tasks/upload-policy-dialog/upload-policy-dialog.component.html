@@ -525,6 +525,48 @@
           ></nz-switch>
         </div>
       </section>
+
+      <section class="form-section" aria-labelledby="retention-heading">
+        <h3 id="retention-heading">本地录像</h3>
+
+        <nz-form-item>
+          <nz-form-label>视频删除策略</nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="retentionMode"
+              [ngModel]="draft.retentionMode"
+              (ngModelChange)="draft.retentionMode = $event"
+              [nzOptions]="retentionModeOptions"
+            ></nz-select>
+            <div *ngIf="retentionUsesDays" class="retention-days-control">
+              <span>达到条件</span>
+              <input
+                nz-input
+                type="number"
+                name="retentionDays"
+                min="0"
+                max="3650"
+                step="1"
+                [(ngModel)]="draft.retentionDays"
+              />
+              <span>天后删除</span>
+            </div>
+            <span *ngIf="validationErrors.retention" class="field-error">
+              {{ validationErrors.retention }}
+            </span>
+            <span class="field-help">
+              只删除本地视频，弹幕 XML 和场次信息会一直保留。填写 0
+              表示达到条件后立即删除。
+            </span>
+            <span
+              *ngIf="draft.retentionMode === 'capacity'"
+              class="field-help"
+            >
+              按设置页的录像容量上限清理最旧且已投稿成功的视频。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+      </section>
     </form>
   </ng-container>
 

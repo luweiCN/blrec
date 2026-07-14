@@ -53,6 +53,8 @@ class RoomUploadPolicyCommand:
     cover_mode: str = 'live'
     cover_asset_id: Optional[int] = None
     publish_delay_seconds: int = 0
+    retention_mode: str = 'submitted'
+    retention_days: int = 5
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,8 @@ class RoomUploadPolicyView:
     cover_mode: str = 'live'
     cover_asset_id: Optional[int] = None
     publish_delay_seconds: int = 0
+    retention_mode: str = 'submitted'
+    retention_days: int = 5
 
 
 class RoomUploadPolicyManager:
@@ -109,7 +113,7 @@ class RoomUploadPolicyManager:
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at,'
             'collection_season_id,collection_section_id,cover_mode,'
-            'cover_asset_id,publish_delay_seconds '
+            'cover_asset_id,publish_delay_seconds,retention_mode,retention_days '
             'FROM room_upload_policies ORDER BY room_id'
         )
         return [await self._view(row) for row in rows]
@@ -123,7 +127,7 @@ class RoomUploadPolicyManager:
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at,'
             'collection_season_id,collection_section_id,cover_mode,'
-            'cover_asset_id,publish_delay_seconds '
+            'cover_asset_id,publish_delay_seconds,retention_mode,retention_days '
             'FROM room_upload_policies WHERE room_id=?',
             (room_id,),
         )
@@ -154,8 +158,8 @@ class RoomUploadPolicyManager:
             'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
             'danmaku_backfill,filter_json,created_at,updated_at,'
             'collection_season_id,collection_section_id,cover_mode,'
-            'cover_asset_id,publish_delay_seconds) '
-            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+            'cover_asset_id,publish_delay_seconds,retention_mode,retention_days) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(room_id) DO UPDATE SET '
             'account_mode=excluded.account_mode,account_id=excluded.account_id,'
             'enabled=excluded.enabled,title_template=excluded.title_template,'
@@ -180,6 +184,8 @@ class RoomUploadPolicyManager:
             'cover_mode=excluded.cover_mode,'
             'cover_asset_id=excluded.cover_asset_id,'
             'publish_delay_seconds=excluded.publish_delay_seconds,'
+            'retention_mode=excluded.retention_mode,'
+            'retention_days=excluded.retention_days,'
             'updated_at=excluded.updated_at',
             (
                 room_id,
@@ -212,6 +218,8 @@ class RoomUploadPolicyManager:
                 command.cover_mode,
                 command.cover_asset_id,
                 command.publish_delay_seconds,
+                command.retention_mode,
+                command.retention_days,
             ),
         )
         return await self.get(room_id)
@@ -304,6 +312,16 @@ class RoomUploadPolicyManager:
             raise InvalidRoomUploadPolicy(
                 'publish delay must be zero or between 2 hours and 15 days'
             )
+        if command.retention_mode not in (
+            'never',
+            'upload_completed',
+            'submitted',
+            'approved',
+            'capacity',
+        ):
+            raise InvalidRoomUploadPolicy('retention mode is invalid')
+        if not 0 <= command.retention_days <= 3650:
+            raise InvalidRoomUploadPolicy('retention days must be between 0 and 3650')
         if not isinstance(command.filters, Mapping):
             raise InvalidRoomUploadPolicy('filters must be an object')
 
@@ -416,4 +434,6 @@ class RoomUploadPolicyManager:
                 None if row['cover_asset_id'] is None else int(row['cover_asset_id'])
             ),
             publish_delay_seconds=int(row['publish_delay_seconds']),
+            retention_mode=str(row['retention_mode']),
+            retention_days=int(row['retention_days']),
         )

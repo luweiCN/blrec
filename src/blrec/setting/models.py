@@ -517,6 +517,8 @@ class SpaceSettings(BaseModel):
     check_interval: int = 60  # 1 minutes
     space_threshold: int = 1024**3  # 1 GB
     recycle_records: bool = False
+    recording_capacity: Annotated[int, Field(ge=0, le=1024**5)] = 0
+    capacity_warning_threshold: Annotated[int, Field(ge=0, le=1024**5)] = 20 * 1024**3
 
     @validator('check_interval')
     def _validate_interval(cls, value: int) -> int:

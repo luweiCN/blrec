@@ -1,1 +1,10 @@
 @use '../shared/styles/setting';
+
+.capacity-status {
+  margin-bottom: 1rem;
+}
+
+.capacity-status-action {
+  display: flex;
+  justify-content: flex-end;
+}

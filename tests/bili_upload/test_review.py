@@ -212,6 +212,10 @@ async def test_review_binds_cids_by_remote_filename_not_array_position(
         assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
             'approved'
         )
+        assert (
+            await database.scalar('SELECT approved_at FROM upload_jobs WHERE id=1')
+            == 1000
+        )
         assert comment.calls == [1]
         assert danmaku.calls == [1]
     finally:

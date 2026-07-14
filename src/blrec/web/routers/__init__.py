@@ -3,6 +3,7 @@ from . import (
     bili_collections,
     live_status,
     recording_sessions,
+    recording_retention,
     room_upload_policies,
     upload_covers,
 )
@@ -12,6 +13,7 @@ __all__ = (
     'bili_collections',
     'live_status',
     'recording_sessions',
+    'recording_retention',
     'room_upload_policies',
     'upload_covers',
 )

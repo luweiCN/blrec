@@ -368,7 +368,8 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
         assert payload['cover'] == 'https://archive.biliimg.com/live.jpg'
         assert 'dtime' not in payload
         job = await database.fetchone(
-            'SELECT state,submit_state,aid,bvid FROM upload_jobs WHERE id=1'
+            'SELECT state,submit_state,aid,bvid,upload_completed_at,submitted_at '
+            'FROM upload_jobs WHERE id=1'
         )
         assert job is not None
         assert dict(job) == {
@@ -376,6 +377,8 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
             'submit_state': 'confirmed',
             'aid': 303,
             'bvid': 'BVfixture',
+            'upload_completed_at': 1000,
+            'submitted_at': 1000,
         }
     finally:
         await database.close()

@@ -1,5 +1,11 @@
 export type UploadAccountMode = 'primary' | 'fixed';
 export type UploadCoverMode = 'live' | 'custom';
+export type UploadRetentionMode =
+  | 'never'
+  | 'upload_completed'
+  | 'submitted'
+  | 'approved'
+  | 'capacity';
 
 export interface RoomUploadPolicyRequest {
   accountMode: UploadAccountMode;
@@ -27,6 +33,8 @@ export interface RoomUploadPolicyRequest {
   coverMode: UploadCoverMode;
   coverAssetId: number | null;
   publishDelaySeconds: number;
+  retentionMode: UploadRetentionMode;
+  retentionDays: number;
 }
 
 export interface RoomUploadPolicy extends RoomUploadPolicyRequest {
