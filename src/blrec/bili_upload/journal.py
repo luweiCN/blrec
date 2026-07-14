@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
 import time
 import uuid
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -29,6 +31,18 @@ class JournalConsistencyError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RecordingSessionMetadata:
+    title: str
+    cover_url: str
+    anchor_uid: int
+    anchor_name: str
+    area_id: int
+    area_name: str
+    parent_area_id: int
+    parent_area_name: str
+
+
+@dataclass(frozen=True)
 class RecordingPart:
     id: int
     session_id: int
@@ -43,6 +57,10 @@ class RecordingPart:
     source_exists: bool
     final_exists: bool
     error_message: Optional[str]
+    record_end_time: Optional[int] = None
+    record_duration_seconds: Optional[int] = None
+    file_size_bytes: Optional[int] = None
+    danmaku_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -54,7 +72,33 @@ class RecordingSession:
     state: str
     started_at: int
     ended_at: Optional[int]
+    title: str = ''
+    cover_url: str = ''
+    cover_path: Optional[str] = None
+    anchor_uid: Optional[int] = None
+    anchor_name: str = ''
+    area_id: Optional[int] = None
+    area_name: str = ''
+    parent_area_id: Optional[int] = None
+    parent_area_name: str = ''
+    live_end_time: Optional[int] = None
     parts: Tuple[RecordingPart, ...] = ()
+
+    @property
+    def part_count(self) -> int:
+        return len(self.parts)
+
+    @property
+    def danmaku_count(self) -> int:
+        return sum(part.danmaku_count for part in self.parts)
+
+    @property
+    def total_file_size_bytes(self) -> int:
+        return sum(part.file_size_bytes or 0 for part in self.parts)
+
+    @property
+    def record_duration_seconds(self) -> int:
+        return sum(part.record_duration_seconds or 0 for part in self.parts)
 
 
 _T = TypeVar('_T')
@@ -81,7 +125,12 @@ class RecordingJournalBridge:
         self._degraded_reason = '{}: {}'.format(type(error).__name__, error)
 
     async def recording_started(
-        self, room_id: int, *, live_start_time: int, event_id: Optional[str] = None
+        self,
+        room_id: int,
+        *,
+        live_start_time: int,
+        metadata: Optional[RecordingSessionMetadata] = None,
+        event_id: Optional[str] = None,
     ) -> str:
         now = int(self._clock())
         run_id = self._uuid_factory()
@@ -122,17 +171,52 @@ class RecordingJournalBridge:
             if row is None:
                 cursor = connection.execute(
                     'INSERT INTO recording_sessions('
-                    'room_id,broadcast_session_key,live_start_time,state,started_at) '
-                    'VALUES(?,?,?,?,?)',
-                    (room_id, key, live_start_time or None, 'open', now),
+                    'room_id,broadcast_session_key,live_start_time,state,started_at,'
+                    'title,cover_url,anchor_uid,anchor_name,area_id,area_name,'
+                    'parent_area_id,parent_area_name) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (
+                        room_id,
+                        key,
+                        live_start_time or None,
+                        'open',
+                        now,
+                        '' if metadata is None else metadata.title,
+                        '' if metadata is None else metadata.cover_url,
+                        None if metadata is None else metadata.anchor_uid,
+                        '' if metadata is None else metadata.anchor_name,
+                        None if metadata is None else metadata.area_id,
+                        '' if metadata is None else metadata.area_name,
+                        None if metadata is None else metadata.parent_area_id,
+                        '' if metadata is None else metadata.parent_area_name,
+                    ),
                 )
                 session_id = int(cursor.lastrowid)
             else:
                 session_id = int(row['id'])
                 connection.execute(
-                    "UPDATE recording_sessions SET state='open',ended_at=NULL "
-                    'WHERE id=?',
-                    (session_id,),
+                    "UPDATE recording_sessions SET state='open',ended_at=NULL,"
+                    'live_end_time=NULL,'
+                    "title=CASE WHEN title='' THEN ? ELSE title END,"
+                    "cover_url=CASE WHEN cover_url='' THEN ? ELSE cover_url END,"
+                    'anchor_uid=COALESCE(anchor_uid,?),'
+                    "anchor_name=CASE WHEN anchor_name='' THEN ? ELSE anchor_name END,"
+                    'area_id=COALESCE(area_id,?),'
+                    "area_name=CASE WHEN area_name='' THEN ? ELSE area_name END,"
+                    'parent_area_id=COALESCE(parent_area_id,?),'
+                    'parent_area_name=CASE WHEN parent_area_name=\'\' THEN ? '
+                    'ELSE parent_area_name END WHERE id=?',
+                    (
+                        '' if metadata is None else metadata.title,
+                        '' if metadata is None else metadata.cover_url,
+                        None if metadata is None else metadata.anchor_uid,
+                        '' if metadata is None else metadata.anchor_name,
+                        None if metadata is None else metadata.area_id,
+                        '' if metadata is None else metadata.area_name,
+                        None if metadata is None else metadata.parent_area_id,
+                        '' if metadata is None else metadata.parent_area_name,
+                        session_id,
+                    ),
                 )
             connection.execute(
                 'INSERT INTO recording_runs(id,session_id,state,started_at) '
@@ -152,6 +236,36 @@ class RecordingJournalBridge:
             return run_id
 
         return await self._database.write(write)
+
+    async def cover_downloaded(
+        self, run_id: str, path: str, *, event_id: Optional[str] = None
+    ) -> None:
+        now = int(self._clock())
+        cover_path = self._normalize_path(path)
+        journal_id = self._new_event_id(event_id)
+
+        def write(connection: sqlite3.Connection) -> None:
+            if self._event_was_recorded(connection, journal_id, 'cover_downloaded'):
+                return
+            session_id = self._session_id_for_run(connection, run_id)
+            room_id = self._room_id_for_run(connection, run_id)
+            connection.execute(
+                'UPDATE recording_sessions SET cover_path=COALESCE(cover_path,?) '
+                'WHERE id=?',
+                (cover_path, session_id),
+            )
+            self._insert_event(
+                connection,
+                journal_id,
+                'cover_downloaded',
+                room_id,
+                run_id,
+                cover_path,
+                {},
+                now,
+            )
+
+        await self._database.write(write)
 
     async def reconcile_open_sessions(self) -> None:
         now = int(self._clock())
@@ -323,8 +437,10 @@ class RecordingJournalBridge:
             room_id = self._room_id_for_run(connection, run_id)
             cursor = connection.execute(
                 'UPDATE recording_parts SET artifact_state=?,source_completed_at=?,'
-                'updated_at=? WHERE run_id=? AND source_path=?',
-                ('postprocessing', now, now, run_id, source_path),
+                'record_end_time=?,record_duration_seconds='
+                'MAX(0,?-record_start_time),updated_at=? '
+                'WHERE run_id=? AND source_path=?',
+                ('postprocessing', now, now, now, now, run_id, source_path),
             )
             if cursor.rowcount != 1:
                 raise JournalConsistencyError(
@@ -355,6 +471,10 @@ class RecordingJournalBridge:
         source = self._normalize_path(source_path)
         final = self._normalize_path(final_path)
         journal_id = self._new_event_id(event_id)
+        loop = asyncio.get_running_loop()
+        file_size_bytes = await loop.run_in_executor(
+            None, self._file_size_or_none, final
+        )
 
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'video_postprocessed'):
@@ -362,9 +482,9 @@ class RecordingJournalBridge:
             room_id = self._room_id_for_run(connection, run_id)
             cursor = connection.execute(
                 'UPDATE recording_parts SET artifact_state=?,final_path=?,'
-                'postprocessed_at=?,updated_at=? '
+                'file_size_bytes=?,postprocessed_at=?,updated_at=? '
                 'WHERE run_id=? AND source_path=?',
-                ('ready', final, now, now, run_id, source),
+                ('ready', final, file_size_bytes, now, now, run_id, source),
             )
             if cursor.rowcount != 1:
                 raise JournalConsistencyError(
@@ -442,6 +562,10 @@ class RecordingJournalBridge:
                 "UPDATE recording_runs SET state='finished',ended_at=? WHERE id=?",
                 (now, run_id),
             )
+            connection.execute(
+                'UPDATE recording_sessions SET live_end_time=? WHERE id=?',
+                (now, session_id),
+            )
             self._refresh_session_state(connection, session_id, now)
             self._insert_event(
                 connection,
@@ -506,6 +630,10 @@ class RecordingJournalBridge:
         now = int(self._clock())
         xml_path = self._normalize_path(path)
         journal_id = self._new_event_id(event_id)
+        loop = asyncio.get_running_loop()
+        danmaku_count = await loop.run_in_executor(
+            None, self._count_danmaku_sync, xml_path
+        )
 
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'danmaku_completed'):
@@ -529,9 +657,10 @@ class RecordingJournalBridge:
                     "cannot bind danmaku file '{}' to one recording part".format(path)
                 )
             connection.execute(
-                'UPDATE recording_parts SET xml_path=?,xml_completed=1,updated_at=? '
+                'UPDATE recording_parts SET xml_path=?,xml_completed=1,'
+                'danmaku_count=?,updated_at=? '
                 'WHERE id=?',
-                (xml_path, now, int(matches[0]['id'])),
+                (xml_path, danmaku_count, now, int(matches[0]['id'])),
             )
             self._insert_event(
                 connection,
@@ -550,7 +679,10 @@ class RecordingJournalBridge:
         row = await self._database.fetchone(
             'SELECT session.id,session.room_id,session.broadcast_session_key,'
             'session.live_start_time,session.state,session.started_at,'
-            'session.ended_at FROM recording_sessions session '
+            'session.ended_at,session.title,session.cover_url,session.cover_path,'
+            'session.anchor_uid,session.anchor_name,session.area_id,'
+            'session.area_name,session.parent_area_id,session.parent_area_name,'
+            'session.live_end_time FROM recording_sessions session '
             'JOIN recording_runs run ON run.session_id=session.id '
             'WHERE run.id=?',
             (run_id,),
@@ -564,7 +696,9 @@ class RecordingJournalBridge:
             raise ValueError('limit must be between 1 and 200')
         rows = await self._database.fetchall(
             'SELECT id,room_id,broadcast_session_key,live_start_time,state,'
-            'started_at,ended_at FROM recording_sessions '
+            'started_at,ended_at,title,cover_url,cover_path,anchor_uid,'
+            'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
+            'live_end_time FROM recording_sessions '
             'ORDER BY started_at DESC,id DESC LIMIT ?',
             (limit,),
         )
@@ -591,7 +725,9 @@ class RecordingJournalBridge:
     async def parts_for_run(self, run_id: str) -> Tuple[RecordingPart, ...]:
         rows = await self._database.fetchall(
             'SELECT id,session_id,run_id,part_index,source_path,final_path,'
-            'xml_path,record_start_time,artifact_state,xml_completed,error_message '
+            'xml_path,record_start_time,record_end_time,record_duration_seconds,'
+            'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
+            'error_message '
             'FROM recording_parts WHERE run_id=? ORDER BY part_index',
             (run_id,),
         )
@@ -600,7 +736,9 @@ class RecordingJournalBridge:
     async def parts_for_session(self, session_id: int) -> Tuple[RecordingPart, ...]:
         rows = await self._database.fetchall(
             'SELECT id,session_id,run_id,part_index,source_path,final_path,'
-            'xml_path,record_start_time,artifact_state,xml_completed,error_message '
+            'xml_path,record_start_time,record_end_time,record_duration_seconds,'
+            'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
+            'error_message '
             'FROM recording_parts WHERE session_id=? ORDER BY part_index',
             (session_id,),
         )
@@ -620,6 +758,20 @@ class RecordingJournalBridge:
             state=str(row['state']),
             started_at=int(row['started_at']),
             ended_at=None if row['ended_at'] is None else int(row['ended_at']),
+            title=str(row['title']),
+            cover_url=str(row['cover_url']),
+            cover_path=(None if row['cover_path'] is None else str(row['cover_path'])),
+            anchor_uid=(None if row['anchor_uid'] is None else int(row['anchor_uid'])),
+            anchor_name=str(row['anchor_name']),
+            area_id=None if row['area_id'] is None else int(row['area_id']),
+            area_name=str(row['area_name']),
+            parent_area_id=(
+                None if row['parent_area_id'] is None else int(row['parent_area_id'])
+            ),
+            parent_area_name=str(row['parent_area_name']),
+            live_end_time=(
+                None if row['live_end_time'] is None else int(row['live_end_time'])
+            ),
             parts=parts,
         )
 
@@ -642,6 +794,18 @@ class RecordingJournalBridge:
             error_message=(
                 None if row['error_message'] is None else str(row['error_message'])
             ),
+            record_end_time=(
+                None if row['record_end_time'] is None else int(row['record_end_time'])
+            ),
+            record_duration_seconds=(
+                None
+                if row['record_duration_seconds'] is None
+                else int(row['record_duration_seconds'])
+            ),
+            file_size_bytes=(
+                None if row['file_size_bytes'] is None else int(row['file_size_bytes'])
+            ),
+            danmaku_count=int(row['danmaku_count']),
         )
 
     def _new_event_id(self, event_id: Optional[str]) -> str:
@@ -758,6 +922,22 @@ class RecordingJournalBridge:
     def _normalize_path(path: str) -> str:
         return os.path.abspath(os.path.expanduser(path))
 
+    @staticmethod
+    def _file_size_or_none(path: str) -> Optional[int]:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _count_danmaku_sync(path: str) -> int:
+        count = 0
+        for _, element in ElementTree.iterparse(path, events=('end',)):
+            if element.tag.rsplit('}', 1)[-1] == 'd':
+                count += 1
+            element.clear()
+        return count
+
 
 class RecordingJournalListener:
     def __init__(
@@ -780,9 +960,21 @@ class RecordingJournalListener:
 
     async def on_recording_started(self, recorder: Recorder) -> None:
         room_info = recorder.live.room_info
+        user_info = recorder.live.user_info
         self._current_run_id = await self._guard(
             self._journal.recording_started(
-                int(room_info.room_id), live_start_time=int(room_info.live_start_time)
+                int(room_info.room_id),
+                live_start_time=int(room_info.live_start_time),
+                metadata=RecordingSessionMetadata(
+                    title=str(room_info.title),
+                    cover_url=str(room_info.cover),
+                    anchor_uid=int(user_info.uid),
+                    anchor_name=str(user_info.name),
+                    area_id=int(room_info.area_id),
+                    area_name=str(room_info.area_name),
+                    parent_area_id=int(room_info.parent_area_id),
+                    parent_area_name=str(room_info.parent_area_name),
+                ),
             )
         )
 
@@ -830,7 +1022,8 @@ class RecordingJournalListener:
         return None
 
     async def on_cover_image_downloaded(self, recorder: Recorder, path: str) -> None:
-        return None
+        run_id = self._require_current_run()
+        await self._guard(self._journal.cover_downloaded(run_id, path))
 
     async def on_video_postprocessing_completed(
         self, postprocessor: Postprocessor, path: str

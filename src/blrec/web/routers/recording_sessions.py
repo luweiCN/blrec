@@ -31,6 +31,10 @@ class RecordingPartResponse(ApiModel):
     final_path: Optional[str]
     xml_path: Optional[str]
     record_start_time: int
+    record_end_time: Optional[int]
+    record_duration_seconds: Optional[int]
+    file_size_bytes: Optional[int]
+    danmaku_count: int
     artifact_state: str
     xml_completed: bool
     source_exists: bool
@@ -46,6 +50,20 @@ class RecordingSessionResponse(ApiModel):
     state: str
     started_at: int
     ended_at: Optional[int]
+    title: str
+    cover_url: str
+    cover_path: Optional[str]
+    anchor_uid: Optional[int]
+    anchor_name: str
+    area_id: Optional[int]
+    area_name: str
+    parent_area_id: Optional[int]
+    parent_area_name: str
+    live_end_time: Optional[int]
+    part_count: int
+    danmaku_count: int
+    total_file_size_bytes: int
+    record_duration_seconds: int
     parts: List[RecordingPartResponse]
 
 
@@ -72,6 +90,10 @@ def _part_response(part: RecordingPart) -> RecordingPartResponse:
         final_path=part.final_path,
         xml_path=part.xml_path,
         record_start_time=part.record_start_time,
+        record_end_time=part.record_end_time,
+        record_duration_seconds=part.record_duration_seconds,
+        file_size_bytes=part.file_size_bytes,
+        danmaku_count=part.danmaku_count,
         artifact_state=part.artifact_state,
         xml_completed=part.xml_completed,
         source_exists=part.source_exists,
@@ -89,6 +111,20 @@ def _session_response(session: RecordingSession) -> RecordingSessionResponse:
         state=session.state,
         started_at=session.started_at,
         ended_at=session.ended_at,
+        title=session.title,
+        cover_url=session.cover_url,
+        cover_path=session.cover_path,
+        anchor_uid=session.anchor_uid,
+        anchor_name=session.anchor_name,
+        area_id=session.area_id,
+        area_name=session.area_name,
+        parent_area_id=session.parent_area_id,
+        parent_area_name=session.parent_area_name,
+        live_end_time=session.live_end_time,
+        part_count=session.part_count,
+        danmaku_count=session.danmaku_count,
+        total_file_size_bytes=session.total_file_size_bytes,
+        record_duration_seconds=session.record_duration_seconds,
         parts=[_part_response(part) for part in session.parts],
     )
 

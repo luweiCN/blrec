@@ -354,6 +354,10 @@ describe('UploadsComponent', () => {
     expect(text).toContain('固定绑定房间（1）');
     expect(text).toContain('可迁移上传任务（1）');
     expect(accountService.removeAccount).not.toHaveBeenCalled();
+
+    component.closeRemovalDialog();
+    fixture.detectChanges();
+    tick(500);
   }));
 
   it('blocks account removal after an upload has remote side effects', fakeAsync(() => {

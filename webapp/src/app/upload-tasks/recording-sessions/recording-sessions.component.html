@@ -58,12 +58,36 @@
         [nzHeader]="sessionHeader(session)"
         [nzActive]="session.state === 'open'"
       >
+        <div class="session-overview">
+          <img
+            *ngIf="session.coverUrl"
+            class="session-cover"
+            [src]="session.coverUrl"
+            [alt]="coverAlt(session)"
+            loading="lazy"
+            referrerpolicy="no-referrer"
+          />
+          <div class="session-identity">
+            <h3>{{ session.title || '未记录直播标题' }}</h3>
+            <div>
+              主播 {{ session.anchorName || '未知' }} · 房间 {{ session.roomId }}
+            </div>
+            <div *ngIf="areaLabel(session) as area">{{ area }}</div>
+          </div>
+        </div>
+
         <div class="session-summary">
           <nz-tag [nzColor]="sessionStateColor(session.state)">
             {{ sessionStateLabel(session.state) }}
           </nz-tag>
-          <span>开始于 {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}</span>
-          <span>{{ session.parts.length }} 个分 P</span>
+          <span>
+            开始于
+            {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
+          </span>
+          <span>录制 {{ formatDuration(session.recordDurationSeconds) }}</span>
+          <span>{{ session.partCount }} 个分 P</span>
+          <span>{{ formatBytes(session.totalFileSizeBytes) }}</span>
+          <span>{{ session.danmakuCount }} 条弹幕</span>
         </div>
 
         <div class="parts-table-wrap">
@@ -77,6 +101,7 @@
                 <th scope="col">状态</th>
                 <th scope="col">录制时间</th>
                 <th scope="col">文件</th>
+                <th scope="col">弹幕</th>
               </tr>
             </thead>
             <tbody>
@@ -91,7 +116,12 @@
                   </div>
                 </td>
                 <td>
-                  {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
+                  <div>
+                    {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
+                  </div>
+                  <div class="part-metric">
+                    {{ formatDuration(part.recordDurationSeconds) }}
+                  </div>
                 </td>
                 <td class="file-list">
                   <div *ngIf="part.finalPath">
@@ -106,6 +136,12 @@
                     <span class="file-label">弹幕</span>
                     <code>{{ part.xmlPath }}</code>
                   </div>
+                  <div class="part-metric">
+                    大小 {{ formatBytes(part.fileSizeBytes) }}
+                  </div>
+                </td>
+                <td class="part-count">
+                  {{ part.danmakuCount }} 条
                 </td>
               </tr>
             </tbody>

@@ -29,6 +29,10 @@ export interface RecordingPart {
   readonly finalPath: string | null;
   readonly xmlPath: string | null;
   readonly recordStartTime: number;
+  readonly recordEndTime: number | null;
+  readonly recordDurationSeconds: number | null;
+  readonly fileSizeBytes: number | null;
+  readonly danmakuCount: number;
   readonly artifactState: RecordingArtifactState;
   readonly xmlCompleted: boolean;
   readonly sourceExists: boolean;
@@ -44,6 +48,20 @@ export interface RecordingSession {
   readonly state: RecordingSessionState;
   readonly startedAt: number;
   readonly endedAt: number | null;
+  readonly title: string;
+  readonly coverUrl: string;
+  readonly coverPath: string | null;
+  readonly anchorUid: number | null;
+  readonly anchorName: string;
+  readonly areaId: number | null;
+  readonly areaName: string;
+  readonly parentAreaId: number | null;
+  readonly parentAreaName: string;
+  readonly liveEndTime: number | null;
+  readonly partCount: number;
+  readonly danmakuCount: number;
+  readonly totalFileSizeBytes: number;
+  readonly recordDurationSeconds: number;
   readonly parts: readonly RecordingPart[];
 }
 

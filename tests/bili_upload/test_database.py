@@ -65,7 +65,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 5
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 6
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -80,6 +80,32 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             )
         }
         assert 'account_mode' in policy_columns
+        session_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(recording_sessions)')
+        }
+        assert {
+            'title',
+            'cover_url',
+            'cover_path',
+            'anchor_uid',
+            'anchor_name',
+            'area_id',
+            'area_name',
+            'parent_area_id',
+            'parent_area_name',
+            'live_end_time',
+        } <= session_columns
+        part_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(recording_parts)')
+        }
+        assert {
+            'record_end_time',
+            'record_duration_seconds',
+            'file_size_bytes',
+            'danmaku_count',
+        } <= part_columns
 
         indexes = {
             row['name']
@@ -179,6 +205,11 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'created_at,updated_at) '
             "VALUES(100,1,1,'title','description',17,'tag',1,'',0,0,'{}',10,20)"
         )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,live_start_time,state,started_at) '
+            "VALUES(1,100,'100:900',900,'closed',900)"
+        )
         connection.commit()
     finally:
         connection.close()
@@ -209,7 +240,19 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
         )
         assert policy is not None
         assert dict(policy) == {'account_mode': 'fixed', 'account_id': 1}
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 5
+        session = await database.fetchone(
+            'SELECT room_id,title,cover_url,anchor_name,area_name '
+            'FROM recording_sessions WHERE id=1'
+        )
+        assert session is not None
+        assert dict(session) == {
+            'room_id': 100,
+            'title': '',
+            'cover_url': '',
+            'anchor_name': '',
+            'area_name': '',
+        }
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 6
     finally:
         await database.close()
 
