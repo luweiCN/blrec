@@ -13,6 +13,7 @@
 - `uploading`：正在上传
 - `submitting`：正在投稿
 - `waiting_review`：等待审核
+- `waiting_review` 且 B 站返回定时发布状态：等待定时发布
 - `approved`、`completed`：投稿完成
 - `rejected`：审核未通过
 - `paused`：处理暂停
