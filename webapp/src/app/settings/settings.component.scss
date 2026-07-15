@@ -5,3 +5,8 @@
   @extend %inner-content;
   padding-top: 0;
 }
+
+.settings-page {
+  box-sizing: border-box;
+  padding: 0 16px 16px;
+}

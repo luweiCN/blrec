@@ -1,5 +1,5 @@
 <div class="inner-content" #innerContent>
-  <div class="main-settings settings-page">
+  <div class="main-settings settings-page primary-page">
     <div class="settings-page-content">
       <app-page-section name="文件">
         <app-output-settings [settings]="settings.output"></app-output-settings>
@@ -9,6 +9,10 @@
         <app-recorder-settings
           [settings]="settings.recorder"
         ></app-recorder-settings>
+      </app-page-section>
+
+      <app-page-section name="直播监控">
+        <app-live-monitor-settings></app-live-monitor-settings>
       </app-page-section>
 
       <app-page-section name="弹幕">
@@ -43,10 +47,6 @@
         <app-logging-settings
           [settings]="settings.logging"
         ></app-logging-settings>
-      </app-page-section>
-
-      <app-page-section name="通知">
-        <app-notification-settings></app-notification-settings>
       </app-page-section>
 
       <app-page-section name="Webhook">

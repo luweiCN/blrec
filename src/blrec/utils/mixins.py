@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import os
 import threading
@@ -36,11 +37,11 @@ class SwitchableMixin(ABC):
 
     @abstractmethod
     def _do_enable(self) -> None:
-        ...
+        pass
 
     @abstractmethod
     def _do_disable(self) -> None:
-        ...
+        pass
 
 
 class StoppableMixin(ABC):
@@ -72,11 +73,11 @@ class StoppableMixin(ABC):
 
     @abstractmethod
     def _do_start(self) -> None:
-        ...
+        pass
 
     @abstractmethod
     def _do_stop(self) -> None:
-        ...
+        pass
 
 
 class AsyncStoppableMixin(ABC):
@@ -107,11 +108,11 @@ class AsyncStoppableMixin(ABC):
 
     @abstractmethod
     async def _do_start(self) -> None:
-        ...
+        pass
 
     @abstractmethod
     async def _do_stop(self) -> None:
-        ...
+        pass
 
 
 _T = TypeVar('_T')

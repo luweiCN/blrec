@@ -1,3 +1,4 @@
+import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { MessageTemplateEditDialogComponent } from './message-template-edit-dialog.component';
@@ -8,9 +9,9 @@ describe('MessageTemplateEditDialogComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ MessageTemplateEditDialogComponent ]
-    })
-    .compileComponents();
+      declarations: [MessageTemplateEditDialogComponent],
+      schemas: [NO_ERRORS_SCHEMA],
+    }).compileComponents();
   });
 
   beforeEach(() => {

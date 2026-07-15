@@ -18,6 +18,7 @@ import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzFormModule } from 'ng-zorro-antd/form';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
+import { NzCascaderModule } from 'ng-zorro-antd/cascader';
 import { NzPopconfirmModule } from 'ng-zorro-antd/popconfirm';
 import { NzRadioModule } from 'ng-zorro-antd/radio';
 import { NzDividerModule } from 'ng-zorro-antd/divider';
@@ -30,6 +31,7 @@ import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzStatisticModule } from 'ng-zorro-antd/statistic';
 import { NzDescriptionsModule } from 'ng-zorro-antd/descriptions';
+import { NzDatePickerModule } from 'ng-zorro-antd/date-picker';
 import { NgxEchartsModule } from 'ngx-echarts';
 
 import { SharedModule } from '../shared/shared.module';
@@ -51,6 +53,7 @@ import { TaskRecordingDetailComponent } from './task-detail/task-recording-detai
 import { TaskNetworkDetailComponent } from './task-detail/task-network-detail/task-network-detail.component';
 import { InfoPanelComponent } from './info-panel/info-panel.component';
 import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component';
+import { UploadPolicyDialogComponent } from './upload-policy-dialog/upload-policy-dialog.component';
 
 @NgModule({
   declarations: [
@@ -71,6 +74,7 @@ import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component
     TaskNetworkDetailComponent,
     InfoPanelComponent,
     WaveGraphComponent,
+    UploadPolicyDialogComponent,
   ],
   imports: [
     CommonModule,
@@ -94,6 +98,7 @@ import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component
     NzFormModule,
     NzInputModule,
     NzCheckboxModule,
+    NzCascaderModule,
     NzPopconfirmModule,
     NzRadioModule,
     NzDividerModule,
@@ -106,6 +111,7 @@ import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component
     NzTableModule,
     NzStatisticModule,
     NzDescriptionsModule,
+    NzDatePickerModule,
     NgxEchartsModule.forRoot({
       echarts: () => import('echarts'),
     }),

@@ -1,184 +1,73 @@
-<div class="controls-wrapper" [class.use-drawer]="useDrawer">
-  <ng-container *ngIf="useRadioGroup">
-    <ng-container [ngTemplateOutlet]="radioGroup"></ng-container>
-    <nz-divider nzType="vertical"></nz-divider>
-    <ng-container [ngTemplateOutlet]="filter"></ng-container>
-    <nz-divider nzType="vertical"></nz-divider>
-    <ng-container [ngTemplateOutlet]="reorderButton"></ng-container>
-    <nz-divider nzType="vertical"></nz-divider>
-    <ng-container [ngTemplateOutlet]="menuButton"></ng-container>
-  </ng-container>
+<div class="controls-wrapper" aria-label="录制任务筛选">
+  <nz-input-group class="filter" [nzPrefix]="searchIcon" [nzSuffix]="clearIcon">
+    <input
+      nz-input
+      type="search"
+      maxlength="100"
+      placeholder="搜索主播、标题、分区或房间号"
+      #filterInput
+      (input)="onFilterInput(filterInput.value)"
+    />
+  </nz-input-group>
+  <ng-template #searchIcon><i nz-icon nzType="search"></i></ng-template>
+  <ng-template #clearIcon>
+    <i
+      *ngIf="filterInput.value"
+      nz-icon
+      class="filter-clear"
+      nzTheme="fill"
+      nzType="close-circle"
+      (click)="filterInput.value = ''; onFilterInput('')"
+    ></i>
+  </ng-template>
 
-  <ng-container *ngIf="useSelector">
-    <ng-container [ngTemplateOutlet]="selector"></ng-container>
-    <nz-divider nzType="vertical"></nz-divider>
-    <ng-container [ngTemplateOutlet]="filter"></ng-container>
-    <nz-divider nzType="vertical"></nz-divider>
-    <ng-container [ngTemplateOutlet]="reorderButton"></ng-container>
-    <nz-divider nzType="vertical"></nz-divider>
-    <ng-container [ngTemplateOutlet]="menuButton"></ng-container>
-  </ng-container>
-
-  <ng-container *ngIf="useDrawer">
-    <ng-container [ngTemplateOutlet]="filter"></ng-container>
-    <ng-container [ngTemplateOutlet]="drawerButton"></ng-container>
-  </ng-container>
-</div>
-
-<ng-template #radioGroup>
-  <nz-radio-group
-    class="radio-group"
-    nzButtonStyle="solid"
-    [(ngModel)]="selection"
-    (ngModelChange)="selectionChange.emit($event)"
-  >
-    <ng-container *ngFor="let selection of selections">
-      <label nz-radio-button [nzValue]="selection.value">{{
-        selection.label
-      }}</label>
-    </ng-container>
-  </nz-radio-group>
-</ng-template>
-
-<ng-template #selector>
   <nz-select
     class="selector"
     [nzOptions]="selections"
     [(ngModel)]="selection"
     (ngModelChange)="selectionChange.emit($event)"
   ></nz-select>
-</ng-template>
 
-<ng-template #filter>
-  <nz-input-group class="filter" [nzSuffix]="inputClearTpl">
-    <input
-      nz-input
-      type="text"
-      maxlength="18"
-      placeholder="用标题、分区、主播名、房间号筛选"
-      #filterInput
-      (input)="onFilterInput(filterInput.value)"
-    />
-  </nz-input-group>
-  <ng-template #inputClearTpl
-    ><i
-      nz-icon
-      class="filter-clear"
-      nzTheme="fill"
-      nzType="close-circle"
-      *ngIf="filterInput.value"
-      (click)="filterInput.value = ''; onFilterInput('')"
-    ></i
-  ></ng-template>
-</ng-template>
+  <nz-range-picker
+    class="date-filter"
+    [ngModel]="dateRange"
+    [nzPlaceHolder]="['开播开始日期', '开播结束日期']"
+    (ngModelChange)="onDateRangeChanged($event)"
+  ></nz-range-picker>
 
-<ng-template #reorderButton>
   <button
     class="reverse-button"
     nz-button
-    nzType="text"
-    nzSize="default"
+    type="button"
     (click)="toggleReverse()"
   >
-    <span>{{ reverse ? "倒序" : "正序" }}</span>
-    <i
-      nz-icon
-      [nzType]="reverse ? 'swap-left' : 'swap-right'"
-      [nzRotate]="90"
-    ></i>
+    <span>{{ reverse ? '最早优先' : '最新优先' }}</span>
+    <i nz-icon nzType="swap" [nzRotate]="90"></i>
   </button>
-</ng-template>
 
-<ng-template #menuButton>
   <button
     class="more-actions-button"
     nz-button
     nzType="text"
-    nzSize="default"
+    type="button"
     nz-dropdown
     nzPlacement="bottomRight"
+    nzOverlayClassName="action-dropdown-overlay"
     [nzDropdownMenu]="dropdownMenu"
+    aria-label="全部任务操作"
   >
     <i nz-icon nzType="more"></i>
   </button>
-</ng-template>
+</div>
 
 <nz-dropdown-menu #dropdownMenu="nzDropdownMenu">
-  <ng-container [ngTemplateOutlet]="menu"></ng-container>
-  <ng-template #menu>
-    <ul nz-menu class="menu">
-      <li nz-menu-item (click)="startAllTasks()">全部运行</li>
-      <li nz-menu-item (click)="stopAllTasks()">全部停止</li>
-      <li nz-menu-item (click)="stopAllTasks(true)">全部强制停止</li>
-      <li nz-menu-divider></li>
-      <li nz-menu-item (click)="disableAllRecorders(false)">全部关闭录制</li>
-      <li nz-menu-item (click)="disableAllRecorders(true)">全部强制关闭录制</li>
-      <li nz-menu-divider></li>
-      <li nz-menu-item (click)="removeAllTasks()">全部删除</li>
-      <li nz-menu-item (click)="updateAllTaskInfos()">全部刷新数据</li>
-      <li nz-menu-item (click)="copyAllTaskRoomIds()">复制全部房间号</li>
-    </ul>
-  </ng-template>
+  <ul nz-menu>
+    <li nz-menu-item (click)="startAllTasks()">全部开启</li>
+    <li nz-menu-item (click)="stopAllTasks()">全部关闭</li>
+    <li nz-menu-item (click)="stopAllTasks(true)">全部强制停止</li>
+    <li nz-menu-divider></li>
+    <li nz-menu-item (click)="updateAllTaskInfos()">全部刷新数据</li>
+    <li nz-menu-item (click)="copyAllTaskRoomIds()">复制全部房间号</li>
+    <li nz-menu-item nzDanger (click)="removeAllTasks()">全部删除</li>
+  </ul>
 </nz-dropdown-menu>
-
-<ng-template #drawerButton>
-  <button
-    class="more-actions-button"
-    nz-button
-    nzType="text"
-    nzSize="default"
-    (click)="drawerVisible = true"
-  >
-    <i nz-icon nzType="more"></i>
-  </button>
-</ng-template>
-
-<nz-drawer
-  *ngIf="useDrawer"
-  nzPlacement="bottom"
-  nzHeight="auto"
-  [nzTitle]="drawerHeader"
-  [nzClosable]="false"
-  [(nzVisible)]="drawerVisible"
-  (nzOnClose)="drawerVisible = false"
->
-  <ng-container *nzDrawerContent>
-    <div class="drawer-content">
-      <nz-divider nzText="筛选"></nz-divider>
-      <ng-container [ngTemplateOutlet]="radioGroup"></ng-container>
-      <nz-divider nzText="排序"></nz-divider>
-      <div class="reorder-button-wrapper">
-        <ng-container [ngTemplateOutlet]="reorderButton"></ng-container>
-      </div>
-    </div>
-  </ng-container>
-
-  <nz-drawer
-    nzPlacement="bottom"
-    nzHeight="auto"
-    [nzClosable]="false"
-    [nzBodyStyle]="{ padding: '0' }"
-    [(nzVisible)]="menuDrawerVisible"
-    (nzOnClose)="menuDrawerVisible = false"
-  >
-    <ng-container *nzDrawerContent>
-      <div class="drawer-content" (click)="menuDrawerVisible = false">
-        <ng-container [ngTemplateOutlet]="menu"></ng-container>
-      </div>
-    </ng-container>
-  </nz-drawer>
-</nz-drawer>
-
-<ng-template #drawerHeader>
-  <div class="drawer-header">
-    <button
-      class="more-actions-button"
-      nz-button
-      nzType="text"
-      nzSize="default"
-      (click)="menuDrawerVisible = true"
-    >
-      <i nz-icon nzType="more"></i>
-    </button>
-  </div>
-</ng-template>

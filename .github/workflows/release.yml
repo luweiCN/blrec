@@ -1,0 +1,88 @@
+name: Publish Docker release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/luweicn/blrec
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate version
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package_version="$(python -c "import sys; sys.path.insert(0, 'src'); import blrec; print(blrec.__version__)")"
+          test "$version" = "$package_version"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            REVISION=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.value }}
+            ${{ env.IMAGE }}:beta
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify manifest platforms
+        shell: bash
+        run: |
+          docker buildx imagetools inspect --raw "$IMAGE:${{ steps.version.outputs.value }}" > manifest.json
+          python - <<'PY'
+          import json
+          manifest = json.load(open('manifest.json', encoding='utf8'))
+          platforms = {
+              (item.get('platform') or {}).get('os', '') + '/' +
+              (item.get('platform') or {}).get('architecture', '')
+              for item in manifest.get('manifests', [])
+          }
+          assert {'linux/amd64', 'linux/arm64'} <= platforms, platforms
+          PY
+
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            compose.synology.yml synology.env.example \
+            --verify-tag \
+            --prerelease \
+            --title "BLREC ${{ steps.version.outputs.value }}" \
+            --notes-file "docs/releases/${{ steps.version.outputs.value }}.md"

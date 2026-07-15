@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from typing import Optional
+from typing import Optional, cast
 
 import requests
 from loguru import logger
@@ -40,7 +40,7 @@ class StreamFetcher(AsyncCooperationMixin):
                     response = self._session.get(
                         url,
                         stream=True,
-                        headers=self._live.headers,
+                        headers=self._live.stream_headers,
                         timeout=self.read_timeout,
                     )
                     logger.info('Response received')
@@ -49,7 +49,7 @@ class StreamFetcher(AsyncCooperationMixin):
                     logger.warning(f'Failed to request live stream: {repr(e)}')
                     observer.on_error(e)
                 else:
-                    observer.on_next(response.raw)  # urllib3.response.HTTPResponse
+                    observer.on_next(cast(io.RawIOBase, response.raw))
 
             return source.subscribe(
                 on_next, observer.on_error, observer.on_completed, scheduler=scheduler

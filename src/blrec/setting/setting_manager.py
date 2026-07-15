@@ -3,16 +3,16 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Optional, cast
 
-from ..exception import NotFoundError
+from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
 from ..notification import (
+    Bark,
     EmailService,
     Notifier,
     Pushdeer,
     Pushplus,
     Serverchan,
     Telegram,
-    Bark,
 )
 from ..webhook import WebHook
 from .helpers import shadow_settings, update_settings
@@ -51,6 +51,17 @@ class SettingsManager:
 
     async def change_settings(self, settings: SettingsIn) -> SettingsOut:
         changed = False
+        live_monitor = settings.live_monitor
+        mode_changed = (
+            'live_monitor' in settings.__fields_set__
+            and live_monitor is not None
+            and 'mode' in live_monitor.__fields_set__
+            and live_monitor.mode != self._settings.live_monitor.mode
+        )
+        if mode_changed and self._app.has_recording_task():
+            raise ForbiddenError(
+                'Cannot change live monitor mode while a task is recording'
+            )
 
         for name in settings.__fields_set__:
             src_sub_settings = getattr(settings, name)
@@ -74,8 +85,25 @@ class SettingsManager:
 
         if changed:
             await self.dump_settings()
+        if mode_changed:
+            await self._app.restart()
 
         return self.get_settings(cast(KeySetOfSettings, settings.__fields_set__))
+
+    async def apply_live_monitor_settings(self) -> None:
+        coordinator = getattr(self._app, '_live_status_coordinator', None)
+        if coordinator is None:
+            return
+        settings = self._settings.live_monitor
+        await coordinator.reconfigure(
+            interval_seconds=settings.interval_seconds,
+            batch_size=settings.batch_size,
+            fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
+        )
+
+    def apply_network_settings(self) -> None:
+        # Network clients resolve the selected interface for each new request.
+        pass
 
     def get_task_options(self, room_id: int) -> TaskOptions:
         if settings := self.find_task_settings(room_id):
@@ -258,8 +286,6 @@ class SettingsManager:
 
         out_dir = self._settings.output.out_dir
         self._app._out_dir = out_dir
-        self._app._space_monitor.path = out_dir
-        self._app._space_reclaimer.path = out_dir
 
     def apply_logging_settings(self) -> None:
         configure_logger(
@@ -273,6 +299,10 @@ class SettingsManager:
             self._app._task_manager.apply_task_bili_api_settings(
                 task_settings.room_id, self._settings.bili_api
             )
+
+    def apply_bili_upload_settings(self) -> None:
+        # Database and chunk-shape changes take effect after process restart.
+        pass
 
     async def apply_header_settings(self) -> None:
         for settings in self._settings.tasks:
@@ -293,17 +323,10 @@ class SettingsManager:
             )
 
     def apply_space_settings(self) -> None:
-        self.apply_space_monitor_settings()
-        self.apply_space_reclaimer_settings()
-
-    def apply_space_monitor_settings(self) -> None:
-        settings = self._settings.space
-        self._app._space_monitor.check_interval = settings.check_interval
-        self._app._space_monitor.space_threshold = settings.space_threshold
-
-    def apply_space_reclaimer_settings(self) -> None:
-        settings = self._settings.space
-        self._app._space_reclaimer.recycle_records = settings.recycle_records
+        # Legacy physical-disk monitoring fields remain loadable for old
+        # settings files, but recording cleanup is driven only by the managed
+        # capacity limit and per-room retention policies.
+        pass
 
     def apply_email_notification_settings(self) -> None:
         notifier = self._app._email_notifier
@@ -352,6 +375,11 @@ class SettingsManager:
         self._apply_notifier_settings(notifier, settings)
         self._apply_notification_settings(notifier, settings)
         self._apply_message_template_settings(notifier, settings)
+
+    def apply_operational_notifications_settings(self) -> None:
+        # The operational notification center reads this shared settings object
+        # for every state transition, so no worker restart is required.
+        pass
 
     def apply_webhooks_settings(self) -> None:
         webhooks = [WebHook.from_settings(s) for s in self._settings.webhooks]

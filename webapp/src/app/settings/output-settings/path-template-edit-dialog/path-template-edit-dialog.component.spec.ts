@@ -1,3 +1,4 @@
+import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { PathTemplateEditDialogComponent } from './path-template-edit-dialog.component';
@@ -8,9 +9,9 @@ describe('PathTemplateEditDialogComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ PathTemplateEditDialogComponent ]
-    })
-    .compileComponents();
+      declarations: [PathTemplateEditDialogComponent],
+      schemas: [NO_ERRORS_SCHEMA],
+    }).compileComponents();
   });
 
   beforeEach(() => {

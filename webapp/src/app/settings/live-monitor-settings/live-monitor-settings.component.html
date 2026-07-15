@@ -1,0 +1,143 @@
+<div class="settings-load-state" aria-live="polite">
+  <nz-spin *ngIf="settingsLoad.state === 'loading'" nzSimple></nz-spin>
+  <nz-alert
+    *ngIf="settingsLoad.state === 'error'"
+    nzType="error"
+    [nzMessage]="settingsLoad.message"
+    nzShowIcon
+  ></nz-alert>
+  <button
+    *ngIf="settingsLoad.state === 'error'"
+    nz-button
+    type="button"
+    data-testid="retry-settings"
+    (click)="retrySettings()"
+  >
+    重试加载设置
+  </button>
+</div>
+
+<form
+  nz-form
+  [formGroup]="settingsForm"
+  [attr.aria-busy]="settingsLoad.state === 'loading'"
+>
+  <nz-form-item class="setting-item">
+    <nz-form-label
+      class="setting-label"
+      nzNoColon
+      nzTooltipTitle="批量模式会合并查询多个房间的直播状态，只为确认开播的房间建立弹幕连接，可减少请求次数和空闲连接。旧模式会分别监控每个房间，仅用于兼容或紧急回退，通常产生更多请求和连接。切换模式会重启应用，录制期间不能切换。"
+      >监控模式</nz-form-label
+    >
+    <nz-form-control class="setting-control select">
+      <nz-select formControlName="mode" [nzOptions]="modeOptions"></nz-select>
+    </nz-form-control>
+  </nz-form-item>
+
+  <nz-form-item class="setting-item">
+    <nz-form-label
+      class="setting-label"
+      nzNoColon
+      nzTooltipTitle="系统每隔指定秒数查询一次所有已登记房间的直播状态。数值越小，发现开播越快，但请求更频繁；数值越大，请求更少，但发现开播可能更慢。允许设置为 30–60 秒。"
+      >轮询间隔（秒）</nz-form-label
+    >
+    <nz-form-control class="setting-control select">
+      <input
+        nz-input
+        type="number"
+        min="30"
+        max="60"
+        formControlName="intervalSeconds"
+      />
+    </nz-form-control>
+  </nz-form-item>
+
+  <nz-form-item class="setting-item">
+    <nz-form-label
+      class="setting-label"
+      nzNoColon
+      nzTooltipTitle="一次批量状态请求包含的最大房间数。房间总数超过该值时会拆成多次请求；数值越小，每轮产生的请求越多。允许设置为 1–29；例如 58 个房间设置为 29 时，正常每轮需要 2 次批量请求。"
+      >每批数量</nz-form-label
+    >
+    <nz-form-control class="setting-control select">
+      <input
+        nz-input
+        type="number"
+        min="1"
+        max="29"
+        formControlName="batchSize"
+      />
+    </nz-form-control>
+  </nz-form-item>
+
+  <nz-form-item class="setting-item">
+    <nz-form-label
+      class="setting-label"
+      nzNoColon
+      nzTooltipTitle="当批量结果缺少原本已确认开播的房间时，系统会使用单房间匿名请求再次确认，避免误判下播。该值表示同一房间两次兜底确认的最短间隔；数值越大，请求越少，但异常状态恢复可能更慢。允许设置为 600–3600 秒。"
+      >兜底冷却（秒）</nz-form-label
+    >
+    <nz-form-control class="setting-control select">
+      <input
+        nz-input
+        type="number"
+        min="600"
+        max="3600"
+        formControlName="fallbackCooldownSeconds"
+      />
+    </nz-form-control>
+  </nz-form-item>
+</form>
+
+<nz-card class="status-card" nzTitle="运行状态" aria-live="polite">
+  <nz-spin *ngIf="status.state === 'loading'" nzSimple></nz-spin>
+  <nz-alert
+    *ngIf="status.state === 'error'"
+    nzType="error"
+    [nzMessage]="status.message"
+    nzShowIcon
+  ></nz-alert>
+
+  <ng-container *ngIf="status.state === 'ready'">
+    <p>模式：{{ status.data.mode }}</p>
+    <p>
+      轮询：{{ status.data.intervalSeconds }} 秒 / 每批
+      {{ status.data.batchSize }}
+    </p>
+    <p>房间：{{ status.data.registeredRooms }}</p>
+    <p>活跃 WSS：{{ status.data.activeWebsockets }}</p>
+    <p>
+      缺项：{{ status.data.missingResults }}；兜底：{{
+        status.data.fallbackRequests
+      }}
+    </p>
+    <p>
+      上次成功：{{
+        status.data.lastSuccessAt === null
+          ? '尚无'
+          : status.data.lastSuccessAt
+      }}
+    </p>
+    <p>
+      快照最长年龄：{{
+        status.data.snapshotMaxAgeSeconds === null
+          ? '尚无'
+          : status.data.snapshotMaxAgeSeconds + ' 秒'
+      }}
+    </p>
+    <p>熔断原因：{{ status.data.breakerReason || '无' }}</p>
+    <nz-alert
+      *ngIf="status.data.mode === 'legacy'"
+      nzType="warning"
+      nzMessage="旧模式会为离线房间维持连接"
+    ></nz-alert>
+    <button
+      nz-button
+      type="button"
+      *ngIf="status.data.breakerState === 'paused'"
+      (click)="resume()"
+    >
+      恢复小批 canary
+    </button>
+  </ng-container>
+</nz-card>

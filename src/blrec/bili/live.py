@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, cast
 
 import aiohttp
 from jsonpath import jsonpath
@@ -24,6 +24,9 @@ from .models import LiveStatus, RoomInfo, UserInfo
 from .net import connector, timeout
 from .typing import ApiPlatform, QualityNumber, ResponseData, StreamCodec, StreamFormat
 
+if TYPE_CHECKING:
+    from blrec.networking.manager import NetworkRouteManager
+
 __all__ = ('Live',)
 
 from loguru import logger
@@ -35,7 +38,16 @@ _LIVE_STATUS_PATTERN = re.compile(rb'"live_status"\s*:\s*(\d)')
 
 
 class Live:
-    def __init__(self, room_id: int, user_agent: str = '', cookie: str = '') -> None:
+    def __init__(
+        self,
+        room_id: int,
+        user_agent: str = '',
+        cookie: str = '',
+        *,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        session: Optional[Any] = None,
+        network_route_manager: Optional['NetworkRouteManager'] = None,
+    ) -> None:
         self._logger = logger.bind(room_id=room_id)
 
         self._room_id = room_id
@@ -44,19 +56,35 @@ class Live:
         self._update_headers()
         self._html_page_url = f'https://live.bilibili.com/{room_id}'
 
-        self._session = aiohttp.ClientSession(
-            connector=connector,
-            connector_owner=False,
-            raise_for_status=True,
-            trust_env=True,
-            timeout=timeout,
+        self._owns_session = session is None
+        self._network_route_manager = network_route_manager
+        if session is None:
+            self._session: Any = aiohttp.ClientSession(
+                connector=connector,
+                connector_owner=False,
+                raise_for_status=True,
+                trust_env=True,
+                timeout=timeout,
+            )
+        else:
+            self._session = session
+        self._appapi = AppApi(
+            self._session,
+            self.headers,
+            room_id=room_id,
+            auth_failure_reporter=auth_failure_reporter,
         )
-        self._appapi = AppApi(self._session, self.headers, room_id=room_id)
-        self._webapi = WebApi(self._session, self.headers, room_id=room_id)
+        self._webapi = WebApi(
+            self._session,
+            self.headers,
+            room_id=room_id,
+            auth_failure_reporter=auth_failure_reporter,
+        )
 
         self._room_info: RoomInfo
         self._user_info: UserInfo
         self._no_flv_stream: bool
+        self._real_quality_number: Optional[QualityNumber] = None
 
     @property
     def base_api_urls(self) -> List[str]:
@@ -111,6 +139,10 @@ class Live:
     def headers(self) -> Dict[str, str]:
         return self._headers
 
+    @property
+    def stream_headers(self) -> Dict[str, str]:
+        return self._stream_headers
+
     def _update_headers(self) -> None:
         self._headers = {
             **BASE_HEADERS,
@@ -118,10 +150,19 @@ class Live:
             'User-Agent': self._user_agent,
             'Cookie': self._cookie,
         }
+        self._stream_headers = {
+            **BASE_HEADERS,
+            'Referer': f'https://live.bilibili.com/{self._room_id}',
+            'User-Agent': self._user_agent,
+        }
 
     @property
-    def session(self) -> aiohttp.ClientSession:
+    def session(self) -> Any:
         return self._session
+
+    @property
+    def network_route_manager(self) -> Optional['NetworkRouteManager']:
+        return self._network_route_manager
 
     @property
     def appapi(self) -> AppApi:
@@ -136,8 +177,16 @@ class Live:
         return self._room_id
 
     @property
+    def real_quality_number(self) -> Optional[QualityNumber]:
+        return self._real_quality_number
+
+    @property
     def room_info(self) -> RoomInfo:
         return self._room_info
+
+    def replace_room_info(self, room_info: RoomInfo) -> None:
+        self._room_info = room_info
+        self._room_id = room_info.room_id
 
     @property
     def user_info(self) -> UserInfo:
@@ -155,7 +204,8 @@ class Live:
                 self._no_flv_stream = not flv_formats
 
     async def deinit(self) -> None:
-        await self._session.close()
+        if self._owns_session:
+            await self._session.close()
 
     def has_no_flv_streams(self) -> bool:
         return self._no_flv_stream
@@ -175,9 +225,11 @@ class Live:
 
     async def check_connectivity(self) -> bool:
         try:
-            await self._session.head('https://live.bilibili.com/', timeout=3, headers={
-                'User-Agent': self._user_agent,
-            })
+            await self._session.head(
+                'https://live.bilibili.com/',
+                timeout=3,
+                headers={'User-Agent': self._user_agent},
+            )
             return True
         except Exception as e:
             self._logger.warning(f'Check connectivity failed: {repr(e)}')
@@ -295,8 +347,13 @@ class Live:
 
         accept_qns = jsonpath(codecs, '$[*].accept_qn[*]')
         current_qns = jsonpath(codecs, '$[*].current_qn')
-        if qn not in accept_qns or not all(map(lambda q: q == qn, current_qns)):
+        if (
+            not current_qns
+            or not all(map(lambda value: value == current_qns[0], current_qns))
+            or current_qns[0] not in accept_qns
+        ):
             raise NoStreamQualityAvailable(stream_format, stream_codec, qn)
+        self._real_quality_number = cast(QualityNumber, current_qns[0])
 
         def sort_by_host(info: Any) -> int:
             host = info['host']

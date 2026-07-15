@@ -1,0 +1,37 @@
+<nz-modal
+  [nzTitle]="title"
+  [nzVisible]="visible"
+  [nzFooter]="null"
+  nzWidth="760px"
+  (nzOnCancel)="handleClose()"
+>
+  <ng-container *nzModalContent>
+    <nz-alert
+      *ngIf="error"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="error"
+    ></nz-alert>
+    <ol *ngIf="items.length > 0" class="danmaku-list">
+      <li *ngFor="let item of items">
+        <time>{{ formatProgress(item.progressMs) }}</time>
+        <span class="danmaku-user">用户：{{ item.user ?? '未记录' }}</span>
+        <span class="danmaku-uid">UID：{{ item.uid ?? '未记录' }}</span>
+        <span class="danmaku-content">{{ item.content }}</span>
+      </li>
+    </ol>
+    <div *ngIf="!loading && !error && items.length === 0" class="empty-state">
+      该分 P 没有弹幕
+    </div>
+    <div *ngIf="loading" class="loading-state">正在加载弹幕…</div>
+    <button
+      *ngIf="nextCursor !== null"
+      nz-button
+      type="button"
+      [disabled]="!canLoadMore"
+      (click)="loadMore()"
+    >
+      加载更多
+    </button>
+  </ng-container>
+</nz-modal>

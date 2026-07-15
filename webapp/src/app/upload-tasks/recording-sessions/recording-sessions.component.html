@@ -1,0 +1,894 @@
+<nz-page-header
+  nzTitle="上传任务"
+  nzSubtitle="查看录制、上传、投稿和弹幕回灌进度"
+>
+  <nz-page-header-extra>
+    <div class="header-actions">
+      <button
+        nz-button
+        type="button"
+        data-testid="retry-all-failed"
+        [nzLoading]="retryPreviewLoading || retryAllLoading"
+        nz-tooltip
+        nzTooltipTitle="只重试结果明确且本地文件仍可用的失败录像"
+        (click)="retryAllFailedJobs()"
+      >
+        <i nz-icon nzType="redo"></i>
+        重试失败
+      </button>
+      <button
+        nz-button
+        type="button"
+        data-testid="refresh-sessions"
+        [disabled]="view.state === 'loading'"
+        (click)="load()"
+      >
+        <i nz-icon nzType="reload"></i>
+        刷新
+      </button>
+    </div>
+  </nz-page-header-extra>
+</nz-page-header>
+
+<div class="task-list" aria-live="polite">
+  <div class="filter-bar" aria-label="上传任务筛选">
+    <nz-input-group class="keyword-filter" [nzPrefix]="searchIcon">
+      <input
+        nz-input
+        type="search"
+        maxlength="100"
+        placeholder="搜索标题、主播、房间号、稿件或账号"
+        [(ngModel)]="keyword"
+        (keyup.enter)="applyFilters()"
+      />
+    </nz-input-group>
+    <ng-template #searchIcon><i nz-icon nzType="search"></i></ng-template>
+    <nz-select
+      class="state-filter"
+      nzAllowClear
+      nzPlaceHolder="录制状态"
+      [nzOptions]="recordingStateOptions"
+      [(ngModel)]="recordingState"
+      (ngModelChange)="applyFilters()"
+    ></nz-select>
+    <nz-select
+      class="state-filter upload-state-filter"
+      nzAllowClear
+      nzPlaceHolder="投稿状态"
+      [nzOptions]="uploadStateOptions"
+      [(ngModel)]="uploadState"
+      (ngModelChange)="applyFilters()"
+    ></nz-select>
+    <nz-range-picker
+      class="date-filter"
+      [ngModel]="dateRange"
+      [nzPlaceHolder]="['开始日期', '结束日期']"
+      (ngModelChange)="dateRangeChanged($event)"
+    ></nz-range-picker>
+    <nz-select
+      class="sort-filter"
+      [(ngModel)]="sortOrder"
+      (ngModelChange)="applyFilters()"
+    >
+      <nz-option nzValue="newest" nzLabel="最新优先"></nz-option>
+      <nz-option nzValue="oldest" nzLabel="最早优先"></nz-option>
+    </nz-select>
+    <button nz-button type="button" (click)="applyFilters()">搜索</button>
+    <button nz-button nzType="link" type="button" (click)="clearFilters()">
+      清空
+    </button>
+  </div>
+
+  <ng-container *ngIf="errorMessage as message">
+    <nz-alert
+      nzType="error"
+      nzShowIcon
+      nzMessage="无法加载上传任务"
+      [nzDescription]="message"
+    ></nz-alert>
+    <button
+      class="retry-button"
+      nz-button
+      type="button"
+      data-testid="retry-sessions"
+      (click)="load()"
+    >
+      重试加载
+    </button>
+  </ng-container>
+
+  <nz-alert
+    *ngIf="degradedReason as reason"
+    class="degraded-warning"
+    nzType="warning"
+    nzShowIcon
+    nzMessage="自动处理已暂停"
+    [nzDescription]="reason"
+  ></nz-alert>
+
+  <div
+    *ngIf="selectedSessionCount > 0"
+    class="batch-action-bar"
+    data-testid="batch-action-bar"
+  >
+    <span>已选择 {{ selectedSessionCount }} 个场次</span>
+    <button
+      *ngIf="selectedSupports('set_upload')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('set_upload', selectedSessionIdsArray)"
+    >
+      本场上传
+    </button>
+    <button
+      *ngIf="selectedSupports('set_skip')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('set_skip', selectedSessionIdsArray)"
+    >
+      本场不上传
+    </button>
+    <button
+      *ngIf="selectedSupports('retry_failed')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('retry_failed', selectedSessionIdsArray)"
+    >
+      重试上传
+    </button>
+    <button
+      *ngIf="selectedSupports('pause_upload')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('pause_upload', selectedSessionIdsArray)"
+    >
+      暂停上传
+    </button>
+    <button
+      *ngIf="selectedSupports('resume_upload')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('resume_upload', selectedSessionIdsArray)"
+    >
+      继续上传
+    </button>
+    <button
+      *ngIf="selectedSupports('edit_task')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openTaskEdit(selectedEditableJobIds())"
+    >
+      修改任务
+    </button>
+    <button
+      *ngIf="selectedSupports('repair_transcode')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('repair_transcode', selectedSessionIdsArray)"
+    >
+      修复转码
+    </button>
+    <button
+      *ngIf="selectedSupports('backfill_danmaku')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('backfill_danmaku', selectedSessionIdsArray)"
+    >
+      回灌弹幕
+    </button>
+    <button
+      *ngIf="selectedSupports('repost_as_new')"
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openSessionAction('repost_as_new', selectedSessionIdsArray)"
+    >
+      重新投稿
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      nzDanger
+      type="button"
+      (click)="openSessionAction('delete_local', selectedSessionIdsArray)"
+    >
+      删除
+    </button>
+  </div>
+
+  <nz-table
+    #taskTable
+    nzSize="middle"
+    nzTableLayout="fixed"
+    [nzData]="sessions"
+    [nzLoading]="view.state === 'loading'"
+    [nzFrontPagination]="false"
+    [nzShowPagination]="false"
+    [nzScroll]="{ x: '1120px' }"
+    [nzNoResult]="'还没有上传任务'"
+  >
+    <thead>
+      <tr>
+        <th nzWidth="48px">
+          <label
+            nz-checkbox
+            aria-label="选择本页场次"
+            [ngModel]="allPageSessionsSelected"
+            [nzIndeterminate]="somePageSessionsSelected"
+            [nzDisabled]="pageSessionIds.length === 0"
+            (ngModelChange)="setAllPageSessionsSelected($event)"
+          ></label>
+        </th>
+        <th nzWidth="260px">直播与房间</th>
+        <th nzWidth="135px">开始时间</th>
+        <th nzWidth="170px">录制概要</th>
+        <th nzWidth="160px">状态</th>
+        <th nzWidth="115px">投稿账号</th>
+        <th nzRight nzWidth="175px">
+          操作
+          <i
+            nz-icon
+            nzType="question-circle"
+            nz-tooltip
+            nzTooltipTitle="“更多”中只显示当前场次可以执行的操作。"
+          ></i>
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr *ngFor="let session of taskTable.data; trackBy: trackSession">
+        <td>
+          <label
+            nz-checkbox
+            data-testid="session-select"
+            [attr.aria-label]="'选择场次 ' + session.id"
+            [ngModel]="isSessionSelected(session.id)"
+            (ngModelChange)="setSessionSelected(session.id, $event)"
+          ></label>
+        </td>
+        <td>
+          <div class="session-cell">
+            <img
+              *ngIf="session.coverUrl"
+              class="session-thumbnail"
+              [src]="session.coverUrl"
+              [alt]="coverAlt(session)"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
+            <div class="session-cell-text">
+              <ng-container *ngIf="archiveUrl(session) as url; else plainTitle">
+                <a
+                  class="archive-title"
+                  data-testid="archive-link"
+                  [href]="url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <strong>{{ session.title || '未记录直播标题' }}</strong>
+                </a>
+              </ng-container>
+              <ng-template #plainTitle>
+                <strong>{{ session.title || '未记录直播标题' }}</strong>
+              </ng-template>
+              <span>
+                {{ session.anchorName || '未知主播' }} · 房间
+                {{ session.roomId }}
+              </span>
+            </div>
+          </div>
+        </td>
+        <td class="nowrap">
+          {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm' }}
+        </td>
+        <td>
+          <div>{{ session.partCount }} 个分 P</div>
+          <div class="secondary-text">
+            {{ formatDuration(session.recordDurationSeconds) }} ·
+            {{ formatBytes(session.totalFileSizeBytes) }}
+          </div>
+        </td>
+        <td>
+          <nz-tag [nzColor]="displayStateColor(session.displayState)">
+            {{ displayStateLabel(session.displayState) }}
+          </nz-tag>
+          <div class="secondary-text" *ngIf="displayStateDetail(session) as detail">
+            {{ detail }}
+          </div>
+        </td>
+        <td>
+          <ng-container *ngIf="session.uploadJob as job; else noAccount">
+            {{ job.accountDisplayName }}
+          </ng-container>
+          <ng-template #noAccount>—</ng-template>
+        </td>
+        <td nzRight>
+          <button nz-button nzType="link" type="button" (click)="openDetails(session)">
+            详情
+          </button>
+          <button
+            nz-button
+            nzType="link"
+            nzDanger
+            type="button"
+            data-testid="delete-session"
+            (click)="openSessionAction('delete_local', [session.id])"
+          >
+            删除
+          </button>
+          <button
+            *ngIf="hasMoreActions(session)"
+            nz-button
+            nzType="text"
+            type="button"
+            nz-dropdown
+            nzPlacement="bottomRight"
+            nzOverlayClassName="action-dropdown-overlay"
+            [nzDropdownMenu]="sessionActions"
+            data-testid="session-actions-trigger"
+            aria-label="更多场次操作"
+          >
+            <i nz-icon nzType="more"></i>
+          </button>
+          <nz-dropdown-menu #sessionActions="nzDropdownMenu">
+            <ul nz-menu>
+              <li
+                *ngIf="hasAction(session.id, 'set_upload')"
+                nz-menu-item
+                (click)="openSessionAction('set_upload', [session.id])"
+              >
+                本场上传
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'set_skip')"
+                nz-menu-item
+                (click)="openSessionAction('set_skip', [session.id])"
+              >
+                本场不上传
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'retry_failed')"
+                nz-menu-item
+                (click)="openSessionAction('retry_failed', [session.id])"
+              >
+                重试上传
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'pause_upload')"
+                nz-menu-item
+                (click)="openSessionAction('pause_upload', [session.id])"
+              >
+                暂停上传
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'resume_upload')"
+                nz-menu-item
+                (click)="openSessionAction('resume_upload', [session.id])"
+              >
+                继续上传
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'edit_task') && session.uploadJob"
+                nz-menu-item
+                (click)="openTaskEdit([session.uploadJob.id])"
+              >
+                修改任务
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'repair_transcode')"
+                nz-menu-item
+                (click)="openSessionAction('repair_transcode', [session.id])"
+              >
+                修复转码
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'backfill_danmaku')"
+                nz-menu-item
+                (click)="openSessionAction('backfill_danmaku', [session.id])"
+              >
+                回灌弹幕
+              </li>
+              <li
+                *ngIf="hasAction(session.id, 'repost_as_new')"
+                nz-menu-item
+                (click)="openSessionAction('repost_as_new', [session.id])"
+              >
+                重新投稿
+              </li>
+            </ul>
+          </nz-dropdown-menu>
+        </td>
+      </tr>
+    </tbody>
+  </nz-table>
+
+  <div *ngIf="view.state === 'ready' && total > 0" class="pagination-bar">
+    <span>共 {{ total }} 条</span>
+    <nz-pagination
+      nzSize="small"
+      [nzPageIndex]="pageIndex"
+      [nzPageSize]="pageSize"
+      [nzTotal]="total"
+      [nzPageSizeOptions]="pageSizeOptions"
+      [nzShowSizeChanger]="true"
+      (nzPageIndexChange)="pageIndexChanged($event)"
+      (nzPageSizeChange)="pageSizeChanged($event)"
+    ></nz-pagination>
+  </div>
+</div>
+
+<nz-drawer
+  nzPlacement="right"
+  nzWidth="1180px"
+  nzWrapClassName="upload-task-detail-drawer"
+  [nzTitle]="selectedSession ? sessionHeader(selectedSession) : '任务详情'"
+  [nzVisible]="detailVisible"
+  [nzBodyStyle]="{ padding: '20px 24px' }"
+  (nzOnClose)="closeDetails()"
+>
+  <ng-container *nzDrawerContent>
+    <ng-container *ngIf="selectedSession as session">
+      <div class="session-overview">
+        <img
+          *ngIf="session.coverUrl"
+          class="session-cover"
+          [src]="session.coverUrl"
+          [alt]="coverAlt(session)"
+          loading="lazy"
+          referrerpolicy="no-referrer"
+        />
+        <div class="session-identity">
+          <h3>{{ session.title || '未记录直播标题' }}</h3>
+          <div>
+            主播 {{ session.anchorName || '未知' }} · 房间 {{ session.roomId }}
+          </div>
+          <div *ngIf="areaLabel(session) as area">{{ area }}</div>
+        </div>
+      </div>
+
+      <div class="session-summary">
+        <nz-tag [nzColor]="sessionStateColor(session.state)">
+          {{ sessionStateLabel(session.state) }}
+        </nz-tag>
+        <span>
+          开始于 {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
+        </span>
+        <span>录制 {{ formatDuration(session.recordDurationSeconds) }}</span>
+        <span>{{ session.partCount }} 个分 P</span>
+        <span>{{ formatBytes(session.totalFileSizeBytes) }}</span>
+        <span>{{ session.danmakuCount }} 条弹幕</span>
+      </div>
+
+      <div class="upload-progress" *ngIf="session.uploadJob as job; else noJob">
+        <div class="upload-status-row">
+          <nz-tag [nzColor]="uploadDisplayStateColor(job)">
+            {{ uploadDisplayStateLabel(job) }}
+          </nz-tag>
+          <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
+          <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
+        </div>
+        <div>投稿账号：{{ job.accountDisplayName }}</div>
+        <div *ngIf="job.aid || job.bvid">
+          稿件：
+          <span *ngIf="job.aid">AV{{ job.aid }}</span>
+          <span *ngIf="job.aid && job.bvid"> · </span>
+          <a
+            *ngIf="archiveUrl(session) as url"
+            [href]="url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >{{ job.bvid }}</a>
+          <span *ngIf="job.bvid && !archiveUrl(session)">{{ job.bvid }}</span>
+        </div>
+        <div class="upload-reason" *ngIf="job.reviewReason">
+          {{ job.reviewReason }}
+        </div>
+        <div class="repair-message" *ngIf="job.repairMessage">
+          转码修复：{{ job.repairMessage }}
+        </div>
+        <div class="repair-error" *ngIf="job.repairError">
+          转码修复：{{ job.repairError }}
+        </div>
+        <div *ngIf="job.scheduledPublishAt">
+          定时发布：{{ job.scheduledPublishAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
+        </div>
+        <div>合集：{{ collectionBranchLabel(job.collectionBranchState) }}</div>
+        <div class="repair-error" *ngIf="job.collectionError">
+          合集：{{ job.collectionError }}
+        </div>
+        <div class="repair-error" *ngIf="job.commentError">
+          自动评论：{{ job.commentError }}
+        </div>
+        <div class="repair-error" *ngIf="job.danmakuError">
+          弹幕回灌：{{ job.danmakuError }}
+        </div>
+
+        <div class="danmaku-progress" *ngIf="job.danmakuTotal > 0">
+          <strong>弹幕回灌进度</strong>
+          <span>已发送 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}</span>
+          <span>待发送 {{ job.danmakuPending }}</span>
+          <span *ngIf="job.danmakuUnknown > 0">
+            结果未知 {{ job.danmakuUnknown }}
+          </span>
+          <span *ngIf="job.danmakuFailed > 0">
+            失败 {{ job.danmakuFailed }}
+          </span>
+        </div>
+
+        <div class="unknown-danmaku" *ngIf="job.unknownDanmakuItems?.length">
+          <nz-alert
+            nzType="warning"
+            nzShowIcon
+            nzMessage="有弹幕的发送结果无法确认"
+            nzDescription="系统不会自动重发。请先到 B 站稿件中人工核对，再选择处理方式。"
+          ></nz-alert>
+          <div
+            class="unknown-danmaku-item"
+            *ngFor="let item of job.unknownDanmakuItems ?? []"
+          >
+            <div class="unknown-danmaku-target">
+              P{{ item.partIndex }} ·
+              {{ formatDanmakuProgress(item.progressMs) }}
+            </div>
+            <div class="unknown-danmaku-content">{{ item.content }}</div>
+            <div class="unknown-danmaku-error" *ngIf="item.errorMessage">
+              {{ item.errorMessage }}
+            </div>
+            <div class="unknown-danmaku-actions">
+              <button
+                nz-button
+                nzSize="small"
+                type="button"
+                (click)="openDanmakuDecision(item, 'assume_success')"
+              >
+                视为已发送
+              </button>
+              <button
+                nz-button
+                nzSize="small"
+                nzDanger
+                type="button"
+                (click)="openDanmakuDecision(item, 'retry_accept_duplicate_risk')"
+              >
+                接受重复风险并重试
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ng-template #noJob>
+        <div class="upload-progress upload-progress-empty">
+          {{ noUploadJobReason(session) }}
+        </div>
+      </ng-template>
+
+      <div class="parts-table-wrap">
+        <table class="parts-table">
+          <caption>
+            房间 {{ session.roomId }} 的录制文件
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">分 P</th>
+              <th scope="col">状态</th>
+              <th scope="col">上传</th>
+              <th scope="col">CID / 回灌</th>
+              <th scope="col">录制时间</th>
+              <th scope="col">文件</th>
+              <th scope="col">弹幕</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let part of session.parts; trackBy: trackPart">
+              <th scope="row">
+                <a
+                  *ngIf="remotePartUrl(session, part.partIndex) as url; else plainPart"
+                  [href]="url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="remote-part-link"
+                >
+                  P{{ part.partIndex }}
+                </a>
+                <ng-template #plainPart>P{{ part.partIndex }}</ng-template>
+              </th>
+              <td>
+                <nz-tag [nzColor]="artifactStateColor(part.artifactState)">
+                  {{ artifactStateLabel(part.artifactState) }}
+                </nz-tag>
+                <div class="part-error" *ngIf="part.errorMessage">
+                  {{ part.errorMessage }}
+                </div>
+              </td>
+              <td>
+                <ng-container
+                  *ngIf="
+                    uploadPartFor(session, part.partIndex) as uploadPart;
+                    else notUploaded
+                  "
+                >
+                  <nz-tag [nzColor]="uploadPartStateColor(uploadPart.uploadState)">
+                    {{ uploadPartStateLabel(uploadPart.uploadState) }}
+                  </nz-tag>
+                  <div
+                    class="part-metric"
+                    *ngIf="uploadPart.transcodeState !== 'unknown'"
+                  >
+                    {{ transcodeStateLabel(uploadPart.transcodeState) }}
+                    <span *ngIf="uploadPart.transcodeFailDesc">
+                      · {{ uploadPart.transcodeFailDesc }}
+                    </span>
+                  </div>
+                  <div
+                    class="part-metric"
+                    *ngIf="uploadPart.repairStage && uploadPart.repairStage !== 'none'"
+                  >
+                    {{ transcodeRepairStageLabel(uploadPart.repairStage) }}
+                    <span *ngIf="uploadPart.repairDiagnostic">
+                      · {{ uploadPart.repairDiagnostic }}
+                    </span>
+                  </div>
+                </ng-container>
+                <ng-template #notUploaded>尚未进入上传</ng-template>
+              </td>
+              <td>
+                <ng-container
+                  *ngIf="uploadPartFor(session, part.partIndex) as uploadPart"
+                >
+                  <div>
+                    {{ uploadPart.cid ? 'CID ' + uploadPart.cid : 'CID 待回填' }}
+                  </div>
+                  <div class="part-metric">
+                    {{ danmakuImportStateLabel(uploadPart.danmakuImportState) }}
+                  </div>
+                </ng-container>
+                <span *ngIf="!uploadPartFor(session, part.partIndex)">—</span>
+              </td>
+              <td>
+                <div>
+                  {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
+                </div>
+                <div class="part-metric">
+                  {{ formatDuration(part.recordDurationSeconds) }}
+                </div>
+              </td>
+              <td class="file-list">
+                <div class="file-path-row" *ngIf="part.finalPath">
+                  <span class="file-label">成品</span>
+                  <code
+                    class="file-name"
+                    nz-tooltip
+                    [nzTooltipTitle]="part.finalPath"
+                    >{{ fileName(part.finalPath) }}</code
+                  >
+                  <button
+                    nz-button
+                    nzType="text"
+                    nzSize="small"
+                    type="button"
+                    class="copy-path-button"
+                    data-testid="copy-final-path"
+                    nz-tooltip
+                    nzTooltipTitle="复制完整路径"
+                    aria-label="复制完整路径"
+                    (click)="copyPath(part.finalPath)"
+                  >
+                    <span nz-icon nzType="copy"></span>
+                  </button>
+                </div>
+                <div class="file-path-row" *ngIf="!part.finalPath">
+                  <span class="file-label">录制</span>
+                  <code
+                    class="file-name"
+                    nz-tooltip
+                    [nzTooltipTitle]="part.sourcePath"
+                    >{{ fileName(part.sourcePath) }}</code
+                  >
+                  <button
+                    nz-button
+                    nzType="text"
+                    nzSize="small"
+                    type="button"
+                    class="copy-path-button"
+                    data-testid="copy-source-path"
+                    nz-tooltip
+                    nzTooltipTitle="复制完整路径"
+                    aria-label="复制完整路径"
+                    (click)="copyPath(part.sourcePath)"
+                  >
+                    <span nz-icon nzType="copy"></span>
+                  </button>
+                </div>
+                <div class="file-path-row" *ngIf="part.xmlPath">
+                  <span class="file-label">弹幕</span>
+                  <code
+                    class="file-name"
+                    nz-tooltip
+                    [nzTooltipTitle]="part.xmlPath"
+                    >{{ fileName(part.xmlPath) }}</code
+                  >
+                  <button
+                    nz-button
+                    nzType="text"
+                    nzSize="small"
+                    type="button"
+                    class="copy-path-button"
+                    data-testid="copy-xml-path"
+                    nz-tooltip
+                    nzTooltipTitle="复制完整路径"
+                    aria-label="复制完整路径"
+                    (click)="copyPath(part.xmlPath)"
+                  >
+                    <span nz-icon nzType="copy"></span>
+                  </button>
+                </div>
+                <div class="part-metric">
+                  大小 {{ formatBytes(part.fileSizeBytes) }}
+                </div>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  data-testid="open-part-video"
+                  [disabled]="!part.sourceExists && !part.finalExists"
+                  (click)="openPartVideo(session, part)"
+                >
+                  播放
+                </button>
+              </td>
+              <td class="part-count">
+                <div>{{ part.danmakuCount }} 条</div>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  data-testid="open-part-danmaku"
+                  [disabled]="!part.xmlPath"
+                  (click)="openPartDanmaku(session, part)"
+                >
+                  查看
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </ng-container>
+  </ng-container>
+</nz-drawer>
+
+<app-task-edit-dialog
+  [visible]="taskEditVisible"
+  [jobIds]="taskEditJobIds"
+  (closed)="closeTaskEdit()"
+  (saved)="taskEditSaved()"
+></app-task-edit-dialog>
+
+<app-part-video-dialog
+  *ngIf="videoSession && videoPart"
+  [visible]="videoVisible"
+  [session]="videoSession"
+  [part]="videoPart"
+  (visibleChange)="videoVisibilityChanged($event)"
+></app-part-video-dialog>
+
+<app-part-danmaku-dialog
+  *ngIf="danmakuSession && danmakuPart"
+  [visible]="danmakuVisible"
+  [session]="danmakuSession"
+  [part]="danmakuPart"
+  (visibleChange)="danmakuVisibilityChanged($event)"
+></app-part-danmaku-dialog>
+
+<nz-modal
+  [nzTitle]="decisionTitle()"
+  nzOkText="确认处理"
+  nzCancelText="取消"
+  [nzVisible]="decisionVisible"
+  [nzOkDisabled]="!canSubmitDecision"
+  [nzOkLoading]="decisionSubmitting"
+  [nzCancelDisabled]="decisionSubmitting"
+  (nzOnOk)="submitDanmakuDecision()"
+  (nzOnCancel)="closeDanmakuDecision()"
+>
+  <ng-container *nzModalContent>
+    <nz-alert
+      *ngIf="decisionAction === 'retry_accept_duplicate_risk'"
+      nzType="error"
+      nzShowIcon
+      nzMessage="这次操作可能产生一条重复弹幕"
+      nzDescription="只有在人工核对后仍决定重试时才应继续；系统不会替你判断远端是否已经收到。"
+    ></nz-alert>
+    <nz-alert
+      *ngIf="decisionAction === 'assume_success'"
+      nzType="info"
+      nzShowIcon
+      nzMessage="该弹幕将记为已发送"
+      nzDescription="此操作不会再次请求 B 站。请确认你已经在稿件页面找到这条弹幕。"
+    ></nz-alert>
+
+    <div class="decision-target" *ngIf="decisionItem as item">
+      <div>P{{ item.partIndex }} · {{ formatDanmakuProgress(item.progressMs) }}</div>
+      <div>{{ item.content }}</div>
+    </div>
+
+    <label class="decision-reason-label" for="danmaku-decision-reason">
+      处理原因
+    </label>
+    <textarea
+      id="danmaku-decision-reason"
+      nz-input
+      rows="3"
+      maxlength="500"
+      name="danmakuDecisionReason"
+      [(ngModel)]="decisionReason"
+      placeholder="填写人工核对结果，不能为空"
+    ></textarea>
+
+    <nz-alert
+      *ngIf="decisionError"
+      class="decision-error"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="decisionError"
+    ></nz-alert>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  nzTitle="重试失败任务"
+  nzOkText="确认重试"
+  nzCancelText="取消"
+  [nzVisible]="retryPreviewVisible"
+  [nzOkLoading]="retryAllLoading"
+  [nzCancelDisabled]="retryAllLoading"
+  (nzOnOk)="submitRetryAllFailedJobs()"
+  (nzOnCancel)="closeRetryFailedPreview()"
+>
+  <ng-container *nzModalContent>
+    <p>找到 {{ retryPreviewItems.length }} 个可以安全重试的失败任务：</p>
+    <ul class="retry-list">
+      <li *ngFor="let item of retryPreviewItems">
+        <strong>{{ item.title || '未记录直播标题' }}</strong>
+        <span>房间 {{ item.roomId }} · {{ item.accountDisplayName }}</span>
+        <span *ngIf="item.reason">{{ item.reason }}</span>
+      </li>
+    </ul>
+    <p class="secondary-text">
+      结果未知的任务不会列在这里，也不会被自动重试。
+    </p>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [nzTitle]="uploadActionTitle()"
+  nzOkText="确认执行"
+  nzCancelText="取消"
+  [nzVisible]="uploadActionVisible"
+  [nzOkLoading]="uploadActionSubmitting"
+  [nzCancelDisabled]="uploadActionSubmitting"
+  (nzOnOk)="submitUploadAction()"
+  (nzOnCancel)="closeUploadAction()"
+>
+  <ng-container *nzModalContent>
+    <p>{{ uploadActionDescription() }}</p>
+    <p>本次将处理 {{ uploadActionSessionIds.length }} 个场次。</p>
+    <nz-alert
+      *ngIf="uploadActionError"
+      nzType="error"
+      nzShowIcon
+      nzMessage="操作未执行"
+      [nzDescription]="uploadActionError"
+    ></nz-alert>
+  </ng-container>
+</nz-modal>

@@ -22,9 +22,9 @@ from tenacity import (
 
 from blrec.bili.live import Live
 from blrec.core import operators as core_ops
+from blrec.exception.helpers import format_exception
 from blrec.utils import operators as utils_ops
 from blrec.utils.hash import cksum
-from blrec.exception.helpers import format_exception
 
 from ..exceptions import FetchSegmentError, SegmentDataCorrupted
 
@@ -181,7 +181,9 @@ class SegmentFetcher:
     )
     def _fetch_segment(self, url: str) -> bytes:
         try:
-            response = self._session.get(url, headers=self._live.headers, timeout=5)
+            response = self._session.get(
+                url, headers=self._live.stream_headers, timeout=5
+            )
             response.raise_for_status()
         except Exception as e:
             logger.debug(f'Failed to fetch segment {url}: {repr(e)}')

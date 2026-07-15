@@ -1,5 +1,5 @@
-import { Injectable } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
+import { Injectable } from '@angular/core';
 
 import { catchError, map, tap } from 'rxjs/operators';
 import { Observable, of } from 'rxjs';
@@ -7,6 +7,7 @@ import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { TaskService } from './task.service';
 import { ResponseMessage } from 'src/app/shared/api.models';
+import { TaskBatchAction, TaskBatchActionResponse } from '../task.model';
 
 export interface AddTaskResultMessage {
   type: 'success' | 'info' | 'warning' | 'error';
@@ -26,6 +27,30 @@ export class TaskManagerService {
     return this.taskService
       .getAllTaskData()
       .pipe(map((taskData) => taskData.map((data) => data.room_info.room_id)));
+  }
+
+  runBatchAction(
+    action: TaskBatchAction,
+    roomIds: readonly number[]
+  ): Observable<TaskBatchActionResponse> {
+    return this.taskService.runBatchAction(action, roomIds).pipe(
+      tap(
+        (response) => {
+          const accepted = response.results.filter((result) => result.accepted);
+          const rejected = response.results.filter((result) => !result.accepted);
+          if (rejected.length > 0) {
+            this.message.warning(
+              `已完成 ${accepted.length} 个，跳过 ${rejected.length} 个：${rejected[0].message}`
+            );
+          } else {
+            this.message.success(`已完成 ${accepted.length} 个任务`);
+          }
+        },
+        (error: HttpErrorResponse) => {
+          this.message.error(`批量操作失败：${error.message}`);
+        }
+      )
+    );
   }
 
   updateTaskInfo(roomId: number): Observable<ResponseMessage> {

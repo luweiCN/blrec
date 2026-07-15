@@ -1,0 +1,176 @@
+.uploads-page {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 12px;
+  overflow: auto;
+}
+
+.scope-note {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.account-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+}
+
+.account-main {
+  display: flex;
+  min-width: 0;
+  gap: 12px;
+  align-items: center;
+}
+
+.account-details {
+  min-width: 0;
+}
+
+.account-avatar {
+  width: 48px;
+  height: 48px;
+  flex: none;
+}
+
+.account-avatar-image {
+  display: block;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.account-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.account-meta-grid {
+  display: grid;
+  margin-top: 4px;
+  color: #595959;
+  column-gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  row-gap: 2px;
+}
+
+.help-mark {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #8c8c8c;
+  border-radius: 50%;
+  cursor: help;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.account-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.impact-list {
+  margin-bottom: 0;
+  padding-left: 20px;
+
+  li + li {
+    margin-top: 8px;
+  }
+}
+
+.relationship-warning,
+.relationship-groups,
+.removal-form {
+  display: block;
+  margin-top: 16px;
+}
+
+.relationship-groups ul {
+  margin-bottom: 0;
+  padding-left: 20px;
+}
+
+.removal-form fieldset {
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.removal-form legend,
+.form-row label {
+  display: block;
+  margin-bottom: 8px;
+  color: #262626;
+  font-weight: 600;
+}
+
+.removal-form nz-radio-group,
+.removal-form label[nz-radio] {
+  display: block;
+}
+
+.removal-form label[nz-radio] + label[nz-radio] {
+  margin-top: 12px;
+}
+
+.removal-choice-copy {
+  display: inline-flex;
+  flex-direction: column;
+  margin-left: 4px;
+
+  small {
+    margin-top: 2px;
+    color: #595959;
+  }
+}
+
+.form-row {
+  margin-top: 16px;
+
+  nz-select {
+    width: 100%;
+  }
+}
+
+.login-state {
+  text-align: center;
+}
+
+.status-text {
+  font-weight: 600;
+}
+
+.login-qr {
+  display: block;
+  width: min(256px, 100%);
+  height: auto;
+  margin: 0 auto 12px;
+  image-rendering: pixelated;
+}
+
+@media (max-width: 760px) {
+  .account-list li,
+  .account-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .account-meta-grid {
+    grid-template-columns: 1fr;
+  }
+}

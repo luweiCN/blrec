@@ -1,52 +1,53 @@
 from __future__ import annotations
-from typing import List, TYPE_CHECKING
 
+from typing import TYPE_CHECKING, List
+
+from ..bili.live import Live
+from ..bili.live_monitor import LiveEventListener
+from ..bili.models import RoomInfo
+from ..core.recorder import RecorderEventListener
+from ..disk_space import SpaceEventListener
+from ..postprocess import PostprocessorEventListener
 from .event_center import EventCenter
 from .models import (
+    CoverImageDownloadedEvent,
+    CoverImageDownloadedEventData,
+    DanmakuFileCompletedEvent,
+    DanmakuFileCompletedEventData,
+    DanmakuFileCreatedEvent,
+    DanmakuFileCreatedEventData,
     LiveBeganEvent,
     LiveBeganEventData,
     LiveEndedEvent,
     LiveEndedEventData,
-    RoomChangeEvent,
-    RoomChangeEventData,
-    RecordingStartedEvent,
-    RecordingStartedEventData,
-    RecordingFinishedEvent,
-    RecordingFinishedEventData,
-    RecordingCancelledEvent,
-    RecordingCancelledEventData,
-    VideoFileCreatedEvent,
-    VideoFileCreatedEventData,
-    VideoFileCompletedEvent,
-    VideoFileCompletedEventData,
-    DanmakuFileCreatedEvent,
-    DanmakuFileCreatedEventData,
-    DanmakuFileCompletedEvent,
-    DanmakuFileCompletedEventData,
-    RawDanmakuFileCreatedEvent,
-    RawDanmakuFileCreatedEventData,
-    RawDanmakuFileCompletedEvent,
-    RawDanmakuFileCompletedEventData,
-    CoverImageDownloadedEvent,
-    CoverImageDownloadedEventData,
-    VideoPostprocessingCompletedEvent,
-    VideoPostprocessingCompletedEventData,
     PostprocessingCompletedEvent,
     PostprocessingCompletedEventData,
+    RawDanmakuFileCompletedEvent,
+    RawDanmakuFileCompletedEventData,
+    RawDanmakuFileCreatedEvent,
+    RawDanmakuFileCreatedEventData,
+    RecordingCancelledEvent,
+    RecordingCancelledEventData,
+    RecordingFinishedEvent,
+    RecordingFinishedEventData,
+    RecordingStartedEvent,
+    RecordingStartedEventData,
+    RoomChangeEvent,
+    RoomChangeEventData,
     SpaceNoEnoughEvent,
     SpaceNoEnoughEventData,
+    VideoFileCompletedEvent,
+    VideoFileCompletedEventData,
+    VideoFileCreatedEvent,
+    VideoFileCreatedEventData,
+    VideoPostprocessingCompletedEvent,
+    VideoPostprocessingCompletedEventData,
 )
-from ..bili.live import Live
-from ..bili.models import RoomInfo
-from ..bili.live_monitor import LiveEventListener
-from ..core.recorder import RecorderEventListener
-from ..disk_space import SpaceEventListener
-from ..postprocess import PostprocessorEventListener
 
 if TYPE_CHECKING:
     from ..bili.live_monitor import LiveMonitor
     from ..core.recorder import Recorder
-    from ..disk_space import SpaceMonitor, DiskUsage
+    from ..disk_space import DiskUsage, SpaceMonitor
     from ..postprocess import Postprocessor
 
 

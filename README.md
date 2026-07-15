@@ -77,28 +77,7 @@
 
 ## Docker
 
-### 环境变量
-
-- 默认设置文件位置: `ENV BLREC_DEFAULT_SETTINGS_FILE=/cfg/settings.toml`
-- 默认日志存放目录: `ENV BLREC_DEFAULT_LOG_DIR=/log`
-- 默认录播存放目录: `ENV BLREC_DEFAULT_OUT_DIR=/rec`
-- 默认时区: `ENV TZ="Asia/Shanghai"`
-
-### 默认参数运行
-
-`sudo docker run -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec -dp 2233:2233 acgnhiki/blrec`
-
-### 命令行参数用法
-
-```bash
-sudo docker run \
-    -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec \
-    -dp 2233:2233 acgnhiki/blrec \
-    -c /cfg/another_settings.toml \
-    --key-file path/to/key-file \
-    --cert-file path/to/cert-file \
-    --api-key bili2233
-```
+Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.1`](https://github.com/luweicn/blrec/pkgs/container/blrec)。请仅使用仓库中的 `compose.synology.yml` 部署；首次安装、凭据密钥初始化、升级与回滚步骤见 [群晖双网络部署](docs/operations/synology-multi-network.md)。
 
 ## 使用方法
 
@@ -134,25 +113,19 @@ sudo docker run \
 
 ### 网络安全
 
-指定 `SSL` 证书使用 **https** 协议并指定 `api key` 可防止被恶意访问和泄漏设置里的敏感信息
+首次打开页面时需要输入部署时配置的管理员用户名、初始化安全码（API Key）并创建管理员密码。此后日常登录只使用用户名和密码；网页通过 HttpOnly 会话 Cookie 和 CSRF 校验认证，不会保存或继续发送 API Key。
 
-例如：`blrec --key-file path/to/key-file --cert-file path/to/cert-file --api-key bili2233`
+通过不可信网络访问时，应在反向代理或程序入口配置 **HTTPS**：
 
-如果指定了 api key，浏览器第一次访问会弹对话框要求输入 api key。
+例如：`blrec --key-file path/to/key-file --cert-file path/to/cert-file`
 
-输入的 api key 会被保存在浏览器的 `local storage` 以避免每次都得输入
-
-如果在不信任的环境下，请使用浏览器的隐式模式访问。
+`BLREC_ADMIN_USERNAME` 指定唯一管理员用户名，区分大小写。`api key` 仅用于首次创建管理员或忘记密码后的恢复验证；设置完成后，普通页面和 API 请求不再携带它。未配置 API Key 时，只允许从本机回环地址完成首次设置和恢复。
 
 ### 关于 api-key
 
 api key 可以使用数字和字母，长度限制为最短 8 最长 80。
 
-3 次尝试内 api key 正确客户端 ip 会自动加入白名单，3 次错误后则 ip 会被加入黑名单，黑名单后请求会被拒绝 (403)。
-
-黑名单和白名单数以及同时尝试连接的 ip 数量限制各为 100，黑名单或白名单到达限制后不再接受除了白名单内的其它 ip 。
-
-只有重启才会清空黑名单和白名单。
+管理员登录与初始化/恢复失败会分别按客户端限速，五分钟内失败五次会暂停十五分钟；两个计数互不影响。修改或恢复密码会撤销全部已有会话。API Key 不应与管理员密码相同，也不应提交到仓库。
 
 ## 作为 ASGI 应用运行
 
@@ -167,15 +140,17 @@ api key 可以使用数字和字母，长度限制为最短 8 最长 80。
 - `BLREC_CONFIG` 指定设置文件
 - `BLREC_OUT_DIR` 指定录播存放位置
 - `BLREC_LOG_DIR` 指定日志存放位置
-- `BLREC_API_KEY` 指定 `api key`
+- `BLREC_ADMIN_USERNAME` 指定管理员用户名（未设置时为 `admin`）
+- `BLREC_API_KEY` 指定仅供初始化和密码恢复使用的安全码
+- `BLREC_FORWARDED_ALLOW_IPS` 指定可信反向代理地址（默认只信任 `127.0.0.1`）；没有反向代理时不要扩大范围
 
 ### bash
 
-    BLREC_CONFIG=path/to/settings.toml BLREC_OUT_DIR=path/to/dir BLREC_API_KEY=******** uvicorn blrec.web:app --host 0.0.0.0 --port 8000
+    BLREC_CONFIG=path/to/settings.toml BLREC_OUT_DIR=path/to/dir BLREC_ADMIN_USERNAME=owner BLREC_API_KEY=******** uvicorn blrec.web:app --host 0.0.0.0 --port 8000 --forwarded-allow-ips 127.0.0.1
 
 ### cmd
 
-    set BLREC_CONFIG=D:\\path\\to\\config.toml & set BLREC_OUT_DIR=D:\\path\\to\\dir & set BLREC_API_KEY=******** uvicorn blrec.web:app --host 0.0.0.0 --port 8000
+    set BLREC_CONFIG=D:\\path\\to\\config.toml & set BLREC_OUT_DIR=D:\\path\\to\\dir & set BLREC_ADMIN_USERNAME=owner & set BLREC_API_KEY=******** uvicorn blrec.web:app --host 0.0.0.0 --port 8000 --forwarded-allow-ips 127.0.0.1
 
 ## Webhook
 

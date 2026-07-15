@@ -2,6 +2,7 @@
 Analyse the FLV stream to make MetaData
 ref: https://github.com/ioppermann/yamdi/blob/master/yamdi.c
 """
+
 from __future__ import annotations
 
 from typing import List, Optional, TypedDict

@@ -1,6 +1,7 @@
 import os
-from typing import Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
+import attr
 from brotli_asgi import BrotliMiddleware
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,15 +11,44 @@ from pkg_resources import resource_filename
 from pydantic import ValidationError
 from starlette.responses import Response
 
+from blrec.bili_upload.recording_content import MediaResource
+from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.exception import ExistsError, ForbiddenError, NotFoundError
+from blrec.networking.manager import NetworkRouteManager
+from blrec.notification.providers import (
+    Bark,
+    EmailService,
+    Pushdeer,
+    Pushplus,
+    Serverchan,
+    Telegram,
+)
 from blrec.path.helpers import create_file, file_exists
 from blrec.setting import EnvSettings, Settings
 from blrec.web.middlewares.base_herf import BaseHrefMiddleware
 from blrec.web.middlewares.route_redirect import RouteRedirectMiddleware
+from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
 
 from ..application import Application
 from . import security
-from .routers import application, settings, tasks, update, validation, websockets
+from .auth_store import AdminAuthStore
+from .routers import (
+    application,
+    auth,
+    bili_accounts,
+    bili_collections,
+    live_status,
+    network,
+    recording_retention,
+    recording_sessions,
+    room_upload_policies,
+    settings,
+    tasks,
+    update,
+    upload_covers,
+    validation,
+    websockets,
+)
 from .schemas import ResponseMessage
 
 _env_settings = EnvSettings()
@@ -29,14 +59,114 @@ _env_settings.settings_file = _path
 
 _settings = Settings.load(_env_settings.settings_file)
 _settings.update_from_env_settings(_env_settings)
+_auth_database_path = os.environ.get(
+    'BLREC_AUTH_DATABASE', os.path.join(os.path.dirname(_path), 'auth.sqlite3')
+)
+_admin_auth_store = AdminAuthStore(
+    _auth_database_path, admin_username=_env_settings.admin_username
+)
+_admin_auth_store.open()
+_application_started = False
+_network_route_manager = NetworkRouteManager(lambda: _settings.network)
 
-app = Application(_settings)
 
-if _env_settings.api_key is None:
-    _dependencies = None
-else:
-    security.api_key = _env_settings.api_key
-    _dependencies = [Depends(security.authenticate)]
+def _notification_channel_enabled(channel: str) -> bool:
+    setting_name = '{}_notification'.format(channel)
+    channel_settings = getattr(_settings, setting_name, None)
+    return bool(channel_settings is not None and channel_settings.enabled)
+
+
+async def _managed_cookie_provider(url: str) -> Optional[str]:
+    return await _bili_account_runtime.recording_cookie_header(url)
+
+
+async def _report_primary_auth_failure() -> None:
+    await _bili_account_runtime.report_primary_auth_failure()
+
+
+async def _apply_primary_credential() -> None:
+    if _application_started:
+        await app.refresh_managed_cookie()
+
+
+async def _cancel_active_recording(room_id: int) -> None:
+    await app.suppress_current_live(room_id)
+
+
+_bili_account_runtime = BiliAccountRuntime(
+    _settings.bili_upload,
+    api_key=_env_settings.api_key,
+    credential_key=_env_settings.load_credential_key(),
+    old_credential_keys=_env_settings.load_old_credential_keys(),
+    space_threshold_bytes=_settings.space.space_threshold,
+    recording_root=_settings.output.out_dir,
+    recording_capacity_bytes=lambda: _settings.space.recording_capacity,
+    capacity_warning_threshold_bytes=(
+        lambda: _settings.space.capacity_warning_threshold
+    ),
+    on_primary_credential_changed=_apply_primary_credential,
+    active_session_canceller=_cancel_active_recording,
+    network_route_manager=_network_route_manager,
+    operational_settings_provider=lambda: _settings.operational_notifications,
+    notification_senders={
+        'email': EmailService.get_instance(),
+        'serverchan': Serverchan.get_instance(),
+        'pushdeer': Pushdeer.get_instance(),
+        'pushplus': Pushplus.get_instance(),
+        'telegram': Telegram.get_instance(),
+        'bark': Bark.get_instance(),
+    },
+    notification_channel_enabled=_notification_channel_enabled,
+)
+app = Application(
+    _settings,
+    managed_cookie_provider=_managed_cookie_provider,
+    auth_failure_reporter=_report_primary_auth_failure,
+    recording_journal_provider=lambda: _bili_account_runtime.journal,
+    recording_retention_provider=(lambda: _bili_account_runtime.retention_manager),
+    network_route_manager=_network_route_manager,
+)
+
+
+def _active_recording_metadata(resource: MediaResource) -> Optional[Mapping[str, Any]]:
+    if not _application_started or resource.path is None:
+        return None
+    try:
+        task = app.get_task_data(resource.room_id)
+        metadata = app.get_task_metadata(resource.room_id)
+    except (NotFoundError, RuntimeError):
+        return None
+    recording_path = task.task_status.recording_path
+    if (
+        recording_path is None
+        or os.path.realpath(recording_path) != os.path.realpath(resource.path)
+        or metadata is None
+    ):
+        return None
+    return attr.asdict(metadata)
+
+
+bili_accounts.manager = None
+bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
+recording_sessions.journal = None
+recording_sessions.danmaku_publisher = None
+recording_sessions.content_reader = None
+recording_sessions.task_actions = None
+recording_sessions.session_action_runner = None
+recording_sessions.active_recording_metadata_provider = _active_recording_metadata
+recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+recording_retention.manager = None
+recording_retention.unavailable_reason = _bili_account_runtime.unavailable_reason
+room_upload_policies.manager = None
+room_upload_policies.category_catalog = None
+room_upload_policies.unavailable_reason = _bili_account_runtime.unavailable_reason
+upload_covers.library = None
+upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
+bili_collections.manager = None
+bili_collections.unavailable_reason = _bili_account_runtime.unavailable_reason
+network.manager = _network_route_manager
+
+_dependencies = [Depends(security.authenticate)]
 
 api = FastAPI(
     title='Bilibili live streaming recorder web API',
@@ -47,12 +177,17 @@ api = FastAPI(
 
 api.add_middleware(BaseHrefMiddleware)
 api.add_middleware(BrotliMiddleware)
+api.add_middleware(SecurityHeadersMiddleware)
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:4200'],  # angular development
+    allow_origins=[
+        'http://localhost:4200',
+        'http://127.0.0.1:4200',
+    ],  # angular development
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
+    expose_headers=['Accept-Ranges', 'Content-Length', 'Content-Range'],
 )
 api.add_middleware(RouteRedirectMiddleware)
 
@@ -97,13 +232,86 @@ async def validation_error_handler(
 
 @api.on_event('startup')
 async def on_startup() -> None:
-    await app.launch()
+    global _application_started
+    _admin_auth_store.open()
+    security.configure(_admin_auth_store, bootstrap_api_key=_env_settings.api_key or '')
+    auth.configure(_admin_auth_store, bootstrap_api_key=_env_settings.api_key or '')
+    application_launched = False
+    try:
+        await _bili_account_runtime.start()
+        bili_accounts.manager = _bili_account_runtime.manager
+        bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
+        recording_sessions.journal = _bili_account_runtime.journal
+        recording_sessions.danmaku_publisher = _bili_account_runtime.danmaku_publisher
+        recording_sessions.content_reader = _bili_account_runtime.content_reader
+        recording_sessions.task_actions = _bili_account_runtime.task_actions
+        recording_sessions.session_action_runner = (
+            _bili_account_runtime.run_recording_session_action
+        )
+        recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+        recording_retention.manager = _bili_account_runtime.retention_manager
+        recording_retention.unavailable_reason = (
+            _bili_account_runtime.unavailable_reason
+        )
+        room_upload_policies.manager = _bili_account_runtime.policy_manager
+        room_upload_policies.category_catalog = _bili_account_runtime.category_catalog
+        room_upload_policies.unavailable_reason = (
+            _bili_account_runtime.unavailable_reason
+        )
+        upload_covers.library = _bili_account_runtime.cover_library
+        upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
+        bili_collections.manager = _bili_account_runtime.collection_manager
+        bili_collections.unavailable_reason = _bili_account_runtime.unavailable_reason
+        await app.launch()
+        application_launched = True
+        _application_started = True
+        await app.refresh_managed_cookie()
+    except BaseException:
+        _application_started = False
+        bili_accounts.manager = None
+        recording_sessions.journal = None
+        recording_sessions.danmaku_publisher = None
+        recording_sessions.content_reader = None
+        recording_sessions.task_actions = None
+        recording_sessions.session_action_runner = None
+        recording_retention.manager = None
+        room_upload_policies.manager = None
+        room_upload_policies.category_catalog = None
+        upload_covers.library = None
+        bili_collections.manager = None
+        try:
+            if application_launched:
+                await app.exit()
+        finally:
+            await _bili_account_runtime.close()
+        raise
 
 
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
-    _settings.dump()
-    await app.exit()
+    global _application_started
+    _application_started = False
+    bili_accounts.manager = None
+    recording_sessions.journal = None
+    recording_sessions.danmaku_publisher = None
+    recording_sessions.content_reader = None
+    recording_sessions.task_actions = None
+    recording_sessions.session_action_runner = None
+    recording_retention.manager = None
+    room_upload_policies.manager = None
+    room_upload_policies.category_catalog = None
+    upload_covers.library = None
+    bili_collections.manager = None
+    try:
+        await app.exit()
+    finally:
+        _settings.dump()
+        try:
+            await _bili_account_runtime.close()
+        finally:
+            security.reset()
+            auth.reset()
+            _admin_auth_store.close()
 
 
 tasks.app = app
@@ -112,12 +320,22 @@ application.app = app
 validation.app = app
 websockets.app = app
 update.app = app
+live_status.app = app
+api.include_router(auth.router, prefix='/api/v1')
 api.include_router(tasks.router)
 api.include_router(settings.router)
 api.include_router(application.router)
 api.include_router(validation.router)
 api.include_router(websockets.router)
 api.include_router(update.router)
+api.include_router(live_status.router, prefix='/api/v1')
+api.include_router(network.router, prefix='/api/v1')
+api.include_router(bili_accounts.router, prefix='/api/v1')
+api.include_router(recording_sessions.router, prefix='/api/v1')
+api.include_router(recording_retention.router, prefix='/api/v1')
+api.include_router(room_upload_policies.router, prefix='/api/v1')
+api.include_router(upload_covers.router, prefix='/api/v1')
+api.include_router(bili_collections.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

@@ -1,0 +1,64 @@
+<nz-modal
+  nzTitle="修改任务"
+  nzWidth="720px"
+  [nzVisible]="visible"
+  [nzOkLoading]="submitting"
+  [nzOkDisabled]="loading || !!errorMessage || draft.accountId === null"
+  nzOkText="保存"
+  nzCancelText="取消"
+  (nzOnOk)="save()"
+  (nzOnCancel)="close()"
+>
+  <ng-container *nzModalContent>
+    <nz-spin [nzSpinning]="loading">
+      <nz-alert
+        *ngIf="errorMessage"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="errorMessage"
+      ></nz-alert>
+      <form class="task-edit-form" *ngIf="!loading && !errorMessage">
+        <label>
+          <span>投稿账号</span>
+          <nz-select [(ngModel)]="draft.accountId" name="accountId">
+            <nz-option
+              *ngFor="let account of accounts"
+              [nzValue]="account.id"
+              [nzLabel]="account.displayName"
+            ></nz-option>
+          </nz-select>
+        </label>
+        <label class="full-width">
+          <span>标题</span>
+          <input nz-input name="title" maxlength="80" [(ngModel)]="draft.title" />
+        </label>
+        <label>
+          <span>投稿分区 ID</span>
+          <input nz-input name="tid" type="number" min="1" [(ngModel)]="draft.tid" />
+        </label>
+        <label>
+          <span>标签</span>
+          <input nz-input name="tags" [(ngModel)]="draft.tags" />
+        </label>
+        <label class="full-width">
+          <span>简介</span>
+          <textarea nz-input name="description" rows="4" maxlength="2000" [(ngModel)]="draft.description"></textarea>
+        </label>
+        <label class="full-width">
+          <span>动态文案</span>
+          <textarea nz-input name="dynamic" rows="2" maxlength="1000" [(ngModel)]="draft.dynamic"></textarea>
+        </label>
+        <label>
+          <span>定时发布延迟（秒）</span>
+          <input nz-input name="publishDelay" type="number" min="0" [(ngModel)]="draft.publishDelaySeconds" />
+        </label>
+        <div class="switches full-width">
+          <label><nz-switch [(ngModel)]="draft.publishDynamic" name="publishDynamic"></nz-switch><span>发布动态</span></label>
+          <label><nz-switch [(ngModel)]="draft.isOnlySelf" name="isOnlySelf"></nz-switch><span>仅自己可见</span></label>
+          <label><nz-switch [(ngModel)]="draft.autoComment" name="autoComment"></nz-switch><span>自动评论</span></label>
+          <label><nz-switch [(ngModel)]="draft.danmakuBackfill" name="danmakuBackfill"></nz-switch><span>弹幕回灌</span></label>
+        </div>
+      </form>
+    </nz-spin>
+  </ng-container>
+</nz-modal>

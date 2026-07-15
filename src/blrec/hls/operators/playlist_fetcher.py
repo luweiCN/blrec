@@ -99,7 +99,9 @@ class PlaylistFetcher(SupportDebugMixin):
     )
     def _fetch_playlist(self, url: str) -> str:
         try:
-            response = self._session.get(url, headers=self._live.headers, timeout=3)
+            response = self._session.get(
+                url, headers=self._live.stream_headers, timeout=3
+            )
             response.raise_for_status()
         except Exception as e:
             logger.debug(f'Failed to fetch playlist: {repr(e)}')

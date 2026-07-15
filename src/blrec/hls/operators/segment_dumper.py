@@ -15,9 +15,7 @@ __all__ = ('SegmentDumper',)
 
 
 class SegmentDumper:
-    def __init__(
-        self, path_provider: Callable[[Optional[int]], Tuple[str, int]]
-    ) -> None:
+    def __init__(self, path_provider: Callable[[], Tuple[str, int]]) -> None:
         self._path_provider = path_provider
         self._file_opened: Subject[Tuple[str, int]] = Subject()
         self._file_closed: Subject[str] = Subject()

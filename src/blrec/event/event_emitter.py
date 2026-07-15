@@ -10,7 +10,7 @@ __all__ = 'EventListener', 'EventEmitter'
 
 
 class EventListener(ABC):
-    ...
+    pass
 
 
 _T = TypeVar('_T', bound=EventListener)

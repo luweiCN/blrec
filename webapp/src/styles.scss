@@ -1,4 +1,11 @@
 /* You can add global styles to this file, and also import other style files */
+.primary-page {
+  width: 100%;
+  max-width: 1180px;
+  margin-right: auto;
+  margin-left: auto;
+}
+
 @media screen and (min-width: 768px) {
   ::-webkit-scrollbar {
     width: 8px;
@@ -15,5 +22,21 @@
 
   ::-webkit-scrollbar-thumb:hover {
     background: #a8a8a8;
+  }
+}
+
+.action-dropdown-overlay {
+  .ant-dropdown-menu-item:not(.ant-dropdown-menu-item-disabled):hover,
+  .ant-dropdown-menu-item:not(.ant-dropdown-menu-item-disabled):focus-visible {
+    color: #096dd9;
+    background: #e6f7ff;
+  }
+
+  .ant-dropdown-menu-item-danger:not(.ant-dropdown-menu-item-disabled):hover,
+  .ant-dropdown-menu-item-danger:not(
+      .ant-dropdown-menu-item-disabled
+    ):focus-visible {
+    color: #cf1322;
+    background: #fff1f0;
   }
 }

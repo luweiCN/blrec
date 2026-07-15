@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 from jsonpath import jsonpath
@@ -12,7 +12,10 @@ from .typing import QualityNumber, ResponseData, StreamCodec, StreamFormat
 __all__ = 'room_init', 'ensure_room_id'
 
 
-async def room_init(room_id: int) -> ResponseData:
+async def room_init(room_id: int, session: Optional[Any] = None) -> ResponseData:
+    if session is not None:
+        api = WebApi(session, room_id=room_id)
+        return await api.room_init(room_id)
     async with aiohttp.ClientSession(
         connector=connector,
         connector_owner=False,
@@ -24,10 +27,10 @@ async def room_init(room_id: int) -> ResponseData:
         return await api.room_init(room_id)
 
 
-async def ensure_room_id(room_id: int) -> int:
+async def ensure_room_id(room_id: int, session: Optional[Any] = None) -> int:
     """Ensure room id is valid and is the real room id"""
     try:
-        result = await room_init(room_id)
+        result = await room_init(room_id, session)
     except ApiRequestError as e:
         if e.code == 60004:
             raise NotFoundError(f'the room {room_id} not existed')

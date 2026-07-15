@@ -6,3 +6,4 @@ include LICENSE
 
 # Include all package data
 graft src/blrec/data
+graft src/blrec/bili_upload/migrations

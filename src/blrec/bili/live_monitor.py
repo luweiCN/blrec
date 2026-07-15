@@ -1,6 +1,7 @@
 import asyncio
 import random
 from contextlib import suppress
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
@@ -12,6 +13,7 @@ from ..utils.mixins import SwitchableMixin
 from .danmaku_client import DanmakuClient, DanmakuCommand, DanmakuListener
 from .helpers import extract_formats
 from .live import Live
+from .live_status import ObservedStatus
 from .models import LiveStatus, RoomInfo
 from .typing import Danmaku
 
@@ -22,33 +24,44 @@ class LiveEventListener(EventListener):
     async def on_live_status_changed(
         self, current_status: LiveStatus, previous_status: LiveStatus
     ) -> None:
-        ...
+        pass
 
     async def on_live_began(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_live_ended(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_live_stream_available(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_live_stream_reset(self, live: Live) -> None:
-        ...
+        pass
 
     async def on_room_changed(self, room_info: RoomInfo) -> None:
-        ...
+        pass
 
 
 class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMixin):
-    def __init__(self, danmaku_client: DanmakuClient, live: Live) -> None:
+    def __init__(
+        self,
+        danmaku_client: DanmakuClient,
+        live: Live,
+        status_sink: Optional[Callable[[ObservedStatus], Awaitable[None]]] = None,
+    ) -> None:
         super().__init__()
         self._logger_context = {'room_id': live.room_id}
         self._logger = logger.bind(**self._logger_context)
         self._danmaku_client = danmaku_client
         self._live = live
+        self._status_sink = status_sink
 
     def _init_status(self) -> None:
+        if self._status_sink is not None:
+            self._previous_status = LiveStatus.PREPARING
+            self._status_count = 0
+            self._stream_available = False
+            return
         self._previous_status = self._live.room_info.live_status
         if self._live.is_living():
             self._status_count = 2
@@ -60,12 +73,14 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
     def _do_enable(self) -> None:
         self._init_status()
         self._danmaku_client.add_listener(self)
-        self._start_polling()
+        if self._status_sink is None:
+            self._start_polling()
         self._logger.debug('Enabled live monitor')
 
     def _do_disable(self) -> None:
         self._danmaku_client.remove_listener(self)
-        asyncio.create_task(self._stop_polling())
+        if self._status_sink is None:
+            asyncio.create_task(self._stop_polling())
         asyncio.create_task(self._stop_checking())
         self._logger.debug('Disabled live monitor')
 
@@ -101,6 +116,9 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
         # such as an operating system hibernation.
         self._logger.warning('The Danmaku Client Reconnected')
 
+        if self._status_sink is not None:
+            return
+
         await self._live.update_room_info()
         current_status = self._live.room_info.live_status
 
@@ -118,8 +136,34 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
                 self._logger.debug('Simulating live ended event')
                 await self._handle_status_change(current_status)
 
+    async def on_client_retries_exhausted(self, error: Exception) -> None:
+        if self._status_sink is not None:
+            await self._status_sink(ObservedStatus.STALE)
+
+    async def apply_confirmed_status(self, status: ObservedStatus) -> None:
+        live_status = {
+            ObservedStatus.LIVE: LiveStatus.LIVE,
+            ObservedStatus.PREPARING: LiveStatus.PREPARING,
+            ObservedStatus.ROUND: LiveStatus.ROUND,
+        }.get(status)
+        if live_status is not None:
+            await self._handle_status_change(live_status)
+
     async def on_danmaku_received(self, danmu: Danmaku) -> None:
         danmu_cmd = danmu['cmd']
+
+        if self._status_sink is not None:
+            status = {
+                DanmakuCommand.LIVE.value: ObservedStatus.LIVE,
+                DanmakuCommand.PREPARING.value: (
+                    ObservedStatus.ROUND
+                    if danmu.get('round') == 1
+                    else ObservedStatus.PREPARING
+                ),
+            }.get(danmu_cmd)
+            if status is not None:
+                await self._status_sink(status)
+            return
 
         if danmu_cmd == DanmakuCommand.LIVE.value:
             await self._live.update_room_info()
@@ -170,6 +214,8 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
         self._previous_status = current_status
 
     async def check_live_status(self) -> None:
+        if self._status_sink is not None:
+            return
         self._logger.debug('Checking live status...')
         try:
             await self._check_live_status()

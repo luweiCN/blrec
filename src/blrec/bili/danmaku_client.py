@@ -5,13 +5,13 @@ import struct
 import zlib
 from contextlib import suppress
 from enum import Enum, IntEnum
-from typing import Any, Dict, Final, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Final, List, NoReturn, Optional, Tuple, Union, cast
 
 import aiohttp
 import brotli
 from aiohttp import ClientSession
 from loguru import logger
-from tenacity import retry, retry_if_exception_type, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
 
 from blrec.logging.context import async_task_with_logger_context
 
@@ -28,19 +28,22 @@ __all__ = 'DanmakuClient', 'DanmakuListener', 'Danmaku', 'DanmakuCommand'
 
 class DanmakuListener(EventListener):
     async def on_client_connected(self) -> None:
-        ...
+        pass
 
     async def on_client_disconnected(self) -> None:
-        ...
+        pass
 
     async def on_client_reconnected(self) -> None:
-        ...
+        pass
+
+    async def on_client_retries_exhausted(self, error: Exception) -> None:
+        pass
 
     async def on_danmaku_received(self, danmu: Danmaku) -> None:
-        ...
+        pass
 
     async def on_error_occurred(self, error: Exception) -> None:
-        ...
+        pass
 
 
 class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
@@ -99,6 +102,17 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._uid = extract_uid_from_cookie(cookie) or 0
         self._buvid = extract_buvid_from_cookie(cookie) or ''
 
+    @property
+    def room_id(self) -> int:
+        return self._room_id
+
+    def set_room_id(self, room_id: int) -> None:
+        if not self.stopped:
+            raise RuntimeError('room_id can only change while stopped')
+        self._room_id = room_id
+        self._logger_context = {'room_id': room_id}
+        self._logger = logger.bind(**self._logger_context)
+
     async def _do_start(self) -> None:
         await self._update_danmu_info()
         await self._connect()
@@ -113,8 +127,13 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
     @async_task_with_logger_context
     async def restart(self) -> None:
         self._logger.debug('Restarting danmaku client...')
-        await self.stop()
-        await self.start()
+        try:
+            await self.stop()
+            await self.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._raise_retries_exhausted(exc)
         self._logger.debug('Restarted danmaku client')
 
     async def reconnect(self) -> None:
@@ -127,6 +146,8 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         await self._emit('client_reconnected')
 
     @retry(
+        reraise=True,
+        stop=stop_after_delay(30),
         wait=wait_exponential(multiplier=0.1, max=10),
         retry=retry_if_exception_type(
             (asyncio.TimeoutError, aiohttp.ClientError, ConnectionError)
@@ -139,7 +160,11 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
             await self._send_auth()
             reply = await self._recieve_auth_reply()
             await self._handle_auth_reply(reply)
+        except asyncio.CancelledError:
+            await self._close_websocket()
+            raise
         except Exception:
+            await self._close_websocket()
             self._host_index += 1
             if self._host_index >= len(self._danmu_info['host_list']):
                 self._host_index = 0
@@ -245,7 +270,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         await self._emit('client_disconnected')
 
     async def _close_websocket(self) -> None:
-        with suppress(BaseException):
+        with suppress(Exception):
             await self._ws.close()
 
     def _create_heartbeat_task(self) -> None:
@@ -253,6 +278,8 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._heartbeat_task.add_done_callback(exception_callback)
 
     async def _cancel_heartbeat_task(self) -> None:
+        if not hasattr(self, '_heartbeat_task'):
+            return
         self._heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await self._heartbeat_task
@@ -277,8 +304,10 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._logger.debug('Created message loop')
 
     async def _terminate_message_loop(self) -> None:
+        if not hasattr(self, '_message_loop_task'):
+            return
         self._message_loop_task.cancel()
-        with suppress(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError, Exception):
             await self._message_loop_task
         self._logger.debug('Terminated message loop')
 
@@ -349,11 +378,21 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
                     )
                 )
                 await asyncio.sleep(self._retry_delay)
-            await self.reconnect()
+            try:
+                await self.reconnect()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._raise_retries_exhausted(exc)
             self._retry_count += 1
             self._retry_delay += 1
         else:
-            raise aiohttp.WebSocketError(1006, 'Over the maximum of retries')
+            error = aiohttp.WebSocketError(1006, 'Over the maximum of retries')
+            await self._raise_retries_exhausted(error)
+
+    async def _raise_retries_exhausted(self, error: Exception) -> NoReturn:
+        await self._emit('client_retries_exhausted', error)
+        raise error
 
 
 class Frame:

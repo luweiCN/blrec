@@ -1,2 +1,11 @@
-*/__pycache__*
-*/.mypy_cache*
+.git
+.venv
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+webapp/node_modules
+webapp/.angular
+src/blrec/data/webapp
+dist
+build
+*.log

@@ -5,10 +5,8 @@ import {
   Input,
   Output,
   EventEmitter,
-  ChangeDetectorRef,
   OnDestroy,
 } from '@angular/core';
-import { BreakpointObserver } from '@angular/cdk/layout';
 import { Clipboard } from '@angular/cdk/clipboard';
 
 import { Subject } from 'rxjs';
@@ -22,7 +20,6 @@ import {
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
-import { breakpoints } from '../shared/breakpoints';
 import { DataSelection } from '../shared/task.model';
 import { TaskManagerService } from '../shared/services/task-manager.service';
 
@@ -41,49 +38,37 @@ export class ToolbarComponent implements OnInit, OnDestroy {
 
   @Output() filterChange = new EventEmitter<string>();
 
+  @Input() dateRange: Date[] | null = null;
+  @Output() dateRangeChange = new EventEmitter<Date[] | null>();
+
   destroyed = new Subject<void>();
-  useDrawer = false;
-  useSelector = false;
-  useRadioGroup = true;
-  drawerVisible = false;
-  menuDrawerVisible = false;
 
   private filterTerms = new Subject<string>();
 
   readonly selections = [
     { label: '全部', value: DataSelection.ALL },
     { label: '录制中', value: DataSelection.RECORDING },
-    { label: '录制开', value: DataSelection.RECORDER_ENABLED },
-    { label: '录制关', value: DataSelection.RECORDER_DISABLED },
-    { label: '运行', value: DataSelection.MONITOR_ENABLED },
-    { label: '停止', value: DataSelection.MONITOR_DISABLED },
+    { label: '已开启', value: DataSelection.MONITOR_ENABLED },
+    { label: '已关闭', value: DataSelection.MONITOR_DISABLED },
     { label: '直播', value: DataSelection.LIVING },
     { label: '轮播', value: DataSelection.ROUNDING },
     { label: '闲置', value: DataSelection.PREPARING },
   ];
 
   constructor(
-    changeDetector: ChangeDetectorRef,
-    breakpointObserver: BreakpointObserver,
     private message: NzMessageService,
     private modal: NzModalService,
     private clipboard: Clipboard,
     private taskManager: TaskManagerService
-  ) {
-    breakpointObserver
-      .observe(breakpoints)
-      .pipe(takeUntil(this.destroyed))
-      .subscribe((state) => {
-        this.useDrawer = state.breakpoints[breakpoints[0]];
-        this.useSelector = state.breakpoints[breakpoints[1]];
-        this.useRadioGroup = state.breakpoints[breakpoints[2]];
-        changeDetector.markForCheck();
-      });
-  }
+  ) {}
 
   ngOnInit(): void {
     this.filterTerms
-      .pipe(debounceTime(300), distinctUntilChanged())
+      .pipe(
+        debounceTime(300),
+        distinctUntilChanged(),
+        takeUntil(this.destroyed)
+      )
       .subscribe((term) => {
         this.filterChange.emit(term);
       });
@@ -96,6 +81,11 @@ export class ToolbarComponent implements OnInit, OnDestroy {
 
   onFilterInput(term: string): void {
     this.filterTerms.next(term);
+  }
+
+  onDateRangeChanged(value: Date[] | null): void {
+    this.dateRange = value;
+    this.dateRangeChange.emit(value);
   }
 
   toggleReverse(): void {
@@ -130,23 +120,6 @@ export class ToolbarComponent implements OnInit, OnDestroy {
       });
     } else {
       this.taskManager.stopAllTasks().subscribe();
-    }
-  }
-
-  disableAllRecorders(force: boolean = false): void {
-    if (force) {
-      this.modal.confirm({
-        nzTitle: '确定要强制关闭全部任务的录制？',
-        nzContent: '正在录制的文件会被强行中断！确定要放弃正在录制的文件？',
-        nzOnOk: () =>
-          new Promise((resolve, reject) => {
-            this.taskManager
-              .disableAllRecorders(force)
-              .subscribe(resolve, reject);
-          }),
-      });
-    } else {
-      this.taskManager.disableAllRecorders().subscribe();
     }
   }
 

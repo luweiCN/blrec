@@ -1,8 +1,6 @@
 import struct
 
-
 from .io_protocols import RandomIO
-
 
 __all__ = 'StructReader', 'StructWriter'
 

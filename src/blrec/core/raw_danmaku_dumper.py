@@ -23,10 +23,10 @@ __all__ = 'RawDanmakuDumper', 'RawDanmakuDumperEventListener'
 
 class RawDanmakuDumperEventListener(EventListener):
     async def on_raw_danmaku_file_created(self, path: str) -> None:
-        ...
+        pass
 
     async def on_raw_danmaku_file_completed(self, path: str) -> None:
-        ...
+        pass
 
 
 class RawDanmakuDumper(

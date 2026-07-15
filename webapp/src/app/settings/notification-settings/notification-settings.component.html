@@ -1,12 +1,87 @@
-<a class="setting-item" routerLink="email-notification"><span class="setting-label">邮箱通知</span><span
-    class="setting-control"> <i nz-icon nzType="right"></i> </span></a>
-<a class="setting-item" routerLink="serverchan-notification"><span class="setting-label">ServerChan 通知</span><span
-    class="setting-control"><i nz-icon nzType="right"></i></span></a>
-<a class="setting-item" routerLink="pushdeer-notification"><span class="setting-label">PushDeer 通知</span><span
-    class="setting-control"><i nz-icon nzType="right"></i></span></a>
-<a class="setting-item" routerLink="pushplus-notification"><span class="setting-label">pushplus 通知</span><span
-    class="setting-control"><i nz-icon nzType="right"></i></span></a>
-<a class="setting-item" routerLink="telegram-notification"><span class="setting-label">telegram 通知</span><span
-    class="setting-control"><i nz-icon nzType="right"></i></span></a>
-<a class="setting-item" routerLink="bark-notification"><span class="setting-label">Bark 通知</span><span
-    class="setting-control"><i nz-icon nzType="right"></i></span></a>
+<section class="notification-section">
+  <div class="section-heading">
+    <div>
+      <h2>通知渠道</h2>
+      <p>先完成渠道配置，再把需要的事件发送到对应渠道。</p>
+    </div>
+  </div>
+
+  <div class="channel-grid">
+    <a
+      class="channel-card"
+      *ngFor="let channel of channelOptions"
+      [routerLink]="channel.route"
+    >
+      <span>{{ channel.label }}</span>
+      <nz-tag [nzColor]="channelReady(channel.value) ? 'success' : 'default'">
+        {{ channelReady(channel.value) ? '可用' : '未完成配置' }}
+      </nz-tag>
+      <span nz-icon nzType="right"></span>
+    </a>
+  </div>
+</section>
+
+<section class="notification-section">
+  <div class="section-heading route-heading">
+    <div>
+      <h2>事件通知</h2>
+      <p>同一异常只通知一次；恢复后可再发送一条恢复消息。</p>
+    </div>
+    <button
+      nz-button
+      nzType="primary"
+      type="button"
+      [nzLoading]="saving"
+      (click)="save()"
+    >
+      保存通知规则
+    </button>
+  </div>
+
+  <div class="route-table" role="table" aria-label="运行事件通知规则">
+    <div class="route-row route-header" role="row">
+      <span role="columnheader">事件</span>
+      <span role="columnheader">通知渠道</span>
+      <span role="columnheader">消息格式</span>
+      <span role="columnheader">恢复通知</span>
+    </div>
+    <div
+      class="route-row"
+      role="row"
+      *ngFor="let route of routes; trackBy: trackRoute"
+    >
+      <strong role="cell">{{ eventLabel(route.event) }}</strong>
+      <div role="cell">
+        <nz-select
+          nzMode="multiple"
+          nzPlaceHolder="不通知"
+          [ngModel]="selectedChannels(route)"
+          (ngModelChange)="changeChannels(route, $event)"
+        >
+          <nz-option
+            *ngFor="let channel of channelOptions"
+            [nzValue]="channel.value"
+            [nzLabel]="channel.label"
+            [nzDisabled]="!channelReady(channel.value)"
+          ></nz-option>
+        </nz-select>
+      </div>
+      <div class="format-list" role="cell">
+        <label *ngFor="let target of route.targets">
+          <span>{{ channelLabel(target.channel) }}</span>
+          <nz-select [(ngModel)]="target.messageType">
+            <nz-option
+              *ngFor="let format of messageTypes(target.channel)"
+              [nzValue]="format"
+              [nzLabel]="messageTypeLabel(format)"
+            ></nz-option>
+          </nz-select>
+        </label>
+        <span class="empty-format" *ngIf="route.targets.length === 0">—</span>
+      </div>
+      <div role="cell">
+        <nz-switch [(ngModel)]="route.notifyRecovery"></nz-switch>
+      </div>
+    </div>
+  </div>
+</section>

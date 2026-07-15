@@ -1,12 +1,13 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 import attr
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, status
-from pydantic import PositiveInt, conint
+from pydantic import BaseModel, Field, PositiveInt, conint, validator
 
 from ...application import Application
 from ...exception import ForbiddenError, NotFoundError
 from ...utils.ffprobe import StreamProfile
+from ...utils.string import camel_case
 from ..dependencies import TaskDataFilter, task_data_filter
 from ..responses import (
     accepted_responses,
@@ -20,6 +21,45 @@ from ..schemas import ResponseMessage
 app: Application = None  # type: ignore  # bypass flake8 F821
 
 router = APIRouter(prefix='/api/v1/tasks', tags=['tasks'])
+
+
+class ApiModel(BaseModel):
+    class Config:
+        alias_generator = camel_case
+        allow_population_by_field_name = True
+
+
+class TaskBatchActionRequest(ApiModel):
+    action: Literal[
+        'start',
+        'stop',
+        'force_stop',
+        'recorder_enable',
+        'recorder_disable',
+        'recorder_force_disable',
+        'refresh',
+        'cut',
+        'delete',
+    ]
+    room_ids: List[int] = Field(..., min_items=1, max_items=100)
+
+    @validator('room_ids')
+    def room_ids_must_be_unique(cls, value: List[int]) -> List[int]:
+        if any(room_id <= 0 for room_id in value):
+            raise ValueError('room IDs must be positive')
+        if len(set(value)) != len(value):
+            raise ValueError('room IDs must be unique')
+        return value
+
+
+class TaskBatchActionResult(ApiModel):
+    room_id: int
+    accepted: bool
+    message: str
+
+
+class TaskBatchActionResponse(ApiModel):
+    results: List[TaskBatchActionResult]
 
 
 @router.get('/data')
@@ -40,6 +80,66 @@ async def get_task_data(
         task_data.append(attr.asdict(data))
 
     return task_data
+
+
+@router.post('/actions', response_model=TaskBatchActionResponse)
+async def run_task_batch_action(
+    command: TaskBatchActionRequest,
+) -> TaskBatchActionResponse:
+    results = []
+    for room_id in command.room_ids:
+        if not app.has_task(room_id):
+            results.append(
+                TaskBatchActionResult(
+                    room_id=room_id, accepted=False, message='录制任务不存在'
+                )
+            )
+            continue
+        try:
+            if command.action == 'start':
+                await app.start_task(room_id)
+                message = '任务已运行'
+            elif command.action == 'stop':
+                await app.stop_task(room_id, False)
+                message = '任务已停止'
+            elif command.action == 'force_stop':
+                await app.stop_task(room_id, True)
+                message = '任务已强制停止'
+            elif command.action == 'recorder_enable':
+                await app.enable_task_recorder(room_id)
+                message = '录制已开启'
+            elif command.action == 'recorder_disable':
+                await app.disable_task_recorder(room_id, False)
+                message = '录制已关闭'
+            elif command.action == 'recorder_force_disable':
+                await app.disable_task_recorder(room_id, True)
+                message = '录制已强制关闭'
+            elif command.action == 'refresh':
+                await app.update_task_info(room_id)
+                message = '任务数据已刷新'
+            elif command.action == 'cut':
+                if not app.cut_stream(room_id):
+                    results.append(
+                        TaskBatchActionResult(
+                            room_id=room_id, accepted=False, message='当前不能切割文件'
+                        )
+                    )
+                    continue
+                message = '已触发文件切割'
+            else:
+                await app.remove_task(room_id)
+                message = '任务已删除'
+        except Exception as error:
+            results.append(
+                TaskBatchActionResult(
+                    room_id=room_id, accepted=False, message=str(error) or '操作失败'
+                )
+            )
+        else:
+            results.append(
+                TaskBatchActionResult(room_id=room_id, accepted=True, message=message)
+            )
+    return TaskBatchActionResponse(results=results)
 
 
 @router.get('/{room_id}/data', responses={**not_found_responses})

@@ -118,6 +118,19 @@ $app-logo-size: 32px;
     height: 100%;
     margin-left: auto;
     margin-right: calc((var(--app-header-height) - var(--icon-size)) / 2);
+    gap: 16px;
+
+    .logout-button {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #595959;
+      cursor: pointer;
+
+      &:hover {
+        color: #1890ff;
+      }
+    }
 
     .external-link {
       @include layout.center-content;

@@ -1,5 +1,7 @@
+import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
+import { TaskManagerService } from '../shared/services/task-manager.service';
 import { AddTaskDialogComponent } from './add-task-dialog.component';
 
 describe('AddTaskDialogComponent', () => {
@@ -8,9 +10,19 @@ describe('AddTaskDialogComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ AddTaskDialogComponent ]
+      declarations: [AddTaskDialogComponent],
+      providers: [
+        {
+          provide: TaskManagerService,
+          useValue: jasmine.createSpyObj<TaskManagerService>(
+            'TaskManagerService',
+            ['addTask']
+          ),
+        },
+      ],
+      schemas: [NO_ERRORS_SCHEMA],
     })
-    .compileComponents();
+      .compileComponents();
   });
 
   beforeEach(() => {

@@ -111,6 +111,18 @@ class StreamURLResolver(AsyncCooperationMixin):
                     observer.on_error(e)
                 else:
                     logger.info(f"Got live stream url: '{url}'")
+                    real_quality_number = self._live.real_quality_number
+                    if real_quality_number is not None:
+                        self._stream_param_holder.real_quality_number = (
+                            real_quality_number
+                        )
+                        if real_quality_number != params.quality_number:
+                            logger.warning(
+                                'The requested stream quality ({}) is unavailable; '
+                                'using the server-selected quality ({}) instead.',
+                                params.quality_number,
+                                real_quality_number,
+                            )
                     self._stream_url = url
                     self._stream_host = urlparse(url).hostname or ''
                     self._stream_params = params
@@ -127,7 +139,10 @@ class StreamURLResolver(AsyncCooperationMixin):
         if params == self._stream_params and self._stream_url:
             try:
                 response = self._session.get(
-                    self._stream_url, stream=True, headers=self._live.headers, timeout=3
+                    self._stream_url,
+                    stream=True,
+                    headers=self._live.stream_headers,
+                    timeout=3,
                 )
                 response.raise_for_status()
             except Exception:

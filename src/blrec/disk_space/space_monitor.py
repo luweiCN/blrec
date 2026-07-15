@@ -17,7 +17,7 @@ class SpaceEventListener(EventListener):
     async def on_space_no_enough(
         self, path: str, threshold: int, disk_usage: DiskUsage
     ) -> None:
-        ...
+        pass
 
 
 class SpaceMonitor(

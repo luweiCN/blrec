@@ -34,36 +34,36 @@ __all__ = 'RecorderEventListener', 'Recorder'
 
 class RecorderEventListener(EventListener):
     async def on_recording_started(self, recorder: Recorder) -> None:
-        ...
+        pass
 
     async def on_recording_finished(self, recorder: Recorder) -> None:
-        ...
+        pass
 
     async def on_recording_cancelled(self, recorder: Recorder) -> None:
-        ...
+        pass
 
     async def on_video_file_created(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_video_file_completed(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_danmaku_file_created(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_danmaku_file_completed(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_raw_danmaku_file_created(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
     async def on_raw_danmaku_file_completed(
         self, recorder: Recorder, path: str
     ) -> None:
-        ...
+        pass
 
     async def on_cover_image_downloaded(self, recorder: Recorder, path: str) -> None:
-        ...
+        pass
 
 
 class Recorder(
@@ -112,6 +112,8 @@ class Recorder(
 
         self._recording: bool = False
         self._stream_available: bool = False
+        self._record_start_time: Optional[int] = None
+        self._suppressed_live_start_time: Optional[int] = None
 
         self._stream_recorder = StreamRecorder(
             live,
@@ -159,6 +161,10 @@ class Recorder(
     @property
     def recording(self) -> bool:
         return self._recording
+
+    @property
+    def record_start_time(self) -> Optional[int]:
+        return self._record_start_time
 
     @property
     def stream_format(self) -> StreamFormat:
@@ -381,6 +387,10 @@ class Recorder(
     async def on_live_began(self, live: Live) -> None:
         self._logger.info('The live has began')
         self._print_live_info()
+        if self._current_live_is_suppressed():
+            self._logger.info('The current live was manually suppressed')
+            return
+        self._suppressed_live_start_time = None
         await self._start_recording()
 
     async def on_live_ended(self, live: Live) -> None:
@@ -389,6 +399,7 @@ class Recorder(
         self._stream_available = False
         self._stream_recorder.stream_available_time = None
         await self._stop_recording()
+        self._suppressed_live_start_time = None
         self._print_waiting_message()
 
     async def on_live_stream_available(self, live: Live) -> None:
@@ -399,14 +410,19 @@ class Recorder(
 
     async def on_live_stream_reset(self, live: Live) -> None:
         self._logger.warning('The live stream has been reset')
-        if not self._recording:
+        if not self._recording and not self._current_live_is_suppressed():
             await self._start_recording()
+
+    async def suppress_current_live(self) -> None:
+        self._suppressed_live_start_time = self._live.room_info.live_start_time
+        await self._stop_recording(cancelled=True)
 
     async def on_room_changed(self, room_info: RoomInfo) -> None:
         self._print_changed_room_info(room_info)
         self._stream_recorder.update_progress_bar_info()
 
     async def on_video_file_created(self, path: str, record_start_time: int) -> None:
+        self._record_start_time = int(record_start_time)
         await self._emit('video_file_created', self, path)
 
     async def on_video_file_completed(self, path: str) -> None:
@@ -439,7 +455,11 @@ class Recorder(
         self._logger.debug('Started recorder')
 
         self._print_live_info()
-        if self._live.is_living():
+        if (
+            self._live_monitor.enabled
+            and self._live.is_living()
+            and not self._current_live_is_suppressed()
+        ):
             self._stream_available = True
             await self._start_recording()
         else:
@@ -467,13 +487,13 @@ class Recorder(
         self._stream_recorder.add_listener(self)
 
         await self._prepare()
+        await self._emit('recording_started', self)
         if self._stream_available:
             await self._stream_recorder.start()
 
         self._logger.info('Started recording')
-        await self._emit('recording_started', self)
 
-    async def _stop_recording(self) -> None:
+    async def _stop_recording(self, *, cancelled: bool = False) -> None:
         if not self._recording:
             return
         self._recording = False
@@ -487,12 +507,18 @@ class Recorder(
         self._cover_downloader.disable()
         self._stream_recorder.remove_listener(self)
 
-        if self._stopped:
+        if cancelled or self._stopped:
             self._logger.info('Recording Cancelled')
             await self._emit('recording_cancelled', self)
         else:
             self._logger.info('Recording Finished')
             await self._emit('recording_finished', self)
+
+    def _current_live_is_suppressed(self) -> bool:
+        suppressed = getattr(self, '_suppressed_live_start_time', None)
+        return suppressed is not None and (
+            suppressed == self._live.room_info.live_start_time
+        )
 
     async def _prepare(self) -> None:
         live_start_time = self._live.room_info.live_start_time

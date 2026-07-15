@@ -1,4 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ReactiveFormsModule } from '@angular/forms';
+import { NzFormModule } from 'ng-zorro-antd/form';
+import { NzInputModule } from 'ng-zorro-antd/input';
 
 import { InputFilesizeComponent } from './input-filesize.component';
 
@@ -8,9 +11,10 @@ describe('InputFilesizeComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [ InputFilesizeComponent ]
+      declarations: [InputFilesizeComponent],
+      imports: [ReactiveFormsModule, NzFormModule, NzInputModule],
     })
-    .compileComponents();
+      .compileComponents();
   });
 
   beforeEach(() => {

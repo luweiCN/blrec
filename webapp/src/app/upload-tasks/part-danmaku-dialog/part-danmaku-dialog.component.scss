@@ -1,0 +1,41 @@
+.danmaku-list {
+  max-height: 58vh;
+  padding: 0;
+  margin: 0 0 12px;
+  overflow: auto;
+  list-style: none;
+  border-top: 1px solid #f0f0f0;
+
+  li {
+    display: grid;
+    grid-template-columns: 76px 140px 120px minmax(0, 1fr);
+    gap: 12px;
+    padding: 9px 4px;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  time {
+    color: #8c8c8c;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.danmaku-user,
+.danmaku-uid {
+  overflow: hidden;
+  color: #595959;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.danmaku-content {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.empty-state,
+.loading-state {
+  padding: 24px 0;
+  color: #8c8c8c;
+  text-align: center;
+}

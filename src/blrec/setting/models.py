@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
 import os
 import re
-from typing import ClassVar, Collection, Final, List, Optional, TypeVar
+import stat
+from typing import (
+    ClassVar,
+    Collection,
+    Dict,
+    Final,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 
 import toml
 from pydantic import BaseModel as PydanticBaseModel
-from pydantic import BaseSettings, Field, PrivateAttr, validator
+from pydantic import BaseSettings, Field, PrivateAttr, root_validator, validator
 from pydantic.networks import EmailStr, HttpUrl
 from typing_extensions import Annotated
 
@@ -34,6 +49,10 @@ __all__ = (
     'SettingsIn',
     'SettingsOut',
     'BiliApiSettings',
+    'BiliUploadSettings',
+    'NetworkRouteSettings',
+    'NetworkSettings',
+    'LiveMonitorSettings',
     'HeaderOptions',
     'HeaderSettings',
     'DanmakuOptions',
@@ -55,6 +74,9 @@ __all__ = (
     'BarkSettings',
     'NotifierSettings',
     'NotificationSettings',
+    'OperationalNotificationTarget',
+    'OperationalNotificationRoute',
+    'OperationalNotificationSettings',
     'EmailMessageTemplateSettings',
     'ServerchanMessageTemplateSettings',
     'PushdeerMessageTemplateSettings',
@@ -78,10 +100,87 @@ DEFAULT_SETTINGS_FILE: Final[str] = os.environ.get(
 )
 
 
+def _decode_credential_key(value: str) -> bytes:
+    try:
+        key = base64.b64decode(value.strip(), altchars=b'-_', validate=True)
+    except (binascii.Error, ValueError):
+        key = b''
+    if len(key) != 32:
+        raise ValueError('credential key must decode to 32 bytes')
+    return key
+
+
+def _load_credential_key_file(path: str) -> bytes:
+    try:
+        file_stat = os.lstat(path)
+    except OSError as error:
+        raise ValueError(f'credential key file cannot be read: {path}') from error
+    if stat.S_ISLNK(file_stat.st_mode):
+        raise ValueError('credential key file must not be a symlink')
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError('credential key file must be a regular file')
+    if file_stat.st_mode & 0o077:
+        raise ValueError('credential key file must use 0600 permissions')
+
+    flags = os.O_RDONLY
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f'credential key file cannot be read: {path}') from error
+    try:
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ValueError('credential key file must be a regular file')
+        if opened_stat.st_mode & 0o077:
+            raise ValueError('credential key file must use 0600 permissions')
+        with os.fdopen(descriptor, 'rt', encoding='ascii') as file:
+            descriptor = -1
+            value = file.read()
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f'credential key file cannot be read: {path}') from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return _decode_credential_key(value)
+
+
+def _parse_old_credential_key_files(value: object) -> Dict[str, str]:
+    if value is None:
+        return {}
+    entries: List[Tuple[object, object]]
+    if isinstance(value, dict):
+        entries = list(value.items())
+    elif isinstance(value, str):
+        entries = []
+        for item in value.split(','):
+            if '=' not in item:
+                raise ValueError(
+                    'old credential keys must use key_id=/absolute/path pairs'
+                )
+            key_id, path = item.split('=', 1)
+            entries.append((key_id, path))
+    else:
+        raise ValueError('old credential keys must use key_id=/absolute/path pairs')
+
+    result: Dict[str, str] = {}
+    for raw_key_id, raw_path in entries:
+        key_id = str(raw_key_id).strip()
+        path = str(raw_path).strip()
+        if not key_id or not os.path.isabs(path):
+            raise ValueError('old credential keys must use key_id=/absolute/path pairs')
+        if key_id in result:
+            raise ValueError(f'duplicate old credential key id: {key_id}')
+        result[key_id] = path
+    return result
+
+
 class EnvSettings(BaseSettings):
     settings_file: Annotated[str, Field(env='BLREC_CONFIG')] = DEFAULT_SETTINGS_FILE
     out_dir: Annotated[Optional[str], Field(env='BLREC_OUT_DIR')] = None
     log_dir: Annotated[Optional[str], Field(env='BLREC_LOG_DIR')] = None
+    admin_username: Annotated[str, Field(env='BLREC_ADMIN_USERNAME')] = 'admin'
     api_key: Annotated[
         Optional[str],
         Field(
@@ -91,9 +190,94 @@ class EnvSettings(BaseSettings):
             regex=r'[a-zA-Z\d\-]{8,80}',
         ),
     ] = None
+    credential_key: Annotated[Optional[str], Field(env='BLREC_CREDENTIAL_KEY')] = None
+    credential_key_file: Annotated[
+        Optional[str], Field(env='BLREC_CREDENTIAL_KEY_FILE')
+    ] = None
+    credential_old_key_files: Annotated[
+        Dict[str, str], Field(env='BLREC_CREDENTIAL_OLD_KEY_FILES')
+    ] = {}
+
+    @validator('admin_username')
+    def _validate_admin_username(cls, value: str) -> str:
+        if (
+            not 1 <= len(value) <= 64
+            or value != value.strip()
+            or any(not char.isprintable() for char in value)
+        ):
+            raise ValueError(
+                'administrator username must contain 1 to 64 visible characters'
+            )
+        return value
+
+    @root_validator(pre=True)
+    def _parse_credential_sources(cls, values: Dict[str, object]) -> Dict[str, object]:
+        admin_username = values.get('admin_username')
+        if isinstance(admin_username, str) and (
+            admin_username != admin_username.strip()
+            or any(not char.isprintable() for char in admin_username)
+        ):
+            raise ValueError(
+                'administrator username must contain 1 to 64 visible characters'
+            )
+        if (
+            values.get('credential_key') is not None
+            and values.get('credential_key_file') is not None
+        ):
+            raise ValueError(
+                'BLREC_CREDENTIAL_KEY and BLREC_CREDENTIAL_KEY_FILE '
+                'must not both be set'
+            )
+        values['credential_old_key_files'] = _parse_old_credential_key_files(
+            values.get('credential_old_key_files')
+        )
+        return values
+
+    @root_validator
+    def _validate_credential_sources(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        credential_key = values.get('credential_key')
+        credential_key_file = values.get('credential_key_file')
+        current_key: Optional[bytes] = None
+        if isinstance(credential_key, str):
+            current_key = _decode_credential_key(credential_key)
+        elif isinstance(credential_key_file, str):
+            current_key = _load_credential_key_file(credential_key_file)
+
+        old_key_files = values.get('credential_old_key_files', {})
+        assert isinstance(old_key_files, dict)
+        for path in old_key_files.values():
+            _load_credential_key_file(path)
+        if current_key is not None:
+            current_key_id = hashlib.sha256(current_key).hexdigest()
+            if current_key_id in old_key_files:
+                raise ValueError(
+                    'old credential key id duplicates current credential key id'
+                )
+        return values
+
+    def load_credential_key(self) -> Optional[bytes]:
+        if self.credential_key is not None:
+            return _decode_credential_key(self.credential_key)
+        if self.credential_key_file is not None:
+            return _load_credential_key_file(self.credential_key_file)
+        return None
+
+    def load_old_credential_keys(self) -> Dict[str, bytes]:
+        return {
+            key_id: _load_credential_key_file(path)
+            for key_id, path in self.credential_old_key_files.items()
+        }
 
     class Config:
         anystr_strip_whitespace = True
+
+        @classmethod
+        def parse_env_var(cls, field_name: str, raw_value: str) -> object:
+            if field_name == 'credential_old_key_files':
+                return raw_value
+            return json.loads(raw_value)
 
 
 _V = TypeVar('_V')
@@ -122,6 +306,47 @@ class BiliApiSettings(BaseModel):
     base_api_urls: List[str] = ['https://api.bilibili.com']
     base_live_api_urls: List[str] = ['https://api.live.bilibili.com']
     base_play_info_api_urls: List[str] = ['https://api.live.bilibili.com']
+
+
+class BiliUploadSettings(BaseModel):
+    database_path: str = '/cfg/blrec.sqlite3'
+    upload_chunk_size: Annotated[int, Field(ge=1024 * 1024, le=32 * 1024 * 1024)] = (
+        4 * 1024 * 1024
+    )
+    upload_chunk_concurrency: Annotated[int, Field(ge=1, le=3)] = 2
+    danmaku_interval_seconds: Annotated[int, Field(ge=25, le=3600)] = 25
+    import_high_watermark: Annotated[int, Field(ge=10000)] = 1000000
+
+
+class LiveMonitorSettings(BaseModel):
+    mode: Literal['batch', 'legacy'] = 'batch'
+    interval_seconds: Annotated[int, Field(ge=30, le=60)] = 30
+    batch_size: Annotated[int, Field(ge=1, le=29)] = 29
+    fallback_cooldown_seconds: Annotated[int, Field(ge=600, le=3600)] = 600
+
+
+class NetworkRouteSettings(BaseModel):
+    primary_interface: Optional[str] = None
+    fallback_interface: Optional[str] = None
+    failover_enabled: bool = True
+
+    @root_validator
+    def _validate_distinct_interfaces(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        primary = values.get('primary_interface')
+        fallback = values.get('fallback_interface')
+        if primary is not None and primary == fallback:
+            raise ValueError('primary and fallback interfaces must be different')
+        return values
+
+
+class NetworkSettings(BaseModel):
+    room_status: NetworkRouteSettings = NetworkRouteSettings()
+    danmaku: NetworkRouteSettings = NetworkRouteSettings()
+    recording: NetworkRouteSettings = NetworkRouteSettings()
+    upload: NetworkRouteSettings = NetworkRouteSettings()
+    bili_api: NetworkRouteSettings = NetworkRouteSettings()
 
 
 class HeaderOptions(BaseModel):
@@ -338,6 +563,8 @@ class SpaceSettings(BaseModel):
     check_interval: int = 60  # 1 minutes
     space_threshold: int = 1024**3  # 1 GB
     recycle_records: bool = False
+    recording_capacity: Annotated[int, Field(ge=0, le=1024**5)] = 0
+    capacity_warning_threshold: Annotated[int, Field(ge=0, le=1024**5)] = 20 * 1024**3
 
     @validator('check_interval')
     def _validate_interval(cls, value: int) -> int:
@@ -452,6 +679,109 @@ class NotificationSettings(BaseModel):
     notify_ended: bool = True
     notify_error: bool = True
     notify_space: bool = True
+
+
+OperationalEventCode = Literal[
+    'account_unavailable',
+    'network_unavailable',
+    'network_failover',
+    'recording_failed',
+    'upload_failed',
+    'review_rejected',
+    'collection_failed',
+    'comment_failed',
+    'danmaku_failed',
+    'transcode_repair_failed',
+    'capacity_warning',
+]
+OperationalChannel = Literal[
+    'email', 'serverchan', 'pushdeer', 'pushplus', 'telegram', 'bark'
+]
+
+_OPERATIONAL_EVENT_CODES: Tuple[OperationalEventCode, ...] = (
+    'account_unavailable',
+    'network_unavailable',
+    'network_failover',
+    'recording_failed',
+    'upload_failed',
+    'review_rejected',
+    'collection_failed',
+    'comment_failed',
+    'danmaku_failed',
+    'transcode_repair_failed',
+    'capacity_warning',
+)
+_OPERATIONAL_MESSAGE_TYPES = {
+    'email': frozenset(('text', 'html')),
+    'serverchan': frozenset(('markdown',)),
+    'pushdeer': frozenset(('text', 'markdown')),
+    'pushplus': frozenset(('text', 'markdown', 'html')),
+    'telegram': frozenset(('markdown', 'html')),
+    'bark': frozenset(('text', 'markdown')),
+}
+
+
+class OperationalNotificationTarget(BaseModel):
+    channel: OperationalChannel
+    message_type: MessageType = 'text'
+
+    @root_validator
+    def validate_message_type(cls, values: Dict[str, object]) -> Dict[str, object]:
+        channel = values.get('channel')
+        message_type = values.get('message_type')
+        if (
+            isinstance(channel, str)
+            and isinstance(message_type, str)
+            and message_type not in _OPERATIONAL_MESSAGE_TYPES[channel]
+        ):
+            raise ValueError(
+                "channel '{}' does not support '{}' messages".format(
+                    channel, message_type
+                )
+            )
+        return values
+
+
+class OperationalNotificationRoute(BaseModel):
+    event: OperationalEventCode
+    targets: Annotated[List[OperationalNotificationTarget], Field(max_items=6)] = []
+    notify_recovery: bool = True
+
+    @validator('targets')
+    def targets_must_be_unique(
+        cls, targets: List[OperationalNotificationTarget]
+    ) -> List[OperationalNotificationTarget]:
+        channels = [target.channel for target in targets]
+        if len(channels) != len(set(channels)):
+            raise ValueError('duplicate channel in operational notification route')
+        return targets
+
+
+def _default_operational_routes() -> List[OperationalNotificationRoute]:
+    return [
+        OperationalNotificationRoute(event=event) for event in _OPERATIONAL_EVENT_CODES
+    ]
+
+
+class OperationalNotificationSettings(BaseModel):
+    routes: List[OperationalNotificationRoute] = Field(
+        default_factory=_default_operational_routes
+    )
+
+    @validator('routes')
+    def routes_must_be_unique(
+        cls, routes: List[OperationalNotificationRoute]
+    ) -> List[OperationalNotificationRoute]:
+        events = [route.event for route in routes]
+        if len(events) != len(set(events)):
+            raise ValueError('duplicate operational notification event route')
+        return routes
+
+    def route_for(self, event: OperationalEventCode) -> OperationalNotificationRoute:
+        for route in self.routes:
+            if route.event == event:
+                return route
+        return OperationalNotificationRoute(event=event)
 
 
 class MessageTemplateSettings(BaseModel):
@@ -642,6 +972,9 @@ class Settings(BaseModel):
     output: OutputSettings = OutputSettings()  # type: ignore
     logging: LoggingSettings = LoggingSettings()  # type: ignore
     bili_api: BiliApiSettings = BiliApiSettings()
+    bili_upload: BiliUploadSettings = BiliUploadSettings()
+    live_monitor: LiveMonitorSettings = LiveMonitorSettings()
+    network: NetworkSettings = NetworkSettings()
     header: HeaderSettings = HeaderSettings()
     danmaku: DanmakuSettings = DanmakuSettings()
     recorder: RecorderSettings = RecorderSettings()
@@ -655,6 +988,9 @@ class Settings(BaseModel):
     pushplus_notification: PushplusNotificationSettings = PushplusNotificationSettings()
     telegram_notification: TelegramNotificationSettings = TelegramNotificationSettings()
     bark_notification: BarkNotificationSettings = BarkNotificationSettings()
+    operational_notifications: OperationalNotificationSettings = (
+        OperationalNotificationSettings()
+    )
     webhooks: Annotated[List[WebHookSettings], Field(max_items=50)] = []
 
     @classmethod
@@ -693,6 +1029,9 @@ class SettingsIn(BaseModel):
     output: Optional[OutputSettings] = None
     logging: Optional[LoggingSettings] = None
     bili_api: Optional[BiliApiSettings] = None
+    bili_upload: Optional[BiliUploadSettings] = None
+    live_monitor: Optional[LiveMonitorSettings] = None
+    network: Optional[NetworkSettings] = None
     header: Optional[HeaderSettings] = None
     danmaku: Optional[DanmakuSettings] = None
     recorder: Optional[RecorderSettings] = None
@@ -704,6 +1043,7 @@ class SettingsIn(BaseModel):
     pushplus_notification: Optional[PushplusNotificationSettings] = None
     telegram_notification: Optional[TelegramNotificationSettings] = None
     bark_notification: Optional[BarkNotificationSettings] = None
+    operational_notifications: Optional[OperationalNotificationSettings] = None
     webhooks: Optional[List[WebHookSettings]] = None
 
 

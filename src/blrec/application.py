@@ -1,37 +1,33 @@
+from __future__ import annotations
+
 import asyncio
 import os
+import time
 from contextlib import suppress
-from typing import Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, List, Optional
 
+import aiohttp
 import attr
 import psutil
 from loguru import logger
+from pydantic import BaseModel as PydanticBaseModel
 
 from . import __prog__, __version__
-from .bili.helpers import ensure_room_id
-from .core.typing import MetaData
-from .disk_space import SpaceMonitor, SpaceReclaimer
-from .event.event_submitters import SpaceEventSubmitter
+from .bili.live_status import BreakerState
 from .exception import ExceptionHandler, ExistsError, exception_callback
-from .flv.operators import StreamProfile
-from .notification import (
-    BarkNotifier,
-    EmailNotifier,
-    PushdeerNotifier,
-    PushplusNotifier,
-    ServerchanNotifier,
-    TelegramNotifier,
-)
 from .setting import Settings, SettingsIn, SettingsManager, SettingsOut, TaskOptions
 from .setting.typing import KeySetOfSettings
-from .task import (
-    DanmakuFileDetail,
-    RecordTaskManager,
-    TaskData,
-    TaskParam,
-    VideoFileDetail,
-)
-from .webhook import WebHookEmitter
+from .utils.string import camel_case
+
+if TYPE_CHECKING:
+    from .bili.live_status_coordinator import LiveStatusCoordinator
+    from .bili_upload.journal import RecordingJournalBridge
+    from .bili_upload.retention import RetentionManager
+    from .core.typing import MetaData
+    from .flv.operators import StreamProfile
+    from .networking.aiohttp_session import AiohttpSessionPool
+    from .networking.manager import NetworkRouteManager
+    from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)
@@ -53,11 +49,75 @@ class AppStatus:
     num_threads: int
 
 
+class CoordinatorMetrics(PydanticBaseModel):
+    mode: str
+    interval_seconds: int
+    batch_size: int
+    registered_rooms: int
+    active_websockets: int
+    last_success_at: Optional[float]
+    snapshot_max_age_seconds: Optional[float]
+    missing_results: int
+    fallback_requests: int
+    breaker_state: BreakerState
+    breaker_reason: Optional[str]
+
+    class Config:
+        alias_generator = camel_case
+        allow_population_by_field_name = True
+        frozen = True
+
+
+def _raise_teardown_errors(errors: List[BaseException]) -> None:
+    if not errors:
+        return
+    primary = next(
+        (error for error in errors if isinstance(error, asyncio.CancelledError)),
+        errors[0],
+    )
+    for error in errors:
+        if error is not primary:
+            logger.error('Additional teardown error: {!r}', error)
+    raise primary
+
+
+async def _collect_teardown_error(
+    operation: Awaitable[None], errors: List[BaseException]
+) -> None:
+    try:
+        await operation
+    except BaseException as error:
+        errors.append(error)
+
+
 class Application:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        managed_cookie_provider: Optional[
+            Callable[[str], Awaitable[Optional[str]]]
+        ] = None,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        recording_journal_provider: Optional[
+            Callable[[], Optional[RecordingJournalBridge]]
+        ] = None,
+        recording_retention_provider: Optional[
+            Callable[[], Optional[RetentionManager]]
+        ] = None,
+        network_route_manager: Optional[NetworkRouteManager] = None,
+    ) -> None:
+        self._settings = settings
         self._out_dir = settings.output.out_dir
         self._settings_manager = SettingsManager(self, settings)
-        self._task_manager = RecordTaskManager(self._settings_manager)
+        self._live_status_session: Optional[Any] = None
+        self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
+        self._network_route_manager = network_route_manager
+        self._network_session_pool: Optional[AiohttpSessionPool] = None
+        self._managed_cookie_provider = managed_cookie_provider
+        self._auth_failure_reporter = auth_failure_reporter
+        self._recording_journal_provider = recording_journal_provider
+        self._recording_retention_provider = recording_retention_provider
 
     @property
     def info(self) -> AppInfo:
@@ -100,7 +160,12 @@ class Application:
     async def launch(self) -> None:
         self._setup_logger()
         logger.info('Launching Application...')
-        self._setup()
+        await self._setup_live_status_monitor()
+        try:
+            self._setup()
+        except BaseException as error:
+            await self._teardown_live_status_monitor_after_failure(error)
+            raise
         logger.debug(f'Default umask {os.umask(0o000)}')
         logger.info(f'Launched Application v{__version__}')
         self._loading_task = asyncio.create_task(self._task_manager.load_all_tasks())
@@ -122,13 +187,25 @@ class Application:
         logger.info('Aborted Application')
 
     async def _exit(self, force: bool = False) -> None:
+        errors: List[BaseException] = []
         if hasattr(self, '_loading_task'):
             self._loading_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._loading_task
-        await self._task_manager.stop_all_tasks(force=force)
-        await self._task_manager.destroy_all_tasks()
-        self._destroy()
+            try:
+                with suppress(asyncio.CancelledError):
+                    await self._loading_task
+            except BaseException as error:
+                errors.append(error)
+        await _collect_teardown_error(
+            self._task_manager.stop_all_tasks(force=force), errors
+        )
+        await _collect_teardown_error(self._task_manager.destroy_all_tasks(), errors)
+        await _collect_teardown_error(self._teardown_live_status_monitor(), errors)
+        await _collect_teardown_error(self._teardown_network_sessions(), errors)
+        try:
+            self._destroy()
+        except BaseException as error:
+            errors.append(error)
+        _raise_teardown_errors(errors)
 
     async def restart(self) -> None:
         logger.info('Restarting Application...')
@@ -139,8 +216,50 @@ class Application:
     def has_task(self, room_id: int) -> bool:
         return self._task_manager.has_task(room_id)
 
+    def has_recording_task(self) -> bool:
+        from .task import RunningStatus
+
+        return any(
+            data.task_status.running_status is RunningStatus.RECORDING
+            for data in self._task_manager.get_all_task_data()
+        )
+
+    def get_live_status_metrics(self) -> CoordinatorMetrics:
+        if self._live_status_coordinator is not None:
+            metrics = self._live_status_coordinator.metrics(time.monotonic())
+            return CoordinatorMetrics(**vars(metrics))
+
+        settings = self._settings.live_monitor
+        registered_rooms = 0
+        active_websockets = 0
+        for task_data in self._task_manager.get_all_task_data():
+            registered_rooms += 1
+            active_websockets += task_data.task_status.monitor_enabled
+        return CoordinatorMetrics(
+            mode='legacy',
+            interval_seconds=settings.interval_seconds,
+            batch_size=settings.batch_size,
+            registered_rooms=registered_rooms,
+            active_websockets=active_websockets,
+            last_success_at=None,
+            snapshot_max_age_seconds=None,
+            missing_results=0,
+            fallback_requests=0,
+            breaker_state=BreakerState.CLOSED,
+            breaker_reason=None,
+        )
+
+    def resume_live_status_coordinator(self) -> None:
+        if self._live_status_coordinator is not None:
+            self._live_status_coordinator.resume()
+
     async def add_task(self, room_id: int) -> int:
-        room_id = await ensure_room_id(room_id)
+        from .bili.helpers import ensure_room_id
+
+        network_pool = self._ensure_network_session_pool()
+        room_id = await ensure_room_id(
+            room_id, None if network_pool is None else network_pool.client('bili_api')
+        )
 
         if self._task_manager.has_task(room_id):
             raise ExistsError(f'a task for the room {room_id} is already existed')
@@ -176,6 +295,9 @@ class Application:
         await self._task_manager.stop_task(room_id, force)
         await self._settings_manager.mark_task_disabled(room_id)
         logger.info(f'Successfully stopped task {room_id}')
+
+    async def suppress_current_live(self, room_id: int) -> None:
+        await self._task_manager.suppress_current_live(room_id)
 
     async def start_all_tasks(self) -> None:
         logger.info('Starting all tasks...')
@@ -294,11 +416,112 @@ class Application:
     ) -> TaskOptions:
         return await self._settings_manager.change_task_options(room_id, options)
 
+    async def refresh_managed_cookie(self) -> None:
+        await self._task_manager.refresh_managed_cookie()
+
+    async def _setup_live_status_monitor(self) -> None:
+        from .bili.anonymous_room_client import AnonymousRoomClient
+        from .bili.batch_status_client import BatchStatusClient
+        from .bili.live_status_coordinator import LiveStatusCoordinator
+        from .bili.net import connector, timeout
+        from .task import RecordTaskManager
+
+        network_session_pool = self._ensure_network_session_pool()
+
+        settings = self._settings.live_monitor
+        recording_journal = (
+            None
+            if self._recording_journal_provider is None
+            else self._recording_journal_provider()
+        )
+        self._live_status_session = None
+        self._live_status_coordinator = None
+        if settings.mode == 'legacy':
+            self._task_manager = RecordTaskManager(
+                self._settings_manager,
+                managed_cookie_provider=self._managed_cookie_provider,
+                auth_failure_reporter=self._auth_failure_reporter,
+                recording_journal=recording_journal,
+                network_session_pool=network_session_pool,
+                network_route_manager=self._network_route_manager,
+            )
+            return
+
+        session: Any
+        if network_session_pool is None:
+            session = aiohttp.ClientSession(
+                connector=connector,
+                connector_owner=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=timeout,
+                trust_env=False,
+            )
+        else:
+            session = network_session_pool.client('room_status', anonymous=True)
+        self._live_status_session = session
+        try:
+            coordinator = LiveStatusCoordinator(
+                BatchStatusClient(session),
+                interval_seconds=settings.interval_seconds,
+                batch_size=settings.batch_size,
+                fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
+            )
+            self._live_status_coordinator = coordinator
+            self._task_manager = RecordTaskManager(
+                self._settings_manager,
+                coordinator,
+                AnonymousRoomClient(session),
+                managed_cookie_provider=self._managed_cookie_provider,
+                auth_failure_reporter=self._auth_failure_reporter,
+                recording_journal=recording_journal,
+                network_session_pool=network_session_pool,
+                network_route_manager=self._network_route_manager,
+            )
+            await coordinator.start()
+        except BaseException as error:
+            await self._teardown_live_status_monitor_after_failure(error)
+            raise
+
+    async def _teardown_live_status_monitor_after_failure(
+        self, original_error: BaseException
+    ) -> None:
+        try:
+            await self._teardown_live_status_monitor()
+            await self._teardown_network_sessions()
+        except asyncio.CancelledError as cleanup_error:
+            raise cleanup_error from original_error
+        except BaseException as cleanup_error:
+            raise original_error from cleanup_error
+
+    async def _teardown_live_status_monitor(self) -> None:
+        coordinator = getattr(self, '_live_status_coordinator', None)
+        session = getattr(self, '_live_status_session', None)
+        self._live_status_coordinator = None
+        self._live_status_session = None
+        errors: List[BaseException] = []
+        if coordinator is not None:
+            await _collect_teardown_error(coordinator.stop(), errors)
+        if session is not None:
+            await _collect_teardown_error(session.close(), errors)
+        _raise_teardown_errors(errors)
+
+    def _ensure_network_session_pool(self) -> Optional[AiohttpSessionPool]:
+        if self._network_route_manager is None:
+            return None
+        if self._network_session_pool is None or self._network_session_pool.closed:
+            from .networking.aiohttp_session import AiohttpSessionPool
+
+            self._network_session_pool = AiohttpSessionPool(self._network_route_manager)
+        return self._network_session_pool
+
+    async def _teardown_network_sessions(self) -> None:
+        pool = getattr(self, '_network_session_pool', None)
+        self._network_session_pool = None
+        if pool is not None:
+            await pool.close()
+
     def _setup(self) -> None:
         self._setup_exception_handler()
-        self._setup_space_monitor()
-        self._setup_space_event_submitter()
-        self._setup_space_reclaimer()
         self._setup_notifiers()
         self._setup_webhooks()
 
@@ -309,20 +532,16 @@ class Application:
         self._exception_handler = ExceptionHandler()
         self._exception_handler.enable()
 
-    def _setup_space_monitor(self) -> None:
-        self._space_monitor = SpaceMonitor(self._out_dir)
-        self._settings_manager.apply_space_monitor_settings()
-        self._space_monitor.enable()
-
-    def _setup_space_event_submitter(self) -> None:
-        self._space_event_submitter = SpaceEventSubmitter(self._space_monitor)
-
-    def _setup_space_reclaimer(self) -> None:
-        self._space_reclaimer = SpaceReclaimer(self._space_monitor, self._out_dir)
-        self._settings_manager.apply_space_reclaimer_settings()
-        self._space_reclaimer.enable()
-
     def _setup_notifiers(self) -> None:
+        from .notification import (
+            BarkNotifier,
+            EmailNotifier,
+            PushdeerNotifier,
+            PushplusNotifier,
+            ServerchanNotifier,
+            TelegramNotifier,
+        )
+
         self._email_notifier = EmailNotifier()
         self._serverchan_notifier = ServerchanNotifier()
         self._pushdeer_notifier = PushdeerNotifier()
@@ -337,28 +556,16 @@ class Application:
         self._settings_manager.apply_bark_notification_settings()
 
     def _setup_webhooks(self) -> None:
+        from .webhook import WebHookEmitter
+
         self._webhook_emitter = WebHookEmitter()
         self._settings_manager.apply_webhooks_settings()
         self._webhook_emitter.enable()
 
     def _destroy(self) -> None:
-        self._destroy_space_reclaimer()
-        self._destroy_space_event_submitter()
-        self._destroy_space_monitor()
         self._destroy_notifiers()
         self._destroy_webhooks()
         self._destroy_exception_handler()
-
-    def _destroy_space_monitor(self) -> None:
-        self._space_monitor.disable()
-        del self._space_monitor
-
-    def _destroy_space_event_submitter(self) -> None:
-        del self._space_event_submitter
-
-    def _destroy_space_reclaimer(self) -> None:
-        self._space_reclaimer.disable()
-        del self._space_reclaimer
 
     def _destroy_notifiers(self) -> None:
         self._email_notifier.disable()

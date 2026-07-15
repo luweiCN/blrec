@@ -14,6 +14,10 @@ from ..logging import TqdmOutputStream
 cli = typer.Typer()
 
 
+def forwarded_allow_ips() -> str:
+    return os.environ.get('BLREC_FORWARDED_ALLOW_IPS', '127.0.0.1').strip()
+
+
 def version_callback(value: bool) -> None:
     if value:
         typer.echo(f'Bilibili live streaming recorder {__version__}')
@@ -93,7 +97,7 @@ def cli_main(
         port=port,
         root_path=root_path,
         proxy_headers=True,
-        forwarded_allow_ips='*',
+        forwarded_allow_ips=forwarded_allow_ips(),
         ssl_keyfile=key_file,
         ssl_certfile=cert_file,
         log_config=logging_config,

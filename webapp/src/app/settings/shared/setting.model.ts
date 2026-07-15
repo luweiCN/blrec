@@ -6,6 +6,51 @@ export interface BiliApiSettings {
   basePlayInfoApiUrls: string[];
 }
 
+export interface LiveMonitorSettings {
+  mode: 'batch' | 'legacy';
+  intervalSeconds: number;
+  batchSize: number;
+  fallbackCooldownSeconds: number;
+}
+
+export interface NetworkRouteSettings {
+  primaryInterface: string | null;
+  fallbackInterface: string | null;
+  failoverEnabled: boolean;
+}
+
+export interface NetworkSettings {
+  roomStatus: NetworkRouteSettings;
+  danmaku: NetworkRouteSettings;
+  recording: NetworkRouteSettings;
+  upload: NetworkRouteSettings;
+  biliApi: NetworkRouteSettings;
+}
+
+export type LiveMonitorSettingsView =
+  | { state: 'loading' }
+  | { state: 'ready' }
+  | { state: 'error'; message: string };
+
+export interface LiveStatusMetrics {
+  mode: 'batch' | 'legacy';
+  intervalSeconds: number;
+  batchSize: number;
+  registeredRooms: number;
+  activeWebsockets: number;
+  lastSuccessAt: number | null;
+  snapshotMaxAgeSeconds: number | null;
+  missingResults: number;
+  fallbackRequests: number;
+  breakerState: 'closed' | 'open' | 'half_open' | 'paused';
+  breakerReason: string | null;
+}
+
+export type LiveStatusView =
+  | { state: 'loading' }
+  | { state: 'ready'; data: LiveStatusMetrics }
+  | { state: 'error'; message: string };
+
 export type BiliApiOptions = Nullable<BiliApiSettings>;
 
 export interface HeaderSettings {
@@ -121,6 +166,8 @@ export interface SpaceSettings {
   checkInterval: number;
   spaceThreshold: number;
   recycleRecords: boolean;
+  recordingCapacity: number;
+  capacityWarningThreshold: number;
 }
 
 export interface EmailSettings {
@@ -188,6 +235,42 @@ export interface NotificationSettings {
   notifyEnded: boolean;
   notifyError: boolean;
   notifySpace: boolean;
+}
+
+export type OperationalNotificationEvent =
+  | 'account_unavailable'
+  | 'network_unavailable'
+  | 'network_failover'
+  | 'recording_failed'
+  | 'upload_failed'
+  | 'review_rejected'
+  | 'collection_failed'
+  | 'comment_failed'
+  | 'danmaku_failed'
+  | 'transcode_repair_failed'
+  | 'capacity_warning';
+
+export type OperationalNotificationChannel =
+  | 'email'
+  | 'serverchan'
+  | 'pushdeer'
+  | 'pushplus'
+  | 'telegram'
+  | 'bark';
+
+export interface OperationalNotificationTarget {
+  channel: OperationalNotificationChannel;
+  messageType: MessageType;
+}
+
+export interface OperationalNotificationRoute {
+  event: OperationalNotificationEvent;
+  targets: OperationalNotificationTarget[];
+  notifyRecovery: boolean;
+}
+
+export interface OperationalNotificationSettings {
+  routes: OperationalNotificationRoute[];
 }
 
 export const KEYS_OF_NOTIFICATION_SETTINGS = [
@@ -394,6 +477,8 @@ export interface Settings {
   output: OutputSettings;
   logging: LoggingSettings;
   biliApi: BiliApiSettings;
+  liveMonitor: LiveMonitorSettings;
+  network: NetworkSettings;
   header: HeaderSettings;
   danmaku: DanmakuSettings;
   recorder: RecorderSettings;
@@ -405,6 +490,7 @@ export interface Settings {
   pushplusNotification: PushplusNotificationSettings;
   telegramNotification: TelegramNotificationSettings;
   barkNotification: BarkNotificationSettings;
+  operationalNotifications: OperationalNotificationSettings;
   webhooks: WebhookSettings[];
 }
 

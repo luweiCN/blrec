@@ -4,7 +4,7 @@ import asyncio
 import html
 import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator, Final, List
+from typing import Any, AsyncIterator, Final, List, Optional
 
 import aiofiles
 import attr
@@ -80,10 +80,16 @@ class DanmakuReader:  # TODO rewrite
             date=int(params[4]),
             pool=int(params[5]),
             uid_hash=params[6],
-            uid=elem.get('uid'),
+            uid=int(elem.get('uid')),
             uname=elem.get('user'),
             dmid=int(params[7]),
             text=elem.text,
+            source_event_id=elem.get('source_event_id'),
+            is_system=parse_optional_bool(elem.get('is_system')),
+            is_lottery=parse_optional_bool(elem.get('is_lottery')),
+            user_level=parse_optional_int(elem.get('user_level')),
+            fan_medal_name=elem.get('fan_medal_name'),
+            fan_medal_level=parse_optional_int(elem.get('fan_medal_level')),
         )
 
 
@@ -166,6 +172,21 @@ class DanmakuWriter:
             'uid': str(dm.uid),
             'user': dm.uname,
         }
+        optional = {
+            'source_event_id': dm.source_event_id,
+            'is_system': dm.is_system,
+            'is_lottery': dm.is_lottery,
+            'user_level': dm.user_level,
+            'fan_medal_name': dm.fan_medal_name,
+            'fan_medal_level': dm.fan_medal_level,
+        }
+        for name, value in optional.items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                attrib[name] = 'true' if value else 'false'
+            else:
+                attrib[name] = remove_control_characters(str(value))
 
         try:
             elem = etree.Element('d', attrib=attrib)
@@ -229,3 +250,23 @@ def record_value_serializer(
 
 def remove_control_characters(s: str) -> str:
     return ''.join(c for c in s if unicodedata.category(c) != 'Cc')
+
+
+def parse_optional_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in ('1', 'true'):
+        return True
+    if normalized in ('0', 'false'):
+        return False
+    return None
+
+
+def parse_optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

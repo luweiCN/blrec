@@ -1,5 +1,5 @@
-import attr
 import aiohttp
+import attr
 
 
 @attr.s(auto_attribs=True, frozen=True, slots=True)

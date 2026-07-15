@@ -1,22 +1,26 @@
-<app-toolbar
-  [selection]="selection"
-  (selectionChange)="onSelectionChanged($event)"
-  [reverse]="reverse"
-  (reverseChange)="onReverseChanged($event)"
-  (filterChange)="filterTerm = $event"
-></app-toolbar>
+<div class="tasks-page primary-page">
+  <app-toolbar
+    [selection]="selection"
+    (selectionChange)="onSelectionChanged($event)"
+    [reverse]="reverse"
+    (reverseChange)="onReverseChanged($event)"
+    (filterChange)="filterTerm = $event"
+    [dateRange]="dateRange"
+    (dateRangeChange)="dateRange = $event"
+  ></app-toolbar>
 
-<nz-spin
-  class="spinner"
-  [nzSize]="'large'"
-  [nzSpinning]="loading"
-  *ngIf="loading; else elseBlock"
-></nz-spin>
-<ng-template #elseBlock>
-  <app-task-list
-    [dataList]="dataList | filterTasks: filterTerm"
-  ></app-task-list>
-</ng-template>
+  <nz-spin
+    class="spinner"
+    [nzSize]="'large'"
+    [nzSpinning]="loading"
+    *ngIf="loading; else elseBlock"
+  ></nz-spin>
+  <ng-template #elseBlock>
+    <app-task-list
+      [dataList]="dataList | filterTasks: filterTerm: dateRange"
+    ></app-task-list>
+  </ng-template>
+</div>
 
 <button
   class="add-task-button"

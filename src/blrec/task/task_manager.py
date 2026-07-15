@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Dict, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterator, Optional
 
 import aiohttp
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
@@ -16,6 +16,11 @@ from .models import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 from .task import RecordTask
 
 if TYPE_CHECKING:
+    from ..bili.anonymous_room_client import AnonymousRoomClient
+    from ..bili.live_status_coordinator import LiveStatusCoordinator
+    from ..bili_upload.journal import RecordingJournalBridge
+    from ..networking.aiohttp_session import AiohttpSessionPool
+    from ..networking.manager import NetworkRouteManager
     from ..setting import SettingsManager
 
 from loguru import logger
@@ -34,8 +39,34 @@ __all__ = ('RecordTaskManager',)
 
 
 class RecordTaskManager:
-    def __init__(self, settings_manager: SettingsManager) -> None:
+    _MANAGED_COOKIE_URL = 'https://api.bilibili.com/'
+
+    def __init__(
+        self,
+        settings_manager: SettingsManager,
+        live_status_coordinator: Optional[LiveStatusCoordinator] = None,
+        anonymous_room_client: Optional[AnonymousRoomClient] = None,
+        managed_cookie_provider: Optional[
+            Callable[[str], Awaitable[Optional[str]]]
+        ] = None,
+        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        recording_journal: Optional[RecordingJournalBridge] = None,
+        network_session_pool: Optional[AiohttpSessionPool] = None,
+        network_route_manager: Optional[NetworkRouteManager] = None,
+    ) -> None:
+        if (live_status_coordinator is None) != (anonymous_room_client is None):
+            raise ValueError(
+                'live_status_coordinator and anonymous_room_client '
+                'must be provided together'
+            )
         self._settings_manager = settings_manager
+        self._live_status_coordinator = live_status_coordinator
+        self._anonymous_room_client = anonymous_room_client
+        self._managed_cookie_provider = managed_cookie_provider
+        self._auth_failure_reporter = auth_failure_reporter
+        self._recording_journal = recording_journal
+        self._network_session_pool = network_session_pool
+        self._network_route_manager = network_route_manager
         self._tasks: Dict[int, RecordTask] = {}
 
     async def load_all_tasks(self) -> None:
@@ -76,7 +107,19 @@ class RecordTaskManager:
     async def add_task(self, settings: TaskSettings) -> None:
         logger.info(f'Adding task {settings.room_id}...')
 
-        task = RecordTask(settings.room_id)
+        task_options: Dict[str, Any] = {
+            'live_status_coordinator': self._live_status_coordinator,
+            'anonymous_room_client': self._anonymous_room_client,
+        }
+        if self._auth_failure_reporter is not None:
+            task_options['auth_failure_reporter'] = self._auth_failure_reporter
+        if self._recording_journal is not None:
+            task_options['recording_journal'] = self._recording_journal
+        if self._network_session_pool is not None:
+            task_options['network_session_pool'] = self._network_session_pool
+        if self._network_route_manager is not None:
+            task_options['network_route_manager'] = self._network_route_manager
+        task = RecordTask(settings.room_id, **task_options)
         self._tasks[settings.room_id] = task
 
         try:
@@ -107,8 +150,28 @@ class RecordTaskManager:
                 await task.enable_recorder()
         except BaseException as e:
             logger.error(f'Failed to add task {settings.room_id} due to: {repr(e)}')
-            await task.destroy()
-            del self._tasks[settings.room_id]
+            try:
+                await task.disable_recorder(force=True)
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Failed to disable recorder while cleaning up task '
+                    f'{settings.room_id}: {repr(cleanup_error)}'
+                )
+            try:
+                await task.disable_monitor()
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Failed to disable monitor while cleaning up task '
+                    f'{settings.room_id}: {repr(cleanup_error)}'
+                )
+            try:
+                await task.destroy()
+            except BaseException as cleanup_error:
+                logger.error(
+                    f'Failed to destroy task {settings.room_id}: '
+                    f'{repr(cleanup_error)}'
+                )
+            self._tasks.pop(settings.room_id, None)
             raise
 
         logger.info(f'Successfully added task {settings.room_id}')
@@ -146,6 +209,12 @@ class RecordTaskManager:
         await task.disable_recorder(force)
         await task.disable_monitor()
         logger.debug(f'Stopped task {room_id}')
+
+    async def suppress_current_live(self, room_id: int) -> None:
+        logger.info(f'Suppressing current live for task {room_id}...')
+        task = self._get_task(room_id, check_ready=True)
+        await task.suppress_current_live()
+        logger.info(f'Suppressed current live for task {room_id}')
 
     async def start_all_tasks(self) -> None:
         logger.debug('Starting all tasks...')
@@ -291,11 +360,29 @@ class RecordTaskManager:
         if task.user_agent != settings.user_agent:
             task.user_agent = settings.user_agent
             changed = True
-        if task.cookie != settings.cookie:
-            task.cookie = settings.cookie
+        cookie = settings.cookie
+        if self._managed_cookie_provider is not None:
+            managed_cookie = await self._managed_cookie_provider(
+                self._MANAGED_COOKIE_URL
+            )
+            if managed_cookie is not None:
+                cookie = managed_cookie
+        if task.cookie != cookie:
+            task.cookie = cookie
             changed = True
         if changed and restart_danmaku_client:
             await task.restart_danmaku_client()
+
+    async def refresh_managed_cookie(self) -> None:
+        if self._managed_cookie_provider is None:
+            return
+        cookie = await self._managed_cookie_provider(self._MANAGED_COOKIE_URL)
+        if cookie is None:
+            return
+        for task in self._tasks.values():
+            if not task.ready or task.cookie == cookie:
+                continue
+            task.cookie = cookie
 
     def apply_task_output_settings(
         self, room_id: int, settings: OutputSettings

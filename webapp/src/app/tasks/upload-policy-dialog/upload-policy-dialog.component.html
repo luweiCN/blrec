@@ -1,0 +1,698 @@
+<nz-modal
+  [nzTitle]="modalTitle"
+  nzWidth="760px"
+  nzWrapClassName="upload-policy-modal"
+  [nzVisible]="visible"
+  [nzMaskClosable]="false"
+  [nzKeyboard]="!saving"
+  [nzClosable]="!saving"
+  (nzOnCancel)="close()"
+  (nzAfterClose)="closed.emit()"
+>
+  <ng-container *nzModalContent>
+    <nz-skeleton
+      *ngIf="loading"
+      [nzActive]="true"
+      [nzParagraph]="{ rows: 8 }"
+    ></nz-skeleton>
+
+    <form *ngIf="!loading" nz-form nzLayout="vertical" class="policy-form">
+      <nz-alert
+        *ngIf="error"
+        class="form-alert"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="error"
+      ></nz-alert>
+
+      <div class="top-settings">
+        <div class="switch-field">
+          <div>
+            <label for="policy-enabled">自动投稿</label>
+            <p>关闭后，新结束的直播不再创建上传任务；已有任务不受影响。</p>
+          </div>
+          <nz-switch
+            id="policy-enabled"
+            name="enabled"
+            [(ngModel)]="draft.enabled"
+          ></nz-switch>
+        </div>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>投稿账号</nz-form-label>
+          <nz-form-control>
+            <nz-radio-group
+              name="accountMode"
+              [ngModel]="draft.accountMode"
+              (ngModelChange)="accountModeChanged($event)"
+            >
+              <label nz-radio nzValue="primary">使用主账号</label>
+              <label nz-radio nzValue="fixed">指定账号</label>
+            </nz-radio-group>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item *ngIf="draft.accountMode === 'fixed'">
+          <nz-form-label nzRequired>选择账号</nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="accountId"
+              nzPlaceHolder="选择投稿账号"
+              [ngModel]="draft.accountId"
+              (ngModelChange)="fixedAccountChanged($event)"
+            >
+              <nz-option
+                *ngFor="let account of activeAccounts"
+                [nzValue]="account.id"
+                [nzLabel]="account.displayName + ' · UID ' + account.uid"
+              ></nz-option>
+            </nz-select>
+            <span *ngIf="validationErrors.account" class="field-error">
+              {{ validationErrors.account }}
+            </span>
+            <span class="field-help">
+              账号失效时任务会暂停，不会自动换用其他账号。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+      </div>
+
+      <section class="form-section" aria-labelledby="archive-content-heading">
+        <h3 id="archive-content-heading">稿件内容</h3>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>
+            标题模板
+            <span
+              class="help-mark"
+              nz-tooltip
+              [nzTooltipTitle]="templateTip"
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <input
+              nz-input
+              name="titleTemplate"
+              maxlength="500"
+              [(ngModel)]="draft.titleTemplate"
+            />
+            <span *ngIf="validationErrors.title" class="field-error">
+              {{ validationErrors.title }}
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label>
+            简介模板
+            <span
+              class="help-mark"
+              nz-tooltip
+              [nzTooltipTitle]="templateTip"
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <textarea
+              nz-input
+              name="descriptionTemplate"
+              rows="4"
+              maxlength="5000"
+              [(ngModel)]="draft.descriptionTemplate"
+            ></textarea>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>
+            分 P 标题模板
+            <span
+              class="help-mark"
+              nz-tooltip
+              [nzTooltipTitle]="partTemplateTip"
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <input
+              nz-input
+              name="partTitleTemplate"
+              maxlength="500"
+              [(ngModel)]="draft.partTitleTemplate"
+            />
+            <span *ngIf="validationErrors.partTitle" class="field-error">
+              {{ validationErrors.partTitle }}
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>投稿分区</nz-form-label>
+          <nz-form-control>
+            <div class="category-control">
+              <nz-cascader
+                name="categoryPath"
+                nzPlaceHolder="搜索并选择一级 / 二级分区"
+                [nzShowSearch]="true"
+                [nzOptions]="categoryOptions"
+                [nzDisabled]="categoryLoading || categoryOptions.length === 0"
+                [ngModel]="categoryPath"
+                (ngModelChange)="categoryChanged($event)"
+              ></nz-cascader>
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="categoryLoading"
+                [disabled]="categoryLoading"
+                (click)="refreshCategories()"
+              >
+                刷新分区
+              </button>
+            </div>
+            <div
+              *ngIf="liveAreaName || liveParentAreaName"
+              class="live-category-recommendation"
+            >
+              <span>
+                直播分区：
+                {{ liveParentAreaName || '未记录' }} /
+                {{ liveAreaName || '未记录' }}
+              </span>
+              <ng-container
+                *ngIf="categoryRecommendation as recommendation; else noRecommendation"
+              >
+                <span>推荐投稿分区：{{ recommendation.label }}</span>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  [disabled]="draft.tid === recommendation.path[1]"
+                  (click)="applyCategoryRecommendation()"
+                >
+                  使用推荐
+                </button>
+              </ng-container>
+              <ng-template #noRecommendation>
+                <span>没有可靠的自动映射，请手动选择投稿分区。</span>
+              </ng-template>
+            </div>
+            <span *ngIf="validationErrors.category" class="field-error">
+              {{ validationErrors.category }}
+            </span>
+            <nz-alert
+              *ngIf="categoryError"
+              class="inline-alert"
+              nzType="warning"
+              nzShowIcon
+              [nzMessage]="categoryError"
+            ></nz-alert>
+            <span *ngIf="selectedCategoryDescription" class="field-help">
+              {{ selectedCategoryDescription }}
+            </span>
+            <span *ngIf="catalog?.stale" class="field-help">
+              B 站分区暂时无法更新，当前显示上次成功获取的目录。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>
+            标签
+            <span
+              class="help-mark"
+              nz-tooltip
+              nzTooltipTitle="多个标签使用英文逗号分隔，例如：直播,录播。"
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <input nz-input name="tags" [(ngModel)]="draft.tags" />
+            <span *ngIf="validationErrors.tags" class="field-error">
+              {{ validationErrors.tags }}
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label nzRequired>创作声明</nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="creationStatementId"
+              nzPlaceHolder="选择创作声明"
+              [nzLoading]="categoryLoading"
+              [nzDisabled]="categoryLoading || creationStatements.length === 0"
+              [ngModel]="draft.creationStatementId"
+              (ngModelChange)="creationStatementChanged($event)"
+            >
+              <nz-option
+                *ngFor="let statement of creationStatements"
+                [nzValue]="statement.id"
+                [nzLabel]="statement.content"
+              ></nz-option>
+            </nz-select>
+            <span
+              *ngIf="validationErrors.creationStatement"
+              class="field-error"
+            >
+              {{ validationErrors.creationStatement }}
+            </span>
+            <span *ngIf="catalog?.creationStatementTip" class="field-help">
+              {{ catalog?.creationStatementTip }}
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <div *ngIf="!isRepost" class="switch-field compact-switch-field">
+          <label for="original-authorization">
+            内容为自制：未经作者允许，禁止转载
+          </label>
+          <nz-switch
+            id="original-authorization"
+            name="originalAuthorization"
+            [(ngModel)]="draft.originalAuthorization"
+          ></nz-switch>
+        </div>
+
+        <nz-form-item *ngIf="isRepost">
+          <nz-form-label nzRequired>转载来源</nz-form-label>
+          <nz-form-control>
+            <input nz-input name="source" [(ngModel)]="draft.source" />
+            <span *ngIf="validationErrors.source" class="field-error">
+              {{ validationErrors.source }}
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+      </section>
+
+      <section class="form-section" aria-labelledby="cover-collection-heading">
+        <h3 id="cover-collection-heading">封面与合集</h3>
+
+        <nz-form-item>
+          <nz-form-label>稿件封面</nz-form-label>
+          <nz-form-control>
+            <nz-radio-group
+              name="coverMode"
+              [ngModel]="draft.coverMode"
+              (ngModelChange)="coverModeChanged($event)"
+            >
+              <label nz-radio nzValue="live">使用本场直播封面</label>
+              <label nz-radio nzValue="custom">使用手动封面</label>
+            </nz-radio-group>
+
+            <div *ngIf="draft.coverMode === 'custom'" class="asset-control">
+              <nz-select
+                name="coverAssetId"
+                nzPlaceHolder="选择已上传的封面"
+                [nzLoading]="coverLoading"
+                [nzDisabled]="coverLoading || coverAssets.length === 0"
+                [ngModel]="draft.coverAssetId"
+                (ngModelChange)="customCoverChanged($event)"
+              >
+                <nz-option
+                  *ngFor="let asset of coverAssets"
+                  [nzValue]="asset.id"
+                  [nzLabel]="asset.filename"
+                ></nz-option>
+              </nz-select>
+              <input
+                #coverInput
+                class="visually-hidden"
+                type="file"
+                accept="image/jpeg,image/png"
+                (change)="coverFileSelected($event)"
+              />
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="coverUploading"
+                [disabled]="coverUploading"
+                (click)="coverInput.click()"
+              >
+                上传封面
+              </button>
+            </div>
+
+            <div *ngIf="selectedCover" class="cover-preview">
+              <img
+                *ngIf="selectedCoverPreviewUrl"
+                [src]="selectedCoverPreviewUrl"
+                [alt]="selectedCover.filename"
+              />
+              <span>
+                {{ selectedCover.filename }} · {{ selectedCover.width }} ×
+                {{ selectedCover.height }}
+              </span>
+            </div>
+            <span *ngIf="validationErrors.cover" class="field-error">
+              {{ validationErrors.cover }}
+            </span>
+            <nz-alert
+              *ngIf="coverError"
+              class="inline-alert"
+              nzType="warning"
+              nzShowIcon
+              [nzMessage]="coverError"
+            ></nz-alert>
+            <span class="field-help">
+              手动上传的 JPEG / PNG 会保存在封面库中，其他房间也可复用；最大
+              2 MiB，尺寸至少 1146 × 717。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label>加入合集</nz-form-label>
+          <nz-form-control>
+            <div class="asset-control">
+              <nz-select
+                name="collectionSelection"
+                nzAllowClear
+                nzPlaceHolder="不加入合集"
+                [nzLoading]="collectionLoading"
+                [nzDisabled]="collectionLoading"
+                [ngModel]="collectionSelection"
+                (ngModelChange)="collectionChanged($event)"
+              >
+                <nz-option
+                  *ngFor="let option of selectableCollectionSections"
+                  [nzValue]="option.value"
+                  [nzLabel]="option.label"
+                ></nz-option>
+              </nz-select>
+              <button nz-button type="button" (click)="openCreateCollection()">
+                新建合集
+              </button>
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="collectionLoading"
+                [disabled]="collectionLoading"
+                (click)="refreshCollections()"
+              >
+                刷新
+              </button>
+            </div>
+            <span *ngIf="validationErrors.collection" class="field-error">
+              {{ validationErrors.collection }}
+            </span>
+            <nz-alert
+              *ngIf="collectionError"
+              class="inline-alert"
+              nzType="warning"
+              nzShowIcon
+              [nzMessage]="collectionError"
+            ></nz-alert>
+            <span class="field-help">
+              合集跟随当前投稿账号；新建合集通过 B 站审核后才能选择。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+      </section>
+
+      <section class="form-section" aria-labelledby="publish-options-heading">
+        <h3 id="publish-options-heading">发布选项</h3>
+
+        <nz-form-item>
+          <nz-form-label>可见范围</nz-form-label>
+          <nz-form-control>
+            <nz-radio-group name="isOnlySelf" [(ngModel)]="draft.isOnlySelf">
+              <label nz-radio [nzValue]="false">公开</label>
+              <label nz-radio [nzValue]="true">仅自己可见</label>
+            </nz-radio-group>
+          </nz-form-control>
+        </nz-form-item>
+
+        <nz-form-item>
+          <nz-form-label>发布时间</nz-form-label>
+          <nz-form-control>
+            <nz-radio-group
+              name="publishMode"
+              [ngModel]="publishMode"
+              (ngModelChange)="publishModeChanged($event)"
+            >
+              <label nz-radio nzValue="immediate">审核通过后发布</label>
+              <label nz-radio nzValue="scheduled">B 站定时发布</label>
+            </nz-radio-group>
+            <div *ngIf="publishMode === 'scheduled'" class="schedule-control">
+              <span>投稿提交</span>
+              <input
+                nz-input
+                type="number"
+                name="publishDelayHours"
+                min="2"
+                max="360"
+                step="1"
+                [(ngModel)]="publishDelayHours"
+              />
+              <span>小时后发布</span>
+            </div>
+            <span *ngIf="validationErrors.schedule" class="field-error">
+              {{ validationErrors.schedule }}
+            </span>
+            <span *ngIf="publishMode === 'scheduled'" class="field-help">
+              使用 B 站原生定时发布，支持 2～360 个整小时。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+
+        <div class="switch-field">
+          <label for="publish-dynamic">投稿后发布动态</label>
+          <nz-switch
+            id="publish-dynamic"
+            name="publishDynamic"
+            [(ngModel)]="draft.publishDynamic"
+          ></nz-switch>
+        </div>
+
+        <nz-form-item *ngIf="draft.publishDynamic">
+          <nz-form-label>
+            动态内容
+            <span
+              class="help-mark"
+              nz-tooltip
+              [nzTooltipTitle]="templateTip"
+              tabindex="0"
+              >?</span
+            >
+          </nz-form-label>
+          <nz-form-control>
+            <textarea
+              nz-input
+              name="dynamicTemplate"
+              rows="3"
+              maxlength="5000"
+              [(ngModel)]="draft.dynamicTemplate"
+            ></textarea>
+          </nz-form-control>
+        </nz-form-item>
+
+        <div class="switch-field">
+          <label for="allow-replies">允许评论</label>
+          <nz-switch
+            id="allow-replies"
+            name="allowReplies"
+            [ngModel]="allowReplies"
+            (ngModelChange)="allowRepliesChanged($event)"
+          ></nz-switch>
+        </div>
+
+        <div *ngIf="allowReplies" class="switch-field nested-switch-field">
+          <label for="selection-reply">
+            仅展示投稿账号精选的评论
+          </label>
+          <nz-switch
+            id="selection-reply"
+            name="upSelectionReply"
+            [(ngModel)]="draft.upSelectionReply"
+          ></nz-switch>
+        </div>
+
+        <div class="switch-field">
+          <label for="allow-danmaku">允许弹幕</label>
+          <nz-switch
+            id="allow-danmaku"
+            name="allowDanmaku"
+            [ngModel]="allowDanmaku"
+            (ngModelChange)="allowDanmakuChanged($event)"
+          ></nz-switch>
+        </div>
+      </section>
+
+      <section class="form-section" aria-labelledby="after-review-heading">
+        <h3 id="after-review-heading">审核后处理</h3>
+
+        <div class="switch-field">
+          <div>
+            <label for="auto-comment">发布 SC / 上舰索引评论</label>
+            <p>把直播中的 SC 和上舰记录整理成带时间点的评论。</p>
+          </div>
+          <nz-switch
+            id="auto-comment"
+            name="autoComment"
+            [nzDisabled]="!allowReplies"
+            [(ngModel)]="draft.autoComment"
+          ></nz-switch>
+        </div>
+
+        <div class="switch-field">
+          <div>
+            <label for="danmaku-backfill">回灌直播弹幕</label>
+            <p>稿件审核通过后，按原时间轴把直播弹幕发送到视频。</p>
+          </div>
+          <nz-switch
+            id="danmaku-backfill"
+            name="danmakuBackfill"
+            [nzDisabled]="!allowDanmaku"
+            [(ngModel)]="draft.danmakuBackfill"
+          ></nz-switch>
+        </div>
+      </section>
+
+      <section class="form-section" aria-labelledby="retention-heading">
+        <h3 id="retention-heading">本地录像</h3>
+
+        <nz-form-item>
+          <nz-form-label>视频删除策略</nz-form-label>
+          <nz-form-control>
+            <nz-select
+              name="retentionMode"
+              [ngModel]="draft.retentionMode"
+              (ngModelChange)="draft.retentionMode = $event"
+              [nzOptions]="retentionModeOptions"
+            ></nz-select>
+            <div *ngIf="retentionUsesDays" class="retention-days-control">
+              <span>达到条件</span>
+              <input
+                nz-input
+                type="number"
+                name="retentionDays"
+                min="0"
+                max="3650"
+                step="1"
+                [(ngModel)]="draft.retentionDays"
+              />
+              <span>天后删除</span>
+            </div>
+            <span *ngIf="validationErrors.retention" class="field-error">
+              {{ validationErrors.retention }}
+            </span>
+            <span class="field-help">
+              只删除本地视频，弹幕 XML 和场次信息会一直保留。填写 0
+              表示达到条件后立即删除。
+            </span>
+            <span
+              *ngIf="draft.retentionMode === 'capacity'"
+              class="field-help"
+            >
+              按设置页的录像容量上限清理最旧且已投稿成功的视频。
+            </span>
+          </nz-form-control>
+        </nz-form-item>
+      </section>
+    </form>
+  </ng-container>
+
+  <ng-template [nzModalFooter]>
+    <div class="modal-footer">
+      <span class="footer-spacer"></span>
+      <button
+        nz-button
+        type="button"
+        [disabled]="saving"
+        (click)="close()"
+      >
+        取消
+      </button>
+      <button
+        nz-button
+        nzType="primary"
+        type="button"
+        data-testid="save-policy"
+        [nzLoading]="saving"
+        [disabled]="saveDisabled"
+        (click)="save()"
+      >
+        保存设置
+      </button>
+    </div>
+  </ng-template>
+</nz-modal>
+
+<nz-modal
+  nzTitle="新建 B 站合集"
+  nzWidth="560px"
+  [nzVisible]="newCollectionVisible"
+  [nzMaskClosable]="false"
+  [nzKeyboard]="!creatingCollection"
+  [nzClosable]="!creatingCollection"
+  [nzOkLoading]="creatingCollection"
+  [nzOkDisabled]="creatingCollection"
+  nzOkText="创建合集"
+  nzCancelText="取消"
+  (nzOnCancel)="closeCreateCollection()"
+  (nzOnOk)="createCollection()"
+>
+  <ng-container *nzModalContent>
+    <form nz-form nzLayout="vertical">
+      <nz-alert
+        *ngIf="newCollectionError"
+        class="form-alert"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="newCollectionError"
+      ></nz-alert>
+
+      <nz-form-item>
+        <nz-form-label nzRequired>合集名称</nz-form-label>
+        <nz-form-control>
+          <input
+            nz-input
+            name="newCollectionTitle"
+            maxlength="100"
+            [(ngModel)]="newCollectionTitle"
+          />
+        </nz-form-control>
+      </nz-form-item>
+
+      <nz-form-item>
+        <nz-form-label>合集简介</nz-form-label>
+        <nz-form-control>
+          <textarea
+            nz-input
+            name="newCollectionDescription"
+            rows="3"
+            maxlength="2000"
+            [(ngModel)]="newCollectionDescription"
+          ></textarea>
+        </nz-form-control>
+      </nz-form-item>
+
+      <nz-form-item>
+        <nz-form-label nzRequired>合集封面</nz-form-label>
+        <nz-form-control>
+          <nz-select
+            name="newCollectionCoverAssetId"
+            nzPlaceHolder="选择手动上传的封面"
+            [nzDisabled]="coverAssets.length === 0"
+            [(ngModel)]="newCollectionCoverAssetId"
+          >
+            <nz-option
+              *ngFor="let asset of coverAssets"
+              [nzValue]="asset.id"
+              [nzLabel]="asset.filename"
+            ></nz-option>
+          </nz-select>
+          <span class="field-help">
+            合集封面从上方手动封面库中选择；没有可选封面时，请先关闭此窗口并上传。
+          </span>
+        </nz-form-control>
+      </nz-form-item>
+    </form>
+  </ng-container>
+</nz-modal>

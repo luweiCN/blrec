@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import io
 import math
 from typing import Final, List, Tuple
@@ -6,10 +7,9 @@ from typing import Final, List, Tuple
 import attr
 from bitarray import bitarray
 
-from .struct_io import StructReader
 from .bits_io import BitsReader
+from .struct_io import StructReader
 from .utils import OffsetRepositor
-
 
 __all__ = (
     'AVCDecoderConfigurationRecord',
@@ -27,6 +27,7 @@ __all__ = (
 # ISO/IEC 14496-15:2010(E)
 # 5.2.4.1.1 Syntax
 # 5.2.4.1.2 Semantics
+
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)
 class AVCDecoderConfigurationRecord:
@@ -69,13 +70,10 @@ class AVCSequenceHeaderParser:
 
         for _ in range(num_of_sequence_parameter_sets):
             sequence_parameter_set_length = reader.read_ui16()
-            sequence_parameter_set_nal_unit = reader.read(
-                sequence_parameter_set_length
-            )
+            sequence_parameter_set_nal_unit = reader.read(sequence_parameter_set_length)
             sequence_parameter_sets.append(
                 SequenceParameterSet(
-                    sequence_parameter_set_length,
-                    sequence_parameter_set_nal_unit,
+                    sequence_parameter_set_length, sequence_parameter_set_nal_unit
                 )
             )
 
@@ -84,13 +82,10 @@ class AVCSequenceHeaderParser:
 
         for _ in range(num_of_picture_parameter_sets):
             picture_parameter_set_length = reader.read_ui16()
-            picture_parameter_set_nal_unit = reader.read(
-                picture_parameter_set_length
-            )
+            picture_parameter_set_nal_unit = reader.read(picture_parameter_set_length)
             picture_parameter_sets.append(
                 PictureParameterSet(
-                    picture_parameter_set_length,
-                    picture_parameter_set_nal_unit,
+                    picture_parameter_set_length, picture_parameter_set_nal_unit
                 )
             )
 
@@ -112,6 +107,7 @@ class AVCSequenceHeaderParser:
 # ISO/IEC 14496-10:2020(E)
 # 7.3.1 NAL unit syntax
 # 7.4.1 NAL unit semantics
+
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)
 class NalUnit:
@@ -159,12 +155,7 @@ class NalUnitParser:
 
         rbsp_bytes = rbsp_bytes_io.getvalue()
 
-        return NalUnit(
-            forbidden_zero_bit,
-            nal_ref_idc,
-            nal_unit_type,
-            rbsp_bytes,
-        )
+        return NalUnit(forbidden_zero_bit, nal_ref_idc, nal_unit_type, rbsp_bytes)
 
 
 # ISO/IEC 14496-10:2020(E)
@@ -173,11 +164,7 @@ class NalUnitParser:
 
 # Table 6-1 – SubWidthC, and SubHeightC values derived from
 # chroma_format_idc and separate_colour_plane_flag
-SUB_WIDTH_HEIGHT_MAPPING: Final = {
-    1: (2, 2),
-    2: (2, 1),
-    3: (1, 1),
-}
+SUB_WIDTH_HEIGHT_MAPPING: Final = {1: (2, 2), 2: (2, 1), 3: (1, 1)}
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True)
@@ -229,16 +216,14 @@ class SequenceParameterSetData:
     @property
     def sub_width_c(self) -> int:
         assert (
-            self.chroma_format_idc in (1, 2, 3) and
-            self.separate_colour_plane_flag == 0
+            self.chroma_format_idc in (1, 2, 3) and self.separate_colour_plane_flag == 0
         ), 'SubWidthC undefined!'
         return SUB_WIDTH_HEIGHT_MAPPING[self.chroma_format_idc][0]
 
     @property
     def sub_height_c(self) -> int:
         assert (
-            self.chroma_format_idc in (1, 2, 3) and
-            self.separate_colour_plane_flag == 0
+            self.chroma_format_idc in (1, 2, 3) and self.separate_colour_plane_flag == 0
         ), 'SubHeightC undefined!'
         return SUB_WIDTH_HEIGHT_MAPPING[self.chroma_format_idc][1]
 
@@ -293,15 +278,17 @@ class SequenceParameterSetData:
     @property
     def frame_width(self) -> int:
         x0 = self.crop_unit_x * self.frame_crop_left_offset
-        x1 = self.pic_width_in_samples_l - \
-            (self.crop_unit_x * self.frame_crop_right_offset + 1)
+        x1 = self.pic_width_in_samples_l - (
+            self.crop_unit_x * self.frame_crop_right_offset + 1
+        )
         return x1 - x0 + 1  # x1 inclusive
 
     @property
     def frame_height(self) -> int:
         y0 = self.crop_unit_y * self.frame_crop_top_offset
-        y1 = 16 * self.frame_height_in_mbs - \
-            (self.crop_unit_y * self.frame_crop_bottom_offset + 1)
+        y1 = 16 * self.frame_height_in_mbs - (
+            self.crop_unit_y * self.frame_crop_bottom_offset + 1
+        )
         return y1 - y0 + 1  # y1 inclusive
 
 
@@ -348,15 +335,26 @@ class SequenceParameterSetRBSPParser:
         seq_scaling_list_present_flag = []
 
         if profile_idc in (
-            100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135
+            100,
+            110,
+            122,
+            244,
+            44,
+            83,
+            86,
+            118,
+            128,
+            138,
+            139,
+            134,
+            135,
         ):
             chroma_format_idc = egc_reader.read_ue()
             if chroma_format_idc == 3:
                 separate_colour_plane_flag = bits_reader.read_bits_as_int(1)
             bit_depth_luma_minus8 = egc_reader.read_ue()
             bit_depth_chroma_minus8 = egc_reader.read_ue()
-            qpprime_y_zero_transform_bypass_flag = \
-                bits_reader.read_bits_as_int(1)
+            qpprime_y_zero_transform_bypass_flag = bits_reader.read_bits_as_int(1)
             seq_scaling_matrix_present_flag = bits_reader.read_bits_as_int(1)
             if seq_scaling_matrix_present_flag:
                 for i in range(8 if chroma_format_idc != 3 else 12):
@@ -467,9 +465,7 @@ class SequenceParameterSetRBSPParser:
             vui_parameters_present_flag,
         )
 
-    def _scaling_list(
-        self, egc_reader: ExpGolombCodeReader, list_size: int
-    ) -> None:
+    def _scaling_list(self, egc_reader: ExpGolombCodeReader, list_size: int) -> None:
         # 7.3.2.1.1.1 Scaling list syntax
         # scalingList and useDefaultScalingMatrixFlag ignored
         last_scale = next_scale = 8
@@ -484,6 +480,7 @@ class SequenceParameterSetRBSPParser:
 # ISO/IEC 14496-10:2020(E)
 # 9.1 Parsing process for Exp-Golomb codes
 # 9.1.1 Mapping process for signed Exp-Golomb codes
+
 
 class ExpGolombCodeReader:
     def __init__(self, reader: BitsReader) -> None:
@@ -501,13 +498,12 @@ class ExpGolombCodeReader:
                 break
 
         return (
-            2 ** leading_zero_bits - 1 +
-            self._reader.read_bits_as_int(leading_zero_bits)
+            2**leading_zero_bits - 1 + self._reader.read_bits_as_int(leading_zero_bits)
         )
 
     def read_se(self) -> int:
         code_num = self.read_ue()
-        value = -1 ** (code_num + 1) * math.ceil(code_num / 2)
+        value = -(1 ** (code_num + 1)) * math.ceil(code_num / 2)
         result = value if code_num % 2 == 0 else abs(value)
         return result
 

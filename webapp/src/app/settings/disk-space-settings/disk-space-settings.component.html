@@ -1,49 +1,97 @@
 <form nz-form [formGroup]="settingsForm">
+  <section
+    *ngIf="retentionStatus?.capacityBytes"
+    class="capacity-card"
+    [class.warning]="retentionStatus?.warning"
+    aria-live="polite"
+  >
+    <div class="capacity-card-header">
+      <div>
+        <strong>
+          {{
+            retentionStatus?.warning
+              ? '录像容量即将达到上限'
+              : '录像容量正常'
+          }}
+        </strong>
+        <span>
+          已使用 {{ formatBytes(retentionStatus!.managedVideoBytes) }}，剩余
+          {{ formatBytes(retentionStatus!.remainingBytes) }}
+        </span>
+      </div>
+      <button
+        nz-button
+        nzType="text"
+        nzShape="circle"
+        type="button"
+        aria-label="刷新容量状态"
+        data-testid="refresh-capacity"
+        nz-tooltip
+        nzTooltipTitle="刷新容量状态"
+        [nzLoading]="retentionStatusLoading"
+        (click)="refreshRetentionStatus()"
+      >
+        <i nz-icon nzType="reload"></i>
+      </button>
+    </div>
+    <div class="capacity-progress" aria-hidden="true">
+      <span [style.width.%]="capacityPercent"></span>
+    </div>
+    <div class="capacity-total">
+      {{ formatBytes(retentionStatus!.managedVideoBytes) }} /
+      {{ formatBytes(retentionStatus!.capacityBytes) }}
+    </div>
+  </section>
+
   <nz-form-item class="setting-item">
-    <nz-form-label class="setting-label" nzNoColon
-      >硬盘空间检测间隔</nz-form-label
-    >
+    <nz-form-label class="setting-label" nzNoColon>
+      录像容量上限
+      <i
+        class="help-icon"
+        nz-icon
+        nzType="question-circle"
+        nz-tooltip
+        nzTooltipTitle="统计本应用管理的录像；达到上限后，仅清理选择“容量超限时清理”的已投稿视频，弹幕文件会保留。"
+      ></i>
+    </nz-form-label>
     <nz-form-control
       class="setting-control select"
       [nzWarningTip]="syncFailedWarningTip"
       [nzValidateStatus]="
-        syncStatus.checkInterval ? checkIntervalControl : 'warning'
-      "
-    >
-      <nz-select formControlName="checkInterval" [nzOptions]="intervalOptions">
-      </nz-select>
-    </nz-form-control>
-  </nz-form-item>
-  <nz-form-item class="setting-item">
-    <nz-form-label class="setting-label" nzNoColon
-      >硬盘空间检测阈值</nz-form-label
-    >
-    <nz-form-control
-      class="setting-control select"
-      [nzWarningTip]="syncFailedWarningTip"
-      [nzValidateStatus]="
-        syncStatus.spaceThreshold ? spaceThresholdControl : 'warning'
+        syncStatus.recordingCapacity ? recordingCapacityControl : 'warning'
       "
     >
       <nz-select
-        formControlName="spaceThreshold"
-        [nzOptions]="thresholdOptions"
-      >
-      </nz-select>
+        formControlName="recordingCapacity"
+        [nzOptions]="capacityOptions"
+      ></nz-select>
     </nz-form-control>
   </nz-form-item>
-  <nz-form-item class="setting-item" appSwitchActionable>
-    <nz-form-label class="setting-label" nzNoColon
-      >空间不足删除旧录播文件</nz-form-label
-    >
+
+  <nz-form-item class="setting-item">
+    <nz-form-label class="setting-label" nzNoColon>
+      容量剩余预警
+      <i
+        class="help-icon"
+        nz-icon
+        nzType="question-circle"
+        nz-tooltip
+        nzTooltipTitle="录像容量距离上限不足该数值时，页面会显示预警。"
+      ></i>
+    </nz-form-label>
     <nz-form-control
-      class="setting-control switch"
+      class="setting-control select"
       [nzWarningTip]="syncFailedWarningTip"
       [nzValidateStatus]="
-        syncStatus.recycleRecords ? recycleRecordsControl : 'warning'
+        syncStatus.capacityWarningThreshold
+          ? capacityWarningThresholdControl
+          : 'warning'
       "
     >
-      <nz-switch formControlName="recycleRecords"></nz-switch>
+      <nz-select
+        formControlName="capacityWarningThreshold"
+        [nzOptions]="capacityWarningOptions"
+      ></nz-select>
     </nz-form-control>
   </nz-form-item>
 </form>
