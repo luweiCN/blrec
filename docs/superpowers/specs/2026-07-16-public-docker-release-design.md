@@ -39,6 +39,8 @@ Dockerfile 使用三个构建阶段，但只输出一个运行镜像：
 4. 所有门禁通过后，使用 QEMU 与 Buildx 构建 AMD64/ARM64 镜像，通过仓库 `GITHUB_TOKEN` 推送到 GHCR。
 5. 检查多架构 manifest 后创建 GitHub Pre-release，并附加部署文件。
 
+删除旧 Docker Hub 和旧 GHCR 发布工作流，避免同一标签发布多套互相冲突的镜像。现有 PyPI 与 Windows portable 工作流改为只允许手动触发；首个 Docker 测试版标签不得连带发布未经本轮验收的 Python 包或 Windows 压缩包。
+
 工作流明确声明 `contents: write` 和 `packages: write`，不保存个人 GHCR Token。任何门禁失败都阻止镜像推送；镜像已推送但 Release 创建失败时允许重跑同一次工作流，固定标签内容必须保持同一提交摘要。
 
 首次成功推送后，在 GitHub Packages 设置中将 `blrec` 容器包手动改为 Public。公开后群晖可以匿名拉取，后续发布不再需要重复设置。
