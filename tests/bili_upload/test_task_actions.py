@@ -1056,3 +1056,48 @@ async def test_failed_session_deletion_resumes_after_restart(tmp_path: Path) -> 
         assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_session_deletion_permanently_stops_transcode_repair(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        protocol = FakeProtocol(archive_response())
+        manager, _, _ = make_manager(database, protocol, tmp_path)
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        manager._run_file_deletion = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OSError('busy')
+        )
+
+        with pytest.raises(UploadTaskActionRejected, match='busy'):
+            await manager.delete_session(1, manager_subject='manager')
+
+        stopped = await database.fetchone(
+            'SELECT operator_paused,repair_state,lease_owner,lease_until '
+            'FROM upload_jobs WHERE id=9'
+        )
+        assert stopped is not None
+        assert dict(stopped) == {
+            'operator_paused': 1,
+            'repair_state': 'failed',
+            'lease_owner': None,
+            'lease_until': None,
+        }
+
+        restarted_protocol = FakeProtocol(archive_response())
+        restarted, uploader, _ = make_manager(database, restarted_protocol, tmp_path)
+        restarted._run_file_deletion = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OSError('still busy')
+        )
+        await restarted.recover_interrupted()
+
+        assert await restarted.run_once() is None
+        assert restarted_protocol.view_calls == []
+        assert uploader.calls == []
+        assert restarted_protocol.edit_calls == []
+    finally:
+        await database.close()

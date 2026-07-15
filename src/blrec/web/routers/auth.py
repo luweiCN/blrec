@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import secrets
 import time
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from typing import Dict, Optional
 
 from fastapi import APIRouter, Request, Response, status
@@ -127,14 +129,14 @@ async def login(request: Request, command: LoginRequest) -> Response:
 
 
 @router.get('/session')
-async def session(request: Request) -> Dict[str, object]:
+async def session(request: Request) -> Response:
     credentials = getattr(request.state, 'admin_session', None)
     if not isinstance(credentials, SessionCredentials):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Administrator session is required',
         )
-    return _session_content(credentials)
+    return _session_response(request, credentials)
 
 
 @router.post('/logout', status_code=status.HTTP_204_NO_CONTENT)
@@ -193,7 +195,9 @@ def _session_response(request: Request, credentials: SessionCredentials) -> Resp
         security.SESSION_COOKIE_NAME,
         credentials.session_token,
         max_age=max(1, credentials.expires_at - int(time.time())),
-        expires=credentials.expires_at,
+        expires=format_datetime(
+            datetime.fromtimestamp(credentials.expires_at, timezone.utc), usegmt=True
+        ),  # type: ignore[arg-type]  # Starlette treats integer expiry as relative.
         path='/',
         secure=request.url.scheme == 'https',
         httponly=True,

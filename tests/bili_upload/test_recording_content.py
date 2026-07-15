@@ -190,9 +190,9 @@ async def test_danmaku_pages_completed_xml(
     xml = tmp_path / 'part.xml'
     xml.write_text(
         '<i>'
-        '<d p="1.25,1,25,16777215,0,0,0,0">第一条</d>'
+        '<d p="1.25,1,25,16777215,0,0,0,0" user="主播" uid="42">第一条</d>'
         '<d p="2.5,4,18,255,0,0,0,0">第二条</d>'
-        '<d p="3.75,5,30,65280,0,0,0,0">第三条</d>'
+        '<d p="3.75,5,30,65280,0,0,0,0" user=" " uid="invalid">第三条</d>'
         '</i>',
         encoding='utf8',
     )
@@ -210,8 +210,14 @@ async def test_danmaku_pages_completed_xml(
     assert first.items[0].mode == 1
     assert first.items[0].font_size == 25
     assert first.items[0].color == 16_777_215
+    assert first.items[0].user == '主播'
+    assert first.items[0].uid == 42
+    assert first.items[1].user is None
+    assert first.items[1].uid is None
     assert first.next_cursor == 2
     assert [item.content for item in second.items] == ['第三条']
+    assert second.items[0].user is None
+    assert second.items[0].uid is None
     assert second.next_cursor is None
 
 

@@ -8,7 +8,7 @@
 
   li {
     display: grid;
-    grid-template-columns: 76px minmax(0, 1fr);
+    grid-template-columns: 76px 140px 120px minmax(0, 1fr);
     gap: 12px;
     padding: 9px 4px;
     border-bottom: 1px solid #f0f0f0;
@@ -18,6 +18,14 @@
     color: #8c8c8c;
     font-variant-numeric: tabular-nums;
   }
+}
+
+.danmaku-user,
+.danmaku-uid {
+  overflow: hidden;
+  color: #595959;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .danmaku-content {

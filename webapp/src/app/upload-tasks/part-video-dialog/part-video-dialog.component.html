@@ -20,6 +20,8 @@
       controls
       preload="metadata"
       [attr.src]="isFlv ? null : mediaUrl"
+      (error)="handleNativeMediaError()"
+      (stalled)="handleNativeMediaStalled()"
     ></video>
     <p *ngIf="mediaAccess?.snapshotId" class="hint">
       当前可播放至打开播放器时的录制进度；重新打开可读取新增内容。

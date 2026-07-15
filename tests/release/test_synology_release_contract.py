@@ -109,8 +109,9 @@ def test_rollback_validates_and_stages_restore_before_replacing_config() -> None
     assert rollback.index('test -s "$restore_candidate/credential.key"') < replace
 
 
-def test_readme_docker_commands_use_the_pinned_public_image() -> None:
+def test_readme_uses_only_the_verified_compose_installation_flow() -> None:
     readme = (ROOT / 'README.md').read_text(encoding='utf8')
-    pinned = '2233:2233 ghcr.io/luweicn/blrec:3.0.0-beta.1'
-    assert '2233:2233 acgnhiki/blrec' not in readme
-    assert readme.count(pinned) == 2
+    assert 'bili2233' not in readme
+    assert '--api-key' not in readme
+    assert 'docker run' not in readme
+    assert '[群晖双网络部署](docs/operations/synology-multi-network.md)' in readme

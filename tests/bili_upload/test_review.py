@@ -40,6 +40,23 @@ class FakeProtocol:
         return self.details[str(params['bvid'])]
 
 
+class FakePagingProtocol(FakeProtocol):
+    def __init__(
+        self,
+        pages: Mapping[int, Mapping[str, Any]],
+        details: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> None:
+        super().__init__({1: pages[1]}, details)
+        self.pages = dict(pages)
+
+    async def list_archives(
+        self, bundle: object, params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        account_id = int(bundle)
+        self.calls.append((account_id, dict(params)))
+        return self.pages[int(params['pn'])]
+
+
 class FakeBranch:
     def __init__(self, *, failing_jobs: Iterable[int] = ()) -> None:
         self.calls = []
@@ -136,6 +153,14 @@ def archive_response(
         }
     }
     return {'code': 0, 'data': {'arc_audits': [entry]}}
+
+
+def archive_page(entries: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    return {'code': 0, 'data': {'arc_audits': list(entries)}}
+
+
+def archive_entry(aid: int, bvid: str) -> Mapping[str, Any]:
+    return {'Archive': {'aid': aid, 'bvid': bvid, 'state': 0}}
 
 
 def archive_detail(
@@ -754,5 +779,135 @@ async def test_waiting_jobs_are_grouped_into_one_read_per_account(
         assert await review.run_once() == 0
 
         assert [call[0] for call in protocol.calls] == [1, 2]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_finds_an_archive_on_the_second_page(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    first_page = [
+        archive_entry(1_000 + index, 'BVfill{}'.format(index)) for index in range(50)
+    ]
+    protocol = FakePagingProtocol(
+        {1: archive_page(first_page), 2: archive_response()},
+        {'BVfixture': archive_detail([video('p1', 101, 1)])},
+    )
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 1
+        assert [call[1]['pn'] for call in protocol.calls] == [1, 2]
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'approved'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_paginates_until_multiple_jobs_are_all_found(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    first_page = [archive_entry(303, 'BVfixture')]
+    first_page.extend(
+        archive_entry(1_000 + index, 'BVfill{}'.format(index)) for index in range(49)
+    )
+    protocol = FakePagingProtocol(
+        {
+            1: archive_page(first_page),
+            2: archive_page([archive_entry(304, 'BVsecond')]),
+        },
+        {
+            'BVfixture': archive_detail([video('p1', 101, 1)]),
+            'BVsecond': archive_detail([video('p1', 201, 1)], aid=304, bvid='BVsecond'),
+        },
+    )
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        await seed_waiting_job(
+            database,
+            job_id=2,
+            account_id=1,
+            account_uid=42,
+            aid=304,
+            bvid='BVsecond',
+            filenames=('p1',),
+        )
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 2
+        assert [call[1]['pn'] for call in protocol.calls] == [1, 2]
+        states = await database.fetchall('SELECT state FROM upload_jobs ORDER BY id')
+        assert [str(row['state']) for row in states] == ['approved', 'approved']
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_stops_after_a_first_page_match(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    protocol = FakePagingProtocol(
+        {1: archive_response()}, {'BVfixture': archive_detail([video('p1', 101, 1)])}
+    )
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 1
+        assert protocol.calls == [
+            (1, {'status': 'is_pubing,pubed,not_pubed', 'pn': 1, 'ps': 50})
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_stops_when_the_remote_repeats_a_full_page(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    repeated = archive_page(
+        [archive_entry(1_000 + index, 'BVfill{}'.format(index)) for index in range(50)]
+    )
+    protocol = FakePagingProtocol({1: repeated, 2: repeated})
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 0
+        assert [call[1]['pn'] for call in protocol.calls] == [1, 2]
     finally:
         await database.close()

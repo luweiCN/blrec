@@ -56,6 +56,8 @@ class ReviewWatcher:
     # Bilibili uses -50 for a completed archive that is only visible to its owner.
     APPROVED_STATES = frozenset((-50, 0, 1))
     REJECTED_STATES = frozenset((-2, -3, -4, -5, -12, -14, -16, -100))
+    ARCHIVE_PAGE_SIZE = 50
+    MAX_ARCHIVE_PAGES = 20
 
     def __init__(
         self,
@@ -108,11 +110,8 @@ class ReviewWatcher:
                         changed += 1
                 continue
             bundle = await self._bundle_loader(account_id)
-            response = await self._protocol.list_archives(
-                bundle, {'status': 'is_pubing,pubed,not_pubed', 'pn': 1}
-            )
             try:
-                archives = self._archives(response)
+                archives = await self._load_archives(bundle, jobs)
             except _ReviewMismatch as error:
                 for job in jobs:
                     if await self._pause(job, str(error)):
@@ -122,6 +121,45 @@ class ReviewWatcher:
                 if await self._process_job(job, archives, bundle):
                     changed += 1
         return changed
+
+    async def _load_archives(
+        self, bundle: Any, jobs: Sequence[_WaitingJob]
+    ) -> List[Mapping[str, Any]]:
+        archives: List[Mapping[str, Any]] = []
+        unresolved = {
+            job.id for job in jobs if job.aid is not None or job.bvid is not None
+        }
+        seen_pages = set()
+        for page_number in range(1, self.MAX_ARCHIVE_PAGES + 1):
+            response = await self._protocol.list_archives(
+                bundle,
+                {
+                    'status': 'is_pubing,pubed,not_pubed',
+                    'pn': page_number,
+                    'ps': self.ARCHIVE_PAGE_SIZE,
+                },
+            )
+            page = self._archives(response)
+            archives.extend(page)
+            unresolved.difference_update(
+                job.id
+                for job in jobs
+                if job.id in unresolved
+                and any(self._matches(job, entry) for entry in page)
+            )
+            if not unresolved or len(page) < self.ARCHIVE_PAGE_SIZE:
+                break
+            page_identity = tuple(
+                (
+                    self._positive_int(self._archive(entry).get('aid')),
+                    self._text(self._archive(entry).get('bvid')),
+                )
+                for entry in page
+            )
+            if page_identity in seen_pages:
+                break
+            seen_pages.add(page_identity)
+        return archives
 
     async def _process_job(
         self, job: _WaitingJob, archives: Sequence[Mapping[str, Any]], bundle: Any

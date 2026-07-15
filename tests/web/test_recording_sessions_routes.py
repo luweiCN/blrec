@@ -176,6 +176,8 @@ class FakeContentReader:
                     font_size=25,
                     color=16_777_215,
                     content='第一条',
+                    user='主播',
+                    uid=42,
                 ),
                 DanmakuLine(
                     index=4,
@@ -650,6 +652,7 @@ def test_media_access_token_authorizes_range_requests_without_exposing_api_key(
         params={
             'media_token': access.json()['token'],
             'media_expires': access.json()['expiresAt'],
+            'media_snapshot': access.json()['snapshotId'],
         },
         headers={'range': 'bytes=5-'},
     )
@@ -727,6 +730,55 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
     assert metadata['filesize'] == body['fileSizeBytes']
 
 
+def test_media_access_freezes_a_growing_flv_when_index_creation_fails(
+    client: TestClient, tmp_path: Path
+) -> None:
+    media = tmp_path / 'unindexed.flv'
+    opened_content = b'FLV-opened-content'
+    media.write_bytes(opened_content)
+
+    class GrowingContentReader(FakeContentReader):
+        async def media(self, part_id: int) -> MediaResource:
+            assert part_id == 2
+            return MediaResource(
+                path=str(media),
+                size=media.stat().st_size,
+                content_type='video/x-flv',
+                recording=True,
+                room_id=100,
+                part_index=1,
+                bvid=None,
+                remote_available=False,
+            )
+
+    recording_sessions.content_reader = GrowingContentReader(media)
+    recording_sessions.active_recording_metadata_provider = lambda _resource: {}
+
+    access = client.post(
+        '/api/v1/recording-sessions/parts/2/media-access',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert access.status_code == 200
+    body = access.json()
+    assert body['snapshotId']
+    assert body['durationMs'] is None
+    assert body['fileSizeBytes'] == len(opened_content)
+    media.write_bytes(opened_content + b'-appended-later')
+
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        params={
+            'media_token': body['token'],
+            'media_expires': body['expiresAt'],
+            'media_snapshot': body['snapshotId'],
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers['content-length'] == str(len(opened_content))
+    assert response.content == opened_content
+
+
 def test_media_access_rejects_a_tampered_token(client: TestClient) -> None:
     access = client.post(
         '/api/v1/recording-sessions/parts/2/media-access',
@@ -759,6 +811,8 @@ def test_danmaku_returns_a_camel_case_page(client: TestClient) -> None:
                 'mode': 1,
                 'fontSize': 25,
                 'color': 16_777_215,
+                'user': '主播',
+                'uid': 42,
                 'content': '第一条',
             },
             {
@@ -767,6 +821,8 @@ def test_danmaku_returns_a_camel_case_page(client: TestClient) -> None:
                 'mode': 4,
                 'fontSize': 18,
                 'color': 255,
+                'user': None,
+                'uid': None,
                 'content': '<script>不会执行</script>',
             },
         ],

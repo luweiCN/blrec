@@ -203,6 +203,58 @@ async def test_capacity_retention_deletes_oldest_eligible_video_only(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('upload_intent', ('none', 'skip'))
+async def test_capacity_retention_reclaims_safe_no_job_sessions_only(
+    tmp_path: Path, upload_intent: str
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        reclaimable, _ = await seed_recording(
+            database,
+            root,
+            identifier=1,
+            room_id=101,
+            retention_mode='capacity',
+            retention_days=5,
+            submitted_at=1_000,
+            content=b'1111',
+        )
+        pending_upload, _ = await seed_recording(
+            database,
+            root,
+            identifier=2,
+            room_id=102,
+            retention_mode='capacity',
+            retention_days=5,
+            submitted_at=None,
+            content=b'2222',
+        )
+        await database.execute('DELETE FROM upload_jobs WHERE id=1')
+        await database.execute(
+            'UPDATE recording_sessions SET upload_intent=? WHERE id=1', (upload_intent,)
+        )
+        manager = RetentionManager(
+            database, root, capacity_bytes=lambda: 4, clock=lambda: 10_000
+        )
+
+        assert await manager.run_once() == 1
+        assert not reclaimable.exists()
+        assert pending_upload.exists()
+        assert (
+            await database.scalar(
+                'SELECT video_deleted_at FROM recording_parts WHERE id=2'
+            )
+            is None
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_retention_rejects_video_path_outside_recording_root(
     tmp_path: Path,
 ) -> None:

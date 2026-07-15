@@ -54,7 +54,19 @@ describe('PartDanmakuDialogComponent', () => {
             mode: 1,
             fontSize: 25,
             color: 16_777_215,
+            user: '主播',
+            uid: 42,
             content: '<script>不会执行</script>',
+          },
+          {
+            index: 1,
+            progressMs: 2_500,
+            mode: 1,
+            fontSize: 25,
+            color: 16_777_215,
+            user: null,
+            uid: null,
+            content: '未署名弹幕',
           },
         ],
         nextCursor: null,
@@ -92,5 +104,15 @@ describe('PartDanmakuDialogComponent', () => {
     expect(
       overlayContainer.getContainerElement().querySelector('.danmaku-content script')
     ).toBeNull();
+    expect(
+      Array.from(
+        overlayContainer.getContainerElement().querySelectorAll('.danmaku-user')
+      ).map((element) => element.textContent?.trim())
+    ).toEqual(['用户：主播', '用户：未记录']);
+    expect(
+      Array.from(
+        overlayContainer.getContainerElement().querySelectorAll('.danmaku-uid')
+      ).map((element) => element.textContent?.trim())
+    ).toEqual(['UID：42', 'UID：未记录']);
   });
 });

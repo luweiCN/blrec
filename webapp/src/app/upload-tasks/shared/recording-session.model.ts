@@ -229,6 +229,8 @@ export interface RecordingDanmakuLine {
   readonly mode: number;
   readonly fontSize: number;
   readonly color: number;
+  readonly user: string | null;
+  readonly uid: number | null;
   readonly content: string;
 }
 

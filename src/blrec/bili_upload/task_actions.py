@@ -970,12 +970,20 @@ class UploadTaskActionManager:
             connection.execute(
                 "UPDATE upload_jobs SET state='paused',operator_paused=1,"
                 'operator_resume_state=NULL,review_reason=?,lease_owner=NULL,'
-                'lease_until=NULL,comment_branch_state=CASE '
+                'lease_until=NULL,repair_state=CASE WHEN repair_state IN '
+                "('queued','checking','reuploading','editing') THEN 'failed' "
+                'ELSE repair_state END,repair_message=CASE WHEN repair_state IN '
+                "('queued','checking','reuploading','editing') THEN NULL "
+                'ELSE repair_message END,repair_error=CASE WHEN repair_state IN '
+                "('queued','checking','reuploading','editing') THEN ? "
+                'ELSE repair_error END,repair_completed_at=CASE WHEN repair_state IN '
+                "('queued','checking','reuploading','editing') THEN ? "
+                'ELSE repair_completed_at END,comment_branch_state=CASE '
                 "WHEN comment_branch_state IN ('pending','running') THEN 'paused' "
                 'ELSE comment_branch_state END,danmaku_branch_state=CASE '
                 "WHEN danmaku_branch_state IN ('pending','importing','publishing') "
                 "THEN 'paused' ELSE danmaku_branch_state END,updated_at=? WHERE id=?",
-                ('任务正在删除', now, job_id),
+                ('任务正在删除', '任务正在删除，转码修复已终止', now, now, job_id),
             )
             connection.execute(
                 'UPDATE comment_items SET lease_owner=NULL,lease_until=NULL,'
@@ -1261,14 +1269,21 @@ class UploadTaskActionManager:
             connection.execute(
                 "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
                 'repair_error=NULL,lease_owner=NULL,lease_until=NULL,updated_at=? '
-                "WHERE repair_state IN ('checking','reuploading')",
+                "WHERE repair_state IN ('checking','reuploading') "
+                'AND operator_paused=0 AND EXISTS('
+                'SELECT 1 FROM recording_sessions session '
+                'WHERE session.id=upload_jobs.session_id '
+                "AND session.deletion_state='none')",
                 ('上次修复中断，已重新排队', now),
             )
             connection.execute(
                 "UPDATE upload_jobs SET state='paused',"
                 "repair_state='unknown_outcome',repair_message=NULL,repair_error=?,"
                 'review_reason=?,lease_owner=NULL,lease_until=NULL,updated_at=? '
-                "WHERE repair_state='editing'",
+                "WHERE repair_state='editing' AND operator_paused=0 AND EXISTS("
+                'SELECT 1 FROM recording_sessions session '
+                'WHERE session.id=upload_jobs.session_id '
+                "AND session.deletion_state='none')",
                 (
                     '稿件编辑在重启前已发出，远端结果未知',
                     '转码修复的稿件编辑结果未知，需要远端核对',
@@ -1303,10 +1318,12 @@ class UploadTaskActionManager:
 
         def claim(connection: sqlite3.Connection) -> Optional[LeaseClaim]:
             row = connection.execute(
-                'SELECT id,repair_attempt FROM upload_jobs '
-                "WHERE repair_state='queued' "
-                'AND (lease_until IS NULL OR lease_until<=?) '
-                'ORDER BY repair_requested_at,id LIMIT 1',
+                'SELECT job.id,job.repair_attempt FROM upload_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                "WHERE job.repair_state='queued' AND job.operator_paused=0 "
+                "AND session.deletion_state='none' "
+                'AND (job.lease_until IS NULL OR job.lease_until<=?) '
+                'ORDER BY job.repair_requested_at,job.id LIMIT 1',
                 (now,),
             ).fetchone()
             if row is None:
@@ -1318,7 +1335,11 @@ class UploadTaskActionManager:
                 'repair_error=NULL,repair_attempt=repair_attempt+1,'
                 'lease_owner=?,lease_generation=lease_generation+1,lease_until=?, '
                 "updated_at=? WHERE id=? AND repair_state='queued' "
-                'AND (lease_until IS NULL OR lease_until<=?)',
+                'AND operator_paused=0 '
+                'AND (lease_until IS NULL OR lease_until<=?) AND EXISTS('
+                'SELECT 1 FROM recording_sessions session '
+                'WHERE session.id=upload_jobs.session_id '
+                "AND session.deletion_state='none')",
                 (
                     '正在核对 B 站分 P 转码状态',
                     self._worker_id,
@@ -1352,6 +1373,7 @@ class UploadTaskActionManager:
             gate = self._account_gates.for_account(job.account_id)
             async with gate.hold(job.credential_version):
                 bundle = await self._bundle_loader(job.account_id)
+                await self._assert_active_repair(claim)
                 response = await self._protocol.archive_view(
                     bundle,
                     {'topic_grey': 1, 'bvid': job.bvid, 't': int(self._clock() * 1000)},
@@ -1379,6 +1401,7 @@ class UploadTaskActionManager:
                 try:
                     await self._prepare_failed_parts(claim, failed, repair_modes)
                     for part in failed:
+                        await self._assert_active_repair(claim)
                         await self._uploader.upload_part(
                             part.local_id, bundle=bundle, claim=claim
                         )
@@ -1396,6 +1419,7 @@ class UploadTaskActionManager:
                 await self._set_repair_stage(
                     claim, 'editing', '正在更新原稿件的异常分 P'
                 )
+                await self._assert_active_repair(claim)
                 await self._protocol.edit_archive(bundle, payload)
                 await self._finish_repair(claim, failed, healthy_cids, repair_modes)
         except DefinitelyNotSent:
@@ -1427,8 +1451,10 @@ class UploadTaskActionManager:
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
             'account.credential_version FROM upload_jobs job '
             'JOIN bili_accounts account ON account.id=job.account_id '
+            'JOIN recording_sessions session ON session.id=job.session_id '
             'WHERE job.id=? AND job.lease_owner=? AND job.lease_generation=? '
-            "AND job.lease_until>? AND job.repair_state='checking'",
+            "AND job.lease_until>? AND job.repair_state='checking' "
+            "AND job.operator_paused=0 AND session.deletion_state='none'",
             (claim.id, claim.lease_owner, claim.lease_generation, now),
         )
         if row is None:
@@ -1787,7 +1813,11 @@ class UploadTaskActionManager:
     ) -> None:
         updated = await self._database.execute(
             'UPDATE upload_jobs SET repair_state=?,repair_message=?,updated_at=? '
-            'WHERE id=? AND lease_owner=? AND lease_generation=?',
+            'WHERE id=? AND lease_owner=? AND lease_generation=? '
+            'AND operator_paused=0 AND EXISTS('
+            'SELECT 1 FROM recording_sessions session '
+            'WHERE session.id=upload_jobs.session_id '
+            "AND session.deletion_state='none')",
             (
                 state,
                 message,
@@ -1916,7 +1946,10 @@ class UploadTaskActionManager:
         parameters.extend((claim.id, claim.lease_owner, claim.lease_generation))
         updated = await self._database.execute(
             'UPDATE upload_jobs SET {} WHERE id=? AND lease_owner=? '
-            'AND lease_generation=?'.format(','.join(assignments)),
+            'AND lease_generation=? AND operator_paused=0 AND EXISTS('
+            'SELECT 1 FROM recording_sessions session '
+            'WHERE session.id=upload_jobs.session_id '
+            "AND session.deletion_state='none')".format(','.join(assignments)),
             parameters,
         )
         if updated != 1:
@@ -1929,10 +1962,27 @@ class UploadTaskActionManager:
     @staticmethod
     def _require_claim(connection: sqlite3.Connection, claim: LeaseClaim) -> None:
         row = connection.execute(
-            'SELECT 1 FROM upload_jobs WHERE id=? AND lease_owner=? '
-            'AND lease_generation=?',
+            'SELECT 1 FROM upload_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'WHERE job.id=? AND job.lease_owner=? '
+            'AND job.lease_generation=? AND job.operator_paused=0 '
+            "AND session.deletion_state='none'",
             (claim.id, claim.lease_owner, claim.lease_generation),
         ).fetchone()
+        if row is None:
+            raise LeaseLost('转码修复任务租约已失效')
+
+    async def _assert_active_repair(self, claim: LeaseClaim) -> None:
+        now = int(self._clock())
+        row = await self._database.fetchone(
+            'SELECT 1 FROM upload_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'WHERE job.id=? AND job.lease_owner=? '
+            'AND job.lease_generation=? AND job.lease_until>? '
+            "AND job.repair_state IN ('checking','reuploading','editing') "
+            "AND job.operator_paused=0 AND session.deletion_state='none'",
+            (claim.id, claim.lease_owner, claim.lease_generation, now),
+        )
         if row is None:
             raise LeaseLost('转码修复任务租约已失效')
 

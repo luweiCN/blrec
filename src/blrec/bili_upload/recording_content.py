@@ -66,6 +66,8 @@ class DanmakuLine:
     font_size: int
     color: int
     content: str
+    user: Optional[str] = None
+    uid: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -80,7 +82,7 @@ class FlvMediaSnapshot:
     source_size: int
     source_tail_start: int
     prefix: bytes
-    duration_ms: int
+    duration_ms: Optional[int]
 
     @property
     def size(self) -> int:
@@ -176,6 +178,18 @@ class FlvMediaSnapshot:
             source_tail_start=source_tail_start,
             prefix=prefix,
             duration_ms=int(round(duration_seconds * 1_000)),
+        )
+
+    @classmethod
+    def frozen(cls, path: str, source_size: int) -> FlvMediaSnapshot:
+        if source_size < 0:
+            raise ValueError('snapshot size must not be negative')
+        return cls(
+            path=path,
+            source_size=source_size,
+            source_tail_start=0,
+            prefix=b'',
+            duration_ms=None,
         )
 
     @staticmethod
@@ -364,6 +378,19 @@ class RecordingContentReader:
             raise RecordingContentInvalid('弹幕文件格式无效') from None
         if not math.isfinite(progress) or progress < 0:
             raise RecordingContentInvalid('弹幕文件格式无效')
+        user_value = element.get('user')
+        user = (
+            user_value.strip()
+            if isinstance(user_value, str) and user_value.strip()
+            else None
+        )
+        uid_value = element.get('uid')
+        try:
+            uid = None if uid_value is None else int(uid_value)
+        except ValueError:
+            uid = None
+        if uid is not None and uid < 0:
+            uid = None
         return DanmakuLine(
             index=index,
             progress_ms=int(round(progress * 1_000)),
@@ -371,4 +398,6 @@ class RecordingContentReader:
             font_size=font_size,
             color=color,
             content=element.text or '',
+            user=user,
+            uid=uid,
         )

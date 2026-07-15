@@ -149,20 +149,27 @@ class RetentionManager:
         return candidates
 
     async def _capacity_candidates(self) -> List[_Candidate]:
+        now = int(self._clock())
         rows = await self._database.fetchall(
             'SELECT part.id,part.source_path,part.final_path,session.started_at,'
-            'job.submitted_at '
+            'CASE WHEN job.id IS NULL THEN '
+            'COALESCE(session.ended_at,session.started_at) '
+            'ELSE job.submitted_at END AS order_at '
             'FROM recording_parts part '
             'JOIN recording_sessions session ON session.id=part.session_id '
-            'JOIN upload_jobs job ON job.session_id=session.id '
+            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
             'JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             "WHERE part.video_deleted_at IS NULL AND session.state='closed' "
-            "AND policy.retention_mode='capacity' AND job.submitted_at IS NOT NULL "
-            'ORDER BY job.submitted_at,session.started_at,part.part_index,part.id'
+            "AND session.deletion_state='none' "
+            "AND part.artifact_state NOT IN ('recording','postprocessing') "
+            "AND policy.retention_mode='capacity' AND ((job.id IS NULL "
+            "AND session.upload_intent IN ('none','skip')) OR "
+            '(job.id IS NOT NULL AND job.submitted_at IS NOT NULL)) '
+            'AND (job.id IS NULL OR job.lease_until IS NULL OR job.lease_until<=?) '
+            'ORDER BY order_at,session.started_at,part.part_index,part.id',
+            (now,),
         )
-        return [
-            self._candidate(row, 'capacity', int(row['submitted_at'])) for row in rows
-        ]
+        return [self._candidate(row, 'capacity', int(row['order_at'])) for row in rows]
 
     @staticmethod
     def _candidate(row: Any, reason: str, order_at: int) -> _Candidate:

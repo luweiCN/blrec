@@ -97,6 +97,18 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     this.visibleChange.emit(false);
   }
 
+  handleNativeMediaError(): void {
+    if (!this.isFlv) {
+      this.error = '本地视频播放失败，请重新打开后再试';
+    }
+  }
+
+  handleNativeMediaStalled(): void {
+    if (!this.isFlv) {
+      this.error = '本地视频加载停滞，请检查连接后重试';
+    }
+  }
+
   private loadMedia(): void {
     this.request?.unsubscribe();
     this.teardownPlayer();
@@ -133,10 +145,9 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       this.videoElement,
       this.mediaUrl,
       {
-        isLive: access?.recording === true && access.snapshotId === null,
+        isLive: false,
         durationMs: access?.durationMs ?? null,
-        fileSizeBytes:
-          access?.snapshotId === null || !access ? null : access.fileSizeBytes,
+        fileSizeBytes: access?.fileSizeBytes ?? null,
       },
       (message) => {
         this.error = message;

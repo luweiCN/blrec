@@ -311,6 +311,8 @@ class DanmakuLineResponse(ApiModel):
     mode: int
     font_size: int
     color: int
+    user: Optional[str]
+    uid: Optional[int]
     content: str
 
 
@@ -925,20 +927,20 @@ async def create_recording_media_access(
         resource.recording
         and resource.content_type == 'video/x-flv'
         and resource.size is not None
-        and active_recording_metadata_provider is not None
     ):
-        metadata = active_recording_metadata_provider(resource)
-        if metadata is not None:
-            try:
-                snapshot = FlvMediaSnapshot.create(
-                    resource.path, resource.size, metadata
-                )
-            except (OSError, EOFError, ValueError, AssertionError, RuntimeError):
-                pass
-            else:
-                snapshot_id = media_snapshot_store.add(part_id, expires_at, snapshot)
-                duration_ms = snapshot.duration_ms
-                file_size_bytes = snapshot.size
+        snapshot = FlvMediaSnapshot.frozen(resource.path, resource.size)
+        if active_recording_metadata_provider is not None:
+            metadata = active_recording_metadata_provider(resource)
+            if metadata is not None:
+                try:
+                    snapshot = FlvMediaSnapshot.create(
+                        resource.path, resource.size, metadata
+                    )
+                except (OSError, EOFError, ValueError, AssertionError, RuntimeError):
+                    pass
+        snapshot_id = media_snapshot_store.add(part_id, expires_at, snapshot)
+        duration_ms = snapshot.duration_ms
+        file_size_bytes = snapshot.size
     return MediaAccessResponse(
         token=security.media_access_token(part_id, expires_at, snapshot_id),
         expires_at=expires_at,
@@ -1041,6 +1043,8 @@ async def list_recording_danmaku(
                 mode=item.mode,
                 font_size=item.font_size,
                 color=item.color,
+                user=item.user,
+                uid=item.uid,
                 content=item.content,
             )
             for item in page.items

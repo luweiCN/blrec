@@ -77,34 +77,7 @@
 
 ## Docker
 
-Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.1`](https://github.com/luweicn/blrec/pkgs/container/blrec)。群晖 Container Manager 和 Compose 的首次安装、升级与回滚步骤见 [群晖双网络部署](docs/operations/synology-multi-network.md)。
-
-### 环境变量
-
-- 默认设置文件位置: `ENV BLREC_DEFAULT_SETTINGS_FILE=/cfg/settings.toml`
-- 默认日志存放目录: `ENV BLREC_DEFAULT_LOG_DIR=/log`
-- 默认录播存放目录: `ENV BLREC_DEFAULT_OUT_DIR=/rec`
-- 默认时区: `ENV TZ="Asia/Shanghai"`
-
-### 默认参数运行
-
-`sudo docker run -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec -dp 2233:2233 ghcr.io/luweicn/blrec:3.0.0-beta.1`
-
-### 命令行参数用法
-
-```bash
-sudo docker run \
-    -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec \
-    -dp 2233:2233 ghcr.io/luweicn/blrec:3.0.0-beta.1 \
-    -c /cfg/another_settings.toml \
-    --key-file path/to/key-file \
-    --cert-file path/to/cert-file \
-    --api-key bili2233
-```
-
-### 群晖双网络
-
-使用两条宽带分别承载录制、上传和 B 站请求时，请使用主机网络模式部署，具体配置见 [群晖双网络部署](docs/operations/synology-multi-network.md)。
+Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.1`](https://github.com/luweicn/blrec/pkgs/container/blrec)。请仅使用仓库中的 `compose.synology.yml` 部署；首次安装、凭据密钥初始化、升级与回滚步骤见 [群晖双网络部署](docs/operations/synology-multi-network.md)。
 
 ## 使用方法
 
@@ -144,7 +117,7 @@ sudo docker run \
 
 通过不可信网络访问时，应在反向代理或程序入口配置 **HTTPS**：
 
-例如：`blrec --key-file path/to/key-file --cert-file path/to/cert-file --api-key bili2233`
+例如：`blrec --key-file path/to/key-file --cert-file path/to/cert-file`
 
 `BLREC_ADMIN_USERNAME` 指定唯一管理员用户名，区分大小写。`api key` 仅用于首次创建管理员或忘记密码后的恢复验证；设置完成后，普通页面和 API 请求不再携带它。未配置 API Key 时，只允许从本机回环地址完成首次设置和恢复。
 

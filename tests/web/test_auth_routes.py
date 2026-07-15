@@ -1,3 +1,8 @@
+import hashlib
+import sqlite3
+import time
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Iterator
 
@@ -170,6 +175,39 @@ def test_login_session_logout_and_password_change(client: TestClient) -> None:
     assert logout.status_code == 204
     assert 'Max-Age=0' in logout.headers['set-cookie']
     assert client.get('/api/v1/protected').status_code == 401
+
+
+def test_session_renewal_reissues_the_cookie_with_the_current_expiry(
+    client: TestClient,
+) -> None:
+    setup_admin(client)
+    token = client.cookies.get(security.SESSION_COOKIE_NAME)
+    assert token is not None
+    store = security.auth_store
+    assert store is not None
+    now = int(time.time())
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            'UPDATE admin_sessions SET expires_at=? WHERE token_hash=?',
+            (now + 60, hashlib.sha256(token.encode('utf8')).hexdigest()),
+        )
+
+    response = client.get('/api/v1/auth/session')
+
+    assert response.status_code == 200
+    assert 'set-cookie' in response.headers
+    cookies = SimpleCookie()
+    cookies.load(response.headers['set-cookie'])
+    renewed = cookies[security.SESSION_COOKIE_NAME]
+    expires_at = int(response.json()['expiresAt'])
+    assert renewed.value == token
+    assert expires_at > now + 29 * 24 * 3600
+    assert abs(int(renewed['max-age']) - (expires_at - int(time.time()))) <= 1
+    assert int(parsedate_to_datetime(renewed['expires']).timestamp()) == expires_at
+    assert renewed['path'] == '/'
+    assert renewed['secure'] is True
+    assert renewed['httponly'] is True
+    assert renewed['samesite'].lower() == 'lax'
 
 
 def test_bootstrap_key_can_reset_password_and_revokes_sessions(

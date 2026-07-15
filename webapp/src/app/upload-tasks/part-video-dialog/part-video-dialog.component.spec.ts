@@ -1,4 +1,5 @@
 import { CommonModule } from '@angular/common';
+import { OverlayContainer } from '@angular/cdk/overlay';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
@@ -16,6 +17,7 @@ describe('PartVideoDialogComponent', () => {
   let service: jasmine.SpyObj<RecordingSessionService>;
   let playerFactory: jasmine.SpyObj<PartPlayerFactory>;
   let player: jasmine.SpyObj<PartPlayer>;
+  let overlayContainer: OverlayContainer;
 
   const part: RecordingPart = {
     id: 2,
@@ -110,6 +112,7 @@ describe('PartVideoDialogComponent', () => {
     }).compileComponents();
 
     fixture = TestBed.createComponent(PartVideoDialogComponent);
+    overlayContainer = TestBed.inject(OverlayContainer);
     fixture.componentRef.setInput('session', session);
     fixture.componentRef.setInput('part', part);
     fixture.componentRef.setInput('visible', true);
@@ -133,6 +136,32 @@ describe('PartVideoDialogComponent', () => {
     expect(fixture.nativeElement.textContent).not.toContain('查看弹幕');
   });
 
+  it('uses finite player options when a growing FLV has no duration index', () => {
+    service.createMediaAccess.and.returnValue(
+      of({
+        token: 'signed',
+        expiresAt: 123,
+        snapshotId: null,
+        durationMs: null,
+        fileSizeBytes: 1_024,
+        recording: true,
+      })
+    );
+
+    fixture.detectChanges();
+
+    expect(playerFactory.attachFlv).toHaveBeenCalledWith(
+      jasmine.any(HTMLVideoElement),
+      '/api/media?signed',
+      {
+        isLive: false,
+        durationMs: null,
+        fileSizeBytes: 1_024,
+      },
+      jasmine.any(Function)
+    );
+  });
+
   it('destroys the FLV player when closed', () => {
     fixture.detectChanges();
 
@@ -142,5 +171,43 @@ describe('PartVideoDialogComponent', () => {
     expect(player.unload).toHaveBeenCalled();
     expect(player.detachMediaElement).toHaveBeenCalled();
     expect(player.destroy).toHaveBeenCalled();
+  });
+
+  it('surfaces native MP4 playback errors', () => {
+    fixture.componentRef.setInput('part', {
+      ...part,
+      finalPath: '/rec/p1.mp4',
+      finalExists: true,
+    });
+    fixture.detectChanges();
+
+    const video = overlayContainer.getContainerElement().querySelector(
+      '[data-testid="part-video"]'
+    ) as HTMLVideoElement;
+    video.dispatchEvent(new Event('error'));
+    fixture.detectChanges();
+
+    expect(overlayContainer.getContainerElement().textContent).toContain(
+      '本地视频播放失败，请重新打开后再试'
+    );
+  });
+
+  it('surfaces stalled native MP4 playback', () => {
+    fixture.componentRef.setInput('part', {
+      ...part,
+      finalPath: '/rec/p1.mp4',
+      finalExists: true,
+    });
+    fixture.detectChanges();
+
+    const video = overlayContainer.getContainerElement().querySelector(
+      '[data-testid="part-video"]'
+    ) as HTMLVideoElement;
+    video.dispatchEvent(new Event('stalled'));
+    fixture.detectChanges();
+
+    expect(overlayContainer.getContainerElement().textContent).toContain(
+      '本地视频加载停滞，请检查连接后重试'
+    );
   });
 });
