@@ -1,14 +1,13 @@
-import { BreakpointObserver } from '@angular/cdk/layout';
-import { NO_ERRORS_SCHEMA } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { NO_ERRORS_SCHEMA, Pipe, PipeTransform } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzDropDownModule } from 'ng-zorro-antd/dropdown';
-import { NEVER } from 'rxjs';
+import { of } from 'rxjs';
 
 import { SettingService } from 'src/app/settings/shared/services/setting.service';
 import { TaskManagerService } from '../shared/services/task-manager.service';
-import { TaskSettingsService } from '../shared/services/task-settings.service';
 import {
   PostprocessorStatus,
   RunningStatus,
@@ -16,8 +15,22 @@ import {
 } from '../shared/task.model';
 import { TaskItemComponent } from './task-item.component';
 
+@Pipe({ name: 'dataurl' })
+class DataurlStubPipe implements PipeTransform {
+  transform(value: string) {
+    return of(value);
+  }
+}
+
 const taskData: TaskData = {
-  user_info: { name: '', gender: '', face: '', uid: 1, level: 0, sign: '' },
+  user_info: {
+    name: '测试主播',
+    gender: '',
+    face: '',
+    uid: 1,
+    level: 0,
+    sign: '',
+  },
   room_info: {
     uid: 1,
     room_id: 1,
@@ -61,22 +74,10 @@ describe('TaskItemComponent', () => {
   let fixture: ComponentFixture<TaskItemComponent>;
 
   beforeEach(async () => {
-    const breakpointObserver = jasmine.createSpyObj<BreakpointObserver>(
-      'BreakpointObserver',
-      ['observe']
-    );
-    breakpointObserver.observe.and.returnValue(NEVER);
-    const taskSettings = jasmine.createSpyObj<TaskSettingsService>(
-      'TaskSettingsService',
-      ['getSettings', 'updateSettings']
-    );
-    taskSettings.getSettings.and.returnValue({});
-
     await TestBed.configureTestingModule({
-      declarations: [TaskItemComponent],
-      imports: [NzDropDownModule],
+      declarations: [TaskItemComponent, DataurlStubPipe],
+      imports: [CommonModule, NzDropDownModule],
       providers: [
-        { provide: BreakpointObserver, useValue: breakpointObserver },
         {
           provide: NzMessageService,
           useValue: jasmine.createSpyObj<NzMessageService>(
@@ -103,7 +104,6 @@ describe('TaskItemComponent', () => {
             ['updateTaskInfo']
           ),
         },
-        { provide: TaskSettingsService, useValue: taskSettings },
       ],
       schemas: [NO_ERRORS_SCHEMA],
     })
@@ -120,6 +120,16 @@ describe('TaskItemComponent', () => {
   it('should create', () => {
     expect(component).toBeTruthy();
     expect(component.stopped).toBeTrue();
+    expect(fixture.nativeElement.querySelector('nz-card')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('测试主播');
+  });
+
+  it('emits row selection changes', () => {
+    const selectionChange = spyOn(component.selectedChange, 'emit');
+
+    component.setSelected(true);
+
+    expect(selectionChange).toHaveBeenCalledOnceWith(true);
   });
 
   it('creates the upload settings dialog only after its card action is used', () => {

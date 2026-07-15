@@ -13,6 +13,7 @@ import {
   RecordingArtifactState,
   RecordingPart,
   RecordingSession,
+  RecordingSessionFilters,
   RecordingSessionState,
   RecordingSessionsView,
   TranscodeState,
@@ -51,6 +52,32 @@ export class RecordingSessionsComponent implements OnInit {
   uploadActionJobIds: readonly number[] = [];
   uploadActionSubmitting = false;
   uploadActionError: string | null = null;
+  keyword = '';
+  recordingState: RecordingSessionState | null = null;
+  uploadState: UploadJobState | 'none' | null = null;
+  sortOrder: 'newest' | 'oldest' = 'newest';
+  dateRange: Date[] | null = null;
+  retryAllLoading = false;
+
+  readonly recordingStateOptions = [
+    { label: '录制中', value: 'open' },
+    { label: '已归集', value: 'closed' },
+    { label: '已中断', value: 'cancelled' },
+    { label: '自动恢复中', value: 'manual_review' },
+    { label: '已跳过', value: 'skipped' },
+  ];
+  readonly uploadStateOptions = [
+    { label: '未创建任务', value: 'none' },
+    { label: '等待制品', value: 'waiting_artifacts' },
+    { label: '待上传', value: 'ready' },
+    { label: '上传中', value: 'uploading' },
+    { label: '投稿中', value: 'submitting' },
+    { label: '等待审核', value: 'waiting_review' },
+    { label: '审核通过', value: 'approved' },
+    { label: '审核未通过', value: 'rejected' },
+    { label: '已暂停', value: 'paused' },
+    { label: '后续处理完成', value: 'completed' },
+  ];
 
   constructor(
     private recordingSessions: RecordingSessionService,
@@ -124,33 +151,89 @@ export class RecordingSessionsComponent implements OnInit {
   load(): void {
     this.view = { state: 'loading' };
     const offset = (this.pageIndex - 1) * this.pageSize;
-    this.recordingSessions.listSessions(this.pageSize, offset).subscribe({
-      next: (response) => {
-        this.view = { state: 'ready', response };
-        const currentJobIds = new Set(
-          response.sessions
-            .map((session) => session.uploadJob?.id)
-            .filter((jobId): jobId is number => jobId !== undefined)
-        );
-        for (const jobId of this.selectedJobIds) {
-          if (!currentJobIds.has(jobId)) {
-            this.selectedJobIds.delete(jobId);
+    this.recordingSessions
+      .listSessions(this.pageSize, offset, this.filters())
+      .subscribe({
+        next: (response) => {
+          this.view = { state: 'ready', response };
+          const currentJobIds = new Set(
+            response.sessions
+              .map((session) => session.uploadJob?.id)
+              .filter((jobId): jobId is number => jobId !== undefined)
+          );
+          for (const jobId of this.selectedJobIds) {
+            if (!currentJobIds.has(jobId)) {
+              this.selectedJobIds.delete(jobId);
+            }
           }
-        }
-        if (this.detailVisible && this.selectedSession) {
-          this.selectedSession =
-            response.sessions.find(
-              (session) => session.id === this.selectedSession?.id
-            ) ?? null;
-          this.detailVisible = this.selectedSession !== null;
-        }
-        this.changeDetector.markForCheck();
-      },
-      error: (error: unknown) => {
-        this.view = { state: 'error', message: this.describeError(error) };
-        this.changeDetector.markForCheck();
-      },
-    });
+          if (this.detailVisible && this.selectedSession) {
+            this.selectedSession =
+              response.sessions.find(
+                (session) => session.id === this.selectedSession?.id
+              ) ?? null;
+            this.detailVisible = this.selectedSession !== null;
+          }
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.view = { state: 'error', message: this.describeError(error) };
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  applyFilters(): void {
+    this.pageIndex = 1;
+    this.selectedJobIds.clear();
+    this.load();
+  }
+
+  clearFilters(): void {
+    this.keyword = '';
+    this.recordingState = null;
+    this.uploadState = null;
+    this.sortOrder = 'newest';
+    this.dateRange = null;
+    this.applyFilters();
+  }
+
+  dateRangeChanged(value: Date[] | null): void {
+    this.dateRange = value;
+    this.applyFilters();
+  }
+
+  retryAllFailedJobs(): void {
+    if (this.retryAllLoading) {
+      return;
+    }
+    this.retryAllLoading = true;
+    this.recordingSessions
+      .retryFailedJobs()
+      .pipe(
+        finalize(() => {
+          this.retryAllLoading = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe({
+        next: (response) => {
+          const accepted = response.results.filter((result) => result.accepted);
+          const rejected = response.results.filter((result) => !result.accepted);
+          if (response.results.length === 0) {
+            this.message.success('没有可安全重试的失败录像');
+          } else if (rejected.length > 0) {
+            this.message.warning(
+              `已重新排队 ${accepted.length} 个任务，跳过 ${rejected.length} 个：${rejected[0].message}`
+            );
+          } else {
+            this.message.success(`已重新排队 ${accepted.length} 个失败任务`);
+          }
+          this.load();
+        },
+        error: (error: unknown) => {
+          this.message.error(`重试失败录像出错：${this.describeError(error)}`);
+        },
+      });
   }
 
   pageIndexChanged(pageIndex: number): void {
@@ -358,10 +441,10 @@ export class RecordingSessionsComponent implements OnInit {
       uploading: '上传中',
       submitting: '投稿中',
       waiting_review: '等待审核',
-      approved: '投稿完成',
+      approved: '审核通过',
       rejected: '审核未通过',
       paused: '已暂停',
-      completed: '投稿完成',
+      completed: '后续处理完成',
     }[state];
   }
 
@@ -430,6 +513,27 @@ export class RecordingSessionsComponent implements OnInit {
       return 'warning';
     }
     return this.uploadJobStateColor(job.state);
+  }
+
+  private filters(): RecordingSessionFilters {
+    let startedFrom: number | null = null;
+    let startedTo: number | null = null;
+    if (this.dateRange?.length === 2) {
+      const from = new Date(this.dateRange[0]);
+      from.setHours(0, 0, 0, 0);
+      const to = new Date(this.dateRange[1]);
+      to.setHours(23, 59, 59, 999);
+      startedFrom = Math.floor(from.getTime() / 1000);
+      startedTo = Math.floor(to.getTime() / 1000);
+    }
+    return {
+      query: this.keyword,
+      recordingState: this.recordingState,
+      uploadState: this.uploadState,
+      startedFrom,
+      startedTo,
+      sort: this.sortOrder,
+    };
   }
 
   commentBranchLabel(state: CommentBranchState): string {

@@ -31,6 +31,7 @@ import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzStatisticModule } from 'ng-zorro-antd/statistic';
 import { NzDescriptionsModule } from 'ng-zorro-antd/descriptions';
+import { NzDatePickerModule } from 'ng-zorro-antd/date-picker';
 import { NgxEchartsModule } from 'ngx-echarts';
 
 import { SharedModule } from '../shared/shared.module';
@@ -110,6 +111,7 @@ import { UploadPolicyDialogComponent } from './upload-policy-dialog/upload-polic
     NzTableModule,
     NzStatisticModule,
     NzDescriptionsModule,
+    NzDatePickerModule,
     NgxEchartsModule.forRoot({
       echarts: () => import('echarts'),
     }),

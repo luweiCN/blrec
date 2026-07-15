@@ -1,12 +1,102 @@
-<div class="empty-container" *ngIf="dataList.length === 0; else elseBlock">
+<div class="empty-container" *ngIf="dataList.length === 0; else taskList">
   <nz-empty></nz-empty>
 </div>
 
-<ng-template #elseBlock>
-  <div class="tasks-container" #tasks>
+<ng-template #taskList>
+  <div
+    *ngIf="selectedCount > 0"
+    class="batch-action-bar"
+    data-testid="recording-task-batch-actions"
+  >
+    <strong>已选择 {{ selectedCount }} 个房间</strong>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      [disabled]="eligibleCount('start') === 0"
+      (click)="runBatchAction('start')"
+    >
+      运行
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      [disabled]="eligibleCount('stop') === 0"
+      (click)="runBatchAction('stop')"
+    >
+      停止
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      [disabled]="eligibleCount('recorder_enable') === 0"
+      (click)="runBatchAction('recorder_enable')"
+    >
+      开启录制
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      [disabled]="eligibleCount('recorder_disable') === 0"
+      (click)="runBatchAction('recorder_disable')"
+    >
+      关闭录制
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      [disabled]="eligibleCount('cut') === 0"
+      (click)="runBatchAction('cut')"
+    >
+      切割文件
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="runBatchAction('refresh')"
+    >
+      刷新数据
+    </button>
+    <button
+      nz-button
+      nzDanger
+      nzSize="small"
+      type="button"
+      [disabled]="eligibleCount('delete') === 0"
+      (click)="runBatchAction('delete')"
+    >
+      删除
+    </button>
+  </div>
+
+  <div class="task-table" role="table" aria-label="录制任务列表">
+    <div class="task-list-header" role="row">
+      <div role="columnheader">
+        <label
+          nz-checkbox
+          aria-label="选择当前列表全部房间"
+          [ngModel]="allSelected"
+          [nzIndeterminate]="someSelected"
+          (ngModelChange)="setAllSelected($event)"
+        ></label>
+      </div>
+      <div role="columnheader">直播间</div>
+      <div role="columnheader">直播状态</div>
+      <div role="columnheader">任务状态</div>
+      <div role="columnheader">录制</div>
+      <div role="columnheader">操作</div>
+    </div>
     <app-task-item
       *ngFor="let data of dataList; trackBy: trackByRoomId"
+      role="row"
       [data]="data"
+      [selected]="isSelected(data.room_info.room_id)"
+      (selectedChange)="setTaskSelected(data.room_info.room_id, $event)"
     ></app-task-item>
   </div>
 </ng-template>

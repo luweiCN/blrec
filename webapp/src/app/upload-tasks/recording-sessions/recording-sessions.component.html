@@ -3,19 +3,82 @@
   nzSubtitle="查看录制、上传、投稿和弹幕回灌进度"
 >
   <nz-page-header-extra>
-    <button
-      nz-button
-      type="button"
-      data-testid="refresh-sessions"
-      [disabled]="view.state === 'loading'"
-      (click)="load()"
-    >
-      刷新
-    </button>
+    <div class="header-actions">
+      <button
+        nz-button
+        type="button"
+        data-testid="retry-all-failed"
+        [nzLoading]="retryAllLoading"
+        nz-tooltip
+        nzTooltipTitle="只重试结果明确且本地文件仍可用的失败录像"
+        (click)="retryAllFailedJobs()"
+      >
+        <i nz-icon nzType="redo"></i>
+        重新上传失败录像
+      </button>
+      <button
+        nz-button
+        type="button"
+        data-testid="refresh-sessions"
+        [disabled]="view.state === 'loading'"
+        (click)="load()"
+      >
+        <i nz-icon nzType="reload"></i>
+        刷新
+      </button>
+    </div>
   </nz-page-header-extra>
 </nz-page-header>
 
 <div class="task-list" aria-live="polite">
+  <div class="filter-bar" aria-label="上传任务筛选">
+    <nz-input-group class="keyword-filter" [nzPrefix]="searchIcon">
+      <input
+        nz-input
+        type="search"
+        maxlength="100"
+        placeholder="搜索标题、主播、房间号、稿件或账号"
+        [(ngModel)]="keyword"
+        (keyup.enter)="applyFilters()"
+      />
+    </nz-input-group>
+    <ng-template #searchIcon><i nz-icon nzType="search"></i></ng-template>
+    <nz-select
+      class="state-filter"
+      nzAllowClear
+      nzPlaceHolder="录制状态"
+      [nzOptions]="recordingStateOptions"
+      [(ngModel)]="recordingState"
+      (ngModelChange)="applyFilters()"
+    ></nz-select>
+    <nz-select
+      class="state-filter upload-state-filter"
+      nzAllowClear
+      nzPlaceHolder="投稿状态"
+      [nzOptions]="uploadStateOptions"
+      [(ngModel)]="uploadState"
+      (ngModelChange)="applyFilters()"
+    ></nz-select>
+    <nz-range-picker
+      class="date-filter"
+      [ngModel]="dateRange"
+      [nzPlaceHolder]="['开始日期', '结束日期']"
+      (ngModelChange)="dateRangeChanged($event)"
+    ></nz-range-picker>
+    <nz-select
+      class="sort-filter"
+      [(ngModel)]="sortOrder"
+      (ngModelChange)="applyFilters()"
+    >
+      <nz-option nzValue="newest" nzLabel="最新优先"></nz-option>
+      <nz-option nzValue="oldest" nzLabel="最早优先"></nz-option>
+    </nz-select>
+    <button nz-button type="button" (click)="applyFilters()">搜索</button>
+    <button nz-button nzType="link" type="button" (click)="clearFilters()">
+      清空
+    </button>
+  </div>
+
   <ng-container *ngIf="errorMessage as message">
     <nz-alert
       nzType="error"
@@ -96,7 +159,15 @@
         <th nzWidth="95px">录制状态</th>
         <th nzWidth="145px">投稿状态</th>
         <th nzWidth="115px">投稿账号</th>
-        <th nzRight nzWidth="130px">操作</th>
+        <th nzRight nzWidth="130px">
+          操作
+          <i
+            nz-icon
+            nzType="question-circle"
+            nz-tooltip
+            nzTooltipTitle="失败任务可安全重试；已投稿稿件可检查并修复 B 站转码异常。不可执行的操作会自动禁用。"
+          ></i>
+        </th>
       </tr>
     </thead>
     <tbody>
@@ -171,8 +242,7 @@
         </td>
         <td>
           <ng-container *ngIf="session.uploadJob as job; else noAccount">
-            <div>{{ job.accountDisplayName }}</div>
-            <div class="secondary-text">UID {{ job.accountUid }}</div>
+            {{ job.accountDisplayName }}
           </ng-container>
           <ng-template #noAccount>—</ng-template>
         </td>
@@ -287,9 +357,7 @@
           <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
           <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
         </div>
-        <div>
-          投稿账号：{{ job.accountDisplayName }}（UID {{ job.accountUid }}）
-        </div>
+        <div>投稿账号：{{ job.accountDisplayName }}</div>
         <div *ngIf="job.aid || job.bvid">
           稿件：
           <span *ngIf="job.aid">AV{{ job.aid }}</span>

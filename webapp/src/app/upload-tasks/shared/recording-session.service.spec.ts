@@ -32,6 +32,31 @@ describe('RecordingSessionService', () => {
     request.flush({ degradedReason: null, total: 0, sessions: [] });
   });
 
+  it('sends upload-task filters as query parameters', () => {
+    service
+      .listSessions(20, 0, {
+        query: '主播 名',
+        recordingState: 'closed',
+        uploadState: 'approved',
+        startedFrom: 100,
+        startedTo: 200,
+        sort: 'oldest',
+      })
+      .subscribe();
+
+    const request = http.expectOne(
+      (candidate) =>
+        candidate.url === '/api/v1/recording-sessions' &&
+        candidate.params.get('q') === '主播 名'
+    );
+    expect(request.request.params.get('recordingState')).toBe('closed');
+    expect(request.request.params.get('uploadState')).toBe('approved');
+    expect(request.request.params.get('startedFrom')).toBe('100');
+    expect(request.request.params.get('startedTo')).toBe('200');
+    expect(request.request.params.get('sort')).toBe('oldest');
+    request.flush({ degradedReason: null, total: 0, sessions: [] });
+  });
+
   it('sends one explicit decision for an unknown danmaku item', () => {
     service
       .decideDanmakuItem(11, {
@@ -62,6 +87,17 @@ describe('RecordingSessionService', () => {
       action: 'repair_transcode',
       jobIds: [9, 10],
     });
+    request.flush({ results: [] });
+  });
+
+  it('retries all server-selected failed upload jobs', () => {
+    service.retryFailedJobs().subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/recording-sessions/upload-jobs/retry-failed'
+    );
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toBeNull();
     request.flush({ results: [] });
   });
 

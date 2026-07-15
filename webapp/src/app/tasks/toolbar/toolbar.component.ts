@@ -5,10 +5,8 @@ import {
   Input,
   Output,
   EventEmitter,
-  ChangeDetectorRef,
   OnDestroy,
 } from '@angular/core';
-import { BreakpointObserver } from '@angular/cdk/layout';
 import { Clipboard } from '@angular/cdk/clipboard';
 
 import { Subject } from 'rxjs';
@@ -22,7 +20,6 @@ import {
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
-import { breakpoints } from '../shared/breakpoints';
 import { DataSelection } from '../shared/task.model';
 import { TaskManagerService } from '../shared/services/task-manager.service';
 
@@ -41,12 +38,10 @@ export class ToolbarComponent implements OnInit, OnDestroy {
 
   @Output() filterChange = new EventEmitter<string>();
 
+  @Input() dateRange: Date[] | null = null;
+  @Output() dateRangeChange = new EventEmitter<Date[] | null>();
+
   destroyed = new Subject<void>();
-  useDrawer = false;
-  useSelector = false;
-  useRadioGroup = true;
-  drawerVisible = false;
-  menuDrawerVisible = false;
 
   private filterTerms = new Subject<string>();
 
@@ -63,27 +58,19 @@ export class ToolbarComponent implements OnInit, OnDestroy {
   ];
 
   constructor(
-    changeDetector: ChangeDetectorRef,
-    breakpointObserver: BreakpointObserver,
     private message: NzMessageService,
     private modal: NzModalService,
     private clipboard: Clipboard,
     private taskManager: TaskManagerService
-  ) {
-    breakpointObserver
-      .observe(breakpoints)
-      .pipe(takeUntil(this.destroyed))
-      .subscribe((state) => {
-        this.useDrawer = state.breakpoints[breakpoints[0]];
-        this.useSelector = state.breakpoints[breakpoints[1]];
-        this.useRadioGroup = state.breakpoints[breakpoints[2]];
-        changeDetector.markForCheck();
-      });
-  }
+  ) {}
 
   ngOnInit(): void {
     this.filterTerms
-      .pipe(debounceTime(300), distinctUntilChanged())
+      .pipe(
+        debounceTime(300),
+        distinctUntilChanged(),
+        takeUntil(this.destroyed)
+      )
       .subscribe((term) => {
         this.filterChange.emit(term);
       });
@@ -96,6 +83,11 @@ export class ToolbarComponent implements OnInit, OnDestroy {
 
   onFilterInput(term: string): void {
     this.filterTerms.next(term);
+  }
+
+  onDateRangeChanged(value: Date[] | null): void {
+    this.dateRange = value;
+    this.dateRangeChange.emit(value);
   }
 
   toggleReverse(): void {

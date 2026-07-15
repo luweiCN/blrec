@@ -926,24 +926,70 @@ class RecordingJournalBridge:
             raise ValueError("unknown recording run '{}'".format(run_id))
         return self._make_session(row, await self.parts_for_session(int(row['id'])))
 
-    async def count_sessions(self) -> int:
-        value = await self._database.scalar('SELECT COUNT(*) FROM recording_sessions')
+    async def count_sessions(
+        self,
+        *,
+        query: str = '',
+        session_state: Optional[str] = None,
+        upload_state: Optional[str] = None,
+        started_from: Optional[int] = None,
+        started_to: Optional[int] = None,
+    ) -> int:
+        where_sql, parameters = self._session_filters(
+            query=query,
+            session_state=session_state,
+            upload_state=upload_state,
+            started_from=started_from,
+            started_to=started_to,
+        )
+        value = await self._database.scalar(
+            'SELECT COUNT(*) FROM recording_sessions session '
+            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
+            'LEFT JOIN bili_accounts account ON account.id=job.account_id ' + where_sql,
+            parameters,
+        )
         return int(value or 0)
 
     async def list_sessions(
-        self, *, limit: int = 50, offset: int = 0
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        query: str = '',
+        session_state: Optional[str] = None,
+        upload_state: Optional[str] = None,
+        started_from: Optional[int] = None,
+        started_to: Optional[int] = None,
+        sort_order: str = 'newest',
     ) -> Tuple[RecordingSession, ...]:
         if limit < 1 or limit > 200:
             raise ValueError('limit must be between 1 and 200')
         if offset < 0:
             raise ValueError('offset must not be negative')
+        if sort_order not in ('newest', 'oldest'):
+            raise ValueError('sort order must be newest or oldest')
+        where_sql, parameters = self._session_filters(
+            query=query,
+            session_state=session_state,
+            upload_state=upload_state,
+            started_from=started_from,
+            started_to=started_to,
+        )
+        direction = 'DESC' if sort_order == 'newest' else 'ASC'
         rows = await self._database.fetchall(
-            'SELECT id,room_id,broadcast_session_key,live_start_time,state,'
-            'started_at,ended_at,title,cover_url,cover_path,anchor_uid,'
-            'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
-            'live_end_time FROM recording_sessions '
-            'ORDER BY started_at DESC,id DESC LIMIT ? OFFSET ?',
-            (limit, offset),
+            'SELECT session.id,session.room_id,session.broadcast_session_key,'
+            'session.live_start_time,session.state,session.started_at,'
+            'session.ended_at,session.title,session.cover_url,session.cover_path,'
+            'session.anchor_uid,session.anchor_name,session.area_id,'
+            'session.area_name,session.parent_area_id,session.parent_area_name,'
+            'session.live_end_time FROM recording_sessions session '
+            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
+            'LEFT JOIN bili_accounts account ON account.id=job.account_id '
+            + where_sql
+            + ' ORDER BY session.started_at {},session.id {} LIMIT ? OFFSET ?'.format(
+                direction, direction
+            ),
+            (*parameters, limit, offset),
         )
         sessions = []
         for row in rows:
@@ -952,6 +998,82 @@ class RecordingJournalBridge:
                 self._make_session(row, await self.parts_for_session(session_id))
             )
         return tuple(sessions)
+
+    @staticmethod
+    def _session_filters(
+        *,
+        query: str,
+        session_state: Optional[str],
+        upload_state: Optional[str],
+        started_from: Optional[int],
+        started_to: Optional[int],
+    ) -> Tuple[str, Tuple[object, ...]]:
+        session_states = frozenset(
+            ('open', 'closed', 'cancelled', 'manual_review', 'skipped')
+        )
+        upload_states = frozenset(
+            (
+                'waiting_artifacts',
+                'ready',
+                'uploading',
+                'submitting',
+                'waiting_review',
+                'approved',
+                'rejected',
+                'paused',
+                'completed',
+                'none',
+            )
+        )
+        if session_state is not None and session_state not in session_states:
+            raise ValueError('invalid recording session state')
+        if upload_state is not None and upload_state not in upload_states:
+            raise ValueError('invalid upload state')
+        if started_from is not None and started_from < 0:
+            raise ValueError('started_from must not be negative')
+        if started_to is not None and started_to < 0:
+            raise ValueError('started_to must not be negative')
+        if (
+            started_from is not None
+            and started_to is not None
+            and started_from > started_to
+        ):
+            raise ValueError('started_from must not be after started_to')
+
+        clauses: List[str] = []
+        parameters: List[object] = []
+        normalized_query = query.strip()
+        if normalized_query:
+            escaped = (
+                normalized_query.replace('\\', '\\\\')
+                .replace('%', '\\%')
+                .replace('_', '\\_')
+            )
+            pattern = '%{}%'.format(escaped)
+            clauses.append(
+                '(session.title LIKE ? ESCAPE \'\\\' '
+                'OR session.anchor_name LIKE ? ESCAPE \'\\\' '
+                'OR CAST(session.room_id AS TEXT) LIKE ? ESCAPE \'\\\' '
+                'OR COALESCE(job.bvid,\'\') LIKE ? ESCAPE \'\\\' '
+                'OR COALESCE(account.display_name,\'\') LIKE ? ESCAPE \'\\\')'
+            )
+            parameters.extend((pattern,) * 5)
+        if session_state is not None:
+            clauses.append('session.state=?')
+            parameters.append(session_state)
+        if upload_state == 'none':
+            clauses.append('job.id IS NULL')
+        elif upload_state is not None:
+            clauses.append('job.state=?')
+            parameters.append(upload_state)
+        if started_from is not None:
+            clauses.append('session.started_at>=?')
+            parameters.append(started_from)
+        if started_to is not None:
+            clauses.append('session.started_at<=?')
+            parameters.append(started_to)
+        where_sql = '' if not clauses else 'WHERE ' + ' AND '.join(clauses)
+        return where_sql, tuple(parameters)
 
     async def upload_jobs_for_sessions(
         self, session_ids: Sequence[int]

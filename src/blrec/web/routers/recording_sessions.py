@@ -436,11 +436,57 @@ router = APIRouter(prefix='/recording-sessions', tags=['recording-sessions'])
 async def list_recording_sessions(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    query: str = Query('', alias='q', max_length=100),
+    session_state: Optional[
+        Literal['open', 'closed', 'cancelled', 'manual_review', 'skipped']
+    ] = Query(None, alias='recordingState'),
+    upload_state: Optional[
+        Literal[
+            'waiting_artifacts',
+            'ready',
+            'uploading',
+            'submitting',
+            'waiting_review',
+            'approved',
+            'rejected',
+            'paused',
+            'completed',
+            'none',
+        ]
+    ] = Query(None, alias='uploadState'),
+    started_from: Optional[int] = Query(None, ge=0, alias='startedFrom'),
+    started_to: Optional[int] = Query(None, ge=0, alias='startedTo'),
+    sort_order: Literal['newest', 'oldest'] = Query('newest', alias='sort'),
     _subject: str = Depends(authenticated_manager_subject),
     recording_journal: RecordingJournalBridge = Depends(get_recording_journal),
 ) -> RecordingSessionsResponse:
-    total = await recording_journal.count_sessions()
-    sessions = await recording_journal.list_sessions(limit=limit, offset=offset)
+    if (
+        started_from is not None
+        and started_to is not None
+        and started_from > started_to
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='开始时间不能晚于结束时间',
+        )
+    normalized_query = query.strip()
+    total = await recording_journal.count_sessions(
+        query=normalized_query,
+        session_state=session_state,
+        upload_state=upload_state,
+        started_from=started_from,
+        started_to=started_to,
+    )
+    sessions = await recording_journal.list_sessions(
+        limit=limit,
+        offset=offset,
+        query=normalized_query,
+        session_state=session_state,
+        upload_state=upload_state,
+        started_from=started_from,
+        started_to=started_to,
+        sort_order=sort_order,
+    )
     upload_jobs = await recording_journal.upload_jobs_for_sessions(
         [session.id for session in sessions]
     )
@@ -469,6 +515,30 @@ async def run_upload_job_actions(
                 message = await actions.request_transcode_repair(
                     job_id, manager_subject=subject
                 )
+        except UploadTaskActionRejected as error:
+            results.append(
+                UploadJobActionResultResponse(
+                    job_id=job_id, accepted=False, message=str(error)
+                )
+            )
+        else:
+            results.append(
+                UploadJobActionResultResponse(
+                    job_id=job_id, accepted=True, message=message
+                )
+            )
+    return UploadJobActionResponse(results=results)
+
+
+@router.post('/upload-jobs/retry-failed', response_model=UploadJobActionResponse)
+async def retry_all_failed_upload_jobs(
+    subject: str = Depends(authenticated_manager_subject),
+    actions: UploadTaskActionManager = Depends(get_task_actions),
+) -> UploadJobActionResponse:
+    results = []
+    for job_id in await actions.retryable_failed_job_ids():
+        try:
+            message = await actions.retry_failed(job_id, manager_subject=subject)
         except UploadTaskActionRejected as error:
             results.append(
                 UploadJobActionResultResponse(

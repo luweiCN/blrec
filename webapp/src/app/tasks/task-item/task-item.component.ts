@@ -1,23 +1,21 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import {
-  Component,
-  OnChanges,
-  OnDestroy,
-  Input,
-  HostBinding,
-  SimpleChanges,
   ChangeDetectionStrategy,
   ChangeDetectorRef,
+  Component,
+  EventEmitter,
+  HostBinding,
+  Input,
+  OnChanges,
+  Output,
+  SimpleChanges,
 } from '@angular/core';
-import { HttpErrorResponse } from '@angular/common/http';
-import { BreakpointObserver } from '@angular/cdk/layout';
 
-import { Subject, zip } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
+import { zip } from 'rxjs';
 
 import { retry } from '../../shared/rx-operators';
-import { breakpoints } from '../shared/breakpoints';
 import { SettingService } from '../../settings/shared/services/setting.service';
 import { RunningStatus, TaskData } from '../shared/task.model';
 import { TaskManagerService } from '../shared/services/task-manager.service';
@@ -26,7 +24,6 @@ import {
   GlobalTaskSettings,
   TaskOptionsIn,
 } from '../../settings/shared/setting.model';
-import { TaskSettingsService } from '../shared/services/task-settings.service';
 
 @Component({
   selector: 'app-task-item',
@@ -34,16 +31,15 @@ import { TaskSettingsService } from '../shared/services/task-settings.service';
   styleUrls: ['./task-item.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TaskItemComponent implements OnChanges, OnDestroy {
+export class TaskItemComponent implements OnChanges {
   @Input() data!: TaskData;
+  @Input() selected = false;
+  @Output() selectedChange = new EventEmitter<boolean>();
   @HostBinding('class.stopped') stopped = false;
 
   taskOptions?: TaskOptions;
   globalSettings?: GlobalTaskSettings;
 
-  destroyed = new Subject<void>();
-  useDrawer = false;
-  menuDrawerVisible = false;
   switchPending = false;
   settingsDialogVisible = false;
   uploadPolicyDialogVisible = false;
@@ -51,22 +47,12 @@ export class TaskItemComponent implements OnChanges, OnDestroy {
   readonly RunningStatus = RunningStatus;
 
   constructor(
-    breakpointObserver: BreakpointObserver,
     private changeDetector: ChangeDetectorRef,
     private message: NzMessageService,
     private modal: NzModalService,
     private settingService: SettingService,
-    private taskManager: TaskManagerService,
-    private appTaskSettings: TaskSettingsService
-  ) {
-    breakpointObserver
-      .observe(breakpoints[0])
-      .pipe(takeUntil(this.destroyed))
-      .subscribe((state) => {
-        this.useDrawer = state.matches;
-        changeDetector.markForCheck();
-      });
-  }
+    private taskManager: TaskManagerService
+  ) {}
 
   get roomId() {
     return this.data.room_info.room_id;
@@ -76,23 +62,42 @@ export class TaskItemComponent implements OnChanges, OnDestroy {
     return !this.data.task_status.monitor_enabled;
   }
 
-  get showInfoPanel() {
-    return Boolean(this.appTaskSettings.getSettings(this.roomId).showInfoPanel);
+  setSelected(selected: boolean): void {
+    this.selectedChange.emit(selected);
   }
 
-  set showInfoPanel(value: boolean) {
-    this.appTaskSettings.updateSettings(this.roomId, { showInfoPanel: value });
+  liveStatusLabel(status: number): string {
+    return { 0: '未开播', 1: '直播中', 2: '轮播中' }[status] ?? '未知';
+  }
+
+  liveStatusColor(status: number): string {
+    return { 0: 'default', 1: 'red', 2: 'green' }[status] ?? 'default';
+  }
+
+  runningStatusLabel(status: RunningStatus): string {
+    return {
+      [RunningStatus.STOPPED]: '已停止',
+      [RunningStatus.WAITING]: '监控中',
+      [RunningStatus.RECORDING]: '录制中',
+      [RunningStatus.REMUXING]: '转封装中',
+      [RunningStatus.INJECTING]: '写入元数据',
+    }[status];
+  }
+
+  runningStatusColor(status: RunningStatus): string {
+    return {
+      [RunningStatus.STOPPED]: 'default',
+      [RunningStatus.WAITING]: 'blue',
+      [RunningStatus.RECORDING]: 'red',
+      [RunningStatus.REMUXING]: 'processing',
+      [RunningStatus.INJECTING]: 'processing',
+    }[status];
   }
 
   ngOnChanges(changes: SimpleChanges): void {
     console.debug('[ngOnChanges]', this.roomId, changes);
     this.stopped =
       this.data.task_status.running_status === RunningStatus.STOPPED;
-  }
-
-  ngOnDestroy() {
-    this.destroyed.next();
-    this.destroyed.complete();
   }
 
   updateTaskInfo(): void {
@@ -121,7 +126,15 @@ export class TaskItemComponent implements OnChanges, OnDestroy {
   }
 
   removeTask(): void {
-    this.taskManager.removeTask(this.roomId).subscribe();
+    this.modal.confirm({
+      nzTitle: `确定删除房间 ${this.roomId} 的录制任务？`,
+      nzContent: '任务配置会被删除，已录制文件不会因此删除。',
+      nzOkDanger: true,
+      nzOnOk: () =>
+        new Promise((resolve, reject) => {
+          this.taskManager.removeTask(this.roomId).subscribe(resolve, reject);
+        }),
+    });
   }
 
   startTask(): void {

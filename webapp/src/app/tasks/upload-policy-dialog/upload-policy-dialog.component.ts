@@ -67,6 +67,23 @@ const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
   retentionDays: 5,
 };
 
+const LIVE_CATEGORY_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  教育学习: ['校园学习'],
+  其他单机: ['单机游戏'],
+  主机游戏: ['单机游戏'],
+  单机游戏: ['单机游戏'],
+  网游: ['网络游戏'],
+  手游: ['手机游戏'],
+  无畏契约: ['电子竞技', '网络游戏'],
+  英雄联盟: ['电子竞技', '网络游戏'],
+  王者荣耀: ['电子竞技', '手机游戏'],
+};
+
+interface CategoryRecommendation {
+  readonly path: readonly [number, number];
+  readonly label: string;
+}
+
 type PublishMode = 'immediate' | 'scheduled';
 
 type PolicyValidationErrors = Partial<
@@ -95,6 +112,8 @@ type PolicyValidationErrors = Partial<
 export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   @Input() roomId!: number;
   @Input() roomName = '';
+  @Input() liveAreaName = '';
+  @Input() liveParentAreaName = '';
   @Output() closed = new EventEmitter<void>();
 
   visible = true;
@@ -256,6 +275,29 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return '';
   }
 
+  get categoryRecommendation(): CategoryRecommendation | null {
+    const candidates = [
+      this.liveAreaName,
+      ...(LIVE_CATEGORY_ALIASES[this.liveAreaName] ?? []),
+      ...(LIVE_CATEGORY_ALIASES[this.liveParentAreaName] ?? []),
+      this.liveParentAreaName,
+    ]
+      .map((value) => value.trim())
+      .filter(Boolean);
+    for (const candidate of candidates) {
+      for (const parent of this.categories) {
+        const child = parent.children.find((item) => item.name === candidate);
+        if (child) {
+          return {
+            path: [parent.id, child.id],
+            label: `${parent.name} / ${child.name}`,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
   get allowReplies(): boolean {
     return !this.draft.upCloseReply;
   }
@@ -308,6 +350,16 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.categoryPath = path ?? [];
     this.draft.tid =
       this.categoryPath.length === 2 ? this.categoryPath[1] : null;
+  }
+
+  applyCategoryRecommendation(): void {
+    const recommendation = this.categoryRecommendation;
+    if (!recommendation) {
+      return;
+    }
+    this.categoryPath = [...recommendation.path];
+    this.draft.tid = recommendation.path[1];
+    this.changeDetector.markForCheck();
   }
 
   creationStatementChanged(statementId: number): void {

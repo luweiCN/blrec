@@ -6,6 +6,42 @@
   padding: 0 24px 24px;
 }
 
+.header-actions,
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-bar {
+  flex-wrap: wrap;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+
+.keyword-filter {
+  width: min(320px, 100%);
+}
+
+.state-filter {
+  width: 132px;
+}
+
+.upload-state-filter {
+  width: 150px;
+}
+
+.date-filter {
+  width: 250px;
+}
+
+.sort-filter {
+  width: 112px;
+}
+
 .retry-button,
 .degraded-warning {
   margin: 12px 0;
@@ -308,6 +344,15 @@
     align-items: flex-end;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .header-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .filter-bar > * {
+    width: 100%;
   }
 }
 

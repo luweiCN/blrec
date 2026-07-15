@@ -28,14 +28,20 @@ from blrec.web.routers import recording_sessions
 class FakeJournal:
     degraded_reason = None
 
-    async def count_sessions(self) -> int:
+    def __init__(self) -> None:
+        self.list_filters = {}
+        self.count_filters = {}
+
+    async def count_sessions(self, **filters: object) -> int:
+        self.count_filters = filters
         return 41
 
     async def list_sessions(
-        self, *, limit: int = 50, offset: int = 0
+        self, *, limit: int = 50, offset: int = 0, **filters: object
     ) -> Tuple[RecordingSession, ...]:
         assert limit == 20
         assert offset == 40
+        self.list_filters = filters
         part = RecordingPart(
             id=2,
             session_id=1,
@@ -322,6 +328,61 @@ def test_list_recording_sessions_returns_redacted_part_state(
     }
     assert 'cookie' not in response.text.lower()
     assert 'token' not in response.text.lower()
+
+
+def test_list_recording_sessions_passes_server_side_filters(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions',
+        params={
+            'limit': 20,
+            'offset': 40,
+            'q': '主播',
+            'recordingState': 'closed',
+            'uploadState': 'approved',
+            'startedFrom': 100,
+            'startedTo': 200,
+            'sort': 'oldest',
+        },
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    fake = recording_sessions.journal
+    assert isinstance(fake, FakeJournal)
+    expected = {
+        'query': '主播',
+        'session_state': 'closed',
+        'upload_state': 'approved',
+        'started_from': 100,
+        'started_to': 200,
+    }
+    assert fake.count_filters == expected
+    assert fake.list_filters == {**expected, 'sort_order': 'oldest'}
+
+
+def test_retry_all_failed_upload_jobs_uses_server_selected_jobs(
+    client: TestClient,
+) -> None:
+    actions = recording_sessions.task_actions
+    assert actions is not None
+    actions.retryable_failed_job_ids.return_value = (9, 10)
+    actions.retry_failed.side_effect = (
+        '失败任务已重新排队',
+        UploadTaskActionRejected('失败分 P 的本地视频不可用'),
+    )
+
+    response = client.post(
+        '/api/v1/recording-sessions/upload-jobs/retry-failed',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'results': [
+            {'jobId': 9, 'accepted': True, 'message': '失败任务已重新排队'},
+            {'jobId': 10, 'accepted': False, 'message': '失败分 P 的本地视频不可用'},
+        ]
+    }
 
 
 def test_unavailable_journal_returns_503(client: TestClient) -> None:

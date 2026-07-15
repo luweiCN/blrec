@@ -159,4 +159,15 @@ export class DiskSpaceSettingsComponent implements OnInit, OnChanges {
     }
     return `${(value / 1024 ** 3).toFixed(2)} GB`;
   }
+
+  get capacityPercent(): number {
+    const status = this.retentionStatus;
+    if (!status || status.capacityBytes <= 0) {
+      return 0;
+    }
+    return Math.min(
+      100,
+      Math.max(0, (status.managedVideoBytes / status.capacityBytes) * 100)
+    );
+  }
 }

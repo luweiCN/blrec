@@ -8,6 +8,8 @@ import { UrlService } from 'src/app/core/services/url.service';
 import { ResponseMessage } from '../../../shared/api.models';
 import {
   TaskData,
+  TaskBatchAction,
+  TaskBatchActionResponse,
   DataSelection,
   TaskParam,
   Metadata,
@@ -28,6 +30,14 @@ export class TaskService {
   ): Observable<TaskData[]> {
     const url = this.url.makeApiUrl('/api/v1/tasks/data');
     return this.http.get<TaskData[]>(url, { params: { select } });
+  }
+
+  runBatchAction(
+    action: TaskBatchAction,
+    roomIds: readonly number[]
+  ): Observable<TaskBatchActionResponse> {
+    const url = this.url.makeApiUrl('/api/v1/tasks/actions');
+    return this.http.post<TaskBatchActionResponse>(url, { action, roomIds });
   }
 
   getTaskData(roomId: number): Observable<TaskData> {

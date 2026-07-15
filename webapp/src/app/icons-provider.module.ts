@@ -7,6 +7,11 @@ import {
   DashboardOutline,
   MenuFoldOutline,
   MenuUnfoldOutline,
+  QuestionCircleOutline,
+  RedoOutline,
+  ReloadOutline,
+  SearchOutline,
+  SwapOutline,
   UserOutline,
 } from '@ant-design/icons-angular/icons';
 
@@ -16,6 +21,11 @@ const icons = [
   DashboardOutline,
   CloudUploadOutline,
   CopyOutline,
+  QuestionCircleOutline,
+  RedoOutline,
+  ReloadOutline,
+  SearchOutline,
+  SwapOutline,
   UserOutline,
 ];
 

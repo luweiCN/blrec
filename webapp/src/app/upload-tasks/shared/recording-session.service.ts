@@ -1,4 +1,4 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import { Observable } from 'rxjs';
@@ -8,6 +8,7 @@ import {
   DanmakuDecisionRequest,
   RecordingDanmakuPage,
   RecordingMediaAccess,
+  RecordingSessionFilters,
   RecordingSessionsResponse,
   UploadJobAction,
   UploadJobActionResponse,
@@ -17,9 +18,37 @@ import {
 export class RecordingSessionService {
   constructor(private http: HttpClient, private url: UrlService) {}
 
-  listSessions(limit = 20, offset = 0): Observable<RecordingSessionsResponse> {
-    const path = `/api/v1/recording-sessions?limit=${limit}&offset=${offset}`;
-    return this.http.get<RecordingSessionsResponse>(this.url.makeApiUrl(path));
+  listSessions(
+    limit = 20,
+    offset = 0,
+    filters?: RecordingSessionFilters
+  ): Observable<RecordingSessionsResponse> {
+    const path = '/api/v1/recording-sessions';
+    let params = new HttpParams()
+      .set('limit', limit)
+      .set('offset', offset);
+    if (filters) {
+      if (filters.query.trim()) {
+        params = params.set('q', filters.query.trim());
+      }
+      if (filters.recordingState) {
+        params = params.set('recordingState', filters.recordingState);
+      }
+      if (filters.uploadState) {
+        params = params.set('uploadState', filters.uploadState);
+      }
+      if (filters.startedFrom !== null) {
+        params = params.set('startedFrom', filters.startedFrom);
+      }
+      if (filters.startedTo !== null) {
+        params = params.set('startedTo', filters.startedTo);
+      }
+      params = params.set('sort', filters.sort);
+    }
+    return this.http.get<RecordingSessionsResponse>(
+      this.url.makeApiUrl(path),
+      { params }
+    );
   }
 
   decideDanmakuItem(
@@ -38,6 +67,14 @@ export class RecordingSessionService {
     return this.http.post<UploadJobActionResponse>(
       this.url.makeApiUrl(path),
       { action, jobIds }
+    );
+  }
+
+  retryFailedJobs(): Observable<UploadJobActionResponse> {
+    const path = '/api/v1/recording-sessions/upload-jobs/retry-failed';
+    return this.http.post<UploadJobActionResponse>(
+      this.url.makeApiUrl(path),
+      null
     );
   }
 

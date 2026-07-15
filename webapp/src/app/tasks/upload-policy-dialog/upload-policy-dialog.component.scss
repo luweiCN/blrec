@@ -63,6 +63,23 @@ textarea[nz-input] {
   }
 }
 
+.live-category-recommendation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  padding: 0.625rem 0.75rem;
+  margin-top: 0.75rem;
+  color: rgba(0, 0, 0, 0.65);
+  background: #fafafa;
+  border-radius: 0.25rem;
+
+  button {
+    height: auto;
+    padding: 0;
+  }
+}
+
 .asset-control {
   display: flex;
   align-items: flex-start;

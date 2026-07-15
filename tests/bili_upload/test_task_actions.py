@@ -267,6 +267,40 @@ async def test_retry_failed_resets_only_safe_failed_parts(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_retryable_failed_job_ids_excludes_unknown_remote_outcomes(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='prepared',
+            second_upload_state='failed',
+        )
+        await database.execute(
+            "INSERT INTO recording_sessions("
+            "id,room_id,broadcast_session_key,state,started_at) "
+            "VALUES(2,200,'200:1','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'created_at,updated_at) '
+            "VALUES(10,2,1,'{}','paused','unknown_outcome',1,1)"
+        )
+        manager, _, _ = make_manager(database, FakeProtocol(archive_response()))
+
+        job_ids = await manager.retryable_failed_job_ids()
+
+        assert job_ids == (9,)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ('submit_state', 'part_state'),
     (('unknown_outcome', 'unknown_outcome'), ('prepared', 'completing')),

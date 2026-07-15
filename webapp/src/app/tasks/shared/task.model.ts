@@ -12,6 +12,25 @@ export interface TaskData {
   task_status: Readonly<TaskStatus>;
 }
 
+export type TaskBatchAction =
+  | 'start'
+  | 'stop'
+  | 'recorder_enable'
+  | 'recorder_disable'
+  | 'refresh'
+  | 'cut'
+  | 'delete';
+
+export interface TaskBatchActionResult {
+  readonly roomId: number;
+  readonly accepted: boolean;
+  readonly message: string;
+}
+
+export interface TaskBatchActionResponse {
+  readonly results: readonly TaskBatchActionResult[];
+}
+
 export enum DataSelection {
   ALL = 'all',
 

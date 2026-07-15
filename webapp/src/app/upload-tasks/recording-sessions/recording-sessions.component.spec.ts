@@ -5,10 +5,17 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule } from '@angular/forms';
 
 import { of, throwError } from 'rxjs';
-import { CopyOutline } from '@ant-design/icons-angular/icons';
+import {
+  CopyOutline,
+  QuestionCircleOutline,
+  RedoOutline,
+  ReloadOutline,
+  SearchOutline,
+} from '@ant-design/icons-angular/icons';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
+import { NzDatePickerModule } from 'ng-zorro-antd/date-picker';
 import { NzDrawerModule } from 'ng-zorro-antd/drawer';
 import { NzDropDownModule } from 'ng-zorro-antd/dropdown';
 import { NzInputModule } from 'ng-zorro-antd/input';
@@ -18,6 +25,7 @@ import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
+import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
@@ -34,7 +42,12 @@ describe('RecordingSessionsComponent', () => {
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['listSessions', 'decideDanmakuItem', 'runJobAction']
+      [
+        'listSessions',
+        'decideDanmakuItem',
+        'runJobAction',
+        'retryFailedJobs',
+      ]
     );
     clipboard = jasmine.createSpyObj<Clipboard>('Clipboard', ['copy']);
     message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
@@ -44,6 +57,7 @@ describe('RecordingSessionsComponent', () => {
     ]);
     service.decideDanmakuItem.and.returnValue(of(void 0));
     service.runJobAction.and.returnValue(of({ results: [] }));
+    service.retryFailedJobs.and.returnValue(of({ results: [] }));
     service.listSessions.and.returnValue(
       of({
         degradedReason: null,
@@ -154,6 +168,7 @@ describe('RecordingSessionsComponent', () => {
         NzAlertModule,
         NzButtonModule,
         NzCheckboxModule,
+        NzDatePickerModule,
         NzDrawerModule,
         NzDropDownModule,
         NzInputModule,
@@ -162,6 +177,7 @@ describe('RecordingSessionsComponent', () => {
         NzModalModule,
         NzPageHeaderModule,
         NzPaginationModule,
+        NzSelectModule,
         NzTableModule,
         NzTagModule,
         NzToolTipModule,
@@ -170,7 +186,16 @@ describe('RecordingSessionsComponent', () => {
         { provide: RecordingSessionService, useValue: service },
         { provide: Clipboard, useValue: clipboard },
         { provide: NzMessageService, useValue: message },
-        { provide: NZ_ICONS, useValue: [CopyOutline] },
+        {
+          provide: NZ_ICONS,
+          useValue: [
+            CopyOutline,
+            QuestionCircleOutline,
+            RedoOutline,
+            ReloadOutline,
+            SearchOutline,
+          ],
+        },
       ],
     }).compileComponents();
 
@@ -181,7 +206,14 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     const text = fixture.nativeElement.textContent;
-    expect(service.listSessions).toHaveBeenCalledOnceWith(20, 0);
+    expect(service.listSessions).toHaveBeenCalledOnceWith(20, 0, {
+      query: '',
+      recordingState: null,
+      uploadState: null,
+      startedFrom: null,
+      startedTo: null,
+      sort: 'newest',
+    });
     expect(text).toContain('上传任务');
     expect(text).not.toContain('上传任务列表');
     expect(text).toContain('直播与房间');
@@ -195,6 +227,7 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('1 MB');
     expect(text).toContain('等待审核');
     expect(text).toContain('投稿账号');
+    expect(text).not.toContain('UID 42');
     expect(text).not.toContain('/rec/p1.mp4');
     expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
   });
@@ -227,7 +260,7 @@ describe('RecordingSessionsComponent', () => {
     const archiveLink = fixture.nativeElement.querySelector(
       '[data-testid="archive-link"]'
     ) as HTMLAnchorElement | null;
-    expect(fixture.nativeElement.textContent).toContain('投稿完成');
+    expect(fixture.nativeElement.textContent).toContain('审核通过');
     expect(fixture.nativeElement.textContent).not.toContain('投稿：已确认');
     expect(archiveLink?.textContent).toContain('今晚挑战通关');
     expect(archiveLink?.href).toBe(
@@ -239,11 +272,60 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     fixture.componentInstance.pageIndexChanged(2);
-    expect(service.listSessions).toHaveBeenCalledWith(20, 20);
+    expect(service.listSessions).toHaveBeenCalledWith(
+      20,
+      20,
+      jasmine.any(Object)
+    );
 
     fixture.componentInstance.pageSizeChanged(50);
     expect(fixture.componentInstance.pageIndex).toBe(1);
-    expect(service.listSessions).toHaveBeenCalledWith(50, 0);
+    expect(service.listSessions).toHaveBeenCalledWith(
+      50,
+      0,
+      jasmine.any(Object)
+    );
+  });
+
+  it('reloads from page one with server-side filters', () => {
+    fixture.detectChanges();
+    service.listSessions.calls.reset();
+    fixture.componentInstance.pageIndex = 3;
+    fixture.componentInstance.keyword = '主播';
+    fixture.componentInstance.recordingState = 'closed';
+    fixture.componentInstance.uploadState = 'approved';
+    fixture.componentInstance.sortOrder = 'oldest';
+
+    fixture.componentInstance.applyFilters();
+
+    expect(fixture.componentInstance.pageIndex).toBe(1);
+    expect(service.listSessions).toHaveBeenCalledOnceWith(20, 0, {
+      query: '主播',
+      recordingState: 'closed',
+      uploadState: 'approved',
+      startedFrom: null,
+      startedTo: null,
+      sort: 'oldest',
+    });
+  });
+
+  it('retries every safe failed job without a manual selection', () => {
+    service.retryFailedJobs.and.returnValue(
+      of({
+        results: [
+          { jobId: 9, accepted: true, message: '失败任务已重新排队' },
+          { jobId: 10, accepted: false, message: '本地视频不可用' },
+        ],
+      })
+    );
+    fixture.detectChanges();
+
+    fixture.componentInstance.retryAllFailedJobs();
+
+    expect(service.retryFailedJobs).toHaveBeenCalledTimes(1);
+    expect(message.warning).toHaveBeenCalledWith(
+      '已重新排队 1 个任务，跳过 1 个：本地视频不可用'
+    );
   });
 
   it('selects current-page jobs and exposes batch actions', () => {

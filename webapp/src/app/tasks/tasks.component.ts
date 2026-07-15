@@ -31,6 +31,7 @@ export class TasksComponent implements OnInit, OnDestroy {
   selection: DataSelection;
   reverse: boolean;
   filterTerm = '';
+  dateRange: Date[] | null = null;
 
   private dataSubscription?: Subscription;
 

@@ -1,29 +1,47 @@
-@use "../../shared/styles/layout";
-
-$card-width: 400px;
-$grid-gutter: 12px;
+@use '../../shared/styles/layout';
 
 :host {
-  --card-width: #{$card-width};
-  --grid-gutter: #{$grid-gutter};
-
   @extend %inner-content;
-  padding: var(--grid-gutter);
-
-  @media screen and (max-width: $card-width) {
-    --card-width: 100%;
-    padding: var(--grid-gutter) 0;
-  }
+  display: block;
+  padding: 12px;
+  overflow: auto;
 }
 
-.tasks-container {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, var(--card-width));
-  gap: var(--grid-gutter);
-  justify-content: center;
+.task-table {
+  min-width: 920px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+}
 
-  max-width: min(100%);
-  margin: 0 auto;
+.task-list-header {
+  display: grid;
+  grid-template-columns: 44px minmax(320px, 1fr) 120px 150px 88px 230px;
+  align-items: center;
+  min-height: 46px;
+  padding: 0 16px;
+  color: #595959;
+  font-weight: 500;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.batch-action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #e6f7ff;
+  border: 1px solid #91d5ff;
+  border-radius: 6px;
+
+  strong {
+    margin-right: 4px;
+    color: #096dd9;
+  }
 }
 
 .empty-container {

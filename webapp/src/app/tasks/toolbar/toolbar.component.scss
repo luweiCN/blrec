@@ -1,94 +1,45 @@
-@use "../shared/styles/drawer";
-
 .controls-wrapper {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.2em;
-
+  gap: 8px;
   width: 100%;
-  padding: 0.2em;
-  background: #f9f9f9;
-  border-left: none;
-  border-right: none;
-
-  nz-divider {
-    height: 1.8em;
-    top: 0;
-  }
-
-  &:not(.use-drawer) {
-    .filter {
-      max-width: 18em;
-    }
-  }
-
-  &.use-drawer {
-    .filter {
-      max-width: unset;
-      width: unset;
-      flex: auto;
-    }
-  }
-
-  .selector {
-    min-width: 6em;
-  }
+  padding: 12px;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
 }
 
-.reverse-button {
-  padding: 0 0.5em;
+.filter {
+  width: min(340px, 100%);
+}
 
-  i {
-    margin: 0;
-  }
+.filter-clear {
+  color: #bfbfbf;
+  cursor: pointer;
+}
+
+.selector {
+  width: 132px;
+}
+
+.date-filter {
+  width: 280px;
+}
+
+.reverse-button i {
+  margin-right: 0;
 }
 
 .more-actions-button {
   margin-left: auto;
-  border: none;
-  background: inherit;
-
-  i {
-    font-size: 20px;
-  }
 }
 
-.menu {
-  nz-divider {
-    margin: 0;
-  }
-}
-
-.drawer-header {
-  display: flex;
-}
-
-%button-group {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 2vw;
-}
-
-.drawer-content {
-  nz-divider:first-of-type {
-    margin-top: 0;
+@media (max-width: 700px) {
+  .controls-wrapper > * {
+    width: 100%;
   }
 
-  .radio-group {
-    @extend %button-group;
-
-    label {
-      text-align: center;
-      padding: 0;
-    }
-  }
-
-  .reorder-button-wrapper {
-    @extend %button-group;
-  }
-
-  .menu {
-    @extend %drawer-menu;
+  .more-actions-button {
+    margin-left: 0;
   }
 }

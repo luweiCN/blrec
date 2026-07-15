@@ -101,6 +101,81 @@ async def test_list_sessions_rejects_negative_offset(database) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_filters_upload_state_time_and_fuzzy_text(database) -> None:
+    now = [1_000]
+    journal = RecordingJournalBridge(database, clock=lambda: now[0])
+    first_run = await journal.recording_started(
+        100,
+        live_start_time=900,
+        metadata=SimpleNamespace(
+            title='深夜游戏直播',
+            cover_url='',
+            anchor_uid=10,
+            anchor_name='甲主播',
+            area_id=1,
+            area_name='单机游戏',
+            parent_area_id=2,
+            parent_area_name='游戏',
+        ),
+    )
+    now[0] = 2_000
+    second_run = await journal.recording_started(
+        200,
+        live_start_time=1_900,
+        metadata=SimpleNamespace(
+            title='白天学习直播',
+            cover_url='',
+            anchor_uid=20,
+            anchor_name='乙主播',
+            area_id=3,
+            area_name='教育学习',
+            parent_area_id=4,
+            parent_area_name='知识',
+        ),
+    )
+    first = await journal.session_for_run(first_run)
+    second = await journal.session_for_run(second_run)
+    await database.execute(
+        'INSERT INTO bili_accounts('
+        'id,uid,display_name,credential_ciphertext,credential_version,key_id,state,'
+        'created_at,updated_at) '
+        "VALUES(1,10,'游戏投稿账号',X'00',1,'k','active',1,1),"
+        "(2,20,'学习投稿账号',X'00',1,'k','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+        (first.id, 1, '{}', 'paused', 'prepared', 1_000, 1_000),
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'session_id,account_id,policy_snapshot_json,state,submit_state,aid,bvid,'
+        'created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        (second.id, 2, '{}', 'approved', 'confirmed', 123, 'BV1approved', 2_000, 2_000),
+    )
+
+    sessions = await journal.list_sessions(
+        query='学习投稿',
+        upload_state='approved',
+        started_from=1_500,
+        started_to=2_500,
+        sort_order='oldest',
+    )
+
+    assert [session.id for session in sessions] == [second.id]
+    assert (
+        await journal.count_sessions(
+            query='学习投稿',
+            upload_state='approved',
+            started_from=1_500,
+            started_to=2_500,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_live_start_time_reuses_open_surrogate_session(database) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
 

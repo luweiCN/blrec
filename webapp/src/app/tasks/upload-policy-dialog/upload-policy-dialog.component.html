@@ -173,6 +173,34 @@
                 刷新分区
               </button>
             </div>
+            <div
+              *ngIf="liveAreaName || liveParentAreaName"
+              class="live-category-recommendation"
+            >
+              <span>
+                直播分区：
+                {{ liveParentAreaName || '未记录' }} /
+                {{ liveAreaName || '未记录' }}
+              </span>
+              <ng-container
+                *ngIf="categoryRecommendation as recommendation; else noRecommendation"
+              >
+                <span>推荐投稿分区：{{ recommendation.label }}</span>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  [disabled]="draft.tid === recommendation.path[1]"
+                  (click)="applyCategoryRecommendation()"
+                >
+                  使用推荐
+                </button>
+              </ng-container>
+              <ng-template #noRecommendation>
+                <span>没有可靠的自动映射，请手动选择投稿分区。</span>
+              </ng-template>
+            </div>
             <span *ngIf="validationErrors.category" class="field-error">
               {{ validationErrors.category }}
             </span>

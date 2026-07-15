@@ -58,6 +58,19 @@ describe('UploadPolicyDialogComponent', () => {
           },
         ],
       },
+      {
+        id: 36,
+        name: '知识',
+        description: '',
+        children: [
+          {
+            id: 208,
+            name: '校园学习',
+            description: '学习内容',
+            children: [],
+          },
+        ],
+      },
     ],
     creationStatements: [
       { id: -1, content: '内容无需标注' },
@@ -275,6 +288,22 @@ describe('UploadPolicyDialogComponent', () => {
 
     expect(component.draft.tid).toBe(17);
     expect(component.categoryPath).toEqual([4, 17]);
+  });
+
+  it('recommends but does not automatically apply a matching live category', () => {
+    create();
+    component.liveParentAreaName = '知识';
+    component.liveAreaName = '教育学习';
+    component.draft.tid = 17;
+    component.categoryPath = [4, 17];
+
+    expect(component.categoryRecommendation?.label).toBe('知识 / 校园学习');
+    expect(component.draft.tid).toBe(17);
+
+    component.applyCategoryRecommendation();
+
+    expect(component.draft.tid).toBe(208);
+    expect(component.categoryPath).toEqual([36, 208]);
   });
 
   it('keeps save available and reports missing fields after it is clicked', () => {

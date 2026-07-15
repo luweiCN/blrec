@@ -1,10 +1,93 @@
 @use '../shared/styles/setting';
 
-.capacity-status {
-  margin-bottom: 1rem;
+.capacity-card {
+  padding: 18px 20px;
+  margin-bottom: 8px;
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
+  border-radius: 8px;
+
+  &.warning {
+    background: #fffbe6;
+    border-color: #ffe58f;
+
+    .capacity-progress span {
+      background: #faad14;
+    }
+  }
 }
 
-.capacity-status-action {
+.capacity-card-header {
   display: flex;
-  justify-content: flex-end;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+
+  > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  strong {
+    color: #262626;
+    font-size: 16px;
+  }
+
+  span {
+    color: #595959;
+  }
+}
+
+.capacity-progress {
+  height: 8px;
+  margin-top: 16px;
+  overflow: hidden;
+  background: rgb(0 0 0 / 8%);
+  border-radius: 999px;
+
+  span {
+    display: block;
+    height: 100%;
+    background: #52c41a;
+    border-radius: inherit;
+    transition: width 180ms ease;
+  }
+}
+
+.capacity-total {
+  margin-top: 6px;
+  color: #8c8c8c;
+  font-size: 12px;
+  text-align: right;
+}
+
+.help-icon {
+  margin-left: 6px;
+  color: #8c8c8c;
+  cursor: help;
+}
+
+.disk-protection {
+  margin-top: 8px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.protection-title {
+  color: #595959;
+  font-weight: 500;
+}
+
+.advanced-setting-item {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+::ng-deep .disk-protection .ant-collapse-header {
+  padding-right: 0 !important;
+  padding-left: 0 !important;
+}
+
+::ng-deep .disk-protection .ant-collapse-content-box {
+  padding: 0 !important;
 }

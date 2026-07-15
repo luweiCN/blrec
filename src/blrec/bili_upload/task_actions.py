@@ -95,6 +95,20 @@ class UploadTaskActionManager:
         self._clock = clock
         self._run_lock = asyncio.Lock()
 
+    async def retryable_failed_job_ids(self) -> Tuple[int, ...]:
+        rows = await self._database.fetchall(
+            'SELECT job.id FROM upload_jobs job '
+            'JOIN bili_accounts account ON account.id=job.account_id '
+            "WHERE job.state='paused' AND account.state='active' "
+            "AND job.submit_state NOT IN ('in_flight','unknown_outcome') "
+            "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
+            'AND NOT EXISTS('
+            'SELECT 1 FROM upload_parts part WHERE part.job_id=job.id '
+            "AND part.upload_state IN ('completing','unknown_outcome')) "
+            'ORDER BY job.id'
+        )
+        return tuple(int(row['id']) for row in rows)
+
     async def retry_failed(self, job_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')

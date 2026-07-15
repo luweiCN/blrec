@@ -4,6 +4,8 @@
   [reverse]="reverse"
   (reverseChange)="onReverseChanged($event)"
   (filterChange)="filterTerm = $event"
+  [dateRange]="dateRange"
+  (dateRangeChange)="dateRange = $event"
 ></app-toolbar>
 
 <nz-spin
@@ -14,7 +16,7 @@
 ></nz-spin>
 <ng-template #elseBlock>
   <app-task-list
-    [dataList]="dataList | filterTasks: filterTerm"
+    [dataList]="dataList | filterTasks: filterTerm: dateRange"
   ></app-task-list>
 </ng-template>
 

@@ -93,6 +93,15 @@ export type UploadRepairState =
 
 export type UploadJobAction = 'retry_failed' | 'repair_transcode';
 
+export interface RecordingSessionFilters {
+  readonly query: string;
+  readonly recordingState: RecordingSessionState | null;
+  readonly uploadState: UploadJobState | 'none' | null;
+  readonly startedFrom: number | null;
+  readonly startedTo: number | null;
+  readonly sort: 'newest' | 'oldest';
+}
+
 export interface UploadJobActionRequest {
   readonly action: UploadJobAction;
   readonly jobIds: readonly number[];
