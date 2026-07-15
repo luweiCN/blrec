@@ -88,14 +88,14 @@ Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.1`](https:
 
 ### 默认参数运行
 
-`sudo docker run -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec -dp 2233:2233 acgnhiki/blrec`
+`sudo docker run -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec -dp 2233:2233 ghcr.io/luweicn/blrec:3.0.0-beta.1`
 
 ### 命令行参数用法
 
 ```bash
 sudo docker run \
     -v /etc/blrec:/cfg -v /var/log/blrec:/log -v ~/blrec:/rec \
-    -dp 2233:2233 acgnhiki/blrec \
+    -dp 2233:2233 ghcr.io/luweicn/blrec:3.0.0-beta.1 \
     -c /cfg/another_settings.toml \
     --key-file path/to/key-file \
     --cert-file path/to/cert-file \

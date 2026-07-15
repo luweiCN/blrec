@@ -14,21 +14,33 @@
 
 ## 首次安装
 
-先创建 `/cfg`、`/log` 和 `/rec` 对应的宿主目录，并在配置目录生成 Base64 编码的 32 字节凭据密钥：
+先创建 `/cfg`、`/log` 和 `/rec` 对应的宿主目录。以下命令遇到任何失败都会停止；已有且非空的 `credential.key` 只会收紧权限，不会被重新生成或覆盖：
 
 ```bash
+set -eu
 mkdir -p /volume1/docker/blrec/config /volume1/docker/blrec/log /volume1/video/blrec
-openssl rand -base64 32 > /volume1/docker/blrec/config/credential.key
-chmod 600 /volume1/docker/blrec/config/credential.key
+credential_key=/volume1/docker/blrec/config/credential.key
+if [ -e "$credential_key" ]; then
+  test -s "$credential_key"
+else
+  umask 077
+  openssl rand -base64 32 > /volume1/docker/blrec/config/credential.key
+fi
+chmod 600 "$credential_key"
+test -s "$credential_key"
 openssl rand -hex 32
+test ! -e .env
 cp synology.env.example .env
+chmod 600 .env
+test -s .env
 ```
 
-把最后一条 `openssl rand -hex 32` 的输出填入 `.env` 的 `BLREC_API_KEY`，并按需修改管理员用户名和三个宿主目录。API Key 只用于首次创建管理员和密码恢复，不要提交 `.env`；原始凭据密钥只保存在 `/cfg/credential.key`，不要写入环境变量。
+把 `openssl rand -hex 32` 的输出填入 `.env` 的 `BLREC_API_KEY`，并按需修改管理员用户名和三个宿主目录。若 `.env` 已存在，`test ! -e .env` 会停止安装以避免覆盖，请先确认并妥善迁移原文件。API Key 只用于首次创建管理员和密码恢复，不要提交 `.env`；原始凭据密钥只保存在 `/cfg/credential.key`，不要写入环境变量。
 
 通过 SSH 启动：
 
 ```bash
+set -eu
 docker compose --env-file .env -f compose.synology.yml pull
 docker compose --env-file .env -f compose.synology.yml up -d
 ```
@@ -42,17 +54,33 @@ docker compose --env-file .env -f compose.synology.yml up -d
 先停止服务并备份 `/cfg` 对应的宿主目录及当前 `.env`，确认备份成功后再修改 `BLREC_IMAGE_TAG`。下面的命令以示例中的目录为准；如果修改过 `BLREC_CONFIG_DIR`，请同步替换 `config_dir`：
 
 ```bash
+set -eu
 backup_id="$(date +%Y%m%d-%H%M%S)"
 config_dir=/volume1/docker/blrec/config
+backup_config_dir="${config_dir}.backup-${backup_id}"
+backup_env=".env.backup-${backup_id}"
+test -d "$config_dir"
+test -s "$config_dir/credential.key"
+test -s .env
+test ! -e "$backup_config_dir"
+test ! -e "$backup_env"
 docker compose --env-file .env -f compose.synology.yml stop
-cp -a "$config_dir" "${config_dir}.backup-${backup_id}"
-cp .env ".env.backup-${backup_id}"
+cp -a "$config_dir" "$backup_config_dir"
+cp .env "$backup_env"
+chmod 600 "$backup_env"
+test -d "$backup_config_dir"
+test -s "$backup_config_dir/credential.key"
+cmp -s "$config_dir/credential.key" "$backup_config_dir/credential.key"
+test -s "$backup_env"
+cmp -s .env "$backup_env"
 echo "$backup_id"
 ```
 
-记录终端输出的 `backup_id`，然后编辑 `.env`，把 `BLREC_IMAGE_TAG` 改成要升级的固定版本，再部署：
+只有上述校验全部成功后，才记录终端输出的 `backup_id`，编辑 `.env`，把 `BLREC_IMAGE_TAG` 改成要升级的固定版本，再部署：
 
 ```bash
+set -eu
+docker compose --env-file .env -f compose.synology.yml config >/dev/null
 docker compose --env-file .env -f compose.synology.yml pull
 docker compose --env-file .env -f compose.synology.yml up -d
 ```
@@ -61,21 +89,41 @@ Container Manager 的操作顺序相同：先停止项目并通过 File Station 
 
 ## 回滚
 
-回滚必须成对恢复升级前的 `/cfg` 和镜像标签。把下方 `backup_id` 改成升级时记录的值；如果自定义过配置目录，也要修改 `config_dir`。当前配置会另存为 `.failed-*`，便于排查：
+回滚必须成对恢复升级前的 `/cfg` 和镜像标签。把下方 `backup_id` 改成升级时记录的值；如果自定义过配置目录，也要修改 `config_dir`。命令会先校验备份、解析旧环境、拉取旧镜像并完整复制出恢复候选，全部成功后才停止容器和移动当前配置。当前配置会另存为 `.failed-*`，便于排查：
 
 ```bash
+set -eu
 backup_id=20260716-120000
 config_dir=/volume1/docker/blrec/config
+backup_config_dir="${config_dir}.backup-${backup_id}"
+backup_env=".env.backup-${backup_id}"
+restore_candidate="${config_dir}.restore-${backup_id}"
 failed_id="$(date +%Y%m%d-%H%M%S)"
+test -d "$config_dir"
+test -d "$backup_config_dir"
+test -s "$backup_config_dir/credential.key"
+test -s "$backup_env"
+grep -Eq '^BLREC_IMAGE_TAG=[^[:space:]]+$' "$backup_env"
+test ! -e "$restore_candidate"
+test ! -e "${config_dir}.failed-${failed_id}"
+docker compose --env-file "$backup_env" -f compose.synology.yml config >/dev/null
+docker compose --env-file "$backup_env" -f compose.synology.yml pull
+cp -a "$backup_config_dir" "$restore_candidate"
+test -d "$restore_candidate"
+test -s "$restore_candidate/credential.key"
+cmp -s "$backup_config_dir/credential.key" "$restore_candidate/credential.key"
 docker compose --env-file .env -f compose.synology.yml down
 mv "$config_dir" "${config_dir}.failed-${failed_id}"
-cp -a "${config_dir}.backup-${backup_id}" "$config_dir"
-cp ".env.backup-${backup_id}" .env
-docker compose --env-file .env -f compose.synology.yml pull
+mv "$restore_candidate" "$config_dir"
+cp "$backup_env" .env
+chmod 600 .env
+test -s .env
+cmp -s "$backup_env" .env
+docker compose --env-file .env -f compose.synology.yml config >/dev/null
 docker compose --env-file .env -f compose.synology.yml up -d
 ```
 
-恢复的 `.env` 会重新选中旧 `BLREC_IMAGE_TAG`，恢复的配置目录同时带回旧设置、状态和 `credential.key`。在 Container Manager 中也必须同时还原配置目录和项目环境中的旧标签，然后重新构建项目。
+恢复的 `.env` 会重新选中已预拉取的旧 `BLREC_IMAGE_TAG`，恢复的配置目录同时带回旧设置、状态和 `credential.key`。任一校验、复制、拉取或移动失败时，`set -eu` 都会阻止后续启动，避免以空配置或不匹配配置启动。在 Container Manager 中也必须先验证配置和环境备份、确认旧镜像可用，再同时还原配置目录和项目环境中的旧标签，最后重新构建项目。
 
 ## 日志与验收
 
