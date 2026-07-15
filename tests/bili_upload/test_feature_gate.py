@@ -27,11 +27,7 @@ def write_key_file(path: Path, *, byte: int = 1, mode: int = 0o600) -> None:
 def test_bili_upload_settings_have_safe_defaults() -> None:
     settings = BiliUploadSettings()
 
-    assert settings.enabled is False
     assert settings.database_path == '/cfg/blrec.sqlite3'
-    assert settings.auto_upload_enabled is False
-    assert settings.auto_comment_enabled is False
-    assert settings.danmaku_backfill_enabled is False
     assert settings.upload_chunk_size == 4 * 1024 * 1024
     assert settings.upload_chunk_concurrency == 2
     assert settings.danmaku_interval_seconds == 25
@@ -59,11 +55,30 @@ def test_bili_upload_settings_reject_out_of_bounds_values(
 
 def test_settings_models_include_bili_upload() -> None:
     settings = Settings()
-    update = SettingsIn.parse_obj({'biliUpload': {'enabled': True}})
+    update = SettingsIn.parse_obj({'biliUpload': {'uploadChunkConcurrency': 3}})
 
     assert settings.bili_upload == BiliUploadSettings()
-    assert update.bili_upload == BiliUploadSettings(enabled=True)
+    assert update.bili_upload == BiliUploadSettings(upload_chunk_concurrency=3)
     assert ExportedBiliUploadSettings is BiliUploadSettings
+
+
+def test_removed_feature_switches_are_ignored_and_not_serialized() -> None:
+    settings = BiliUploadSettings.parse_obj(
+        {
+            'enabled': False,
+            'autoUploadEnabled': False,
+            'autoCommentEnabled': False,
+            'danmakuBackfillEnabled': False,
+        }
+    )
+
+    assert settings.dict() == BiliUploadSettings().dict()
+    assert not {
+        'enabled',
+        'auto_upload_enabled',
+        'auto_comment_enabled',
+        'danmaku_backfill_enabled',
+    } & set(settings.__fields__)
 
 
 def test_env_settings_read_credential_aliases(monkeypatch, tmp_path: Path) -> None:
@@ -147,34 +162,22 @@ def test_key_sources_must_decode_to_32_bytes(contents: str, tmp_path: Path) -> N
         EnvSettings(credential_key_file=str(key_path))
 
 
-def test_write_features_fail_closed_without_both_keys(tmp_path: Path) -> None:
-    settings = BiliUploadSettings(
-        enabled=True, database_path=str(tmp_path / 'db.sqlite3')
-    )
+def test_write_features_fail_closed_without_credential_key(tmp_path: Path) -> None:
+    settings = BiliUploadSettings(database_path=str(tmp_path / 'db.sqlite3'))
 
-    with pytest.raises(FeatureUnavailable, match='BLREC_API_KEY'):
-        validate_feature_gate(settings, api_key=None, credential_key=None)
     with pytest.raises(FeatureUnavailable, match='credential key'):
         validate_feature_gate(settings, api_key='12345678', credential_key=None)
 
 
 def test_write_features_validate_key_length() -> None:
-    settings = BiliUploadSettings(enabled=True)
+    settings = BiliUploadSettings()
 
     with pytest.raises(FeatureUnavailable, match='decode to 32 bytes'):
         validate_feature_gate(settings, api_key='12345678', credential_key=b'short')
 
 
-def test_disabled_write_features_do_not_require_keys() -> None:
-    validate_feature_gate(
-        BiliUploadSettings(enabled=False), api_key=None, credential_key=None
-    )
-
-
-def test_enabled_write_features_accept_both_keys() -> None:
-    validate_feature_gate(
-        BiliUploadSettings(enabled=True), api_key='12345678', credential_key=bytes(32)
-    )
+def test_write_features_do_not_require_api_key() -> None:
+    validate_feature_gate(BiliUploadSettings(), api_key=None, credential_key=bytes(32))
 
 
 def test_upload_state_values_are_stable() -> None:

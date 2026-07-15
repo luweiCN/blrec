@@ -10,6 +10,18 @@
   overflow: hidden;
 }
 
+.tasks-page {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.tasks-page app-task-list {
+  min-height: 0;
+  flex: 1;
+}
+
 .add-task-button {
   position: fixed;
   bottom: 5vh;

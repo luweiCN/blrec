@@ -15,8 +15,10 @@ export interface TaskData {
 export type TaskBatchAction =
   | 'start'
   | 'stop'
+  | 'force_stop'
   | 'recorder_enable'
   | 'recorder_disable'
+  | 'recorder_force_disable'
   | 'refresh'
   | 'cut'
   | 'delete';

@@ -15,70 +15,45 @@ describe('AuthInterceptor', () => {
   let interceptor: AuthInterceptor;
 
   beforeEach(() => {
-    auth = jasmine.createSpyObj<AuthService>('AuthService', [
-      'getApiKey',
-      'hasApiKey',
-      'removeApiKey',
-      'setApiKey',
-    ]);
-    auth.getApiKey.and.returnValue('old-api-key');
-    auth.hasApiKey.and.returnValue(true);
+    auth = jasmine.createSpyObj<AuthService>(
+      'AuthService',
+      ['handleUnauthorized'],
+      { csrfToken: 'csrf-token' }
+    );
     interceptor = new AuthInterceptor(auth);
   });
 
-  it('should be created', () => {
-    expect(interceptor).toBeTruthy();
-  });
-
-  it('does not retry failed write requests automatically', () => {
-    let calls = 0;
+  it('uses cookies and never sends an API key', () => {
     const next: HttpHandler = {
-      handle: () =>
-        defer(() => {
-          calls += 1;
-          return throwError(
-            () =>
-              new HttpErrorResponse({ status: 0, statusText: 'network error' })
-          );
-        }),
-    };
-
-    interceptor
-      .intercept(
-        new HttpRequest('POST', '/api/v1/bili-accounts/7/refresh', null),
-        next
-      )
-      .subscribe({ error: () => undefined });
-
-    expect(calls).toBe(1);
-  });
-
-  it('retries once with the newly entered key after a 401', () => {
-    spyOn(window, 'prompt').and.returnValue('new-api-key');
-    let calls = 0;
-    const next: HttpHandler = {
-      handle: (request) =>
-        defer(() => {
-          calls += 1;
-          if (request.headers.get('X-API-KEY') === 'old-api-key') {
-            return throwError(() => new HttpErrorResponse({ status: 401 }));
-          }
-          expect(request.headers.get('X-API-KEY')).toBe('new-api-key');
-          return of(new HttpResponse({ status: 200 }));
-        }),
+      handle: (request) => {
+        expect(request.withCredentials).toBeTrue();
+        expect(request.headers.has('X-API-KEY')).toBeFalse();
+        expect(request.headers.has('X-CSRF-Token')).toBeFalse();
+        return of(new HttpResponse({ status: 200 }));
+      },
     };
 
     interceptor
       .intercept(new HttpRequest('GET', '/api/v1/bili-accounts'), next)
       .subscribe();
-
-    expect(calls).toBe(2);
-    expect(auth.removeApiKey).toHaveBeenCalledTimes(1);
-    expect(auth.setApiKey).toHaveBeenCalledOnceWith('new-api-key');
   });
 
-  it('stores a replacement key but never replays a mutation after 401', () => {
-    spyOn(window, 'prompt').and.returnValue('new-api-key');
+  it('adds CSRF only to state-changing requests', () => {
+    const next: HttpHandler = {
+      handle: (request) => {
+        expect(request.withCredentials).toBeTrue();
+        expect(request.headers.get('X-CSRF-Token')).toBe('csrf-token');
+        return of(new HttpResponse({ status: 200 }));
+      },
+    };
+
+    interceptor
+      .intercept(new HttpRequest('POST', '/api/v1/write', {}), next)
+      .subscribe();
+  });
+
+  it('does not prompt or replay requests after a 401', () => {
+    spyOn(window, 'prompt');
     let calls = 0;
     const next: HttpHandler = {
       handle: () =>
@@ -89,10 +64,11 @@ describe('AuthInterceptor', () => {
     };
 
     interceptor
-      .intercept(new HttpRequest('POST', '/api/v1/write', {}), next)
+      .intercept(new HttpRequest('GET', '/api/v1/bili-accounts'), next)
       .subscribe({ error: () => undefined });
 
     expect(calls).toBe(1);
-    expect(auth.setApiKey).toHaveBeenCalledOnceWith('new-api-key');
+    expect(window.prompt).not.toHaveBeenCalled();
+    expect(auth.handleUnauthorized).toHaveBeenCalledTimes(1);
   });
 });

@@ -54,11 +54,11 @@ class IdentityProtocol:
 
 
 @pytest.mark.asyncio
-async def test_disabled_runtime_uses_no_database_or_protocol(tmp_path: Path) -> None:
+async def test_runtime_requires_credential_key_without_creating_database(
+    tmp_path: Path,
+) -> None:
     runtime = BiliAccountRuntime(
-        BiliUploadSettings(
-            enabled=False, database_path=str(tmp_path / 'unused.sqlite3')
-        ),
+        BiliUploadSettings(database_path=str(tmp_path / 'unused.sqlite3')),
         api_key=None,
         credential_key=None,
     )
@@ -66,27 +66,27 @@ async def test_disabled_runtime_uses_no_database_or_protocol(tmp_path: Path) -> 
     assert not await runtime.start()
     assert runtime.manager is None
     assert runtime.journal is None
-    assert runtime.unavailable_reason == 'Bilibili account management is not enabled'
+    assert runtime.unavailable_reason == 'credential key is required'
     assert not (tmp_path / 'unused.sqlite3').exists()
     assert await runtime.primary_cookie_header('https://api.bilibili.com/') is None
 
 
 @pytest.mark.asyncio
-async def test_missing_security_configuration_fails_closed_without_database(
-    tmp_path: Path,
-) -> None:
+async def test_runtime_starts_without_api_key(tmp_path: Path) -> None:
     runtime = BiliAccountRuntime(
-        BiliUploadSettings(
-            enabled=True, database_path=str(tmp_path / 'unused.sqlite3')
-        ),
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
         api_key=None,
         credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
     )
 
-    assert not await runtime.start()
-    assert runtime.manager is None
-    assert runtime.unavailable_reason == 'BLREC_API_KEY is required'
-    assert not (tmp_path / 'unused.sqlite3').exists()
+    try:
+        assert await runtime.start()
+        assert runtime.manager is not None
+        assert runtime.unavailable_reason is None
+        assert (tmp_path / 'blrec.sqlite3').exists()
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -95,9 +95,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
 ) -> None:
     protocol = IdentityProtocol()
     clock = FakeClock()
-    settings = BiliUploadSettings(
-        enabled=True, database_path=str(tmp_path / 'blrec.sqlite3')
-    )
+    settings = BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3'))
     seed_runtime = BiliAccountRuntime(
         settings,
         api_key='test-api-key',
@@ -151,7 +149,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
 @pytest.mark.asyncio
 async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     runtime = BiliAccountRuntime(
-        BiliUploadSettings(enabled=True, database_path=str(tmp_path / 'blrec.sqlite3')),
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
         api_key='test-api-key',
         credential_key=b'k' * 32,
         protocol=IdentityProtocol(),
@@ -192,7 +190,7 @@ async def test_runtime_reconciles_crash_interrupted_recording_before_use(
     await database.close()
 
     runtime = BiliAccountRuntime(
-        BiliUploadSettings(enabled=True, database_path=database_path),
+        BiliUploadSettings(database_path=database_path),
         api_key='test-api-key',
         credential_key=b'k' * 32,
         protocol=IdentityProtocol(),
@@ -213,9 +211,7 @@ async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
     tmp_path: Path,
 ) -> None:
     runtime = BiliAccountRuntime(
-        BiliUploadSettings(
-            enabled=False, database_path=str(tmp_path / 'unused.sqlite3')
-        ),
+        BiliUploadSettings(database_path=str(tmp_path / 'unused.sqlite3')),
         api_key=None,
         credential_key=None,
     )
@@ -256,7 +252,7 @@ async def test_runtime_exposes_primary_cookie_and_forwards_auth_failures(
 ) -> None:
     changed = AsyncMock()
     runtime = BiliAccountRuntime(
-        BiliUploadSettings(enabled=True, database_path=str(tmp_path / 'blrec.sqlite3')),
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
         api_key='test-api-key',
         credential_key=b'k' * 32,
         protocol=IdentityProtocol(),
@@ -278,3 +274,83 @@ async def test_runtime_exposes_primary_cookie_and_forwards_auth_failures(
         runtime.manager.report_primary_auth_failure.assert_awaited_once_with()
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_open_session_stops_workers_and_current_recording() -> None:
+    calls = []
+    runtime = object.__new__(BiliAccountRuntime)
+    runtime._session_action_lock = asyncio.Lock()
+    runtime._database = SimpleNamespace(
+        fetchone=AsyncMock(
+            return_value={'room_id': 100, 'state': 'open', 'job_id': None}
+        )
+    )
+    runtime._task_actions = SimpleNamespace(
+        delete_session=AsyncMock(return_value='已删除')
+    )
+    runtime._active_session_canceller = AsyncMock(
+        side_effect=lambda room_id: calls.append(('cancel', room_id))
+    )
+    runtime._stop_upload_worker = AsyncMock(
+        side_effect=lambda: calls.append(('stop_worker', None))
+    )
+    runtime._start_upload_worker = AsyncMock(
+        side_effect=lambda: calls.append(('start_worker', None))
+    )
+
+    message = await runtime.run_recording_session_action(
+        'delete_local', 7, manager_subject='manager'
+    )
+
+    assert message == '已删除'
+    assert calls == [('stop_worker', None), ('cancel', 100), ('start_worker', None)]
+    runtime._task_actions.delete_session.assert_awaited_once_with(
+        7, manager_subject='manager'
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_action_maps_job_capability_to_job_id() -> None:
+    runtime = object.__new__(BiliAccountRuntime)
+    runtime._session_action_lock = asyncio.Lock()
+    runtime._database = SimpleNamespace(
+        fetchone=AsyncMock(
+            return_value={'room_id': 100, 'state': 'closed', 'job_id': 9}
+        )
+    )
+    runtime._task_actions = SimpleNamespace(
+        retry_failed=AsyncMock(return_value='已重新排队')
+    )
+
+    message = await runtime.run_recording_session_action(
+        'retry_failed', 7, manager_subject='manager'
+    )
+
+    assert message == '已重新排队'
+    runtime._task_actions.retry_failed.assert_awaited_once_with(
+        9, manager_subject='manager'
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_action_maps_manual_danmaku_backfill_to_job_id() -> None:
+    runtime = object.__new__(BiliAccountRuntime)
+    runtime._session_action_lock = asyncio.Lock()
+    runtime._database = SimpleNamespace(
+        fetchone=AsyncMock(
+            return_value={'room_id': 100, 'state': 'closed', 'job_id': 9}
+        )
+    )
+    runtime._task_actions = SimpleNamespace(
+        request_danmaku_backfill=AsyncMock(return_value='已排队回灌弹幕')
+    )
+
+    message = await runtime.run_recording_session_action(
+        'backfill_danmaku', 7, manager_subject='manager'
+    )
+
+    assert message == '已排队回灌弹幕'
+    runtime._task_actions.request_danmaku_backfill.assert_awaited_once_with(
+        9, manager_subject='manager'
+    )

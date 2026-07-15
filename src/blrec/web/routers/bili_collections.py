@@ -16,7 +16,7 @@ from blrec.utils.string import camel_case
 from .bili_accounts import authenticated_manager_subject
 
 manager: Optional[CollectionManager] = None
-unavailable_reason: Optional[str] = 'Bilibili collections are not enabled'
+unavailable_reason: Optional[str] = 'Bilibili collections are not ready'
 
 
 class ApiModel(BaseModel):

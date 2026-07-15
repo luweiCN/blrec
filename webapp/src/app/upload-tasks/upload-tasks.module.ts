@@ -16,20 +16,26 @@ import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
 import { NzSelectModule } from 'ng-zorro-antd/select';
+import { NzSpinModule } from 'ng-zorro-antd/spin';
+import { NzSwitchModule } from 'ng-zorro-antd/switch';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
-import { PartContentDialogComponent } from './part-content-dialog/part-content-dialog.component';
+import { PartDanmakuDialogComponent } from './part-danmaku-dialog/part-danmaku-dialog.component';
+import { PartVideoDialogComponent } from './part-video-dialog/part-video-dialog.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
 import { UploadTasksComponent } from './upload-tasks.component';
+import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.component';
 
 @NgModule({
   declarations: [
     UploadTasksComponent,
     RecordingSessionsComponent,
-    PartContentDialogComponent,
+    PartDanmakuDialogComponent,
+    PartVideoDialogComponent,
+    TaskEditDialogComponent,
   ],
   imports: [
     CommonModule,
@@ -49,6 +55,8 @@ import { UploadTasksComponent } from './upload-tasks.component';
     NzPageHeaderModule,
     NzPaginationModule,
     NzSelectModule,
+    NzSpinModule,
+    NzSwitchModule,
     NzTableModule,
     NzTagModule,
     NzToolTipModule,

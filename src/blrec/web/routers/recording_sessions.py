@@ -1,8 +1,19 @@
-import hashlib
-import hmac
 import re
+import secrets
 import time
-from typing import BinaryIO, Iterator, List, Literal, Optional, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    BinaryIO,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+)
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
@@ -20,6 +31,8 @@ from blrec.bili_upload.journal import (
 )
 from blrec.bili_upload.recording_content import (
     DanmakuPage,
+    FlvMediaSnapshot,
+    MediaResource,
     RecordingContentInvalid,
     RecordingContentNotFound,
     RecordingContentReader,
@@ -38,10 +51,15 @@ journal: Optional[RecordingJournalBridge] = None
 danmaku_publisher: Optional[DanmakuPublisher] = None
 content_reader: Optional[RecordingContentReader] = None
 task_actions: Optional[UploadTaskActionManager] = None
-unavailable_reason: Optional[str] = 'Recording journal is not enabled'
+session_action_runner: Optional[Callable[..., Awaitable[str]]] = None
+active_recording_metadata_provider: Optional[
+    Callable[[MediaResource], Optional[Mapping[str, Any]]]
+] = None
+unavailable_reason: Optional[str] = 'Recording journal is not ready'
 
 _BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
 _MEDIA_ACCESS_TTL_SECONDS = 2 * 60 * 60
+_MAX_MEDIA_SNAPSHOTS = 64
 
 
 class RangeNotSatisfiable(ValueError):
@@ -83,6 +101,8 @@ class UploadPartProgressResponse(ApiModel):
     transcode_state: str
     transcode_fail_code: Optional[int]
     transcode_fail_desc: Optional[str]
+    repair_stage: str
+    repair_diagnostic: Optional[str]
 
 
 class DanmakuItemProgressResponse(ApiModel):
@@ -119,6 +139,18 @@ class UploadJobProgressResponse(ApiModel):
     repair_error: Optional[str]
     can_retry: bool
     can_repair: bool
+    can_skip: bool
+    can_repost: bool
+    can_delete: bool
+    operator_paused: bool
+    scheduled_publish_at: Optional[int]
+    collection_branch_state: str
+    collection_error: Optional[str]
+    comment_error: Optional[str]
+    danmaku_error: Optional[str]
+    can_pause: bool
+    can_resume: bool
+    can_edit: bool
     unknown_danmaku_items: List[DanmakuItemProgressResponse]
     parts: List[UploadPartProgressResponse]
 
@@ -136,7 +168,15 @@ class DanmakuDecisionRequest(ApiModel):
 
 
 class UploadJobActionRequest(ApiModel):
-    action: Literal['retry_failed', 'repair_transcode']
+    action: Literal[
+        'retry_failed',
+        'repair_transcode',
+        'skip_upload',
+        'repost_as_new',
+        'delete_local',
+        'pause_upload',
+        'resume_upload',
+    ]
     job_ids: List[int] = Field(..., min_items=1, max_items=100)
 
     @validator('job_ids')
@@ -156,6 +196,75 @@ class UploadJobActionResultResponse(ApiModel):
 
 class UploadJobActionResponse(ApiModel):
     results: List[UploadJobActionResultResponse]
+
+
+class RecordingSessionActionRequest(ApiModel):
+    action: Literal[
+        'set_upload',
+        'set_skip',
+        'retry_failed',
+        'repair_transcode',
+        'backfill_danmaku',
+        'repost_as_new',
+        'delete_local',
+        'pause_upload',
+        'resume_upload',
+    ]
+    session_ids: List[int] = Field(..., min_items=1, max_items=100)
+
+    @validator('session_ids')
+    def session_ids_must_be_unique(cls, value: List[int]) -> List[int]:
+        if any(session_id <= 0 for session_id in value):
+            raise ValueError('session IDs must be positive')
+        if len(set(value)) != len(value):
+            raise ValueError('session IDs must be unique')
+        return value
+
+
+class RecordingSessionActionResultResponse(ApiModel):
+    session_id: int
+    accepted: bool
+    message: str
+
+
+class RecordingSessionActionResponse(ApiModel):
+    results: List[RecordingSessionActionResultResponse]
+
+
+class UploadJobRetryPreviewItemResponse(ApiModel):
+    job_id: int
+    room_id: int
+    title: str
+    account_display_name: str
+    reason: str
+
+
+class UploadJobRetryPreviewResponse(ApiModel):
+    items: List[UploadJobRetryPreviewItemResponse]
+
+
+class UploadTaskSettingsResponse(ApiModel):
+    job_id: int
+    account_id: int
+    settings: Dict[str, Any]
+    editable: bool
+    blocked_reason: Optional[str]
+
+
+class UploadTaskSettingsUpdateRequest(ApiModel):
+    account_id: int = Field(..., gt=0)
+    changes: Dict[str, Any]
+
+    @validator('changes')
+    def changes_must_not_be_empty(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        if not value or len(value) > 30:
+            raise ValueError('changes must contain 1 to 30 fields')
+        return value
+
+
+class UploadTaskSettingsUpdateResponse(ApiModel):
+    collection_cleared: bool
+    task: UploadTaskSettingsResponse
 
 
 class RecordingSessionResponse(ApiModel):
@@ -180,6 +289,12 @@ class RecordingSessionResponse(ApiModel):
     danmaku_count: int
     total_file_size_bytes: int
     record_duration_seconds: int
+    upload_intent: str
+    upload_suppressed: bool
+    deletion_state: str
+    deletion_error: Optional[str]
+    display_state: str
+    available_actions: List[str]
     upload_job: Optional[UploadJobProgressResponse]
     parts: List[RecordingPartResponse]
 
@@ -207,6 +322,43 @@ class DanmakuPageResponse(ApiModel):
 class MediaAccessResponse(ApiModel):
     token: str
     expires_at: int
+    snapshot_id: Optional[str]
+    duration_ms: Optional[int]
+    file_size_bytes: int
+    recording: bool
+
+
+class MediaSnapshotStore:
+    def __init__(self) -> None:
+        self._items: Dict[str, Tuple[int, int, FlvMediaSnapshot]] = {}
+
+    def add(self, part_id: int, expires_at: int, snapshot: FlvMediaSnapshot) -> str:
+        self._discard_expired()
+        while len(self._items) >= _MAX_MEDIA_SNAPSHOTS:
+            oldest = min(self._items, key=lambda key: self._items[key][1])
+            del self._items[oldest]
+        snapshot_id = secrets.token_urlsafe(18)
+        self._items[snapshot_id] = (int(part_id), int(expires_at), snapshot)
+        return snapshot_id
+
+    def get(self, part_id: int, snapshot_id: str) -> Optional[FlvMediaSnapshot]:
+        self._discard_expired()
+        item = self._items.get(snapshot_id)
+        if item is None or item[0] != int(part_id):
+            return None
+        return item[2]
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def _discard_expired(self) -> None:
+        now = int(time.time())
+        for snapshot_id, (_, expires_at, _) in tuple(self._items.items()):
+            if expires_at < now:
+                del self._items[snapshot_id]
+
+
+media_snapshot_store = MediaSnapshotStore()
 
 
 def get_recording_journal() -> RecordingJournalBridge:
@@ -243,6 +395,82 @@ def get_task_actions() -> UploadTaskActionManager:
             detail=unavailable_reason or 'Upload task actions are unavailable',
         )
     return task_actions
+
+
+def get_session_action_runner() -> Callable[..., Awaitable[str]]:
+    if session_action_runner is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Recording session actions are unavailable',
+        )
+    return session_action_runner
+
+
+def _session_display(
+    session: RecordingSession, upload_job: Optional[UploadJobProgress]
+) -> Tuple[str, List[str]]:
+    actions: List[str] = []
+    if session.deletion_state in ('requested', 'deleting'):
+        return 'deleting', actions
+    if session.deletion_state == 'failed':
+        return 'delete_failed', ['delete_local']
+    if upload_job is not None:
+        if upload_job.can_retry:
+            actions.append('retry_failed')
+        if upload_job.can_skip:
+            actions.append('set_skip')
+        if upload_job.can_repost:
+            actions.append('repost_as_new')
+        if upload_job.can_pause:
+            actions.append('pause_upload')
+        if upload_job.can_resume:
+            actions.append('resume_upload')
+        if upload_job.can_edit:
+            actions.append('edit_task')
+        recorded_part_indexes = {
+            part.part_index
+            for part in session.parts
+            if part.xml_path and part.xml_completed
+        }
+        upload_part_indexes = {
+            part.part_index for part in upload_job.parts if part.cid is not None
+        }
+        if (
+            upload_job.state in ('approved', 'completed')
+            and upload_job.danmaku_branch_state == 'disabled'
+            and recorded_part_indexes
+            and recorded_part_indexes == upload_part_indexes
+        ):
+            actions.append('backfill_danmaku')
+    elif session.upload_intent in ('auto', 'upload'):
+        actions.append('set_skip')
+    else:
+        actions.append('set_upload')
+    actions.append('delete_local')
+
+    if session.state == 'open':
+        return 'recording', actions
+    if upload_job is None:
+        if session.upload_intent in ('auto', 'upload'):
+            return 'pending_upload', actions
+        return 'not_uploading', actions
+    if upload_job.repair_state in ('failed', 'unknown_outcome'):
+        return 'needs_attention', actions
+    if upload_job.operator_paused:
+        return 'paused', actions
+    if upload_job.repair_state in ('queued', 'checking', 'reuploading', 'editing'):
+        return 'uploading', actions
+    if upload_job.repair_state == 'waiting_review':
+        return 'waiting_review', actions
+    if upload_job.state in ('waiting_artifacts', 'ready'):
+        return 'pending_upload', actions
+    if upload_job.state in ('uploading', 'submitting'):
+        return 'uploading', actions
+    if upload_job.state == 'waiting_review':
+        return 'waiting_review', actions
+    if upload_job.state in ('approved', 'completed'):
+        return 'completed', actions
+    return 'needs_attention', actions
 
 
 def parse_byte_range(value: str, size: int) -> Tuple[int, int]:
@@ -288,30 +516,21 @@ def _content_error(error: RuntimeError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
 
 
-def _media_access_token(part_id: int, expires_at: int) -> str:
-    value = '{}:{}'.format(int(part_id), int(expires_at)).encode('ascii')
-    return hmac.new(security.api_key.encode('utf8'), value, hashlib.sha256).hexdigest()
-
-
-def _valid_media_access(part_id: int, expires_at: int, token: str) -> bool:
-    if not security.api_key or expires_at < int(time.time()):
-        return False
-    expected = _media_access_token(part_id, expires_at)
-    return hmac.compare_digest(token, expected)
-
-
 async def authenticated_media_subject(
     request: Request,
     part_id: int,
     media_token: Optional[str] = Query(None),
     media_expires: Optional[int] = Query(None),
+    media_snapshot: Optional[str] = Query(None),
     x_api_key: Optional[str] = Header(None),
 ) -> str:
     if media_token is not None or media_expires is not None:
         if (
             media_token is not None
             and media_expires is not None
-            and _valid_media_access(part_id, media_expires, media_token)
+            and security.valid_media_access(
+                part_id, media_expires, media_token, media_snapshot
+            )
         ):
             return 'recording-media-access'
         raise HTTPException(
@@ -352,6 +571,8 @@ def _upload_part_response(part: UploadPartProgress) -> UploadPartProgressRespons
         transcode_state=part.transcode_state,
         transcode_fail_code=part.transcode_fail_code,
         transcode_fail_desc=part.transcode_fail_desc,
+        repair_stage=part.repair_stage,
+        repair_diagnostic=part.repair_diagnostic,
     )
 
 
@@ -392,6 +613,18 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         repair_error=job.repair_error,
         can_retry=job.can_retry,
         can_repair=job.can_repair,
+        can_skip=job.can_skip,
+        can_repost=job.can_repost,
+        can_delete=job.can_delete,
+        operator_paused=job.operator_paused,
+        scheduled_publish_at=job.scheduled_publish_at,
+        collection_branch_state=job.collection_branch_state,
+        collection_error=job.collection_error,
+        comment_error=job.comment_error,
+        danmaku_error=job.danmaku_error,
+        can_pause=job.can_pause,
+        can_resume=job.can_resume,
+        can_edit=job.can_edit,
         unknown_danmaku_items=[
             _danmaku_item_response(item) for item in job.unknown_danmaku_items
         ],
@@ -402,6 +635,7 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
 def _session_response(
     session: RecordingSession, upload_job: Optional[UploadJobProgress]
 ) -> RecordingSessionResponse:
+    display_state, available_actions = _session_display(session, upload_job)
     return RecordingSessionResponse(
         id=session.id,
         room_id=session.room_id,
@@ -424,6 +658,12 @@ def _session_response(
         danmaku_count=session.danmaku_count,
         total_file_size_bytes=session.total_file_size_bytes,
         record_duration_seconds=session.record_duration_seconds,
+        upload_intent=session.upload_intent,
+        upload_suppressed=session.upload_suppressed,
+        deletion_state=session.deletion_state,
+        deletion_error=session.deletion_error,
+        display_state=display_state,
+        available_actions=available_actions,
         upload_job=(None if upload_job is None else _upload_job_response(upload_job)),
         parts=[_part_response(part) for part in session.parts],
     )
@@ -452,6 +692,7 @@ async def list_recording_sessions(
             'paused',
             'completed',
             'none',
+            'suppressed',
         ]
     ] = Query(None, alias='uploadState'),
     started_from: Optional[int] = Query(None, ge=0, alias='startedFrom'),
@@ -511,8 +752,20 @@ async def run_upload_job_actions(
         try:
             if command.action == 'retry_failed':
                 message = await actions.retry_failed(job_id, manager_subject=subject)
-            else:
+            elif command.action == 'repair_transcode':
                 message = await actions.request_transcode_repair(
+                    job_id, manager_subject=subject
+                )
+            elif command.action == 'skip_upload':
+                message = await actions.skip_upload(job_id, manager_subject=subject)
+            elif command.action == 'repost_as_new':
+                message = await actions.repost_as_new(job_id, manager_subject=subject)
+            elif command.action == 'pause_upload':
+                message = await actions.pause_upload(job_id, manager_subject=subject)
+            elif command.action == 'resume_upload':
+                message = await actions.resume_upload(job_id, manager_subject=subject)
+            else:
+                message = await actions.delete_local_task(
                     job_id, manager_subject=subject
                 )
         except UploadTaskActionRejected as error:
@@ -528,6 +781,81 @@ async def run_upload_job_actions(
                 )
             )
     return UploadJobActionResponse(results=results)
+
+
+@router.get('/upload-jobs/{job_id}/settings', response_model=UploadTaskSettingsResponse)
+async def get_upload_task_settings(
+    job_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    actions: UploadTaskActionManager = Depends(get_task_actions),
+) -> UploadTaskSettingsResponse:
+    try:
+        value = await actions.task_settings(job_id)
+    except UploadTaskActionRejected as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    return UploadTaskSettingsResponse(
+        job_id=value.job_id,
+        account_id=value.account_id,
+        settings=dict(value.settings),
+        editable=value.editable,
+        blocked_reason=value.blocked_reason,
+    )
+
+
+@router.put(
+    '/upload-jobs/{job_id}/settings', response_model=UploadTaskSettingsUpdateResponse
+)
+async def update_upload_task_settings(
+    job_id: int,
+    command: UploadTaskSettingsUpdateRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    actions: UploadTaskActionManager = Depends(get_task_actions),
+) -> UploadTaskSettingsUpdateResponse:
+    try:
+        result = await actions.update_task(
+            job_id,
+            account_id=command.account_id,
+            changes=command.changes,
+            manager_subject=subject,
+        )
+        value = await actions.task_settings(job_id)
+    except UploadTaskActionRejected as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return UploadTaskSettingsUpdateResponse(
+        collection_cleared=result.collection_cleared,
+        task=UploadTaskSettingsResponse(
+            job_id=value.job_id,
+            account_id=value.account_id,
+            settings=dict(value.settings),
+            editable=value.editable,
+            blocked_reason=value.blocked_reason,
+        ),
+    )
+
+
+@router.post('/actions', response_model=RecordingSessionActionResponse)
+async def run_recording_session_actions(
+    command: RecordingSessionActionRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    runner: Callable[..., Awaitable[str]] = Depends(get_session_action_runner),
+) -> RecordingSessionActionResponse:
+    results = []
+    for session_id in command.session_ids:
+        try:
+            message = await runner(command.action, session_id, manager_subject=subject)
+        except UploadTaskActionRejected as error:
+            results.append(
+                RecordingSessionActionResultResponse(
+                    session_id=session_id, accepted=False, message=str(error)
+                )
+            )
+        else:
+            results.append(
+                RecordingSessionActionResultResponse(
+                    session_id=session_id, accepted=True, message=message
+                )
+            )
+    return RecordingSessionActionResponse(results=results)
 
 
 @router.post('/upload-jobs/retry-failed', response_model=UploadJobActionResponse)
@@ -554,6 +882,27 @@ async def retry_all_failed_upload_jobs(
     return UploadJobActionResponse(results=results)
 
 
+@router.get(
+    '/upload-jobs/retry-failed-preview', response_model=UploadJobRetryPreviewResponse
+)
+async def preview_retryable_failed_upload_jobs(
+    _subject: str = Depends(authenticated_manager_subject),
+    actions: UploadTaskActionManager = Depends(get_task_actions),
+) -> UploadJobRetryPreviewResponse:
+    return UploadJobRetryPreviewResponse(
+        items=[
+            UploadJobRetryPreviewItemResponse(
+                job_id=item.job_id,
+                room_id=item.room_id,
+                title=item.title,
+                account_display_name=item.account_display_name,
+                reason=item.reason,
+            )
+            for item in await actions.retryable_failed_jobs()
+        ]
+    )
+
+
 @router.post('/parts/{part_id}/media-access', response_model=MediaAccessResponse)
 async def create_recording_media_access(
     part_id: int,
@@ -569,8 +918,34 @@ async def create_recording_media_access(
             status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
         )
     expires_at = int(time.time()) + _MEDIA_ACCESS_TTL_SECONDS
+    snapshot_id = None
+    duration_ms = None
+    file_size_bytes = int(resource.size or 0)
+    if (
+        resource.recording
+        and resource.content_type == 'video/x-flv'
+        and resource.size is not None
+        and active_recording_metadata_provider is not None
+    ):
+        metadata = active_recording_metadata_provider(resource)
+        if metadata is not None:
+            try:
+                snapshot = FlvMediaSnapshot.create(
+                    resource.path, resource.size, metadata
+                )
+            except (OSError, EOFError, ValueError, AssertionError, RuntimeError):
+                pass
+            else:
+                snapshot_id = media_snapshot_store.add(part_id, expires_at, snapshot)
+                duration_ms = snapshot.duration_ms
+                file_size_bytes = snapshot.size
     return MediaAccessResponse(
-        token=_media_access_token(part_id, expires_at), expires_at=expires_at
+        token=security.media_access_token(part_id, expires_at, snapshot_id),
+        expires_at=expires_at,
+        snapshot_id=snapshot_id,
+        duration_ms=duration_ms,
+        file_size_bytes=file_size_bytes,
+        recording=resource.recording,
     )
 
 
@@ -578,6 +953,7 @@ async def create_recording_media_access(
 async def stream_recording_media(
     part_id: int,
     range_header: Optional[str] = Header(None, alias='Range'),
+    media_snapshot: Optional[str] = Query(None),
     _subject: str = Depends(authenticated_media_subject),
     reader: RecordingContentReader = Depends(get_content_reader),
 ) -> StreamingResponse:
@@ -589,7 +965,20 @@ async def stream_recording_media(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
         )
-    size = resource.size
+    snapshot = None
+    if media_snapshot is not None:
+        snapshot = media_snapshot_store.get(part_id, media_snapshot)
+        if snapshot is None or snapshot.path != resource.path:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='播放快照已失效，请重新打开播放器',
+            )
+        if resource.size < snapshot.source_size:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='录制文件已发生变化，请重新打开播放器',
+            )
+    size = snapshot.size if snapshot is not None else resource.size
     start, end = 0, size - 1
     response_status = status.HTTP_200_OK
     if range_header is not None:
@@ -602,12 +991,6 @@ async def stream_recording_media(
                 headers={'Content-Range': 'bytes */{}'.format(size)},
             ) from None
         response_status = status.HTTP_206_PARTIAL_CONTENT
-    try:
-        file = open(resource.path, 'rb')
-    except OSError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
-        ) from None
     length = max(0, end - start + 1)
     headers = {
         'Accept-Ranges': 'bytes',
@@ -616,8 +999,18 @@ async def stream_recording_media(
     }
     if response_status == status.HTTP_206_PARTIAL_CONTENT:
         headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)
+    if snapshot is not None:
+        chunks = snapshot.iter_range(start, length)
+    else:
+        try:
+            file = open(resource.path, 'rb')
+        except OSError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
+            ) from None
+        chunks = _file_chunks(file, start=start, length=length)
     return StreamingResponse(
-        _file_chunks(file, start=start, length=length),
+        chunks,
         status_code=response_status,
         media_type=resource.content_type,
         headers=headers,

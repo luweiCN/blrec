@@ -33,8 +33,10 @@ class TaskBatchActionRequest(ApiModel):
     action: Literal[
         'start',
         'stop',
+        'force_stop',
         'recorder_enable',
         'recorder_disable',
+        'recorder_force_disable',
         'refresh',
         'cut',
         'delete',
@@ -100,12 +102,18 @@ async def run_task_batch_action(
             elif command.action == 'stop':
                 await app.stop_task(room_id, False)
                 message = '任务已停止'
+            elif command.action == 'force_stop':
+                await app.stop_task(room_id, True)
+                message = '任务已强制停止'
             elif command.action == 'recorder_enable':
                 await app.enable_task_recorder(room_id)
                 message = '录制已开启'
             elif command.action == 'recorder_disable':
                 await app.disable_task_recorder(room_id, False)
                 message = '录制已关闭'
+            elif command.action == 'recorder_force_disable':
+                await app.disable_task_recorder(room_id, True)
+                message = '录制已强制关闭'
             elif command.action == 'refresh':
                 await app.update_task_info(room_id)
                 message = '任务数据已刷新'

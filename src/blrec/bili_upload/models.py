@@ -36,10 +36,6 @@ def validate_feature_gate(
     api_key: Optional[str],
     credential_key: Optional[bytes],
 ) -> None:
-    if not settings.enabled:
-        return
-    if not api_key:
-        raise FeatureUnavailable('BLREC_API_KEY is required')
     if credential_key is None:
         raise FeatureUnavailable('credential key is required')
     if len(credential_key) != 32:

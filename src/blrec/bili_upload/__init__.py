@@ -14,8 +14,8 @@ from .database import (
     LeaseLost,
     UnsupportedDatabaseFilesystem,
 )
-from .retention import RetentionManager, RetentionStatus
 from .models import FeatureUnavailable, JobState, WriteState, validate_feature_gate
+from .retention import RetentionManager, RetentionStatus
 
 __all__ = (
     'AccountRelationships',

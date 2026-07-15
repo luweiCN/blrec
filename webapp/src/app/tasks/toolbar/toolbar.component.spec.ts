@@ -68,4 +68,17 @@ describe('ToolbarComponent', () => {
   it('should create', () => {
     expect(component).toBeTruthy();
   });
+
+  it('uses the combined monitoring and recording terminology', () => {
+    expect(component.selections.map((item) => item.label)).toEqual([
+      '全部',
+      '录制中',
+      '已开启',
+      '已关闭',
+      '直播',
+      '轮播',
+      '闲置',
+    ]);
+    expect(fixture.nativeElement.textContent).not.toContain('关闭录制');
+  });
 });

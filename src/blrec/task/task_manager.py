@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from ..bili.anonymous_room_client import AnonymousRoomClient
     from ..bili.live_status_coordinator import LiveStatusCoordinator
     from ..bili_upload.journal import RecordingJournalBridge
+    from ..networking.aiohttp_session import AiohttpSessionPool
+    from ..networking.manager import NetworkRouteManager
     from ..setting import SettingsManager
 
 from loguru import logger
@@ -49,6 +51,8 @@ class RecordTaskManager:
         ] = None,
         auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
         recording_journal: Optional[RecordingJournalBridge] = None,
+        network_session_pool: Optional[AiohttpSessionPool] = None,
+        network_route_manager: Optional[NetworkRouteManager] = None,
     ) -> None:
         if (live_status_coordinator is None) != (anonymous_room_client is None):
             raise ValueError(
@@ -61,6 +65,8 @@ class RecordTaskManager:
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
         self._recording_journal = recording_journal
+        self._network_session_pool = network_session_pool
+        self._network_route_manager = network_route_manager
         self._tasks: Dict[int, RecordTask] = {}
 
     async def load_all_tasks(self) -> None:
@@ -109,6 +115,10 @@ class RecordTaskManager:
             task_options['auth_failure_reporter'] = self._auth_failure_reporter
         if self._recording_journal is not None:
             task_options['recording_journal'] = self._recording_journal
+        if self._network_session_pool is not None:
+            task_options['network_session_pool'] = self._network_session_pool
+        if self._network_route_manager is not None:
+            task_options['network_route_manager'] = self._network_route_manager
         task = RecordTask(settings.room_id, **task_options)
         self._tasks[settings.room_id] = task
 
@@ -199,6 +209,12 @@ class RecordTaskManager:
         await task.disable_recorder(force)
         await task.disable_monitor()
         logger.debug(f'Stopped task {room_id}')
+
+    async def suppress_current_live(self, room_id: int) -> None:
+        logger.info(f'Suppressing current live for task {room_id}...')
+        task = self._get_task(room_id, check_ready=True)
+        await task.suppress_current_live()
+        logger.info(f'Suppressed current live for task {room_id}')
 
     async def start_all_tasks(self) -> None:
         logger.debug('Starting all tasks...')

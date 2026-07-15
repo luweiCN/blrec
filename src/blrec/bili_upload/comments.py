@@ -21,7 +21,6 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
-    Union,
 )
 
 from lxml import etree
@@ -49,9 +48,6 @@ __all__ = (
     'CommentRecord',
     'PartXml',
 )
-
-
-_FeatureSwitch = Union[bool, Callable[[], bool]]
 
 
 @dataclass(frozen=True)
@@ -431,7 +427,6 @@ class CommentPublisher:
         *,
         bundle_loader: Callable[[int], Awaitable[CredentialBundle]],
         account_gates: AccountWriteGate,
-        auto_comment_enabled: _FeatureSwitch,
         worker_id: Optional[str] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -439,13 +434,10 @@ class CommentPublisher:
         self._protocol = protocol
         self._bundle_loader = bundle_loader
         self._account_gates = account_gates
-        self._auto_comment_enabled = auto_comment_enabled
         self._worker_id = worker_id or 'comment-{}'.format(uuid.uuid4().hex)
         self._clock = clock
 
     async def run_once(self) -> Optional[int]:
-        if not self._enabled(self._auto_comment_enabled):
-            return None
         claim = await self._database.claim(
             'comment_items',
             ('prepared', 'in_flight', 'unknown_outcome'),
@@ -926,7 +918,3 @@ class CommentPublisher:
         else:
             return None
         return result if result >= 0 else None
-
-    @staticmethod
-    def _enabled(value: _FeatureSwitch) -> bool:
-        return bool(value() if callable(value) else value)

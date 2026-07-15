@@ -39,24 +39,6 @@ export class DiskSpaceSettingsComponent implements OnInit, OnChanges {
   readonly settingsForm: FormGroup;
   readonly syncFailedWarningTip = SYNC_FAILED_WARNING_TIP;
 
-  readonly intervalOptions = [
-    { label: '不检测', value: 0 },
-    { label: '10 秒', value: 10 },
-    { label: '30 秒', value: 30 },
-    { label: '1 分钟', value: 60 },
-    { label: '3 分钟', value: 180 },
-    { label: '5 分钟', value: 300 },
-    { label: '10 分钟', value: 600 },
-  ];
-
-  readonly thresholdOptions = [
-    { label: '1 GB', value: 1024 ** 3 },
-    { label: '3 GB', value: 1024 ** 3 * 3 },
-    { label: '5 GB', value: 1024 ** 3 * 5 },
-    { label: '10 GB', value: 1024 ** 3 * 10 },
-    { label: '20 GB', value: 1024 ** 3 * 20 },
-  ];
-
   readonly capacityOptions = [
     { label: '不限制', value: 0 },
     { label: '100 GB', value: 1024 ** 3 * 100 },
@@ -88,18 +70,6 @@ export class DiskSpaceSettingsComponent implements OnInit, OnChanges {
       recordingCapacity: [''],
       capacityWarningThreshold: [''],
     });
-  }
-
-  get recycleRecordsControl() {
-    return this.settingsForm.get('recycleRecords') as FormControl;
-  }
-
-  get checkIntervalControl() {
-    return this.settingsForm.get('checkInterval') as FormControl;
-  }
-
-  get spaceThresholdControl() {
-    return this.settingsForm.get('spaceThreshold') as FormControl;
   }
 
   get recordingCapacityControl() {

@@ -1,3 +1,8 @@
+<ng-container *ngIf="authPage; else appShell">
+  <router-outlet></router-outlet>
+</ng-container>
+
+<ng-template #appShell>
 <nz-layout>
   <ng-container *ngIf="!useDrawer" [ngTemplateOutlet]="sider"></ng-container>
 
@@ -60,10 +65,30 @@
             nzMatchRouter="true"
             nz-tooltip
             nzTooltipPlacement="right"
+            [nzTooltipTitle]="collapsed ? '网络管理' : ''"
+          >
+            <i nz-icon nzType="global" nzTheme="outline"></i>
+            <span><a routerLink="/network">网络管理</a></span>
+          </li>
+          <li
+            nz-menu-item
+            nzMatchRouter="true"
+            nz-tooltip
+            nzTooltipPlacement="right"
             [nzTooltipTitle]="collapsed ? '设置' : ''"
           >
             <i nz-icon nzType="setting" nzTheme="outline"></i>
             <span><a routerLink="/settings">设置</a></span>
+          </li>
+          <li
+            nz-menu-item
+            nzMatchRouter="true"
+            nz-tooltip
+            nzTooltipPlacement="right"
+            [nzTooltipTitle]="collapsed ? '通知设置' : ''"
+          >
+            <i nz-icon nzType="bell" nzTheme="outline"></i>
+            <span><a routerLink="/notifications">通知设置</a></span>
           </li>
           <li
             nz-menu-item
@@ -90,6 +115,9 @@
         ></i>
       </div>
       <div class="icon-actions">
+        <button class="logout-button" type="button" (click)="logout()">
+          退出
+        </button>
         <a
           class="external-link"
           href="https://github.com/acgnhiki/blrec"
@@ -126,3 +154,4 @@
     </nz-layout>
   </ng-container>
 </nz-drawer>
+</ng-template>

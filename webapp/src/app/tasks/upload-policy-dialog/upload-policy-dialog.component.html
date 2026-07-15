@@ -1,11 +1,11 @@
 <nz-modal
-  [nzTitle]="'投稿设置 · ' + roomName + ' · ' + roomId"
+  [nzTitle]="modalTitle"
   nzWidth="760px"
   nzWrapClassName="upload-policy-modal"
   [nzVisible]="visible"
   [nzMaskClosable]="false"
-  [nzKeyboard]="!saving && !deleting"
-  [nzClosable]="!saving && !deleting"
+  [nzKeyboard]="!saving"
+  [nzClosable]="!saving"
   (nzOnCancel)="close()"
   (nzAfterClose)="closed.emit()"
 >
@@ -600,24 +600,11 @@
 
   <ng-template [nzModalFooter]>
     <div class="modal-footer">
-      <button
-        *ngIf="existingPolicy"
-        nz-button
-        nzDanger
-        type="button"
-        nz-popconfirm
-        nzPopconfirmTitle="只删除以后场次的投稿设置；已创建的上传任务不受影响。确认删除吗？"
-        [nzLoading]="deleting"
-        [disabled]="saving || deleting"
-        (nzOnConfirm)="deletePolicy()"
-      >
-        删除投稿设置
-      </button>
       <span class="footer-spacer"></span>
       <button
         nz-button
         type="button"
-        [disabled]="saving || deleting"
+        [disabled]="saving"
         (click)="close()"
       >
         取消

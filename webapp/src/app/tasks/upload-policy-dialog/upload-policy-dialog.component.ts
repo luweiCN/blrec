@@ -111,6 +111,7 @@ type PolicyValidationErrors = Partial<
 })
 export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   @Input() roomId!: number;
+  @Input() roomIds: readonly number[] = [];
   @Input() roomName = '';
   @Input() liveAreaName = '';
   @Input() liveParentAreaName = '';
@@ -120,7 +121,6 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   loading = true;
   categoryLoading = false;
   saving = false;
-  deleting = false;
   existingPolicy = false;
   error: string | null = null;
   categoryError: string | null = null;
@@ -129,6 +129,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   saveAttempted = false;
   accounts: readonly BiliAccount[] = [];
   catalog: UploadCategoryCatalog | null = null;
+  categoryOptions: NzCascaderOption[] = [];
   coverAssets: readonly CoverAsset[] = [];
   selectedCoverPreviewUrl: string | null = null;
   collectionCatalog: BiliCollectionCatalog | null = null;
@@ -210,6 +211,17 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return this.accounts.filter((account) => account.state === 'active');
   }
 
+  get targetRoomIds(): readonly number[] {
+    const values = this.roomIds.length > 0 ? this.roomIds : [this.roomId];
+    return [...new Set(values.filter((roomId) => roomId > 0))];
+  }
+
+  get modalTitle(): string {
+    return this.targetRoomIds.length > 1
+      ? `批量投稿设置 · ${this.targetRoomIds.length} 个房间`
+      : `投稿设置 · ${this.roomName} · ${this.roomId}`;
+  }
+
   get categories(): UploadCategoryNode[] {
     return this.catalog?.categories ?? [];
   }
@@ -246,19 +258,6 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   get isRepost(): boolean {
     return this.draft.creationStatementId === -2;
-  }
-
-  get categoryOptions(): NzCascaderOption[] {
-    return this.categories.map((parent) => ({
-      value: parent.id,
-      label: parent.name,
-      isLeaf: false,
-      children: parent.children.map((child) => ({
-        value: child.id,
-        label: child.name,
-        isLeaf: true,
-      })),
-    }));
   }
 
   get selectedCategoryDescription(): string {
@@ -322,7 +321,6 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return (
       this.loading ||
       this.saving ||
-      this.deleting ||
       this.coverUploading ||
       this.creatingCollection
     );
@@ -529,7 +527,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   save(): void {
-    if (this.loading || this.saving || this.deleting) {
+    if (this.loading || this.saving) {
       return;
     }
     this.saveAttempted = true;
@@ -576,8 +574,12 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     };
     this.saving = true;
     this.error = null;
-    this.policyService
-      .save(this.roomId, request)
+    const targetRoomIds = this.targetRoomIds;
+    const operation: Observable<unknown> =
+      targetRoomIds.length === 1
+        ? this.policyService.save(targetRoomIds[0], request)
+        : this.policyService.saveMany(targetRoomIds, request);
+    operation
       .pipe(
         finalize(() => {
           this.saving = false;
@@ -588,35 +590,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       .subscribe({
         next: () => {
           this.existingPolicy = true;
-          this.message.success(`房间 ${this.roomId} 的投稿设置已保存`);
-          this.visible = false;
-          this.changeDetector.markForCheck();
-        },
-        error: (error: unknown) => {
-          this.error = this.errorMessage(error);
-          this.changeDetector.markForCheck();
-        },
-      });
-  }
-
-  deletePolicy(): void {
-    if (!this.existingPolicy || this.deleting || this.saving) {
-      return;
-    }
-    this.deleting = true;
-    this.error = null;
-    this.policyService
-      .delete(this.roomId)
-      .pipe(
-        finalize(() => {
-          this.deleting = false;
-          this.changeDetector.markForCheck();
-        }),
-        takeUntil(this.destroy$),
-      )
-      .subscribe({
-        next: () => {
-          this.message.success(`房间 ${this.roomId} 的投稿设置已删除`);
+          this.message.success(
+            targetRoomIds.length > 1
+              ? `已保存 ${targetRoomIds.length} 个房间的投稿设置`
+              : `房间 ${this.roomId} 的投稿设置已保存`,
+          );
           this.visible = false;
           this.changeDetector.markForCheck();
         },
@@ -628,7 +606,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   close(): void {
-    if (!this.saving && !this.deleting) {
+    if (!this.saving) {
       this.visible = false;
     }
   }
@@ -646,7 +624,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   private loadCategories(forceRefresh = false): void {
     if (this.draft.accountMode === 'fixed' && this.draft.accountId === null) {
-      this.catalog = null;
+      this.setCategoryCatalog(null);
       this.categoryError = '请选择一个可用的固定投稿账号。';
       this.loading = false;
       this.changeDetector.markForCheck();
@@ -669,12 +647,12 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: (catalog) => {
-          this.catalog = catalog;
+          this.setCategoryCatalog(catalog);
           this.syncCategoryPath();
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
-          this.catalog = null;
+          this.setCategoryCatalog(null);
           this.categoryError = this.errorMessage(error);
           this.changeDetector.markForCheck();
         },
@@ -801,9 +779,23 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   private clearCategorySelectionForAccountChange(): void {
-    this.catalog = null;
+    this.setCategoryCatalog(null);
     this.categoryPath = [];
     this.draft.tid = null;
+  }
+
+  private setCategoryCatalog(catalog: UploadCategoryCatalog | null): void {
+    this.catalog = catalog;
+    this.categoryOptions = (catalog?.categories ?? []).map((parent) => ({
+      value: parent.id,
+      label: parent.name,
+      isLeaf: false,
+      children: parent.children.map((child) => ({
+        value: child.id,
+        label: child.name,
+        isLeaf: true,
+      })),
+    }));
   }
 
   private clearCollectionSelectionForAccountChange(): void {

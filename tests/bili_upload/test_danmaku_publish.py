@@ -141,7 +141,6 @@ def publisher(
         protocol,
         bundle_loader=bundle_loader,
         account_gates=AccountWriteGate(database),
-        auto_danmaku_enabled=True,
         interval_seconds=25,
         auth_refresh=auth_refresh,
         worker_id='danmaku-test',

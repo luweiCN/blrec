@@ -1,0 +1,14 @@
+:host {
+  display: block;
+  height: 100%;
+}
+
+.inner-content {
+  height: 100%;
+  overflow: auto;
+}
+
+.notifications-page {
+  box-sizing: border-box;
+  padding: 24px;
+}

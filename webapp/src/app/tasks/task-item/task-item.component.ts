@@ -14,6 +14,7 @@ import {
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { zip } from 'rxjs';
+import { finalize } from 'rxjs/operators';
 
 import { retry } from '../../shared/rx-operators';
 import { SettingService } from '../../settings/shared/services/setting.service';
@@ -58,8 +59,11 @@ export class TaskItemComponent implements OnChanges {
     return this.data.room_info.room_id;
   }
 
-  get toggleRecorderForbidden() {
-    return !this.data.task_status.monitor_enabled;
+  get taskEnabled(): boolean {
+    return (
+      this.data.task_status.monitor_enabled ||
+      this.data.task_status.recorder_enabled
+    );
   }
 
   setSelected(selected: boolean): void {
@@ -104,25 +108,22 @@ export class TaskItemComponent implements OnChanges {
     this.taskManager.updateTaskInfo(this.roomId).subscribe();
   }
 
-  toggleRecorder(): void {
-    if (this.toggleRecorderForbidden) {
-      return;
-    }
-
+  toggleTask(): void {
     if (this.switchPending) {
       return;
     }
     this.switchPending = true;
-
-    if (this.data.task_status.recorder_enabled) {
-      this.taskManager
-        .disableRecorder(this.roomId)
-        .subscribe(() => (this.switchPending = false));
-    } else {
-      this.taskManager
-        .enableRecorder(this.roomId)
-        .subscribe(() => (this.switchPending = false));
-    }
+    const request = this.taskEnabled
+      ? this.taskManager.stopTask(this.roomId)
+      : this.taskManager.startTask(this.roomId);
+    request
+      .pipe(
+        finalize(() => {
+          this.switchPending = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe();
   }
 
   removeTask(): void {
@@ -135,14 +136,6 @@ export class TaskItemComponent implements OnChanges {
           this.taskManager.removeTask(this.roomId).subscribe(resolve, reject);
         }),
     });
-  }
-
-  startTask(): void {
-    if (this.data.task_status.running_status === RunningStatus.STOPPED) {
-      this.taskManager.startTask(this.roomId).subscribe();
-    } else {
-      this.message.warning('任务运行中，忽略操作。');
-    }
   }
 
   stopTask(force: boolean = false): void {
@@ -167,31 +160,6 @@ export class TaskItemComponent implements OnChanges {
       });
     } else {
       this.taskManager.stopTask(this.roomId).subscribe();
-    }
-  }
-
-  disableRecorder(force: boolean = false): void {
-    if (!this.data.task_status.recorder_enabled) {
-      this.message.warning('录制处于关闭状态，忽略操作。');
-      return;
-    }
-
-    if (
-      force &&
-      this.data.task_status.running_status == RunningStatus.RECORDING
-    ) {
-      this.modal.confirm({
-        nzTitle: '确定要强制停止录制？',
-        nzContent: '正在录制的文件会被强行中断！确定要放弃正在录制的文件？',
-        nzOnOk: () =>
-          new Promise((resolve, reject) => {
-            this.taskManager
-              .disableRecorder(this.roomId, force)
-              .subscribe(resolve, reject);
-          }),
-      });
-    } else {
-      this.taskManager.disableRecorder(this.roomId).subscribe();
     }
   }
 

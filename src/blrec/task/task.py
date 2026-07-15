@@ -37,6 +37,8 @@ from .models import (
 if TYPE_CHECKING:
     from blrec.bili.anonymous_room_client import AnonymousRoomClient
     from blrec.bili.live_status_coordinator import LiveStatusCoordinator
+    from blrec.networking.aiohttp_session import AiohttpSessionPool
+    from blrec.networking.manager import NetworkRouteManager
 
 __all__ = ('RecordTask',)
 
@@ -57,6 +59,8 @@ class RecordTask:
         anonymous_room_client: Optional['AnonymousRoomClient'] = None,
         auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
         recording_journal: Optional[RecordingJournalBridge] = None,
+        network_session_pool: Optional['AiohttpSessionPool'] = None,
+        network_route_manager: Optional['NetworkRouteManager'] = None,
     ) -> None:
         super().__init__()
 
@@ -66,11 +70,28 @@ class RecordTask:
                 'must be provided together'
             )
 
-        if auth_failure_reporter is None:
-            self._live = Live(room_id, user_agent, cookie)
+        if network_session_pool is None and network_route_manager is None:
+            if auth_failure_reporter is None:
+                self._live = Live(room_id, user_agent, cookie)
+            else:
+                self._live = Live(
+                    room_id,
+                    user_agent,
+                    cookie,
+                    auth_failure_reporter=auth_failure_reporter,
+                )
         else:
             self._live = Live(
-                room_id, user_agent, cookie, auth_failure_reporter=auth_failure_reporter
+                room_id,
+                user_agent,
+                cookie,
+                auth_failure_reporter=auth_failure_reporter,
+                session=(
+                    network_session_pool.client('bili_api')
+                    if network_session_pool is not None
+                    else None
+                ),
+                network_route_manager=network_route_manager,
             )
 
         self._room_id = room_id
@@ -84,6 +105,7 @@ class RecordTask:
         self._live_status_coordinator = live_status_coordinator
         self._anonymous_room_client = anonymous_room_client
         self._recording_journal = recording_journal
+        self._network_session_pool = network_session_pool
         self._batch_monitoring = live_status_coordinator is not None
 
         self._ready = False
@@ -533,6 +555,12 @@ class RecordTask:
             await self._recorder.stop()
             await self._postprocessor.stop()
 
+    async def suppress_current_live(self) -> None:
+        """Stop this broadcast while leaving the room task enabled."""
+        await self._recorder.suppress_current_live()
+        await self._postprocessor.stop()
+        await self._postprocessor.start()
+
     async def update_info(self, raise_exception: bool = False) -> bool:
         return await self._live.update_info(raise_exception=raise_exception)
 
@@ -552,8 +580,11 @@ class RecordTask:
         self._setup_postprocessor_event_submitter()
 
     def _setup_danmaku_client(self) -> None:
+        session = self._live.session
+        if self._network_session_pool is not None:
+            session = self._network_session_pool.client('danmaku')
         self._danmaku_client = DanmakuClient(
-            self._live.session,
+            session,
             self._live.appapi,
             self._live.webapi,
             self._live.room_info.room_id,

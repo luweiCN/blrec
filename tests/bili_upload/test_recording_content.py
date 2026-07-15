@@ -1,3 +1,4 @@
+from io import BytesIO
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
@@ -7,10 +8,14 @@ import pytest_asyncio
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.recording_content import (
+    FlvMediaSnapshot,
     RecordingContentInvalid,
     RecordingContentReader,
     RecordingContentUnavailable,
 )
+from blrec.flv.common import create_metadata_tag, parse_metadata
+from blrec.flv.io import FlvReader, FlvWriter
+from blrec.flv.models import FlvHeader
 
 
 @pytest_asyncio.fixture
@@ -74,6 +79,58 @@ async def test_media_falls_back_to_growing_source_file(
     assert resource.size == len(b'source-video')
     assert resource.content_type == 'video/x-flv'
     assert resource.recording is True
+    assert resource.room_id == 100
+
+
+def test_flv_snapshot_exposes_duration_and_maps_virtual_ranges(tmp_path: Path) -> None:
+    source = tmp_path / 'recording.flv'
+    original = BytesIO()
+    writer = FlvWriter(original)
+    writer.write_header(FlvHeader('FLV', 1, 5, 9))
+    writer.write_tag(
+        create_metadata_tag({'duration': 0.0, 'filesize': 0.0, 'Title': '直播'})
+    )
+    source_tail_start = original.tell()
+    tail = b'video-tag-0' + b'video-tag-1' + b'video-tag-2'
+    original.write(tail)
+    source.write_bytes(original.getvalue())
+
+    snapshot = FlvMediaSnapshot.create(
+        str(source),
+        source.stat().st_size,
+        {
+            'duration': 12.5,
+            'filesize': float(source.stat().st_size),
+            'lasttimestamp': 12.5,
+            'keyframes': {
+                'times': [0.0, 5.0, 10.0],
+                'filepositions': [
+                    float(source_tail_start),
+                    float(source_tail_start + 11),
+                    float(source_tail_start + 22),
+                ],
+            },
+        },
+    )
+
+    prefix_reader = FlvReader(BytesIO(snapshot.prefix))
+    prefix_reader.read_header()
+    metadata = parse_metadata(prefix_reader.read_tag())
+    offset = len(snapshot.prefix) - source_tail_start
+    assert metadata['duration'] == 12.5
+    assert metadata['filesize'] == snapshot.size
+    assert metadata['keyframes']['filepositions'] == [
+        float(source_tail_start + offset),
+        float(source_tail_start + 11 + offset),
+        float(source_tail_start + 22 + offset),
+    ]
+    assert snapshot.duration_ms == 12_500
+    assert b''.join(snapshot.iter_range(0, snapshot.size)) == snapshot.prefix + tail
+
+    range_start = len(snapshot.prefix) - 4
+    assert b''.join(snapshot.iter_range(range_start, 12)) == (
+        snapshot.prefix[-4:] + tail[:8]
+    )
 
 
 @pytest.mark.asyncio

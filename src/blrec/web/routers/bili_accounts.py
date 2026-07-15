@@ -29,7 +29,7 @@ from blrec.utils.string import camel_case
 from .. import security
 
 manager: Optional[AccountManager] = None
-unavailable_reason: Optional[str] = 'Bilibili account management is not enabled'
+unavailable_reason: Optional[str] = 'Bilibili account management is not ready'
 
 
 class ApiModel(BaseModel):
@@ -109,6 +109,8 @@ def get_account_manager() -> AccountManager:
 async def authenticated_manager_subject(
     request: Request, x_api_key: Optional[str] = Header(None)
 ) -> str:
+    if security.auth_store is not None:
+        return security.manager_subject(request)
     if not security.api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail='API key is not configured'

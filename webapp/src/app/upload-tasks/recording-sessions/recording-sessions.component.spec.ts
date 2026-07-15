@@ -1,12 +1,15 @@
 import { CommonModule } from '@angular/common';
 import { Clipboard } from '@angular/cdk/clipboard';
+import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule } from '@angular/forms';
 
 import { of, throwError } from 'rxjs';
 import {
   CopyOutline,
+  MoreOutline,
   QuestionCircleOutline,
   RedoOutline,
   ReloadOutline,
@@ -16,8 +19,11 @@ import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
 import { NzDatePickerModule } from 'ng-zorro-antd/date-picker';
-import { NzDrawerModule } from 'ng-zorro-antd/drawer';
-import { NzDropDownModule } from 'ng-zorro-antd/dropdown';
+import { NzDrawerComponent, NzDrawerModule } from 'ng-zorro-antd/drawer';
+import {
+  NzDropDownDirective,
+  NzDropDownModule,
+} from 'ng-zorro-antd/dropdown';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
@@ -33,6 +39,14 @@ import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
 
+@Component({ selector: 'app-task-edit-dialog', template: '' })
+class TaskEditDialogStubComponent {
+  @Input() visible = false;
+  @Input() jobIds: readonly number[] = [];
+  @Output() readonly closed = new EventEmitter<void>();
+  @Output() readonly saved = new EventEmitter<void>();
+}
+
 describe('RecordingSessionsComponent', () => {
   let fixture: ComponentFixture<RecordingSessionsComponent>;
   let service: jasmine.SpyObj<RecordingSessionService>;
@@ -46,7 +60,9 @@ describe('RecordingSessionsComponent', () => {
         'listSessions',
         'decideDanmakuItem',
         'runJobAction',
+        'runSessionAction',
         'retryFailedJobs',
+        'previewRetryFailedJobs',
       ]
     );
     clipboard = jasmine.createSpyObj<Clipboard>('Clipboard', ['copy']);
@@ -54,10 +70,13 @@ describe('RecordingSessionsComponent', () => {
       'success',
       'error',
       'warning',
+      'info',
     ]);
     service.decideDanmakuItem.and.returnValue(of(void 0));
     service.runJobAction.and.returnValue(of({ results: [] }));
+    service.runSessionAction.and.returnValue(of({ results: [] }));
     service.retryFailedJobs.and.returnValue(of({ results: [] }));
+    service.previewRetryFailedJobs.and.returnValue(of({ items: [] }));
     service.listSessions.and.returnValue(
       of({
         degradedReason: null,
@@ -85,6 +104,12 @@ describe('RecordingSessionsComponent', () => {
             danmakuCount: 321,
             totalFileSizeBytes: 1_048_576,
             recordDurationSeconds: 59,
+            uploadIntent: 'none',
+            uploadSuppressed: false,
+            deletionState: 'none',
+            deletionError: null,
+            displayState: 'waiting_review',
+            availableActions: ['delete_local'],
             uploadJob: {
               id: 9,
               accountId: 7,
@@ -110,7 +135,19 @@ describe('RecordingSessionsComponent', () => {
               repairMessage: null,
               repairError: null,
               canRetry: false,
-              canRepair: true,
+              canRepair: false,
+              canSkip: false,
+              canRepost: false,
+              canDelete: true,
+              operatorPaused: false,
+              scheduledPublishAt: null,
+              collectionBranchState: 'disabled',
+              collectionError: null,
+              commentError: null,
+              danmakuError: null,
+              canPause: false,
+              canResume: false,
+              canEdit: false,
               unknownDanmakuItems: [
                 {
                   id: 11,
@@ -160,7 +197,7 @@ describe('RecordingSessionsComponent', () => {
     );
 
     await TestBed.configureTestingModule({
-      declarations: [RecordingSessionsComponent],
+      declarations: [RecordingSessionsComponent, TaskEditDialogStubComponent],
       imports: [
         CommonModule,
         FormsModule,
@@ -190,6 +227,7 @@ describe('RecordingSessionsComponent', () => {
           provide: NZ_ICONS,
           useValue: [
             CopyOutline,
+            MoreOutline,
             QuestionCircleOutline,
             RedoOutline,
             ReloadOutline,
@@ -220,7 +258,9 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('录制概要');
     expect(text).toContain('投稿状态');
     expect(text).toContain('房间 100');
-    expect(text).toContain('已归集');
+    expect(fixture.nativeElement.querySelector('thead').textContent).not.toContain(
+      '录制状态'
+    );
     expect(text).toContain('今晚挑战通关');
     expect(text).toContain('主播名');
     expect(text).toContain('59 秒');
@@ -230,6 +270,69 @@ describe('RecordingSessionsComponent', () => {
     expect(text).not.toContain('UID 42');
     expect(text).not.toContain('/rec/p1.mp4');
     expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
+  });
+
+  it('renders more actions with the shared ellipsis dropdown', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready recording-session view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [{ ...session, availableActions: ['retry_failed', 'delete_local'] }],
+      },
+    };
+    fixture.detectChanges();
+
+    const trigger = fixture.nativeElement.querySelector(
+      '[data-testid="session-actions-trigger"]'
+    ) as HTMLButtonElement | null;
+    const dropdown = fixture.debugElement
+      .query(By.directive(NzDropDownDirective))
+      .injector.get(NzDropDownDirective);
+
+    expect(trigger).not.toBeNull();
+    expect(trigger?.classList).toContain('ant-btn-text');
+    expect(trigger?.querySelector('i[nz-icon][nztype="more"]')).not.toBeNull();
+    expect(trigger?.textContent?.trim()).toBe('');
+    expect(dropdown.nzOverlayClassName).toBe('action-dropdown-overlay');
+  });
+
+  it('hides the more menu when delete is the only available row action', () => {
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="delete-session"]')
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="session-actions-trigger"]',
+      )
+    ).toBeNull();
+  });
+
+  it('keeps delete visible and uses concise operation names', () => {
+    fixture.detectChanges();
+
+    const deleteButton = fixture.nativeElement.querySelector(
+      '[data-testid="delete-session"]',
+    ) as HTMLButtonElement | null;
+    expect(deleteButton).not.toBeNull();
+    expect(deleteButton?.textContent?.trim()).toBe('删除');
+
+    fixture.componentInstance.openSessionAction('retry_failed', [1]);
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('重试上传');
+    fixture.componentInstance.openSessionAction('repair_transcode', [1]);
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('修复转码');
+    fixture.componentInstance.openSessionAction('backfill_danmaku', [1]);
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('回灌弹幕');
+    fixture.componentInstance.openSessionAction('repost_as_new', [1]);
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('重新投稿');
+    fixture.componentInstance.openSessionAction('delete_local', [1]);
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('删除');
   });
 
   it('shows one completed status and links an approved archive title', () => {
@@ -246,6 +349,7 @@ describe('RecordingSessionsComponent', () => {
         sessions: [
           {
             ...session,
+            displayState: 'completed',
             uploadJob: {
               ...session.uploadJob!,
               state: 'approved',
@@ -266,6 +370,29 @@ describe('RecordingSessionsComponent', () => {
     expect(archiveLink?.href).toBe(
       'https://www.bilibili.com/video/BV1test'
     );
+  });
+
+  it('links an approved part only after its cid is available', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    const approved = {
+      ...session,
+      uploadJob: {
+        ...session.uploadJob!,
+        state: 'approved' as const,
+        parts: [
+          {
+            ...session.uploadJob!.parts[0],
+            cid: 456,
+          },
+        ],
+      },
+    };
+
+    expect(fixture.componentInstance.remotePartUrl(approved, 1)).toBe(
+      'https://www.bilibili.com/video/BV1test?p=1'
+    );
+    expect(fixture.componentInstance.remotePartUrl(session, 1)).toBeNull();
   });
 
   it('requests the selected server page and page size', () => {
@@ -309,7 +436,20 @@ describe('RecordingSessionsComponent', () => {
     });
   });
 
-  it('retries every safe failed job without a manual selection', () => {
+  it('previews every safe failed job before retrying', () => {
+    service.previewRetryFailedJobs.and.returnValue(
+      of({
+        items: [
+          {
+            jobId: 9,
+            roomId: 100,
+            title: '失败录像',
+            accountDisplayName: '投稿账号',
+            reason: '网络失败',
+          },
+        ],
+      })
+    );
     service.retryFailedJobs.and.returnValue(
       of({
         results: [
@@ -322,19 +462,25 @@ describe('RecordingSessionsComponent', () => {
 
     fixture.componentInstance.retryAllFailedJobs();
 
+    expect(service.previewRetryFailedJobs).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.retryPreviewVisible).toBeTrue();
+    expect(service.retryFailedJobs).not.toHaveBeenCalled();
+
+    fixture.componentInstance.submitRetryAllFailedJobs();
+
     expect(service.retryFailedJobs).toHaveBeenCalledTimes(1);
     expect(message.warning).toHaveBeenCalledWith(
       '已重新排队 1 个任务，跳过 1 个：本地视频不可用'
     );
   });
 
-  it('selects current-page jobs and exposes batch actions', () => {
+  it('selects current-page sessions and exposes batch actions', () => {
     fixture.detectChanges();
 
-    fixture.componentInstance.setJobSelected(9, true);
+    fixture.componentInstance.setSessionSelected(1, true);
     fixture.detectChanges();
 
-    expect(fixture.componentInstance.selectedJobCount).toBe(1);
+    expect(fixture.componentInstance.selectedSessionCount).toBe(1);
     expect(
       fixture.nativeElement.querySelector('[data-testid="batch-action-bar"]')
     ).not.toBeNull();
@@ -354,33 +500,33 @@ describe('RecordingSessionsComponent', () => {
     expect(fixedCell?.textContent).toContain('详情');
   });
 
-  it('submits row actions through the same batch endpoint', () => {
-    service.runJobAction.and.returnValue(
+  it('submits row actions through the session batch endpoint', () => {
+    service.runSessionAction.and.returnValue(
       of({
         results: [
-          { jobId: 9, accepted: true, message: '已排队检查 B 站转码状态' },
+          { sessionId: 1, accepted: true, message: '已排队检查 B 站转码状态' },
         ],
       })
     );
     fixture.detectChanges();
 
-    fixture.componentInstance.openUploadAction('repair_transcode', [9]);
+    fixture.componentInstance.openSessionAction('repair_transcode', [1]);
     fixture.componentInstance.submitUploadAction();
 
-    expect(service.runJobAction).toHaveBeenCalledOnceWith(
+    expect(service.runSessionAction).toHaveBeenCalledOnceWith(
       'repair_transcode',
-      [9]
+      [1]
     );
     expect(message.success).toHaveBeenCalledWith('已排队检查 B 站转码状态');
     expect(fixture.componentInstance.uploadActionVisible).toBeFalse();
   });
 
   it('keeps a rejected upload action visible with its exact reason', () => {
-    service.runJobAction.and.returnValue(
+    service.runSessionAction.and.returnValue(
       of({
         results: [
           {
-            jobId: 9,
+            sessionId: 1,
             accepted: false,
             message: '投稿结果未知，自动重试可能产生重复稿件',
           },
@@ -389,43 +535,95 @@ describe('RecordingSessionsComponent', () => {
     );
     fixture.detectChanges();
 
-    fixture.componentInstance.openUploadAction('retry_failed', [9]);
+    fixture.componentInstance.openSessionAction('retry_failed', [1]);
     fixture.componentInstance.submitUploadAction();
 
     expect(fixture.componentInstance.uploadActionVisible).toBeTrue();
     expect(fixture.componentInstance.uploadActionError).toContain('投稿结果未知');
   });
 
+  it('allows a session without an upload job to be uploaded or deleted', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready recording-session view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            uploadJob: null,
+            displayState: 'not_uploading',
+            availableActions: ['set_upload', 'delete_local'],
+          },
+        ],
+      },
+    };
+
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.pageSessionIds).toEqual([1]);
+    expect(fixture.componentInstance.hasAction(session.id, 'set_upload')).toBeTrue();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="session-select"]')
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="session-actions-trigger"]')
+    ).not.toBeNull();
+  });
+
   it('opens full session details in a right drawer', () => {
     fixture.detectChanges();
     const session = fixture.componentInstance.sessions[0];
+    const drawer = fixture.debugElement
+      .query(By.directive(NzDrawerComponent))
+      .injector.get(NzDrawerComponent);
 
     fixture.componentInstance.openDetails(session);
+    fixture.detectChanges();
 
     expect(fixture.componentInstance.detailVisible).toBeTrue();
     expect(fixture.componentInstance.selectedSession).toBe(session);
+    expect(drawer.nzWidth).toBe('1180px');
+    expect(document.body.textContent).not.toContain('remote-p1');
     fixture.componentInstance.closeDetails();
     expect(fixture.componentInstance.detailVisible).toBeFalse();
     expect(fixture.componentInstance.selectedSession).toBeNull();
   });
 
-  it('opens and clears a selected part content dialog', () => {
+  it('opens and clears video and danmaku in separate dialogs', () => {
     fixture.detectChanges();
     const session = fixture.componentInstance.sessions[0];
     const part = session.parts[0];
 
-    fixture.componentInstance.openPartContent(session, part, 'danmaku');
+    fixture.componentInstance.openPartVideo(session, part);
 
-    expect(fixture.componentInstance.contentVisible).toBeTrue();
-    expect(fixture.componentInstance.contentSession).toBe(session);
-    expect(fixture.componentInstance.contentPart).toBe(part);
-    expect(fixture.componentInstance.contentFocus).toBe('danmaku');
+    expect(fixture.componentInstance.videoVisible).toBeTrue();
+    expect(fixture.componentInstance.videoSession).toBe(session);
+    expect(fixture.componentInstance.videoPart).toBe(part);
+    expect(fixture.componentInstance.danmakuVisible).toBeFalse();
 
-    fixture.componentInstance.contentVisibilityChanged(false);
+    fixture.componentInstance.videoVisibilityChanged(false);
 
-    expect(fixture.componentInstance.contentVisible).toBeFalse();
-    expect(fixture.componentInstance.contentSession).toBeNull();
-    expect(fixture.componentInstance.contentPart).toBeNull();
+    expect(fixture.componentInstance.videoVisible).toBeFalse();
+    expect(fixture.componentInstance.videoSession).toBeNull();
+    expect(fixture.componentInstance.videoPart).toBeNull();
+
+    fixture.componentInstance.openPartDanmaku(session, part);
+
+    expect(fixture.componentInstance.danmakuVisible).toBeTrue();
+    expect(fixture.componentInstance.danmakuSession).toBe(session);
+    expect(fixture.componentInstance.danmakuPart).toBe(part);
+    expect(fixture.componentInstance.videoVisible).toBeFalse();
+
+    fixture.componentInstance.danmakuVisibilityChanged(false);
+
+    expect(fixture.componentInstance.danmakuVisible).toBeFalse();
+    expect(fixture.componentInstance.danmakuSession).toBeNull();
+    expect(fixture.componentInstance.danmakuPart).toBeNull();
   });
 
   it('does not reopen a closed detail drawer when the list refreshes', () => {

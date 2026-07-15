@@ -276,7 +276,6 @@ def publisher(database: BiliUploadDatabase, protocol: FakeProtocol) -> CommentPu
         protocol,
         bundle_loader=bundle_loader,
         account_gates=AccountWriteGate(database),
-        auto_comment_enabled=True,
         worker_id='comment-test',
         clock=lambda: 1000,
     )

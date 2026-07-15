@@ -245,23 +245,16 @@ async def test_low_disk_pauses_import_and_keeps_source(
 
 
 @pytest.mark.asyncio
-async def test_emergency_switch_pauses_import_without_losing_task(
+async def test_importer_processes_pending_branch_without_global_switch(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
     xml = write_xml(tmp_path / 'switch.xml', '<d p="1,1,25,1,1,0,h,1">弹幕</d>')
     await seed_part(database, xml, branch_state='pending')
-    enabled = False
-    importer = DanmakuImporter(
-        database, space_threshold_bytes=0, enabled=lambda: enabled
-    )
+    importer = DanmakuImporter(database, space_threshold_bytes=0)
 
     await importer.create(1)
-    assert await database.scalar('SELECT COUNT(*) FROM danmaku_items') == 0
+    assert await database.scalar('SELECT COUNT(*) FROM danmaku_items') == 1
     assert (
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
-        == 'importing'
+        == 'publishing'
     )
-
-    enabled = True
-    assert await importer.run_once() == 1
-    assert await database.scalar('SELECT COUNT(*) FROM danmaku_items') == 1

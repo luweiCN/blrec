@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Awaitable, Callable, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, List, Optional
 
 import aiohttp
 import attr
@@ -14,7 +14,6 @@ from pydantic import BaseModel as PydanticBaseModel
 
 from . import __prog__, __version__
 from .bili.live_status import BreakerState
-from .disk_space import SpaceMonitor, SpaceReclaimer
 from .exception import ExceptionHandler, ExistsError, exception_callback
 from .setting import Settings, SettingsIn, SettingsManager, SettingsOut, TaskOptions
 from .setting.typing import KeySetOfSettings
@@ -26,6 +25,8 @@ if TYPE_CHECKING:
     from .bili_upload.retention import RetentionManager
     from .core.typing import MetaData
     from .flv.operators import StreamProfile
+    from .networking.aiohttp_session import AiohttpSessionPool
+    from .networking.manager import NetworkRouteManager
     from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 
 
@@ -104,12 +105,15 @@ class Application:
         recording_retention_provider: Optional[
             Callable[[], Optional[RetentionManager]]
         ] = None,
+        network_route_manager: Optional[NetworkRouteManager] = None,
     ) -> None:
         self._settings = settings
         self._out_dir = settings.output.out_dir
         self._settings_manager = SettingsManager(self, settings)
-        self._live_status_session: Optional[aiohttp.ClientSession] = None
+        self._live_status_session: Optional[Any] = None
         self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
+        self._network_route_manager = network_route_manager
+        self._network_session_pool: Optional[AiohttpSessionPool] = None
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
         self._recording_journal_provider = recording_journal_provider
@@ -196,6 +200,7 @@ class Application:
         )
         await _collect_teardown_error(self._task_manager.destroy_all_tasks(), errors)
         await _collect_teardown_error(self._teardown_live_status_monitor(), errors)
+        await _collect_teardown_error(self._teardown_network_sessions(), errors)
         try:
             self._destroy()
         except BaseException as error:
@@ -251,7 +256,10 @@ class Application:
     async def add_task(self, room_id: int) -> int:
         from .bili.helpers import ensure_room_id
 
-        room_id = await ensure_room_id(room_id)
+        network_pool = self._ensure_network_session_pool()
+        room_id = await ensure_room_id(
+            room_id, None if network_pool is None else network_pool.client('bili_api')
+        )
 
         if self._task_manager.has_task(room_id):
             raise ExistsError(f'a task for the room {room_id} is already existed')
@@ -287,6 +295,9 @@ class Application:
         await self._task_manager.stop_task(room_id, force)
         await self._settings_manager.mark_task_disabled(room_id)
         logger.info(f'Successfully stopped task {room_id}')
+
+    async def suppress_current_live(self, room_id: int) -> None:
+        await self._task_manager.suppress_current_live(room_id)
 
     async def start_all_tasks(self) -> None:
         logger.info('Starting all tasks...')
@@ -415,6 +426,8 @@ class Application:
         from .bili.net import connector, timeout
         from .task import RecordTaskManager
 
+        network_session_pool = self._ensure_network_session_pool()
+
         settings = self._settings.live_monitor
         recording_journal = (
             None
@@ -429,16 +442,22 @@ class Application:
                 managed_cookie_provider=self._managed_cookie_provider,
                 auth_failure_reporter=self._auth_failure_reporter,
                 recording_journal=recording_journal,
+                network_session_pool=network_session_pool,
+                network_route_manager=self._network_route_manager,
             )
             return
 
-        session = aiohttp.ClientSession(
-            connector=connector,
-            connector_owner=False,
-            cookie_jar=aiohttp.DummyCookieJar(),
-            timeout=timeout,
-            trust_env=False,
-        )
+        session: Any
+        if network_session_pool is None:
+            session = aiohttp.ClientSession(
+                connector=connector,
+                connector_owner=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=timeout,
+                trust_env=False,
+            )
+        else:
+            session = network_session_pool.client('room_status', anonymous=True)
         self._live_status_session = session
         try:
             coordinator = LiveStatusCoordinator(
@@ -455,6 +474,8 @@ class Application:
                 managed_cookie_provider=self._managed_cookie_provider,
                 auth_failure_reporter=self._auth_failure_reporter,
                 recording_journal=recording_journal,
+                network_session_pool=network_session_pool,
+                network_route_manager=self._network_route_manager,
             )
             await coordinator.start()
         except BaseException as error:
@@ -466,6 +487,7 @@ class Application:
     ) -> None:
         try:
             await self._teardown_live_status_monitor()
+            await self._teardown_network_sessions()
         except asyncio.CancelledError as cleanup_error:
             raise cleanup_error from original_error
         except BaseException as cleanup_error:
@@ -483,11 +505,23 @@ class Application:
             await _collect_teardown_error(session.close(), errors)
         _raise_teardown_errors(errors)
 
+    def _ensure_network_session_pool(self) -> Optional[AiohttpSessionPool]:
+        if self._network_route_manager is None:
+            return None
+        if self._network_session_pool is None or self._network_session_pool.closed:
+            from .networking.aiohttp_session import AiohttpSessionPool
+
+            self._network_session_pool = AiohttpSessionPool(self._network_route_manager)
+        return self._network_session_pool
+
+    async def _teardown_network_sessions(self) -> None:
+        pool = getattr(self, '_network_session_pool', None)
+        self._network_session_pool = None
+        if pool is not None:
+            await pool.close()
+
     def _setup(self) -> None:
         self._setup_exception_handler()
-        self._setup_space_monitor()
-        self._setup_space_event_submitter()
-        self._setup_space_reclaimer()
         self._setup_notifiers()
         self._setup_webhooks()
 
@@ -497,35 +531,6 @@ class Application:
     def _setup_exception_handler(self) -> None:
         self._exception_handler = ExceptionHandler()
         self._exception_handler.enable()
-
-    def _setup_space_monitor(self) -> None:
-        self._space_monitor = SpaceMonitor(self._out_dir)
-        self._settings_manager.apply_space_monitor_settings()
-        self._space_monitor.enable()
-
-    def _setup_space_event_submitter(self) -> None:
-        from .event.event_submitters import SpaceEventSubmitter
-
-        self._space_event_submitter = SpaceEventSubmitter(self._space_monitor)
-
-    def _setup_space_reclaimer(self) -> None:
-        async def reclaim(size: int) -> bool:
-            if self._recording_retention_provider is None:
-                return False
-            manager = self._recording_retention_provider()
-            if manager is None:
-                return False
-            return await manager.reclaim_for_low_space(size)
-
-        self._space_reclaimer = SpaceReclaimer(
-            self._space_monitor,
-            self._out_dir,
-            managed_reclaimer=(
-                reclaim if self._recording_retention_provider is not None else None
-            ),
-        )
-        self._settings_manager.apply_space_reclaimer_settings()
-        self._space_reclaimer.enable()
 
     def _setup_notifiers(self) -> None:
         from .notification import (
@@ -558,23 +563,9 @@ class Application:
         self._webhook_emitter.enable()
 
     def _destroy(self) -> None:
-        self._destroy_space_reclaimer()
-        self._destroy_space_event_submitter()
-        self._destroy_space_monitor()
         self._destroy_notifiers()
         self._destroy_webhooks()
         self._destroy_exception_handler()
-
-    def _destroy_space_monitor(self) -> None:
-        self._space_monitor.disable()
-        del self._space_monitor
-
-    def _destroy_space_event_submitter(self) -> None:
-        del self._space_event_submitter
-
-    def _destroy_space_reclaimer(self) -> None:
-        self._space_reclaimer.disable()
-        del self._space_reclaimer
 
     def _destroy_notifiers(self) -> None:
         self._email_notifier.disable()

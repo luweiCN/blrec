@@ -23,7 +23,7 @@ from .bili_accounts import authenticated_manager_subject
 
 manager: Optional[RoomUploadPolicyManager] = None
 category_catalog: Optional[UploadCategoryCatalog] = None
-unavailable_reason: Optional[str] = 'Room upload policies are not enabled'
+unavailable_reason: Optional[str] = 'Room upload policies are not ready'
 
 
 class ApiModel(BaseModel):

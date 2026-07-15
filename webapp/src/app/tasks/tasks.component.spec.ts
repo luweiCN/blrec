@@ -55,4 +55,10 @@ describe('TasksComponent', () => {
     expect(component).toBeTruthy();
     expect(component.selection).toBe(DataSelection.ALL);
   });
+
+  it('uses one shared primary-page container', () => {
+    expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
+      1
+    );
+  });
 });

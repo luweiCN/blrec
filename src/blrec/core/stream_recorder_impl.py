@@ -19,6 +19,7 @@ from blrec.flv import operators as flv_ops
 from blrec.flv.operators import StreamProfile
 from blrec.flv.utils import format_timestamp
 from blrec.hls import operators as hls_ops
+from blrec.networking.requests_session import RoutedRequestsSession
 from blrec.setting.typing import RecordingMode
 from blrec.utils.mixins import AsyncCooperationMixin, AsyncStoppableMixin
 
@@ -83,7 +84,11 @@ class StreamRecorderImpl(
 
         self._live = live
         self._live_monitor = live_monitor
-        self._session = requests.Session()
+        route_manager = live.network_route_manager
+        if route_manager is None:
+            self._session = requests.Session()
+        else:
+            self._session = RoutedRequestsSession(route_manager)
 
         self._recording_mode = recording_mode
         self._buffer_size = buffer_size or io.DEFAULT_BUFFER_SIZE

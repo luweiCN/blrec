@@ -84,6 +84,10 @@ class RecordingSession:
     parent_area_id: Optional[int] = None
     parent_area_name: str = ''
     live_end_time: Optional[int] = None
+    upload_intent: str = 'none'
+    upload_suppressed: bool = False
+    deletion_state: str = 'none'
+    deletion_error: Optional[str] = None
     parts: Tuple[RecordingPart, ...] = ()
 
     @property
@@ -115,6 +119,8 @@ class UploadPartProgress:
     transcode_state: str = 'unknown'
     transcode_fail_code: Optional[int] = None
     transcode_fail_desc: Optional[str] = None
+    repair_stage: str = 'none'
+    repair_diagnostic: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,18 @@ class UploadJobProgress:
     repair_error: Optional[str] = None
     can_retry: bool = False
     can_repair: bool = False
+    can_skip: bool = False
+    can_repost: bool = False
+    can_delete: bool = False
+    operator_paused: bool = False
+    scheduled_publish_at: Optional[int] = None
+    collection_branch_state: str = 'disabled'
+    collection_error: Optional[str] = None
+    comment_error: Optional[str] = None
+    danmaku_error: Optional[str] = None
+    can_pause: bool = False
+    can_resume: bool = False
+    can_edit: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,12 +272,19 @@ class RecordingJournalBridge:
                     else str(row['broadcast_session_key'])
                 )
             if row is None:
+                policy = connection.execute(
+                    'SELECT enabled FROM room_upload_policies WHERE room_id=?',
+                    (room_id,),
+                ).fetchone()
+                upload_intent = (
+                    'auto' if policy is not None and bool(policy['enabled']) else 'none'
+                )
                 cursor = connection.execute(
                     'INSERT INTO recording_sessions('
                     'room_id,broadcast_session_key,live_start_time,state,started_at,'
                     'title,cover_url,anchor_uid,anchor_name,area_id,area_name,'
-                    'parent_area_id,parent_area_name) '
-                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'parent_area_id,parent_area_name,upload_intent) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (
                         room_id,
                         key,
@@ -274,6 +299,7 @@ class RecordingJournalBridge:
                         '' if metadata is None else metadata.area_name,
                         None if metadata is None else metadata.parent_area_id,
                         '' if metadata is None else metadata.parent_area_name,
+                        upload_intent,
                     ),
                 )
                 session_id = int(cursor.lastrowid)
@@ -917,7 +943,9 @@ class RecordingJournalBridge:
             'session.ended_at,session.title,session.cover_url,session.cover_path,'
             'session.anchor_uid,session.anchor_name,session.area_id,'
             'session.area_name,session.parent_area_id,session.parent_area_name,'
-            'session.live_end_time FROM recording_sessions session '
+            'session.live_end_time,session.upload_intent,'
+            'session.deletion_state,session.deletion_error '
+            'FROM recording_sessions session '
             'JOIN recording_runs run ON run.session_id=session.id '
             'WHERE run.id=?',
             (run_id,),
@@ -945,7 +973,9 @@ class RecordingJournalBridge:
         value = await self._database.scalar(
             'SELECT COUNT(*) FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
-            'LEFT JOIN bili_accounts account ON account.id=job.account_id ' + where_sql,
+            'LEFT JOIN bili_accounts account ON account.id=job.account_id '
+            'LEFT JOIN upload_suppressions suppression '
+            'ON suppression.session_id=session.id ' + where_sql,
             parameters,
         )
         return int(value or 0)
@@ -982,9 +1012,14 @@ class RecordingJournalBridge:
             'session.ended_at,session.title,session.cover_url,session.cover_path,'
             'session.anchor_uid,session.anchor_name,session.area_id,'
             'session.area_name,session.parent_area_id,session.parent_area_name,'
-            'session.live_end_time FROM recording_sessions session '
+            'session.live_end_time,session.upload_intent,'
+            'session.deletion_state,session.deletion_error,'
+            'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
+            'AS upload_suppressed FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN bili_accounts account ON account.id=job.account_id '
+            'LEFT JOIN upload_suppressions suppression '
+            'ON suppression.session_id=session.id '
             + where_sql
             + ' ORDER BY session.started_at {},session.id {} LIMIT ? OFFSET ?'.format(
                 direction, direction
@@ -1023,6 +1058,7 @@ class RecordingJournalBridge:
                 'paused',
                 'completed',
                 'none',
+                'suppressed',
             )
         )
         if session_state is not None and session_state not in session_states:
@@ -1062,7 +1098,9 @@ class RecordingJournalBridge:
             clauses.append('session.state=?')
             parameters.append(session_state)
         if upload_state == 'none':
-            clauses.append('job.id IS NULL')
+            clauses.append('job.id IS NULL AND suppression.session_id IS NULL')
+        elif upload_state == 'suppressed':
+            clauses.append('suppression.session_id IS NOT NULL')
         elif upload_state is not None:
             clauses.append('job.state=?')
             parameters.append(upload_state)
@@ -1088,7 +1126,9 @@ class RecordingJournalBridge:
             'job.submit_state,job.comment_branch_state,job.danmaku_branch_state,'
             'job.aid,job.bvid,job.review_reason,job.attempt,job.next_attempt_at,'
             'job.created_at,job.updated_at,job.repair_state,job.repair_message,'
-            'job.repair_error FROM upload_jobs job '
+            'job.repair_error,job.lease_until,job.operator_paused,'
+            'job.scheduled_publish_at,job.collection_branch_state,'
+            'job.collection_error FROM upload_jobs job '
             'JOIN bili_accounts account ON account.id=job.account_id '
             'WHERE job.session_id IN ({})'.format(placeholders),
             unique_session_ids,
@@ -1100,7 +1140,8 @@ class RecordingJournalBridge:
         part_rows = await self._database.fetchall(
             'SELECT id,job_id,part_index,upload_state,danmaku_import_state,'
             'remote_filename,cid,transcode_state,transcode_fail_code,'
-            'transcode_fail_desc FROM upload_parts WHERE job_id IN ({}) '
+            'transcode_fail_desc,repair_stage,repair_diagnostic '
+            'FROM upload_parts WHERE job_id IN ({}) '
             'ORDER BY job_id,part_index'.format(job_placeholders),
             job_ids,
         )
@@ -1180,6 +1221,12 @@ class RecordingJournalBridge:
                         if row['transcode_fail_desc'] is None
                         else str(row['transcode_fail_desc'])
                     ),
+                    repair_stage=str(row['repair_stage']),
+                    repair_diagnostic=(
+                        None
+                        if row['repair_diagnostic'] is None
+                        else str(row['repair_diagnostic'])
+                    ),
                 )
             )
         result = {}
@@ -1187,6 +1234,7 @@ class RecordingJournalBridge:
             job_id = int(row['id'])
             session_id = int(row['session_id'])
             danmaku = danmaku_by_job.get(job_id, (0, 0, 0, 0, 0))
+            parts = tuple(parts_by_job.get(job_id, ()))
             result[session_id] = UploadJobProgress(
                 id=job_id,
                 session_id=session_id,
@@ -1206,7 +1254,7 @@ class RecordingJournalBridge:
                 next_attempt_at=int(row['next_attempt_at']),
                 created_at=int(row['created_at']),
                 updated_at=int(row['updated_at']),
-                parts=tuple(parts_by_job.get(job_id, ())),
+                parts=parts,
                 danmaku_total=danmaku[0],
                 danmaku_confirmed=danmaku[1],
                 danmaku_pending=danmaku[2],
@@ -1223,7 +1271,37 @@ class RecordingJournalBridge:
                     None if row['repair_error'] is None else str(row['repair_error'])
                 ),
                 can_retry=self._can_retry_upload_job(row),
-                can_repair=self._can_repair_upload_job(row),
+                can_repair=self._can_repair_upload_job(row, parts),
+                can_skip=self._can_skip_upload_job(row),
+                can_repost=self._can_repost_upload_job(row),
+                can_delete=self._can_delete_upload_job(row),
+                operator_paused=bool(row['operator_paused']),
+                scheduled_publish_at=(
+                    None
+                    if row['scheduled_publish_at'] is None
+                    else int(row['scheduled_publish_at'])
+                ),
+                collection_branch_state=str(row['collection_branch_state']),
+                collection_error=(
+                    None
+                    if row['collection_error'] is None
+                    else str(row['collection_error'])
+                ),
+                comment_error=(
+                    str(row['review_reason'])
+                    if str(row['comment_branch_state']) in ('paused', 'failed')
+                    and row['review_reason'] is not None
+                    else None
+                ),
+                danmaku_error=(
+                    str(row['review_reason'])
+                    if str(row['danmaku_branch_state']) in ('paused', 'failed')
+                    and row['review_reason'] is not None
+                    else None
+                ),
+                can_pause=self._can_pause_upload_job(row),
+                can_resume=self._can_resume_upload_job(row),
+                can_edit=self._can_edit_upload_job(row, parts),
             )
         return result
 
@@ -1237,7 +1315,9 @@ class RecordingJournalBridge:
         )
 
     @staticmethod
-    def _can_repair_upload_job(row: sqlite3.Row) -> bool:
+    def _can_repair_upload_job(
+        row: sqlite3.Row, parts: Sequence[UploadPartProgress]
+    ) -> bool:
         state = str(row['state'])
         repair_state = str(row['repair_state'])
         return (
@@ -1247,6 +1327,69 @@ class RecordingJournalBridge:
             and bool(row['bvid'])
             and repair_state not in ('queued', 'checking', 'reuploading', 'editing')
             and not (repair_state == 'waiting_review' and state == 'waiting_review')
+            and any(part.transcode_state == 'failed' for part in parts)
+        )
+
+    def _can_skip_upload_job(self, row: sqlite3.Row) -> bool:
+        return (
+            str(row['state']) in ('waiting_artifacts', 'ready')
+            and str(row['submit_state']) == 'prepared'
+            and not self._has_active_job_lease(row)
+        )
+
+    @staticmethod
+    def _can_repost_upload_job(row: sqlite3.Row) -> bool:
+        return (
+            str(row['state']) in ('approved', 'completed')
+            and str(row['submit_state']) == 'confirmed'
+            and row['aid'] is not None
+            and bool(row['bvid'])
+            and str(row['repair_state'])
+            not in ('queued', 'checking', 'reuploading', 'editing')
+        )
+
+    def _can_delete_upload_job(self, row: sqlite3.Row) -> bool:
+        return not self._has_active_job_lease(row) and str(row['repair_state']) not in (
+            'queued',
+            'checking',
+            'reuploading',
+            'editing',
+        )
+
+    @staticmethod
+    def _can_pause_upload_job(row: sqlite3.Row) -> bool:
+        return (
+            str(row['state']) in ('ready', 'uploading', 'submitting')
+            and str(row['submit_state']) == 'prepared'
+            and not bool(row['operator_paused'])
+        )
+
+    @staticmethod
+    def _can_resume_upload_job(row: sqlite3.Row) -> bool:
+        return (
+            str(row['state']) == 'paused'
+            and str(row['submit_state']) == 'prepared'
+            and bool(row['operator_paused'])
+        )
+
+    def _can_edit_upload_job(
+        self, row: sqlite3.Row, parts: Sequence[UploadPartProgress]
+    ) -> bool:
+        return (
+            str(row['state']) in ('waiting_artifacts', 'ready', 'paused')
+            and (str(row['state']) != 'paused' or bool(row['operator_paused']))
+            and str(row['submit_state']) == 'prepared'
+            and not self._has_active_job_lease(row)
+            and bool(parts)
+            and all(
+                part.upload_state == 'prepared' and part.remote_filename is None
+                for part in parts
+            )
+        )
+
+    def _has_active_job_lease(self, row: sqlite3.Row) -> bool:
+        return row['lease_until'] is not None and int(row['lease_until']) > int(
+            self._clock()
         )
 
     async def run_id_for_source(self, source_path: str) -> str:
@@ -1310,6 +1453,22 @@ class RecordingJournalBridge:
             parent_area_name=str(row['parent_area_name']),
             live_end_time=(
                 None if row['live_end_time'] is None else int(row['live_end_time'])
+            ),
+            upload_intent=(
+                str(row['upload_intent']) if 'upload_intent' in row.keys() else 'none'
+            ),
+            upload_suppressed=(
+                bool(row['upload_suppressed'])
+                if 'upload_suppressed' in row.keys()
+                else False
+            ),
+            deletion_state=(
+                str(row['deletion_state']) if 'deletion_state' in row.keys() else 'none'
+            ),
+            deletion_error=(
+                None
+                if 'deletion_error' not in row.keys() or row['deletion_error'] is None
+                else str(row['deletion_error'])
             ),
             parts=parts,
         )

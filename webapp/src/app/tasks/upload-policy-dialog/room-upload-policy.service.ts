@@ -1,7 +1,12 @@
-import { HttpClient, HttpParams } from '@angular/common/http';
+import {
+  HttpClient,
+  HttpErrorResponse,
+  HttpParams,
+} from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
-import { Observable } from 'rxjs';
+import { Observable, forkJoin, of, throwError } from 'rxjs';
+import { catchError, map } from 'rxjs/operators';
 
 import { UrlService } from 'src/app/core/services/url.service';
 import {
@@ -39,11 +44,30 @@ export class RoomUploadPolicyService {
     return this.http.put<RoomUploadPolicy>(url, request);
   }
 
+  saveMany(
+    roomIds: readonly number[],
+    request: RoomUploadPolicyRequest,
+  ): Observable<readonly RoomUploadPolicy[]> {
+    return forkJoin(roomIds.map((roomId) => this.save(roomId, request)));
+  }
+
   delete(roomId: number): Observable<void> {
     const url = this.url.makeApiUrl(
       `/api/v1/room-upload-policies/${roomId}`,
     );
     return this.http.delete<void>(url);
+  }
+
+  deleteMany(roomIds: readonly number[]): Observable<void> {
+    return forkJoin(
+      roomIds.map((roomId) =>
+        this.delete(roomId).pipe(
+          catchError((error: HttpErrorResponse) =>
+            error.status === 404 ? of(void 0) : throwError(() => error),
+          ),
+        ),
+      ),
+    ).pipe(map(() => void 0));
   }
 
   categories(

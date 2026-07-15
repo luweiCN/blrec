@@ -24,7 +24,9 @@ class FakeApplication:
         self.calls.append(('recorder_enable', room_id))
 
     async def disable_task_recorder(self, room_id: int, force: bool = False) -> None:
-        self.calls.append(('recorder_disable', room_id))
+        self.calls.append(
+            ('recorder_force_disable' if force else 'recorder_disable', room_id)
+        )
 
     async def update_task_info(self, room_id: int) -> None:
         self.calls.append(('refresh', room_id))
@@ -73,3 +75,23 @@ def test_batch_task_action_rejects_duplicate_rooms(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ('action', 'expected_call'),
+    (
+        ('force_stop', ('force_stop', 100)),
+        ('recorder_force_disable', ('recorder_force_disable', 100)),
+    ),
+)
+def test_batch_task_action_supports_force_operations(
+    client: TestClient, action: str, expected_call: Tuple[str, int]
+) -> None:
+    response = client.post(
+        '/api/v1/tasks/actions', json={'action': action, 'roomIds': [100]}
+    )
+
+    assert response.status_code == 200
+    app = tasks.app
+    assert isinstance(app, FakeApplication)
+    assert app.calls == [expected_call]

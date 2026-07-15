@@ -46,4 +46,10 @@ describe('AboutComponent', () => {
   it('should create', () => {
     expect(component).toBeTruthy();
   });
+
+  it('uses one shared primary-page container', () => {
+    expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
+      1
+    );
+  });
 });

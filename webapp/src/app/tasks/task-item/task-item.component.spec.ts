@@ -1,9 +1,21 @@
 import { CommonModule } from '@angular/common';
 import { NO_ERRORS_SCHEMA, Pipe, PipeTransform } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
+import {
+  CloudUploadOutline,
+  MoreOutline,
+  ScissorOutline,
+  SettingOutline,
+} from '@ant-design/icons-angular/icons';
+import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
-import { NzDropDownModule } from 'ng-zorro-antd/dropdown';
+import {
+  NzDropDownDirective,
+  NzDropDownModule,
+} from 'ng-zorro-antd/dropdown';
+import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 import { of } from 'rxjs';
 
 import { SettingService } from 'src/app/settings/shared/services/setting.service';
@@ -72,12 +84,28 @@ const taskData: TaskData = {
 describe('TaskItemComponent', () => {
   let component: TaskItemComponent;
   let fixture: ComponentFixture<TaskItemComponent>;
+  let taskManager: jasmine.SpyObj<TaskManagerService>;
 
   beforeEach(async () => {
+    taskManager = jasmine.createSpyObj<TaskManagerService>(
+      'TaskManagerService',
+      ['updateTaskInfo', 'startTask', 'stopTask'],
+    );
+    taskManager.startTask.and.returnValue(of({ code: 0, message: '已开启' }));
+    taskManager.stopTask.and.returnValue(of({ code: 0, message: '已关闭' }));
     await TestBed.configureTestingModule({
       declarations: [TaskItemComponent, DataurlStubPipe],
-      imports: [CommonModule, NzDropDownModule],
+      imports: [CommonModule, NzButtonModule, NzDropDownModule, NzIconModule],
       providers: [
+        {
+          provide: NZ_ICONS,
+          useValue: [
+            CloudUploadOutline,
+            MoreOutline,
+            ScissorOutline,
+            SettingOutline,
+          ],
+        },
         {
           provide: NzMessageService,
           useValue: jasmine.createSpyObj<NzMessageService>(
@@ -99,10 +127,7 @@ describe('TaskItemComponent', () => {
         },
         {
           provide: TaskManagerService,
-          useValue: jasmine.createSpyObj<TaskManagerService>(
-            'TaskManagerService',
-            ['updateTaskInfo']
-          ),
+          useValue: taskManager,
         },
       ],
       schemas: [NO_ERRORS_SCHEMA],
@@ -143,5 +168,54 @@ describe('TaskItemComponent', () => {
     expect(
       fixture.nativeElement.querySelector('app-upload-policy-dialog')
     ).not.toBeNull();
+  });
+
+  it('renders more actions with the shared ellipsis dropdown', () => {
+    const trigger = fixture.nativeElement.querySelector(
+      '[aria-label="更多任务操作"]'
+    ) as HTMLButtonElement | null;
+    const dropdown = fixture.debugElement
+      .query(By.directive(NzDropDownDirective))
+      .injector.get(NzDropDownDirective);
+
+    expect(trigger).not.toBeNull();
+    expect(trigger?.classList).toContain('ant-btn-text');
+    expect(trigger?.querySelector('i[nz-icon][nztype="more"]')).not.toBeNull();
+    expect(trigger?.textContent?.trim()).toBe('');
+    expect(dropdown.nzOverlayClassName).toBe('action-dropdown-overlay');
+  });
+
+  it('uses one control to start monitoring and recording together', () => {
+    expect(component.taskEnabled).toBeFalse();
+
+    component.toggleTask();
+
+    expect(taskManager.startTask).toHaveBeenCalledOnceWith(1);
+    expect(taskManager.stopTask).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.textContent).not.toContain('监控已关闭');
+    expect(fixture.nativeElement.textContent).not.toContain('监控已开启');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="task-enabled-switch"]')
+    ).not.toBeNull();
+  });
+
+  it('uses the same control to stop monitoring and recording together', () => {
+    const runningTask: TaskData = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        monitor_enabled: true,
+        recorder_enabled: true,
+        running_status: RunningStatus.WAITING,
+      },
+    };
+    fixture.componentRef.setInput('data', runningTask);
+    fixture.detectChanges();
+
+    expect(component.taskEnabled).toBeTrue();
+    component.toggleTask();
+
+    expect(taskManager.stopTask).toHaveBeenCalledOnceWith(1);
+    expect(taskManager.startTask).not.toHaveBeenCalled();
   });
 });

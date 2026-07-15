@@ -1,3 +1,4 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
@@ -6,9 +7,18 @@ import {
   OnChanges,
 } from '@angular/core';
 import { NzModalService } from 'ng-zorro-antd/modal';
+import { NzMessageService } from 'ng-zorro-antd/message';
 
+import { forkJoin, zip } from 'rxjs';
 import { finalize } from 'rxjs/operators';
 
+import { retry } from '../../shared/rx-operators';
+import {
+  GlobalTaskSettings,
+  TaskOptions,
+  TaskOptionsIn,
+} from '../../settings/shared/setting.model';
+import { SettingService } from '../../settings/shared/services/setting.service';
 import { TaskManagerService } from '../shared/services/task-manager.service';
 import {
   RunningStatus,
@@ -26,10 +36,17 @@ export class TaskListComponent implements OnChanges {
   @Input() dataList: TaskData[] = [];
   readonly selectedRoomIds = new Set<number>();
   batchLoading = false;
+  batchSettingsLoading = false;
+  batchSettingsDialogVisible = false;
+  batchUploadPolicyDialogVisible = false;
+  batchTaskOptions?: TaskOptions;
+  batchGlobalSettings?: GlobalTaskSettings;
 
   constructor(
     private changeDetector: ChangeDetectorRef,
+    private message: NzMessageService,
     private modal: NzModalService,
+    private settingService: SettingService,
     private taskManager: TaskManagerService
   ) {}
 
@@ -46,6 +63,20 @@ export class TaskListComponent implements OnChanges {
 
   get selectedCount(): number {
     return this.selectedRoomIds.size;
+  }
+
+  get selectedRoomIdsArray(): number[] {
+    return this.dataList
+      .map((data) => data.room_info.room_id)
+      .filter((roomId) => this.selectedRoomIds.has(roomId));
+  }
+
+  get selectedReferenceTask(): TaskData | null {
+    return (
+      this.dataList.find((data) =>
+        this.selectedRoomIds.has(data.room_info.room_id)
+      ) ?? null
+    );
   }
 
   get allSelected(): boolean {
@@ -104,7 +135,100 @@ export class TaskListComponent implements OnChanges {
       });
       return;
     }
+    if (action === 'force_stop' || action === 'recorder_force_disable') {
+      this.modal.confirm({
+        nzTitle:
+          action === 'force_stop'
+            ? `强制停止选中的 ${roomIds.length} 个任务？`
+            : `强制关闭选中的 ${roomIds.length} 个录制？`,
+        nzContent: '正在写入的录像文件会被中断，仅在普通停止无效时使用。',
+        nzOkDanger: true,
+        nzOnOk: () =>
+          new Promise<void>((resolve, reject) => {
+            this.executeBatch(action, roomIds, resolve, reject);
+          }),
+      });
+      return;
+    }
     this.executeBatch(action, roomIds);
+  }
+
+  openBatchSettingsDialog(): void {
+    const roomId = this.selectedRoomIdsArray[0];
+    if (!roomId || this.batchSettingsLoading) {
+      return;
+    }
+    this.batchSettingsLoading = true;
+    zip(
+      this.settingService.getTaskOptions(roomId),
+      this.settingService.getSettings([
+        'output',
+        'header',
+        'danmaku',
+        'recorder',
+        'postprocessing',
+      ])
+    )
+      .pipe(
+        finalize(() => {
+          this.batchSettingsLoading = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe({
+        next: ([taskOptions, globalSettings]) => {
+          this.batchTaskOptions = taskOptions;
+          this.batchGlobalSettings = globalSettings;
+          this.batchSettingsDialogVisible = true;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: HttpErrorResponse) => {
+          this.message.error(`获取批量录制设置出错：${error.message}`);
+        },
+      });
+  }
+
+  openBatchUploadPolicyDialog(): void {
+    if (this.selectedCount === 0) {
+      return;
+    }
+    this.batchUploadPolicyDialogVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  changeBatchTaskOptions(options: TaskOptionsIn): void {
+    const roomIds = this.selectedRoomIdsArray;
+    if (roomIds.length === 0 || this.batchSettingsLoading) {
+      return;
+    }
+    this.batchSettingsLoading = true;
+    forkJoin(
+      roomIds.map((roomId) =>
+        this.settingService
+          .changeTaskOptions(roomId, options)
+          .pipe(retry(3, 300))
+      )
+    )
+      .pipe(
+        finalize(() => {
+          this.batchSettingsLoading = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe({
+        next: () => {
+          this.message.success(`已修改 ${roomIds.length} 个房间的录制设置`);
+        },
+        error: (error: HttpErrorResponse) => {
+          this.message.error(`修改批量录制设置出错：${error.message}`);
+        },
+      });
+  }
+
+  cleanBatchSettingsData(): void {
+    delete this.batchTaskOptions;
+    delete this.batchGlobalSettings;
+    this.changeDetector.markForCheck();
   }
 
   trackByRoomId(index: number, data: TaskData): number {
@@ -120,10 +244,12 @@ export class TaskListComponent implements OnChanges {
           case 'start':
             return status.running_status === RunningStatus.STOPPED;
           case 'stop':
+          case 'force_stop':
             return status.running_status !== RunningStatus.STOPPED;
           case 'recorder_enable':
             return status.monitor_enabled && !status.recorder_enabled;
           case 'recorder_disable':
+          case 'recorder_force_disable':
             return status.recorder_enabled;
           case 'cut':
             return status.running_status === RunningStatus.RECORDING;

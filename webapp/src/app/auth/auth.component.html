@@ -1,0 +1,102 @@
+<div class="auth-page">
+  <nz-card class="auth-card" [nzBordered]="false">
+    <div class="auth-brand">
+      <img src="assets/images/logo.png" alt="BLREC" />
+      <div>
+        <h1>B 站直播录制</h1>
+        <p>管理员登录</p>
+      </div>
+    </div>
+
+    <nz-spin *ngIf="mode === 'loading'" nzSimple></nz-spin>
+
+    <form *ngIf="mode !== 'loading'" (ngSubmit)="mode === 'recover' ? submitRecovery() : submit()">
+      <h2 *ngIf="mode === 'setup'">设置管理员密码</h2>
+      <h2 *ngIf="mode === 'login'">登录</h2>
+      <h2 *ngIf="mode === 'recover'">重置管理员密码</h2>
+
+      <nz-alert
+        *ngIf="errorMessage"
+        nzType="error"
+        [nzMessage]="errorMessage"
+        nzShowIcon
+      ></nz-alert>
+      <nz-alert
+        *ngIf="successMessage"
+        nzType="success"
+        [nzMessage]="successMessage"
+        nzShowIcon
+      ></nz-alert>
+
+      <label>
+        <span>管理员用户名</span>
+        <input
+          nz-input
+          name="username"
+          type="text"
+          maxlength="64"
+          autocomplete="username"
+          [(ngModel)]="username"
+          required
+        />
+      </label>
+
+      <label *ngIf="mode === 'setup' || mode === 'recover'">
+        <span>初始化安全码</span>
+        <input
+          nz-input
+          name="apiKey"
+          type="password"
+          autocomplete="off"
+          [(ngModel)]="apiKey"
+        />
+      </label>
+      <p class="field-hint" *ngIf="mode === 'setup'">
+        来自部署时设置的 BLREC_API_KEY，仅用于首次设置和密码恢复，浏览器不会保存。
+      </p>
+
+      <label>
+        <span>{{ mode === 'recover' ? '新密码' : '管理员密码' }}</span>
+        <input
+          nz-input
+          name="password"
+          type="password"
+          minlength="10"
+          maxlength="1024"
+          [attr.autocomplete]="mode === 'login' ? 'current-password' : 'new-password'"
+          [(ngModel)]="password"
+          required
+        />
+      </label>
+
+      <button
+        nz-button
+        nzType="primary"
+        type="submit"
+        [nzLoading]="submitting"
+        [disabled]="!username || password.length < 10"
+      >
+        {{ mode === 'setup' ? '完成设置' : mode === 'recover' ? '重置密码' : '登录' }}
+      </button>
+
+      <button
+        *ngIf="mode === 'login'"
+        nz-button
+        nzType="link"
+        type="button"
+        (click)="showRecovery()"
+      >
+        使用初始化安全码重置密码
+      </button>
+      <button
+        *ngIf="mode === 'recover'"
+        nz-button
+        nzType="link"
+        type="button"
+        (click)="showLogin()"
+      >
+        返回登录
+      </button>
+    </form>
+  </nz-card>
+</div>

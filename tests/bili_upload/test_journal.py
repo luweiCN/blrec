@@ -20,6 +20,50 @@ async def database(tmp_path: Path) -> AsyncIterator[BiliUploadDatabase]:
         await value.close()
 
 
+async def seed_upload_policy(
+    database: BiliUploadDatabase, *, room_id: int = 100, enabled: bool = True
+) -> None:
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(1,42,'投稿账号',X'00',1,'k','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO bili_account_selection(id,primary_account_id) VALUES(1,1)'
+    )
+    await database.execute(
+        'INSERT INTO room_upload_policies('
+        'room_id,account_mode,account_id,enabled,title_template,'
+        'description_template,part_title_template,dynamic_template,tid,tags,'
+        'creation_statement_id,original_authorization,copyright,source,'
+        'is_only_self,publish_dynamic,no_reprint,up_selection_reply,'
+        'up_close_reply,up_close_danmu,auto_comment,danmaku_backfill,'
+        'filter_json,created_at,updated_at) '
+        "VALUES(?,'primary',NULL,?,'{{ title }} 录播','',"
+        "'P{{ part_index }}','',17,'直播,录播',-1,1,1,'',0,0,1,0,0,0,0,0,"
+        "'{}',1,1)",
+        (room_id, int(enabled)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_recording_start_freezes_room_upload_intent(database) -> None:
+    await seed_upload_policy(database)
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+
+    first_run = await journal.recording_started(100, live_start_time=900)
+    await database.execute(
+        'UPDATE room_upload_policies SET enabled=0 WHERE room_id=100'
+    )
+    second_run = await journal.recording_started(100, live_start_time=901)
+
+    first = await journal.session_for_run(first_run)
+    second = await journal.session_for_run(second_run)
+    assert first.upload_intent == 'auto'
+    assert second.upload_intent == 'none'
+
+
 @pytest.mark.asyncio
 async def test_part_order_is_creation_order_not_completion_order(database) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
@@ -613,6 +657,7 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert (job.parts[0].part_index, job.parts[0].upload_state) == (1, 'confirmed')
     assert job.parts[0].remote_filename == 'remote-p1'
     assert job.parts[0].cid is None
+    assert job.can_repair is False
     assert (
         job.danmaku_total,
         job.danmaku_confirmed,
@@ -623,6 +668,12 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert len(job.unknown_danmaku_items) == 1
     assert job.unknown_danmaku_items[0].content == '弹幕 3'
     assert job.unknown_danmaku_items[0].part_index == 1
+
+    await database.execute(
+        "UPDATE upload_parts SET transcode_state='failed' WHERE id=10"
+    )
+    failed_jobs = await journal.upload_jobs_for_sessions((session.id,))
+    assert failed_jobs[session.id].can_repair is True
 
 
 class FakeEmitter:

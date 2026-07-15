@@ -34,6 +34,9 @@ REQUIRED_TABLES = {
     'comment_items',
     'danmaku_items',
     'management_audit',
+    'upload_suppressions',
+    'upload_job_archives',
+    'operational_notification_states',
 }
 
 
@@ -68,7 +71,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 11
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 16
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -119,6 +122,8 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'repair_attempt',
             'repair_requested_at',
             'repair_completed_at',
+            'operator_paused',
+            'operator_resume_state',
         } <= job_columns
         upload_part_columns = {
             row['name']
@@ -128,6 +133,13 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'transcode_state',
             'transcode_fail_code',
             'transcode_fail_desc',
+            'repair_stage',
+            'repair_original_attempts',
+            'repair_remux_attempts',
+            'repair_diagnostic',
+            'repair_temp_path',
+            'repair_original_path',
+            'repair_original_identity',
         } <= upload_part_columns
         session_columns = {
             row['name']
@@ -144,6 +156,9 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'parent_area_id',
             'parent_area_name',
             'live_end_time',
+            'deletion_state',
+            'deletion_error',
+            'deletion_requested_at',
         } <= session_columns
         part_columns = {
             row['name']
@@ -320,7 +335,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 11
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 16
     finally:
         await database.close()
 

@@ -5,16 +5,27 @@ import math
 import os
 import stat
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Iterator, Mapping, Optional, Tuple
 
 from lxml import etree
+
+from blrec.flv.common import (
+    create_metadata_tag,
+    ensure_order,
+    is_metadata_tag,
+    parse_metadata,
+)
+from blrec.flv.io import FlvReader, FlvWriter
+from blrec.flv.models import FlvHeader
 
 from .database import BiliUploadDatabase
 
 __all__ = (
     'DanmakuLine',
     'DanmakuPage',
+    'FlvMediaSnapshot',
     'MediaResource',
     'RecordingContentInvalid',
     'RecordingContentNotFound',
@@ -41,6 +52,7 @@ class MediaResource:
     size: Optional[int]
     content_type: Optional[str]
     recording: bool
+    room_id: int
     part_index: int
     bvid: Optional[str]
     remote_available: bool
@@ -62,6 +74,144 @@ class DanmakuPage:
     next_cursor: Optional[int]
 
 
+@dataclass(frozen=True)
+class FlvMediaSnapshot:
+    path: str
+    source_size: int
+    source_tail_start: int
+    prefix: bytes
+    duration_ms: int
+
+    @property
+    def size(self) -> int:
+        return len(self.prefix) + self.source_size - self.source_tail_start
+
+    @classmethod
+    def create(
+        cls, path: str, source_size: int, current_metadata: Mapping[str, Any]
+    ) -> FlvMediaSnapshot:
+        with open(path, 'rb') as file:
+            reader = FlvReader(file)
+            header = reader.read_header()
+            header_end = file.tell()
+            first_tag = reader.read_tag()
+            if is_metadata_tag(first_tag):
+                original_metadata = parse_metadata(first_tag)
+                source_tail_start = file.tell()
+            else:
+                original_metadata = {}
+                source_tail_start = header_end
+
+        keyframes = current_metadata.get('keyframes')
+        if not isinstance(keyframes, Mapping):
+            raise RecordingContentUnavailable('录制中的视频索引暂时不可用')
+        raw_times = keyframes.get('times')
+        raw_positions = keyframes.get('filepositions')
+        if not isinstance(raw_times, list) or not isinstance(raw_positions, list):
+            raise RecordingContentUnavailable('录制中的视频索引暂时不可用')
+        indexed = []
+        for raw_time, raw_position in zip(raw_times, raw_positions):
+            if isinstance(raw_time, bool) or isinstance(raw_position, bool):
+                continue
+            if not isinstance(raw_time, (int, float)) or not isinstance(
+                raw_position, (int, float)
+            ):
+                continue
+            timestamp = float(raw_time)
+            position = float(raw_position)
+            if (
+                math.isfinite(timestamp)
+                and math.isfinite(position)
+                and timestamp >= 0
+                and source_tail_start <= position < source_size
+            ):
+                indexed.append((timestamp, position))
+        if len(indexed) < 2:
+            raise RecordingContentUnavailable('录制中的视频索引暂时不可用')
+
+        duration = current_metadata.get('duration')
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            raise RecordingContentUnavailable('录制中的视频时长暂时不可用')
+        duration_seconds = float(duration)
+        if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+            raise RecordingContentUnavailable('录制中的视频时长暂时不可用')
+        analysed_size = current_metadata.get('filesize')
+        if isinstance(analysed_size, (int, float)) and analysed_size > source_size:
+            duration_seconds = indexed[-1][0]
+
+        metadata = {
+            **original_metadata,
+            **current_metadata,
+            'duration': duration_seconds,
+            'filesize': float(source_size),
+            'lasttimestamp': duration_seconds,
+            'lastkeyframelocation': indexed[-1][1],
+            'lastkeyframetimestamp': indexed[-1][0],
+            'keyframes': {
+                'times': [timestamp for timestamp, _ in indexed],
+                'filepositions': [position for _, position in indexed],
+            },
+        }
+        initial_prefix = cls._make_prefix(header, metadata)
+        offset = len(initial_prefix) - source_tail_start
+        logical_size = source_size + offset
+        logical_positions = [position + offset for _, position in indexed]
+        metadata.update(
+            {
+                'filesize': float(logical_size),
+                'lastkeyframelocation': logical_positions[-1],
+                'lastkeyframetimestamp': indexed[-1][0],
+                'keyframes': {
+                    'times': [timestamp for timestamp, _ in indexed],
+                    'filepositions': logical_positions,
+                },
+            }
+        )
+        prefix = cls._make_prefix(header, metadata)
+        if len(prefix) != len(initial_prefix):
+            raise RecordingContentUnavailable('录制中的视频索引暂时不可用')
+        return cls(
+            path=path,
+            source_size=source_size,
+            source_tail_start=source_tail_start,
+            prefix=prefix,
+            duration_ms=int(round(duration_seconds * 1_000)),
+        )
+
+    @staticmethod
+    def _make_prefix(header: FlvHeader, metadata: Mapping[str, Any]) -> bytes:
+        output = BytesIO()
+        writer = FlvWriter(output)
+        writer.write_header(header)
+        writer.write_tag(create_metadata_tag(ensure_order(dict(metadata))))
+        return output.getvalue()
+
+    def iter_range(
+        self, start: int, length: int, *, chunk_size: int = 64 * 1024
+    ) -> Iterator[bytes]:
+        if start < 0 or length < 0 or start + length > self.size:
+            raise ValueError('snapshot range is out of bounds')
+        end = start + length
+        prefix_end = min(end, len(self.prefix))
+        if start < prefix_end:
+            yield self.prefix[start:prefix_end]
+        logical_source_start = max(start, len(self.prefix))
+        if logical_source_start >= end:
+            return
+        source_start = self.source_tail_start + (
+            logical_source_start - len(self.prefix)
+        )
+        remaining = end - logical_source_start
+        with open(self.path, 'rb') as file:
+            file.seek(source_start)
+            while remaining > 0:
+                chunk = file.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+
 class RecordingContentReader:
     _MEDIA_TYPES = {
         '.flv': 'video/x-flv',
@@ -75,9 +225,10 @@ class RecordingContentReader:
 
     async def media(self, part_id: int) -> MediaResource:
         row = await self._database.fetchone(
-            'SELECT part.part_index,part.source_path,part.final_path,'
+            'SELECT session.room_id,part.part_index,part.source_path,part.final_path,'
             'part.artifact_state,job.state AS job_state,job.bvid '
             'FROM recording_parts part '
+            'JOIN recording_sessions session ON session.id=part.session_id '
             'LEFT JOIN upload_jobs job ON job.session_id=part.session_id '
             'WHERE part.id=?',
             (int(part_id),),
@@ -144,6 +295,7 @@ class RecordingContentReader:
                 )
             ),
             recording=recording,
+            room_id=int(row['room_id']),
             part_index=int(row['part_index']),
             bvid=bvid,
             remote_available=remote_available,

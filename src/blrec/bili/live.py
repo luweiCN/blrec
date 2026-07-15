@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, cast
 
 import aiohttp
 from jsonpath import jsonpath
@@ -24,6 +24,9 @@ from .models import LiveStatus, RoomInfo, UserInfo
 from .net import connector, timeout
 from .typing import ApiPlatform, QualityNumber, ResponseData, StreamCodec, StreamFormat
 
+if TYPE_CHECKING:
+    from blrec.networking.manager import NetworkRouteManager
+
 __all__ = ('Live',)
 
 from loguru import logger
@@ -42,6 +45,8 @@ class Live:
         cookie: str = '',
         *,
         auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        session: Optional[Any] = None,
+        network_route_manager: Optional['NetworkRouteManager'] = None,
     ) -> None:
         self._logger = logger.bind(room_id=room_id)
 
@@ -51,13 +56,18 @@ class Live:
         self._update_headers()
         self._html_page_url = f'https://live.bilibili.com/{room_id}'
 
-        self._session = aiohttp.ClientSession(
-            connector=connector,
-            connector_owner=False,
-            raise_for_status=True,
-            trust_env=True,
-            timeout=timeout,
-        )
+        self._owns_session = session is None
+        self._network_route_manager = network_route_manager
+        if session is None:
+            self._session: Any = aiohttp.ClientSession(
+                connector=connector,
+                connector_owner=False,
+                raise_for_status=True,
+                trust_env=True,
+                timeout=timeout,
+            )
+        else:
+            self._session = session
         self._appapi = AppApi(
             self._session,
             self.headers,
@@ -147,8 +157,12 @@ class Live:
         }
 
     @property
-    def session(self) -> aiohttp.ClientSession:
+    def session(self) -> Any:
         return self._session
+
+    @property
+    def network_route_manager(self) -> Optional['NetworkRouteManager']:
+        return self._network_route_manager
 
     @property
     def appapi(self) -> AppApi:
@@ -190,7 +204,8 @@ class Live:
                 self._no_flv_stream = not flv_formats
 
     async def deinit(self) -> None:
-        await self._session.close()
+        if self._owns_session:
+            await self._session.close()
 
     def has_no_flv_streams(self) -> bool:
         return self._no_flv_stream

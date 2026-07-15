@@ -13,18 +13,19 @@ import {
   RecordingArtifactState,
   RecordingPart,
   RecordingSession,
+  RecordingSessionAction,
+  RecordingSessionDisplayState,
   RecordingSessionFilters,
   RecordingSessionState,
   RecordingSessionsView,
   TranscodeState,
-  UploadJobAction,
   UploadJobProgress,
+  UploadJobRetryPreviewItem,
   UploadJobState,
   UploadPartProgress,
   UploadPartState,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
-import { PartContentFocus } from '../part-content-dialog/part-content-dialog.component';
 
 @Component({
   selector: 'app-recording-sessions',
@@ -43,21 +44,28 @@ export class RecordingSessionsComponent implements OnInit {
   decisionReason = '';
   decisionSubmitting = false;
   decisionError: string | null = null;
-  contentVisible = false;
-  contentSession: RecordingSession | null = null;
-  contentPart: RecordingPart | null = null;
-  contentFocus: PartContentFocus = 'video';
-  readonly selectedJobIds = new Set<number>();
-  uploadAction: UploadJobAction | null = null;
-  uploadActionJobIds: readonly number[] = [];
+  videoVisible = false;
+  videoSession: RecordingSession | null = null;
+  videoPart: RecordingPart | null = null;
+  danmakuVisible = false;
+  danmakuSession: RecordingSession | null = null;
+  danmakuPart: RecordingPart | null = null;
+  readonly selectedSessionIds = new Set<number>();
+  uploadAction: RecordingSessionAction | null = null;
+  uploadActionSessionIds: readonly number[] = [];
   uploadActionSubmitting = false;
   uploadActionError: string | null = null;
   keyword = '';
   recordingState: RecordingSessionState | null = null;
-  uploadState: UploadJobState | 'none' | null = null;
+  uploadState: UploadJobState | 'none' | 'suppressed' | null = null;
   sortOrder: 'newest' | 'oldest' = 'newest';
   dateRange: Date[] | null = null;
   retryAllLoading = false;
+  retryPreviewLoading = false;
+  retryPreviewVisible = false;
+  retryPreviewItems: readonly UploadJobRetryPreviewItem[] = [];
+  taskEditVisible = false;
+  taskEditJobIds: readonly number[] = [];
 
   readonly recordingStateOptions = [
     { label: '录制中', value: 'open' },
@@ -68,6 +76,7 @@ export class RecordingSessionsComponent implements OnInit {
   ];
   readonly uploadStateOptions = [
     { label: '未创建任务', value: 'none' },
+    { label: '已设为不上传', value: 'suppressed' },
     { label: '等待制品', value: 'waiting_artifacts' },
     { label: '待上传', value: 'ready' },
     { label: '上传中', value: 'uploading' },
@@ -116,36 +125,36 @@ export class RecordingSessionsComponent implements OnInit {
     return !this.decisionSubmitting && this.decisionReason.trim().length > 0;
   }
 
-  get selectedJobCount(): number {
-    return this.selectedJobIds.size;
+  get selectedSessionCount(): number {
+    return this.selectedSessionIds.size;
   }
 
-  get selectedJobIdsArray(): readonly number[] {
-    return [...this.selectedJobIds];
+  get selectedSessionIdsArray(): readonly number[] {
+    return [...this.selectedSessionIds];
   }
 
   get uploadActionVisible(): boolean {
-    return this.uploadAction !== null && this.uploadActionJobIds.length > 0;
+    return this.uploadAction !== null && this.uploadActionSessionIds.length > 0;
   }
 
-  get pageJobIds(): readonly number[] {
-    return this.sessions
-      .map((session) => session.uploadJob?.id)
-      .filter((jobId): jobId is number => jobId !== undefined);
+  get pageSessionIds(): readonly number[] {
+    return this.sessions.map((session) => session.id);
   }
 
-  get allPageJobsSelected(): boolean {
+  get allPageSessionsSelected(): boolean {
     return (
-      this.pageJobIds.length > 0 &&
-      this.pageJobIds.every((jobId) => this.selectedJobIds.has(jobId))
+      this.pageSessionIds.length > 0 &&
+      this.pageSessionIds.every((sessionId) =>
+        this.selectedSessionIds.has(sessionId)
+      )
     );
   }
 
-  get somePageJobsSelected(): boolean {
-    const selected = this.pageJobIds.filter((jobId) =>
-      this.selectedJobIds.has(jobId)
+  get somePageSessionsSelected(): boolean {
+    const selected = this.pageSessionIds.filter((sessionId) =>
+      this.selectedSessionIds.has(sessionId)
     ).length;
-    return selected > 0 && selected < this.pageJobIds.length;
+    return selected > 0 && selected < this.pageSessionIds.length;
   }
 
   load(): void {
@@ -156,14 +165,12 @@ export class RecordingSessionsComponent implements OnInit {
       .subscribe({
         next: (response) => {
           this.view = { state: 'ready', response };
-          const currentJobIds = new Set(
-            response.sessions
-              .map((session) => session.uploadJob?.id)
-              .filter((jobId): jobId is number => jobId !== undefined)
+          const currentSessionIds = new Set(
+            response.sessions.map((session) => session.id)
           );
-          for (const jobId of this.selectedJobIds) {
-            if (!currentJobIds.has(jobId)) {
-              this.selectedJobIds.delete(jobId);
+          for (const sessionId of this.selectedSessionIds) {
+            if (!currentSessionIds.has(sessionId)) {
+              this.selectedSessionIds.delete(sessionId);
             }
           }
           if (this.detailVisible && this.selectedSession) {
@@ -184,7 +191,7 @@ export class RecordingSessionsComponent implements OnInit {
 
   applyFilters(): void {
     this.pageIndex = 1;
-    this.selectedJobIds.clear();
+    this.selectedSessionIds.clear();
     this.load();
   }
 
@@ -203,7 +210,45 @@ export class RecordingSessionsComponent implements OnInit {
   }
 
   retryAllFailedJobs(): void {
+    if (this.retryAllLoading || this.retryPreviewLoading) {
+      return;
+    }
+    this.retryPreviewLoading = true;
+    this.recordingSessions
+      .previewRetryFailedJobs()
+      .pipe(
+        finalize(() => {
+          this.retryPreviewLoading = false;
+          this.changeDetector.markForCheck();
+        })
+      )
+      .subscribe({
+        next: (response) => {
+          this.retryPreviewItems = response.items;
+          if (response.items.length === 0) {
+            this.message.info('没有可安全重试的失败录像');
+            return;
+          }
+          this.retryPreviewVisible = true;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.message.error(`读取失败录像出错：${this.describeError(error)}`);
+        },
+      });
+  }
+
+  closeRetryFailedPreview(): void {
     if (this.retryAllLoading) {
+      return;
+    }
+    this.retryPreviewVisible = false;
+    this.retryPreviewItems = [];
+    this.changeDetector.markForCheck();
+  }
+
+  submitRetryAllFailedJobs(): void {
+    if (this.retryAllLoading || this.retryPreviewItems.length === 0) {
       return;
     }
     this.retryAllLoading = true;
@@ -219,15 +264,15 @@ export class RecordingSessionsComponent implements OnInit {
         next: (response) => {
           const accepted = response.results.filter((result) => result.accepted);
           const rejected = response.results.filter((result) => !result.accepted);
-          if (response.results.length === 0) {
-            this.message.success('没有可安全重试的失败录像');
-          } else if (rejected.length > 0) {
+          if (rejected.length > 0) {
             this.message.warning(
               `已重新排队 ${accepted.length} 个任务，跳过 ${rejected.length} 个：${rejected[0].message}`
             );
           } else {
             this.message.success(`已重新排队 ${accepted.length} 个失败任务`);
           }
+          this.retryPreviewVisible = false;
+          this.retryPreviewItems = [];
           this.load();
         },
         error: (error: unknown) => {
@@ -253,37 +298,42 @@ export class RecordingSessionsComponent implements OnInit {
     this.load();
   }
 
-  isJobSelected(jobId: number): boolean {
-    return this.selectedJobIds.has(jobId);
+  isSessionSelected(sessionId: number): boolean {
+    return this.selectedSessionIds.has(sessionId);
   }
 
-  setJobSelected(jobId: number, selected: boolean): void {
+  setSessionSelected(sessionId: number, selected: boolean): void {
     if (selected) {
-      this.selectedJobIds.add(jobId);
+      this.selectedSessionIds.add(sessionId);
     } else {
-      this.selectedJobIds.delete(jobId);
+      this.selectedSessionIds.delete(sessionId);
     }
     this.changeDetector.markForCheck();
   }
 
-  setAllPageJobsSelected(selected: boolean): void {
-    for (const jobId of this.pageJobIds) {
+  setAllPageSessionsSelected(selected: boolean): void {
+    for (const sessionId of this.pageSessionIds) {
       if (selected) {
-        this.selectedJobIds.add(jobId);
+        this.selectedSessionIds.add(sessionId);
       } else {
-        this.selectedJobIds.delete(jobId);
+        this.selectedSessionIds.delete(sessionId);
       }
     }
     this.changeDetector.markForCheck();
   }
 
-  openUploadAction(action: UploadJobAction, jobIds: readonly number[]): void {
-    const uniqueJobIds = [...new Set(jobIds.filter((jobId) => jobId > 0))];
-    if (uniqueJobIds.length === 0 || this.uploadActionSubmitting) {
+  openSessionAction(
+    action: RecordingSessionAction,
+    sessionIds: readonly number[]
+  ): void {
+    const uniqueSessionIds = [
+      ...new Set(sessionIds.filter((sessionId) => sessionId > 0)),
+    ];
+    if (uniqueSessionIds.length === 0 || this.uploadActionSubmitting) {
       return;
     }
     this.uploadAction = action;
-    this.uploadActionJobIds = uniqueJobIds;
+    this.uploadActionSessionIds = uniqueSessionIds;
     this.uploadActionError = null;
     this.changeDetector.markForCheck();
   }
@@ -293,21 +343,21 @@ export class RecordingSessionsComponent implements OnInit {
       return;
     }
     this.uploadAction = null;
-    this.uploadActionJobIds = [];
+    this.uploadActionSessionIds = [];
     this.uploadActionError = null;
     this.changeDetector.markForCheck();
   }
 
   submitUploadAction(): void {
     const action = this.uploadAction;
-    const jobIds = [...this.uploadActionJobIds];
-    if (!action || jobIds.length === 0 || this.uploadActionSubmitting) {
+    const sessionIds = [...this.uploadActionSessionIds];
+    if (!action || sessionIds.length === 0 || this.uploadActionSubmitting) {
       return;
     }
     this.uploadActionSubmitting = true;
     this.uploadActionError = null;
     this.recordingSessions
-      .runJobAction(action, jobIds)
+      .runSessionAction(action, sessionIds)
       .pipe(
         finalize(() => {
           this.uploadActionSubmitting = false;
@@ -320,7 +370,7 @@ export class RecordingSessionsComponent implements OnInit {
           const rejected = response.results.filter((result) => !result.accepted);
           if (accepted.length === 0) {
             this.uploadActionError = rejected
-              .map((result) => `任务 ${result.jobId}：${result.message}`)
+              .map((result) => `场次 ${result.sessionId}：${result.message}`)
               .join('；');
             this.changeDetector.markForCheck();
             return;
@@ -335,8 +385,8 @@ export class RecordingSessionsComponent implements OnInit {
             this.message.success(`已接受 ${accepted.length} 个任务`);
           }
           this.uploadAction = null;
-          this.uploadActionJobIds = [];
-          this.selectedJobIds.clear();
+          this.uploadActionSessionIds = [];
+          this.selectedSessionIds.clear();
           this.load();
         },
         error: (error: unknown) => {
@@ -347,16 +397,89 @@ export class RecordingSessionsComponent implements OnInit {
   }
 
   uploadActionTitle(): string {
-    return this.uploadAction === 'repair_transcode'
-      ? '检查并修复转码异常'
-      : '重试失败任务';
+    return {
+      retry_failed: '重试上传',
+      repair_transcode: '修复转码',
+      backfill_danmaku: '回灌弹幕',
+      set_upload: '设为本场上传',
+      set_skip: '设为本场不上传',
+      repost_as_new: '重新投稿',
+      pause_upload: '暂停上传',
+      resume_upload: '继续上传',
+      edit_task: '修改任务',
+      delete_local: '删除',
+    }[this.uploadAction ?? 'retry_failed'];
   }
 
   uploadActionDescription(): string {
-    if (this.uploadAction === 'repair_transcode') {
-      return '系统会先核对 B 站稿件状态；只有明确转码失败、本地原文件仍完整的分 P 才会重新上传，并继续使用原稿件。';
+    return {
+      retry_failed:
+        '系统只会重新排队可以安全重试的失败任务；投稿或分 P 结果未知时不会自动重试。',
+      repair_transcode:
+        '系统会先核对 B 站稿件状态；只有明确转码失败、本地原文件仍完整的分 P 才会重新上传，并继续使用原稿件。',
+      backfill_danmaku:
+        '系统会把本场录制的弹幕发送到已经审核通过的对应分 P；已存在发送记录时不会重复创建。',
+      set_upload: '本场文件就绪后会使用当前投稿设置创建上传任务。',
+      set_skip: '本场不会上传；录制任务本身仍会继续监控下一场直播。',
+      repost_as_new:
+        '系统会使用本地成品重新创建一个 B 站稿件。原稿件不会删除，旧 BV 号会保存在本地历史中。',
+      pause_upload: '系统会在当前分片的安全检查点暂停，并保留已经完成的上传进度。',
+      resume_upload: '系统会从已经保存的上传进度继续，不会重新上传已确认的分片。',
+      edit_task: '只有尚未开始上传的任务可以修改投稿账号和本场投稿设置。',
+      delete_local:
+        '只删除本系统中的任务记录及该场次归属的本地录像、弹幕文件；绝不会删除或修改 B 站上的稿件。',
+    }[this.uploadAction ?? 'retry_failed'];
+  }
+
+  hasAction(sessionId: number, action: RecordingSessionAction): boolean {
+    const session = this.sessions.find((item) => item.id === sessionId);
+    return session?.availableActions.includes(action) ?? false;
+  }
+
+  hasMoreActions(session: RecordingSession): boolean {
+    return session.availableActions.some((action) => action !== 'delete_local');
+  }
+
+  openTaskEdit(jobIds: readonly number[]): void {
+    const uniqueJobIds = [...new Set(jobIds.filter((jobId) => jobId > 0))];
+    if (uniqueJobIds.length === 0) {
+      return;
     }
-    return '系统只会重新排队可以安全重试的失败任务；投稿或分 P 结果未知时不会自动重试。';
+    this.taskEditJobIds = uniqueJobIds;
+    this.taskEditVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  closeTaskEdit(): void {
+    this.taskEditVisible = false;
+    this.taskEditJobIds = [];
+    this.changeDetector.markForCheck();
+  }
+
+  taskEditSaved(): void {
+    this.closeTaskEdit();
+    this.selectedSessionIds.clear();
+    this.load();
+  }
+
+  selectedEditableJobIds(): readonly number[] {
+    return this.sessions
+      .filter(
+        (session) =>
+          this.selectedSessionIds.has(session.id) &&
+          session.availableActions.includes('edit_task') &&
+          session.uploadJob !== null
+      )
+      .map((session) => session.uploadJob?.id)
+      .filter((jobId): jobId is number => jobId !== undefined);
+  }
+
+  selectedSupports(action: RecordingSessionAction): boolean {
+    return this.sessions.some(
+      (session) =>
+        this.selectedSessionIds.has(session.id) &&
+        session.availableActions.includes(action)
+    );
   }
 
   openDetails(session: RecordingSession): void {
@@ -371,23 +494,34 @@ export class RecordingSessionsComponent implements OnInit {
     this.changeDetector.markForCheck();
   }
 
-  openPartContent(
-    session: RecordingSession,
-    part: RecordingPart,
-    focus: PartContentFocus
-  ): void {
-    this.contentSession = session;
-    this.contentPart = part;
-    this.contentFocus = focus;
-    this.contentVisible = true;
+  openPartVideo(session: RecordingSession, part: RecordingPart): void {
+    this.videoSession = session;
+    this.videoPart = part;
+    this.videoVisible = true;
     this.changeDetector.markForCheck();
   }
 
-  contentVisibilityChanged(visible: boolean): void {
-    this.contentVisible = visible;
+  videoVisibilityChanged(visible: boolean): void {
+    this.videoVisible = visible;
     if (!visible) {
-      this.contentSession = null;
-      this.contentPart = null;
+      this.videoSession = null;
+      this.videoPart = null;
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  openPartDanmaku(session: RecordingSession, part: RecordingPart): void {
+    this.danmakuSession = session;
+    this.danmakuPart = part;
+    this.danmakuVisible = true;
+    this.changeDetector.markForCheck();
+  }
+
+  danmakuVisibilityChanged(visible: boolean): void {
+    this.danmakuVisible = visible;
+    if (!visible) {
+      this.danmakuSession = null;
+      this.danmakuPart = null;
     }
     this.changeDetector.markForCheck();
   }
@@ -410,6 +544,54 @@ export class RecordingSessionsComponent implements OnInit {
       manual_review: 'processing',
       skipped: 'default',
     }[state];
+  }
+
+  displayStateLabel(state: RecordingSessionDisplayState): string {
+    return {
+      recording: '录制中',
+      pending_upload: '待上传',
+      uploading: '上传处理中',
+      waiting_review: '等待审核',
+      completed: '审核通过',
+      paused: '已暂停',
+      deleting: '正在删除',
+      delete_failed: '删除失败',
+      not_uploading: '不上传',
+      needs_attention: '处理异常',
+    }[state];
+  }
+
+  displayStateColor(state: RecordingSessionDisplayState): string {
+    return {
+      recording: 'processing',
+      pending_upload: 'blue',
+      uploading: 'processing',
+      waiting_review: 'gold',
+      completed: 'success',
+      paused: 'warning',
+      deleting: 'processing',
+      delete_failed: 'error',
+      not_uploading: 'default',
+      needs_attention: 'error',
+    }[state];
+  }
+
+  displayStateDetail(session: RecordingSession): string {
+    if (session.displayState === 'recording') {
+      return ['auto', 'upload'].includes(session.uploadIntent)
+        ? '本场结束后上传'
+        : '本场不上传';
+    }
+    if (session.displayState === 'pending_upload' && !session.uploadJob) {
+      return '正在准备上传任务';
+    }
+    if (session.displayState === 'not_uploading') {
+      return '保留本地录像';
+    }
+    if (session.displayState === 'delete_failed') {
+      return session.deletionError ?? '删除未完成，可以重新尝试';
+    }
+    return '';
   }
 
   artifactStateLabel(state: RecordingArtifactState): string {
@@ -460,6 +642,14 @@ export class RecordingSessionsComponent implements OnInit {
     return `https://www.bilibili.com/video/${encodeURIComponent(
       job.bvid
     )}${part}`;
+  }
+
+  remotePartUrl(session: RecordingSession, partIndex: number): string | null {
+    const uploadPart = this.uploadPartFor(session, partIndex);
+    if (uploadPart?.cid === null || uploadPart?.cid === undefined) {
+      return null;
+    }
+    return this.archiveUrl(session, partIndex);
   }
 
   uploadJobStateColor(state: UploadJobState): string {
@@ -566,6 +756,18 @@ export class RecordingSessionsComponent implements OnInit {
     }`;
   }
 
+  collectionBranchLabel(
+    state: UploadJobProgress['collectionBranchState']
+  ): string {
+    return {
+      disabled: '未加入',
+      pending: '待处理',
+      running: '处理中',
+      completed: '已加入',
+      failed: '失败',
+    }[state];
+  }
+
   uploadPartStateLabel(state: UploadPartState): string {
     return {
       prepared: '等待上传',
@@ -609,6 +811,20 @@ export class RecordingSessionsComponent implements OnInit {
       processing: 'B 站转码中',
       failed: 'B 站转码失败',
     }[state];
+  }
+
+  transcodeRepairStageLabel(
+    stage: NonNullable<UploadPartProgress['repairStage']>
+  ): string {
+    return {
+      none: '未修复',
+      original: '正在重传原文件',
+      original_waiting_review: '原文件已重传，等待转码',
+      remux: '正在重新封装',
+      remux_waiting_review: '重新封装已上传，等待转码',
+      completed: '自动修复完成',
+      exhausted: '自动修复失败',
+    }[stage];
   }
 
   openDanmakuDecision(
@@ -691,6 +907,9 @@ export class RecordingSessionsComponent implements OnInit {
   }
 
   noUploadJobReason(session: RecordingSession): string {
+    if (session.uploadSuppressed) {
+      return '本场已设为不上传，本地录像仍会按保留策略管理。';
+    }
     if (session.state === 'open') {
       return '本场仍在录制，结束并归集后才会创建投稿任务。';
     }

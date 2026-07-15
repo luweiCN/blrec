@@ -147,8 +147,23 @@ def archive_detail(
     }
 
 
-def video(filename: str, cid: int, page: int) -> Mapping[str, Any]:
-    return {'filename': filename, 'cid': cid, 'page': page}
+def video(
+    filename: str,
+    cid: int,
+    page: int,
+    *,
+    fail_code: int = 0,
+    xcode_state: int = 0,
+    fail_desc: str = '',
+) -> Mapping[str, Any]:
+    return {
+        'filename': filename,
+        'cid': cid,
+        'page': page,
+        'failCode': fail_code,
+        'xcodeState': xcode_state,
+        'failDesc': fail_desc,
+    }
 
 
 def watcher(
@@ -239,6 +254,142 @@ async def test_private_archive_state_is_complete_and_binds_cid(tmp_path: Path) -
         )
         assert (
             await database.scalar('SELECT cid FROM upload_parts WHERE job_id=1') == 101
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_records_transcode_failures_without_an_extra_remote_check(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database)
+        review = watcher(
+            database,
+            archive_response(),
+            detail=archive_detail(
+                [
+                    video('p1', 101, 1),
+                    video(
+                        'p2',
+                        202,
+                        2,
+                        fail_code=9,
+                        xcode_state=3,
+                        fail_desc='服务端转码失败',
+                    ),
+                ]
+            ),
+        )
+
+        assert await review.run_once() == 1
+
+        rows = await database.fetchall(
+            'SELECT part_index,transcode_state,transcode_fail_code,'
+            'transcode_fail_desc FROM upload_parts WHERE job_id=1 '
+            'ORDER BY part_index'
+        )
+        assert [dict(row) for row in rows] == [
+            {
+                'part_index': 1,
+                'transcode_state': 'ready',
+                'transcode_fail_code': 0,
+                'transcode_fail_desc': None,
+            },
+            {
+                'part_index': 2,
+                'transcode_state': 'failed',
+                'transcode_fail_code': 9,
+                'transcode_fail_desc': '服务端转码失败',
+            },
+        ]
+        job = await database.fetchone(
+            'SELECT state,repair_state,repair_message FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'waiting_review',
+            'repair_state': 'queued',
+            'repair_message': '发现 1 个分 P 转码失败，等待自动修复',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_escalates_original_reupload_failure_to_remux(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database)
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='waiting_review' WHERE id=1"
+        )
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='original_waiting_review',"
+            'repair_original_attempts=1 WHERE job_id=1 AND part_index=2'
+        )
+        review = watcher(
+            database,
+            archive_response(),
+            detail=archive_detail(
+                [video('p1', 101, 1), video('p2', 202, 2, fail_code=9, xcode_state=3)]
+            ),
+        )
+
+        assert await review.run_once() == 1
+
+        job = await database.fetchone(
+            'SELECT state,repair_state,repair_message FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'waiting_review',
+            'repair_state': 'queued',
+            'repair_message': '原文件重传后仍有 1 个分 P 转码失败，等待重新封装',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_stops_after_remux_also_fails(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='waiting_review' WHERE id=1"
+        )
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='remux_waiting_review',"
+            'repair_original_attempts=1,repair_remux_attempts=1 '
+            'WHERE job_id=1'
+        )
+        review = watcher(
+            database,
+            archive_response(),
+            detail=archive_detail([video('p1', 101, 1, fail_code=9, xcode_state=3)]),
+        )
+
+        assert await review.run_once() == 1
+
+        job = await database.fetchone(
+            'SELECT state,repair_state,repair_error FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'repair_state': 'failed',
+            'repair_error': '重新封装后 B 站转码仍失败，已停止自动修复',
+        }
+        assert (
+            await database.scalar(
+                'SELECT repair_stage FROM upload_parts WHERE job_id=1'
+            )
+            == 'exhausted'
         )
     finally:
         await database.close()

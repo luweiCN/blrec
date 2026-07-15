@@ -23,5 +23,8 @@ describe('UploadTasksComponent', () => {
     expect(
       fixture.nativeElement.querySelectorAll('app-recording-sessions').length
     ).toBe(1);
+    expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
+      1
+    );
   });
 });

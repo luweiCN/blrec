@@ -72,13 +72,13 @@ describe('DiskSpaceSettingsComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('shows a compact capacity card and hides legacy explanations', () => {
+  it('shows only managed capacity settings and hides legacy disk protection', () => {
     const text = fixture.nativeElement.textContent;
 
     expect(text).toContain('录像容量即将达到上限');
     expect(text).toContain('录像容量上限');
     expect(text).toContain('容量剩余预警');
-    expect(text).toContain('磁盘保护');
+    expect(text).not.toContain('磁盘保护');
     expect(text).not.toContain('硬盘空间检测间隔');
     expect(text).not.toContain('仅房间选择');
     expect(text).not.toContain('录像容量距离上限不足');

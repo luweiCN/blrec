@@ -39,29 +39,25 @@
     </span>
   </div>
 
-  <div class="status-cell">
-    <nz-tag [nzColor]="runningStatusColor(data.task_status.running_status)">
-      {{ runningStatusLabel(data.task_status.running_status) }}
-    </nz-tag>
+  <div class="task-control-cell">
+    <div class="task-control-summary">
+      <nz-switch
+        data-testid="task-enabled-switch"
+        nz-tooltip
+        nzTooltipTitle="同时开启或关闭监控与录制"
+        [ngModel]="taskEnabled"
+        [nzControl]="true"
+        [nzLoading]="switchPending"
+        (click)="toggleTask()"
+      ></nz-switch>
+      <nz-tag [nzColor]="runningStatusColor(data.task_status.running_status)">
+        {{ runningStatusLabel(data.task_status.running_status) }}
+      </nz-tag>
+    </div>
     <span *ngIf="data.task_status.running_status === RunningStatus.RECORDING">
       {{ data.task_status.rec_elapsed | duration }} ·
       {{ data.task_status.rec_total | filesize : { spacer: '' } }}
     </span>
-    <span *ngIf="data.task_status.running_status !== RunningStatus.RECORDING">
-      {{ data.task_status.monitor_enabled ? '监控已开启' : '监控已关闭' }}
-    </span>
-  </div>
-
-  <div class="recorder-cell">
-    <nz-switch
-      nz-tooltip
-      nzTooltipTitle="录制开关"
-      [nzDisabled]="toggleRecorderForbidden"
-      [ngModel]="data.task_status.recorder_enabled"
-      [nzControl]="true"
-      [nzLoading]="switchPending"
-      (click)="toggleRecorder()"
-    ></nz-switch>
   </div>
 
   <div class="actions-cell">
@@ -106,6 +102,7 @@
       type="button"
       nz-dropdown
       nzPlacement="bottomRight"
+      nzOverlayClassName="action-dropdown-overlay"
       [nzDropdownMenu]="dropdownMenu"
       aria-label="更多任务操作"
     >
@@ -116,14 +113,11 @@
 
 <nz-dropdown-menu #dropdownMenu="nzDropdownMenu">
   <ul nz-menu>
-    <li nz-menu-item (click)="startTask()">运行任务</li>
-    <li nz-menu-item (click)="stopTask()">停止任务</li>
     <li nz-menu-item (click)="updateTaskInfo()">刷新数据</li>
     <li nz-menu-divider></li>
-    <li nz-menu-item (click)="stopTask(true)">强制停止任务</li>
-    <li nz-menu-item (click)="disableRecorder(true)">强制关闭录制</li>
+    <li nz-menu-item (click)="stopTask(true)">强制停止</li>
     <li nz-menu-divider></li>
-    <li nz-menu-item nzDanger (click)="removeTask()">删除任务</li>
+    <li nz-menu-item nzDanger (click)="removeTask()">删除</li>
   </ul>
 </nz-dropdown-menu>
 

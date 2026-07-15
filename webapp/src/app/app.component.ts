@@ -9,6 +9,7 @@ import { BreakpointObserver, Breakpoints } from '@angular/cdk/layout';
 
 import { Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
+import { AuthService } from './core/services/auth.service';
 
 @Component({
   selector: 'app-root',
@@ -23,13 +24,16 @@ export class AppComponent implements OnDestroy {
   loading = false;
   collapsed = false;
   useDrawer = false;
+  authPage = false;
   destroyed = new Subject<void>();
 
   constructor(
     router: Router,
     changeDetector: ChangeDetectorRef,
-    breakpointObserver: BreakpointObserver
+    breakpointObserver: BreakpointObserver,
+    private auth: AuthService
   ) {
+    this.authPage = router.url.startsWith('/auth');
     router.events.subscribe((event) => {
       if (event instanceof NavigationStart) {
         this.loading = true;
@@ -39,6 +43,8 @@ export class AppComponent implements OnDestroy {
         }
       } else if (event instanceof NavigationEnd) {
         this.loading = false;
+        this.authPage = event.urlAfterRedirects.startsWith('/auth');
+        changeDetector.markForCheck();
       }
     });
 
@@ -69,5 +75,9 @@ export class AppComponent implements OnDestroy {
   ngOnDestroy() {
     this.destroyed.next();
     this.destroyed.complete();
+  }
+
+  logout(): void {
+    this.auth.logout().subscribe({ error: () => this.auth.handleUnauthorized() });
   }
 }

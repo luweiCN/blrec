@@ -79,6 +79,15 @@ export type DanmakuImportState =
 
 export type TranscodeState = 'unknown' | 'ready' | 'processing' | 'failed';
 
+export type TranscodeRepairStage =
+  | 'none'
+  | 'original'
+  | 'original_waiting_review'
+  | 'remux'
+  | 'remux_waiting_review'
+  | 'completed'
+  | 'exhausted';
+
 export type UploadRepairState =
   | 'idle'
   | 'queued'
@@ -91,12 +100,43 @@ export type UploadRepairState =
   | 'failed'
   | 'unknown_outcome';
 
-export type UploadJobAction = 'retry_failed' | 'repair_transcode';
+export type UploadJobAction =
+  | 'retry_failed'
+  | 'repair_transcode'
+  | 'skip_upload'
+  | 'repost_as_new'
+  | 'pause_upload'
+  | 'resume_upload'
+  | 'delete_local';
+
+export type RecordingSessionAction =
+  | 'set_upload'
+  | 'set_skip'
+  | 'retry_failed'
+  | 'repair_transcode'
+  | 'backfill_danmaku'
+  | 'repost_as_new'
+  | 'pause_upload'
+  | 'resume_upload'
+  | 'edit_task'
+  | 'delete_local';
+
+export type RecordingSessionDisplayState =
+  | 'recording'
+  | 'pending_upload'
+  | 'uploading'
+  | 'waiting_review'
+  | 'completed'
+  | 'paused'
+  | 'deleting'
+  | 'delete_failed'
+  | 'not_uploading'
+  | 'needs_attention';
 
 export interface RecordingSessionFilters {
   readonly query: string;
   readonly recordingState: RecordingSessionState | null;
-  readonly uploadState: UploadJobState | 'none' | null;
+  readonly uploadState: UploadJobState | 'none' | 'suppressed' | null;
   readonly startedFrom: number | null;
   readonly startedTo: number | null;
   readonly sort: 'newest' | 'oldest';
@@ -117,6 +157,28 @@ export interface UploadJobActionResponse {
   readonly results: readonly UploadJobActionResult[];
 }
 
+export interface RecordingSessionActionResult {
+  readonly sessionId: number;
+  readonly accepted: boolean;
+  readonly message: string;
+}
+
+export interface RecordingSessionActionResponse {
+  readonly results: readonly RecordingSessionActionResult[];
+}
+
+export interface UploadJobRetryPreviewItem {
+  readonly jobId: number;
+  readonly roomId: number;
+  readonly title: string;
+  readonly accountDisplayName: string;
+  readonly reason: string;
+}
+
+export interface UploadJobRetryPreviewResponse {
+  readonly items: readonly UploadJobRetryPreviewItem[];
+}
+
 export interface UploadPartProgress {
   readonly id: number;
   readonly partIndex: number;
@@ -127,6 +189,8 @@ export interface UploadPartProgress {
   readonly transcodeState: TranscodeState;
   readonly transcodeFailCode: number | null;
   readonly transcodeFailDesc: string | null;
+  readonly repairStage?: TranscodeRepairStage;
+  readonly repairDiagnostic?: string | null;
 }
 
 export const DANMAKU_DECISION_ACTIONS = [
@@ -153,6 +217,10 @@ export interface DanmakuDecisionRequest {
 export interface RecordingMediaAccess {
   readonly token: string;
   readonly expiresAt: number;
+  readonly snapshotId: string | null;
+  readonly durationMs: number | null;
+  readonly fileSizeBytes: number;
+  readonly recording: boolean;
 }
 
 export interface RecordingDanmakuLine {
@@ -195,6 +263,23 @@ export interface UploadJobProgress {
   readonly repairError: string | null;
   readonly canRetry: boolean;
   readonly canRepair: boolean;
+  readonly canSkip: boolean;
+  readonly canRepost: boolean;
+  readonly canDelete: boolean;
+  readonly operatorPaused: boolean;
+  readonly scheduledPublishAt: number | null;
+  readonly collectionBranchState:
+    | 'disabled'
+    | 'pending'
+    | 'running'
+    | 'completed'
+    | 'failed';
+  readonly collectionError: string | null;
+  readonly commentError: string | null;
+  readonly danmakuError: string | null;
+  readonly canPause: boolean;
+  readonly canResume: boolean;
+  readonly canEdit: boolean;
   readonly unknownDanmakuItems: readonly DanmakuItemProgress[];
   readonly parts: readonly UploadPartProgress[];
 }
@@ -240,6 +325,12 @@ export interface RecordingSession {
   readonly danmakuCount: number;
   readonly totalFileSizeBytes: number;
   readonly recordDurationSeconds: number;
+  readonly uploadIntent: 'none' | 'auto' | 'upload' | 'skip';
+  readonly uploadSuppressed: boolean;
+  readonly deletionState: 'none' | 'requested' | 'deleting' | 'failed';
+  readonly deletionError: string | null;
+  readonly displayState: RecordingSessionDisplayState;
+  readonly availableActions: readonly RecordingSessionAction[];
   readonly uploadJob: UploadJobProgress | null;
   readonly parts: readonly RecordingPart[];
 }
@@ -254,3 +345,16 @@ export type RecordingSessionsView =
   | { readonly state: 'loading' }
   | { readonly state: 'ready'; readonly response: RecordingSessionsResponse }
   | { readonly state: 'error'; readonly message: string };
+
+export interface UploadTaskSettings {
+  readonly jobId: number;
+  readonly accountId: number;
+  readonly settings: Readonly<Record<string, unknown>>;
+  readonly editable: boolean;
+  readonly blockedReason: string | null;
+}
+
+export interface UploadTaskSettingsUpdateResponse {
+  readonly collectionCleared: boolean;
+  readonly task: UploadTaskSettings;
+}

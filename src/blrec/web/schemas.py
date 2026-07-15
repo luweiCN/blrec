@@ -41,6 +41,7 @@ AliasKeyOfSettings = Literal[
     'logging',
     'biliApi',
     'liveMonitor',
+    'network',
     'header',
     'danmaku',
     'recorder',
@@ -52,5 +53,6 @@ AliasKeyOfSettings = Literal[
     'pushplusNotification',
     'telegramNotification',
     'barkNotification',
+    'operationalNotifications',
     'webhooks',
 ]

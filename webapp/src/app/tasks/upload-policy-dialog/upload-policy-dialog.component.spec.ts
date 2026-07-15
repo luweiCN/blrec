@@ -290,6 +290,15 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.categoryPath).toEqual([4, 17]);
   });
 
+  it('keeps category options stable while the catalog is unchanged', () => {
+    create();
+    const options = component.categoryOptions;
+
+    fixture.detectChanges();
+
+    expect(component.categoryOptions).toBe(options);
+  });
+
   it('recommends but does not automatically apply a matching live category', () => {
     create();
     component.liveParentAreaName = '知识';
@@ -348,9 +357,12 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.draft.originalAuthorization).toBeTrue();
   });
 
-  it('submits the complete policy and deletes an existing policy', () => {
+  it('submits the complete policy without exposing a destructive delete action', () => {
     policyService.get.and.returnValue(of(existingPolicy));
     create();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).not.toContain('删除投稿设置');
     component.save();
 
     expect(policyService.save).toHaveBeenCalledOnceWith(
@@ -371,8 +383,7 @@ describe('UploadPolicyDialogComponent', () => {
       }),
     );
 
-    component.deletePolicy();
-    expect(policyService.delete).toHaveBeenCalledOnceWith(100);
+    expect(policyService.delete).not.toHaveBeenCalled();
   });
 
   it('clears account-specific collection selection when the account changes', () => {

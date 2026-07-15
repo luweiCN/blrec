@@ -6,12 +6,17 @@ import { Observable } from 'rxjs';
 import { UrlService } from 'src/app/core/services/url.service';
 import {
   DanmakuDecisionRequest,
+  RecordingSessionAction,
+  RecordingSessionActionResponse,
   RecordingDanmakuPage,
   RecordingMediaAccess,
+  UploadJobRetryPreviewResponse,
   RecordingSessionFilters,
   RecordingSessionsResponse,
   UploadJobAction,
   UploadJobActionResponse,
+  UploadTaskSettings,
+  UploadTaskSettingsUpdateResponse,
 } from './recording-session.model';
 
 @Injectable({ providedIn: 'root' })
@@ -70,11 +75,47 @@ export class RecordingSessionService {
     );
   }
 
+  runSessionAction(
+    action: RecordingSessionAction,
+    sessionIds: readonly number[]
+  ): Observable<RecordingSessionActionResponse> {
+    const path = '/api/v1/recording-sessions/actions';
+    return this.http.post<RecordingSessionActionResponse>(
+      this.url.makeApiUrl(path),
+      { action, sessionIds }
+    );
+  }
+
   retryFailedJobs(): Observable<UploadJobActionResponse> {
     const path = '/api/v1/recording-sessions/upload-jobs/retry-failed';
     return this.http.post<UploadJobActionResponse>(
       this.url.makeApiUrl(path),
       null
+    );
+  }
+
+  previewRetryFailedJobs(): Observable<UploadJobRetryPreviewResponse> {
+    const path =
+      '/api/v1/recording-sessions/upload-jobs/retry-failed-preview';
+    return this.http.get<UploadJobRetryPreviewResponse>(
+      this.url.makeApiUrl(path)
+    );
+  }
+
+  getTaskSettings(jobId: number): Observable<UploadTaskSettings> {
+    const path = `/api/v1/recording-sessions/upload-jobs/${jobId}/settings`;
+    return this.http.get<UploadTaskSettings>(this.url.makeApiUrl(path));
+  }
+
+  updateTaskSettings(
+    jobId: number,
+    accountId: number,
+    changes: Readonly<Record<string, unknown>>
+  ): Observable<UploadTaskSettingsUpdateResponse> {
+    const path = `/api/v1/recording-sessions/upload-jobs/${jobId}/settings`;
+    return this.http.put<UploadTaskSettingsUpdateResponse>(
+      this.url.makeApiUrl(path),
+      { accountId, changes }
     );
   }
 
@@ -88,9 +129,12 @@ export class RecordingSessionService {
 
   mediaUrl(partId: number, access: RecordingMediaAccess): string {
     const token = encodeURIComponent(access.token);
-    const path =
+    let path =
       `/api/v1/recording-sessions/parts/${partId}/media` +
       `?media_token=${token}&media_expires=${access.expiresAt}`;
+    if (access.snapshotId !== null) {
+      path += `&media_snapshot=${encodeURIComponent(access.snapshotId)}`;
+    }
     return this.url.makeApiUrl(path);
   }
 

@@ -52,6 +52,7 @@
     type="button"
     nz-dropdown
     nzPlacement="bottomRight"
+    nzOverlayClassName="action-dropdown-overlay"
     [nzDropdownMenu]="dropdownMenu"
     aria-label="全部任务操作"
   >
@@ -61,12 +62,9 @@
 
 <nz-dropdown-menu #dropdownMenu="nzDropdownMenu">
   <ul nz-menu>
-    <li nz-menu-item (click)="startAllTasks()">全部运行</li>
-    <li nz-menu-item (click)="stopAllTasks()">全部停止</li>
+    <li nz-menu-item (click)="startAllTasks()">全部开启</li>
+    <li nz-menu-item (click)="stopAllTasks()">全部关闭</li>
     <li nz-menu-item (click)="stopAllTasks(true)">全部强制停止</li>
-    <li nz-menu-divider></li>
-    <li nz-menu-item (click)="disableAllRecorders(false)">全部关闭录制</li>
-    <li nz-menu-item (click)="disableAllRecorders(true)">全部强制关闭录制</li>
     <li nz-menu-divider></li>
     <li nz-menu-item (click)="updateAllTaskInfos()">全部刷新数据</li>
     <li nz-menu-item (click)="copyAllTaskRoomIds()">复制全部房间号</li>

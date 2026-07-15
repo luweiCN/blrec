@@ -49,6 +49,7 @@
 
 .batch-action-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -60,6 +61,25 @@
 
   span {
     margin-right: 4px;
+  }
+}
+
+.retry-list {
+  max-height: 320px;
+  padding: 0;
+  margin: 12px 0;
+  overflow-y: auto;
+  list-style: none;
+
+  li {
+    display: grid;
+    gap: 2px;
+    padding: 10px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  span {
+    color: #8c8c8c;
   }
 }
 

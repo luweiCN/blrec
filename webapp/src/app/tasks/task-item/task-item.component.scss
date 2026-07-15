@@ -6,7 +6,7 @@
 
 .task-row {
   display: grid;
-  grid-template-columns: 44px minmax(320px, 1fr) 120px 150px 88px 230px;
+  grid-template-columns: 44px minmax(320px, 1fr) 120px 190px 230px;
   align-items: center;
   min-height: 82px;
   padding: 10px 16px;
@@ -43,7 +43,7 @@
 
 .room-text,
 .live-cell,
-.status-cell {
+.task-control-cell {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -68,14 +68,15 @@
 
 .room-meta,
 .live-cell span,
-.status-cell span {
+.task-control-cell > span {
   color: #8c8c8c;
   font-size: 12px;
 }
 
-.recorder-cell {
+.task-control-summary {
   display: flex;
-  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
 }
 
 .actions-cell {

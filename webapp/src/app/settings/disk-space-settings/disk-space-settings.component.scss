@@ -2,7 +2,7 @@
 
 .capacity-card {
   padding: 18px 20px;
-  margin-bottom: 8px;
+  margin: 8px 16px 20px;
   background: #f6ffed;
   border: 1px solid #b7eb8f;
   border-radius: 8px;
@@ -66,28 +66,4 @@
   margin-left: 6px;
   color: #8c8c8c;
   cursor: help;
-}
-
-.disk-protection {
-  margin-top: 8px;
-  border-top: 1px solid #f0f0f0;
-}
-
-.protection-title {
-  color: #595959;
-  font-weight: 500;
-}
-
-.advanced-setting-item {
-  padding-right: 0;
-  padding-left: 0;
-}
-
-::ng-deep .disk-protection .ant-collapse-header {
-  padding-right: 0 !important;
-  padding-left: 0 !important;
-}
-
-::ng-deep .disk-protection .ant-collapse-content-box {
-  padding: 0 !important;
 }

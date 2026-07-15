@@ -3,11 +3,13 @@ import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import {
+  BellOutline,
   CloudUploadOutline,
   GithubOutline,
   InfoCircleOutline,
   MenuFoldOutline,
   MenuUnfoldOutline,
+  GlobalOutline,
   SettingOutline,
   UnorderedListOutline,
   UserOutline,
@@ -25,11 +27,13 @@ describe('AppComponent', () => {
         {
           provide: NZ_ICONS,
           useValue: [
+            BellOutline,
             CloudUploadOutline,
             GithubOutline,
             InfoCircleOutline,
             MenuFoldOutline,
             MenuUnfoldOutline,
+            GlobalOutline,
             SettingOutline,
             UnorderedListOutline,
             UserOutline,
@@ -76,12 +80,45 @@ describe('AppComponent', () => {
     const recordingTasks = fixture.nativeElement.querySelector(
       'a[href="/tasks"]',
     ) as HTMLAnchorElement;
+    const network = fixture.nativeElement.querySelector(
+      'a[href="/network"]',
+    ) as HTMLAnchorElement;
 
     expect(recordingTasks?.textContent?.trim()).toBe('录制任务');
     expect(uploadTasks).not.toBeNull();
     expect(uploadTasks?.textContent?.trim()).toBe('上传任务');
     expect(policies).toBeNull();
     expect(accounts.textContent?.trim()).toBe('投稿账号');
+    expect(network.textContent?.trim()).toBe('网络管理');
+  });
+
+  it('shows primary navigation in the expected order', () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.detectChanges();
+
+    const links = fixture.nativeElement.querySelectorAll(
+      '.sidebar-menu a',
+    ) as NodeListOf<HTMLAnchorElement>;
+    const labels = Array.from(links).map((link) => link.textContent?.trim());
+
+    expect(labels).toEqual([
+      '录制任务',
+      '上传任务',
+      '投稿账号',
+      '网络管理',
+      '设置',
+      '通知设置',
+      '关于',
+    ]);
+  });
+
+  it('lazy loads the independent notification settings page', () => {
+    const router = TestBed.inject(Router);
+    const route = router.config.find(
+      (candidate) => candidate.path === 'notifications'
+    );
+
+    expect(route?.loadChildren).toBeDefined();
   });
 
   it('redirects the retired upload-policy page to recording tasks', () => {

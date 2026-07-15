@@ -101,6 +101,10 @@ class SettingsManager:
             fallback_cooldown_seconds=settings.fallback_cooldown_seconds,
         )
 
+    def apply_network_settings(self) -> None:
+        # Network clients resolve the selected interface for each new request.
+        pass
+
     def get_task_options(self, room_id: int) -> TaskOptions:
         if settings := self.find_task_settings(room_id):
             return TaskOptions.from_settings(settings)
@@ -282,8 +286,6 @@ class SettingsManager:
 
         out_dir = self._settings.output.out_dir
         self._app._out_dir = out_dir
-        self._app._space_monitor.path = out_dir
-        self._app._space_reclaimer.path = out_dir
 
     def apply_logging_settings(self) -> None:
         configure_logger(
@@ -299,8 +301,7 @@ class SettingsManager:
             )
 
     def apply_bili_upload_settings(self) -> None:
-        # Emergency switches are read from the shared settings object by the
-        # upload worker. Database and chunk-shape changes require a restart.
+        # Database and chunk-shape changes take effect after process restart.
         pass
 
     async def apply_header_settings(self) -> None:
@@ -322,17 +323,10 @@ class SettingsManager:
             )
 
     def apply_space_settings(self) -> None:
-        self.apply_space_monitor_settings()
-        self.apply_space_reclaimer_settings()
-
-    def apply_space_monitor_settings(self) -> None:
-        settings = self._settings.space
-        self._app._space_monitor.check_interval = settings.check_interval
-        self._app._space_monitor.space_threshold = settings.space_threshold
-
-    def apply_space_reclaimer_settings(self) -> None:
-        settings = self._settings.space
-        self._app._space_reclaimer.recycle_records = settings.recycle_records
+        # Legacy physical-disk monitoring fields remain loadable for old
+        # settings files, but recording cleanup is driven only by the managed
+        # capacity limit and per-room retention policies.
+        pass
 
     def apply_email_notification_settings(self) -> None:
         notifier = self._app._email_notifier
@@ -381,6 +375,11 @@ class SettingsManager:
         self._apply_notifier_settings(notifier, settings)
         self._apply_notification_settings(notifier, settings)
         self._apply_message_template_settings(notifier, settings)
+
+    def apply_operational_notifications_settings(self) -> None:
+        # The operational notification center reads this shared settings object
+        # for every state transition, so no worker restart is required.
+        pass
 
     def apply_webhooks_settings(self) -> None:
         webhooks = [WebHook.from_settings(s) for s in self._settings.webhooks]

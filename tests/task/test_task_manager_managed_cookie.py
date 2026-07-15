@@ -13,6 +13,7 @@ class FakeTask:
         self.cookie = ''
         self.ready = True
         self.restart_danmaku_client = AsyncMock()
+        self.suppress_current_live = AsyncMock()
 
 
 @pytest.mark.asyncio
@@ -68,3 +69,17 @@ async def test_manual_cookie_remains_available_when_account_manager_is_disabled(
     await manager.apply_task_header_settings(100, settings)  # type: ignore[arg-type]
 
     assert task.cookie == 'manual-cookie'
+
+
+@pytest.mark.asyncio
+async def test_manager_suppresses_only_the_current_live_without_disabling_task() -> (
+    None
+):
+    manager = RecordTaskManager(object())  # type: ignore[arg-type]
+    task = FakeTask()
+    manager._tasks[100] = task  # type: ignore[assignment]
+
+    await manager.suppress_current_live(100)
+
+    task.suppress_current_live.assert_awaited_once_with()
+    assert task.ready

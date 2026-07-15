@@ -13,6 +13,20 @@ export interface LiveMonitorSettings {
   fallbackCooldownSeconds: number;
 }
 
+export interface NetworkRouteSettings {
+  primaryInterface: string | null;
+  fallbackInterface: string | null;
+  failoverEnabled: boolean;
+}
+
+export interface NetworkSettings {
+  roomStatus: NetworkRouteSettings;
+  danmaku: NetworkRouteSettings;
+  recording: NetworkRouteSettings;
+  upload: NetworkRouteSettings;
+  biliApi: NetworkRouteSettings;
+}
+
 export type LiveMonitorSettingsView =
   | { state: 'loading' }
   | { state: 'ready' }
@@ -223,6 +237,42 @@ export interface NotificationSettings {
   notifySpace: boolean;
 }
 
+export type OperationalNotificationEvent =
+  | 'account_unavailable'
+  | 'network_unavailable'
+  | 'network_failover'
+  | 'recording_failed'
+  | 'upload_failed'
+  | 'review_rejected'
+  | 'collection_failed'
+  | 'comment_failed'
+  | 'danmaku_failed'
+  | 'transcode_repair_failed'
+  | 'capacity_warning';
+
+export type OperationalNotificationChannel =
+  | 'email'
+  | 'serverchan'
+  | 'pushdeer'
+  | 'pushplus'
+  | 'telegram'
+  | 'bark';
+
+export interface OperationalNotificationTarget {
+  channel: OperationalNotificationChannel;
+  messageType: MessageType;
+}
+
+export interface OperationalNotificationRoute {
+  event: OperationalNotificationEvent;
+  targets: OperationalNotificationTarget[];
+  notifyRecovery: boolean;
+}
+
+export interface OperationalNotificationSettings {
+  routes: OperationalNotificationRoute[];
+}
+
 export const KEYS_OF_NOTIFICATION_SETTINGS = [
   'notifyBegan',
   'notifyEnded',
@@ -428,6 +478,7 @@ export interface Settings {
   logging: LoggingSettings;
   biliApi: BiliApiSettings;
   liveMonitor: LiveMonitorSettings;
+  network: NetworkSettings;
   header: HeaderSettings;
   danmaku: DanmakuSettings;
   recorder: RecorderSettings;
@@ -439,6 +490,7 @@ export interface Settings {
   pushplusNotification: PushplusNotificationSettings;
   telegramNotification: TelegramNotificationSettings;
   barkNotification: BarkNotificationSettings;
+  operationalNotifications: OperationalNotificationSettings;
   webhooks: WebhookSettings[];
 }
 

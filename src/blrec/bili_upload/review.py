@@ -44,6 +44,14 @@ class _WaitingJob:
     collection_branch_state: str
 
 
+@dataclass(frozen=True)
+class _VerifiedPart:
+    cid: int
+    transcode_state: str
+    fail_code: int
+    fail_desc: Optional[str]
+
+
 class ReviewWatcher:
     # Bilibili uses -50 for a completed archive that is only visible to its owner.
     APPROVED_STATES = frozenset((-50, 0, 1))
@@ -157,18 +165,24 @@ class ReviewWatcher:
                 bundle,
                 {'topic_grey': 1, 'bvid': job.bvid, 't': int(self._clock() * 1000)},
             )
-            cids = await self._verified_cids(job, detail)
+            verified_parts = await self._verified_parts(job, detail)
         except _ReviewMismatch as error:
             return await self._pause(job, str(error))
-        approved = await self._approve(job, cids)
+        if any(part.transcode_state == 'failed' for part in verified_parts.values()):
+            return await self._handle_transcode_failures(job, verified_parts)
+        if any(
+            part.transcode_state == 'processing' for part in verified_parts.values()
+        ):
+            return await self._store_processing_parts(job, verified_parts)
+        approved = await self._approve(job, verified_parts)
         if not approved:
             return False
         await self._create_branches(job)
         return True
 
-    async def _verified_cids(
+    async def _verified_parts(
         self, job: _WaitingJob, response: Mapping[str, Any]
-    ) -> Dict[int, int]:
+    ) -> Dict[int, _VerifiedPart]:
         parts = await self._database.fetchall(
             'SELECT id,part_index,remote_filename FROM upload_parts '
             'WHERE job_id=? ORDER BY part_index',
@@ -201,7 +215,7 @@ class ReviewWatcher:
             videos = data.get('Videos')
         if not isinstance(videos, list):
             raise _ReviewMismatch('稿件详情接口未返回可核对的分 P 信息')
-        remote_by_filename: Dict[str, Tuple[int, int]] = {}
+        remote_by_filename: Dict[str, Tuple[int, _VerifiedPart]] = {}
         for video in videos:
             if not isinstance(video, Mapping):
                 raise _ReviewMismatch('稿件详情接口返回的分 P 信息不完整')
@@ -223,22 +237,172 @@ class ReviewWatcher:
                 or filename in remote_by_filename
             ):
                 raise _ReviewMismatch('稿件详情返回的分 P filename/CID 重复或缺失')
-            remote_by_filename[filename] = (cid, page)
+            fail_code = self._integer(video.get('failCode'), default=0)
+            xcode_state = self._integer(video.get('xcodeState'), default=0)
+            fail_desc = self._text(video.get('failDesc'))
+            remote_by_filename[filename] = (
+                page,
+                _VerifiedPart(
+                    cid=cid,
+                    transcode_state=self._transcode_state(
+                        fail_code, xcode_state, fail_desc or ''
+                    ),
+                    fail_code=fail_code,
+                    fail_desc=fail_desc,
+                ),
+            )
 
         if not identity_verified:
             raise _ReviewMismatch('稿件详情缺少可核对的 AID/BVID')
 
         if set(remote_by_filename) != set(local_by_filename):
             raise _ReviewMismatch('远端分 P 与本地上传 filename 不能一一对应')
-        cids: Dict[int, int] = {}
+        verified_parts: Dict[int, _VerifiedPart] = {}
         for filename, (part_id, part_index) in local_by_filename.items():
-            cid, page = remote_by_filename[filename]
+            page, verified = remote_by_filename[filename]
             if page != part_index:
                 raise _ReviewMismatch('远端分 P 页码与本地顺序不一致')
-            cids[part_id] = cid
-        return cids
+            verified_parts[part_id] = verified
+        return verified_parts
 
-    async def _approve(self, job: _WaitingJob, cids: Mapping[int, int]) -> bool:
+    async def _handle_transcode_failures(
+        self, job: _WaitingJob, parts: Mapping[int, _VerifiedPart]
+    ) -> bool:
+        now = int(self._clock())
+
+        def handle(connection: sqlite3.Connection) -> bool:
+            current = connection.execute(
+                'SELECT state,account_id,aid,bvid FROM upload_jobs WHERE id=?',
+                (job.id,),
+            ).fetchone()
+            if (
+                current is None
+                or str(current['state']) != 'waiting_review'
+                or int(current['account_id']) != job.account_id
+                or current['aid'] != job.aid
+                or current['bvid'] != job.bvid
+            ):
+                return False
+            rows = connection.execute(
+                'SELECT id,repair_stage,repair_original_attempts,'
+                'repair_remux_attempts FROM upload_parts WHERE job_id=?',
+                (job.id,),
+            ).fetchall()
+            by_id = {int(row['id']): row for row in rows}
+            if set(by_id) != set(parts):
+                return False
+            failed_ids = [
+                part_id
+                for part_id, part in parts.items()
+                if part.transcode_state == 'failed'
+            ]
+            exhausted = any(
+                str(by_id[part_id]['repair_stage'])
+                in ('remux_waiting_review', 'exhausted')
+                or (
+                    int(by_id[part_id]['repair_original_attempts']) >= 1
+                    and int(by_id[part_id]['repair_remux_attempts']) >= 1
+                )
+                for part_id in failed_ids
+            )
+            for part_id, part in parts.items():
+                stage = str(by_id[part_id]['repair_stage'])
+                if part.transcode_state != 'failed' and stage in (
+                    'original_waiting_review',
+                    'remux_waiting_review',
+                ):
+                    stage = 'completed'
+                elif part.transcode_state == 'failed' and exhausted:
+                    stage = 'exhausted'
+                connection.execute(
+                    'UPDATE upload_parts SET cid=?,transcode_state=?,'
+                    'transcode_fail_code=?,transcode_fail_desc=?,repair_stage=?,'
+                    'repair_diagnostic=CASE WHEN ?=\'failed\' THEN ? '
+                    'ELSE repair_diagnostic END WHERE id=? AND job_id=?',
+                    (
+                        part.cid,
+                        part.transcode_state,
+                        part.fail_code,
+                        part.fail_desc,
+                        stage,
+                        part.transcode_state,
+                        (part.fail_desc or 'B 站转码失败')[:500],
+                        part_id,
+                        job.id,
+                    ),
+                )
+            if exhausted:
+                reason = '重新封装后 B 站转码仍失败，已停止自动修复'
+                connection.execute(
+                    "UPDATE upload_jobs SET state='paused',repair_state='failed',"
+                    'repair_message=NULL,repair_error=?,repair_completed_at=?,'
+                    'review_reason=?,updated_at=? WHERE id=?',
+                    (reason, now, reason, now, job.id),
+                )
+                return True
+            needs_remux = any(
+                str(by_id[part_id]['repair_stage']) == 'original_waiting_review'
+                or int(by_id[part_id]['repair_original_attempts']) >= 1
+                for part_id in failed_ids
+            )
+            if needs_remux:
+                message = '原文件重传后仍有 {} 个分 P 转码失败，等待重新封装'.format(
+                    len(failed_ids)
+                )
+            else:
+                message = '发现 {} 个分 P 转码失败，等待自动修复'.format(
+                    len(failed_ids)
+                )
+            connection.execute(
+                "UPDATE upload_jobs SET state='waiting_review',"
+                "repair_state='queued',repair_message=?,repair_error=NULL,"
+                'repair_requested_at=?,repair_completed_at=NULL,review_reason=?,'
+                'updated_at=? WHERE id=?',
+                (message, now, message, now, job.id),
+            )
+            return True
+
+        return await self._database.write(handle)
+
+    async def _store_processing_parts(
+        self, job: _WaitingJob, parts: Mapping[int, _VerifiedPart]
+    ) -> bool:
+        now = int(self._clock())
+
+        def store(connection: sqlite3.Connection) -> bool:
+            current = connection.execute(
+                'SELECT state FROM upload_jobs WHERE id=?', (job.id,)
+            ).fetchone()
+            if current is None or str(current['state']) != 'waiting_review':
+                return False
+            for part_id, part in parts.items():
+                connection.execute(
+                    'UPDATE upload_parts SET cid=?,transcode_state=?,'
+                    'transcode_fail_code=?,transcode_fail_desc=? '
+                    'WHERE id=? AND job_id=?',
+                    (
+                        part.cid,
+                        part.transcode_state,
+                        part.fail_code,
+                        part.fail_desc,
+                        part_id,
+                        job.id,
+                    ),
+                )
+            message = 'B 站仍在处理视频转码'
+            connection.execute(
+                'UPDATE upload_jobs SET review_reason=?,repair_message=CASE '
+                "WHEN repair_state='waiting_review' THEN ? ELSE repair_message END,"
+                'updated_at=? WHERE id=?',
+                (message, message, now, job.id),
+            )
+            return True
+
+        return await self._database.write(store)
+
+    async def _approve(
+        self, job: _WaitingJob, parts: Mapping[int, _VerifiedPart]
+    ) -> bool:
         now = int(self._clock())
 
         def approve(connection: sqlite3.Connection) -> bool:
@@ -260,12 +424,24 @@ class ReviewWatcher:
                     'SELECT id FROM upload_parts WHERE job_id=?', (job.id,)
                 ).fetchall()
             }
-            if part_ids != set(cids):
+            if part_ids != set(parts):
                 return False
-            for part_id, cid in cids.items():
+            for part_id, part in parts.items():
                 connection.execute(
-                    'UPDATE upload_parts SET cid=? WHERE id=? AND job_id=?',
-                    (cid, part_id, job.id),
+                    'UPDATE upload_parts SET cid=?,transcode_state=?,'
+                    'transcode_fail_code=?,transcode_fail_desc=?,'
+                    'repair_stage=CASE WHEN repair_stage IN '
+                    "('original_waiting_review','remux_waiting_review') "
+                    "THEN 'completed' ELSE repair_stage END "
+                    'WHERE id=? AND job_id=?',
+                    (
+                        part.cid,
+                        part.transcode_state,
+                        part.fail_code,
+                        part.fail_desc,
+                        part_id,
+                        job.id,
+                    ),
                 )
             connection.execute(
                 "UPDATE upload_jobs SET state='approved',review_reason=NULL,"
@@ -445,6 +621,24 @@ class ReviewWatcher:
         else:
             return None
         return result if result > 0 else None
+
+    @staticmethod
+    def _integer(value: Any, *, default: int) -> int:
+        if value is None:
+            return default
+        if type(value) is int:
+            return value
+        if isinstance(value, str) and value.lstrip('-').isdigit():
+            return int(value)
+        raise _ReviewMismatch('远端分 P 转码状态不是整数')
+
+    @staticmethod
+    def _transcode_state(fail_code: int, xcode_state: int, fail_desc: str) -> str:
+        if fail_code == 0 and xcode_state == 2:
+            return 'processing'
+        if (fail_code, xcode_state) in ((9, 3), (14, 1)) or fail_code != 0:
+            return 'failed'
+        return 'ready'
 
     @staticmethod
     def _text(value: Any) -> Optional[str]:

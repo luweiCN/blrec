@@ -129,6 +129,9 @@ describe('UploadsComponent', () => {
     expect(
       fixture.nativeElement.querySelector('app-recording-sessions')
     ).toBeNull();
+    expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
+      1
+    );
   });
 
   it('loads redacted account metadata and explains credential scope', () => {

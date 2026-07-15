@@ -10,7 +10,7 @@ from blrec.utils.string import camel_case
 from .bili_accounts import authenticated_manager_subject
 
 manager: Optional[RetentionManager] = None
-unavailable_reason: Optional[str] = 'Recording retention is not enabled'
+unavailable_reason: Optional[str] = 'Recording retention is not ready'
 
 
 class RetentionStatusResponse(BaseModel):

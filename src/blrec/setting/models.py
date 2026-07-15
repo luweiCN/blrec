@@ -50,6 +50,8 @@ __all__ = (
     'SettingsOut',
     'BiliApiSettings',
     'BiliUploadSettings',
+    'NetworkRouteSettings',
+    'NetworkSettings',
     'LiveMonitorSettings',
     'HeaderOptions',
     'HeaderSettings',
@@ -72,6 +74,9 @@ __all__ = (
     'BarkSettings',
     'NotifierSettings',
     'NotificationSettings',
+    'OperationalNotificationTarget',
+    'OperationalNotificationRoute',
+    'OperationalNotificationSettings',
     'EmailMessageTemplateSettings',
     'ServerchanMessageTemplateSettings',
     'PushdeerMessageTemplateSettings',
@@ -175,6 +180,7 @@ class EnvSettings(BaseSettings):
     settings_file: Annotated[str, Field(env='BLREC_CONFIG')] = DEFAULT_SETTINGS_FILE
     out_dir: Annotated[Optional[str], Field(env='BLREC_OUT_DIR')] = None
     log_dir: Annotated[Optional[str], Field(env='BLREC_LOG_DIR')] = None
+    admin_username: Annotated[str, Field(env='BLREC_ADMIN_USERNAME')] = 'admin'
     api_key: Annotated[
         Optional[str],
         Field(
@@ -192,8 +198,28 @@ class EnvSettings(BaseSettings):
         Dict[str, str], Field(env='BLREC_CREDENTIAL_OLD_KEY_FILES')
     ] = {}
 
+    @validator('admin_username')
+    def _validate_admin_username(cls, value: str) -> str:
+        if (
+            not 1 <= len(value) <= 64
+            or value != value.strip()
+            or any(not char.isprintable() for char in value)
+        ):
+            raise ValueError(
+                'administrator username must contain 1 to 64 visible characters'
+            )
+        return value
+
     @root_validator(pre=True)
     def _parse_credential_sources(cls, values: Dict[str, object]) -> Dict[str, object]:
+        admin_username = values.get('admin_username')
+        if isinstance(admin_username, str) and (
+            admin_username != admin_username.strip()
+            or any(not char.isprintable() for char in admin_username)
+        ):
+            raise ValueError(
+                'administrator username must contain 1 to 64 visible characters'
+            )
         if (
             values.get('credential_key') is not None
             and values.get('credential_key_file') is not None
@@ -283,11 +309,7 @@ class BiliApiSettings(BaseModel):
 
 
 class BiliUploadSettings(BaseModel):
-    enabled: bool = False
     database_path: str = '/cfg/blrec.sqlite3'
-    auto_upload_enabled: bool = False
-    auto_comment_enabled: bool = False
-    danmaku_backfill_enabled: bool = False
     upload_chunk_size: Annotated[int, Field(ge=1024 * 1024, le=32 * 1024 * 1024)] = (
         4 * 1024 * 1024
     )
@@ -301,6 +323,30 @@ class LiveMonitorSettings(BaseModel):
     interval_seconds: Annotated[int, Field(ge=30, le=60)] = 30
     batch_size: Annotated[int, Field(ge=1, le=29)] = 29
     fallback_cooldown_seconds: Annotated[int, Field(ge=600, le=3600)] = 600
+
+
+class NetworkRouteSettings(BaseModel):
+    primary_interface: Optional[str] = None
+    fallback_interface: Optional[str] = None
+    failover_enabled: bool = True
+
+    @root_validator
+    def _validate_distinct_interfaces(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        primary = values.get('primary_interface')
+        fallback = values.get('fallback_interface')
+        if primary is not None and primary == fallback:
+            raise ValueError('primary and fallback interfaces must be different')
+        return values
+
+
+class NetworkSettings(BaseModel):
+    room_status: NetworkRouteSettings = NetworkRouteSettings()
+    danmaku: NetworkRouteSettings = NetworkRouteSettings()
+    recording: NetworkRouteSettings = NetworkRouteSettings()
+    upload: NetworkRouteSettings = NetworkRouteSettings()
+    bili_api: NetworkRouteSettings = NetworkRouteSettings()
 
 
 class HeaderOptions(BaseModel):
@@ -635,6 +681,109 @@ class NotificationSettings(BaseModel):
     notify_space: bool = True
 
 
+OperationalEventCode = Literal[
+    'account_unavailable',
+    'network_unavailable',
+    'network_failover',
+    'recording_failed',
+    'upload_failed',
+    'review_rejected',
+    'collection_failed',
+    'comment_failed',
+    'danmaku_failed',
+    'transcode_repair_failed',
+    'capacity_warning',
+]
+OperationalChannel = Literal[
+    'email', 'serverchan', 'pushdeer', 'pushplus', 'telegram', 'bark'
+]
+
+_OPERATIONAL_EVENT_CODES: Tuple[OperationalEventCode, ...] = (
+    'account_unavailable',
+    'network_unavailable',
+    'network_failover',
+    'recording_failed',
+    'upload_failed',
+    'review_rejected',
+    'collection_failed',
+    'comment_failed',
+    'danmaku_failed',
+    'transcode_repair_failed',
+    'capacity_warning',
+)
+_OPERATIONAL_MESSAGE_TYPES = {
+    'email': frozenset(('text', 'html')),
+    'serverchan': frozenset(('markdown',)),
+    'pushdeer': frozenset(('text', 'markdown')),
+    'pushplus': frozenset(('text', 'markdown', 'html')),
+    'telegram': frozenset(('markdown', 'html')),
+    'bark': frozenset(('text', 'markdown')),
+}
+
+
+class OperationalNotificationTarget(BaseModel):
+    channel: OperationalChannel
+    message_type: MessageType = 'text'
+
+    @root_validator
+    def validate_message_type(cls, values: Dict[str, object]) -> Dict[str, object]:
+        channel = values.get('channel')
+        message_type = values.get('message_type')
+        if (
+            isinstance(channel, str)
+            and isinstance(message_type, str)
+            and message_type not in _OPERATIONAL_MESSAGE_TYPES[channel]
+        ):
+            raise ValueError(
+                "channel '{}' does not support '{}' messages".format(
+                    channel, message_type
+                )
+            )
+        return values
+
+
+class OperationalNotificationRoute(BaseModel):
+    event: OperationalEventCode
+    targets: Annotated[List[OperationalNotificationTarget], Field(max_items=6)] = []
+    notify_recovery: bool = True
+
+    @validator('targets')
+    def targets_must_be_unique(
+        cls, targets: List[OperationalNotificationTarget]
+    ) -> List[OperationalNotificationTarget]:
+        channels = [target.channel for target in targets]
+        if len(channels) != len(set(channels)):
+            raise ValueError('duplicate channel in operational notification route')
+        return targets
+
+
+def _default_operational_routes() -> List[OperationalNotificationRoute]:
+    return [
+        OperationalNotificationRoute(event=event) for event in _OPERATIONAL_EVENT_CODES
+    ]
+
+
+class OperationalNotificationSettings(BaseModel):
+    routes: List[OperationalNotificationRoute] = Field(
+        default_factory=_default_operational_routes
+    )
+
+    @validator('routes')
+    def routes_must_be_unique(
+        cls, routes: List[OperationalNotificationRoute]
+    ) -> List[OperationalNotificationRoute]:
+        events = [route.event for route in routes]
+        if len(events) != len(set(events)):
+            raise ValueError('duplicate operational notification event route')
+        return routes
+
+    def route_for(self, event: OperationalEventCode) -> OperationalNotificationRoute:
+        for route in self.routes:
+            if route.event == event:
+                return route
+        return OperationalNotificationRoute(event=event)
+
+
 class MessageTemplateSettings(BaseModel):
     began_message_type: MessageType
     began_message_title: str
@@ -825,6 +974,7 @@ class Settings(BaseModel):
     bili_api: BiliApiSettings = BiliApiSettings()
     bili_upload: BiliUploadSettings = BiliUploadSettings()
     live_monitor: LiveMonitorSettings = LiveMonitorSettings()
+    network: NetworkSettings = NetworkSettings()
     header: HeaderSettings = HeaderSettings()
     danmaku: DanmakuSettings = DanmakuSettings()
     recorder: RecorderSettings = RecorderSettings()
@@ -838,6 +988,9 @@ class Settings(BaseModel):
     pushplus_notification: PushplusNotificationSettings = PushplusNotificationSettings()
     telegram_notification: TelegramNotificationSettings = TelegramNotificationSettings()
     bark_notification: BarkNotificationSettings = BarkNotificationSettings()
+    operational_notifications: OperationalNotificationSettings = (
+        OperationalNotificationSettings()
+    )
     webhooks: Annotated[List[WebHookSettings], Field(max_items=50)] = []
 
     @classmethod
@@ -878,6 +1031,7 @@ class SettingsIn(BaseModel):
     bili_api: Optional[BiliApiSettings] = None
     bili_upload: Optional[BiliUploadSettings] = None
     live_monitor: Optional[LiveMonitorSettings] = None
+    network: Optional[NetworkSettings] = None
     header: Optional[HeaderSettings] = None
     danmaku: Optional[DanmakuSettings] = None
     recorder: Optional[RecorderSettings] = None
@@ -889,6 +1043,7 @@ class SettingsIn(BaseModel):
     pushplus_notification: Optional[PushplusNotificationSettings] = None
     telegram_notification: Optional[TelegramNotificationSettings] = None
     bark_notification: Optional[BarkNotificationSettings] = None
+    operational_notifications: Optional[OperationalNotificationSettings] = None
     webhooks: Optional[List[WebHookSettings]] = None
 
 

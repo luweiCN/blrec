@@ -13,10 +13,27 @@
       nz-button
       nzSize="small"
       type="button"
+      [nzLoading]="batchSettingsLoading"
+      (click)="openBatchSettingsDialog()"
+    >
+      批量录制设置
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
+      (click)="openBatchUploadPolicyDialog()"
+    >
+      批量投稿设置
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      type="button"
       [disabled]="eligibleCount('start') === 0"
       (click)="runBatchAction('start')"
     >
-      运行
+      开启
     </button>
     <button
       nz-button
@@ -25,25 +42,7 @@
       [disabled]="eligibleCount('stop') === 0"
       (click)="runBatchAction('stop')"
     >
-      停止
-    </button>
-    <button
-      nz-button
-      nzSize="small"
-      type="button"
-      [disabled]="eligibleCount('recorder_enable') === 0"
-      (click)="runBatchAction('recorder_enable')"
-    >
-      开启录制
-    </button>
-    <button
-      nz-button
-      nzSize="small"
-      type="button"
-      [disabled]="eligibleCount('recorder_disable') === 0"
-      (click)="runBatchAction('recorder_disable')"
-    >
-      关闭录制
+      关闭
     </button>
     <button
       nz-button
@@ -53,6 +52,16 @@
       (click)="runBatchAction('cut')"
     >
       切割文件
+    </button>
+    <button
+      nz-button
+      nzSize="small"
+      nzDanger
+      type="button"
+      [disabled]="eligibleCount('force_stop') === 0"
+      (click)="runBatchAction('force_stop')"
+    >
+      强制停止
     </button>
     <button
       nz-button
@@ -87,8 +96,7 @@
       </div>
       <div role="columnheader">直播间</div>
       <div role="columnheader">直播状态</div>
-      <div role="columnheader">任务状态</div>
-      <div role="columnheader">录制</div>
+      <div role="columnheader">监控与录制</div>
       <div role="columnheader">操作</div>
     </div>
     <app-task-item
@@ -100,3 +108,24 @@
     ></app-task-item>
   </div>
 </ng-template>
+
+<ng-container *ngIf="batchTaskOptions && batchGlobalSettings">
+  <app-task-settings-dialog
+    [title]="'批量录制设置 · ' + selectedCount + ' 个房间'"
+    [taskOptions]="batchTaskOptions"
+    [globalSettings]="batchGlobalSettings"
+    [(visible)]="batchSettingsDialogVisible"
+    (confirm)="changeBatchTaskOptions($event)"
+    (afterClose)="cleanBatchSettingsData()"
+  ></app-task-settings-dialog>
+</ng-container>
+
+<app-upload-policy-dialog
+  *ngIf="batchUploadPolicyDialogVisible && selectedReferenceTask as reference"
+  [roomId]="reference.room_info.room_id"
+  [roomIds]="selectedRoomIdsArray"
+  [roomName]="reference.user_info.name"
+  [liveAreaName]="reference.room_info.area_name"
+  [liveParentAreaName]="reference.room_info.parent_area_name"
+  (closed)="batchUploadPolicyDialogVisible = false"
+></app-upload-policy-dialog>

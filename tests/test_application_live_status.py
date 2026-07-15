@@ -255,6 +255,16 @@ def test_legacy_metrics_count_monitor_enabled_tasks_with_one_iteration() -> None
 
 
 @pytest.mark.asyncio
+async def test_application_forwards_current_live_suppression() -> None:
+    app = object.__new__(Application)
+    app._task_manager = SimpleNamespace(suppress_current_live=AsyncMock())
+
+    await app.suppress_current_live(100)
+
+    app._task_manager.suppress_current_live.assert_awaited_once_with(100)
+
+
+@pytest.mark.asyncio
 async def test_application_stops_coordinator_after_tasks() -> None:
     calls: List[str] = []
     app = object.__new__(Application)

@@ -7,7 +7,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from liquid import Environment
 
@@ -36,8 +36,6 @@ from .errors import (
 from .upos import FileIdentity, UposUploader, UposUploadPaused, UposUploadStopped
 
 __all__ = ('InvalidUploadPolicy', 'UploadCoordinator')
-
-_FeatureSwitch = Union[bool, Callable[[], bool]]
 
 
 class InvalidUploadPolicy(RuntimeError):
@@ -75,9 +73,6 @@ class UploadCoordinator:
         *,
         bundle_loader: Callable[[int], Awaitable[CredentialBundle]],
         account_gates: AccountWriteGate,
-        auto_upload_enabled: _FeatureSwitch,
-        auto_comment_enabled: _FeatureSwitch,
-        danmaku_backfill_enabled: _FeatureSwitch,
         cover_resolver: CoverResolver,
         worker_id: Optional[str] = None,
         stability_seconds: int = 30,
@@ -91,9 +86,6 @@ class UploadCoordinator:
         self._uploader = uploader
         self._bundle_loader = bundle_loader
         self._account_gates = account_gates
-        self._auto_upload_enabled = auto_upload_enabled
-        self._auto_comment_enabled = auto_comment_enabled
-        self._danmaku_backfill_enabled = danmaku_backfill_enabled
         self._cover_resolver = cover_resolver
         self._worker_id = worker_id or 'upload-{}'.format(uuid.uuid4().hex)
         self._stability_seconds = stability_seconds
@@ -130,8 +122,12 @@ class UploadCoordinator:
             "WHEN policy.account_mode='fixed' THEN policy.account_id "
             'ELSE (SELECT primary_account_id FROM bili_account_selection '
             'WHERE id=1) END '
-            "WHERE session.state='closed' AND policy.enabled=1 "
+            "WHERE session.state='closed' "
+            "AND session.deletion_state='none' "
+            "AND session.upload_intent IN ('auto','upload') "
             "AND account.state='active' "
+            'AND NOT EXISTS(SELECT 1 FROM upload_suppressions suppression '
+            'WHERE suppression.session_id=session.id) '
             'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
             'WHERE job.session_id=session.id) '
             'ORDER BY session.started_at,session.id'
@@ -144,7 +140,7 @@ class UploadCoordinator:
         return created
 
     async def run_once(self) -> Optional[int]:
-        if not self._enabled(self._auto_upload_enabled) or self._stop_requested():
+        if self._stop_requested():
             return None
         async with self._run_lock:
             claim = await self._database.claim(
@@ -214,12 +210,6 @@ class UploadCoordinator:
         return payload
 
     async def _create_candidate(self, row: sqlite3.Row) -> Optional[int]:
-        if bool(row['auto_comment']) and not self._enabled(self._auto_comment_enabled):
-            return None
-        if bool(row['danmaku_backfill']) and not self._enabled(
-            self._danmaku_backfill_enabled
-        ):
-            return None
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path,final_path,xml_path,'
             'artifact_state,updated_at FROM recording_parts '
@@ -280,14 +270,12 @@ class UploadCoordinator:
             if session is None or str(session['state']) != 'closed':
                 return None
             policy = connection.execute(
-                'SELECT enabled,account_mode,account_id,updated_at '
+                'SELECT account_mode,account_id,updated_at '
                 'FROM room_upload_policies WHERE room_id=?',
                 (int(row['room_id']),),
             ).fetchone()
-            if (
-                policy is None
-                or int(policy['enabled']) != 1
-                or int(policy['updated_at']) != int(row['policy_updated_at'])
+            if policy is None or int(policy['updated_at']) != int(
+                row['policy_updated_at']
             ):
                 return None
             resolved_account_id = int(row['resolved_account_id'])
@@ -925,7 +913,3 @@ class UploadCoordinator:
     async def _file_identity(path: str) -> FileIdentity:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, FileIdentity.from_path, path)
-
-    @staticmethod
-    def _enabled(value: _FeatureSwitch) -> bool:
-        return bool(value() if callable(value) else value)

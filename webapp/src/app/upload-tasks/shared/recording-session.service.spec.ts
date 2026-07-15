@@ -90,6 +90,18 @@ describe('RecordingSessionService', () => {
     request.flush({ results: [] });
   });
 
+  it('uses recording-session IDs for actions that also support sessions without jobs', () => {
+    service.runSessionAction('set_upload', [7, 8]).subscribe();
+
+    const request = http.expectOne('/api/v1/recording-sessions/actions');
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({
+      action: 'set_upload',
+      sessionIds: [7, 8],
+    });
+    request.flush({ results: [] });
+  });
+
   it('retries all server-selected failed upload jobs', () => {
     service.retryFailedJobs().subscribe();
 
@@ -107,12 +119,26 @@ describe('RecordingSessionService', () => {
       '/api/v1/recording-sessions/parts/7/media-access'
     );
     expect(accessRequest.request.method).toBe('POST');
-    accessRequest.flush({ token: 'signed token', expiresAt: 123 });
+    accessRequest.flush({
+      token: 'signed token',
+      expiresAt: 123,
+      snapshotId: 'snapshot-id',
+      durationMs: 12_500,
+      fileSizeBytes: 2_048,
+      recording: true,
+    });
 
     expect(
-      service.mediaUrl(7, { token: 'signed token', expiresAt: 123 })
+      service.mediaUrl(7, {
+        token: 'signed token',
+        expiresAt: 123,
+        snapshotId: 'snapshot-id',
+        durationMs: 12_500,
+        fileSizeBytes: 2_048,
+        recording: true,
+      })
     ).toBe(
-      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123'
+      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id'
     );
 
     service.listDanmaku(7, 100, 50).subscribe();

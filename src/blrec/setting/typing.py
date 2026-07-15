@@ -22,6 +22,7 @@ KeyOfSettings = Literal[
     'logging',
     'bili_api',
     'live_monitor',
+    'network',
     'header',
     'danmaku',
     'recorder',
@@ -33,6 +34,7 @@ KeyOfSettings = Literal[
     'pushplus_notification',
     'telegram_notification',
     'bark_notification',
+    'operational_notifications',
     'webhooks',
 ]
 

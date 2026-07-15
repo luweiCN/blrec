@@ -8,7 +8,12 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
 from loguru import logger
 
-from blrec.setting.models import BiliUploadSettings
+from blrec.networking.manager import NetworkRouteManager
+from blrec.notification.operational import (
+    OperationalHealthScanner,
+    OperationalNotificationCenter,
+)
+from blrec.setting.models import BiliUploadSettings, OperationalNotificationSettings
 
 from .accounts import AccountManager, AccountWriteGate
 from .categories import UploadCategoryCatalog
@@ -29,7 +34,7 @@ from .recording_content import RecordingContentReader
 from .retention import RetentionManager
 from .review import ReviewWatcher
 from .signing import WbiSigner, WebSessionBuilder
-from .task_actions import UploadTaskActionManager
+from .task_actions import UploadTaskActionManager, UploadTaskActionRejected
 from .upload import UploadCoordinator
 from .upos import UposUploader
 
@@ -60,6 +65,13 @@ class BiliAccountRuntime:
         recording_capacity_bytes: Callable[[], int] = lambda: 0,
         capacity_warning_threshold_bytes: Callable[[], int] = lambda: 0,
         on_primary_credential_changed: Optional[Callable[[], Awaitable[None]]] = None,
+        active_session_canceller: Optional[Callable[[int], Awaitable[None]]] = None,
+        network_route_manager: Optional[NetworkRouteManager] = None,
+        operational_settings_provider: Optional[
+            Callable[[], OperationalNotificationSettings]
+        ] = None,
+        notification_senders: Optional[Mapping[str, Any]] = None,
+        notification_channel_enabled: Callable[[str], bool] = lambda _channel: False,
     ) -> None:
         if refresh_interval_seconds <= 0:
             raise ValueError('refresh interval must be positive')
@@ -80,6 +92,11 @@ class BiliAccountRuntime:
         self._recording_capacity_bytes = recording_capacity_bytes
         self._capacity_warning_threshold_bytes = capacity_warning_threshold_bytes
         self._on_primary_credential_changed = on_primary_credential_changed
+        self._active_session_canceller = active_session_canceller
+        self._network_route_manager = network_route_manager
+        self._operational_settings_provider = operational_settings_provider
+        self._notification_senders = dict(notification_senders or {})
+        self._notification_channel_enabled = notification_channel_enabled
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
@@ -99,11 +116,13 @@ class BiliAccountRuntime:
         self._danmaku_publisher: Optional[DanmakuPublisher] = None
         self._retention_manager: Optional[RetentionManager] = None
         self._task_actions: Optional[UploadTaskActionManager] = None
+        self._notification_scanner: Optional[OperationalHealthScanner] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
+        self._session_action_lock = asyncio.Lock()
         self._unavailable_reason: Optional[str] = (
-            'Bilibili account management is not enabled'
+            'Bilibili account management is not ready'
         )
 
     @property
@@ -190,9 +209,6 @@ class BiliAccountRuntime:
         except FeatureUnavailable as error:
             self._unavailable_reason = str(error)
             return False
-        if not self._settings.enabled:
-            self._unavailable_reason = 'Bilibili account management is not enabled'
-            return False
         assert self._credential_key is not None
 
         database = BiliUploadDatabase(self._settings.database_path)
@@ -218,15 +234,10 @@ class BiliAccountRuntime:
                 on_primary_credential_changed=self._on_primary_credential_changed,
             )
             await manager.start()
-            upload_stop_event = asyncio.Event()
-
-            def upload_enabled() -> bool:
-                return bool(
-                    self._settings.enabled and self._settings.auto_upload_enabled
-                )
 
             def upload_stop_requested() -> bool:
-                return upload_stop_event.is_set() or not upload_enabled()
+                stop_event = self._upload_stop_event
+                return stop_event is not None and stop_event.is_set()
 
             uploader = UposUploader(
                 database,
@@ -256,11 +267,6 @@ class BiliAccountRuntime:
                 uploader,
                 bundle_loader=load_bundle,
                 account_gates=write_gates,
-                auto_upload_enabled=upload_enabled,
-                auto_comment_enabled=lambda: self._settings.auto_comment_enabled,
-                danmaku_backfill_enabled=(
-                    lambda: self._settings.danmaku_backfill_enabled
-                ),
                 cover_resolver=cover_resolver,
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
@@ -272,6 +278,9 @@ class BiliAccountRuntime:
                 bundle_loader=load_bundle,
                 account_gates=write_gates,
                 edit_payload_builder=coordinator.build_edit_payload,
+                recording_root=(
+                    None if self._recording_root is None else Path(self._recording_root)
+                ),
                 clock=self._clock,
             )
             await task_actions.recover_interrupted()
@@ -292,14 +301,12 @@ class BiliAccountRuntime:
                 protocol,
                 bundle_loader=load_bundle,
                 account_gates=write_gates,
-                auto_comment_enabled=(lambda: self._settings.auto_comment_enabled),
                 clock=self._clock,
             )
             danmaku_importer = DanmakuImporter(
                 database,
                 import_high_watermark=self._settings.import_high_watermark,
                 space_threshold_bytes=self._space_threshold_bytes,
-                enabled=lambda: self._settings.danmaku_backfill_enabled,
                 clock=self._clock,
             )
             danmaku_publisher = DanmakuPublisher(
@@ -307,7 +314,6 @@ class BiliAccountRuntime:
                 protocol,
                 bundle_loader=load_bundle,
                 account_gates=write_gates,
-                auto_danmaku_enabled=(lambda: self._settings.danmaku_backfill_enabled),
                 interval_seconds=self._settings.danmaku_interval_seconds,
                 auth_refresh=manager.refresh_account,
                 clock=self._clock,
@@ -332,6 +338,23 @@ class BiliAccountRuntime:
                     clock=self._clock,
                 )
             )
+            notification_scanner = None
+            if self._operational_settings_provider is not None:
+                notification_center = OperationalNotificationCenter(
+                    database,
+                    settings_provider=self._operational_settings_provider,
+                    senders=self._notification_senders,
+                    channel_enabled=self._notification_channel_enabled,
+                    clock=self._clock,
+                )
+                notification_scanner = OperationalHealthScanner(
+                    database,
+                    notification_center,
+                    retention_status_provider=(
+                        None if retention_manager is None else retention_manager.status
+                    ),
+                    network_route_manager=self._network_route_manager,
+                )
         except Exception:
             logger.exception('Bilibili account management failed to start')
             await self._close_partial(database)
@@ -356,22 +379,10 @@ class BiliAccountRuntime:
         self._danmaku_publisher = danmaku_publisher
         self._retention_manager = retention_manager
         self._task_actions = task_actions
-        self._upload_stop_event = upload_stop_event
+        self._notification_scanner = notification_scanner
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
-        self._upload_task = asyncio.create_task(
-            self._run_uploads(
-                journal,
-                coordinator,
-                review_watcher,
-                comment_publisher,
-                danmaku_importer,
-                danmaku_publisher,
-                upload_stop_event,
-                retention_manager,
-                task_actions,
-            )
-        )
+        await self._start_upload_worker()
         return True
 
     async def primary_cookie_header(self, url: str) -> Optional[str]:
@@ -387,6 +398,94 @@ class BiliAccountRuntime:
     async def report_primary_auth_failure(self) -> None:
         if self._manager is not None:
             await self._manager.report_primary_auth_failure()
+
+    async def run_recording_session_action(
+        self, action: str, session_id: int, *, manager_subject: str
+    ) -> str:
+        database = self._database
+        actions = self._task_actions
+        if database is None or actions is None:
+            raise UploadTaskActionRejected('上传任务管理当前不可用')
+        if not manager_subject:
+            raise UploadTaskActionRejected('管理员身份不能为空')
+        row = await database.fetchone(
+            'SELECT session.room_id,session.state,job.id AS job_id '
+            'FROM recording_sessions session LEFT JOIN upload_jobs job '
+            'ON job.session_id=session.id WHERE session.id=?',
+            (session_id,),
+        )
+        if row is None:
+            raise UploadTaskActionRejected('录制场次不存在')
+
+        if action in (
+            'set_upload',
+            'set_skip',
+            'delete_local',
+            'pause_upload',
+            'resume_upload',
+        ):
+            async with self._session_action_lock:
+                await self._stop_upload_worker()
+                try:
+                    if action == 'delete_local':
+                        if str(row['state']) == 'open':
+                            if self._active_session_canceller is None:
+                                raise UploadTaskActionRejected(
+                                    '当前录制无法停止，请稍后再试'
+                                )
+                            try:
+                                await self._active_session_canceller(
+                                    int(row['room_id'])
+                                )
+                            except UploadTaskActionRejected:
+                                raise
+                            except Exception as error:
+                                raise UploadTaskActionRejected(
+                                    '停止当前录制失败：{}'.format(error)
+                                ) from None
+                        return await actions.delete_session(
+                            session_id, manager_subject=manager_subject
+                        )
+                    job_id = row['job_id']
+                    if action in ('pause_upload', 'resume_upload'):
+                        if job_id is None:
+                            raise UploadTaskActionRejected('本场录像尚未创建上传任务')
+                        if action == 'pause_upload':
+                            return await actions.pause_upload(
+                                int(job_id), manager_subject=manager_subject
+                            )
+                        return await actions.resume_upload(
+                            int(job_id), manager_subject=manager_subject
+                        )
+                    return await actions.set_session_upload_intent(
+                        session_id,
+                        'upload' if action == 'set_upload' else 'skip',
+                        manager_subject=manager_subject,
+                    )
+                finally:
+                    await self._start_upload_worker()
+
+        job_id = row['job_id']
+        if job_id is None:
+            raise UploadTaskActionRejected('本场录像尚未创建上传任务')
+        numeric_job_id = int(job_id)
+        if action == 'retry_failed':
+            return await actions.retry_failed(
+                numeric_job_id, manager_subject=manager_subject
+            )
+        if action == 'repair_transcode':
+            return await actions.request_transcode_repair(
+                numeric_job_id, manager_subject=manager_subject
+            )
+        if action == 'backfill_danmaku':
+            return await actions.request_danmaku_backfill(
+                numeric_job_id, manager_subject=manager_subject
+            )
+        if action == 'repost_as_new':
+            return await actions.repost_as_new(
+                numeric_job_id, manager_subject=manager_subject
+            )
+        raise UploadTaskActionRejected('不支持的场次操作')
 
     async def close(self) -> None:
         await self._stop_upload_worker()
@@ -411,6 +510,7 @@ class BiliAccountRuntime:
         self._danmaku_publisher = None
         self._retention_manager = None
         self._task_actions = None
+        self._notification_scanner = None
         self._content_reader = None
         transport, self._transport = self._transport, None
         if transport is not None:
@@ -421,7 +521,7 @@ class BiliAccountRuntime:
             await database.close()
 
     def _create_protocol(self) -> BiliProtocolClient:
-        transport = AiohttpProtocolTransport()
+        transport = AiohttpProtocolTransport(route_manager=self._network_route_manager)
         self._transport = transport
         return BiliProtocolClient(
             transport=transport,
@@ -451,6 +551,7 @@ class BiliAccountRuntime:
         stop_event: asyncio.Event,
         retention_manager: Optional[RetentionManager] = None,
         task_actions: Optional[UploadTaskActionManager] = None,
+        notification_scanner: Optional[OperationalHealthScanner] = None,
     ) -> None:
         while not stop_event.is_set():
             upload_processed = None
@@ -474,6 +575,13 @@ class BiliAccountRuntime:
                 raise
             except Exception:
                 logger.exception('Bilibili upload worker iteration failed')
+            if notification_scanner is not None:
+                try:
+                    await notification_scanner.scan()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception('Operational notification scan failed')
             delay: float
             if comment_processed is not None:
                 delay = _COMMENT_ACTION_INTERVAL_SECONDS
@@ -498,6 +606,53 @@ class BiliAccountRuntime:
         if upload_task is not None:
             await upload_task
 
+    async def _start_upload_worker(self) -> None:
+        if self._upload_task is not None and not self._upload_task.done():
+            return
+        journal = self._journal
+        coordinator = self._coordinator
+        review_watcher = self._review_watcher
+        comment_publisher = self._comment_publisher
+        danmaku_importer = self._danmaku_importer
+        danmaku_publisher = self._danmaku_publisher
+        task_actions = self._task_actions
+        if any(
+            component is None
+            for component in (
+                journal,
+                coordinator,
+                review_watcher,
+                comment_publisher,
+                danmaku_importer,
+                danmaku_publisher,
+                task_actions,
+            )
+        ):
+            return
+        assert journal is not None
+        assert coordinator is not None
+        assert review_watcher is not None
+        assert comment_publisher is not None
+        assert danmaku_importer is not None
+        assert danmaku_publisher is not None
+        assert task_actions is not None
+        stop_event = asyncio.Event()
+        self._upload_stop_event = stop_event
+        self._upload_task = asyncio.create_task(
+            self._run_uploads(
+                journal,
+                coordinator,
+                review_watcher,
+                comment_publisher,
+                danmaku_importer,
+                danmaku_publisher,
+                stop_event,
+                self._retention_manager,
+                task_actions,
+                self._notification_scanner,
+            )
+        )
+
     async def _close_partial(self, database: BiliUploadDatabase) -> None:
         await self._stop_upload_worker()
         self._coordinator = None
@@ -514,6 +669,7 @@ class BiliAccountRuntime:
         self._danmaku_publisher = None
         self._retention_manager = None
         self._task_actions = None
+        self._notification_scanner = None
         self._journal = None
         self._content_reader = None
         transport, self._transport = self._transport, None

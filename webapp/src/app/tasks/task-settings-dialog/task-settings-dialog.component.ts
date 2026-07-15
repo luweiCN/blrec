@@ -43,6 +43,7 @@ export class TaskSettingsDialogComponent implements OnChanges {
   @Input() taskOptions!: Readonly<TaskOptions>;
   @Input() globalSettings!: Readonly<GlobalTaskSettings>;
   @Input() visible = false;
+  @Input() title = '任务设置';
 
   @Output() visibleChange = new EventEmitter<boolean>();
   @Output() cancel = new EventEmitter<undefined>();

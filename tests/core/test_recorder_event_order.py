@@ -49,3 +49,27 @@ async def test_recording_started_is_persisted_before_video_file_creation() -> No
     await recorder._start_recording()
 
     assert events == ['recording_started', 'stream_started', 'video_file_created']
+
+
+@pytest.mark.asyncio
+async def test_suppressed_live_does_not_restart_until_next_broadcast() -> None:
+    recorder = object.__new__(Recorder)
+    recorder._live = Mock()
+    recorder._live.room_info.live_start_time = 900
+    recorder._logger = Mock()
+    recorder._recording = True
+    recorder._suppressed_live_start_time = None
+    recorder._stop_recording = AsyncMock()
+    recorder._start_recording = AsyncMock()
+
+    await recorder.suppress_current_live()
+    recorder._recording = False
+    await recorder.on_live_stream_reset(recorder._live)
+
+    recorder._stop_recording.assert_awaited_once_with(cancelled=True)
+    recorder._start_recording.assert_not_awaited()
+
+    recorder._live.room_info.live_start_time = 901
+    await recorder.on_live_began(recorder._live)
+
+    recorder._start_recording.assert_awaited_once_with()

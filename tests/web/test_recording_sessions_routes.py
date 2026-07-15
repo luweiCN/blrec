@@ -1,9 +1,10 @@
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, Iterator, Sequence, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from blrec.bili_upload.journal import (
@@ -21,6 +22,9 @@ from blrec.bili_upload.recording_content import (
     RecordingContentUnavailable,
 )
 from blrec.bili_upload.task_actions import UploadTaskActionRejected
+from blrec.flv.common import create_metadata_tag, parse_metadata
+from blrec.flv.io import FlvReader, FlvWriter
+from blrec.flv.models import FlvHeader
 from blrec.web import security
 from blrec.web.routers import recording_sessions
 
@@ -31,6 +35,9 @@ class FakeJournal:
     def __init__(self) -> None:
         self.list_filters = {}
         self.count_filters = {}
+        self.upload_job_state = 'waiting_review'
+        self.danmaku_branch_state = 'pending'
+        self.upload_part_cid = None
 
     async def count_sessions(self, **filters: object) -> int:
         self.count_filters = filters
@@ -95,10 +102,10 @@ class FakeJournal:
                 account_id=7,
                 account_uid=42,
                 account_display_name='投稿账号',
-                state='waiting_review',
+                state=self.upload_job_state,
                 submit_state='confirmed',
                 comment_branch_state='pending',
-                danmaku_branch_state='pending',
+                danmaku_branch_state=self.danmaku_branch_state,
                 aid=123,
                 bvid='BV1test',
                 review_reason='等待 B 站审核',
@@ -111,7 +118,7 @@ class FakeJournal:
                 danmaku_pending=0,
                 danmaku_unknown=1,
                 danmaku_failed=0,
-                can_repair=True,
+                can_repair=False,
                 unknown_danmaku_items=(
                     DanmakuItemProgress(
                         id=11,
@@ -129,7 +136,7 @@ class FakeJournal:
                         upload_state='confirmed',
                         danmaku_import_state='pending',
                         remote_filename='remote-p1',
-                        cid=None,
+                        cid=self.upload_part_cid,
                     ),
                 ),
             )
@@ -150,6 +157,7 @@ class FakeContentReader:
             size=10,
             content_type='video/x-flv',
             recording=True,
+            room_id=100,
             part_index=1,
             bvid=None,
             remote_available=False,
@@ -188,6 +196,12 @@ def restore_router_state() -> Iterator[None]:
     old_reason = recording_sessions.unavailable_reason
     old_publisher = recording_sessions.danmaku_publisher
     old_task_actions = getattr(recording_sessions, 'task_actions', None)
+    old_session_action_runner = getattr(
+        recording_sessions, 'session_action_runner', None
+    )
+    old_metadata_provider = getattr(
+        recording_sessions, 'active_recording_metadata_provider', None
+    )
     had_content_reader = hasattr(recording_sessions, 'content_reader')
     old_content_reader = getattr(recording_sessions, 'content_reader', None)
     old_key = security.api_key
@@ -196,6 +210,10 @@ def restore_router_state() -> Iterator[None]:
     recording_sessions.unavailable_reason = old_reason
     recording_sessions.danmaku_publisher = old_publisher
     recording_sessions.task_actions = old_task_actions
+    recording_sessions.session_action_runner = old_session_action_runner
+    recording_sessions.active_recording_metadata_provider = old_metadata_provider
+    if hasattr(recording_sessions, 'media_snapshot_store'):
+        recording_sessions.media_snapshot_store.clear()
     if had_content_reader:
         recording_sessions.content_reader = old_content_reader
     elif hasattr(recording_sessions, 'content_reader'):
@@ -205,12 +223,13 @@ def restore_router_state() -> Iterator[None]:
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
-    api = FastAPI()
+    api = FastAPI(dependencies=[Depends(security.authenticate)])
     api.include_router(recording_sessions.router, prefix='/api/v1')
     security.api_key = 'test-api-key'
     recording_sessions.journal = FakeJournal()  # type: ignore[assignment]
     recording_sessions.danmaku_publisher = AsyncMock()
     recording_sessions.task_actions = AsyncMock()
+    recording_sessions.session_action_runner = AsyncMock()
     media = tmp_path / 'part.flv'
     media.write_bytes(b'0123456789')
     recording_sessions.content_reader = FakeContentReader(media)
@@ -254,6 +273,12 @@ def test_list_recording_sessions_returns_redacted_part_state(
                 'danmakuCount': 321,
                 'totalFileSizeBytes': 1_048_576,
                 'recordDurationSeconds': 59,
+                'uploadIntent': 'none',
+                'uploadSuppressed': False,
+                'deletionState': 'none',
+                'deletionError': None,
+                'displayState': 'waiting_review',
+                'availableActions': ['delete_local'],
                 'uploadJob': {
                     'id': 9,
                     'accountId': 7,
@@ -279,7 +304,19 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'repairMessage': None,
                     'repairError': None,
                     'canRetry': False,
-                    'canRepair': True,
+                    'canRepair': False,
+                    'canSkip': False,
+                    'canRepost': False,
+                    'canDelete': False,
+                    'operatorPaused': False,
+                    'scheduledPublishAt': None,
+                    'collectionBranchState': 'disabled',
+                    'collectionError': None,
+                    'commentError': None,
+                    'danmakuError': None,
+                    'canPause': False,
+                    'canResume': False,
+                    'canEdit': False,
                     'unknownDanmakuItems': [
                         {
                             'id': 11,
@@ -300,6 +337,8 @@ def test_list_recording_sessions_returns_redacted_part_state(
                             'transcodeState': 'unknown',
                             'transcodeFailCode': None,
                             'transcodeFailDesc': None,
+                            'repairStage': 'none',
+                            'repairDiagnostic': None,
                         }
                     ],
                 },
@@ -358,6 +397,26 @@ def test_list_recording_sessions_passes_server_side_filters(client: TestClient) 
     }
     assert fake.count_filters == expected
     assert fake.list_filters == {**expected, 'sort_order': 'oldest'}
+
+
+def test_approved_archive_with_disabled_danmaku_exposes_manual_backfill(
+    client: TestClient,
+) -> None:
+    fake = recording_sessions.journal
+    assert isinstance(fake, FakeJournal)
+    fake.upload_job_state = 'approved'
+    fake.danmaku_branch_state = 'disabled'
+    fake.upload_part_cid = 456
+
+    response = client.get(
+        '/api/v1/recording-sessions?limit=20&offset=40',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    actions = response.json()['sessions'][0]['availableActions']
+    assert 'backfill_danmaku' in actions
+    assert 'repair_transcode' not in actions
 
 
 def test_retry_all_failed_upload_jobs_uses_server_selected_jobs(
@@ -465,6 +524,54 @@ def test_upload_job_actions_validate_nonempty_unique_batch(client: TestClient) -
     assert duplicate.status_code == 422
 
 
+def test_recording_session_actions_work_without_an_upload_job(
+    client: TestClient,
+) -> None:
+    runner = recording_sessions.session_action_runner
+    assert isinstance(runner, AsyncMock)
+    runner.side_effect = [
+        '本场录像将在文件就绪后上传',
+        UploadTaskActionRejected('录制场次不存在'),
+    ]
+
+    response = client.post(
+        '/api/v1/recording-sessions/actions',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'set_upload', 'sessionIds': [1, 2]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'results': [
+            {'sessionId': 1, 'accepted': True, 'message': '本场录像将在文件就绪后上传'},
+            {'sessionId': 2, 'accepted': False, 'message': '录制场次不存在'},
+        ]
+    }
+    assert runner.await_count == 2
+    assert all(call.args[0] == 'set_upload' for call in runner.await_args_list)
+
+
+def test_recording_session_actions_forward_manual_danmaku_backfill(
+    client: TestClient,
+) -> None:
+    runner = recording_sessions.session_action_runner
+    assert isinstance(runner, AsyncMock)
+    runner.return_value = '已排队回灌 1 个分 P 的弹幕'
+
+    response = client.post(
+        '/api/v1/recording-sessions/actions',
+        headers={'x-api-key': 'test-api-key'},
+        json={'action': 'backfill_danmaku', 'sessionIds': [1]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()['results'] == [
+        {'sessionId': 1, 'accepted': True, 'message': '已排队回灌 1 个分 P 的弹幕'}
+    ]
+    runner.assert_awaited_once()
+    assert runner.await_args.args[0] == 'backfill_danmaku'
+
+
 def test_media_returns_the_fixed_file_snapshot(client: TestClient) -> None:
     response = client.get(
         '/api/v1/recording-sessions/parts/2/media',
@@ -548,6 +655,76 @@ def test_media_access_token_authorizes_range_requests_without_exposing_api_key(
     )
     assert response.status_code == 206
     assert response.content == b'56789'
+
+
+def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
+    client: TestClient, tmp_path: Path
+) -> None:
+    media = tmp_path / 'growing.flv'
+    original = BytesIO()
+    writer = FlvWriter(original)
+    writer.write_header(FlvHeader('FLV', 1, 5, 9))
+    writer.write_tag(create_metadata_tag({'duration': 0.0, 'filesize': 0.0}))
+    tail_start = original.tell()
+    tail = b'video-tag-0' + b'video-tag-1' + b'video-tag-2'
+    original.write(tail)
+    media.write_bytes(original.getvalue())
+
+    class SnapshotContentReader(FakeContentReader):
+        async def media(self, part_id: int) -> MediaResource:
+            assert part_id == 2
+            return MediaResource(
+                path=str(media),
+                size=media.stat().st_size,
+                content_type='video/x-flv',
+                recording=True,
+                room_id=100,
+                part_index=1,
+                bvid=None,
+                remote_available=False,
+            )
+
+    recording_sessions.content_reader = SnapshotContentReader(media)
+    recording_sessions.active_recording_metadata_provider = lambda resource: {
+        'duration': 12.5,
+        'filesize': float(resource.size or 0),
+        'keyframes': {
+            'times': [0.0, 5.0, 10.0],
+            'filepositions': [
+                float(tail_start),
+                float(tail_start + 11),
+                float(tail_start + 22),
+            ],
+        },
+    }
+
+    access = client.post(
+        '/api/v1/recording-sessions/parts/2/media-access',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert access.status_code == 200
+    body = access.json()
+    assert body['snapshotId']
+    assert body['durationMs'] == 12_500
+    assert body['fileSizeBytes'] > media.stat().st_size
+    assert body['recording'] is True
+
+    response = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        params={
+            'media_token': body['token'],
+            'media_expires': body['expiresAt'],
+            'media_snapshot': body['snapshotId'],
+        },
+    )
+    assert response.status_code == 200
+    assert len(response.content) == body['fileSizeBytes']
+    reader = FlvReader(BytesIO(response.content))
+    reader.read_header()
+    metadata = parse_metadata(reader.read_tag())
+    assert metadata['duration'] == 12.5
+    assert metadata['filesize'] == body['fileSizeBytes']
 
 
 def test_media_access_rejects_a_tampered_token(client: TestClient) -> None:

@@ -48,10 +48,8 @@ export class ToolbarComponent implements OnInit, OnDestroy {
   readonly selections = [
     { label: '全部', value: DataSelection.ALL },
     { label: '录制中', value: DataSelection.RECORDING },
-    { label: '录制开', value: DataSelection.RECORDER_ENABLED },
-    { label: '录制关', value: DataSelection.RECORDER_DISABLED },
-    { label: '运行', value: DataSelection.MONITOR_ENABLED },
-    { label: '停止', value: DataSelection.MONITOR_DISABLED },
+    { label: '已开启', value: DataSelection.MONITOR_ENABLED },
+    { label: '已关闭', value: DataSelection.MONITOR_DISABLED },
     { label: '直播', value: DataSelection.LIVING },
     { label: '轮播', value: DataSelection.ROUNDING },
     { label: '闲置', value: DataSelection.PREPARING },
@@ -122,23 +120,6 @@ export class ToolbarComponent implements OnInit, OnDestroy {
       });
     } else {
       this.taskManager.stopAllTasks().subscribe();
-    }
-  }
-
-  disableAllRecorders(force: boolean = false): void {
-    if (force) {
-      this.modal.confirm({
-        nzTitle: '确定要强制关闭全部任务的录制？',
-        nzContent: '正在录制的文件会被强行中断！确定要放弃正在录制的文件？',
-        nzOnOk: () =>
-          new Promise((resolve, reject) => {
-            this.taskManager
-              .disableAllRecorders(force)
-              .subscribe(resolve, reject);
-          }),
-      });
-    } else {
-      this.taskManager.disableAllRecorders().subscribe();
     }
   }
 

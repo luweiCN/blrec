@@ -167,10 +167,10 @@ async def seed_ready_session(
         'INSERT INTO recording_sessions('
         'id,room_id,broadcast_session_key,live_start_time,state,started_at,'
         'ended_at,title,cover_url,cover_path,anchor_uid,anchor_name,area_id,area_name,'
-        'parent_area_id,parent_area_name,live_end_time) '
+        'parent_area_id,parent_area_name,live_end_time,upload_intent) '
         "VALUES(1,100,'100:800',800,'closed',800,900,'测试直播',"
         "'https://i0.hdslb.com/cover.jpg',?,42,'测试主播',17,'单机游戏',"
-        "1,'游戏',900)",
+        "1,'游戏',900,'auto')",
         (cover_path,),
     )
     await database.execute(
@@ -211,8 +211,6 @@ def coordinator(
     uploader: FakeUploader,
     clock: MutableClock,
     *,
-    auto_comment_enabled: bool = False,
-    danmaku_backfill_enabled: bool = False,
     cover_resolver: Optional[FakeCoverResolver] = None,
 ) -> UploadCoordinator:
     async def load_bundle(account_id: int) -> Any:
@@ -225,9 +223,6 @@ def coordinator(
         uploader,
         bundle_loader=load_bundle,
         account_gates=AccountWriteGate(database),
-        auto_upload_enabled=True,
-        auto_comment_enabled=auto_comment_enabled,
-        danmaku_backfill_enabled=danmaku_backfill_enabled,
         cover_resolver=cover_resolver or FakeCoverResolver(),
         worker_id='test-worker',
         clock=clock,

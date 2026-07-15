@@ -1,0 +1,28 @@
+<nz-modal
+  [nzTitle]="title"
+  [nzVisible]="visible"
+  [nzFooter]="null"
+  nzWidth="900px"
+  (nzOnCancel)="handleClose()"
+>
+  <ng-container *nzModalContent>
+    <div *ngIf="loading" class="loading-state">正在打开本地视频…</div>
+    <nz-alert
+      *ngIf="error"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="error"
+    ></nz-alert>
+    <video
+      *ngIf="mediaUrl && !error"
+      #videoElement
+      data-testid="part-video"
+      controls
+      preload="metadata"
+      [attr.src]="isFlv ? null : mediaUrl"
+    ></video>
+    <p *ngIf="mediaAccess?.snapshotId" class="hint">
+      当前可播放至打开播放器时的录制进度；重新打开可读取新增内容。
+    </p>
+  </ng-container>
+</nz-modal>

@@ -56,11 +56,12 @@ describe('HeaderSettingsComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('moves cookie editing to managed posting accounts', () => {
+  it('shows only the user agent request setting', () => {
     const text = fixture.nativeElement.textContent;
 
-    expect(text).toContain('Cookie 已由投稿账号管理');
-    expect(text).toContain('前往投稿账号管理');
+    expect(text).toContain('User Agent');
+    expect(text).not.toContain('Cookie');
+    expect(text).not.toContain('投稿账号');
     expect(
       fixture.nativeElement.querySelector('app-cookie-edit-dialog')
     ).toBeNull();

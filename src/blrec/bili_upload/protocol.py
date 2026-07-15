@@ -3,12 +3,15 @@ import base64
 import json
 import posixpath
 import secrets
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+
+from blrec.networking.manager import NetworkPurpose, NetworkRouteManager
 
 from .crypto import CredentialBundle
 from .errors import (
@@ -86,12 +89,37 @@ class TransportFailure(RuntimeError):
 
 
 class AiohttpProtocolTransport:
-    def __init__(self, *, timeout_seconds: float = 30) -> None:
+    _UPLOAD_OPERATIONS = frozenset(
+        ('preupload', 'preupload_init', 'upload_chunk', 'complete_upload')
+    )
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 30,
+        route_manager: Optional[NetworkRouteManager] = None,
+    ) -> None:
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._session: Optional[aiohttp.ClientSession] = None
+        self._route_manager = route_manager
+        self._sessions: Dict[
+            Tuple[NetworkPurpose, Optional[str]], aiohttp.ClientSession
+        ] = {}
+
+    @classmethod
+    def purpose_for_operation(cls, operation: str) -> NetworkPurpose:
+        if operation in cls._UPLOAD_OPERATIONS:
+            return 'upload'
+        return 'bili_api'
 
     async def send(self, request: ProtocolRequest) -> ProtocolResponse:
-        session = await self._get_session()
+        purpose = self.purpose_for_operation(request.operation)
+        selection = (
+            None if self._route_manager is None else self._route_manager.select(purpose)
+        )
+        session = await self._get_session(
+            purpose, None if selection is None else selection.source_address
+        )
         trace_context = {'headers_sent': False}
         kwargs: Dict[str, Any] = {
             'headers': dict(request.headers),
@@ -113,17 +141,35 @@ class AiohttpProtocolTransport:
                     status=response.status, headers=dict(response.headers), body=body
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            trace_context['failed'] = True
+            if self._route_manager is not None and selection is not None:
+                self._route_manager.report_failure(purpose, selection.interface_name)
             raise TransportFailure(
                 headers_sent=bool(trace_context['headers_sent'])
             ) from None
+        finally:
+            if self._route_manager is not None and selection is not None:
+                # Failed requests return through the except block before this reset.
+                if not trace_context.get('failed'):
+                    self._route_manager.report_success(
+                        purpose, selection.interface_name
+                    )
 
     async def close(self) -> None:
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
+        sessions = list(self._sessions.values())
+        if self._session is not None and self._session not in sessions:
+            sessions.append(self._session)
+        self._sessions = {}
+        self._session = None
+        for session in sessions:
+            await session.close()
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None:
+    async def _get_session(
+        self, purpose: NetworkPurpose = 'bili_api', source_address: Optional[str] = None
+    ) -> aiohttp.ClientSession:
+        key = (purpose, source_address)
+        session = self._sessions.get(key)
+        if session is None or session.closed:
             trace_config = aiohttp.TraceConfig()
 
             async def headers_sent(
@@ -135,8 +181,18 @@ class AiohttpProtocolTransport:
 
             headers_signal: Any = trace_config.on_request_headers_sent
             headers_signal.append(headers_sent)
-            self._session = aiohttp.ClientSession(trace_configs=[trace_config])
-        return self._session
+            connector = None
+            if self._route_manager is not None:
+                connector = aiohttp.TCPConnector(
+                    family=socket.AF_INET,
+                    local_addr=(source_address, 0) if source_address else None,
+                )
+            session = aiohttp.ClientSession(
+                connector=connector, trace_configs=[trace_config], trust_env=False
+            )
+            self._sessions[key] = session
+            self._session = session
+        return session
 
 
 @dataclass(frozen=True, repr=False)

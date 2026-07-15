@@ -34,6 +34,21 @@ def test_get_live_monitor_settings_by_alias() -> None:
     assert application.include == frozenset({'live_monitor'})
 
 
+def test_get_operational_notifications_settings_by_alias() -> None:
+    application = SettingsApplication()
+    api = FastAPI()
+    settings.app = application  # type: ignore[assignment]
+    api.include_router(settings.router)
+
+    with TestClient(api) as client:
+        response = client.get(
+            '/api/v1/settings', params={'include': 'operationalNotifications'}
+        )
+
+    assert response.status_code == 200
+    assert application.include == frozenset({'operational_notifications'})
+
+
 def test_packaged_webapp_contains_live_monitor_ui() -> None:
     webapp_dir = Path(__file__).resolve().parents[2] / 'src/blrec/data/webapp'
     javascript = ''.join(path.read_text() for path in webapp_dir.glob('*.js'))

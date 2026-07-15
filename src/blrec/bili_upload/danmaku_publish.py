@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from math import ceil
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Union
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
 
 from .accounts import (
     AccountNotFound,
@@ -26,7 +26,6 @@ from .errors import (
 __all__ = ('DanmakuBreaker', 'DanmakuPublisher')
 
 
-_FeatureSwitch = Union[bool, Callable[[], bool]]
 _DORMANT_UNTIL = 2_147_483_647
 
 
@@ -115,7 +114,6 @@ class DanmakuPublisher:
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
         account_gates: AccountWriteGate,
-        auto_danmaku_enabled: _FeatureSwitch,
         interval_seconds: int = 25,
         auth_refresh: Optional[Callable[[int], Awaitable[Any]]] = None,
         worker_id: Optional[str] = None,
@@ -127,7 +125,6 @@ class DanmakuPublisher:
         self._protocol = protocol
         self._bundle_loader = bundle_loader
         self._account_gates = account_gates
-        self._auto_danmaku_enabled = auto_danmaku_enabled
         self._interval_seconds = max(25, interval_seconds)
         self._auth_refresh = auth_refresh
         self._worker_id = worker_id or 'danmaku-{}'.format(uuid.uuid4().hex)
@@ -142,8 +139,6 @@ class DanmakuPublisher:
         )
 
     async def run_once(self) -> Optional[int]:
-        if not self._enabled(self._auto_danmaku_enabled):
-            return None
         now = self._clock()
         candidate = await self._select_candidate(now)
         if candidate is None:
@@ -807,7 +802,3 @@ class DanmakuPublisher:
         else:
             return None
         return result if result > 0 else None
-
-    @staticmethod
-    def _enabled(value: _FeatureSwitch) -> bool:
-        return bool(value() if callable(value) else value)

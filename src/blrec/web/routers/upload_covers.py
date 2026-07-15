@@ -17,7 +17,7 @@ from blrec.utils.string import camel_case
 from .bili_accounts import authenticated_manager_subject
 
 library: Optional[CoverLibrary] = None
-unavailable_reason: Optional[str] = 'Upload covers are not enabled'
+unavailable_reason: Optional[str] = 'Upload covers are not ready'
 
 
 class ApiModel(BaseModel):

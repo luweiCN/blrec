@@ -2,7 +2,6 @@ from pathlib import Path
 
 import blrec
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 

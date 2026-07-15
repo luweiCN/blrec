@@ -6,6 +6,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 from websockets.exceptions import ConnectionClosed
 
+from blrec.web import security
+
 from ...application import Application
 from ...event import EventCenter
 from ...event.typing import Event
@@ -18,8 +20,26 @@ app: Application = None  # type: ignore  # bypass flake8 F821
 router = APIRouter(tags=['websockets'])
 
 
+async def authenticate_websocket(websocket: WebSocket) -> bool:
+    store = security.auth_store
+    if store is None:
+        await websocket.close(code=4401)
+        return False
+    origin = websocket.headers.get('origin', '')
+    if not security.valid_origin(websocket, origin):  # type: ignore[arg-type]
+        await websocket.close(code=4403)
+        return False
+    token = websocket.cookies.get(security.SESSION_COOKIE_NAME, '')
+    if store.authenticate_session(token) is None:
+        await websocket.close(code=4401)
+        return False
+    return True
+
+
 @router.websocket('/ws/v1/events')
 async def receive_events(websocket: WebSocket) -> None:
+    if not await authenticate_websocket(websocket):
+        return
     await websocket.accept()
     logger.debug('Events websocket accepted')
 
@@ -48,6 +68,8 @@ async def receive_events(websocket: WebSocket) -> None:
 
 @router.websocket('/ws/v1/exceptions')
 async def receive_exception(websocket: WebSocket) -> None:
+    if not await authenticate_websocket(websocket):
+        return
     await websocket.accept()
     logger.debug('Exceptions websocket accepted')
 

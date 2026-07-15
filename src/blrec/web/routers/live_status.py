@@ -16,6 +16,9 @@ def get_application() -> Application:
 async def authenticate_resume(
     request: Request, x_api_key: Optional[str] = Header(None)
 ) -> None:
+    if security.auth_store is not None:
+        security.manager_subject(request)
+        return
     if not security.api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail='API key is not configured'

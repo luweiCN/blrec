@@ -33,8 +33,6 @@ from .database import BiliUploadDatabase
 
 __all__ = ('DanmakuFilter', 'DanmakuImporter', 'ImportedDanmaku')
 
-_FeatureSwitch = Union[bool, Callable[[], bool]]
-
 
 @dataclass(frozen=True)
 class DanmakuFilter:
@@ -126,7 +124,6 @@ class DanmakuImporter:
         import_high_watermark: int = 1_000_000,
         space_threshold_bytes: int = 1024**3,
         free_space: Optional[Callable[[Path], int]] = None,
-        enabled: _FeatureSwitch = True,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if insert_batch_size <= 0:
@@ -140,7 +137,6 @@ class DanmakuImporter:
         self._import_high_watermark = import_high_watermark
         self._space_threshold_bytes = space_threshold_bytes
         self._free_space = free_space or self._disk_free
-        self._enabled = enabled
         self._clock = clock
 
     async def create(self, job_id: int) -> None:
@@ -178,8 +174,6 @@ class DanmakuImporter:
         )
         if updated != 1:
             return
-        if not self._is_enabled():
-            return
         for row in parts:
             await self.import_part(int(row['id']), str(row['xml_path']))
             state = await self._database.scalar(
@@ -191,8 +185,6 @@ class DanmakuImporter:
         await self._refresh_job_state(job_id)
 
     async def run_once(self) -> Optional[int]:
-        if not self._is_enabled():
-            return None
         row = await self._database.fetchone(
             'SELECT part.id,part.xml_path,part.danmaku_import_state '
             'FROM upload_parts part JOIN upload_jobs job ON job.id=part.job_id '
@@ -639,6 +631,3 @@ class DanmakuImporter:
     @staticmethod
     def _disk_free(path: Path) -> int:
         return int(shutil.disk_usage(str(path)).free)
-
-    def _is_enabled(self) -> bool:
-        return bool(self._enabled() if callable(self._enabled) else self._enabled)
