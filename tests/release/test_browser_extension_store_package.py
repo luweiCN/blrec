@@ -8,12 +8,15 @@ EXTENSION = ROOT / 'browser-extension'
 def test_store_manifest_uses_the_blrec_icon_and_minimum_permissions() -> None:
     manifest = json.loads((EXTENSION / 'src/manifest.json').read_text(encoding='utf8'))
 
+    assert manifest['name'] == 'BLREC 工具'
     assert manifest['permissions'] == ['storage']
     assert manifest['icons'] == {'128': 'icons/icon-128.png'}
     assert manifest['description'] == (
         '在 B 站直播页面收录房间、标记高光，并连接自建 BLREC 完成剪辑投稿。'
     )
     assert manifest['homepage_url'] == 'https://github.com/luweiCN/blrec'
+    package = json.loads((EXTENSION / 'package.json').read_text(encoding='utf8'))
+    assert package['name'] == 'blrec-browser-extension'
 
 
 def test_build_copies_the_existing_blrec_icon() -> None:

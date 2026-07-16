@@ -343,7 +343,7 @@ Use a fixed manifest:
 ```json
 {
   "manifest_version": 3,
-  "name": "BLREC 高光助手",
+  "name": "BLREC 工具",
   "version": "0.1.0",
   "permissions": ["storage", "activeTab", "scripting"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
@@ -462,7 +462,7 @@ git commit -m "feat: add Bilibili live highlight controls"
 - Modify: `tests/release/test_github_release_workflows.py`
 
 **Interfaces:**
-- Produces CI artifact and release asset `blrec-highlight-extension-<version>.zip`.
+- Produces CI artifact and release asset `blrec-browser-extension-<version>.zip`.
 - Consumes completed backend and extension builds.
 
 - [ ] **Step 1: Add extension CI**
@@ -492,7 +492,7 @@ cd browser-extension
 npm ci
 BLREC_EXTENSION_VERSION="$manifest_version" npm run build
 cd dist
-zip -r "../../blrec-highlight-extension-${{ steps.version.outputs.value }}.zip" .
+zip -r "../../blrec-browser-extension-${{ steps.version.outputs.value }}.zip" .
 ```
 
 Attach the zip beside `compose.synology.yml` and `synology.env.example` in `gh release create`.

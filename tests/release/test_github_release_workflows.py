@@ -35,9 +35,7 @@ def test_release_workflow_has_test_gate_and_exact_image_contract() -> None:
     assert ':latest' not in workflow
     assert 'gh release create' in workflow
     assert 'BLREC_EXTENSION_VERSION="$manifest_version" npm run build' in workflow
-    assert (
-        'blrec-highlight-extension-${{ steps.version.outputs.value }}.zip' in workflow
-    )
+    assert 'blrec-browser-extension-${{ steps.version.outputs.value }}.zip' in workflow
     assert 'compose.synology.yml synology.env.example' in workflow
 
 

@@ -61,7 +61,7 @@ jobs:
           npm ci
           BLREC_EXTENSION_VERSION="$manifest_version" npm run build
           cd dist
-          zip -r "../../blrec-highlight-extension-${{ steps.version.outputs.value }}.zip" .
+          zip -r "../../blrec-browser-extension-${{ steps.version.outputs.value }}.zip" .
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -113,7 +113,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             compose.synology.yml synology.env.example \
-            "blrec-highlight-extension-${{ steps.version.outputs.value }}.zip" \
+            "blrec-browser-extension-${{ steps.version.outputs.value }}.zip" \
             --verify-tag \
             --prerelease \
             --title "BLREC ${{ steps.version.outputs.value }}" \

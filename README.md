@@ -82,7 +82,7 @@ Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.5`](https:
 
 ## 使用方法
 
-浏览器高光助手的安装、连接和撤销授权步骤见 [插件说明](browser-extension/README.md)。
+BLREC 浏览器工具的安装、连接和撤销授权步骤见 [插件说明](browser-extension/README.md)。
 
 ### 命令行参数用法
 

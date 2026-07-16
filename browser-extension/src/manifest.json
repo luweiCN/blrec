@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "BLREC 高光助手",
+  "name": "BLREC 工具",
   "description": "在 B 站直播页面收录房间、标记高光，并连接自建 BLREC 完成剪辑投稿。",
   "version": "0.1.0",
   "homepage_url": "https://github.com/luweiCN/blrec",

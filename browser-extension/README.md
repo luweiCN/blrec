@@ -1,4 +1,4 @@
-# BLREC 高光助手
+# BLREC 工具
 
 Chromium 浏览器插件。在 B 站直播页顶部提供以下操作：
 
@@ -10,7 +10,7 @@ Chromium 浏览器插件。在 B 站直播页顶部提供以下操作：
 
 ## 安装发布包
 
-1. 从 BLREC Release 下载 `blrec-highlight-extension-<版本>.zip` 并解压。
+1. 从 BLREC Release 下载 `blrec-browser-extension-<版本>.zip` 并解压。
 2. 打开 `chrome://extensions`，启用右上角“开发者模式”。
 3. 点击“加载已解压的扩展程序”，选择解压目录；该目录下应直接包含 `manifest.json`。
 4. 打开扩展的“选项”，填写 `http://<NAS-IP>:2233` 和 BLREC 管理员用户名，然后点击“连接”。
