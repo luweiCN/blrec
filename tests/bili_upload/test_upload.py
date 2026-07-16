@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pytest
 
@@ -328,8 +328,13 @@ async def test_broken_parts_are_excluded_from_upload_job(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    audit_events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.upload.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
     await database.open()
     try:
@@ -375,6 +380,16 @@ async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
             'upload_completed_at': 1000,
             'submitted_at': 1000,
         }
+        assert any(
+            event == 'upload_job_created' and fields['job_id'] == 1
+            for event, fields in audit_events
+        )
+        assert any(
+            event == 'upload_archive_submitted'
+            and fields['aid'] == 303
+            and fields['bvid'] == 'BVfixture'
+            for event, fields in audit_events
+        )
     finally:
         await database.close()
 

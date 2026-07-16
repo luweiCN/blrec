@@ -11,6 +11,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 
 from liquid import Environment
 
+from blrec.logging.audit import audit
+
 from .accounts import (
     AccountNotFound,
     AccountPaused,
@@ -151,6 +153,12 @@ class UploadCoordinator:
             )
             if claim is None:
                 return None
+            audit(
+                'upload_job_claimed',
+                level='DEBUG',
+                job_id=claim.id,
+                attempt=claim.attempt,
+            )
             await self._process(claim)
             return claim.id
 
@@ -377,7 +385,22 @@ class UploadCoordinator:
                 )
             return job_id
 
-        return await self._database.write(create)
+        job_id = await self._database.write(create)
+        if job_id is not None:
+            audit(
+                'upload_job_created',
+                job_id=job_id,
+                session_id=int(row['session_id']),
+                room_id=int(row['room_id']),
+                account_id=int(row['resolved_account_id']),
+                parts=len(parts),
+                tid=snapshot['tid'],
+                is_only_self=snapshot['is_only_self'],
+                publish_dynamic=snapshot['publish_dynamic'],
+                collection_enabled=snapshot['collection_section_id'] is not None,
+                publish_delay_seconds=snapshot['publish_delay_seconds'],
+            )
+        return job_id
 
     def _policy_snapshot(
         self, row: sqlite3.Row, parts: List[_CandidatePart]
@@ -519,6 +542,14 @@ class UploadCoordinator:
 
     async def _process(self, claim: LeaseClaim) -> None:
         job = await self._load_job(claim)
+        audit(
+            'upload_job_processing',
+            level='DEBUG',
+            job_id=job.id,
+            account_id=job.account_id,
+            state=job.state,
+            submit_state=job.submit_state,
+        )
         if job.state == 'submitting' and job.submit_state == 'in_flight':
             await self._update_job(
                 claim,
@@ -560,6 +591,12 @@ class UploadCoordinator:
                     await self._uploader.upload_part(
                         int(part['id']), bundle=bundle, claim=claim
                     )
+                audit(
+                    'upload_parts_completed',
+                    job_id=job.id,
+                    account_id=job.account_id,
+                    parts=len(parts),
+                )
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
                 payload = await self._submit_payload(job)
@@ -576,6 +613,16 @@ class UploadCoordinator:
                     },
                 )
                 submit_started = True
+                audit(
+                    'upload_archive_submitting',
+                    job_id=job.id,
+                    account_id=job.account_id,
+                    parts=len(parts),
+                    tid=payload.get('tid'),
+                    is_only_self=bool(payload.get('is_only_self')),
+                    publish_dynamic=not bool(payload.get('no_disturbance')),
+                    scheduled_publish_at=scheduled_publish_at,
+                )
                 response = await self._protocol.submit_archive(bundle, payload)
         except DefinitelyNotSent:
             await self._retry_not_sent(claim, submit_started=submit_started)
@@ -648,6 +695,13 @@ class UploadCoordinator:
                 'updated_at': int(self._clock()),
             },
             release=True,
+        )
+        audit(
+            'upload_archive_submitted',
+            job_id=job.id,
+            account_id=job.account_id,
+            aid=aid,
+            bvid=bvid,
         )
 
     async def _submit_payload(
@@ -833,6 +887,13 @@ class UploadCoordinator:
             },
             release=True,
         )
+        audit(
+            'upload_job_retry_scheduled',
+            level='WARNING',
+            job_id=claim.id,
+            stage='submission' if submit_started else 'upload',
+            delay_seconds=delay,
+        )
 
     async def _pause_unknown_submission(self, claim: LeaseClaim) -> None:
         await self._update_job(
@@ -845,6 +906,7 @@ class UploadCoordinator:
             },
             release=True,
         )
+        audit('upload_submission_unknown', level='ERROR', job_id=claim.id)
 
     async def _pause_job(self, claim: LeaseClaim, reason: str) -> None:
         await self._update_job(
@@ -856,6 +918,7 @@ class UploadCoordinator:
             },
             release=True,
         )
+        audit('upload_job_paused', level='WARNING', job_id=claim.id, reason=reason)
 
     async def _release_lease(self, claim: LeaseClaim) -> None:
         await self._update_job(claim, {'updated_at': int(self._clock())}, release=True)

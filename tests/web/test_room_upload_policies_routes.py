@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 from fastapi import FastAPI
@@ -286,8 +286,13 @@ def test_list_upload_categories_maps_catalog_errors(
 
 
 def test_upsert_converts_request_to_domain_command(
-    client: TestClient, manager: FakePolicyManager
+    client: TestClient, manager: FakePolicyManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    audit_events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.web.routers.room_upload_policies.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
     response = client.put(
         '/api/v1/room-upload-policies/100',
         headers=auth_headers(),
@@ -336,6 +341,25 @@ def test_upsert_converts_request_to_domain_command(
     assert manager.command.cover_mode == 'custom'
     assert manager.command.cover_asset_id == 7
     assert manager.command.publish_delay_seconds == 7200
+    assert audit_events == [
+        (
+            'room_upload_policy_updated',
+            {
+                'room_id': 100,
+                'account_mode': 'fixed',
+                'account_id': 7,
+                'enabled': True,
+                'tid': 17,
+                'is_only_self': True,
+                'publish_dynamic': False,
+                'auto_comment': False,
+                'danmaku_backfill': True,
+                'collection_enabled': True,
+                'cover_mode': 'custom',
+                'publish_delay_seconds': 7200,
+            },
+        )
+    ]
 
 
 def test_upsert_rejects_parent_upload_category(

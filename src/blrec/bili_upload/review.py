@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -17,7 +18,10 @@ from typing import (
 
 from typing_extensions import Protocol
 
+from blrec.logging.audit import audit
+
 from .database import BiliUploadDatabase
+from .submission_verifier import SubmissionVerification, verify_submission
 
 __all__ = ('PostReviewBranch', 'ReviewWatcher')
 
@@ -42,6 +46,8 @@ class _WaitingJob:
     comment_branch_state: str
     danmaku_branch_state: str
     collection_branch_state: str
+    policy_snapshot_json: str
+    scheduled_publish_at: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ class ReviewWatcher:
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
             'job.comment_branch_state,job.danmaku_branch_state,'
             'job.collection_branch_state,'
+            'job.policy_snapshot_json,job.scheduled_publish_at,'
             'account.uid AS account_uid,account.state AS account_state '
             'FROM upload_jobs job JOIN bili_accounts account '
             'ON account.id=job.account_id '
@@ -206,6 +213,7 @@ class ReviewWatcher:
             verified_parts = await self._verified_parts(job, detail)
         except _ReviewMismatch as error:
             return await self._pause(job, str(error))
+        await self._verify_submission(job, detail)
         if any(part.transcode_state == 'failed' for part in verified_parts.values()):
             return await self._handle_transcode_failures(job, verified_parts)
         if any(
@@ -217,6 +225,54 @@ class ReviewWatcher:
             return False
         await self._create_branches(job)
         return True
+
+    async def _verify_submission(
+        self, job: _WaitingJob, detail: Mapping[str, Any]
+    ) -> None:
+        try:
+            snapshot = json.loads(job.policy_snapshot_json)
+            if not isinstance(snapshot, Mapping):
+                raise ValueError('policy snapshot is not an object')
+            verification = verify_submission(
+                snapshot, detail, scheduled_publish_at=job.scheduled_publish_at
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            verification = SubmissionVerification(
+                'failed', (), ('policy_snapshot',), ()
+            )
+        await self._database.execute(
+            'UPDATE upload_jobs SET submission_verification_state=?,'
+            'submission_verified_at=?,submission_verification_json=?,updated_at=? '
+            "WHERE id=? AND state='waiting_review' AND account_id=?",
+            (
+                verification.state,
+                int(self._clock()),
+                verification.to_json(),
+                int(self._clock()),
+                job.id,
+                job.account_id,
+            ),
+        )
+        audit(
+            'submission_verified',
+            level=(
+                'INFO'
+                if verification.state == 'passed'
+                else (
+                    'WARNING'
+                    if verification.state in ('different', 'failed')
+                    else 'DEBUG'
+                )
+            ),
+            job_id=job.id,
+            account_id=job.account_id,
+            aid=job.aid,
+            bvid=job.bvid,
+            state=verification.state,
+            checked=len(verification.checked),
+            missing=len(verification.missing),
+            mismatches=len(verification.mismatches),
+        )
 
     async def _verified_parts(
         self, job: _WaitingJob, response: Mapping[str, Any]
@@ -496,7 +552,17 @@ class ReviewWatcher:
             )
             return True
 
-        return await self._database.write(approve)
+        approved = await self._database.write(approve)
+        if approved:
+            audit(
+                'upload_archive_approved',
+                job_id=job.id,
+                account_id=job.account_id,
+                aid=job.aid,
+                bvid=job.bvid,
+                parts=len(parts),
+            )
+        return approved
 
     async def _create_branches(self, job: _WaitingJob) -> None:
         branches = (
@@ -557,7 +623,16 @@ class ReviewWatcher:
             "WHERE id=? AND state='waiting_review' AND account_id=?",
             (reason, int(self._clock()), job.id, job.account_id),
         )
-        return updated == 1
+        paused = updated == 1
+        if paused:
+            audit(
+                'upload_review_paused',
+                level='WARNING',
+                job_id=job.id,
+                account_id=job.account_id,
+                reason=reason,
+            )
+        return paused
 
     async def _reject(self, job: _WaitingJob, reason: str) -> bool:
         updated = await self._database.execute(
@@ -581,7 +656,18 @@ class ReviewWatcher:
                 job.account_id,
             ),
         )
-        return updated == 1
+        rejected = updated == 1
+        if rejected:
+            audit(
+                'upload_archive_rejected',
+                level='WARNING',
+                job_id=job.id,
+                account_id=job.account_id,
+                aid=job.aid,
+                bvid=job.bvid,
+                reason=reason,
+            )
+        return rejected
 
     async def _waiting_reason(self, job: _WaitingJob, reason: str) -> None:
         await self._database.execute(
@@ -648,6 +734,12 @@ class ReviewWatcher:
             comment_branch_state=str(row['comment_branch_state']),
             danmaku_branch_state=str(row['danmaku_branch_state']),
             collection_branch_state=str(row['collection_branch_state']),
+            policy_snapshot_json=str(row['policy_snapshot_json']),
+            scheduled_publish_at=(
+                None
+                if row['scheduled_publish_at'] is None
+                else int(row['scheduled_publish_at'])
+            ),
         )
 
     @staticmethod

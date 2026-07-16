@@ -537,6 +537,25 @@
         <div class="repair-error" *ngIf="job.collectionError">
           合集：{{ job.collectionError }}
         </div>
+        <ng-container *ngIf="job.submissionVerificationState !== 'pending'">
+          <div>
+            投稿配置核验：{{
+              submissionVerificationLabel(job.submissionVerificationState)
+            }}
+          </div>
+          <div
+            class="repair-error"
+            *ngIf="job.submissionVerification?.mismatches?.length as count"
+          >
+            {{ count }} 项设置与 B 站稿件详情不一致
+          </div>
+          <div
+            class="secondary-text"
+            *ngIf="job.submissionVerification?.missing?.length as count"
+          >
+            {{ count }} 项可核验设置未返回
+          </div>
+        </ng-container>
         <div class="repair-error" *ngIf="job.commentError">
           自动评论：{{ job.commentError }}
         </div>

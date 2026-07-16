@@ -171,6 +171,9 @@ class UploadJobProgress:
     scheduled_publish_at: Optional[int] = None
     collection_branch_state: str = 'disabled'
     collection_error: Optional[str] = None
+    submission_verification_state: str = 'pending'
+    submission_verified_at: Optional[int] = None
+    submission_verification: Optional[Dict[str, object]] = None
     comment_error: Optional[str] = None
     danmaku_error: Optional[str] = None
     can_pause: bool = False
@@ -1137,7 +1140,9 @@ class RecordingJournalBridge:
             'job.created_at,job.updated_at,job.repair_state,job.repair_message,'
             'job.repair_error,job.lease_until,job.operator_paused,'
             'job.scheduled_publish_at,job.collection_branch_state,'
-            'job.collection_error FROM upload_jobs job '
+            'job.collection_error,job.submission_verification_state,'
+            'job.submission_verified_at,job.submission_verification_json '
+            'FROM upload_jobs job '
             'JOIN bili_accounts account ON account.id=job.account_id '
             'WHERE job.session_id IN ({})'.format(placeholders),
             unique_session_ids,
@@ -1283,6 +1288,14 @@ class RecordingJournalBridge:
                 ),
                 None if not parts else parts[-1].part_index,
             )
+            submission_verification: Optional[Dict[str, object]] = None
+            if row['submission_verification_json'] is not None:
+                try:
+                    decoded = json.loads(str(row['submission_verification_json']))
+                    if isinstance(decoded, dict):
+                        submission_verification = decoded
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
             result[session_id] = UploadJobProgress(
                 id=job_id,
                 session_id=session_id,
@@ -1335,6 +1348,13 @@ class RecordingJournalBridge:
                     if row['collection_error'] is None
                     else str(row['collection_error'])
                 ),
+                submission_verification_state=str(row['submission_verification_state']),
+                submission_verified_at=(
+                    None
+                    if row['submission_verified_at'] is None
+                    else int(row['submission_verified_at'])
+                ),
+                submission_verification=submission_verification,
                 comment_error=(
                     str(row['review_reason'])
                     if str(row['comment_branch_state']) in ('paused', 'failed')

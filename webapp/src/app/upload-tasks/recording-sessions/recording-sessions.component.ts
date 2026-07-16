@@ -808,6 +808,18 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }[state];
   }
 
+  submissionVerificationLabel(
+    state: UploadJobProgress['submissionVerificationState']
+  ): string {
+    return {
+      pending: '等待核验',
+      passed: '可核验项一致',
+      different: '发现差异',
+      partial: '部分完成',
+      failed: '核验失败',
+    }[state];
+  }
+
   uploadPartStateLabel(state: UploadPartState): string {
     return {
       prepared: '等待上传',

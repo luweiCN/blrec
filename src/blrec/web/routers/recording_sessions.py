@@ -42,6 +42,7 @@ from blrec.bili_upload.task_actions import (
     UploadTaskActionManager,
     UploadTaskActionRejected,
 )
+from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 
 from .. import security
@@ -148,6 +149,9 @@ class UploadJobProgressResponse(ApiModel):
     scheduled_publish_at: Optional[int]
     collection_branch_state: str
     collection_error: Optional[str]
+    submission_verification_state: str
+    submission_verified_at: Optional[int]
+    submission_verification: Optional[Dict[str, object]]
     comment_error: Optional[str]
     danmaku_error: Optional[str]
     can_pause: bool
@@ -632,6 +636,9 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         scheduled_publish_at=job.scheduled_publish_at,
         collection_branch_state=job.collection_branch_state,
         collection_error=job.collection_error,
+        submission_verification_state=job.submission_verification_state,
+        submission_verified_at=job.submission_verified_at,
+        submission_verification=job.submission_verification,
         comment_error=job.comment_error,
         danmaku_error=job.danmaku_error,
         can_pause=job.can_pause,
@@ -798,6 +805,15 @@ async def run_upload_job_actions(
                     job_id=job_id, accepted=True, message=message
                 )
             )
+    rejected = sum(not result.accepted for result in results)
+    audit(
+        'upload_task_action',
+        level='WARNING' if rejected else 'INFO',
+        action=command.action,
+        job_ids=command.job_ids,
+        accepted=len(results) - rejected,
+        rejected=rejected,
+    )
     return UploadJobActionResponse(results=results)
 
 
@@ -839,6 +855,13 @@ async def update_upload_task_settings(
         value = await actions.task_settings(job_id)
     except UploadTaskActionRejected as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    audit(
+        'upload_task_settings_updated',
+        job_id=job_id,
+        account_id=command.account_id,
+        changed_fields=sorted(command.changes),
+        collection_cleared=result.collection_cleared,
+    )
     return UploadTaskSettingsUpdateResponse(
         collection_cleared=result.collection_cleared,
         task=UploadTaskSettingsResponse(
@@ -873,6 +896,15 @@ async def run_recording_session_actions(
                     session_id=session_id, accepted=True, message=message
                 )
             )
+    rejected = sum(not result.accepted for result in results)
+    audit(
+        'recording_session_action',
+        level='WARNING' if rejected else 'INFO',
+        action=command.action,
+        session_ids=command.session_ids,
+        accepted=len(results) - rejected,
+        rejected=rejected,
+    )
     return RecordingSessionActionResponse(results=results)
 
 
@@ -897,6 +929,14 @@ async def retry_all_failed_upload_jobs(
                     job_id=job_id, accepted=True, message=message
                 )
             )
+    rejected = sum(not result.accepted for result in results)
+    audit(
+        'upload_failed_jobs_retried',
+        level='WARNING' if rejected else 'INFO',
+        job_ids=[result.job_id for result in results],
+        accepted=len(results) - rejected,
+        rejected=rejected,
+    )
     return UploadJobActionResponse(results=results)
 
 

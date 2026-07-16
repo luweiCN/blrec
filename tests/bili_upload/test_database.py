@@ -71,7 +71,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 16
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 17
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -124,6 +124,9 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'repair_completed_at',
             'operator_paused',
             'operator_resume_state',
+            'submission_verification_state',
+            'submission_verified_at',
+            'submission_verification_json',
         } <= job_columns
         upload_part_columns = {
             row['name']
@@ -335,7 +338,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 16
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 17
     finally:
         await database.close()
 

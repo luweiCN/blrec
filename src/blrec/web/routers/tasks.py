@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, PositiveInt, conint, validator
 
 from ...application import Application
 from ...exception import ForbiddenError, NotFoundError
+from ...logging.audit import audit
 from ...utils.ffprobe import StreamProfile
 from ...utils.string import camel_case
 from ..dependencies import TaskDataFilter, task_data_filter
@@ -139,6 +140,15 @@ async def run_task_batch_action(
             results.append(
                 TaskBatchActionResult(room_id=room_id, accepted=True, message=message)
             )
+    rejected = sum(not result.accepted for result in results)
+    audit(
+        'recording_task_action',
+        level='WARNING' if rejected else 'INFO',
+        action=command.action,
+        room_ids=command.room_ids,
+        accepted=len(results) - rejected,
+        rejected=rejected,
+    )
     return TaskBatchActionResponse(results=results)
 
 

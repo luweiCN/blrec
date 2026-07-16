@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from blrec.logging.audit import audit
+
 from .crypto import CredentialBundle
 from .database import BiliUploadDatabase, LeaseClaim, LeaseLost
 from .errors import (
@@ -138,6 +140,7 @@ class UposUploader:
         self._max_chunk_attempts = max_chunk_attempts
         self._clock = clock
         self._stop_requested = stop_requested
+        self._progress_milestones: Dict[int, int] = {}
 
     async def upload_part(
         self, part_id: int, *, bundle: CredentialBundle, claim: LeaseClaim
@@ -165,6 +168,13 @@ class UposUploader:
         identity = await self._load_or_store_identity(part, claim)
         if identity.size <= 0:
             await self._pause_identity(part_id, claim, 'recording file is empty')
+        audit(
+            'upload_part_started',
+            job_id=claim.id,
+            part_id=part_id,
+            total_bytes=identity.size,
+            resumed=part.upload_session_json is not None,
+        )
 
         session, renewal_count = self._restore_session(part, claim)
         while True:
@@ -247,6 +257,14 @@ class UposUploader:
             raise ProtocolContractError('UPOS session has no remote filename')
         await self._initialize_session(
             part_id, identity.size, session_json, remote_filename, claim
+        )
+        audit(
+            'upload_session_started',
+            job_id=claim.id,
+            part_id=part_id,
+            total_bytes=identity.size,
+            chunks=int(math.ceil(identity.size / self._chunk_size)),
+            renewal_count=renewal_count,
         )
         return prepared.session
 
@@ -368,6 +386,16 @@ class UposUploader:
                 attempt=attempt,
                 etag=etag,
             )
+            audit(
+                'upload_chunk_confirmed',
+                level='DEBUG',
+                job_id=claim.id,
+                part_id=part_id,
+                chunk_no=chunk.chunk_no,
+                chunk_bytes=chunk.size,
+                attempt=attempt,
+            )
+            await self._audit_progress(part_id, identity.size, claim.id)
             return
 
         await self._fail_chunk(part_id, chunk.chunk_no, claim, session_json)
@@ -446,6 +474,13 @@ class UposUploader:
             {'upload_state': 'confirmed'},
             expected_session_json=session_json,
         )
+        audit(
+            'upload_part_completed',
+            job_id=claim.id,
+            part_id=part_id,
+            total_bytes=identity.size,
+        )
+        self._progress_milestones.pop(part_id, None)
         remote_filename = getattr(session, 'remote_file_name', None)
         if not isinstance(remote_filename, str) or not remote_filename:
             raise ProtocolContractError('UPOS session has no remote filename')
@@ -781,6 +816,39 @@ class UposUploader:
                 raise LeaseLost('upload job lease was lost')
 
         await self._database.write(pause)
+        audit(
+            'upload_part_paused',
+            level='WARNING',
+            job_id=claim.id,
+            part_id=part_id,
+            upload_state=upload_state,
+            artifact_state=artifact_state,
+            reason=reason,
+        )
+
+    async def _audit_progress(
+        self, part_id: int, total_bytes: int, job_id: int
+    ) -> None:
+        confirmed = int(
+            await self._database.scalar(
+                "SELECT COALESCE(SUM(size),0) FROM upload_chunks "
+                "WHERE part_id=? AND state='confirmed'",
+                (part_id,),
+            )
+        )
+        percent = min(100, int(confirmed * 100 / total_bytes))
+        milestone = min(100, (percent // 5) * 5)
+        if milestone <= self._progress_milestones.get(part_id, -1):
+            return
+        self._progress_milestones[part_id] = milestone
+        audit(
+            'upload_progress',
+            job_id=job_id,
+            part_id=part_id,
+            percent=milestone,
+            confirmed_bytes=confirmed,
+            total_bytes=total_bytes,
+        )
 
     @staticmethod
     def _require_claim(

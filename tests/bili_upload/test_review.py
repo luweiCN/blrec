@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Set
 
@@ -258,6 +259,83 @@ async def test_review_binds_cids_by_remote_filename_not_array_position(
         )
         assert comment.calls == [1]
         assert danmaku.calls == [1]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_persists_submission_setting_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.review.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        policy_snapshot = {
+            'format_version': 4,
+            'title': '测试直播 录播',
+            'description': '主播：测试主播',
+            'part_titles': ['P1'],
+            'tid': 17,
+            'tags': '直播,录播',
+            'copyright': 1,
+            'is_only_self': True,
+            'publish_dynamic': False,
+            'no_reprint': True,
+            'up_selection_reply': True,
+            'up_close_reply': False,
+            'up_close_danmu': False,
+            'creation_statement_id': -1,
+        }
+        await database.execute(
+            'UPDATE upload_jobs SET policy_snapshot_json=?,scheduled_publish_at=? '
+            'WHERE id=1',
+            (json.dumps(policy_snapshot), 10_000),
+        )
+        detail = archive_detail([dict(video('p1', 101, 1), title='P1')])
+        detail['data']['archive'].update(
+            {
+                'title': '测试直播 录播',
+                'desc': '主播：测试主播',
+                'tid': 17,
+                'tag': '录播,直播',
+                'copyright': 1,
+                'is_only_self': 1,
+                'no_disturbance': 1,
+                'no_reprint': 1,
+                'up_selection_reply': True,
+                'up_close_reply': False,
+                'up_close_danmu': False,
+                'creation_statement': {'id': -1},
+                'dtime': 10_000,
+            }
+        )
+        review = watcher(database, archive_response(), detail=detail)
+
+        assert await review.run_once() == 1
+
+        row = await database.fetchone(
+            'SELECT state,submission_verification_state,submission_verified_at,'
+            'submission_verification_json FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert row['state'] == 'approved'
+        assert row['submission_verification_state'] == 'passed'
+        assert row['submission_verified_at'] == 1000
+        verification = json.loads(str(row['submission_verification_json']))
+        assert verification['mismatches'] == []
+        assert 'title' in verification['checked']
+        assert '测试直播' not in str(row['submission_verification_json'])
+        assert any(
+            event == 'submission_verified'
+            and fields['job_id'] == 1
+            and fields['state'] == 'passed'
+            for event, fields in audit_events
+        )
     finally:
         await database.close()
 

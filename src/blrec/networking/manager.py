@@ -19,6 +19,8 @@ from typing import (
 
 import aiohttp
 
+from blrec.logging.audit import audit
+
 from .platform import NetworkInterface, discover_interfaces
 from .rate_limit import SharedUploadLimiter
 from .resolver import SourceBoundResolver
@@ -95,6 +97,9 @@ class NetworkRouteManager:
         self._unavailable_since: Dict[Tuple[NetworkPurpose, str], float] = {}
         self._round_robin_cursors: Dict[NetworkPurpose, int] = {}
         self._affinities: Dict[Tuple[NetworkPurpose, str], str] = {}
+        self._selection_audit_at: Dict[
+            Tuple[NetworkPurpose, Optional[str], str], float
+        ] = {}
         self._lock = RLock()
         self._traffic_meter = TrafficMeter(clock=clock)
         self._upload_limiter = SharedUploadLimiter(
@@ -151,6 +156,12 @@ class NetworkRouteManager:
             await self._settings_persister(updated)
         else:
             current.interfaces = updated.interfaces
+        audit(
+            'network_interface_updated',
+            interface=interface_name,
+            enabled=item.enabled,
+            upload_limit_bps=item.upload_limit_bps,
+        )
 
     def cached_probes(self) -> Dict[str, NetworkProbe]:
         return dict(self._probes)
@@ -272,6 +283,15 @@ class NetworkRouteManager:
             self._report_probe_result(interface.name, result)
 
     def _report_probe_result(self, interface_name: str, result: NetworkProbe) -> None:
+        audit(
+            'network_probe',
+            level='INFO' if result.reachable else 'WARNING',
+            interface=interface_name,
+            reachable=result.reachable,
+            latency_ms=result.latency_ms,
+            external_ip=result.external_ip,
+            error=result.error,
+        )
         purposes: Tuple[NetworkPurpose, ...] = (
             'room_status',
             'danmaku',
@@ -314,7 +334,11 @@ class NetworkRouteManager:
                             or purpose == 'upload'
                         )
                     ):
-                        return self._selection(purpose, interface, 'primary')
+                        return self._audited_selection(
+                            self._selection(purpose, interface, 'primary'),
+                            anonymous=anonymous,
+                            affinity=affinity_key is not None,
+                        )
                     self._affinities.pop(affinity, None)
 
             if route.mode == 'round_robin' and anonymous:
@@ -327,11 +351,19 @@ class NetworkRouteManager:
                 self._round_robin_cursors[purpose] = cursor + 1
                 if affinity is not None:
                     self._affinities[affinity] = interface.name
-                return self._selection(purpose, interface, 'round_robin')
+                return self._audited_selection(
+                    self._selection(purpose, interface, 'round_robin'),
+                    anonymous=anonymous,
+                    affinity=affinity_key is not None,
+                )
 
             configured = interfaces.get(route.interface or '')
             if route.interface is None:
-                return self._system_selection(purpose)
+                return self._audited_selection(
+                    self._system_selection(purpose),
+                    anonymous=anonymous,
+                    affinity=affinity_key is not None,
+                )
             if (
                 configured is not None
                 and configured.enabled
@@ -339,7 +371,11 @@ class NetworkRouteManager:
             ):
                 if affinity is not None:
                     self._affinities[affinity] = configured.name
-                return self._selection(purpose, configured, 'primary')
+                return self._audited_selection(
+                    self._selection(purpose, configured, 'primary'),
+                    anonymous=anonymous,
+                    affinity=affinity_key is not None,
+                )
 
             allow_failover = route.failover_enabled and purpose != 'upload'
             if allow_failover:
@@ -354,7 +390,12 @@ class NetworkRouteManager:
                 if fallback is not None:
                     if affinity is not None:
                         self._affinities[affinity] = fallback.name
-                    return self._selection(purpose, fallback, 'fallback')
+                    return self._audited_selection(
+                        self._selection(purpose, fallback, 'fallback'),
+                        anonymous=anonymous,
+                        affinity=affinity_key is not None,
+                    )
+            self._audit_unavailable(purpose, route.interface)
             raise NetworkUnavailable(
                 'Configured network interface is unavailable for {}'.format(purpose)
             )
@@ -373,7 +414,16 @@ class NetworkRouteManager:
             failures = self._failures.get(key, 0) + 1
             self._failures[key] = failures
             if failures >= self._failure_threshold:
+                became_unavailable = key not in self._unavailable_since
                 self._unavailable_since[key] = self._clock()
+                if became_unavailable:
+                    audit(
+                        'network_route_unhealthy',
+                        level='WARNING',
+                        purpose=purpose,
+                        interface=interface_name,
+                        failures=failures,
+                    )
 
     def report_success(
         self, purpose: NetworkPurpose, interface_name: Optional[str]
@@ -382,8 +432,13 @@ class NetworkRouteManager:
             return
         key = (purpose, interface_name)
         with self._lock:
+            recovered = key in self._unavailable_since
             self._failures.pop(key, None)
             self._unavailable_since.pop(key, None)
+            if recovered:
+                audit(
+                    'network_route_recovered', purpose=purpose, interface=interface_name
+                )
 
     def report_http_result(
         self, purpose: NetworkPurpose, interface_name: Optional[str], status: int
@@ -463,6 +518,39 @@ class NetworkRouteManager:
 
     def _route_settings(self, purpose: NetworkPurpose) -> 'NetworkRouteSettings':
         return getattr(self._settings_provider(), purpose)
+
+    def _audited_selection(
+        self, selection: RouteSelection, *, anonymous: bool, affinity: bool
+    ) -> RouteSelection:
+        key = (selection.purpose, selection.interface_name, selection.role)
+        now = self._clock()
+        if now - self._selection_audit_at.get(key, float('-inf')) >= 300:
+            self._selection_audit_at[key] = now
+            audit(
+                'network_route_selected',
+                level='WARNING' if selection.role == 'fallback' else 'DEBUG',
+                purpose=selection.purpose,
+                interface=selection.interface_name,
+                role=selection.role,
+                anonymous=anonymous,
+                affinity=affinity,
+            )
+        return selection
+
+    def _audit_unavailable(
+        self, purpose: NetworkPurpose, interface_name: Optional[str]
+    ) -> None:
+        key = (purpose, interface_name, 'unavailable')
+        now = self._clock()
+        if now - self._selection_audit_at.get(key, float('-inf')) < 300:
+            return
+        self._selection_audit_at[key] = now
+        audit(
+            'network_route_unavailable',
+            level='ERROR',
+            purpose=purpose,
+            interface=interface_name,
+        )
 
     @staticmethod
     def _selection(

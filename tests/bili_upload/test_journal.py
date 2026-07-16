@@ -617,6 +617,13 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
         (session.id,),
     )
     await database.execute(
+        "UPDATE upload_jobs SET submission_verification_state='partial',"
+        "submission_verified_at=1040,submission_verification_json='"
+        '{"state":"partial","checked":["title"],'
+        '"missing":["up_selection_reply"],"mismatches":[]}'
+        "' WHERE id=9"
+    )
+    await database.execute(
         'INSERT INTO upload_parts('
         'id,job_id,part_index,source_path,final_path,xml_path,artifact_state,'
         'upload_state,danmaku_import_state,remote_filename,cid) '
@@ -672,6 +679,14 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert job.bytes_per_second is None
     assert job.eta_seconds is None
     assert job.can_repair is False
+    assert job.submission_verification_state == 'partial'
+    assert job.submission_verified_at == 1040
+    assert job.submission_verification == {
+        'state': 'partial',
+        'checked': ['title'],
+        'missing': ['up_selection_reply'],
+        'mismatches': [],
+    }
     assert (
         job.danmaku_total,
         job.danmaku_confirmed,

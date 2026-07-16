@@ -17,6 +17,7 @@ from blrec.bili_upload.policies import (
     RoomUploadPolicyNotFound,
     RoomUploadPolicyView,
 )
+from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 
 from .bili_accounts import authenticated_manager_subject
@@ -242,7 +243,7 @@ async def upsert_room_upload_policy(
                 status_code=status.HTTP_409_CONFLICT,
                 detail='请选择当前账号支持的创作声明',
             )
-        return await policy_manager.upsert(room_id, payload.to_command())
+        result = await policy_manager.upsert(room_id, payload.to_command())
     except InvalidUploadCategoryRequest as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
@@ -255,6 +256,22 @@ async def upsert_room_upload_policy(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from None
+    audit(
+        'room_upload_policy_updated',
+        room_id=room_id,
+        account_mode=payload.account_mode,
+        account_id=payload.account_id,
+        enabled=payload.enabled,
+        tid=payload.tid,
+        is_only_self=payload.is_only_self,
+        publish_dynamic=payload.publish_dynamic,
+        auto_comment=payload.auto_comment,
+        danmaku_backfill=payload.danmaku_backfill,
+        collection_enabled=payload.collection_section_id is not None,
+        cover_mode=payload.cover_mode,
+        publish_delay_seconds=payload.publish_delay_seconds,
+    )
+    return result
 
 
 @router.delete('/{room_id}', status_code=status.HTTP_204_NO_CONTENT)
@@ -269,4 +286,5 @@ async def delete_room_upload_policy(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Room upload policy not found'
         ) from None
+    audit('room_upload_policy_deleted', room_id=room_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

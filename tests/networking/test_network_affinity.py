@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Any, Dict, List, Tuple
 
 import pytest
 from pydantic import ValidationError
@@ -68,6 +68,43 @@ def test_fixed_route_fails_over_only_after_two_connection_failures() -> None:
     assert manager.select('recording').interface_name == 'eth0'
     manager.report_failure('recording', 'eth0')
     assert manager.select('recording').interface_name == 'eth1'
+
+
+def test_failover_and_recovery_emit_safe_route_audit_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.networking.manager.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
+    settings = NetworkSettings(
+        recording={'mode': 'fixed', 'interface': 'eth0', 'failoverEnabled': True}
+    )
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+
+    manager.report_failure('recording', 'eth0')
+    manager.report_failure('recording', 'eth0')
+    fallback = manager.select('recording')
+    manager.report_success('recording', 'eth0')
+
+    assert fallback.role == 'fallback'
+    assert (
+        'network_route_unhealthy',
+        {
+            'level': 'WARNING',
+            'purpose': 'recording',
+            'interface': 'eth0',
+            'failures': 2,
+        },
+    ) in events
+    assert any(
+        event == 'network_route_selected'
+        and fields['interface'] == 'eth1'
+        and fields['role'] == 'fallback'
+        for event, fields in events
+    )
+    assert any(event == 'network_route_recovered' for event, _fields in events)
 
 
 def test_upload_never_fails_over_to_another_interface() -> None:

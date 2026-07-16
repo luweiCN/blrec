@@ -241,6 +241,20 @@ export interface RecordingDanmakuPage {
   readonly nextCursor: number | null;
 }
 
+export type SubmissionVerificationState =
+  | 'pending'
+  | 'passed'
+  | 'different'
+  | 'partial'
+  | 'failed';
+
+export interface SubmissionVerification {
+  readonly state: SubmissionVerificationState;
+  readonly checked: readonly string[];
+  readonly missing: readonly string[];
+  readonly mismatches: readonly string[];
+}
+
 export interface UploadJobProgress {
   readonly id: number;
   readonly accountId: number;
@@ -279,6 +293,9 @@ export interface UploadJobProgress {
     | 'completed'
     | 'failed';
   readonly collectionError: string | null;
+  readonly submissionVerificationState: SubmissionVerificationState;
+  readonly submissionVerifiedAt: number | null;
+  readonly submissionVerification: SubmissionVerification | null;
   readonly commentError: string | null;
   readonly danmakuError: string | null;
   readonly canPause: boolean;

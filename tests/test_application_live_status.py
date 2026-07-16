@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from typing import Iterator, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest.mock import AsyncMock
 
 import aiohttp
@@ -154,7 +154,14 @@ async def test_settings_manager_restarts_for_safe_mode_change() -> None:
 
 
 @pytest.mark.asyncio
-async def test_partial_live_monitor_update_preserves_legacy_mode() -> None:
+async def test_partial_live_monitor_update_preserves_legacy_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit_events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.setting.setting_manager.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
     application = SettingsApplication(recording=True)
     current = Settings(
         live_monitor=LiveMonitorSettings(
@@ -188,6 +195,9 @@ async def test_partial_live_monitor_update_preserves_legacy_mode() -> None:
     assert result.live_monitor == current.live_monitor
     assert application.restart_count == 0
     assert dump_count == 1
+    assert audit_events == [
+        ('application_settings_updated', {'sections': ['live_monitor']})
+    ]
 
 
 @pytest.mark.asyncio

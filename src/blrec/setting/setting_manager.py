@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional, cast
 
 from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
+from ..logging.audit import audit
 from ..notification import (
     Bark,
     EmailService,
@@ -51,6 +52,7 @@ class SettingsManager:
 
     async def change_settings(self, settings: SettingsIn) -> SettingsOut:
         changed = False
+        changed_sections = []
         live_monitor = settings.live_monitor
         mode_changed = (
             'live_monitor' in settings.__fields_set__
@@ -76,6 +78,7 @@ class SettingsManager:
             else:
                 update_settings(src_sub_settings, dst_sub_settings)
             changed = True
+            changed_sections.append(name)
 
             func = getattr(self, f'apply_{name}_settings')
             if asyncio.iscoroutinefunction(func):
@@ -85,6 +88,7 @@ class SettingsManager:
 
         if changed:
             await self.dump_settings()
+            audit('application_settings_updated', sections=sorted(changed_sections))
         if mode_changed:
             await self._app.restart()
 

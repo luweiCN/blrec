@@ -4,7 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pytest
 
@@ -218,7 +218,14 @@ async def test_changed_file_identity_stops_before_network(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_chunk_reads_and_concurrency_are_bounded(tmp_path: Path) -> None:
+async def test_chunk_reads_and_concurrency_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.upos.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     path = tmp_path / 'part.flv'
     path.write_bytes(b'abcdefghijklmnopq')
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
@@ -235,6 +242,13 @@ async def test_chunk_reads_and_concurrency_are_bounded(tmp_path: Path) -> None:
         assert protocol.max_active_chunks == 2
         assert max(map(len, protocol.chunk_bodies)) <= 4
         assert sum(map(len, protocol.chunk_bodies)) == path.stat().st_size
+        assert any(
+            event == 'upload_progress'
+            and fields['percent'] == 100
+            and fields['confirmed_bytes'] == path.stat().st_size
+            for event, fields in events
+        )
+        assert any(event == 'upload_part_completed' for event, _fields in events)
     finally:
         await database.close()
 

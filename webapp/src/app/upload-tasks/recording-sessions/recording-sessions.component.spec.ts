@@ -147,6 +147,14 @@ describe('RecordingSessionsComponent', () => {
               scheduledPublishAt: null,
               collectionBranchState: 'disabled',
               collectionError: null,
+              submissionVerificationState: 'partial',
+              submissionVerifiedAt: 1_040,
+              submissionVerification: {
+                state: 'partial',
+                checked: ['title'],
+                missing: ['up_selection_reply'],
+                mismatches: [],
+              },
               commentError: null,
               danmakuError: null,
               canPause: false,
@@ -605,6 +613,8 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.detailVisible).toBeTrue();
     expect(fixture.componentInstance.selectedSession).toBe(session);
     expect(drawer.nzWidth).toBe('1180px');
+    expect(document.body.textContent).toContain('投稿配置核验：部分完成');
+    expect(document.body.textContent).toContain('1 项可核验设置未返回');
     expect(document.body.textContent).not.toContain('remote-p1');
     fixture.componentInstance.closeDetails();
     expect(fixture.componentInstance.detailVisible).toBeFalse();

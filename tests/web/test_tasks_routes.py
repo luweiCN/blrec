@@ -1,4 +1,4 @@
-from typing import Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 import pytest
 from fastapi import FastAPI
@@ -52,7 +52,14 @@ def client() -> Iterator[TestClient]:
         tasks.app = old_app
 
 
-def test_batch_task_action_returns_per_room_results(client: TestClient) -> None:
+def test_batch_task_action_returns_per_room_results(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.web.routers.tasks.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
     response = client.post(
         '/api/v1/tasks/actions', json={'action': 'cut', 'roomIds': [100, 200]}
     )
@@ -67,6 +74,18 @@ def test_batch_task_action_returns_per_room_results(client: TestClient) -> None:
     app = tasks.app
     assert isinstance(app, FakeApplication)
     assert app.calls == [('cut', 100), ('cut', 200)]
+    assert audit_events == [
+        (
+            'recording_task_action',
+            {
+                'level': 'WARNING',
+                'action': 'cut',
+                'room_ids': [100, 200],
+                'accepted': 1,
+                'rejected': 1,
+            },
+        )
+    ]
 
 
 def test_batch_task_action_rejects_duplicate_rooms(client: TestClient) -> None:

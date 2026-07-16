@@ -568,7 +568,7 @@ def log_dir_factory() -> str:
 class LoggingSettings(BaseModel):
     log_dir: Annotated[str, Field(default_factory=log_dir_factory)]
     console_log_level: LOG_LEVEL = 'INFO'
-    backup_count: Annotated[int, Field(ge=0, le=90)] = 30
+    backup_count: Annotated[int, Field(ge=0, le=90)] = 60
 
     @validator('log_dir')
     def _validate_dir(cls, path: str) -> str:

@@ -1,6 +1,6 @@
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Iterator, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Sequence, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -119,6 +119,14 @@ class FakeJournal:
                 danmaku_unknown=1,
                 danmaku_failed=0,
                 can_repair=False,
+                submission_verification_state='partial',
+                submission_verified_at=1_040,
+                submission_verification={
+                    'state': 'partial',
+                    'checked': ['title'],
+                    'missing': ['up_selection_reply'],
+                    'mismatches': [],
+                },
                 unknown_danmaku_items=(
                     DanmakuItemProgress(
                         id=11,
@@ -314,6 +322,14 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'scheduledPublishAt': None,
                     'collectionBranchState': 'disabled',
                     'collectionError': None,
+                    'submissionVerificationState': 'partial',
+                    'submissionVerifiedAt': 1_040,
+                    'submissionVerification': {
+                        'state': 'partial',
+                        'checked': ['title'],
+                        'missing': ['up_selection_reply'],
+                        'mismatches': [],
+                    },
                     'commentError': None,
                     'danmakuError': None,
                     'canPause': False,
@@ -491,7 +507,14 @@ def test_unknown_danmaku_decision_requires_auth_and_reason(client: TestClient) -
     assert invalid.status_code == 422
 
 
-def test_upload_job_actions_return_partial_batch_results(client: TestClient) -> None:
+def test_upload_job_actions_return_partial_batch_results(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.web.routers.recording_sessions.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
     actions = recording_sessions.task_actions
     assert isinstance(actions, AsyncMock)
     actions.retry_failed.side_effect = [
@@ -516,6 +539,18 @@ def test_upload_job_actions_return_partial_batch_results(client: TestClient) -> 
     assert all(
         call.kwargs['manager_subject'] for call in actions.retry_failed.await_args_list
     )
+    assert audit_events == [
+        (
+            'upload_task_action',
+            {
+                'level': 'WARNING',
+                'action': 'retry_failed',
+                'job_ids': [9, 10],
+                'accepted': 1,
+                'rejected': 1,
+            },
+        )
+    ]
 
 
 def test_upload_job_actions_validate_nonempty_unique_batch(client: TestClient) -> None:
