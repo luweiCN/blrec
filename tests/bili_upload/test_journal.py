@@ -48,7 +48,7 @@ async def seed_upload_policy(
 
 
 @pytest.mark.asyncio
-async def test_recording_start_freezes_room_upload_intent(database) -> None:
+async def test_recording_start_does_not_freeze_room_upload_policy(database) -> None:
     await seed_upload_policy(database)
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
 
@@ -58,10 +58,13 @@ async def test_recording_start_freezes_room_upload_intent(database) -> None:
     )
     second_run = await journal.recording_started(100, live_start_time=901)
 
-    first = await journal.session_for_run(first_run)
-    second = await journal.session_for_run(second_run)
-    assert first.upload_intent == 'auto'
-    assert second.upload_intent == 'none'
+    rows = await database.fetchall(
+        'SELECT upload_intent,upload_decision FROM recording_sessions ORDER BY id'
+    )
+    assert [tuple(row) for row in rows] == [
+        ('none', 'follow_room'),
+        ('none', 'follow_room'),
+    ]
 
 
 @pytest.mark.asyncio

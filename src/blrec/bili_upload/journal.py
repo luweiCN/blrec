@@ -290,13 +290,6 @@ class RecordingJournalBridge:
                     else str(row['broadcast_session_key'])
                 )
             if row is None:
-                policy = connection.execute(
-                    'SELECT enabled FROM room_upload_policies WHERE room_id=?',
-                    (room_id,),
-                ).fetchone()
-                upload_intent = (
-                    'auto' if policy is not None and bool(policy['enabled']) else 'none'
-                )
                 cursor = connection.execute(
                     'INSERT INTO recording_sessions('
                     'room_id,broadcast_session_key,live_start_time,state,started_at,'
@@ -317,7 +310,7 @@ class RecordingJournalBridge:
                         '' if metadata is None else metadata.area_name,
                         None if metadata is None else metadata.parent_area_id,
                         '' if metadata is None else metadata.parent_area_name,
-                        upload_intent,
+                        'none',
                     ),
                 )
                 session_id = int(cursor.lastrowid)
