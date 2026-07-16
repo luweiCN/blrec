@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -281,3 +282,42 @@ def test_cut_concatenates_compatible_sources_without_a_shell(
     ]
     assert concat_options['shell'] is False
     assert concat_document and concat_document[0].count("file '") == 2
+
+
+@pytest.mark.skipif(
+    not os.environ.get('BLREC_HIGHLIGHT_FIXTURE'),
+    reason='real FFmpeg fixture was not requested',
+)
+def test_real_ffmpeg_keeps_codecs_and_uses_stream_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Path(os.environ['BLREC_HIGHLIGHT_FIXTURE'])
+    output = tmp_path / 'real-highlight.mp4'
+    original_run = subprocess.run
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper()
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 5_000, 18_000),),
+        requested_start_ms=5_000,
+        requested_end_ms=18_000,
+        stable_end_ms=40_000,
+    )
+
+    artifact = clipper.cut(inspection, str(output))
+
+    ffmpeg_calls = [command for command in calls if command[0] == 'ffmpeg']
+    assert ffmpeg_calls
+    assert all(
+        ('-c', 'copy') == command[command.index('-c') :][:2] for command in ffmpeg_calls
+    )
+    output_profile, _ = clipper._probe_media(str(output))
+    assert output_profile.codec_name == inspection.sources[0].profile.codec_name
+    assert output_profile.has_audio is inspection.sources[0].profile.has_audio
+    assert artifact.duration_ms == output_profile.duration_ms
+    assert abs(artifact.duration_ms - inspection.output_duration_ms) <= 2_000
