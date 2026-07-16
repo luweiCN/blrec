@@ -1,0 +1,31 @@
+<div class="extension-authorizations" aria-live="polite">
+  <p class="scope-note">插件只能收录直播间和添加高光。</p>
+  <p *ngIf="loading" class="state-text">正在加载…</p>
+  <div *ngIf="error" class="error-text" role="alert">
+    {{ error }}
+    <button type="button" class="text-button" (click)="load()">重试</button>
+  </div>
+  <p *ngIf="!loading && !error && tokens.length === 0" class="state-text">
+    暂无浏览器插件授权
+  </p>
+  <ul *ngIf="tokens.length > 0" class="token-list">
+    <li *ngFor="let token of tokens; trackBy: trackToken">
+      <div>
+        <strong>授权 #{{ token.id }}</strong>
+        <span>
+          创建 {{ token.createdAt * 1000 | date : 'yyyy-MM-dd HH:mm' }} ·
+          最近使用 {{ token.lastUsedAt * 1000 | date : 'yyyy-MM-dd HH:mm' }}
+        </span>
+      </div>
+      <span *ngIf="token.revokedAt !== null" class="revoked">已撤销</span>
+      <button
+        *ngIf="token.revokedAt === null"
+        type="button"
+        class="danger-button"
+        (click)="confirmRevoke(token)"
+      >
+        撤销
+      </button>
+    </li>
+  </ul>
+</div>

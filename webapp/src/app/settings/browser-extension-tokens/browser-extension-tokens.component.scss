@@ -1,0 +1,59 @@
+.scope-note,
+.state-text {
+  margin: 0;
+  color: #6b7280;
+}
+
+.token-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.token-list li {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  gap: 12px;
+  border-top: 1px solid #eef0f2;
+}
+
+.token-list div {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+}
+
+.token-list span {
+  color: #6b7280;
+}
+
+.danger-button,
+.text-button {
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.danger-button,
+.error-text {
+  color: #cf1322;
+}
+
+.text-button {
+  color: #1677ff;
+}
+
+.danger-button:hover,
+.danger-button:focus-visible {
+  background: #fff1f0;
+}
+
+.revoked {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f0f0f0;
+}

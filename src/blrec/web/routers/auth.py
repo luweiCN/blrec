@@ -5,7 +5,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from email.utils import format_datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.exceptions import HTTPException
@@ -52,6 +52,16 @@ class RecoverPasswordRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
     api_key: str = Field('', alias='apiKey', max_length=1024)
     new_password: str = Field(..., alias='newPassword', min_length=10, max_length=1024)
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class ExtensionTokenResponse(BaseModel):
+    id: int
+    created_at: int = Field(..., alias='createdAt')
+    last_used_at: int = Field(..., alias='lastUsedAt')
+    revoked_at: Optional[int] = Field(None, alias='revokedAt')
 
     class Config:
         allow_population_by_field_name = True
@@ -171,6 +181,29 @@ async def change_password(request: Request, command: ChangePasswordRequest) -> R
         samesite='lax',
     )
     return response
+
+
+@router.get('/extensions', response_model=List[ExtensionTokenResponse])
+async def list_extension_tokens() -> List[ExtensionTokenResponse]:
+    return [
+        ExtensionTokenResponse(
+            id=item.token_id,
+            created_at=item.created_at,
+            last_used_at=item.last_used_at,
+            revoked_at=item.revoked_at,
+        )
+        for item in _store().list_extension_tokens()
+    ]
+
+
+@router.delete('/extensions/{token_id}', status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_extension_token(token_id: int) -> Response:
+    if token_id <= 0 or not _store().revoke_extension_token(token_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Browser extension authorization was not found',
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post('/recover', status_code=status.HTTP_204_NO_CONTENT)

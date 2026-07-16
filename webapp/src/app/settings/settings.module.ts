@@ -52,6 +52,7 @@ import { BaseApiUrlEditDialogComponent } from './bili-api-settings/base-api-url-
 import { BaseLiveApiUrlEditDialogComponent } from './bili-api-settings/base-live-api-url-edit-dialog/base-live-api-url-edit-dialog.component';
 import { BasePlayInfoApiUrlEditDialogComponent } from './bili-api-settings/base-play-info-api-url-edit-dialog/base-play-info-api-url-edit-dialog.component';
 import { LiveMonitorSettingsComponent } from './live-monitor-settings/live-monitor-settings.component';
+import { BrowserExtensionTokensComponent } from './browser-extension-tokens/browser-extension-tokens.component';
 
 @NgModule({
   declarations: [
@@ -78,6 +79,7 @@ import { LiveMonitorSettingsComponent } from './live-monitor-settings/live-monit
     BaseLiveApiUrlEditDialogComponent,
     BasePlayInfoApiUrlEditDialogComponent,
     LiveMonitorSettingsComponent,
+    BrowserExtensionTokensComponent,
   ],
   imports: [
     CommonModule,

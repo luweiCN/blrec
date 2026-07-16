@@ -21,6 +21,8 @@ __all__ = (
     'AdminAuthStore',
     'AuthenticationFailed',
     'AuthenticationRateLimited',
+    'ExtensionCredentials',
+    'ExtensionIdentity',
     'SessionCredentials',
 )
 
@@ -44,6 +46,21 @@ class SessionCredentials:
     session_token: str
     csrf_token: str
     expires_at: int
+
+
+@dataclass(frozen=True)
+class ExtensionCredentials:
+    token_id: int
+    token: str
+    created_at: int
+
+
+@dataclass(frozen=True)
+class ExtensionIdentity:
+    token_id: int
+    created_at: int
+    last_used_at: int
+    revoked_at: Optional[int]
 
 
 class AdminAuthStore:
@@ -266,6 +283,107 @@ class AdminAuthStore:
                 (self._token_hash(session_token),),
             )
 
+    def issue_extension_token(
+        self, username: str, *, client_key: str
+    ) -> ExtensionCredentials:
+        connection = self._require_open()
+        now = int(self._clock())
+        rate_limit_key = self._rate_limit_key('extension_pair', client_key)
+        with self._lock, connection:
+            self._ensure_not_rate_limited(connection, rate_limit_key, now)
+            initialized = (
+                connection.execute('SELECT 1 FROM admin WHERE id=1').fetchone()
+                is not None
+            )
+            if not initialized or not self._username_matches(username):
+                retry_after = self._record_failed_login(
+                    connection, rate_limit_key, now, scope='extension_pair'
+                )
+                connection.commit()
+                if retry_after is not None:
+                    raise AuthenticationRateLimited(retry_after)
+                raise AuthenticationFailed('invalid credentials')
+            connection.execute(
+                'DELETE FROM login_failures WHERE client_key=?', (rate_limit_key,)
+            )
+            for _ in range(3):
+                token = 'blrec_ext_' + secrets.token_urlsafe(32)
+                try:
+                    cursor = connection.execute(
+                        'INSERT INTO extension_tokens('
+                        'token_hash,created_at,last_used_at,revoked_at'
+                        ') VALUES(?,?,?,NULL)',
+                        (self._token_hash(token), now, now),
+                    )
+                except sqlite3.IntegrityError:
+                    continue
+                token_id = int(cursor.lastrowid)
+                self._audit(connection, 'extension_pair_succeeded', now)
+                return ExtensionCredentials(token_id, token, now)
+        raise RuntimeError('could not allocate a unique extension token')
+
+    def authenticate_extension(self, token: str) -> Optional[ExtensionIdentity]:
+        if not token or not token.startswith('blrec_ext_'):
+            return None
+        connection = self._require_open()
+        token_hash = self._token_hash(token)
+        now = int(self._clock())
+        with self._lock, connection:
+            row = connection.execute(
+                'SELECT id,created_at,last_used_at,revoked_at '
+                'FROM extension_tokens WHERE token_hash=?',
+                (token_hash,),
+            ).fetchone()
+            if row is None or row['revoked_at'] is not None:
+                return None
+            updated = connection.execute(
+                'UPDATE extension_tokens SET last_used_at=? '
+                'WHERE id=? AND revoked_at IS NULL',
+                (now, int(row['id'])),
+            )
+            if updated.rowcount != 1:
+                return None
+            self._audit(connection, 'extension_token_used', now)
+            return ExtensionIdentity(
+                token_id=int(row['id']),
+                created_at=int(row['created_at']),
+                last_used_at=now,
+                revoked_at=None,
+            )
+
+    def list_extension_tokens(self) -> tuple[ExtensionIdentity, ...]:
+        connection = self._require_open()
+        with self._lock:
+            rows = connection.execute(
+                'SELECT id,created_at,last_used_at,revoked_at '
+                'FROM extension_tokens ORDER BY id DESC'
+            ).fetchall()
+        return tuple(
+            ExtensionIdentity(
+                token_id=int(row['id']),
+                created_at=int(row['created_at']),
+                last_used_at=int(row['last_used_at']),
+                revoked_at=(
+                    None if row['revoked_at'] is None else int(row['revoked_at'])
+                ),
+            )
+            for row in rows
+        )
+
+    def revoke_extension_token(self, token_id: int) -> bool:
+        connection = self._require_open()
+        now = int(self._clock())
+        with self._lock, connection:
+            updated = connection.execute(
+                'UPDATE extension_tokens SET revoked_at=? '
+                'WHERE id=? AND revoked_at IS NULL',
+                (now, int(token_id)),
+            )
+            if updated.rowcount != 1:
+                return False
+            self._audit(connection, 'extension_token_revoked', now)
+            return True
+
     def change_password(self, current_password: str, new_password: str) -> None:
         self._validate_password(new_password)
         connection = self._require_open()
@@ -322,6 +440,15 @@ class AdminAuthStore:
                 window_started_at INTEGER NOT NULL,
                 blocked_until INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS extension_tokens (
+                id INTEGER PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                revoked_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS extension_tokens_active_idx
+            ON extension_tokens(revoked_at,last_used_at,id);
             CREATE TABLE IF NOT EXISTS auth_audit (
                 id INTEGER PRIMARY KEY,
                 event TEXT NOT NULL,

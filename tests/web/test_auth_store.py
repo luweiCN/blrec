@@ -206,3 +206,68 @@ def test_bootstrap_rate_limit_is_persistent_and_separate_from_login(
             'owner', credential_valid=True, client_key='192.0.2.20'
         )
     reopened.close()
+
+
+def test_extension_pairing_stores_only_a_hash_and_supports_revocation(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    auth = store(tmp_path, clock)
+    auth.open()
+    auth.initialize('owner', 'correct horse battery staple')
+
+    credentials = auth.issue_extension_token('owner', client_key='192.168.50.8')
+
+    assert credentials.token.startswith('blrec_ext_')
+    identity = auth.authenticate_extension(credentials.token)
+    assert identity is not None
+    assert identity.token_id == credentials.token_id
+    row = auth._connection.execute(  # type: ignore[union-attr]
+        'SELECT token_hash,created_at,last_used_at,revoked_at '
+        'FROM extension_tokens WHERE id=?',
+        (credentials.token_id,),
+    ).fetchone()
+    assert row is not None
+    assert credentials.token not in '|'.join(str(value) for value in row)
+    assert len(str(row['token_hash'])) == 64
+
+    clock.value += 30
+    used = auth.authenticate_extension(credentials.token)
+    assert used is not None
+    assert used.last_used_at == clock.value
+    assert auth.list_extension_tokens()[0].last_used_at == clock.value
+
+    assert auth.revoke_extension_token(credentials.token_id)
+    assert auth.authenticate_extension(credentials.token) is None
+    assert auth.list_extension_tokens()[0].revoked_at == clock.value
+    events = [
+        str(row['event'])
+        for row in auth._connection.execute(  # type: ignore[union-attr]
+            'SELECT event FROM auth_audit ORDER BY id'
+        )
+    ]
+    assert 'extension_pair_succeeded' in events
+    assert 'extension_token_used' in events
+    assert 'extension_token_revoked' in events
+    auth.close()
+
+
+def test_extension_pairing_wrong_username_is_rate_limited_separately(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    auth = store(tmp_path, clock)
+    auth.open()
+    auth.initialize('owner', 'correct horse battery staple')
+
+    for _ in range(2):
+        with pytest.raises(AuthenticationFailed):
+            auth.issue_extension_token('wrong', client_key='192.168.50.9')
+    with pytest.raises(AuthenticationRateLimited):
+        auth.issue_extension_token('wrong', client_key='192.168.50.9')
+
+    credentials = auth.login(
+        'owner', 'correct horse battery staple', client_key='192.168.50.9'
+    )
+    assert credentials.session_token
+    auth.close()

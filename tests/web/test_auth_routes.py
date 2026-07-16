@@ -290,3 +290,44 @@ def test_security_headers_are_added_to_every_response(client: TestClient) -> Non
     assert response.headers['x-frame-options'] == 'DENY'
     assert response.headers['referrer-policy'] == 'same-origin'
     assert "frame-ancestors 'none'" in response.headers['content-security-policy']
+
+
+def test_administrator_can_list_and_revoke_extension_tokens(client: TestClient) -> None:
+    csrf_token = setup_admin(client)
+    store = security.auth_store
+    assert store is not None
+    credentials = store.issue_extension_token('owner', client_key='192.168.50.8')
+
+    listed = client.get('/api/v1/auth/extensions')
+
+    assert listed.status_code == 200
+    assert listed.json() == [
+        {
+            'id': credentials.token_id,
+            'createdAt': credentials.created_at,
+            'lastUsedAt': credentials.created_at,
+            'revokedAt': None,
+        }
+    ]
+    assert credentials.token not in listed.text
+
+    revoked = client.delete(
+        '/api/v1/auth/extensions/{}'.format(credentials.token_id),
+        headers={'origin': 'https://testserver', 'x-csrf-token': csrf_token},
+    )
+    assert revoked.status_code == 204
+    assert store.authenticate_extension(credentials.token) is None
+
+
+def test_extension_token_is_not_an_administrator_session(client: TestClient) -> None:
+    setup_admin(client)
+    store = security.auth_store
+    assert store is not None
+    credentials = store.issue_extension_token('owner', client_key='192.168.50.8')
+    client.cookies.clear()
+
+    response = client.get(
+        '/api/v1/protected', headers={'x-blrec-extension-token': credentials.token}
+    )
+
+    assert response.status_code == 401
