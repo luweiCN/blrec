@@ -192,6 +192,26 @@ async def test_list_sessions_identifies_derived_highlight_media(database) -> Non
         ('highlight', 7),
     ]
 
+    recordings = await RecordingJournalBridge(database).list_sessions(
+        scope='recordings'
+    )
+    assert [item.id for item in recordings] == [1]
+
+    await database.execute(
+        'INSERT INTO bili_accounts('
+        'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+        'state,created_at,updated_at) '
+        "VALUES(1,42,'账号',X'00',1,'key','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(2,1,'{}','paused','prepared',1,1)"
+    )
+    uploads = await RecordingJournalBridge(database).list_sessions(scope='uploads')
+    assert [item.id for item in uploads] == [2]
+
 
 @pytest.mark.asyncio
 async def test_list_sessions_rejects_negative_offset(database) -> None:

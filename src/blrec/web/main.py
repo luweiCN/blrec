@@ -230,6 +230,7 @@ recording_sessions.danmaku_publisher = None
 recording_sessions.content_reader = None
 recording_sessions.task_actions = None
 recording_sessions.session_action_runner = None
+recording_sessions.submission_manager = None
 recording_sessions.active_recording_metadata_provider = _active_recording_metadata
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_retention.manager = None
@@ -336,6 +337,9 @@ async def on_startup() -> None:
         recording_sessions.session_action_runner = (
             _bili_account_runtime.run_recording_session_action
         )
+        recording_sessions.submission_manager = (
+            _bili_account_runtime.session_submission_manager
+        )
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_retention.manager = _bili_account_runtime.retention_manager
         recording_retention.unavailable_reason = (
@@ -374,6 +378,7 @@ async def on_startup() -> None:
         recording_sessions.content_reader = None
         recording_sessions.task_actions = None
         recording_sessions.session_action_runner = None
+        recording_sessions.submission_manager = None
         recording_retention.manager = None
         room_upload_policies.manager = None
         room_upload_policies.category_catalog = None
@@ -402,6 +407,7 @@ async def on_shuntdown() -> None:
     recording_sessions.content_reader = None
     recording_sessions.task_actions = None
     recording_sessions.session_action_runner = None
+    recording_sessions.submission_manager = None
     recording_retention.manager = None
     room_upload_policies.manager = None
     room_upload_policies.category_catalog = None

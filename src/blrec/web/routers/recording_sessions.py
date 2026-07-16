@@ -29,6 +29,7 @@ from blrec.bili_upload.journal import (
     UploadJobProgress,
     UploadPartProgress,
 )
+from blrec.bili_upload.policies import InvalidRoomUploadPolicy
 from blrec.bili_upload.recording_content import (
     DanmakuPage,
     FlvMediaSnapshot,
@@ -37,6 +38,13 @@ from blrec.bili_upload.recording_content import (
     RecordingContentNotFound,
     RecordingContentReader,
     RecordingContentUnavailable,
+)
+from blrec.bili_upload.session_submission import (
+    InvalidSessionSubmission,
+    RecordingSessionNotFound,
+    SessionSubmissionLocked,
+    SessionSubmissionManager,
+    SessionSubmissionView,
 )
 from blrec.bili_upload.task_actions import (
     UploadTaskActionManager,
@@ -47,12 +55,14 @@ from blrec.utils.string import camel_case
 
 from .. import security
 from .bili_accounts import authenticated_manager_subject
+from .room_upload_policies import RoomUploadPolicyRequest
 
 journal: Optional[RecordingJournalBridge] = None
 danmaku_publisher: Optional[DanmakuPublisher] = None
 content_reader: Optional[RecordingContentReader] = None
 task_actions: Optional[UploadTaskActionManager] = None
 session_action_runner: Optional[Callable[..., Awaitable[str]]] = None
+submission_manager: Optional[SessionSubmissionManager] = None
 active_recording_metadata_provider: Optional[
     Callable[[MediaResource], Optional[Mapping[str, Any]]]
 ] = None
@@ -302,6 +312,10 @@ class RecordingSessionResponse(ApiModel):
     total_file_size_bytes: int
     record_duration_seconds: int
     upload_intent: str
+    upload_decision: str
+    submission_inherited: bool
+    upload_resolution_state: str
+    upload_resolution_error: Optional[str]
     upload_suppressed: bool
     deletion_state: str
     deletion_error: Optional[str]
@@ -317,6 +331,21 @@ class RecordingSessionsResponse(ApiModel):
     degraded_reason: Optional[str]
     total: int
     sessions: List[RecordingSessionResponse]
+
+
+class SessionSubmissionSettingsResponse(ApiModel):
+    session_id: int
+    room_id: int
+    decision: str
+    inherited: bool
+    settings_source: str
+    resolution_state: str
+    resolution_error: Optional[str]
+    settings: RoomUploadPolicyRequest
+
+
+class SessionSubmissionDecisionRequest(ApiModel):
+    decision: Literal['follow_room', 'upload', 'skip']
 
 
 class DanmakuLineResponse(ApiModel):
@@ -422,6 +451,16 @@ def get_session_action_runner() -> Callable[..., Awaitable[str]]:
     return session_action_runner
 
 
+def get_submission_manager() -> SessionSubmissionManager:
+    if submission_manager is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason
+            or 'Recording submission settings are unavailable',
+        )
+    return submission_manager
+
+
 def _session_display(
     session: RecordingSession, upload_job: Optional[UploadJobProgress]
 ) -> Tuple[str, List[str]]:
@@ -458,16 +497,24 @@ def _session_display(
             and recorded_part_indexes == upload_part_indexes
         ):
             actions.append('backfill_danmaku')
-    elif session.upload_intent in ('auto', 'upload'):
+    elif session.upload_decision != 'skip' and session.upload_resolution_state != (
+        'not_requested'
+    ):
         actions.append('set_skip')
     else:
         actions.append('set_upload')
+    if upload_job is None:
+        actions.append('edit_submission')
     actions.append('delete_local')
 
     if session.state == 'open':
         return 'recording', actions
     if upload_job is None:
-        if session.upload_intent in ('auto', 'upload'):
+        if session.upload_resolution_state == 'configuration_required':
+            return 'needs_attention', actions
+        if session.upload_resolution_state == 'pending' and (
+            session.upload_decision != 'skip'
+        ):
             return 'pending_upload', actions
         return 'not_uploading', actions
     if upload_job.repair_state in ('failed', 'unknown_outcome'):
@@ -686,6 +733,10 @@ def _session_response(
         total_file_size_bytes=session.total_file_size_bytes,
         record_duration_seconds=session.record_duration_seconds,
         upload_intent=session.upload_intent,
+        upload_decision=session.upload_decision,
+        submission_inherited=session.submission_inherited,
+        upload_resolution_state=session.upload_resolution_state,
+        upload_resolution_error=session.upload_resolution_error,
         upload_suppressed=session.upload_suppressed,
         deletion_state=session.deletion_state,
         deletion_error=session.deletion_error,
@@ -705,6 +756,7 @@ router = APIRouter(prefix='/recording-sessions', tags=['recording-sessions'])
 async def list_recording_sessions(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    scope: Literal['recordings', 'uploads'] = Query('recordings'),
     query: str = Query('', alias='q', max_length=100),
     session_state: Optional[
         Literal['open', 'closed', 'cancelled', 'manual_review', 'skipped']
@@ -741,6 +793,7 @@ async def list_recording_sessions(
         )
     normalized_query = query.strip()
     total = await recording_journal.count_sessions(
+        scope=scope,
         query=normalized_query,
         session_state=session_state,
         upload_state=upload_state,
@@ -750,6 +803,7 @@ async def list_recording_sessions(
     sessions = await recording_journal.list_sessions(
         limit=limit,
         offset=offset,
+        scope=scope,
         query=normalized_query,
         session_state=session_state,
         upload_state=upload_state,
@@ -768,6 +822,100 @@ async def list_recording_sessions(
             for session in sessions
         ],
     )
+
+
+def _submission_settings_response(
+    value: SessionSubmissionView,
+) -> SessionSubmissionSettingsResponse:
+    return SessionSubmissionSettingsResponse(
+        session_id=value.session_id,
+        room_id=value.room_id,
+        decision=value.decision,
+        inherited=value.inherited,
+        settings_source=value.settings_source,
+        resolution_state=value.resolution_state,
+        resolution_error=value.resolution_error,
+        settings=RoomUploadPolicyRequest(**value.settings.__dict__),
+    )
+
+
+@router.get(
+    '/{session_id}/submission-settings',
+    response_model=SessionSubmissionSettingsResponse,
+)
+async def get_session_submission_settings(
+    session_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    manager: SessionSubmissionManager = Depends(get_submission_manager),
+) -> SessionSubmissionSettingsResponse:
+    try:
+        return _submission_settings_response(await manager.get(session_id))
+    except RecordingSessionNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+
+
+@router.put(
+    '/{session_id}/submission-settings',
+    response_model=SessionSubmissionSettingsResponse,
+)
+async def save_session_submission_settings(
+    session_id: int,
+    payload: RoomUploadPolicyRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    manager: SessionSubmissionManager = Depends(get_submission_manager),
+) -> SessionSubmissionSettingsResponse:
+    try:
+        value = await manager.save_override(
+            session_id, payload.to_command(), manager_subject=subject
+        )
+    except RecordingSessionNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    except (
+        InvalidRoomUploadPolicy,
+        InvalidSessionSubmission,
+        SessionSubmissionLocked,
+    ) as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return _submission_settings_response(value)
+
+
+@router.delete(
+    '/{session_id}/submission-settings',
+    response_model=SessionSubmissionSettingsResponse,
+)
+async def clear_session_submission_settings(
+    session_id: int,
+    subject: str = Depends(authenticated_manager_subject),
+    manager: SessionSubmissionManager = Depends(get_submission_manager),
+) -> SessionSubmissionSettingsResponse:
+    try:
+        value = await manager.clear_override(session_id, manager_subject=subject)
+    except RecordingSessionNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    except SessionSubmissionLocked as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return _submission_settings_response(value)
+
+
+@router.patch(
+    '/{session_id}/submission-decision',
+    response_model=SessionSubmissionSettingsResponse,
+)
+async def set_session_submission_decision(
+    session_id: int,
+    payload: SessionSubmissionDecisionRequest,
+    subject: str = Depends(authenticated_manager_subject),
+    manager: SessionSubmissionManager = Depends(get_submission_manager),
+) -> SessionSubmissionSettingsResponse:
+    try:
+        value = await manager.set_decision(
+            session_id, payload.decision, manager_subject=subject
+        )
+    except RecordingSessionNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    except (InvalidSessionSubmission, SessionSubmissionLocked) as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return _submission_settings_response(value)
 
 
 @router.post('/upload-jobs/actions', response_model=UploadJobActionResponse)

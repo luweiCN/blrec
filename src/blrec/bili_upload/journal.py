@@ -87,6 +87,10 @@ class RecordingSession:
     parent_area_name: str = ''
     live_end_time: Optional[int] = None
     upload_intent: str = 'none'
+    upload_decision: str = 'follow_room'
+    submission_inherited: bool = True
+    upload_resolution_state: str = 'pending'
+    upload_resolution_error: Optional[str] = None
     upload_suppressed: bool = False
     deletion_state: str = 'none'
     deletion_error: Optional[str] = None
@@ -1024,6 +1028,8 @@ class RecordingJournalBridge:
             'session.anchor_uid,session.anchor_name,session.area_id,'
             'session.area_name,session.parent_area_id,session.parent_area_name,'
             'session.live_end_time,session.upload_intent,'
+            'session.upload_decision,session.upload_override_json,'
+            'session.upload_resolution_state,session.upload_resolution_error,'
             'session.deletion_state,session.deletion_error,session.source_kind,'
             'clip.id AS highlight_clip_id '
             'FROM recording_sessions session '
@@ -1039,6 +1045,7 @@ class RecordingJournalBridge:
     async def count_sessions(
         self,
         *,
+        scope: str = 'all',
         query: str = '',
         session_state: Optional[str] = None,
         upload_state: Optional[str] = None,
@@ -1046,6 +1053,7 @@ class RecordingJournalBridge:
         started_to: Optional[int] = None,
     ) -> int:
         where_sql, parameters = self._session_filters(
+            scope=scope,
             query=query,
             session_state=session_state,
             upload_state=upload_state,
@@ -1067,6 +1075,7 @@ class RecordingJournalBridge:
         *,
         limit: int = 50,
         offset: int = 0,
+        scope: str = 'all',
         query: str = '',
         session_state: Optional[str] = None,
         upload_state: Optional[str] = None,
@@ -1081,6 +1090,7 @@ class RecordingJournalBridge:
         if sort_order not in ('newest', 'oldest'):
             raise ValueError('sort order must be newest or oldest')
         where_sql, parameters = self._session_filters(
+            scope=scope,
             query=query,
             session_state=session_state,
             upload_state=upload_state,
@@ -1095,6 +1105,8 @@ class RecordingJournalBridge:
             'session.anchor_uid,session.anchor_name,session.area_id,'
             'session.area_name,session.parent_area_id,session.parent_area_name,'
             'session.live_end_time,session.upload_intent,'
+            'session.upload_decision,session.upload_override_json,'
+            'session.upload_resolution_state,session.upload_resolution_error,'
             'session.deletion_state,session.deletion_error,'
             'session.source_kind,clip.id AS highlight_clip_id,'
             'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
@@ -1121,12 +1133,15 @@ class RecordingJournalBridge:
     @staticmethod
     def _session_filters(
         *,
+        scope: str,
         query: str,
         session_state: Optional[str],
         upload_state: Optional[str],
         started_from: Optional[int],
         started_to: Optional[int],
     ) -> Tuple[str, Tuple[object, ...]]:
+        if scope not in ('all', 'recordings', 'uploads'):
+            raise ValueError('invalid recording session scope')
         session_states = frozenset(
             ('open', 'closed', 'cancelled', 'manual_review', 'skipped')
         )
@@ -1162,6 +1177,10 @@ class RecordingJournalBridge:
 
         clauses: List[str] = []
         parameters: List[object] = []
+        if scope == 'recordings':
+            clauses.append("session.source_kind='live'")
+        elif scope == 'uploads':
+            clauses.append('job.id IS NOT NULL')
         normalized_query = query.strip()
         if normalized_query:
             escaped = (
@@ -1629,6 +1648,26 @@ class RecordingJournalBridge:
             ),
             upload_intent=(
                 str(row['upload_intent']) if 'upload_intent' in row.keys() else 'none'
+            ),
+            upload_decision=(
+                str(row['upload_decision'])
+                if 'upload_decision' in row.keys()
+                else 'follow_room'
+            ),
+            submission_inherited=(
+                'upload_override_json' not in row.keys()
+                or row['upload_override_json'] is None
+            ),
+            upload_resolution_state=(
+                str(row['upload_resolution_state'])
+                if 'upload_resolution_state' in row.keys()
+                else 'pending'
+            ),
+            upload_resolution_error=(
+                None
+                if 'upload_resolution_error' not in row.keys()
+                or row['upload_resolution_error'] is None
+                else str(row['upload_resolution_error'])
             ),
             upload_suppressed=(
                 bool(row['upload_suppressed'])

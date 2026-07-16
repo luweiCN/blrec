@@ -37,6 +37,7 @@ from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .recording_content import RecordingContentReader
 from .retention import RetentionManager
 from .review import ReviewWatcher
+from .session_submission import SessionSubmissionManager
 from .signing import WbiSigner, WebSessionBuilder
 from .task_actions import UploadTaskActionManager, UploadTaskActionRejected
 from .upload import UploadCoordinator
@@ -108,6 +109,7 @@ class BiliAccountRuntime:
         self._content_reader: Optional[RecordingContentReader] = None
         self._coordinator: Optional[UploadCoordinator] = None
         self._policy_manager: Optional[RoomUploadPolicyManager] = None
+        self._session_submission_manager: Optional[SessionSubmissionManager] = None
         self._category_catalog: Optional[UploadCategoryCatalog] = None
         self._cover_library: Optional[CoverLibrary] = None
         self._cover_resolver: Optional[CoverResolver] = None
@@ -152,6 +154,10 @@ class BiliAccountRuntime:
     @property
     def policy_manager(self) -> Optional[RoomUploadPolicyManager]:
         return self._policy_manager
+
+    @property
+    def session_submission_manager(self) -> Optional[SessionSubmissionManager]:
+        return self._session_submission_manager
 
     @property
     def category_catalog(self) -> Optional[UploadCategoryCatalog]:
@@ -315,6 +321,9 @@ class BiliAccountRuntime:
             )
             await task_actions.recover_interrupted()
             policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
+            session_submission_manager = SessionSubmissionManager(
+                database, policy_manager=policy_manager, clock=self._clock
+            )
             category_catalog = UploadCategoryCatalog(
                 database, protocol, bundle_loader=load_bundle, clock=self._clock
             )
@@ -397,6 +406,7 @@ class BiliAccountRuntime:
         self._manager = manager
         self._coordinator = coordinator
         self._policy_manager = policy_manager
+        self._session_submission_manager = session_submission_manager
         self._category_catalog = category_catalog
         self._cover_library = cover_library
         self._cover_resolver = cover_resolver
@@ -454,7 +464,8 @@ class BiliAccountRuntime:
     ) -> str:
         database = self._database
         actions = self._task_actions
-        if database is None or actions is None:
+        submissions = self._session_submission_manager
+        if database is None or actions is None or submissions is None:
             raise UploadTaskActionRejected('上传任务管理当前不可用')
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
@@ -507,10 +518,21 @@ class BiliAccountRuntime:
                         return await actions.resume_upload(
                             int(job_id), manager_subject=manager_subject
                         )
-                    return await actions.set_session_upload_intent(
+                    if row['job_id'] is not None:
+                        if action == 'set_skip':
+                            return await actions.skip_upload(
+                                int(row['job_id']), manager_subject=manager_subject
+                            )
+                        return '本场录像已经创建上传任务'
+                    await submissions.set_decision(
                         session_id,
                         'upload' if action == 'set_upload' else 'skip',
                         manager_subject=manager_subject,
+                    )
+                    return (
+                        '本场录像将在录制结束后创建上传任务'
+                        if action == 'set_upload'
+                        else '本场录像已设为不投稿'
                     )
                 finally:
                     await self._start_upload_worker()
@@ -549,6 +571,7 @@ class BiliAccountRuntime:
             await manager.close()
         self._coordinator = None
         self._policy_manager = None
+        self._session_submission_manager = None
         self._category_catalog = None
         self._cover_library = None
         self._cover_resolver = None
@@ -751,6 +774,7 @@ class BiliAccountRuntime:
         await self._stop_upload_worker()
         self._coordinator = None
         self._policy_manager = None
+        self._session_submission_manager = None
         self._category_catalog = None
         self._cover_library = None
         self._cover_resolver = None

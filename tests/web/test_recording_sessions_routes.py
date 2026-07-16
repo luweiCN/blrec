@@ -1,3 +1,4 @@
+from dataclasses import asdict, replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Sequence, Tuple
@@ -14,6 +15,7 @@ from blrec.bili_upload.journal import (
     UploadJobProgress,
     UploadPartProgress,
 )
+from blrec.bili_upload.policies import default_room_upload_policy
 from blrec.bili_upload.recording_content import (
     DanmakuLine,
     DanmakuPage,
@@ -21,6 +23,7 @@ from blrec.bili_upload.recording_content import (
     RecordingContentNotFound,
     RecordingContentUnavailable,
 )
+from blrec.bili_upload.session_submission import SessionSubmissionView
 from blrec.bili_upload.task_actions import UploadTaskActionRejected
 from blrec.flv.common import create_metadata_tag, parse_metadata
 from blrec.flv.io import FlvReader, FlvWriter
@@ -200,6 +203,46 @@ class FakeContentReader:
         )
 
 
+class FakeSubmissionManager:
+    def __init__(self) -> None:
+        self.saved = None
+        self.cleared = None
+        self.decision = None
+        self.view = SessionSubmissionView(
+            session_id=1,
+            room_id=100,
+            decision='follow_room',
+            inherited=True,
+            settings_source='room',
+            settings=replace(
+                default_room_upload_policy(), title_template='{{ title }} 录播'
+            ),
+            resolution_state='pending',
+            resolution_error=None,
+        )
+
+    async def get(self, session_id: int) -> SessionSubmissionView:
+        assert session_id == 1
+        return self.view
+
+    async def save_override(self, session_id, command, *, manager_subject):
+        self.saved = (session_id, command, manager_subject)
+        self.view = replace(
+            self.view, inherited=False, settings_source='session', settings=command
+        )
+        return self.view
+
+    async def clear_override(self, session_id, *, manager_subject):
+        self.cleared = (session_id, manager_subject)
+        self.view = replace(self.view, inherited=True, settings_source='room')
+        return self.view
+
+    async def set_decision(self, session_id, decision, *, manager_subject):
+        self.decision = (session_id, decision, manager_subject)
+        self.view = replace(self.view, decision=decision)
+        return self.view
+
+
 @pytest.fixture(autouse=True)
 def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
@@ -209,6 +252,7 @@ def restore_router_state() -> Iterator[None]:
     old_session_action_runner = getattr(
         recording_sessions, 'session_action_runner', None
     )
+    old_submission_manager = getattr(recording_sessions, 'submission_manager', None)
     old_metadata_provider = getattr(
         recording_sessions, 'active_recording_metadata_provider', None
     )
@@ -221,6 +265,7 @@ def restore_router_state() -> Iterator[None]:
     recording_sessions.danmaku_publisher = old_publisher
     recording_sessions.task_actions = old_task_actions
     recording_sessions.session_action_runner = old_session_action_runner
+    recording_sessions.submission_manager = old_submission_manager
     recording_sessions.active_recording_metadata_provider = old_metadata_provider
     if hasattr(recording_sessions, 'media_snapshot_store'):
         recording_sessions.media_snapshot_store.clear()
@@ -240,6 +285,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     recording_sessions.danmaku_publisher = AsyncMock()
     recording_sessions.task_actions = AsyncMock()
     recording_sessions.session_action_runner = AsyncMock()
+    recording_sessions.submission_manager = FakeSubmissionManager()
     media = tmp_path / 'part.flv'
     media.write_bytes(b'0123456789')
     recording_sessions.content_reader = FakeContentReader(media)
@@ -284,6 +330,10 @@ def test_list_recording_sessions_returns_redacted_part_state(
                 'totalFileSizeBytes': 1_048_576,
                 'recordDurationSeconds': 59,
                 'uploadIntent': 'none',
+                'uploadDecision': 'follow_room',
+                'submissionInherited': True,
+                'uploadResolutionState': 'pending',
+                'uploadResolutionError': None,
                 'uploadSuppressed': False,
                 'deletionState': 'none',
                 'deletionError': None,
@@ -417,6 +467,7 @@ def test_list_recording_sessions_passes_server_side_filters(client: TestClient) 
     fake = recording_sessions.journal
     assert isinstance(fake, FakeJournal)
     expected = {
+        'scope': 'recordings',
         'query': '主播',
         'session_state': 'closed',
         'upload_state': 'approved',
@@ -425,6 +476,57 @@ def test_list_recording_sessions_passes_server_side_filters(client: TestClient) 
     }
     assert fake.count_filters == expected
     assert fake.list_filters == {**expected, 'sort_order': 'oldest'}
+
+
+def test_upload_scope_is_forwarded_to_server_side_query(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions',
+        params={'limit': 20, 'offset': 40, 'scope': 'uploads'},
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 200
+    fake = recording_sessions.journal
+    assert isinstance(fake, FakeJournal)
+    assert fake.count_filters['scope'] == 'uploads'
+    assert fake.list_filters['scope'] == 'uploads'
+
+
+def test_recording_submission_settings_support_override_restore_and_decision(
+    client: TestClient,
+) -> None:
+    headers = {'x-api-key': 'test-api-key'}
+    response = client.get(
+        '/api/v1/recording-sessions/1/submission-settings', headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()['inherited'] is True
+    assert response.json()['settings']['titleTemplate'] == '{{ title }} 录播'
+
+    payload = asdict(default_room_upload_policy())
+    payload['title_template'] = '本场 {{ title }}'
+    response = client.put(
+        '/api/v1/recording-sessions/1/submission-settings',
+        headers=headers,
+        json=payload,
+    )
+    assert response.status_code == 200
+    assert response.json()['inherited'] is False
+    assert response.json()['settings']['titleTemplate'] == '本场 {{ title }}'
+
+    response = client.patch(
+        '/api/v1/recording-sessions/1/submission-decision',
+        headers=headers,
+        json={'decision': 'skip'},
+    )
+    assert response.status_code == 200
+    assert response.json()['decision'] == 'skip'
+
+    response = client.delete(
+        '/api/v1/recording-sessions/1/submission-settings', headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()['inherited'] is True
 
 
 def test_approved_archive_with_disabled_danmaku_exposes_manual_backfill(
