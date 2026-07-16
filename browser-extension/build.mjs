@@ -44,6 +44,11 @@ await writeFile(
   `${JSON.stringify(manifest, null, 2)}\n`,
   'utf8'
 );
+await mkdir(resolve(output, 'icons'), { recursive: true });
+await cp(
+  resolve(root, '../webapp/src/assets/icons/icon-128x128.png'),
+  resolve(output, 'icons', 'icon-128.png')
+);
 for (const name of ['options.html', 'options.css', 'content.css']) {
   await cp(resolve(source, name), resolve(output, name));
 }

@@ -34,6 +34,33 @@ describe('extension settings', () => {
     );
   });
 
+  it('requires HTTPS outside localhost and private networks', () => {
+    expect(normalizeBackendUrl('http://localhost:2233')).toBe(
+      'http://localhost:2233'
+    );
+    expect(normalizeBackendUrl('http://10.0.0.8:2233')).toBe(
+      'http://10.0.0.8:2233'
+    );
+    expect(normalizeBackendUrl('http://172.20.0.8:2233')).toBe(
+      'http://172.20.0.8:2233'
+    );
+    expect(normalizeBackendUrl('http://192.168.50.24:2233')).toBe(
+      'http://192.168.50.24:2233'
+    );
+    expect(normalizeBackendUrl('http://[fd00::1]:2233')).toBe(
+      'http://[fd00::1]:2233'
+    );
+    expect(() => normalizeBackendUrl('http://blrec.example.com')).toThrow(
+      '公网地址必须使用 HTTPS'
+    );
+    expect(() => normalizeBackendUrl('http://fcloud.example.com')).toThrow(
+      '公网地址必须使用 HTTPS'
+    );
+    expect(() =>
+      normalizeBackendUrl('http://[2001:4860:4860::8888]:2233')
+    ).toThrow('公网地址必须使用 HTTPS');
+  });
+
   it('trims the username without changing its case', () => {
     expect(normalizeUsername('  LuWei  ')).toBe('LuWei');
     expect(() => normalizeUsername('   ')).toThrow('管理员用户名不能为空');

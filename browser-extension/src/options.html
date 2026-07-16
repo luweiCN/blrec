@@ -10,6 +10,26 @@
   <body>
     <main>
       <h1>连接 BLREC</h1>
+      <section class="privacy-notice" aria-labelledby="privacy-heading">
+        <h2 id="privacy-heading">连接前请确认</h2>
+        <p>
+          插件会在打开 B 站直播页面时读取房间号，并向你的 BLREC
+          查询该房间是否正在录制。
+        </p>
+        <p>
+          点击收录或添加高光时，插件还会读取直播标题和播放器时间；这些数据只发送到你填写的 BLREC 服务器，
+          不会发送给项目维护者或第三方，也不会读取 B 站 Cookie。
+        </p>
+        <p>
+          点击“连接”表示同意上述用途。详情见
+          <a
+            href="https://github.com/luweiCN/blrec/blob/master/docs/privacy/browser-extension.md"
+            target="_blank"
+            rel="noreferrer"
+            >浏览器插件隐私说明</a
+          >。
+        </p>
+      </section>
       <form id="connection-form">
         <label for="backend-url">BLREC 地址</label>
         <input

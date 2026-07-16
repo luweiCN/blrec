@@ -24,6 +24,28 @@ h1 {
   font-size: 24px;
 }
 
+.privacy-notice {
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  border: 1px solid #bae0ff;
+  border-radius: 8px;
+  background: #e6f4ff;
+  line-height: 1.6;
+}
+
+.privacy-notice h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.privacy-notice p {
+  margin: 6px 0;
+}
+
+.privacy-notice a {
+  color: #0958d9;
+}
+
 form {
   display: grid;
   gap: 10px;

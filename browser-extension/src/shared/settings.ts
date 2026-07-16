@@ -28,10 +28,44 @@ export function normalizeBackendUrl(value: string): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error('仅支持 HTTP 或 HTTPS');
   }
+  if (url.protocol === 'http:' && !isLocalHostname(url.hostname)) {
+    throw new Error('公网地址必须使用 HTTPS');
+  }
   if (url.username || url.password || url.search || url.hash) {
     throw new Error('BLREC 地址不能包含账号、查询参数或锚点');
   }
   return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+}
+
+function isLocalHostname(hostname: string): boolean {
+  const value = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    value === 'localhost' ||
+    value.endsWith('.localhost') ||
+    value.endsWith('.local') ||
+    (!value.includes('.') && !value.includes(':'))
+  ) {
+    return true;
+  }
+  if (value.includes(':')) {
+    return (
+      value === '::1' ||
+      value.startsWith('fc') ||
+      value.startsWith('fd') ||
+      value.startsWith('fe80:')
+    );
+  }
+  const octets = value.split('.').map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet))) {
+    return false;
+  }
+  return (
+    octets[0] === 10 ||
+    octets[0] === 127 ||
+    (octets[0] === 169 && octets[1] === 254) ||
+    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 168)
+  );
 }
 
 export function normalizeUsername(value: string): string {

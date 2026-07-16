@@ -1,10 +1,13 @@
 {
   "manifest_version": 3,
   "name": "BLREC 高光助手",
+  "description": "在 B 站直播页面收录房间、标记高光，并连接自建 BLREC 完成剪辑投稿。",
   "version": "0.1.0",
-  "permissions": ["storage", "activeTab", "scripting"],
+  "homepage_url": "https://github.com/luweiCN/blrec",
+  "permissions": ["storage"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "host_permissions": ["https://live.bilibili.com/*"],
+  "icons": { "128": "icons/icon-128.png" },
   "background": { "service_worker": "background.js", "type": "module" },
   "options_page": "options.html",
   "content_scripts": [
