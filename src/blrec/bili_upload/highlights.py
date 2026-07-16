@@ -235,6 +235,22 @@ class HighlightService:
             result='deleted',
         )
 
+    async def inspect_clip(
+        self,
+        *,
+        session_id: int,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        active_durations_ms: Mapping[int, int],
+    ) -> ClipInspection:
+        _timeline, _sources, inspection = await self._prepare_clip(
+            session_id=session_id,
+            requested_start_ms=requested_start_ms,
+            requested_end_ms=requested_end_ms,
+            active_durations_ms=active_durations_ms,
+        )
+        return inspection
+
     async def create_clip(
         self,
         *,
@@ -251,36 +267,11 @@ class HighlightService:
             raise ValueError('highlight clip name must contain 1 to 200 characters')
         if self._recording_root is None or self._clipper is None:
             raise RuntimeError('highlight clipping is not configured')
-        if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
-            raise HighlightRangeUnavailable('高光剪辑时间范围无效')
-
-        timeline = await self.timeline(session_id, active_durations_ms)
-        if not timeline.parts:
-            raise HighlightRangeUnavailable('本场没有可用的本地录像')
-        if requested_end_ms > timeline.stable_end_ms:
-            raise HighlightRangeUnavailable('所选范围进入录制中的最后 10 秒')
-        source_ranges = self._resolve_clip_sources(
-            timeline.parts, requested_start_ms, requested_end_ms
-        )
-        clip_sources = tuple(
-            ClipSource(
-                part_id=part.part_id,
-                path=part.path,
-                requested_start_ms=local_start_ms,
-                requested_end_ms=local_end_ms,
-            )
-            for part, local_start_ms, local_end_ms in source_ranges
-        )
-        loop = asyncio.get_running_loop()
-        inspection = await loop.run_in_executor(
-            None,
-            partial(
-                self._clipper.inspect,
-                clip_sources,
-                requested_start_ms=requested_start_ms,
-                requested_end_ms=requested_end_ms,
-                stable_end_ms=timeline.stable_end_ms,
-            ),
+        _timeline, source_ranges, inspection = await self._prepare_clip(
+            session_id=session_id,
+            requested_start_ms=requested_start_ms,
+            requested_end_ms=requested_end_ms,
+            active_durations_ms=active_durations_ms,
         )
         if inspection.confirmation_required and not confirm_keyframe:
             raise HighlightConfirmationRequired(inspection)
@@ -409,6 +400,50 @@ class HighlightService:
             result='queued',
         )
         return clip
+
+    async def _prepare_clip(
+        self,
+        *,
+        session_id: int,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        active_durations_ms: Mapping[int, int],
+    ) -> Tuple[
+        HighlightTimeline, Tuple[Tuple[TimelinePart, int, int], ...], ClipInspection
+    ]:
+        clipper = self._clipper
+        if clipper is None:
+            raise RuntimeError('highlight clipping is not configured')
+        if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
+            raise HighlightRangeUnavailable('高光剪辑时间范围无效')
+        timeline = await self.timeline(session_id, active_durations_ms)
+        if not timeline.parts:
+            raise HighlightRangeUnavailable('本场没有可用的本地录像')
+        if requested_end_ms > timeline.stable_end_ms:
+            raise HighlightRangeUnavailable('所选范围进入录制中的最后 10 秒')
+        source_ranges = self._resolve_clip_sources(
+            timeline.parts, requested_start_ms, requested_end_ms
+        )
+        clip_sources = tuple(
+            ClipSource(
+                part_id=part.part_id,
+                path=part.path,
+                requested_start_ms=local_start_ms,
+                requested_end_ms=local_end_ms,
+            )
+            for part, local_start_ms, local_end_ms in source_ranges
+        )
+        inspection = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(
+                clipper.inspect,
+                clip_sources,
+                requested_start_ms=requested_start_ms,
+                requested_end_ms=requested_end_ms,
+                stable_end_ms=timeline.stable_end_ms,
+            ),
+        )
+        return timeline, source_ranges, inspection
 
     async def get_clip(self, clip_id: int) -> HighlightClip:
         row = await self._database.fetchone(

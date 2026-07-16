@@ -90,6 +90,37 @@ async def test_sampler_publishes_only_changed_snapshots() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sampler_reuses_same_channel_for_highlight_progress() -> None:
+    async def uploads() -> list:
+        return []
+
+    async def highlights() -> list:
+        return [{'id': 3, 'state': 'processing'}]
+
+    broker = RealtimeBroker()
+    subscription = broker.subscribe()
+    sampler = RealtimeSampler(
+        broker,
+        task_provider=lambda: [],
+        network_provider=lambda: {},
+        upload_provider=uploads,
+        highlight_provider=highlights,
+    )
+
+    await sampler.sample_once()
+    events = [await subscription.get() for _ in range(4)]
+    broker.unsubscribe(subscription)
+
+    assert [event.type for event in events] == [
+        'tasks',
+        'network',
+        'upload_progress',
+        'highlight_progress',
+    ]
+    assert events[-1].data == {'clips': [{'id': 3, 'state': 'processing'}]}
+
+
+@pytest.mark.asyncio
 async def test_broker_unsubscribe_releases_subscriber() -> None:
     broker = RealtimeBroker()
     subscription = broker.subscribe()

@@ -11,7 +11,12 @@ from pkg_resources import resource_filename
 from pydantic import ValidationError
 from starlette.responses import Response
 
-from blrec.bili_upload.recording_content import MediaResource
+from blrec.bili_upload.recording_content import (
+    FlvMediaSnapshot,
+    MediaResource,
+    RecordingContentNotFound,
+    RecordingContentUnavailable,
+)
 from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.exception import ExistsError, ForbiddenError, NotFoundError
 from blrec.networking.manager import NetworkRouteManager
@@ -38,6 +43,7 @@ from .routers import (
     auth,
     bili_accounts,
     bili_collections,
+    highlights,
     live_status,
     network,
     realtime,
@@ -150,11 +156,19 @@ async def _realtime_upload_snapshot() -> List[Dict[str, object]]:
     return await journal.realtime_upload_progress()
 
 
+async def _realtime_highlight_snapshot() -> List[Mapping[str, object]]:
+    highlight_worker = _bili_account_runtime.highlight_worker
+    if highlight_worker is None:
+        return []
+    return list(await highlight_worker.progress())
+
+
 _realtime_sampler = RealtimeSampler(
     realtime.broker,
     task_provider=_realtime_task_snapshot,
     network_provider=network.snapshot,
     upload_provider=_realtime_upload_snapshot,
+    highlight_provider=_realtime_highlight_snapshot,
 )
 
 
@@ -176,6 +190,38 @@ def _active_recording_metadata(resource: MediaResource) -> Optional[Mapping[str,
     return attr.asdict(metadata)
 
 
+async def _active_highlight_durations(session_id: int) -> Mapping[int, int]:
+    journal = _bili_account_runtime.journal
+    reader = _bili_account_runtime.content_reader
+    if not _application_started or journal is None or reader is None:
+        return {}
+    durations: Dict[int, int] = {}
+    for part in await journal.parts_for_session(session_id):
+        try:
+            resource = await reader.media(part.id)
+        except (RecordingContentNotFound, RecordingContentUnavailable):
+            continue
+        if (
+            not resource.recording
+            or resource.path is None
+            or resource.size is None
+            or resource.content_type != 'video/x-flv'
+        ):
+            continue
+        snapshot = FlvMediaSnapshot.frozen(resource.path, resource.size)
+        metadata = _active_recording_metadata(resource)
+        if metadata is not None:
+            try:
+                snapshot = FlvMediaSnapshot.create(
+                    resource.path, resource.size, metadata
+                )
+            except (OSError, EOFError, ValueError, AssertionError, RuntimeError):
+                pass
+        if snapshot.duration_ms is not None:
+            durations[part.id] = snapshot.duration_ms
+    return durations
+
+
 bili_accounts.manager = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_sessions.journal = None
@@ -194,6 +240,11 @@ upload_covers.library = None
 upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
 bili_collections.manager = None
 bili_collections.unavailable_reason = _bili_account_runtime.unavailable_reason
+highlights.service = None
+highlights.worker = None
+highlights.upload_task_creator = None
+highlights.active_durations_provider = _active_highlight_durations
+highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
 network.manager = _network_route_manager
 
 _dependencies = [Depends(security.authenticate)]
@@ -292,6 +343,12 @@ async def on_startup() -> None:
         upload_covers.unavailable_reason = _bili_account_runtime.unavailable_reason
         bili_collections.manager = _bili_account_runtime.collection_manager
         bili_collections.unavailable_reason = _bili_account_runtime.unavailable_reason
+        highlights.service = _bili_account_runtime.highlight_service
+        highlights.worker = _bili_account_runtime.highlight_worker
+        highlights.upload_task_creator = (
+            _bili_account_runtime.create_highlight_upload_task
+        )
+        highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
         await app.launch()
         application_launched = True
         _application_started = True
@@ -311,6 +368,9 @@ async def on_startup() -> None:
         room_upload_policies.category_catalog = None
         upload_covers.library = None
         bili_collections.manager = None
+        highlights.service = None
+        highlights.worker = None
+        highlights.upload_task_creator = None
         try:
             if application_launched:
                 await app.exit()
@@ -335,6 +395,9 @@ async def on_shuntdown() -> None:
     room_upload_policies.category_catalog = None
     upload_covers.library = None
     bili_collections.manager = None
+    highlights.service = None
+    highlights.worker = None
+    highlights.upload_task_creator = None
     try:
         await app.exit()
     finally:
@@ -370,6 +433,7 @@ api.include_router(recording_retention.router, prefix='/api/v1')
 api.include_router(room_upload_policies.router, prefix='/api/v1')
 api.include_router(upload_covers.router, prefix='/api/v1')
 api.include_router(bili_collections.router, prefix='/api/v1')
+api.include_router(highlights.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

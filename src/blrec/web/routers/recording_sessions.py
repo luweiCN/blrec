@@ -305,6 +305,8 @@ class RecordingSessionResponse(ApiModel):
     upload_suppressed: bool
     deletion_state: str
     deletion_error: Optional[str]
+    source_kind: str
+    highlight_clip_id: Optional[int]
     display_state: str
     available_actions: List[str]
     upload_job: Optional[UploadJobProgressResponse]
@@ -687,6 +689,8 @@ def _session_response(
         upload_suppressed=session.upload_suppressed,
         deletion_state=session.deletion_state,
         deletion_error=session.deletion_error,
+        source_kind=session.source_kind,
+        highlight_clip_id=session.highlight_clip_id,
         display_state=display_state,
         available_actions=available_actions,
         upload_job=(None if upload_job is None else _upload_job_response(upload_job)),
