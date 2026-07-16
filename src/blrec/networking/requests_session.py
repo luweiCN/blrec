@@ -15,6 +15,30 @@ from .resolver import SyncSourceBoundResolver
 Resolver = Callable[[str], Sequence[str]]
 
 
+class _MeteredRaw:
+    def __init__(self, raw: Any, callback: Callable[[int], None]) -> None:
+        self._raw = raw
+        self._callback = callback
+
+    def read(self, *args: Any, **kwargs: Any) -> bytes:
+        data = self._raw.read(*args, **kwargs)
+        self._callback(len(data))
+        return data
+
+    def readinto(self, value: Any) -> int:
+        count = self._raw.readinto(value)
+        self._callback(max(0, count))
+        return count
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        for data in self._raw.stream(*args, **kwargs):
+            self._callback(len(data))
+            yield data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
 class _ResolvedConnectionMixin:
     _default_resolver: Optional[Resolver] = None
 
@@ -128,6 +152,12 @@ class RoutedRequestsSession(requests.Session):
             self._manager.report_failure('recording', selection.interface_name)
             raise
         self._manager.report_success('recording', selection.interface_name)
+        response.raw = _MeteredRaw(
+            response.raw,
+            lambda count: self._manager.traffic_meter.record(
+                selection.interface_name, 'recording', 'down', count
+            ),
+        )
         return response
 
     def close(self) -> None:

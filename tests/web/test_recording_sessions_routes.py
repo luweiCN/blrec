@@ -319,6 +319,12 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'canPause': False,
                     'canResume': False,
                     'canEdit': False,
+                    'confirmedBytes': 0,
+                    'totalBytes': 0,
+                    'percent': 0.0,
+                    'bytesPerSecond': None,
+                    'etaSeconds': None,
+                    'currentPartIndex': None,
                     'unknownDanmakuItems': [
                         {
                             'id': 11,
@@ -341,6 +347,8 @@ def test_list_recording_sessions_returns_redacted_part_state(
                             'transcodeFailDesc': None,
                             'repairStage': 'none',
                             'repairDiagnostic': None,
+                            'confirmedBytes': 0,
+                            'totalBytes': 0,
                         }
                     ],
                 },

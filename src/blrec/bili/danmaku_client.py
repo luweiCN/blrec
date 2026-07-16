@@ -207,6 +207,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         self._logger.debug('Sending user authentication...')
         try:
             await self._ws.send_bytes(data)
+            self._record_traffic('up', len(data))
         except Exception as exc:
             self._logger.debug(f'Failed to sent user authentication: {repr(exc)}')
             raise
@@ -219,6 +220,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
             msg = await self._ws.receive(timeout=5)
             if msg.type != aiohttp.WSMsgType.BINARY:
                 raise aiohttp.ClientError(msg)
+            self._record_traffic('down', len(msg.data))
         except Exception as exc:
             self._logger.debug(
                 f'Failed to receive user authentication reply: {repr(exc)}'
@@ -290,6 +292,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
         while True:
             try:
                 await self._ws.send_bytes(data)
+                self._record_traffic('up', len(data))
             except Exception as exc:
                 self._logger.warning(f'Failed to send heartbeat: {repr(exc)}')
                 await self._emit('error_occurred', exc)
@@ -330,6 +333,7 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
                 await self._handle_receive_error(e)
             else:
                 if wsmsg.type == aiohttp.WSMsgType.BINARY:
+                    self._record_traffic('down', len(wsmsg.data))
                     if result := await self._handle_data(wsmsg.data):
                         return result
                 elif wsmsg.type == aiohttp.WSMsgType.ERROR:
@@ -340,6 +344,11 @@ class DanmakuClient(EventEmitter[DanmakuListener], AsyncStoppableMixin):
                     await self._handle_receive_error(exc)
                 else:
                     await self._handle_receive_error(ValueError(wsmsg))
+
+    def _record_traffic(self, direction: str, byte_count: int) -> None:
+        record = getattr(getattr(self, 'session', None), 'record_traffic', None)
+        if callable(record):
+            record(direction, byte_count)
 
     async def _handle_data(self, data: bytes) -> Optional[List[Dict[str, Any]]]:
         loop = asyncio.get_running_loop()

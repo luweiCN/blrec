@@ -595,7 +595,8 @@ async def test_session_snapshot_and_part_metrics_are_persisted(
 
 @pytest.mark.asyncio
 async def test_upload_progress_is_joined_to_its_recording_session(database) -> None:
-    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    now = [1_000.0]
+    journal = RecordingJournalBridge(database, clock=lambda: now[0])
     run_id = await journal.recording_started(100, live_start_time=900)
     await journal.video_created(run_id, '/rec/p1.flv', record_start_time=901)
     session = await journal.session_for_run(run_id)
@@ -621,6 +622,11 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
         'upload_state,danmaku_import_state,remote_filename,cid) '
         "VALUES(10,9,1,'/rec/p1.flv','/rec/p1.mp4','/rec/p1.xml','ready',"
         "'confirmed','pending','remote-p1',NULL)"
+    )
+    await database.execute(
+        'INSERT INTO upload_chunks('
+        'part_id,chunk_no,offset,size,state,attempt) VALUES'
+        "(10,0,0,4,'confirmed',1),(10,1,4,4,'prepared',0)"
     )
     for index, state in enumerate(
         ('confirmed', 'prepared', 'in_flight', 'unknown_outcome', 'failed_permanent')
@@ -657,6 +663,14 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert (job.parts[0].part_index, job.parts[0].upload_state) == (1, 'confirmed')
     assert job.parts[0].remote_filename == 'remote-p1'
     assert job.parts[0].cid is None
+    assert job.parts[0].confirmed_bytes == 4
+    assert job.parts[0].total_bytes == 8
+    assert job.confirmed_bytes == 4
+    assert job.total_bytes == 8
+    assert job.percent == 50.0
+    assert job.current_part_index == 1
+    assert job.bytes_per_second is None
+    assert job.eta_seconds is None
     assert job.can_repair is False
     assert (
         job.danmaku_total,
@@ -668,6 +682,16 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert len(job.unknown_danmaku_items) == 1
     assert job.unknown_danmaku_items[0].content == '弹幕 3'
     assert job.unknown_danmaku_items[0].part_index == 1
+
+    now[0] = 1_002.0
+    await database.execute(
+        "UPDATE upload_chunks SET state='confirmed' " 'WHERE part_id=10 AND chunk_no=1'
+    )
+    progressed = (await journal.upload_jobs_for_sessions((session.id,)))[session.id]
+    assert progressed.confirmed_bytes == 8
+    assert progressed.percent == 100.0
+    assert progressed.bytes_per_second == 2.0
+    assert progressed.eta_seconds == 0
 
     await database.execute(
         "UPDATE upload_parts SET transcode_state='failed' WHERE id=10"

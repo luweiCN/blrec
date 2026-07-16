@@ -60,6 +60,19 @@ class RoutedAiohttpSession:
             self._purpose, self._anonymous, self._affinity_key
         ).ws_connect(*args, **kwargs)
 
+    def record_traffic(self, direction: str, byte_count: int) -> None:
+        selection = self._pool.selection(
+            self._purpose, self._anonymous, self._affinity_key
+        )
+        if direction == 'up':
+            self._pool.manager.traffic_meter.record(
+                selection.interface_name, self._purpose, 'up', byte_count
+            )
+        elif direction == 'down':
+            self._pool.manager.traffic_meter.record(
+                selection.interface_name, self._purpose, 'down', byte_count
+            )
+
     async def close(self) -> None:
         # The application owns the shared pool.
         return None
@@ -75,6 +88,10 @@ class AiohttpSessionPool:
             Tuple[NetworkPurpose, bool, Optional[str]], RoutedAiohttpSession
         ] = {}
         self.closed = False
+
+    @property
+    def manager(self) -> NetworkRouteManager:
+        return self._manager
 
     def client(
         self,
@@ -100,15 +117,23 @@ class AiohttpSessionPool:
     ) -> aiohttp.ClientSession:
         if self.closed:
             raise RuntimeError('network session pool is closed')
-        selection = self._manager.select(
-            purpose, anonymous=anonymous, affinity_key=affinity_key
-        )
+        selection = self.selection(purpose, anonymous, affinity_key)
         key = (purpose, selection.source_address, anonymous)
         session = self._sessions.get(key)
         if session is None or session.closed:
             session = self._create_session(purpose, selection, anonymous)
             self._sessions[key] = session
         return session
+
+    def selection(
+        self,
+        purpose: NetworkPurpose,
+        anonymous: bool = False,
+        affinity_key: Optional[str] = None,
+    ) -> RouteSelection:
+        return self._manager.select(
+            purpose, anonymous=anonymous, affinity_key=affinity_key
+        )
 
     def _create_session(
         self, purpose: NetworkPurpose, selection: RouteSelection, anonymous: bool
@@ -135,6 +160,25 @@ class AiohttpSessionPool:
         request_end_signal.append(request_end)
         request_exception_signal: Any = trace_config.on_request_exception
         request_exception_signal.append(request_exception)
+
+        async def request_chunk_sent(
+            _session: aiohttp.ClientSession, _context: Any, params: Any
+        ) -> None:
+            self._manager.traffic_meter.record(
+                selection.interface_name, purpose, 'up', len(params.chunk)
+            )
+
+        async def response_chunk_received(
+            _session: aiohttp.ClientSession, _context: Any, params: Any
+        ) -> None:
+            self._manager.traffic_meter.record(
+                selection.interface_name, purpose, 'down', len(params.chunk)
+            )
+
+        request_chunk_signal: Any = trace_config.on_request_chunk_sent
+        request_chunk_signal.append(request_chunk_sent)
+        response_chunk_signal: Any = trace_config.on_response_chunk_received
+        response_chunk_signal.append(response_chunk_received)
         connector = aiohttp.TCPConnector(
             family=socket.AF_INET,
             limit=200,

@@ -103,6 +103,8 @@ class UploadPartProgressResponse(ApiModel):
     transcode_fail_desc: Optional[str]
     repair_stage: str
     repair_diagnostic: Optional[str]
+    confirmed_bytes: int
+    total_bytes: int
 
 
 class DanmakuItemProgressResponse(ApiModel):
@@ -151,6 +153,12 @@ class UploadJobProgressResponse(ApiModel):
     can_pause: bool
     can_resume: bool
     can_edit: bool
+    confirmed_bytes: int
+    total_bytes: int
+    percent: float
+    bytes_per_second: Optional[float]
+    eta_seconds: Optional[int]
+    current_part_index: Optional[int]
     unknown_danmaku_items: List[DanmakuItemProgressResponse]
     parts: List[UploadPartProgressResponse]
 
@@ -575,6 +583,8 @@ def _upload_part_response(part: UploadPartProgress) -> UploadPartProgressRespons
         transcode_fail_desc=part.transcode_fail_desc,
         repair_stage=part.repair_stage,
         repair_diagnostic=part.repair_diagnostic,
+        confirmed_bytes=part.confirmed_bytes,
+        total_bytes=part.total_bytes,
     )
 
 
@@ -627,6 +637,12 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         can_pause=job.can_pause,
         can_resume=job.can_resume,
         can_edit=job.can_edit,
+        confirmed_bytes=job.confirmed_bytes,
+        total_bytes=job.total_bytes,
+        percent=job.percent,
+        bytes_per_second=job.bytes_per_second,
+        eta_seconds=job.eta_seconds,
+        current_part_index=job.current_part_index,
         unknown_danmaku_items=[
             _danmaku_item_response(item) for item in job.unknown_danmaku_items
         ],

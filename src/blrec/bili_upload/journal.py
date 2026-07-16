@@ -121,6 +121,8 @@ class UploadPartProgress:
     transcode_fail_desc: Optional[str] = None
     repair_stage: str = 'none'
     repair_diagnostic: Optional[str] = None
+    confirmed_bytes: int = 0
+    total_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,12 @@ class UploadJobProgress:
     can_pause: bool = False
     can_resume: bool = False
     can_edit: bool = False
+    confirmed_bytes: int = 0
+    total_bytes: int = 0
+    percent: float = 0.0
+    bytes_per_second: Optional[float] = None
+    eta_seconds: Optional[int] = None
+    current_part_index: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +210,7 @@ class RecordingJournalBridge:
         self._uuid_factory = uuid_factory
         self._artifact_probe = artifact_probe
         self._degraded_reason: Optional[str] = None
+        self._upload_speed_samples: Dict[int, Tuple[float, int]] = {}
 
     @property
     def degraded_reason(self) -> Optional[str]:
@@ -1138,11 +1147,18 @@ class RecordingJournalBridge:
         job_ids = tuple(int(row['id']) for row in jobs)
         job_placeholders = ','.join('?' for _ in job_ids)
         part_rows = await self._database.fetchall(
-            'SELECT id,job_id,part_index,upload_state,danmaku_import_state,'
-            'remote_filename,cid,transcode_state,transcode_fail_code,'
-            'transcode_fail_desc,repair_stage,repair_diagnostic '
-            'FROM upload_parts WHERE job_id IN ({}) '
-            'ORDER BY job_id,part_index'.format(job_placeholders),
+            'SELECT part.id,part.job_id,part.part_index,part.upload_state,'
+            'part.danmaku_import_state,part.remote_filename,part.cid,'
+            'part.transcode_state,part.transcode_fail_code,'
+            'part.transcode_fail_desc,part.repair_stage,part.repair_diagnostic,'
+            'COALESCE(SUM(CASE WHEN chunk.state=\'confirmed\' '
+            'THEN chunk.size ELSE 0 END),0) AS confirmed_bytes,'
+            'COALESCE(SUM(chunk.size),0) AS total_bytes '
+            'FROM upload_parts part LEFT JOIN upload_chunks chunk '
+            'ON chunk.part_id=part.id WHERE part.job_id IN ({}) '
+            'GROUP BY part.id ORDER BY part.job_id,part.part_index'.format(
+                job_placeholders
+            ),
             job_ids,
         )
         danmaku_rows = await self._database.fetchall(
@@ -1227,14 +1243,46 @@ class RecordingJournalBridge:
                         if row['repair_diagnostic'] is None
                         else str(row['repair_diagnostic'])
                     ),
+                    confirmed_bytes=int(row['confirmed_bytes']),
+                    total_bytes=int(row['total_bytes']),
                 )
             )
         result = {}
+        sampled_at = self._clock()
         for row in jobs:
             job_id = int(row['id'])
             session_id = int(row['session_id'])
             danmaku = danmaku_by_job.get(job_id, (0, 0, 0, 0, 0))
             parts = tuple(parts_by_job.get(job_id, ()))
+            confirmed_bytes = sum(part.confirmed_bytes for part in parts)
+            total_bytes = sum(part.total_bytes for part in parts)
+            percent = (
+                0.0
+                if total_bytes <= 0
+                else round(min(100.0, confirmed_bytes * 100.0 / total_bytes), 2)
+            )
+            bytes_per_second: Optional[float] = None
+            previous_sample = self._upload_speed_samples.get(job_id)
+            if previous_sample is not None:
+                elapsed = sampled_at - previous_sample[0]
+                byte_delta = confirmed_bytes - previous_sample[1]
+                if elapsed > 0 and byte_delta > 0:
+                    bytes_per_second = byte_delta / elapsed
+            self._upload_speed_samples[job_id] = (sampled_at, confirmed_bytes)
+            eta_seconds: Optional[int] = None
+            if bytes_per_second is not None and bytes_per_second > 0:
+                remaining = max(0, total_bytes - confirmed_bytes)
+                eta_seconds = int((remaining / bytes_per_second) + 0.999)
+            current_part = next(
+                (
+                    part.part_index
+                    for part in parts
+                    if part.total_bytes <= 0
+                    or part.confirmed_bytes < part.total_bytes
+                    or part.upload_state != 'confirmed'
+                ),
+                None if not parts else parts[-1].part_index,
+            )
             result[session_id] = UploadJobProgress(
                 id=job_id,
                 session_id=session_id,
@@ -1302,6 +1350,12 @@ class RecordingJournalBridge:
                 can_pause=self._can_pause_upload_job(row),
                 can_resume=self._can_resume_upload_job(row),
                 can_edit=self._can_edit_upload_job(row, parts),
+                confirmed_bytes=confirmed_bytes,
+                total_bytes=total_bytes,
+                percent=percent,
+                bytes_per_second=bytes_per_second,
+                eta_seconds=eta_seconds,
+                current_part_index=current_part,
             )
         return result
 

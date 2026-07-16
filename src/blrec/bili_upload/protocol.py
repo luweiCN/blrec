@@ -134,12 +134,28 @@ class AiohttpProtocolTransport:
         if request.form:
             kwargs['data'] = list(request.form)
         elif request.body is not None:
-            kwargs['data'] = request.body
+            if self._route_manager is not None and selection is not None:
+                if purpose == 'upload':
+                    kwargs['headers']['Content-Length'] = str(len(request.body))
+                    kwargs['data'] = self._route_manager.upload_limiter.stream(
+                        selection.interface_name, request.body
+                    )
+                else:
+                    self._route_manager.traffic_meter.record(
+                        selection.interface_name, purpose, 'up', len(request.body)
+                    )
+                    kwargs['data'] = request.body
+            else:
+                kwargs['data'] = request.body
         try:
             async with session.request(
                 request.method, request.url, **kwargs
             ) as response:
                 body = await response.read()
+                if self._route_manager is not None and selection is not None:
+                    self._route_manager.traffic_meter.record(
+                        selection.interface_name, purpose, 'down', len(body)
+                    )
                 return ProtocolResponse(
                     status=response.status, headers=dict(response.headers), body=body
                 )

@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from blrec.bili_upload.protocol import AiohttpProtocolTransport
+from blrec.bili_upload.protocol import AiohttpProtocolTransport, ProtocolRequest
 from blrec.networking.aiohttp_session import AiohttpSessionPool
 from blrec.networking.manager import NetworkInterface, NetworkRouteManager
 from blrec.networking.requests_session import (
@@ -186,6 +186,64 @@ def test_non_upload_protocol_operations_use_bili_api_route() -> None:
     assert AiohttpProtocolTransport.purpose_for_operation('submit_archive') == (
         'bili_api'
     )
+
+
+@pytest.mark.asyncio
+async def test_upload_transport_streams_limited_body_with_content_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: Dict[str, Any] = {}
+
+    class FakeResponse:
+        status = 200
+        headers: Dict[str, str] = {}
+
+        async def read(self) -> bytes:
+            return b'{}'
+
+    class RequestContext:
+        async def __aenter__(self) -> FakeResponse:
+            captured['chunks'] = [chunk async for chunk in captured['kwargs']['data']]
+            return FakeResponse()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeSession:
+        def request(self, method: str, url: str, **kwargs: Any) -> RequestContext:
+            captured['method'] = method
+            captured['url'] = url
+            captured['kwargs'] = kwargs
+            return RequestContext()
+
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(upload={'interface': 'lan1'}),
+        interface_provider=_interfaces,
+    )
+    transport = AiohttpProtocolTransport(route_manager=manager)
+
+    async def get_session(*args: object) -> FakeSession:
+        return FakeSession()
+
+    monkeypatch.setattr(transport, '_get_session', get_session)
+    body = b'x' * (130 * 1024)
+
+    await transport.send(
+        ProtocolRequest(
+            operation='upload_chunk',
+            method='PUT',
+            url='https://upload.example/part',
+            headers={},
+            body=body,
+        )
+    )
+
+    assert captured['kwargs']['headers']['Content-Length'] == str(len(body))
+    assert b''.join(captured['chunks']) == body
+    assert max(map(len, captured['chunks'])) <= 64 * 1024
+    traffic = manager.traffic_meter.snapshot()[0]
+    assert traffic.interface_name == 'lan1'
+    assert traffic.upload_total == len(body)
 
 
 @pytest.mark.asyncio

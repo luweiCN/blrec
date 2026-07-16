@@ -20,7 +20,9 @@ from typing import (
 import aiohttp
 
 from .platform import NetworkInterface, discover_interfaces
+from .rate_limit import SharedUploadLimiter
 from .resolver import SourceBoundResolver
+from .traffic import TrafficMeter
 
 if TYPE_CHECKING:
     from blrec.setting.models import NetworkRouteSettings, NetworkSettings
@@ -94,6 +96,10 @@ class NetworkRouteManager:
         self._round_robin_cursors: Dict[NetworkPurpose, int] = {}
         self._affinities: Dict[Tuple[NetworkPurpose, str], str] = {}
         self._lock = RLock()
+        self._traffic_meter = TrafficMeter(clock=clock)
+        self._upload_limiter = SharedUploadLimiter(
+            self._upload_limit, meter=self._traffic_meter, clock=clock
+        )
 
     def interfaces(self) -> Dict[str, NetworkInterface]:
         configured = self._settings_provider().interfaces
@@ -153,6 +159,18 @@ class NetworkRouteManager:
         if interface_name is None:
             return None
         return self.interfaces().get(interface_name)
+
+    @property
+    def traffic_meter(self) -> TrafficMeter:
+        return self._traffic_meter
+
+    @property
+    def upload_limiter(self) -> SharedUploadLimiter:
+        return self._upload_limiter
+
+    def _upload_limit(self, interface_name: Optional[str]) -> int:
+        interface = self.interface(interface_name)
+        return 0 if interface is None else interface.upload_limit_bps
 
     def notification_states(self) -> List[NetworkNotificationState]:
         states: List[NetworkNotificationState] = []
