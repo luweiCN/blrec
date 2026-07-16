@@ -227,6 +227,10 @@ export interface RecordingMediaAccess {
   readonly durationMs: number | null;
   readonly fileSizeBytes: number;
   readonly recording: boolean;
+  readonly playbackMode: 'seekable' | 'sequential' | 'active_snapshot';
+  readonly indexState: string;
+  readonly retryAfterMs: number | null;
+  readonly requestId: string;
 }
 
 export interface RecordingDanmakuLine {
@@ -337,6 +341,14 @@ export interface RecordingPart {
   readonly sourceExists: boolean;
   readonly finalExists: boolean;
   readonly errorMessage: string | null;
+  readonly mediaIndexState?:
+    | 'pending'
+    | 'indexing'
+    | 'ready'
+    | 'failed'
+    | 'not_required';
+  readonly mediaIndexError?: string | null;
+  readonly mediaIndexProgress?: number;
 }
 
 export interface RecordingSession {

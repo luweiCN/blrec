@@ -9,10 +9,16 @@ export interface PartPlayer {
   destroy(): void;
 }
 
-export type PartPlayerErrorHandler = (message: string) => void;
+export type PartPlayerEvent =
+  | { readonly type: 'attached' }
+  | { readonly type: 'first_frame' }
+  | { readonly type: 'stalled' }
+  | { readonly type: 'error'; readonly message: string };
+
+export type PartPlayerEventHandler = (event: PartPlayerEvent) => void;
 
 export interface FlvPlaybackSource {
-  readonly isLive: boolean;
+  readonly playbackMode: 'seekable' | 'sequential' | 'active_snapshot';
   readonly durationMs: number | null;
   readonly fileSizeBytes: number | null;
 }
@@ -23,24 +29,29 @@ export class PartPlayerFactory {
     element: HTMLVideoElement,
     url: string,
     source: FlvPlaybackSource,
-    onError: PartPlayerErrorHandler
+    onEvent: PartPlayerEventHandler
   ): PartPlayer | null {
     if (!mpegts.isSupported()) {
       return null;
     }
+    const sequential =
+      source.playbackMode === 'sequential' ||
+      (source.playbackMode === 'active_snapshot' && source.durationMs === null);
     const mediaDataSource = {
       type: 'flv',
       url,
-      isLive: source.isLive,
-      ...(source.durationMs === null ? {} : { duration: source.durationMs }),
-      ...(source.fileSizeBytes === null
+      isLive: sequential,
+      ...(sequential || source.durationMs === null
+        ? {}
+        : { duration: source.durationMs }),
+      ...(sequential || source.fileSizeBytes === null
         ? {}
         : { filesize: source.fileSizeBytes }),
     };
     const player = mpegts.createPlayer(mediaDataSource, {
       enableWorker: false,
       enableStashBuffer: false,
-      lazyLoad: !source.isLive,
+      lazyLoad: !sequential,
       lazyLoadMaxDuration: 60,
       lazyLoadRecoverDuration: 15,
       autoCleanupSourceBuffer: true,
@@ -50,12 +61,34 @@ export class PartPlayerFactory {
     player.on(
       mpegts.Events.ERROR,
       (type: unknown, detail: unknown, info: unknown) => {
-        onError(this.describeError(type, detail, info));
+        onEvent({ type: 'error', message: this.describeError(type, detail, info) });
       }
     );
+    let firstFrameReported = false;
+    const firstFrame = () => {
+      if (!firstFrameReported) {
+        firstFrameReported = true;
+        onEvent({ type: 'first_frame' });
+      }
+    };
+    const stalled = () => onEvent({ type: 'stalled' });
+    element.addEventListener('loadeddata', firstFrame);
+    element.addEventListener('playing', firstFrame);
+    element.addEventListener('stalled', stalled);
     player.attachMediaElement(element);
     player.load();
-    return player;
+    onEvent({ type: 'attached' });
+    return {
+      pause: () => player.pause(),
+      unload: () => player.unload(),
+      detachMediaElement: () => player.detachMediaElement(),
+      destroy: () => {
+        element.removeEventListener('loadeddata', firstFrame);
+        element.removeEventListener('playing', firstFrame);
+        element.removeEventListener('stalled', stalled);
+        player.destroy();
+      },
+    };
   }
 
   private describeError(type: unknown, detail: unknown, info: unknown): string {

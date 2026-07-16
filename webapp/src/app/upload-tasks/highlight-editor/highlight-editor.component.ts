@@ -592,15 +592,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.videoElement,
       this.mediaUrl,
       {
-        isLive: false,
+        playbackMode: this.mediaAccess?.playbackMode ?? 'sequential',
         durationMs: this.mediaAccess?.durationMs ?? null,
         fileSizeBytes: this.mediaAccess?.fileSizeBytes ?? null,
       },
-      (message) => {
+      (event) => {
         this.zone.run(() => {
-          this.mediaError = message;
-          this.teardownPlayer();
-          this.changeDetector.markForCheck();
+          if (event.type === 'error') {
+            this.mediaError = event.message;
+            this.teardownPlayer();
+            this.changeDetector.markForCheck();
+          } else if (event.type === 'stalled') {
+            this.handleMediaStalled();
+            this.changeDetector.markForCheck();
+          }
         });
       }
     );

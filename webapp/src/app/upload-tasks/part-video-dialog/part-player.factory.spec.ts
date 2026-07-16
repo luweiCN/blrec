@@ -22,7 +22,7 @@ describe('PartPlayerFactory', () => {
       element,
       '/api/media?signed',
       {
-        isLive: false,
+        playbackMode: 'seekable',
         durationMs: 12_500,
         fileSizeBytes: 1_024 * 1_024 * 1_024,
       },
@@ -45,5 +45,25 @@ describe('PartPlayerFactory', () => {
     );
     expect(player.attachMediaElement).toHaveBeenCalledOnceWith(element);
     expect(player.load).toHaveBeenCalled();
+  });
+
+  it('plays an unindexed FLV sequentially without advertising file metadata', () => {
+    const element = document.createElement('video');
+
+    new PartPlayerFactory().attachFlv(
+      element,
+      '/api/media?signed',
+      {
+        playbackMode: 'sequential',
+        durationMs: null,
+        fileSizeBytes: 1_024,
+      },
+      () => undefined,
+    );
+
+    expect(createPlayer).toHaveBeenCalledWith(
+      { type: 'flv', url: '/api/media?signed', isLive: true },
+      jasmine.objectContaining({ lazyLoad: false }),
+    );
   });
 });

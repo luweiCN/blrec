@@ -20,7 +20,20 @@ import {
   RecordingSession,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
-import { PartPlayer, PartPlayerFactory } from './part-player.factory';
+import {
+  PartPlayer,
+  PartPlayerEvent,
+  PartPlayerFactory,
+} from './part-player.factory';
+
+type PlaybackState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'access_loading' }
+  | { readonly kind: 'player_loading' }
+  | { readonly kind: 'playing' }
+  | { readonly kind: 'error'; readonly message: string };
+
+const PLAYBACK_DEADLINE_MS = 10_000;
 
 @Component({
   selector: 'app-part-video-dialog',
@@ -35,12 +48,13 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
 
   mediaUrl: string | null = null;
   mediaAccess: RecordingMediaAccess | null = null;
-  loading = false;
-  error: string | null = null;
+  playbackState: PlaybackState = { kind: 'idle' };
 
   private videoElement: HTMLVideoElement | null = null;
   private player: PartPlayer | null = null;
   private request?: Subscription;
+  private deadlineAt = 0;
+  private timer: number | null = null;
 
   constructor(
     private recordingSessions: RecordingSessionService,
@@ -79,6 +93,19 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     return this.localMediaPath?.toLowerCase().endsWith('.flv') ?? false;
   }
 
+  get loading(): boolean {
+    return (
+      this.playbackState.kind === 'access_loading' ||
+      this.playbackState.kind === 'player_loading'
+    );
+  }
+
+  get error(): string | null {
+    return this.playbackState.kind === 'error'
+      ? this.playbackState.message
+      : null;
+  }
+
   ngOnChanges(changes: SimpleChanges): void {
     if (!this.visible || !this.session || !this.part) {
       if (changes['visible'] && !this.visible) {
@@ -103,14 +130,20 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
 
   handleNativeMediaError(): void {
     if (!this.isFlv) {
-      this.error = '本地视频播放失败，请重新打开后再试';
+      this.fail('本地视频播放失败，请重新打开后再试');
     }
   }
 
   handleNativeMediaStalled(): void {
     if (!this.isFlv) {
-      this.error = '本地视频加载停滞，请检查连接后重试';
+      this.fail('本地视频加载停滞，请检查连接后重试');
     }
+  }
+
+  handleFirstFrame(): void {
+    this.clearTimer();
+    this.playbackState = { kind: 'playing' };
+    this.changeDetector.markForCheck();
   }
 
   private loadMedia(): void {
@@ -118,26 +151,34 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     this.teardownPlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
-    this.error = null;
+    this.playbackState = { kind: 'idle' };
     if (this.localMediaPath === null) {
-      this.error = '该分 P 的本地视频不可用';
+      this.fail('该分 P 的本地视频不可用');
       return;
     }
-    this.loading = true;
+    this.deadlineAt = Date.now() + PLAYBACK_DEADLINE_MS;
+    this.playbackState = { kind: 'access_loading' };
+    this.requestMediaAccess();
+  }
+
+  private requestMediaAccess(): void {
     this.request = this.recordingSessions
       .createMediaAccess(this.part.id)
       .subscribe({
         next: (access) => {
+          if (access.retryAfterMs !== null && access.retryAfterMs > 0) {
+            this.scheduleRetry(access.retryAfterMs);
+            return;
+          }
           this.mediaAccess = access;
           this.mediaUrl = this.recordingSessions.mediaUrl(this.part.id, access);
-          this.loading = false;
+          this.playbackState = { kind: 'player_loading' };
+          this.scheduleDeadline();
           this.attachFlvPlayer();
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
-          this.loading = false;
-          this.error = this.describeError(error, '本地视频加载失败');
-          this.changeDetector.markForCheck();
+          this.fail(this.describeError(error, '本地视频加载失败'));
         },
       });
   }
@@ -151,20 +192,74 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       this.videoElement,
       this.mediaUrl,
       {
-        isLive: false,
+        playbackMode: access?.playbackMode ?? 'sequential',
         durationMs: access?.durationMs ?? null,
         fileSizeBytes: access?.fileSizeBytes ?? null,
       },
-      (message) => {
+      (event) => {
         this.zone.run(() => {
-          this.error = message;
-          this.teardownPlayer();
-          this.changeDetector.markForCheck();
+          this.handlePlayerEvent(event);
         });
       }
     );
     if (this.player === null) {
-      this.error = '当前浏览器不支持 FLV 播放';
+      this.fail('当前浏览器不支持 FLV 播放');
+    }
+  }
+
+  private handlePlayerEvent(event: PartPlayerEvent): void {
+    if (event.type === 'first_frame') {
+      this.handleFirstFrame();
+      return;
+    }
+    if (event.type === 'stalled') {
+      this.fail('本地视频加载停滞，请检查连接后重试');
+      return;
+    }
+    if (event.type === 'error') {
+      this.fail(event.message);
+    }
+  }
+
+  private scheduleRetry(delayMs: number): void {
+    const remaining = this.deadlineAt - Date.now();
+    if (remaining <= 0) {
+      this.fail('本地视频打开超时，请稍后重试');
+      return;
+    }
+    this.clearTimer();
+    this.timer = window.setTimeout(() => {
+      this.timer = null;
+      this.requestMediaAccess();
+    }, Math.min(delayMs, remaining));
+  }
+
+  private scheduleDeadline(): void {
+    const remaining = this.deadlineAt - Date.now();
+    if (remaining <= 0) {
+      this.fail('本地视频打开超时，请稍后重试');
+      return;
+    }
+    this.clearTimer();
+    this.timer = window.setTimeout(() => {
+      this.timer = null;
+      if (this.playbackState.kind !== 'playing') {
+        this.fail('本地视频打开超时，请检查录像文件后重试');
+      }
+    }, remaining);
+  }
+
+  private fail(message: string): void {
+    this.clearTimer();
+    this.playbackState = { kind: 'error', message };
+    this.teardownPlayer();
+    this.changeDetector.markForCheck();
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== null) {
+      window.clearTimeout(this.timer);
+      this.timer = null;
     }
   }
 
@@ -182,11 +277,11 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   private reset(): void {
     this.request?.unsubscribe();
     this.request = undefined;
+    this.clearTimer();
     this.teardownPlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
-    this.loading = false;
-    this.error = null;
+    this.playbackState = { kind: 'idle' };
   }
 
   private describeError(error: unknown, fallback: string): string {

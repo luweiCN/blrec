@@ -128,6 +128,10 @@ describe('RecordingSessionService', () => {
       durationMs: 12_500,
       fileSizeBytes: 2_048,
       recording: true,
+      playbackMode: 'active_snapshot',
+      indexState: 'pending',
+      retryAfterMs: null,
+      requestId: 'request-service',
     });
 
     expect(
@@ -138,6 +142,10 @@ describe('RecordingSessionService', () => {
         durationMs: 12_500,
         fileSizeBytes: 2_048,
         recording: true,
+        playbackMode: 'active_snapshot',
+        indexState: 'pending',
+        retryAfterMs: null,
+        requestId: 'request-service',
       })
     ).toBe(
       '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id'

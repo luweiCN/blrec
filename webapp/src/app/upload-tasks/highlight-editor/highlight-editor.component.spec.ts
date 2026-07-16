@@ -172,6 +172,10 @@ describe('HighlightEditorComponent', () => {
         durationMs: 80_000,
         fileSizeBytes: 2048,
         recording: true,
+        playbackMode: 'active_snapshot',
+        indexState: 'pending',
+        retryAfterMs: null,
+        requestId: 'request-editor',
       })
     );
     recordings.mediaUrl.and.callFake((partId) => `/media/${partId}`);

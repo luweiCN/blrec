@@ -20,6 +20,8 @@
       controls
       preload="metadata"
       [attr.src]="isFlv ? null : mediaUrl"
+      (loadeddata)="handleFirstFrame()"
+      (playing)="handleFirstFrame()"
       (error)="handleNativeMediaError()"
       (stalled)="handleNativeMediaStalled()"
     ></video>

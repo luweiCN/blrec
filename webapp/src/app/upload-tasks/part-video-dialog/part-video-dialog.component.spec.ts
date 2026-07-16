@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { OverlayContainer } from '@angular/cdk/overlay';
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ComponentFixture, TestBed, fakeAsync, tick } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
 import { of, Subject } from 'rxjs';
@@ -9,7 +9,11 @@ import { NzModalModule } from 'ng-zorro-antd/modal';
 
 import { RecordingPart, RecordingSession } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
-import { PartPlayer, PartPlayerFactory } from './part-player.factory';
+import {
+  PartPlayer,
+  PartPlayerEventHandler,
+  PartPlayerFactory,
+} from './part-player.factory';
 import { PartVideoDialogComponent } from './part-video-dialog.component';
 
 describe('PartVideoDialogComponent', () => {
@@ -88,6 +92,10 @@ describe('PartVideoDialogComponent', () => {
         durationMs: 12_500,
         fileSizeBytes: 2_048,
         recording: true,
+        playbackMode: 'active_snapshot',
+        indexState: 'pending',
+        retryAfterMs: null,
+        requestId: 'request-1',
       })
     );
     service.mediaUrl.and.returnValue('/api/media?signed');
@@ -131,7 +139,7 @@ describe('PartVideoDialogComponent', () => {
       jasmine.any(HTMLVideoElement),
       '/api/media?signed',
       {
-        isLive: false,
+        playbackMode: 'active_snapshot',
         durationMs: 12_500,
         fileSizeBytes: 2_048,
       },
@@ -151,6 +159,10 @@ describe('PartVideoDialogComponent', () => {
         durationMs: null,
         fileSizeBytes: 1_024,
         recording: true,
+        playbackMode: 'sequential',
+        indexState: 'pending',
+        retryAfterMs: null,
+        requestId: 'request-2',
       })
     );
 
@@ -160,7 +172,7 @@ describe('PartVideoDialogComponent', () => {
       jasmine.any(HTMLVideoElement),
       '/api/media?signed',
       {
-        isLive: false,
+        playbackMode: 'sequential',
         durationMs: null,
         fileSizeBytes: 1_024,
       },
@@ -176,6 +188,10 @@ describe('PartVideoDialogComponent', () => {
       durationMs: number;
       fileSizeBytes: number;
       recording: boolean;
+      playbackMode: 'active_snapshot';
+      indexState: string;
+      retryAfterMs: number | null;
+      requestId: string;
     }>();
     service.createMediaAccess.and.returnValue(access);
     const changeDetector = (fixture.componentInstance as any).changeDetector;
@@ -189,10 +205,42 @@ describe('PartVideoDialogComponent', () => {
       durationMs: 12_500,
       fileSizeBytes: 2_048,
       recording: true,
+      playbackMode: 'active_snapshot',
+      indexState: 'pending',
+      retryAfterMs: null,
+      requestId: 'request-3',
     });
 
     expect(changeDetector.markForCheck).toHaveBeenCalled();
   });
+
+  it('ends player loading after the first frame event', () => {
+    const callbacks: { report?: PartPlayerEventHandler } = {};
+    playerFactory.attachFlv.and.callFake(
+      (_element, _url, _source, handler) => {
+        callbacks.report = handler;
+        return player;
+      },
+    );
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.playbackState.kind).toBe('player_loading');
+    callbacks.report?.({ type: 'first_frame' });
+
+    expect(fixture.componentInstance.playbackState.kind).toBe('playing');
+  });
+
+  it('turns an endless player load into an actionable error', fakeAsync(() => {
+    fixture.detectChanges();
+
+    tick(10_001);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.playbackState.kind).toBe('error');
+    expect(overlayContainer.getContainerElement().textContent).toContain(
+      '本地视频打开超时',
+    );
+  }));
 
   it('destroys the FLV player when closed', () => {
     fixture.detectChanges();
