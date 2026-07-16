@@ -40,8 +40,18 @@ const routes: Routes = [
       ),
   },
   {
+    path: 'recordings',
+    canActivate: [AuthGuard],
+    data: { sessionScope: 'recordings' },
+    loadChildren: () =>
+      import('./upload-tasks/upload-tasks.module').then(
+        (m) => m.UploadTasksModule,
+      ),
+  },
+  {
     path: 'upload-tasks',
     canActivate: [AuthGuard],
+    data: { sessionScope: 'uploads' },
     loadChildren: () =>
       import('./upload-tasks/upload-tasks.module').then(
         (m) => m.UploadTasksModule,

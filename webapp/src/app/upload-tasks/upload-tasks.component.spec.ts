@@ -1,10 +1,12 @@
-import { Component } from '@angular/core';
+import { Component, Input } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { UploadTasksComponent } from './upload-tasks.component';
 
 @Component({ selector: 'app-recording-sessions', template: '' })
-class RecordingSessionsStubComponent {}
+class RecordingSessionsStubComponent {
+  @Input() scope: 'recordings' | 'uploads' = 'uploads';
+}
 
 describe('UploadTasksComponent', () => {
   let fixture: ComponentFixture<UploadTasksComponent>;

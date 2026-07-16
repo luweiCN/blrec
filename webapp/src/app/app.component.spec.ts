@@ -80,11 +80,15 @@ describe('AppComponent', () => {
     const recordingTasks = fixture.nativeElement.querySelector(
       'a[href="/tasks"]',
     ) as HTMLAnchorElement;
+    const recordings = fixture.nativeElement.querySelector(
+      'a[href="/recordings"]',
+    ) as HTMLAnchorElement;
     const network = fixture.nativeElement.querySelector(
       'a[href="/network"]',
     ) as HTMLAnchorElement;
 
-    expect(recordingTasks?.textContent?.trim()).toBe('录制任务');
+    expect(recordingTasks?.textContent?.trim()).toBe('房间管理');
+    expect(recordings?.textContent?.trim()).toBe('录制任务');
     expect(uploadTasks).not.toBeNull();
     expect(uploadTasks?.textContent?.trim()).toBe('上传任务');
     expect(policies).toBeNull();
@@ -102,6 +106,7 @@ describe('AppComponent', () => {
     const labels = Array.from(links).map((link) => link.textContent?.trim());
 
     expect(labels).toEqual([
+      '房间管理',
       '录制任务',
       '上传任务',
       '投稿账号',
@@ -110,6 +115,19 @@ describe('AppComponent', () => {
       '通知设置',
       '关于',
     ]);
+  });
+
+  it('lazy loads recording and upload lists as separate scopes', () => {
+    const router = TestBed.inject(Router);
+    const recordings = router.config.find(
+      (candidate) => candidate.path === 'recordings',
+    );
+    const uploads = router.config.find(
+      (candidate) => candidate.path === 'upload-tasks',
+    );
+
+    expect(recordings?.data?.sessionScope).toBe('recordings');
+    expect(uploads?.data?.sessionScope).toBe('uploads');
   });
 
   it('lazy loads the independent notification settings page', () => {

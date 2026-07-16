@@ -110,6 +110,10 @@ describe('RecordingSessionsComponent', () => {
             totalFileSizeBytes: 1_048_576,
             recordDurationSeconds: 59,
             uploadIntent: 'none',
+            uploadDecision: 'follow_room',
+            submissionInherited: true,
+            uploadResolutionState: 'job_created',
+            uploadResolutionError: null,
             uploadSuppressed: false,
             deletionState: 'none',
             deletionError: null,
@@ -277,6 +281,7 @@ describe('RecordingSessionsComponent', () => {
 
     const text = fixture.nativeElement.textContent;
     expect(service.listSessions).toHaveBeenCalledOnceWith(20, 0, {
+      scope: 'uploads',
       query: '',
       recordingState: null,
       uploadState: null,
@@ -304,14 +309,15 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
   });
 
-  it('links local live recordings to the highlight editor', () => {
+  it('links local live recordings to the recording highlight editor', () => {
+    fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
 
     const link = fixture.nativeElement.querySelector(
       '[data-testid="edit-highlight"]'
     ) as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
-    expect(link?.getAttribute('href')).toBe('/upload-tasks/highlights/1');
+    expect(link?.getAttribute('href')).toBe('/recordings/highlights/1');
   });
 
   it('labels derived highlight tasks without offering another cut', () => {
@@ -496,6 +502,7 @@ describe('RecordingSessionsComponent', () => {
 
     expect(fixture.componentInstance.pageIndex).toBe(1);
     expect(service.listSessions).toHaveBeenCalledOnceWith(20, 0, {
+      scope: 'uploads',
       query: '主播',
       recordingState: 'closed',
       uploadState: 'approved',
@@ -738,6 +745,7 @@ describe('RecordingSessionsComponent', () => {
   });
 
   it('shows explicit copy controls beside every visible file path', () => {
+    fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
     fixture.componentInstance.openDetails(fixture.componentInstance.sessions[0]);
     fixture.detectChanges();

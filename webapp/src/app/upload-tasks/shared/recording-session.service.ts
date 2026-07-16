@@ -31,7 +31,8 @@ export class RecordingSessionService {
     const path = '/api/v1/recording-sessions';
     let params = new HttpParams()
       .set('limit', limit)
-      .set('offset', offset);
+      .set('offset', offset)
+      .set('scope', filters?.scope ?? 'recordings');
     if (filters) {
       if (filters.query.trim()) {
         params = params.set('q', filters.query.trim());

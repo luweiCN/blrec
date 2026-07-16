@@ -35,10 +35,20 @@
             nzMatchRouter="true"
             nz-tooltip
             nzTooltipPlacement="right"
+            [nzTooltipTitle]="collapsed ? '房间管理' : ''"
+          >
+            <i nz-icon nzType="unordered-list" nzTheme="outline"></i>
+            <span><a routerLink="/tasks">房间管理</a></span>
+          </li>
+          <li
+            nz-menu-item
+            nzMatchRouter="true"
+            nz-tooltip
+            nzTooltipPlacement="right"
             [nzTooltipTitle]="collapsed ? '录制任务' : ''"
           >
             <i nz-icon nzType="unordered-list" nzTheme="outline"></i>
-            <span><a routerLink="/tasks">录制任务</a></span>
+            <span><a routerLink="/recordings">录制任务</a></span>
           </li>
           <li
             nz-menu-item

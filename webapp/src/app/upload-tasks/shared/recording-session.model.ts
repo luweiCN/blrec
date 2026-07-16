@@ -133,7 +133,10 @@ export type RecordingSessionDisplayState =
   | 'not_uploading'
   | 'needs_attention';
 
+export type RecordingSessionScope = 'recordings' | 'uploads';
+
 export interface RecordingSessionFilters {
+  readonly scope: RecordingSessionScope;
   readonly query: string;
   readonly recordingState: RecordingSessionState | null;
   readonly uploadState: UploadJobState | 'none' | 'suppressed' | null;
@@ -358,6 +361,14 @@ export interface RecordingSession {
   readonly totalFileSizeBytes: number;
   readonly recordDurationSeconds: number;
   readonly uploadIntent: 'none' | 'auto' | 'upload' | 'skip';
+  readonly uploadDecision: 'follow_room' | 'upload' | 'skip';
+  readonly submissionInherited: boolean;
+  readonly uploadResolutionState:
+    | 'pending'
+    | 'not_requested'
+    | 'configuration_required'
+    | 'job_created';
+  readonly uploadResolutionError: string | null;
   readonly uploadSuppressed: boolean;
   readonly deletionState: 'none' | 'requested' | 'deleting' | 'failed';
   readonly deletionError: string | null;

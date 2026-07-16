@@ -2,6 +2,7 @@ import { Clipboard } from '@angular/cdk/clipboard';
 import {
   ChangeDetectorRef,
   Component,
+  Input,
   OnDestroy,
   OnInit,
 } from '@angular/core';
@@ -23,6 +24,7 @@ import {
   RecordingSessionDisplayState,
   RecordingSessionFilters,
   RecordingSessionState,
+  RecordingSessionScope,
   RecordingSessionsView,
   TranscodeState,
   UploadJobProgress,
@@ -56,6 +58,7 @@ interface RealtimeUploadJobProgress {
   styleUrls: ['./recording-sessions.component.scss'],
 })
 export class RecordingSessionsComponent implements OnInit, OnDestroy {
+  @Input() scope: RecordingSessionScope = 'uploads';
   view: RecordingSessionsView = { state: 'loading' };
   pageIndex = 1;
   pageSize = 20;
@@ -141,6 +144,24 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   get sessions(): readonly RecordingSession[] {
     return this.view.state === 'ready' ? this.view.response.sessions : [];
+  }
+
+  get isRecordingScope(): boolean {
+    return this.scope === 'recordings';
+  }
+
+  get isUploadScope(): boolean {
+    return this.scope === 'uploads';
+  }
+
+  get pageTitle(): string {
+    return this.isRecordingScope ? '录制任务' : '上传任务';
+  }
+
+  get pageSubtitle(): string {
+    return this.isRecordingScope
+      ? '查看每一场录像，并进行播放、弹幕查看和高光剪辑'
+      : '查看视频上传、稿件审核和后续处理进度';
   }
 
   get degradedReason(): string | null {
@@ -487,6 +508,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     );
   }
 
+  highlightEditorLink(session: RecordingSession): readonly string[] {
+    return ['/', 'recordings', 'highlights', String(session.id)];
+  }
+
   openTaskEdit(jobIds: readonly number[]): void {
     const uniqueJobIds = [...new Set(jobIds.filter((jobId) => jobId > 0))];
     if (uniqueJobIds.length === 0) {
@@ -764,6 +789,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       startedTo = Math.floor(to.getTime() / 1000);
     }
     return {
+      scope: this.scope,
       query: this.keyword,
       recordingState: this.recordingState,
       uploadState: this.uploadState,

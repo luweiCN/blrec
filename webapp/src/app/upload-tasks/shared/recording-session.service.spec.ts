@@ -26,7 +26,7 @@ describe('RecordingSessionService', () => {
     service.listSessions(20, 40).subscribe();
 
     const request = http.expectOne(
-      '/api/v1/recording-sessions?limit=20&offset=40'
+      '/api/v1/recording-sessions?limit=20&offset=40&scope=recordings'
     );
     expect(request.request.method).toBe('GET');
     request.flush({ degradedReason: null, total: 0, sessions: [] });
@@ -35,6 +35,7 @@ describe('RecordingSessionService', () => {
   it('sends upload-task filters as query parameters', () => {
     service
       .listSessions(20, 0, {
+        scope: 'uploads',
         query: '主播 名',
         recordingState: 'closed',
         uploadState: 'approved',
@@ -50,6 +51,7 @@ describe('RecordingSessionService', () => {
         candidate.params.get('q') === '主播 名'
     );
     expect(request.request.params.get('recordingState')).toBe('closed');
+    expect(request.request.params.get('scope')).toBe('uploads');
     expect(request.request.params.get('uploadState')).toBe('approved');
     expect(request.request.params.get('startedFrom')).toBe('100');
     expect(request.request.params.get('startedTo')).toBe('200');
