@@ -38,7 +38,7 @@ export class PartPlayerFactory {
         : { filesize: source.fileSizeBytes }),
     };
     const player = mpegts.createPlayer(mediaDataSource, {
-      enableWorker: true,
+      enableWorker: false,
       enableStashBuffer: false,
       lazyLoad: !source.isLive,
       lazyLoadMaxDuration: 60,
