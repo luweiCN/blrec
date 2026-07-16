@@ -214,6 +214,51 @@ async def test_capacity_retention_deletes_oldest_eligible_video_only(
 
 
 @pytest.mark.asyncio
+async def test_capacity_retention_skips_parts_used_by_pending_highlight(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        video, _xml = await seed_recording(
+            database,
+            root,
+            identifier=1,
+            room_id=101,
+            retention_mode='capacity',
+            retention_days=5,
+            submitted_at=1_000,
+            content=b'video',
+        )
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,source_session_id,name,requested_start_ms,'
+            'requested_end_ms,state,created_at,updated_at) '
+            "VALUES(1,101,1,'高光',0,1000,'queued',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO highlight_clip_sources('
+            'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms) '
+            'VALUES(1,1,1,0,1000)'
+        )
+        manager = RetentionManager(
+            database, root, capacity_bytes=lambda: 1, clock=lambda: 10_000
+        )
+
+        assert await manager.run_once() == 0
+        assert video.exists()
+
+        await database.execute("UPDATE highlight_clips SET state='failed' WHERE id=1")
+        assert await manager.run_once() == 1
+        assert not video.exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('upload_intent', ('none', 'skip'))
 async def test_capacity_retention_reclaims_safe_no_job_sessions_only(
     tmp_path: Path, upload_intent: str

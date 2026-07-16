@@ -1030,6 +1030,60 @@ async def test_session_without_upload_job_can_be_deleted(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_session_deletion_rejects_source_used_by_pending_highlight(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'source.flv'
+        video.write_bytes(b'video')
+        await database.execute(
+            "INSERT INTO recording_sessions("
+            "id,room_id,broadcast_session_key,state,started_at) "
+            "VALUES(1,100,'100:1','closed',1)"
+        )
+        await database.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('run-1',1,'finished',1,2)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,created_at,updated_at) '
+            "VALUES(1,1,'run-1',1,?,?,1,'ready',1,1)",
+            (str(video), str(video)),
+        )
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,source_session_id,name,requested_start_ms,'
+            'requested_end_ms,state,created_at,updated_at) '
+            "VALUES(1,100,1,'高光',0,1000,'processing',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO highlight_clip_sources('
+            'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms) '
+            'VALUES(1,1,1,0,1000)'
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        with pytest.raises(UploadTaskActionRejected, match='高光片段正在处理'):
+            await manager.delete_session(1, manager_subject='manager')
+
+        assert video.exists()
+        assert (
+            await database.scalar(
+                'SELECT deletion_state FROM recording_sessions WHERE id=1'
+            )
+            == 'none'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_session_deletion_resumes_after_restart(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
     await database.open()

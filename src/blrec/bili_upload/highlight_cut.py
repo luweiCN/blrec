@@ -166,7 +166,12 @@ class LosslessClipper:
         if output.resolve() in source_paths:
             raise HighlightCutError('剪辑输出不能覆盖源视频')
 
-        suffix = output.suffix or '.mp4'
+        suffixes = output.suffixes
+        suffix = (
+            suffixes[-2]
+            if len(suffixes) >= 2 and suffixes[-1] == '.partial'
+            else (output.suffix or '.mp4')
+        )
         temporary_output = self._temporary_path(output.parent, suffix, 'highlight-')
         segment_paths: List[str] = []
         concat_path: Optional[str] = None

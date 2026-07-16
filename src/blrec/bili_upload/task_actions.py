@@ -960,6 +960,18 @@ class UploadTaskActionManager:
             ).fetchone()
             if active is not None:
                 raise UploadTaskActionRejected('本场仍在录制，请先停止当前场次')
+            highlight = connection.execute(
+                'SELECT 1 FROM recording_parts part '
+                'JOIN highlight_clip_sources source ON source.part_id=part.id '
+                'JOIN highlight_clips clip ON clip.id=source.clip_id '
+                'WHERE part.session_id=? '
+                "AND clip.state IN ('queued','processing') LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if highlight is not None:
+                raise UploadTaskActionRejected(
+                    '高光片段正在处理，请完成或删除高光任务后再删除录像'
+                )
             connection.execute(
                 "UPDATE recording_sessions SET deletion_state='requested',"
                 'deletion_error=NULL,deletion_requested_at=? WHERE id=?',

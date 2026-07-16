@@ -130,6 +130,10 @@ class RetentionManager:
             'JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             "WHERE part.video_deleted_at IS NULL AND session.state='closed' "
+            'AND NOT EXISTS(SELECT 1 FROM highlight_clip_sources source '
+            'JOIN highlight_clips clip ON clip.id=source.clip_id '
+            'WHERE source.part_id=part.id '
+            "AND clip.state IN ('queued','processing')) "
             'ORDER BY session.started_at,part.part_index,part.id'
         )
         candidates = []
@@ -168,6 +172,10 @@ class RetentionManager:
             "AND session.upload_intent IN ('none','skip')) OR "
             '(job.id IS NOT NULL AND job.submitted_at IS NOT NULL)) '
             'AND (job.id IS NULL OR job.lease_until IS NULL OR job.lease_until<=?) '
+            'AND NOT EXISTS(SELECT 1 FROM highlight_clip_sources source '
+            'JOIN highlight_clips clip ON clip.id=source.clip_id '
+            'WHERE source.part_id=part.id '
+            "AND clip.state IN ('queued','processing')) "
             'ORDER BY order_at,session.started_at,part.part_index,part.id',
             (now,),
         )
