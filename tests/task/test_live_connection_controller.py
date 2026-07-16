@@ -88,6 +88,10 @@ def room_info(
     )
 
 
+def test_websocket_activation_budget_allows_both_transport_attempts() -> None:
+    assert LiveConnectionController._ACTIVATION_TIMEOUT_SECONDS >= 60
+
+
 @pytest.mark.asyncio
 async def test_confirmed_live_starts_recording_before_websocket_is_ready() -> None:
     websocket_release = asyncio.Event()
