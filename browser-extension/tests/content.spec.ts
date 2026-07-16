@@ -32,6 +32,7 @@ function makeController(
     }
   );
   let observer: FakeObserver | null = null;
+  let refresh: (() => Promise<void>) | null = null;
   const controller = new HighlightContentController({
     document,
     location: locationAt('/100'),
@@ -40,6 +41,10 @@ function makeController(
     createObserver: (callback) => {
       observer = new FakeObserver(callback);
       return observer;
+    },
+    scheduleRefresh: (callback) => {
+      refresh = callback;
+      return () => undefined;
     },
   });
   return {
@@ -50,6 +55,12 @@ function makeController(
         throw new Error('observer was not created');
       }
       return observer;
+    },
+    async refresh() {
+      if (!refresh) {
+        throw new Error('refresh was not scheduled');
+      }
+      await refresh();
     },
   };
 }
@@ -101,6 +112,53 @@ describe('Bilibili live controls', () => {
     setup.observer.trigger();
 
     expect(document.querySelectorAll('.blrec-highlight-actions')).toHaveLength(1);
+  });
+
+  it('refreshes local room status so add-highlight appears after recording starts', async () => {
+    const status = { collected: true, recording: false };
+    const setup = makeController(status);
+    await setup.controller.start();
+    expect(document.querySelector('.blrec-highlight-actions')).toBeNull();
+
+    status.recording = true;
+    await setup.refresh();
+
+    expect(document.querySelector('.blrec-highlight-actions')?.textContent).toBe(
+      '添加高光'
+    );
+  });
+
+  it('uses the canonical room ID returned after collecting a short room', async () => {
+    const statusRoomIds: number[] = [];
+    const sendMessage = vi.fn(async (message: BackgroundMessage) => {
+      if (message.type === 'ROOM_STATUS') {
+        statusRoomIds.push(message.roomId);
+        return {
+          ok: true as const,
+          data: {
+            collected: message.roomId === 3582149,
+            recording: false,
+          },
+        };
+      }
+      return {
+        ok: true as const,
+        data: { roomId: 3582149, collected: true, upload: false },
+      };
+    });
+    const controller = new HighlightContentController({
+      document,
+      location: locationAt('/6'),
+      sendMessage,
+      createObserver: (callback) => new FakeObserver(callback),
+      scheduleRefresh: () => () => undefined,
+    });
+    await controller.start();
+
+    document
+      .querySelector<HTMLButtonElement>('.blrec-highlight-actions button')!
+      .click();
+    await vi.waitFor(() => expect(statusRoomIds).toEqual([6, 3582149]));
   });
 
   it('sends player-adjusted data and allows repeated highlights', async () => {

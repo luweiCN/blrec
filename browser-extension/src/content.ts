@@ -18,6 +18,9 @@ interface ContentDependencies {
   ) => Promise<BackgroundResponse>;
   readonly now?: () => number;
   readonly createObserver?: (callback: MutationCallback) => ObserverLike;
+  readonly scheduleRefresh?: (
+    callback: () => Promise<void>
+  ) => () => void;
 }
 
 interface RoomStatus {
@@ -31,9 +34,13 @@ export class HighlightContentController {
   private readonly sendMessage: ContentDependencies['sendMessage'];
   private readonly now: () => number;
   private readonly createObserver: (callback: MutationCallback) => ObserverLike;
+  private readonly scheduleRefresh: (
+    callback: () => Promise<void>
+  ) => () => void;
   private roomId: number | null = null;
   private status: RoomStatus | null = null;
   private observer: ObserverLike | null = null;
+  private cancelStatusRefresh: (() => void) | null = null;
   private started = false;
 
   constructor(dependencies: ContentDependencies) {
@@ -44,6 +51,12 @@ export class HighlightContentController {
     this.createObserver =
       dependencies.createObserver ??
       ((callback) => new MutationObserver(callback));
+    this.scheduleRefresh =
+      dependencies.scheduleRefresh ??
+      ((callback) => {
+        const timer = setInterval(() => void callback(), 30_000);
+        return () => clearInterval(timer);
+      });
   }
 
   async start(): Promise<void> {
@@ -63,11 +76,14 @@ export class HighlightContentController {
         subtree: true,
       });
     }
+    this.cancelStatusRefresh = this.scheduleRefresh(() => this.refreshStatus());
   }
 
   destroy(): void {
     this.observer?.disconnect();
     this.observer = null;
+    this.cancelStatusRefresh?.();
+    this.cancelStatusRefresh = null;
     this.document
       .querySelectorAll('.blrec-highlight-actions, .blrec-highlight-toast')
       .forEach((element) => element.remove());
@@ -151,6 +167,9 @@ export class HighlightContentController {
       this.setDisabled(container, false);
       return;
     }
+    if (this.isCollectResult(response.data)) {
+      this.roomId = response.data.roomId;
+    }
     this.toast(upload ? '已收录并开启投稿' : '已收录', 'success');
     await this.refreshStatus();
   }
@@ -224,6 +243,17 @@ export class HighlightContentController {
       typeof value.collected === 'boolean' &&
       'recording' in value &&
       typeof value.recording === 'boolean'
+    );
+  }
+
+  private isCollectResult(value: unknown): value is { roomId: number } {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      'roomId' in value &&
+      typeof value.roomId === 'number' &&
+      Number.isSafeInteger(value.roomId) &&
+      value.roomId > 0
     );
   }
 }
