@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from blrec.bili_upload.highlight_cut import (
+    ClipSource,
+    HighlightCutError,
+    LosslessClipper,
+    MediaProfile,
+)
+
+
+def profile(
+    *, duration_ms: int = 100_000, width: int = 1920, has_audio: bool = True
+) -> MediaProfile:
+    return MediaProfile(
+        codec_name='h264',
+        width=width,
+        height=1080,
+        r_frame_rate='60/1',
+        extradata_size=42,
+        duration_ms=duration_ms,
+        has_audio=has_audio,
+    )
+
+
+def test_inspect_backs_up_to_the_previous_keyframe(tmp_path: Path) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (0, 28_600, 30_600)))
+
+    inspection = clipper.inspect(
+        (
+            ClipSource(
+                part_id=1,
+                path=str(source),
+                requested_start_ms=30_000,
+                requested_end_ms=80_000,
+            ),
+        ),
+        requested_start_ms=30_000,
+        requested_end_ms=80_000,
+        stable_end_ms=100_000,
+    )
+
+    assert inspection.actual_start_ms == 28_600
+    assert inspection.actual_end_ms == 80_000
+    assert inspection.extra_lead_ms == 1_400
+    assert inspection.confirmation_required is False
+    assert inspection.sources[0].actual_start_ms == 28_600
+    assert inspection.sources[0].output_offset_ms == 0
+
+
+def test_inspect_requires_confirmation_above_ten_seconds(tmp_path: Path) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (0, 18_000)))
+
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 30_000, 80_000),),
+        requested_start_ms=30_000,
+        requested_end_ms=80_000,
+        stable_end_ms=100_000,
+    )
+
+    assert inspection.extra_lead_ms == 12_000
+    assert inspection.confirmation_required is True
+
+
+def test_inspect_rejects_unsafe_tail_and_incompatible_parts(tmp_path: Path) -> None:
+    first = tmp_path / 'first.flv'
+    second = tmp_path / 'second.flv'
+    first.write_bytes(b'first')
+    second.write_bytes(b'second')
+
+    safe = LosslessClipper(probe=lambda _path: (profile(), (0, 30_000)))
+    with pytest.raises(HighlightCutError, match='安全'):
+        safe.inspect(
+            (ClipSource(1, str(first), 30_000, 80_000),),
+            requested_start_ms=30_000,
+            requested_end_ms=80_000,
+            stable_end_ms=75_000,
+        )
+
+    def incompatible(path: str):
+        return (profile(width=1920 if path == str(first) else 1280), (0,))
+
+    clipper = LosslessClipper(probe=incompatible)
+    with pytest.raises(HighlightCutError, match='不兼容'):
+        clipper.inspect(
+            (
+                ClipSource(1, str(first), 0, 10_000),
+                ClipSource(2, str(second), 0, 10_000),
+            ),
+            requested_start_ms=0,
+            requested_end_ms=20_000,
+            stable_end_ms=20_000,
+        )
+
+
+def test_inspect_uses_safe_ffprobe_argument_arrays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source; touch unsafe.flv'
+    source.write_bytes(b'video')
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if '-skip_frame' in command:
+            document = {
+                'frames': [
+                    {'best_effort_timestamp_time': '0.0'},
+                    {'best_effort_timestamp_time': '28.6'},
+                ],
+                'streams': [
+                    {
+                        'codec_name': 'h264',
+                        'width': 1920,
+                        'height': 1080,
+                        'r_frame_rate': '60/1',
+                        'extradata_size': 42,
+                    }
+                ],
+                'format': {'duration': '100.0'},
+            }
+        else:
+            document = {'streams': [{'codec_type': 'audio'}]}
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps(document).encode('utf8'), stderr=b''
+        )
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    inspection = LosslessClipper().inspect(
+        (ClipSource(1, str(source), 30_000, 80_000),),
+        requested_start_ms=30_000,
+        requested_end_ms=80_000,
+        stable_end_ms=100_000,
+    )
+
+    command, options = calls[0]
+    assert command == (
+        'ffprobe',
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-skip_frame',
+        'nokey',
+        '-show_entries',
+        'frame=best_effort_timestamp_time:stream=codec_name,width,height,'
+        'r_frame_rate,extradata_size:format=duration',
+        '-of',
+        'json',
+        str(source),
+    )
+    assert options['shell'] is False
+    assert inspection.actual_start_ms == 28_600
+
+
+def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+
+    def probe(path: str):
+        if path == str(source):
+            return profile(), (0, 28_600)
+        return profile(duration_ms=51_400), (0,)
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'ffmpeg ok')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=probe)
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 30_000, 80_000),),
+        requested_start_ms=30_000,
+        requested_end_ms=80_000,
+        stable_end_ms=100_000,
+    )
+
+    artifact = clipper.cut(inspection, str(output))
+
+    command, options = calls[0]
+    assert isinstance(command, tuple)
+    assert ('-c', 'copy') == command[command.index('-c') : command.index('-c') + 2]
+    assert ('-avoid_negative_ts', 'make_zero') == command[
+        command.index('-avoid_negative_ts') : command.index('-avoid_negative_ts') + 2
+    ]
+    assert options['shell'] is False
+    assert output.read_bytes() == b'clip'
+    assert artifact.path == str(output)
+    assert artifact.duration_ms == 51_400
+
+
+def test_cut_rejects_output_that_loses_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+
+    def probe(path: str):
+        if path == str(source):
+            return profile(), (0,)
+        return profile(duration_ms=20_000, has_audio=False), (0,)
+
+    def run(command, **kwargs):
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=probe)
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 0, 20_000),),
+        requested_start_ms=0,
+        requested_end_ms=20_000,
+        stable_end_ms=20_000,
+    )
+
+    with pytest.raises(HighlightCutError, match='音频'):
+        clipper.cut(inspection, str(output))
+    assert not output.exists()
+
+
+def test_cut_concatenates_compatible_sources_without_a_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / 'first.flv'
+    second = tmp_path / 'second.flv'
+    output = tmp_path / 'clip.mp4'
+    first.write_bytes(b'first')
+    second.write_bytes(b'second')
+
+    def probe(path: str):
+        if path in (str(first), str(second)):
+            return profile(duration_ms=10_000), (0,)
+        return profile(duration_ms=20_000), (0,)
+
+    calls = []
+    concat_document = []
+
+    def run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        if '-f' in command and command[command.index('-f') + 1] == 'concat':
+            concat_path = Path(command[command.index('-i') + 1])
+            concat_document.append(concat_path.read_text(encoding='utf8'))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=probe)
+    inspection = clipper.inspect(
+        (ClipSource(1, str(first), 0, 10_000), ClipSource(2, str(second), 0, 10_000)),
+        requested_start_ms=0,
+        requested_end_ms=20_000,
+        stable_end_ms=20_000,
+    )
+
+    clipper.cut(inspection, str(output))
+
+    assert len(calls) == 3
+    concat_command, concat_options = calls[-1]
+    assert ('-f', 'concat') == concat_command[
+        concat_command.index('-f') : concat_command.index('-f') + 2
+    ]
+    assert ('-safe', '0') == concat_command[
+        concat_command.index('-safe') : concat_command.index('-safe') + 2
+    ]
+    assert concat_options['shell'] is False
+    assert concat_document and concat_document[0].count("file '") == 2
