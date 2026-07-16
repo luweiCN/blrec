@@ -88,7 +88,7 @@ umask 077
     '    network_mode: host' \
     '    restart: unless-stopped' \
     '    stop_grace_period: 2m' \
-    "    command: ['--port', '2234']" \
+    "    command: [\"--port\", \"2234\"]" \
     '    environment:' \
     '      TZ: Asia/Shanghai' \
     '      BLREC_ADMIN_USERNAME: "luwei"'
@@ -101,7 +101,7 @@ umask 077
     '      - /volume1/docker/blrec-next/log:/log' \
     '      - /volume1/docker/blrec-next/rec:/rec' \
     '    healthcheck:' \
-    "      test: ['CMD', 'python', '-c', \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:2234/api/v1/auth/status', timeout=3).read()\"]" \
+    "      test: [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:2234/api/v1/auth/status', timeout=3).read()\"]" \
     '      interval: 30s' \
     '      timeout: 5s' \
     '      start_period: 30s' \
@@ -130,14 +130,14 @@ Expected: Compose 文件非空、模式为 `0600`，命令及终端输出均不�
 set -eu
 cd /volume1/docker/blrec-next/workspace
 c=/usr/local/bin/docker-compose
-resolved="$($c -p blrec-next -f compose.yml config)"
-test "$(printf '%s\n' "$resolved" | grep -c 'image: ghcr.io/luweicn/blrec:3.0.0-beta.1')" -eq 1
-printf '%s\n' "$resolved" | grep -q 'network_mode: host'
-printf '%s\n' "$resolved" | grep -q '/volume1/docker/blrec-next/config:/cfg'
-printf '%s\n' "$resolved" | grep -q '/volume1/docker/blrec-next/log:/log'
-printf '%s\n' "$resolved" | grep -q '/volume1/docker/blrec-next/rec:/rec'
-! printf '%s\n' "$resolved" | grep -q '/volume1/docker/blrec/'
-unset resolved
+$c -p blrec-next -f compose.yml config >/dev/null
+test "$($c -p blrec-next -f compose.yml config --services)" = blrec
+test "$($c -p blrec-next -f compose.yml config --images)" = ghcr.io/luweicn/blrec:3.0.0-beta.1
+grep -q 'network_mode: host' compose.yml
+grep -q '/volume1/docker/blrec-next/config:/cfg' compose.yml
+grep -q '/volume1/docker/blrec-next/log:/log' compose.yml
+grep -q '/volume1/docker/blrec-next/rec:/rec' compose.yml
+! grep -q '/volume1/docker/blrec/' compose.yml
 ```
 
 Expected: exit 0；只解析一个固定镜像，且没有引用旧目录。不得输出 `config` 的完整结果，以免显示安全码。
