@@ -90,6 +90,8 @@ class RecordingSession:
     upload_suppressed: bool = False
     deletion_state: str = 'none'
     deletion_error: Optional[str] = None
+    source_kind: str = 'live'
+    highlight_clip_id: Optional[int] = None
     parts: Tuple[RecordingPart, ...] = ()
 
     @property
@@ -253,6 +255,7 @@ class RecordingJournalBridge:
                 row = connection.execute(
                     'SELECT id,broadcast_session_key FROM recording_sessions '
                     'WHERE room_id=? AND live_start_time=? '
+                    "AND source_kind='live' "
                     "AND state IN ('open','cancelled') "
                     'AND NOT EXISTS(SELECT 1 FROM upload_jobs '
                     'WHERE upload_jobs.session_id=recording_sessions.id) '
@@ -276,7 +279,8 @@ class RecordingJournalBridge:
             else:
                 row = connection.execute(
                     'SELECT id,broadcast_session_key FROM recording_sessions '
-                    'WHERE room_id=? AND live_start_time IS NULL AND state=? '
+                    'WHERE room_id=? AND live_start_time IS NULL '
+                    "AND source_kind='live' AND state=? "
                     'ORDER BY id DESC LIMIT 1',
                     (room_id, 'open'),
                 ).fetchone()
@@ -411,7 +415,8 @@ class RecordingJournalBridge:
 
         sessions = await self._database.fetchall(
             'SELECT id FROM recording_sessions '
-            "WHERE state IN ('open','cancelled','manual_review')"
+            "WHERE source_kind='live' "
+            "AND state IN ('open','cancelled','manual_review')"
         )
         recoveries: Dict[int, _ArtifactRecoveryDecision] = {}
         loop = asyncio.get_running_loop()
@@ -439,7 +444,8 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             sessions = connection.execute(
                 'SELECT id,state FROM recording_sessions '
-                "WHERE state IN ('open','cancelled','manual_review')"
+                "WHERE source_kind='live' "
+                "AND state IN ('open','cancelled','manual_review')"
             ).fetchall()
             for session in sessions:
                 session_id = int(session['id'])
@@ -564,7 +570,8 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> int:
             sessions = connection.execute(
                 'SELECT id FROM recording_sessions '
-                "WHERE state='cancelled' AND ended_at IS NOT NULL AND ended_at<=?",
+                "WHERE source_kind='live' AND state='cancelled' "
+                'AND ended_at IS NOT NULL AND ended_at<=?',
                 (cutoff,),
             ).fetchall()
             finalized = 0
@@ -1024,9 +1031,11 @@ class RecordingJournalBridge:
             'session.anchor_uid,session.anchor_name,session.area_id,'
             'session.area_name,session.parent_area_id,session.parent_area_name,'
             'session.live_end_time,session.upload_intent,'
-            'session.deletion_state,session.deletion_error '
+            'session.deletion_state,session.deletion_error,session.source_kind,'
+            'clip.id AS highlight_clip_id '
             'FROM recording_sessions session '
             'JOIN recording_runs run ON run.session_id=session.id '
+            'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
             'WHERE run.id=?',
             (run_id,),
         )
@@ -1094,12 +1103,14 @@ class RecordingJournalBridge:
             'session.area_name,session.parent_area_id,session.parent_area_name,'
             'session.live_end_time,session.upload_intent,'
             'session.deletion_state,session.deletion_error,'
+            'session.source_kind,clip.id AS highlight_clip_id,'
             'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
             'AS upload_suppressed FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN bili_accounts account ON account.id=job.account_id '
             'LEFT JOIN upload_suppressions suppression '
             'ON suppression.session_id=session.id '
+            'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
             + where_sql
             + ' ORDER BY session.started_at {},session.id {} LIMIT ? OFFSET ?'.format(
                 direction, direction
@@ -1638,6 +1649,15 @@ class RecordingJournalBridge:
                 None
                 if 'deletion_error' not in row.keys() or row['deletion_error'] is None
                 else str(row['deletion_error'])
+            ),
+            source_kind=(
+                str(row['source_kind']) if 'source_kind' in row.keys() else 'live'
+            ),
+            highlight_clip_id=(
+                None
+                if 'highlight_clip_id' not in row.keys()
+                or row['highlight_clip_id'] is None
+                else int(row['highlight_clip_id'])
             ),
             parts=parts,
         )

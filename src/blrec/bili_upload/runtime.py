@@ -432,6 +432,23 @@ class BiliAccountRuntime:
         if self._manager is not None:
             await self._manager.report_primary_auth_failure()
 
+    async def create_highlight_upload_task(
+        self, clip_id: int, *, manager_subject: str
+    ) -> int:
+        if not manager_subject:
+            raise UploadTaskActionRejected('管理员身份不能为空')
+        service = self._highlight_service
+        coordinator = self._coordinator
+        if service is None or coordinator is None:
+            raise UploadTaskActionRejected('高光投稿当前不可用')
+        async with self._session_action_lock:
+            await self._stop_upload_worker()
+            try:
+                session_id = await service.ensure_upload_session(clip_id)
+                return await coordinator.create_highlight_job(session_id)
+            finally:
+                await self._start_upload_worker()
+
     async def run_recording_session_action(
         self, action: str, session_id: int, *, manager_subject: str
     ) -> str:

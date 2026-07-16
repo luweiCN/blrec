@@ -358,3 +358,35 @@ async def test_session_action_maps_manual_danmaku_backfill_to_job_id() -> None:
     runtime._task_actions.request_danmaku_backfill.assert_awaited_once_with(
         9, manager_subject='manager'
     )
+
+
+@pytest.mark.asyncio
+async def test_create_highlight_upload_task_pauses_worker_around_draft_creation() -> (
+    None
+):
+    calls = []
+    runtime = object.__new__(BiliAccountRuntime)
+    runtime._session_action_lock = asyncio.Lock()
+    runtime._highlight_service = SimpleNamespace(
+        ensure_upload_session=AsyncMock(
+            side_effect=lambda clip_id: calls.append(('session', clip_id)) or 12
+        )
+    )
+    runtime._coordinator = SimpleNamespace(
+        create_highlight_job=AsyncMock(
+            side_effect=lambda session_id: calls.append(('job', session_id)) or 9
+        )
+    )
+    runtime._stop_upload_worker = AsyncMock(
+        side_effect=lambda: calls.append(('stop', None))
+    )
+    runtime._start_upload_worker = AsyncMock(
+        side_effect=lambda: calls.append(('start', None))
+    )
+
+    job_id = await runtime.create_highlight_upload_task(
+        3, manager_subject='administrator'
+    )
+
+    assert job_id == 9
+    assert calls == [('stop', None), ('session', 3), ('job', 12), ('start', None)]

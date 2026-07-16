@@ -10,6 +10,7 @@ import pytest
 from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim
 from blrec.bili_upload.errors import RemoteOutcomeUnknown
+from blrec.bili_upload.highlights import HighlightService
 from blrec.bili_upload.upload import UploadCoordinator
 
 
@@ -227,6 +228,104 @@ def coordinator(
         worker_id='test-worker',
         clock=clock,
     )
+
+
+async def seed_ready_highlight(
+    database: BiliUploadDatabase, tmp_path: Path, *, clip_id: int
+) -> int:
+    output_directory = tmp_path / 'highlights' / '100'
+    output_directory.mkdir(parents=True, exist_ok=True)
+    video = output_directory / 'highlight-{}.mp4'.format(clip_id)
+    xml = output_directory / 'highlight-{}.xml'.format(clip_id)
+    video.write_bytes(b'highlight-video')
+    xml.write_text('<i/>', encoding='utf8')
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,name,requested_start_ms,requested_end_ms,'
+        'actual_start_ms,actual_end_ms,output_video_path,output_xml_path,state,'
+        'created_at,updated_at) '
+        "VALUES(?,100,1,?,0,10000,0,10000,?,?,'ready',1000,1000)",
+        (clip_id, '高光 {}'.format(clip_id), str(video), str(xml)),
+    )
+    return await HighlightService(
+        database, recording_root=tmp_path
+    ).ensure_upload_session(clip_id)
+
+
+@pytest.mark.asyncio
+async def test_highlight_creates_paused_single_part_jobs_with_saved_or_default_policy(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        original_paths = await seed_ready_session(database, tmp_path)
+        await database.execute(
+            "UPDATE recording_sessions SET upload_intent='none' WHERE id=1"
+        )
+        clock = MutableClock(1000)
+        worker = coordinator(database, FakeProtocol(), FakeUploader(database), clock)
+
+        first_session_id = await seed_ready_highlight(database, tmp_path, clip_id=1)
+        assert await worker.create_ready_jobs() == []
+        first_job_id = await worker.create_highlight_job(first_session_id)
+        assert await worker.create_highlight_job(first_session_id) == first_job_id
+        first = await database.fetchone(
+            'SELECT job.state,job.operator_paused,job.operator_resume_state,'
+            'session.source_kind FROM upload_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'WHERE job.id=?',
+            (first_job_id,),
+        )
+        assert first is not None
+        assert dict(first) == {
+            'state': 'paused',
+            'operator_paused': 1,
+            'operator_resume_state': 'ready',
+            'source_kind': 'highlight',
+        }
+        first_parts = await database.fetchall(
+            'SELECT part.part_index,part.artifact_state,part.source_path,'
+            'part.final_path,part.xml_path FROM recording_parts part '
+            'WHERE part.session_id=?',
+            (first_session_id,),
+        )
+        assert len(first_parts) == 1
+        assert first_parts[0]['part_index'] == 1
+        assert first_parts[0]['artifact_state'] == 'ready'
+        assert first_parts[0]['source_path'] == first_parts[0]['final_path']
+
+        await database.execute('DELETE FROM room_upload_policies WHERE room_id=100')
+        second_session_id = await seed_ready_highlight(database, tmp_path, clip_id=2)
+        second_job_id = await worker.create_highlight_job(second_session_id)
+        assert second_job_id > first_job_id
+        second_snapshot = json.loads(
+            str(
+                await database.scalar(
+                    'SELECT policy_snapshot_json FROM upload_jobs WHERE id=?',
+                    (second_job_id,),
+                )
+            )
+        )
+        assert second_snapshot['tid'] == 21
+        assert second_snapshot['copyright'] == 2
+        assert second_snapshot['auto_comment'] is True
+        assert second_snapshot['danmaku_backfill'] is True
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM room_upload_policies WHERE room_id=100'
+            )
+            == 0
+        )
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM recording_parts WHERE session_id=1"
+            )
+            == 2
+        )
+        assert all(path.exists() for path in original_paths)
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

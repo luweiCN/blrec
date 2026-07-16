@@ -10,6 +10,7 @@ from liquid import Environment
 from .database import BiliUploadDatabase
 
 __all__ = (
+    'default_room_upload_policy',
     'InvalidRoomUploadPolicy',
     'RoomUploadPolicyCommand',
     'RoomUploadPolicyManager',
@@ -94,6 +95,45 @@ class RoomUploadPolicyView:
     publish_delay_seconds: int = 0
     retention_mode: str = 'submitted'
     retention_days: int = 5
+
+
+def default_room_upload_policy() -> RoomUploadPolicyCommand:
+    return RoomUploadPolicyCommand(
+        account_mode='primary',
+        account_id=None,
+        enabled=True,
+        title_template=(
+            '【直播回放】【{{ anchor_name }}】{{ title }} '
+            '{{ live_start_time | date: "%Y年%m月%d日%H点%M分" }}'
+        ),
+        description_template=(
+            '直播录像\n{{ anchor_name }}直播间：'
+            'https://live.bilibili.com/{{ room_id }}'
+        ),
+        part_title_template=(
+            'P{{ part_index }}-{{ area_name }}-'
+            '{{ live_start_time | date: "%m月%d日%H点%M分" }}'
+        ),
+        dynamic_template=(
+            '直播录像\n{{ anchor_name }}直播间：'
+            'https://live.bilibili.com/{{ room_id }}'
+        ),
+        tid=21,
+        tags='直播回放,{{ anchor_name }},{{ area_name }}',
+        creation_statement_id=-2,
+        original_authorization=False,
+        source='https://live.bilibili.com/{{ room_id }}',
+        is_only_self=False,
+        publish_dynamic=True,
+        up_selection_reply=False,
+        up_close_reply=False,
+        up_close_danmu=False,
+        auto_comment=True,
+        danmaku_backfill=True,
+        filters={},
+        retention_mode='submitted',
+        retention_days=5,
+    )
 
 
 class RoomUploadPolicyManager:

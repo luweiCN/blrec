@@ -1084,6 +1084,92 @@ async def test_session_deletion_rejects_source_used_by_pending_highlight(
 
 
 @pytest.mark.asyncio
+async def test_deleting_highlight_upload_keeps_original_recording(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        original = tmp_path / 'original.flv'
+        output = tmp_path / 'highlight.mp4'
+        xml = tmp_path / 'highlight.xml'
+        original.write_bytes(b'original')
+        output.write_bytes(b'highlight')
+        xml.write_text('<i/>', encoding='utf8')
+        await database.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'账号',X'00',1,'k','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+            "VALUES(1,100,'100:1','closed',1,'live'),"
+            "(2,100,'highlight:1','closed',2,'highlight')"
+        )
+        await database.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            "VALUES('live-run',1,'finished',1,2),"
+            "('highlight-run',2,'finished',2,3)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,final_path,xml_path,'
+            'record_start_time,artifact_state,created_at,updated_at) '
+            "VALUES(1,1,'live-run',1,?,?,NULL,1,'ready',1,1),"
+            "(2,2,'highlight-run',1,?,?,?,2,'ready',2,2)",
+            (str(original), str(original), str(output), str(output), str(xml)),
+        )
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,source_session_id,upload_session_id,name,'
+            'requested_start_ms,requested_end_ms,output_video_path,'
+            'output_xml_path,state,created_at,updated_at) '
+            "VALUES(1,100,1,2,'高光',0,1000,?,?,'ready',1,1)",
+            (str(output), str(xml)),
+        )
+        await database.execute(
+            'INSERT INTO highlight_clip_sources('
+            'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms) '
+            'VALUES(1,1,1,0,1000)'
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'created_at,updated_at) '
+            "VALUES(1,2,1,'{}','paused','prepared',2,2)"
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,final_path,xml_path,'
+            'artifact_state) '
+            "VALUES(1,1,1,?,?,?,'ready')",
+            (str(output), str(output), str(xml)),
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        await manager.delete_session(2, manager_subject='manager')
+
+        assert original.exists()
+        assert not output.exists()
+        assert not xml.exists()
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM recording_sessions WHERE id=1')
+            == 1
+        )
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM recording_parts WHERE id=1')
+            == 1
+        )
+        assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_session_deletion_resumes_after_restart(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
     await database.open()

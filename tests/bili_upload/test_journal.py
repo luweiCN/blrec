@@ -168,6 +168,29 @@ async def test_list_sessions_supports_offset_and_total(database) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_identifies_derived_highlight_media(database) -> None:
+    await database.execute(
+        "INSERT INTO recording_sessions("
+        "id,room_id,broadcast_session_key,state,started_at,source_kind) "
+        "VALUES(1,100,'100:live','closed',1,'live'),"
+        "(2,100,'highlight:7','closed',2,'highlight')"
+    )
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,upload_session_id,name,requested_start_ms,'
+        'requested_end_ms,state,created_at,updated_at) '
+        "VALUES(7,100,1,2,'高光',0,1000,'ready',1,1)"
+    )
+
+    sessions = await RecordingJournalBridge(database).list_sessions(sort_order='oldest')
+
+    assert [(item.source_kind, item.highlight_clip_id) for item in sessions] == [
+        ('live', None),
+        ('highlight', 7),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_sessions_rejects_negative_offset(database) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
 

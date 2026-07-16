@@ -461,6 +461,148 @@ class HighlightService:
         )
         return 'deleted'
 
+    async def ensure_upload_session(self, clip_id: int) -> int:
+        clip = await self.get_clip(clip_id)
+        if clip.upload_session_id is not None:
+            return clip.upload_session_id
+        if clip.state != 'ready' or clip.output_video_path is None:
+            raise ValueError('highlight clip is not ready for upload')
+        video_path = self._owned_highlight_path(clip.output_video_path)
+        if not video_path.is_file() or video_path.stat().st_size <= 0:
+            raise ValueError('highlight clip video is missing')
+        xml_path: Optional[Path] = None
+        if clip.output_xml_path is not None:
+            candidate = self._owned_highlight_path(clip.output_xml_path)
+            if candidate.is_file():
+                xml_path = candidate
+        now = int(self._clock())
+        video_size = video_path.stat().st_size
+        duration_seconds = max(
+            1,
+            int(
+                round(
+                    ((clip.actual_end_ms or 0) - (clip.actual_start_ms or 0)) / 1000.0
+                )
+            ),
+        )
+
+        def create(connection: sqlite3.Connection) -> int:
+            current = connection.execute(
+                'SELECT source_session_id,upload_session_id,state,'
+                'output_video_path,output_xml_path FROM highlight_clips WHERE id=?',
+                (clip_id,),
+            ).fetchone()
+            if current is None:
+                raise ValueError('highlight clip does not exist')
+            if current['upload_session_id'] is not None:
+                return int(current['upload_session_id'])
+            if (
+                str(current['state']) != 'ready'
+                or current['source_session_id'] is None
+                or str(current['output_video_path']) != str(video_path)
+            ):
+                raise ValueError('highlight clip state changed')
+            source = connection.execute(
+                'SELECT room_id,live_start_time,started_at,title,cover_url,'
+                'cover_path,anchor_uid,anchor_name,area_id,area_name,'
+                'parent_area_id,parent_area_name,live_end_time '
+                'FROM recording_sessions WHERE id=? AND source_kind=\'live\'',
+                (int(current['source_session_id']),),
+            ).fetchone()
+            if source is None:
+                raise ValueError('highlight source session does not exist')
+            key = 'highlight:{}'.format(clip_id)
+            existing = connection.execute(
+                'SELECT id FROM recording_sessions WHERE broadcast_session_key=?',
+                (key,),
+            ).fetchone()
+            if existing is None:
+                cursor = connection.execute(
+                    'INSERT INTO recording_sessions('
+                    'room_id,broadcast_session_key,live_start_time,state,started_at,'
+                    'ended_at,title,cover_url,cover_path,anchor_uid,anchor_name,'
+                    'area_id,area_name,parent_area_id,parent_area_name,live_end_time,'
+                    'upload_intent,source_kind) '
+                    "VALUES(?,?,?,'closed',?,?,?,?,?,?,?,?,?,?,?,?,"
+                    "'upload','highlight')",
+                    (
+                        int(source['room_id']),
+                        key,
+                        source['live_start_time'],
+                        now,
+                        now,
+                        clip.name,
+                        str(source['cover_url']),
+                        source['cover_path'],
+                        source['anchor_uid'],
+                        str(source['anchor_name']),
+                        source['area_id'],
+                        str(source['area_name']),
+                        source['parent_area_id'],
+                        str(source['parent_area_name']),
+                        source['live_end_time'],
+                    ),
+                )
+                session_id = int(cursor.lastrowid)
+                run_id = 'highlight:{}'.format(clip_id)
+                connection.execute(
+                    'INSERT INTO recording_runs('
+                    'id,session_id,state,started_at,ended_at) '
+                    "VALUES(?,?,'finished',?,?)",
+                    (run_id, session_id, now, now),
+                )
+                record_start_time = int(source['started_at']) + int(
+                    (clip.actual_start_ms or 0) / 1000
+                )
+                connection.execute(
+                    'INSERT INTO recording_parts('
+                    'session_id,run_id,part_index,source_path,final_path,xml_path,'
+                    'record_start_time,record_end_time,record_duration_seconds,'
+                    'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
+                    'created_at,updated_at) '
+                    "VALUES(?,?,1,?,?,?,?,?,?,?,?, 'ready',?,?,?)",
+                    (
+                        session_id,
+                        run_id,
+                        str(video_path),
+                        str(video_path),
+                        None if xml_path is None else str(xml_path),
+                        record_start_time,
+                        record_start_time + duration_seconds,
+                        duration_seconds,
+                        video_size,
+                        0,
+                        int(xml_path is not None),
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                session_id = int(existing['id'])
+                valid = connection.execute(
+                    "SELECT 1 FROM recording_sessions WHERE id=? "
+                    "AND source_kind='highlight'",
+                    (session_id,),
+                ).fetchone()
+                if valid is None:
+                    raise ValueError('highlight upload session key conflicts')
+            connection.execute(
+                'UPDATE highlight_clips SET upload_session_id=?,updated_at=? '
+                'WHERE id=? AND upload_session_id IS NULL',
+                (session_id, now, clip_id),
+            )
+            return session_id
+
+        session_id = await self._database.write(create)
+        audit(
+            'highlight_upload_session_created',
+            clip_id=clip_id,
+            session_id=session_id,
+            room_id=clip.room_id,
+            result='ready_for_draft',
+        )
+        return session_id
+
     async def timeline(
         self, session_id: int, active_durations_ms: Mapping[int, int]
     ) -> HighlightTimeline:

@@ -35,6 +35,7 @@ from .errors import (
     ProtocolContractError,
     RemoteOutcomeUnknown,
 )
+from .policies import RoomUploadPolicyCommand, default_room_upload_policy
 from .upos import FileIdentity, UposUploader, UposUploadPaused, UposUploadStopped
 
 __all__ = ('InvalidUploadPolicy', 'UploadCoordinator')
@@ -125,6 +126,7 @@ class UploadCoordinator:
             'ELSE (SELECT primary_account_id FROM bili_account_selection '
             'WHERE id=1) END '
             "WHERE session.state='closed' "
+            "AND session.source_kind='live' "
             "AND session.deletion_state='none' "
             "AND session.upload_intent IN ('auto','upload') "
             "AND account.state='active' "
@@ -140,6 +142,22 @@ class UploadCoordinator:
             if job_id is not None:
                 created.append(job_id)
         return created
+
+    async def create_highlight_job(self, session_id: int) -> int:
+        row, has_saved_policy = await self._highlight_candidate(session_id)
+        job_id = await self._create_candidate(
+            row,
+            initial_state='paused',
+            operator_paused=True,
+            operator_resume_state='ready',
+            required_source_kind='highlight',
+            require_saved_policy=has_saved_policy,
+            require_stability=False,
+            return_existing=True,
+        )
+        if job_id is None:
+            raise InvalidUploadPolicy('highlight upload draft could not be created')
+        return job_id
 
     async def run_once(self) -> Optional[int]:
         if self._stop_requested():
@@ -217,7 +235,18 @@ class UploadCoordinator:
                 video['cid'] = cid
         return payload
 
-    async def _create_candidate(self, row: sqlite3.Row) -> Optional[int]:
+    async def _create_candidate(
+        self,
+        row: Any,
+        *,
+        initial_state: str = 'ready',
+        operator_paused: bool = False,
+        operator_resume_state: Optional[str] = None,
+        required_source_kind: str = 'live',
+        require_saved_policy: bool = True,
+        require_stability: bool = True,
+        return_existing: bool = False,
+    ) -> Optional[int]:
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path,final_path,xml_path,'
             'artifact_state,updated_at FROM recording_parts '
@@ -239,7 +268,7 @@ class UploadCoordinator:
             stable_before_ns = int(
                 (self._clock() - self._stability_seconds) * 1_000_000_000
             )
-            if identity.mtime_ns > stable_before_ns:
+            if require_stability and identity.mtime_ns > stable_before_ns:
                 return None
             parts.append(
                 _CandidatePart(
@@ -270,25 +299,37 @@ class UploadCoordinator:
                 (int(row['session_id']),),
             ).fetchone()
             if existing is not None:
-                return None
+                return int(existing['id']) if return_existing else None
             session = connection.execute(
-                'SELECT state FROM recording_sessions WHERE id=?',
+                'SELECT state,source_kind FROM recording_sessions WHERE id=?',
                 (int(row['session_id']),),
             ).fetchone()
-            if session is None or str(session['state']) != 'closed':
+            if (
+                session is None
+                or str(session['state']) != 'closed'
+                or str(session['source_kind']) != required_source_kind
+            ):
                 return None
             policy = connection.execute(
                 'SELECT account_mode,account_id,updated_at '
                 'FROM room_upload_policies WHERE room_id=?',
                 (int(row['room_id']),),
             ).fetchone()
-            if policy is None or int(policy['updated_at']) != int(
-                row['policy_updated_at']
-            ):
-                return None
+            if require_saved_policy:
+                if policy is None or int(policy['updated_at']) != int(
+                    row['policy_updated_at']
+                ):
+                    return None
+                account_mode = str(policy['account_mode'])
+                policy_account_id = policy['account_id']
+            else:
+                if policy is not None:
+                    return None
+                account_mode = str(row['account_mode'])
+                policy_account_id = row['account_id']
             resolved_account_id = int(row['resolved_account_id'])
-            if str(policy['account_mode']) == 'fixed':
-                current_account_id = policy['account_id']
+            if account_mode == 'fixed':
+                current_account_id = policy_account_id
             else:
                 selected = connection.execute(
                     'SELECT primary_account_id FROM bili_account_selection '
@@ -345,12 +386,14 @@ class UploadCoordinator:
                 'INSERT INTO upload_jobs('
                 'session_id,account_id,policy_snapshot_json,state,submit_state,'
                 'comment_branch_state,danmaku_branch_state,'
-                'collection_branch_state,created_at,updated_at) '
-                'VALUES(?,?,?,\'ready\',\'prepared\',?,?,?,?,?)',
+                'collection_branch_state,operator_paused,operator_resume_state,'
+                'created_at,updated_at) '
+                "VALUES(?,?,?,?,'prepared',?,?,?,?,?,?,?)",
                 (
                     int(row['session_id']),
                     resolved_account_id,
                     snapshot_json,
+                    initial_state,
                     'pending' if bool(row['auto_comment']) else 'disabled',
                     'pending' if bool(row['danmaku_backfill']) else 'disabled',
                     (
@@ -358,6 +401,8 @@ class UploadCoordinator:
                         if row['collection_section_id'] is not None
                         else 'disabled'
                     ),
+                    int(operator_paused),
+                    operator_resume_state,
                     now,
                     now,
                 ),
@@ -401,6 +446,113 @@ class UploadCoordinator:
                 publish_delay_seconds=snapshot['publish_delay_seconds'],
             )
         return job_id
+
+    async def _highlight_candidate(self, session_id: int) -> Tuple[Any, bool]:
+        policy_exists = bool(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM room_upload_policies policy '
+                'JOIN recording_sessions session ON session.room_id=policy.room_id '
+                'WHERE session.id=?',
+                (session_id,),
+            )
+        )
+        if policy_exists:
+            row = await self._database.fetchone(
+                'SELECT session.id AS session_id,session.room_id,'
+                'session.broadcast_session_key,session.live_start_time,'
+                'session.live_end_time,session.title,session.cover_url,'
+                'session.cover_path,session.anchor_uid,session.anchor_name,'
+                'session.area_id,session.area_name,session.parent_area_id,'
+                'session.parent_area_name,policy.account_mode,policy.account_id,'
+                'policy.title_template,policy.description_template,'
+                'policy.part_title_template,policy.dynamic_template,policy.tid,'
+                'policy.tags,policy.creation_statement_id,'
+                'policy.original_authorization,policy.copyright,policy.source,'
+                'policy.is_only_self,policy.publish_dynamic,policy.no_reprint,'
+                'policy.up_selection_reply,policy.up_close_reply,'
+                'policy.up_close_danmu,policy.auto_comment,'
+                'policy.danmaku_backfill,policy.filter_json,'
+                'policy.collection_season_id,policy.collection_section_id,'
+                'policy.cover_mode,policy.cover_asset_id,'
+                'policy.publish_delay_seconds,policy.updated_at AS policy_updated_at,'
+                'account.id AS resolved_account_id,'
+                'account.uid AS resolved_account_uid,'
+                'account.credential_version AS credential_version '
+                'FROM recording_sessions session '
+                'JOIN room_upload_policies policy ON policy.room_id=session.room_id '
+                'JOIN bili_accounts account ON account.id=CASE '
+                "WHEN policy.account_mode='fixed' THEN policy.account_id "
+                'ELSE (SELECT primary_account_id FROM bili_account_selection '
+                'WHERE id=1) END '
+                "WHERE session.id=? AND session.state='closed' "
+                "AND session.source_kind='highlight' AND account.state='active'",
+                (session_id,),
+            )
+            if row is None:
+                raise InvalidUploadPolicy('highlight upload account is unavailable')
+            return row, True
+
+        session = await self._database.fetchone(
+            'SELECT id AS session_id,room_id,broadcast_session_key,'
+            'live_start_time,live_end_time,title,cover_url,cover_path,anchor_uid,'
+            'anchor_name,area_id,area_name,parent_area_id,parent_area_name '
+            "FROM recording_sessions WHERE id=? AND state='closed' "
+            "AND source_kind='highlight'",
+            (session_id,),
+        )
+        account = await self._database.fetchone(
+            'SELECT account.id,account.uid,account.credential_version '
+            'FROM bili_account_selection selection JOIN bili_accounts account '
+            'ON account.id=selection.primary_account_id '
+            "WHERE selection.id=1 AND account.state='active'"
+        )
+        if session is None:
+            raise InvalidUploadPolicy('highlight upload session does not exist')
+        if account is None:
+            raise InvalidUploadPolicy('highlight upload account is unavailable')
+        command = default_room_upload_policy()
+        return self._default_candidate(session, account, command), False
+
+    @staticmethod
+    def _default_candidate(
+        session: sqlite3.Row, account: sqlite3.Row, command: RoomUploadPolicyCommand
+    ) -> Dict[str, Any]:
+        row: Dict[str, Any] = dict(session)
+        row.update(
+            {
+                'account_mode': command.account_mode,
+                'account_id': command.account_id,
+                'title_template': command.title_template,
+                'description_template': command.description_template,
+                'part_title_template': command.part_title_template,
+                'dynamic_template': command.dynamic_template,
+                'tid': command.tid,
+                'tags': command.tags,
+                'creation_statement_id': command.creation_statement_id,
+                'original_authorization': int(command.original_authorization),
+                'copyright': 2,
+                'source': command.source,
+                'is_only_self': int(command.is_only_self),
+                'publish_dynamic': int(command.publish_dynamic),
+                'no_reprint': 0,
+                'up_selection_reply': int(command.up_selection_reply),
+                'up_close_reply': int(command.up_close_reply),
+                'up_close_danmu': int(command.up_close_danmu),
+                'auto_comment': int(command.auto_comment),
+                'danmaku_backfill': int(command.danmaku_backfill),
+                'filter_json': json.dumps(dict(command.filters)),
+                'collection_season_id': command.collection_season_id,
+                'collection_section_id': command.collection_section_id,
+                'cover_mode': command.cover_mode,
+                'cover_asset_id': command.cover_asset_id,
+                'publish_delay_seconds': command.publish_delay_seconds,
+                'policy_updated_at': None,
+                'resolved_account_id': int(account['id']),
+                'resolved_account_uid': int(account['uid']),
+                'credential_version': int(account['credential_version']),
+            }
+        )
+        return row
 
     def _policy_snapshot(
         self, row: sqlite3.Row, parts: List[_CandidatePart]
