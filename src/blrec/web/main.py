@@ -43,6 +43,7 @@ from .routers import (
     auth,
     bili_accounts,
     bili_collections,
+    browser_extension,
     highlights,
     live_status,
     network,
@@ -245,6 +246,11 @@ highlights.worker = None
 highlights.upload_task_creator = None
 highlights.active_durations_provider = _active_highlight_durations
 highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
+browser_extension.application = app
+browser_extension.highlight_service = None
+browser_extension.policy_manager = None
+browser_extension.category_catalog = None
+browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
 network.manager = _network_route_manager
 
 _dependencies = [Depends(security.authenticate)]
@@ -319,6 +325,7 @@ async def on_startup() -> None:
     auth.configure(_admin_auth_store, bootstrap_api_key=_env_settings.api_key or '')
     application_launched = False
     try:
+        browser_extension.application = app
         await _bili_account_runtime.start()
         bili_accounts.manager = _bili_account_runtime.manager
         bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -349,6 +356,10 @@ async def on_startup() -> None:
             _bili_account_runtime.create_highlight_upload_task
         )
         highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
+        browser_extension.highlight_service = _bili_account_runtime.highlight_service
+        browser_extension.policy_manager = _bili_account_runtime.policy_manager
+        browser_extension.category_catalog = _bili_account_runtime.category_catalog
+        browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
         await app.launch()
         application_launched = True
         _application_started = True
@@ -371,6 +382,7 @@ async def on_startup() -> None:
         highlights.service = None
         highlights.worker = None
         highlights.upload_task_creator = None
+        browser_extension.reset()
         try:
             if application_launched:
                 await app.exit()
@@ -398,6 +410,7 @@ async def on_shuntdown() -> None:
     highlights.service = None
     highlights.worker = None
     highlights.upload_task_creator = None
+    browser_extension.reset()
     try:
         await app.exit()
     finally:
@@ -434,6 +447,7 @@ api.include_router(room_upload_policies.router, prefix='/api/v1')
 api.include_router(upload_covers.router, prefix='/api/v1')
 api.include_router(bili_collections.router, prefix='/api/v1')
 api.include_router(highlights.router, prefix='/api/v1')
+api.include_router(browser_extension.router, prefix='/api/v1')
 
 
 class WebAppFiles(StaticFiles):

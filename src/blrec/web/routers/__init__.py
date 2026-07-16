@@ -1,6 +1,7 @@
 from . import (
     bili_accounts,
     bili_collections,
+    browser_extension,
     highlights,
     live_status,
     recording_retention,
@@ -12,6 +13,7 @@ from . import (
 __all__ = (
     'bili_accounts',
     'bili_collections',
+    'browser_extension',
     'highlights',
     'live_status',
     'recording_sessions',

@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import Header, Request, status
 from fastapi.exceptions import HTTPException
 
-from .auth_store import AdminAuthStore
+from .auth_store import AdminAuthStore, ExtensionIdentity
 
 api_key = ''
 auth_store: Optional[AdminAuthStore] = None
@@ -114,7 +114,11 @@ async def authenticate(
     if auth_store is None:
         await _legacy_test_authenticate(request, x_api_key)
         return
-    if request.method == 'OPTIONS' or request.url.path in _PUBLIC_AUTH_PATHS:
+    if (
+        request.method == 'OPTIONS'
+        or request.url.path in _PUBLIC_AUTH_PATHS
+        or request.url.path.startswith('/api/v1/browser-extension/')
+    ):
         return
     if _valid_signed_media_request(request):
         return
@@ -135,6 +139,21 @@ async def authenticate(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail='CSRF token is invalid'
             )
+
+
+def authenticated_extension(request: Request) -> ExtensionIdentity:
+    if auth_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='浏览器插件授权不可用',
+        )
+    token = request.headers.get('x-blrec-extension-token', '')
+    identity = auth_store.authenticate_extension(token)
+    if identity is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail='浏览器插件授权无效'
+        )
+    return identity
 
 
 def _media_signing_key() -> bytes:
