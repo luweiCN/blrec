@@ -13,6 +13,7 @@
 ## 功能
 
 - 自动完成直播录制
+- 支持浏览器插件一键收录直播间、标记高光并无损裁剪投稿
 - 同步保存弹幕
 - 自动修复时间戳问题：跳变、反跳等。
 - 直播流参数改变自动分割文件，避免出现花屏等问题。
@@ -80,6 +81,8 @@
 Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.4`](https://github.com/luweicn/blrec/pkgs/container/blrec)。请仅使用仓库中的 `compose.synology.yml` 部署；首次安装、凭据密钥初始化、升级与回滚步骤见 [群晖双网络部署](docs/operations/synology-multi-network.md)。
 
 ## 使用方法
+
+浏览器高光助手的安装、连接和撤销授权步骤见 [插件说明](browser-extension/README.md)。
 
 ### 命令行参数用法
 

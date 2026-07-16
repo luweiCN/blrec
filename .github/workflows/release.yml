@@ -32,6 +32,37 @@ jobs:
           test "$version" = "$package_version"
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Node.js for extension
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: browser-extension/package-lock.json
+
+      - name: Build browser extension release asset
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          manifest_version="$(python - "$version" <<'PY'
+          import re
+          import sys
+
+          value = sys.argv[1]
+          match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?', value)
+          if match is None:
+              raise SystemExit('unsupported extension version: ' + value)
+          parts = [match.group(1), match.group(2), match.group(3)]
+          if match.group(4) is not None:
+              parts.append(match.group(4))
+          print('.'.join(parts))
+          PY
+          )"
+          cd browser-extension
+          npm ci
+          BLREC_EXTENSION_VERSION="$manifest_version" npm run build
+          cd dist
+          zip -r "../../blrec-highlight-extension-${{ steps.version.outputs.value }}.zip" .
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -82,6 +113,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             compose.synology.yml synology.env.example \
+            "blrec-highlight-extension-${{ steps.version.outputs.value }}.zip" \
             --verify-tag \
             --prerelease \
             --title "BLREC ${{ steps.version.outputs.value }}" \
