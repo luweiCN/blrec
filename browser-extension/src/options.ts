@@ -10,6 +10,15 @@ const backendInput = document.querySelector<HTMLInputElement>('#backend-url');
 const usernameInput = document.querySelector<HTMLInputElement>('#username');
 const statusElement = document.querySelector<HTMLElement>('#connection-status');
 const submitButton = document.querySelector<HTMLButtonElement>('#connect');
+const setupPanel = document.querySelector<HTMLElement>('#setup-panel');
+const connectedPanel = document.querySelector<HTMLElement>('#connected-panel');
+const connectedBackend = document.querySelector<HTMLElement>(
+  '#connected-backend'
+);
+const connectedUsername = document.querySelector<HTMLElement>(
+  '#connected-username'
+);
+const editButton = document.querySelector<HTMLButtonElement>('#edit-connection');
 
 function setStatus(message: string, state: 'idle' | 'success' | 'error'): void {
   if (!statusElement) {
@@ -17,6 +26,32 @@ function setStatus(message: string, state: 'idle' | 'success' | 'error'): void {
   }
   statusElement.textContent = message;
   statusElement.dataset['state'] = state;
+}
+
+function showForm(message = '', state: 'idle' | 'error' = 'idle'): void {
+  if (setupPanel) {
+    setupPanel.hidden = false;
+  }
+  if (connectedPanel) {
+    connectedPanel.hidden = true;
+  }
+  setStatus(message, state);
+}
+
+function showConnected(backendUrl: string, username: string): void {
+  if (connectedBackend) {
+    connectedBackend.textContent = backendUrl;
+  }
+  if (connectedUsername) {
+    connectedUsername.textContent = username;
+  }
+  if (setupPanel) {
+    setupPanel.hidden = true;
+  }
+  if (connectedPanel) {
+    connectedPanel.hidden = false;
+  }
+  setStatus('', 'success');
 }
 
 async function initialize(): Promise<void> {
@@ -28,14 +63,27 @@ async function initialize(): Promise<void> {
     usernameInput.value = settings.username;
   }
   if (settings.token) {
-    setStatus('已连接 BLREC', 'success');
+    setStatus('正在检查连接…', 'idle');
+    const response = (await chrome.runtime.sendMessage({
+      type: 'ROOM_STATUS',
+      roomId: 0,
+    })) as BackgroundResponse;
+    if (response.ok) {
+      showConnected(settings.backendUrl, settings.username);
+      return;
+    }
+    showForm(`连接已失效：${response.message}`, 'error');
+    return;
   }
+  showForm();
 }
 
 form?.addEventListener('submit', (event) => {
   event.preventDefault();
   void connect();
 });
+
+editButton?.addEventListener('click', () => showForm());
 
 async function connect(): Promise<void> {
   if (!backendInput || !usernameInput) {
@@ -61,7 +109,7 @@ async function connect(): Promise<void> {
     }
     backendInput.value = backendUrl;
     usernameInput.value = username;
-    setStatus('连接成功', 'success');
+    showConnected(backendUrl, username);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '连接失败', 'error');
   } finally {
