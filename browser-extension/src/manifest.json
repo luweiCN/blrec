@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "BLREC 高光助手",
+  "version": "0.1.0",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["https://live.bilibili.com/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://live.bilibili.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
