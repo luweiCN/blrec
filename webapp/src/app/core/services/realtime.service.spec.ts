@@ -55,13 +55,20 @@ describe('RealtimeService', () => {
     const firstSubscription = service.events$.subscribe(first);
     const secondSubscription = service.events$.subscribe(second);
     source.emit('tasks', { tasks: [{ roomId: 1 }] });
+    source.emit('highlight_progress', {
+      clips: [{ id: 3, state: 'processing' }],
+    });
 
     expect(factory).toHaveBeenCalledOnceWith('/api/v1/realtime');
     expect(first).toHaveBeenCalledWith({
       type: 'tasks',
       data: { tasks: [{ roomId: 1 }] },
     });
-    expect(second).toHaveBeenCalledTimes(1);
+    expect(first).toHaveBeenCalledWith({
+      type: 'highlight_progress',
+      data: { clips: [{ id: 3, state: 'processing' }] },
+    });
+    expect(second).toHaveBeenCalledTimes(2);
 
     firstSubscription.unsubscribe();
     expect(source.close).not.toHaveBeenCalled();

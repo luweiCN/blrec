@@ -24,6 +24,7 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
+import { HighlightEditorComponent } from './highlight-editor/highlight-editor.component';
 import { PartDanmakuDialogComponent } from './part-danmaku-dialog/part-danmaku-dialog.component';
 import { PartVideoDialogComponent } from './part-video-dialog/part-video-dialog.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
@@ -37,6 +38,7 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
     PartDanmakuDialogComponent,
     PartVideoDialogComponent,
     TaskEditDialogComponent,
+    HighlightEditorComponent,
   ],
   imports: [
     CommonModule,

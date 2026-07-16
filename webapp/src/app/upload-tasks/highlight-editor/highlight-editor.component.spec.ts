@@ -1,0 +1,309 @@
+import { CommonModule } from '@angular/common';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { FormsModule } from '@angular/forms';
+import { ActivatedRoute } from '@angular/router';
+import { RouterTestingModule } from '@angular/router/testing';
+
+import { of, Subject } from 'rxjs';
+
+import {
+  RealtimeEvent,
+  RealtimeService,
+} from 'src/app/core/services/realtime.service';
+import { PartPlayer, PartPlayerFactory } from '../part-video-dialog/part-player.factory';
+import {
+  HighlightClip,
+  HighlightClipInspection,
+  HighlightTimeline,
+} from '../shared/highlight.model';
+import { HighlightService } from '../shared/highlight.service';
+import { RecordingSessionService } from '../shared/recording-session.service';
+import { HighlightEditorComponent } from './highlight-editor.component';
+
+describe('HighlightEditorComponent', () => {
+  let fixture: ComponentFixture<HighlightEditorComponent>;
+  let component: HighlightEditorComponent;
+  let highlights: jasmine.SpyObj<HighlightService>;
+  let recordings: jasmine.SpyObj<RecordingSessionService>;
+  let playerFactory: jasmine.SpyObj<PartPlayerFactory>;
+  let player: jasmine.SpyObj<PartPlayer>;
+  let realtime: Subject<RealtimeEvent>;
+
+  const timeline: HighlightTimeline = {
+    sessionId: 9,
+    roomId: 100,
+    durationMs: 180_000,
+    stableEndMs: 170_000,
+    parts: [
+      {
+        partId: 11,
+        partIndex: 1,
+        timelineStartMs: 0,
+        durationMs: 90_000,
+        stableEndMs: 90_000,
+        recording: false,
+        mediaKind: 'flv',
+      },
+      {
+        partId: 12,
+        partIndex: 2,
+        timelineStartMs: 90_000,
+        durationMs: 90_000,
+        stableEndMs: 80_000,
+        recording: true,
+        mediaKind: 'flv',
+      },
+    ],
+    markers: [
+      {
+        marker: {
+          id: 7,
+          roomId: 100,
+          observedAtMs: 1_100_000,
+          playerDelayMs: 0,
+          contentAtMs: 1_100_000,
+          title: '直播标题',
+          anchorName: '主播',
+          name: '精彩操作',
+          note: '',
+          source: 'browser_extension',
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        partId: 12,
+        localOffsetMs: 25_000,
+        timelineOffsetMs: 115_000,
+      },
+    ],
+  };
+
+  const inspection: HighlightClipInspection = {
+    requestedStartMs: 110_000,
+    requestedEndMs: 130_000,
+    actualStartMs: 98_000,
+    actualEndMs: 130_000,
+    extraLeadMs: 12_000,
+    confirmationRequired: true,
+    compatible: true,
+    sources: [
+      {
+        partId: 12,
+        actualStartMs: 8_000,
+        actualEndMs: 40_000,
+        outputOffsetMs: 0,
+      },
+    ],
+  };
+
+  const processingClip: HighlightClip = {
+    id: 3,
+    markerId: 7,
+    roomId: 100,
+    sourceSessionId: 9,
+    uploadSessionId: null,
+    name: '精彩操作',
+    requestedStartMs: 110_000,
+    requestedEndMs: 130_000,
+    actualStartMs: 98_000,
+    actualEndMs: 130_000,
+    outputVideoPath: null,
+    outputXmlPath: null,
+    state: 'processing',
+    confirmationRequired: true,
+    confirmed: true,
+    errorMessage: null,
+    attempt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    sources: [],
+  };
+
+  beforeEach(async () => {
+    highlights = jasmine.createSpyObj<HighlightService>('HighlightService', [
+      'getTimeline',
+      'inspectClip',
+      'createClip',
+      'getClip',
+      'deleteClip',
+      'createUploadTask',
+      'updateMarker',
+      'deleteMarker',
+    ]);
+    highlights.getTimeline.and.returnValue(of(timeline));
+    highlights.inspectClip.and.returnValue(of(inspection));
+    highlights.createClip.and.returnValue(of(processingClip));
+    highlights.getClip.and.returnValue(
+      of({
+        ...processingClip,
+        state: 'ready',
+        outputVideoPath: '/rec/highlight-3.mp4',
+      })
+    );
+    highlights.updateMarker.and.callFake((id, name, note) =>
+      of({ ...timeline.markers[0].marker, id, name, note })
+    );
+    highlights.deleteMarker.and.returnValue(of(void 0));
+    highlights.createUploadTask.and.returnValue(of({ jobId: 44 }));
+
+    recordings = jasmine.createSpyObj<RecordingSessionService>(
+      'RecordingSessionService',
+      ['createMediaAccess', 'mediaUrl']
+    );
+    recordings.createMediaAccess.and.returnValue(
+      of({
+        token: 'signed',
+        expiresAt: 123,
+        snapshotId: 'snapshot',
+        durationMs: 80_000,
+        fileSizeBytes: 2048,
+        recording: true,
+      })
+    );
+    recordings.mediaUrl.and.callFake((partId) => `/media/${partId}`);
+
+    player = jasmine.createSpyObj<PartPlayer>('PartPlayer', [
+      'pause',
+      'unload',
+      'detachMediaElement',
+      'destroy',
+    ]);
+    playerFactory = jasmine.createSpyObj<PartPlayerFactory>(
+      'PartPlayerFactory',
+      ['attachFlv']
+    );
+    playerFactory.attachFlv.and.returnValue(player);
+    realtime = new Subject<RealtimeEvent>();
+
+    await TestBed.configureTestingModule({
+      declarations: [HighlightEditorComponent],
+      imports: [CommonModule, FormsModule, RouterTestingModule],
+      providers: [
+        { provide: HighlightService, useValue: highlights },
+        { provide: RecordingSessionService, useValue: recordings },
+        { provide: PartPlayerFactory, useValue: playerFactory },
+        { provide: RealtimeService, useValue: { events$: realtime } },
+        {
+          provide: ActivatedRoute,
+          useValue: {
+            snapshot: { paramMap: { get: () => '9' } },
+          },
+        },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(HighlightEditorComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  it('switches to the marker part and seeks to its local position', () => {
+    component.selectMarker(timeline.markers[0]);
+    fixture.detectChanges();
+
+    expect(component.selectedPart?.partId).toBe(12);
+    expect(component.playheadMs).toBe(115_000);
+    expect(recordings.createMediaAccess).toHaveBeenCalledWith(12);
+    expect(component.selectedMarkerId).toBe(7);
+  });
+
+  it('blocks a range that reaches beyond the stable recording boundary', () => {
+    component.startMs = 160_000;
+    component.endMs = 175_000;
+    component.selectionChanged();
+    fixture.detectChanges();
+
+    const create = fixture.nativeElement.querySelector(
+      '[data-testid="inspect-clip"]'
+    ) as HTMLButtonElement;
+    expect(create.disabled).toBeTrue();
+    expect(fixture.nativeElement.textContent).toContain(
+      '结束位置仍在录制安全区之外'
+    );
+  });
+
+  it('shows selected and actual ranges and requires keyframe confirmation', () => {
+    component.startMs = 110_000;
+    component.endMs = 130_000;
+    component.selectionChanged();
+    component.inspectSelection();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('选择范围 01:50–02:10');
+    expect(fixture.nativeElement.textContent).toContain('实际范围 01:38–02:10');
+    const confirm = fixture.nativeElement.querySelector(
+      '[data-testid="confirm-keyframe"]'
+    ) as HTMLInputElement;
+    expect(confirm).not.toBeNull();
+    expect(
+      (fixture.nativeElement.querySelector(
+        '[data-testid="create-clip"]'
+      ) as HTMLButtonElement).disabled
+    ).toBeTrue();
+
+    component.confirmKeyframe = true;
+    component.createClip();
+
+    expect(highlights.createClip).toHaveBeenCalledWith(9, {
+      markerId: null,
+      name: '高光片段 01:50',
+      startMs: 110_000,
+      endMs: 130_000,
+      confirmKeyframe: true,
+    });
+  });
+
+  it('updates the active clip from the shared realtime stream', () => {
+    component.startMs = 110_000;
+    component.endMs = 130_000;
+    component.selectionChanged();
+    component.inspectSelection();
+    component.confirmKeyframe = true;
+    component.createClip();
+
+    realtime.next({
+      type: 'highlight_progress',
+      data: {
+        clips: [
+          {
+            id: 3,
+            roomId: 100,
+            name: '精彩操作',
+            state: 'ready',
+            attempt: 1,
+            errorMessage: null,
+            updatedAt: 2,
+          },
+        ],
+      },
+    });
+
+    expect(highlights.getClip).toHaveBeenCalledOnceWith(3);
+    expect(component.clip?.state).toBe('ready');
+  });
+
+  it('renames and deletes a marker without changing the clip range', () => {
+    component.beginMarkerEdit(timeline.markers[0]);
+    component.markerName = '新的名称';
+    component.markerNote = '备注';
+    component.saveMarker();
+
+    expect(highlights.updateMarker).toHaveBeenCalledWith(
+      7,
+      '新的名称',
+      '备注'
+    );
+
+    component.deleteMarker(timeline.markers[0]);
+    expect(highlights.deleteMarker).toHaveBeenCalledOnceWith(7);
+    expect(component.timeline?.markers.length).toBe(0);
+  });
+
+  it('destroys the FLV player with the page', () => {
+    fixture.destroy();
+
+    expect(player.pause).toHaveBeenCalled();
+    expect(player.unload).toHaveBeenCalled();
+    expect(player.detachMediaElement).toHaveBeenCalled();
+    expect(player.destroy).toHaveBeenCalled();
+  });
+});

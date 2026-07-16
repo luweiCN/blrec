@@ -178,6 +178,7 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     timeline = client.get('/api/v1/highlights/sessions/9/timeline', headers=auth())
     assert timeline.status_code == 200
     assert timeline.json()['parts'][0]['stableEndMs'] == 110_000
+    assert timeline.json()['parts'][0]['mediaKind'] == 'flv'
     assert timeline.json()['markers'][0]['timelineOffsetMs'] == 80_000
 
     inspected = client.post(

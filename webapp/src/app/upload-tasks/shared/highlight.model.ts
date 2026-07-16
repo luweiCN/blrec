@@ -1,0 +1,123 @@
+export interface HighlightMarker {
+  readonly id: number;
+  readonly roomId: number;
+  readonly observedAtMs: number;
+  readonly playerDelayMs: number;
+  readonly contentAtMs: number;
+  readonly title: string;
+  readonly anchorName: string;
+  readonly name: string;
+  readonly note: string;
+  readonly source: 'web' | 'browser_extension';
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface HighlightTimelinePart {
+  readonly partId: number;
+  readonly partIndex: number;
+  readonly timelineStartMs: number;
+  readonly durationMs: number;
+  readonly stableEndMs: number;
+  readonly recording: boolean;
+  readonly mediaKind: 'flv' | 'native';
+}
+
+export interface MappedHighlight {
+  readonly marker: HighlightMarker;
+  readonly partId: number;
+  readonly localOffsetMs: number;
+  readonly timelineOffsetMs: number;
+}
+
+export interface HighlightTimeline {
+  readonly sessionId: number;
+  readonly roomId: number;
+  readonly durationMs: number;
+  readonly stableEndMs: number;
+  readonly parts: readonly HighlightTimelinePart[];
+  readonly markers: readonly MappedHighlight[];
+}
+
+export interface HighlightClipInspectionSource {
+  readonly partId: number;
+  readonly actualStartMs: number;
+  readonly actualEndMs: number;
+  readonly outputOffsetMs: number;
+}
+
+export interface HighlightClipInspection {
+  readonly requestedStartMs: number;
+  readonly requestedEndMs: number;
+  readonly actualStartMs: number;
+  readonly actualEndMs: number;
+  readonly extraLeadMs: number;
+  readonly confirmationRequired: boolean;
+  readonly compatible: boolean;
+  readonly sources: readonly HighlightClipInspectionSource[];
+}
+
+export type HighlightClipState =
+  | 'queued'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  | 'cancelled';
+
+export interface HighlightClipSource {
+  readonly partId: number;
+  readonly ordinal: number;
+  readonly requestedStartMs: number;
+  readonly requestedEndMs: number;
+  readonly actualStartMs: number | null;
+  readonly actualEndMs: number | null;
+}
+
+export interface HighlightClip {
+  readonly id: number;
+  readonly markerId: number | null;
+  readonly roomId: number;
+  readonly sourceSessionId: number | null;
+  readonly uploadSessionId: number | null;
+  readonly name: string;
+  readonly requestedStartMs: number;
+  readonly requestedEndMs: number;
+  readonly actualStartMs: number | null;
+  readonly actualEndMs: number | null;
+  readonly outputVideoPath: string | null;
+  readonly outputXmlPath: string | null;
+  readonly state: HighlightClipState;
+  readonly confirmationRequired: boolean;
+  readonly confirmed: boolean;
+  readonly errorMessage: string | null;
+  readonly attempt: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly sources: readonly HighlightClipSource[];
+}
+
+export interface CreateHighlightClipRequest {
+  readonly markerId: number | null;
+  readonly name: string;
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly confirmKeyframe: boolean;
+}
+
+export interface HighlightUploadTaskResponse {
+  readonly jobId: number;
+}
+
+export interface HighlightProgressItem {
+  readonly id: number;
+  readonly roomId: number;
+  readonly name: string;
+  readonly state: HighlightClipState;
+  readonly attempt: number;
+  readonly errorMessage: string | null;
+  readonly updatedAt: number;
+}
+
+export interface HighlightProgressEvent {
+  readonly clips: readonly HighlightProgressItem[];
+}

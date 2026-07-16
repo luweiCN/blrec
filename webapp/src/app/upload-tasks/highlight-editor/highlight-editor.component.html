@@ -1,0 +1,273 @@
+<main class="highlight-editor primary-page">
+  <header class="page-header">
+    <div>
+      <a routerLink="/upload-tasks">← 返回上传任务</a>
+      <h1>高光剪辑</h1>
+    </div>
+    <button type="button" class="secondary-button" (click)="refreshTimeline()">
+      刷新可播放进度
+    </button>
+  </header>
+
+  <p *ngIf="loading" class="state-message" aria-live="polite">
+    正在加载录像…
+  </p>
+  <section *ngIf="error" class="error-message" role="alert">
+    {{ error }}
+  </section>
+
+  <ng-container *ngIf="timeline as currentTimeline">
+    <section class="panel preview-panel" aria-labelledby="preview-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="preview-heading">视频预览</h2>
+          <span *ngIf="selectedPart">
+            P{{ selectedPart.partIndex }} · {{ formatTime(playheadMs) }}
+          </span>
+        </div>
+        <button
+          *ngIf="selectedPart"
+          type="button"
+          class="text-button"
+          (click)="selectPart(selectedPart, playheadMs - selectedPart.timelineStartMs)"
+        >
+          重新打开当前分段
+        </button>
+      </div>
+
+      <div *ngIf="mediaLoading" class="state-message" aria-live="polite">
+        正在打开本地视频…
+      </div>
+      <div *ngIf="mediaError" class="error-message" role="alert">
+        {{ mediaError }}
+      </div>
+      <video
+        *ngIf="mediaUrl && selectedPart && !mediaError"
+        #videoElement
+        controls
+        preload="metadata"
+        [attr.src]="selectedPart.mediaKind === 'flv' ? null : mediaUrl"
+        (loadedmetadata)="handleTimeUpdate()"
+        (timeupdate)="handleTimeUpdate()"
+        (error)="handleMediaError()"
+        (stalled)="handleMediaStalled()"
+      ></video>
+      <p *ngIf="mediaAccess?.snapshotId" class="compact-hint">
+        录制中的视频以本次打开时的内容为准。
+      </p>
+    </section>
+
+    <section class="panel timeline-panel" aria-labelledby="timeline-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="timeline-heading">选择片段</h2>
+          <span>
+            {{ formatTime(startMs) }}–{{ formatTime(endMs) }}，共
+            {{ formatTime(endMs - startMs) }}
+          </span>
+        </div>
+      </div>
+
+      <div class="timeline-track" aria-label="录像时间轴">
+        <button
+          *ngFor="let part of currentTimeline.parts; trackBy: trackPart"
+          type="button"
+          class="part-segment"
+          [class.active]="selectedPart?.partId === part.partId"
+          [style.left.%]="positionPercent(part.timelineStartMs)"
+          [style.width.%]="partWidthPercent(part)"
+          [attr.aria-label]="'播放 P' + part.partIndex"
+          (click)="selectPart(part)"
+        >
+          P{{ part.partIndex }}
+        </button>
+        <span
+          *ngIf="currentTimeline.stableEndMs < currentTimeline.durationMs"
+          class="unsafe-tail"
+          [style.left.%]="positionPercent(currentTimeline.stableEndMs)"
+          [style.width.%]="
+            100 - positionPercent(currentTimeline.stableEndMs)
+          "
+          aria-hidden="true"
+        ></span>
+        <button
+          *ngFor="let item of currentTimeline.markers; trackBy: trackMarker"
+          type="button"
+          class="marker-pin"
+          [class.active]="selectedMarkerId === item.marker.id"
+          [style.left.%]="positionPercent(item.timelineOffsetMs)"
+          [attr.aria-label]="
+            item.marker.name + '，' + formatTime(item.timelineOffsetMs)
+          "
+          (click)="selectMarker(item)"
+        ></button>
+      </div>
+
+      <div class="range-fields">
+        <label>
+          开始（秒）
+          <input
+            type="number"
+            min="0"
+            step="0.1"
+            [max]="currentTimeline.stableEndMs / 1000"
+            [(ngModel)]="selectionStartSeconds"
+          />
+        </label>
+        <label>
+          结束（秒）
+          <input
+            type="number"
+            min="0.1"
+            step="0.1"
+            [max]="currentTimeline.stableEndMs / 1000"
+            [(ngModel)]="selectionEndSeconds"
+          />
+        </label>
+        <label class="clip-name-field">
+          片段名称
+          <input type="text" maxlength="200" [(ngModel)]="clipName" />
+        </label>
+      </div>
+
+      <p *ngIf="selectionError" class="error-text" role="alert">
+        {{ selectionError }}
+      </p>
+      <div class="selection-actions">
+        <button
+          type="button"
+          class="primary-button"
+          data-testid="inspect-clip"
+          [disabled]="!canInspect"
+          (click)="inspectSelection()"
+        >
+          {{ inspecting ? '正在检查…' : '检查裁剪范围' }}
+        </button>
+      </div>
+
+      <div *ngIf="inspection as checked" class="inspection" aria-live="polite">
+        <div>
+          <strong>
+            选择范围 {{ formatTime(checked.requestedStartMs) }}–{{
+              formatTime(checked.requestedEndMs)
+            }}
+          </strong>
+          <span>
+            实际范围 {{ formatTime(checked.actualStartMs) }}–{{
+              formatTime(checked.actualEndMs)
+            }}
+          </span>
+        </div>
+        <label *ngIf="checked.confirmationRequired" class="confirm-row">
+          <input
+            type="checkbox"
+            data-testid="confirm-keyframe"
+            [(ngModel)]="confirmKeyframe"
+          />
+          接受因关键帧向前多保留
+          {{ formatTime(checked.extraLeadMs) }}
+        </label>
+        <p *ngIf="!checked.compatible" class="error-text" role="alert">
+          所选分段编码不兼容，无法无损合并。
+        </p>
+        <button
+          type="button"
+          class="primary-button"
+          data-testid="create-clip"
+          [disabled]="!canCreate"
+          (click)="createClip()"
+        >
+          {{ creating ? '正在创建…' : '创建高光片段' }}
+        </button>
+      </div>
+      <p *ngIf="actionError" class="error-text" role="alert">
+        {{ actionError }}
+      </p>
+    </section>
+
+    <section class="panel marker-panel" aria-labelledby="marker-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="marker-heading">高光点</h2>
+          <span>{{ currentTimeline.markers.length }} 个</span>
+        </div>
+      </div>
+      <p *ngIf="currentTimeline.markers.length === 0" class="empty-state">
+        当前录像没有可映射的高光点。
+      </p>
+      <ul class="marker-list">
+        <li
+          *ngFor="let item of currentTimeline.markers; trackBy: trackMarker"
+        >
+          <ng-container *ngIf="editingMarkerId !== item.marker.id; else editMarker">
+            <button type="button" class="marker-main" (click)="selectMarker(item)">
+              <strong>{{ item.marker.name }}</strong>
+              <span>{{ formatTime(item.timelineOffsetMs) }}</span>
+            </button>
+            <button type="button" class="text-button" (click)="beginMarkerEdit(item)">
+              编辑
+            </button>
+            <button type="button" class="danger-button" (click)="deleteMarker(item)">
+              删除
+            </button>
+          </ng-container>
+          <ng-template #editMarker>
+            <div class="marker-edit">
+              <label>
+                名称
+                <input type="text" maxlength="200" [(ngModel)]="markerName" />
+              </label>
+              <label>
+                备注
+                <input type="text" maxlength="1000" [(ngModel)]="markerNote" />
+              </label>
+              <button
+                type="button"
+                class="primary-button"
+                [disabled]="!markerName.trim()"
+                (click)="saveMarker()"
+              >
+                保存
+              </button>
+              <button type="button" class="secondary-button" (click)="cancelMarkerEdit()">
+                取消
+              </button>
+            </div>
+          </ng-template>
+        </li>
+      </ul>
+    </section>
+
+    <section *ngIf="clips.length > 0" class="panel clip-panel" aria-labelledby="clips-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="clips-heading">已创建片段</h2>
+          <span>每个片段会创建独立投稿任务</span>
+        </div>
+      </div>
+      <ul class="clip-list" aria-live="polite">
+        <li *ngFor="let item of clips; trackBy: trackClip">
+          <div>
+            <strong>{{ item.name }}</strong>
+            <span>{{ formatTime(item.actualStartMs) }}–{{ formatTime(item.actualEndMs) }}</span>
+          </div>
+          <span class="status-pill" [attr.data-state]="item.state">
+            {{ item.state === 'ready' ? '可投稿' : item.state === 'failed' ? '处理失败' : '处理中' }}
+          </span>
+          <span *ngIf="uploadJobIds.get(item.id) as jobId">任务 #{{ jobId }} 已创建</span>
+          <button
+            *ngIf="item.state === 'ready' && !uploadJobIds.has(item.id)"
+            type="button"
+            class="primary-button"
+            (click)="createUploadTask(item)"
+          >
+            创建上传任务
+          </button>
+          <button type="button" class="danger-button" (click)="deleteClip(item)">
+            删除
+          </button>
+        </li>
+      </ul>
+    </section>
+  </ng-container>
+</main>

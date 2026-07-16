@@ -9,6 +9,7 @@ const EVENT_TYPES = [
   'tasks',
   'network',
   'upload_progress',
+  'highlight_progress',
   'heartbeat',
 ] as const;
 

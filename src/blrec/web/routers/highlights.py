@@ -81,6 +81,7 @@ class TimelinePartResponse(ApiModel):
     duration_ms: int
     stable_end_ms: int
     recording: bool
+    media_kind: Literal['flv', 'native']
 
 
 class MappedMarkerResponse(ApiModel):
@@ -206,6 +207,7 @@ def _timeline_response(value: HighlightTimeline) -> TimelineResponse:
                 duration_ms=part.duration_ms,
                 stable_end_ms=part.stable_end_ms,
                 recording=part.recording,
+                media_kind=('flv' if part.path.lower().endswith('.flv') else 'native'),
             )
             for part in value.parts
         ],
