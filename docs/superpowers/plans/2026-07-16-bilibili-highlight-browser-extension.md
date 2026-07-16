@@ -334,7 +334,7 @@ Expected: `package-lock.json` is generated with no production dependencies.
 
 - [ ] **Step 2: Write failing normalization and pairing tests**
 
-Assert `192.168.50.24:2233` normalizes to `http://192.168.50.24:2233`, trailing slashes are removed, non-http(s) schemes are rejected, username is trimmed but case is preserved, and a successful pair stores the returned token.
+Assert `192.168.1.100:2233` normalizes to `http://192.168.1.100:2233`, trailing slashes are removed, non-http(s) schemes are rejected, username is trimmed but case is preserved, and a successful pair stores the returned token.
 
 - [ ] **Step 3: Implement manifest and build**
 

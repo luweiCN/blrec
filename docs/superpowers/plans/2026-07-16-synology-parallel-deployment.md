@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 `192.168.50.24` 上部署独立的 `blrec-next`，并保持旧 BLREC 与 Java 上传容器不变。
+**Goal:** 在 `<NAS-IP>` 上部署独立的 `blrec-next`，并保持旧 BLREC 与 Java 上传容器不变。
 
 **Architecture:** 使用固定版本的公开 GHCR 镜像和主机网络，在 `/volume1/docker/blrec-next` 下隔离工作文件与所有运行数据。Compose 内直接保存初始化变量，随机安全码仅在 NAS 内生成和保存；所有远程操作串行执行并在每个变更点验证旧实例未改变。
 
@@ -236,4 +236,4 @@ Expected: 新容器重启后恢复健康，`2234` 可访问，旧 `blrec` 未受
 
 - [ ] **Step 4: 浏览器与 Container Manager 验收**
 
-访问 `http://192.168.50.24:2234`，确认显示管理员初始化页面；在 Container Manager 中确认 `blrec-next` 位于“项目”页，状态为运行中。初始化安全码只从 NAS 本地 `workspace/compose.yml` 复制，不在聊天或日志中展示。
+访问 `http://<NAS-IP>:2234`，确认显示管理员初始化页面；在 Container Manager 中确认 `blrec-next` 位于“项目”页，状态为运行中。初始化安全码只从 NAS 本地 `workspace/compose.yml` 复制，不在聊天或日志中展示。

@@ -31,7 +31,7 @@ def test_linux_policy_routes_supply_all_interface_gateways() -> None:
             'addr_info': [
                 {
                     'family': 'inet',
-                    'local': '192.168.50.24',
+                    'local': '192.168.50.100',
                     'prefixlen': 24,
                     'scope': 'global',
                 }
@@ -51,7 +51,7 @@ def test_linux_policy_routes_supply_all_interface_gateways() -> None:
             'gateway': '192.168.50.1',
             'dev': 'ovs_eth1',
             'table': 'main',
-            'prefsrc': '192.168.50.24',
+            'prefsrc': '192.168.50.100',
         },
     ]
 
