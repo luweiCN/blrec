@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
+from blrec.logging.audit import audit
+
 from .database import BiliUploadDatabase
 from .errors import BiliApiError, RemoteOutcomeUnknown
 
@@ -79,12 +81,22 @@ class CollectionPublisher:
         except Exception as error:
             await self._fail(job_id, self._public_error(error))
             raise
-        await self._database.execute(
+        completed = await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='completed',"
             'collection_error=NULL,updated_at=? '
             "WHERE id=? AND state='approved' AND collection_branch_state='running'",
             (int(self._clock()), job_id),
         )
+        if completed == 1:
+            audit(
+                'collection_episode_added',
+                job_id=job_id,
+                account_id=job.account_id,
+                aid=job.aid,
+                cid=job.cid,
+                section_id=job.section_id,
+                result='completed',
+            )
 
     async def _load(self, job_id: int) -> _CollectionJob:
         row = await self._database.fetchone(
@@ -123,12 +135,20 @@ class CollectionPublisher:
         return _CollectionJob(account_id, aid, cid, section_id, title.strip())
 
     async def _fail(self, job_id: int, message: str) -> None:
-        await self._database.execute(
+        updated = await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='failed',"
             'collection_error=?,updated_at=? '
             "WHERE id=? AND state='approved' AND collection_branch_state='running'",
             (message, int(self._clock()), job_id),
         )
+        if updated == 1:
+            audit(
+                'collection_episode_failed',
+                level='ERROR',
+                job_id=job_id,
+                reason=message,
+                result='failed',
+            )
 
     @staticmethod
     def _public_error(error: Exception) -> str:

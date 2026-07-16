@@ -831,23 +831,44 @@ class UposUploader:
     ) -> None:
         confirmed = int(
             await self._database.scalar(
-                "SELECT COALESCE(SUM(size),0) FROM upload_chunks "
-                "WHERE part_id=? AND state='confirmed'",
-                (part_id,),
+                'SELECT COALESCE(SUM(chunk.size),0) FROM upload_chunks chunk '
+                'JOIN upload_parts part ON part.id=chunk.part_id '
+                "WHERE part.job_id=? AND chunk.state='confirmed'",
+                (job_id,),
             )
         )
-        percent = min(100, int(confirmed * 100 / total_bytes))
+        rows = await self._database.fetchall(
+            'SELECT file_identity,COALESCE(final_path,source_path) AS path '
+            'FROM upload_parts WHERE job_id=?',
+            (job_id,),
+        )
+        job_total_bytes = 0
+        for row in rows:
+            identity_json = row['file_identity']
+            if identity_json is not None:
+                try:
+                    job_total_bytes += FileIdentity.from_json(str(identity_json)).size
+                    continue
+                except ValueError:
+                    pass
+            try:
+                job_total_bytes += os.path.getsize(str(row['path']))
+            except OSError:
+                pass
+        if job_total_bytes <= 0:
+            job_total_bytes = total_bytes
+        percent = min(100, int(confirmed * 100 / job_total_bytes))
         milestone = min(100, (percent // 5) * 5)
-        if milestone <= self._progress_milestones.get(part_id, -1):
+        if milestone <= self._progress_milestones.get(job_id, -1):
             return
-        self._progress_milestones[part_id] = milestone
+        self._progress_milestones[job_id] = milestone
         audit(
             'upload_progress',
             job_id=job_id,
             part_id=part_id,
             percent=milestone,
             confirmed_bytes=confirmed,
-            total_bytes=total_bytes,
+            total_bytes=job_total_bytes,
         )
 
     @staticmethod

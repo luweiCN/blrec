@@ -17,6 +17,8 @@ from typing import (
     TypeVar,
 )
 
+from blrec.logging.audit import audit
+
 from .database import BiliUploadDatabase
 
 __all__ = ('RetentionManager', 'RetentionStatus')
@@ -193,13 +195,30 @@ class RetentionManager:
                 'AND video_deleted_at IS NULL',
                 (str(error)[:1000], candidate.part_id),
             )
+            audit(
+                'recording_video_delete_failed',
+                level='ERROR',
+                part_id=candidate.part_id,
+                reason=reason or candidate.reason,
+                error_type=type(error).__name__,
+                result='failed',
+            )
             return False
         updated = await self._database.execute(
             'UPDATE recording_parts SET video_deleted_at=?,video_delete_reason=?,'
             'video_delete_error=NULL WHERE id=? AND video_deleted_at IS NULL',
             (now, reason or candidate.reason, candidate.part_id),
         )
-        return updated == 1
+        if updated == 1:
+            audit(
+                'recording_video_deleted',
+                part_id=candidate.part_id,
+                reason=reason or candidate.reason,
+                path_count=len(paths),
+                result='deleted',
+            )
+            return True
+        return False
 
     async def _candidate_size(self, candidate: _Candidate) -> int:
         return await self._run_io(

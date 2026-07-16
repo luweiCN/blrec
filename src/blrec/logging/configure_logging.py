@@ -83,9 +83,11 @@ def configure_logger(
             format=LOGURU_FILE_FORMAT,
             enqueue=True,
             rotation="00:00",
-            retention=backup_count,
+            retention=(
+                None if backup_count is None else '{} days'.format(backup_count)
+            ),
             backtrace=True,
-            diagnose=True,
+            diagnose=False,
         )
 
         if _file_handler_id is not None:

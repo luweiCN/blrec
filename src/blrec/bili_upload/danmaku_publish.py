@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from math import ceil
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
 
+from blrec.logging.audit import audit
+
 from .accounts import (
     AccountNotFound,
     AccountPaused,
@@ -308,6 +310,15 @@ class DanmakuPublisher:
             await self._mark_unknown(claim, work, '弹幕接口未返回 DMID，禁止自动重发')
             return
         await self._confirm(claim, work, dmid)
+        audit(
+            'danmaku_confirmed',
+            job_id=work.job_id,
+            part_id=work.part_id,
+            item_id=work.id,
+            dmid=dmid,
+            attempt=claim.attempt,
+            result='confirmed',
+        )
         self.breaker_for(work.account_id).succeeded()
         await self._complete_if_done(work.job_id)
 
@@ -448,6 +459,15 @@ class DanmakuPublisher:
             },
             release=True,
         )
+        audit(
+            'danmaku_failed',
+            level='ERROR',
+            job_id=work.job_id,
+            part_id=work.part_id,
+            item_id=work.id,
+            error_code=error_code,
+            result='failed_permanent',
+        )
         await self._complete_if_done(work.job_id)
 
     async def _safe_retry(
@@ -483,6 +503,14 @@ class DanmakuPublisher:
             },
             release=True,
         )
+        audit(
+            'danmaku_outcome_unknown',
+            level='WARNING',
+            job_id=work.job_id,
+            part_id=work.part_id,
+            item_id=work.id,
+            result='unknown_outcome',
+        )
         await self._pause_job_without_claim(work.job_id, message)
 
     async def _pause_branch(
@@ -504,6 +532,16 @@ class DanmakuPublisher:
             release=True,
         )
         await self._pause_job_without_claim(work.job_id, message)
+        audit(
+            'danmaku_branch_paused',
+            level='WARNING',
+            job_id=work.job_id,
+            part_id=work.part_id,
+            item_id=work.id,
+            error_code=error_code,
+            reason=message,
+            result='paused',
+        )
 
     async def _pause_account(
         self, claim: LeaseClaim, work: _DanmakuWork, error_code: int, message: str
@@ -519,6 +557,16 @@ class DanmakuPublisher:
             release=True,
         )
         await self._pause_account_without_claim(work.account_id, message)
+        audit(
+            'danmaku_account_paused',
+            level='WARNING',
+            account_id=work.account_id,
+            job_id=work.job_id,
+            item_id=work.id,
+            error_code=error_code,
+            reason=message,
+            result='paused',
+        )
 
     async def _pause_account_without_claim(self, account_id: int, message: str) -> None:
         now = int(self._clock())

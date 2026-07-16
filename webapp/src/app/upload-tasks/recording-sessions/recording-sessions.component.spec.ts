@@ -154,6 +154,9 @@ describe('RecordingSessionsComponent', () => {
                 checked: ['title'],
                 missing: ['up_selection_reply'],
                 mismatches: [],
+                differences: {},
+                unverifiable: ['cover', 'collection'],
+                error: null,
               },
               commentError: null,
               danmakuError: null,
@@ -615,6 +618,9 @@ describe('RecordingSessionsComponent', () => {
     expect(drawer.nzWidth).toBe('1180px');
     expect(document.body.textContent).toContain('投稿配置核验：部分完成');
     expect(document.body.textContent).toContain('1 项可核验设置未返回');
+    expect(document.body.textContent).toContain(
+      '2 项设置暂时无法从 B 站稿件详情核验'
+    );
     expect(document.body.textContent).not.toContain('remote-p1');
     fixture.componentInstance.closeDetails();
     expect(fixture.componentInstance.detailVisible).toBeFalse();

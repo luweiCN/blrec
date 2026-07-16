@@ -283,8 +283,13 @@ def publisher(database: BiliUploadDatabase, protocol: FakeProtocol) -> CommentPu
 
 @pytest.mark.asyncio
 async def test_publisher_sends_root_replies_then_pins_once(
-    database: BiliUploadDatabase,
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.comments.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     await seed_comment_items(
         database,
         [
@@ -323,6 +328,9 @@ async def test_publisher_sends_root_replies_then_pins_once(
         await database.scalar('SELECT comment_branch_state FROM upload_jobs WHERE id=1')
         == 'completed'
     )
+    confirmed = [fields for event, fields in events if event == 'comment_confirmed']
+    assert [fields['kind'] for fields in confirmed] == ['root', 'reply', 'pin']
+    assert all(fields['job_id'] == 1 for fields in confirmed)
 
 
 @pytest.mark.asyncio

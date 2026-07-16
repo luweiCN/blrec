@@ -63,6 +63,35 @@ def test_purposes_have_independent_routes() -> None:
     assert manager.select('bili_api').interface_name == 'lan1'
 
 
+def test_every_route_selection_is_audited_with_replayable_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.networking.manager.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
+    settings = NetworkSettings(recording={'interface': 'lan1'})
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+
+    manager.select('recording', affinity_key='room:100', anonymous=True)
+    manager.select('recording', affinity_key='room:100', anonymous=True)
+
+    selected = [fields for event, fields in events if event == 'network_route_selected']
+    assert len(selected) == 2
+    assert selected[0] == {
+        'level': 'DEBUG',
+        'purpose': 'recording',
+        'interface': 'lan1',
+        'source_address': '192.168.1.10',
+        'role': 'primary',
+        'reason': 'configured',
+        'anonymous': True,
+        'affinity_key': 'room:100',
+        'result': 'selected',
+    }
+
+
 def test_interface_settings_override_discovery_defaults() -> None:
     settings = NetworkSettings(
         interfaces={'lan1': {'enabled': False, 'uploadLimitBps': 1024}}

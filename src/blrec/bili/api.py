@@ -71,13 +71,21 @@ class BaseApi(ABC):
         should_check_response = kwds.pop('check_response', True)
         kwds = {'timeout': self.timeout, 'headers': self.headers, **kwds}
         async with self._session.get(url, *args, **kwds) as res:
-            self._logger.trace('Request: {}', res.request_info)
-            self._logger.trace('Response: {}', await res.text())
+            self._logger.trace(
+                'HTTP GET host={} path={} status={}',
+                res.url.host,
+                res.url.path,
+                res.status,
+            )
             try:
                 json_res = await res.json()
             except aiohttp.ContentTypeError:
-                text_res = await res.text()
-                self._logger.debug(f'Response text: {text_res[:200]}')
+                self._logger.debug(
+                    'Non-JSON response from host={} path={} status={}',
+                    res.url.host,
+                    res.url.path,
+                    res.status,
+                )
                 raise
             if should_check_response:
                 await self._check_response(json_res)

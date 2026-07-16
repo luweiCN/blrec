@@ -23,7 +23,7 @@ _SECRET_KEY_FRAGMENTS = (
 
 
 def safe_audit_payload(event: str, fields: Mapping[str, Any]) -> str:
-    payload = {'event': event}
+    payload = {'event': event, 'result': 'observed'}
     payload.update({key: _redact(key, value) for key, value in fields.items()})
     return json.dumps(
         payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True
@@ -31,7 +31,7 @@ def safe_audit_payload(event: str, fields: Mapping[str, Any]) -> str:
 
 
 def audit(event: str, *, level: str = 'INFO', **fields: Any) -> None:
-    logger.log(level, safe_audit_payload(event, fields))
+    logger.log(level, '[audit] {}', safe_audit_payload(event, fields))
 
 
 def _redact(key: str, value: Any) -> Any:

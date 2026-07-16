@@ -555,6 +555,12 @@
           >
             {{ count }} 项可核验设置未返回
           </div>
+          <div
+            class="secondary-text"
+            *ngIf="job.submissionVerification?.unverifiable?.length as count"
+          >
+            {{ count }} 项设置暂时无法从 B 站稿件详情核验
+          </div>
         </ng-container>
         <div class="repair-error" *ngIf="job.commentError">
           自动评论：{{ job.commentError }}

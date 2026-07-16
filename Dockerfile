@@ -32,6 +32,7 @@ RUN apt-get update && \
 COPY --from=wheel-builder /wheels /wheels
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels blrec && \
     rm -rf /wheels
+COPY scripts/migrate_legacy_settings.py /app/scripts/migrate_legacy_settings.py
 ENV BLREC_DEFAULT_SETTINGS_FILE=/cfg/settings.toml \
     BLREC_DEFAULT_LOG_DIR=/log \
     BLREC_DEFAULT_OUT_DIR=/rec \

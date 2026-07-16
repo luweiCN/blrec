@@ -254,6 +254,43 @@ async def test_chunk_reads_and_concurrency_are_bounded(
 
 
 @pytest.mark.asyncio
+async def test_progress_milestones_use_whole_job_bytes_for_multiple_parts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.upos.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
+    first = tmp_path / 'p1.flv'
+    second = tmp_path / 'p2.flv'
+    first.write_bytes(b'abcd')
+    second.write_bytes(b'x' * 16)
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, first)
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,final_path,file_identity,'
+            "artifact_state,upload_state) VALUES(2,1,2,?,?,?,'ready','prepared')",
+            (str(second), str(second), FileIdentity.from_path(str(second)).to_json()),
+        )
+        claim = await claim_job(database)
+        uploader = UposUploader(database, FakeProtocol(), chunk_size=4, concurrency=1)
+
+        await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        progress = [fields for event, fields in events if event == 'upload_progress']
+        assert progress[-1]['percent'] == 20
+        assert progress[-1]['confirmed_bytes'] == 4
+        assert progress[-1]['total_bytes'] == 20
+        assert all(fields['percent'] != 100 for fields in progress)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_complete_result_is_paused_and_never_repeated(
     tmp_path: Path,
 ) -> None:

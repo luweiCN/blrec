@@ -210,10 +210,10 @@ class ReviewWatcher:
                 bundle,
                 {'topic_grey': 1, 'bvid': job.bvid, 't': int(self._clock() * 1000)},
             )
+            await self._verify_submission(job, detail)
             verified_parts = await self._verified_parts(job, detail)
         except _ReviewMismatch as error:
             return await self._pause(job, str(error))
-        await self._verify_submission(job, detail)
         if any(part.transcode_state == 'failed' for part in verified_parts.values()):
             return await self._handle_transcode_failures(job, verified_parts)
         if any(
@@ -238,9 +238,13 @@ class ReviewWatcher:
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             verification = SubmissionVerification(
-                'failed', (), ('policy_snapshot',), ()
+                'failed',
+                (),
+                ('policy_snapshot',),
+                {},
+                error='policy snapshot is invalid',
             )
-        await self._database.execute(
+        updated = await self._database.execute(
             'UPDATE upload_jobs SET submission_verification_state=?,'
             'submission_verified_at=?,submission_verification_json=?,updated_at=? '
             "WHERE id=? AND state='waiting_review' AND account_id=?",
@@ -253,6 +257,8 @@ class ReviewWatcher:
                 job.account_id,
             ),
         )
+        if updated != 1:
+            return
         audit(
             'submission_verified',
             level=(
@@ -272,6 +278,8 @@ class ReviewWatcher:
             checked=len(verification.checked),
             missing=len(verification.missing),
             mismatches=len(verification.mismatches),
+            unverifiable=len(verification.unverifiable),
+            error=verification.error,
         )
 
     async def _verified_parts(

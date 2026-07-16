@@ -210,8 +210,13 @@ async def test_interval_survives_publisher_restart(
 
 @pytest.mark.asyncio
 async def test_success_uses_recorded_style_and_saves_dmid(
-    database: BiliUploadDatabase,
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.danmaku_publish.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     await seed_job(database, 1, [0])
     protocol = FakeProtocol()
     clock = FakeClock()
@@ -237,6 +242,13 @@ async def test_success_uses_recorded_style_and_saves_dmid(
     assert (
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
         == 'completed'
+    )
+    assert any(
+        event == 'danmaku_confirmed'
+        and fields['job_id'] == 1
+        and fields['item_id'] == 1
+        and fields['dmid'] == 9001
+        for event, fields in events
     )
 
 

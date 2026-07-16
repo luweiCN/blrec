@@ -25,6 +25,8 @@ from typing import (
 
 from lxml import etree
 
+from blrec.logging.audit import audit
+
 from .accounts import (
     AccountNotFound,
     AccountPaused,
@@ -527,6 +529,15 @@ class CommentPublisher:
             },
             release=True,
         )
+        audit(
+            'comment_confirmed',
+            job_id=work.job_id,
+            item_id=claim.id,
+            kind=work.kind,
+            rpid=rpid,
+            attempt=claim.attempt,
+            result='confirmed',
+        )
         await self._complete_if_done(work.job_id)
 
     async def _publish_pin(
@@ -564,6 +575,15 @@ class CommentPublisher:
                 'error_message': None,
             },
             release=True,
+        )
+        audit(
+            'comment_confirmed',
+            job_id=work.job_id,
+            item_id=claim.id,
+            kind=work.kind,
+            rpid=root_rpid,
+            attempt=claim.attempt,
+            result='confirmed',
         )
         await self._complete_if_done(work.job_id)
 
@@ -615,6 +635,16 @@ class CommentPublisher:
                 'error_message': None,
             },
             release=True,
+        )
+        audit(
+            'comment_confirmed',
+            job_id=work.job_id,
+            item_id=claim.id,
+            kind=work.kind,
+            rpid=rpid,
+            attempt=claim.attempt,
+            reconciled=True,
+            result='confirmed',
         )
         await self._complete_if_done(work.job_id)
 
@@ -808,6 +838,16 @@ class CommentPublisher:
             )
 
         await self._database.write(transition)
+        audit(
+            'comment_branch_transition',
+            level='ERROR' if branch_state == 'failed' else 'WARNING',
+            job_id=job_id,
+            item_id=claim.id,
+            state=branch_state,
+            error_code=error_code,
+            reason=message,
+            result=branch_state,
+        )
 
     async def _release(self, claim: LeaseClaim, *, next_attempt_at: int) -> None:
         await self._update_item(

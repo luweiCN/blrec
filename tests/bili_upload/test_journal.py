@@ -65,7 +65,14 @@ async def test_recording_start_freezes_room_upload_intent(database) -> None:
 
 
 @pytest.mark.asyncio
-async def test_part_order_is_creation_order_not_completion_order(database) -> None:
+async def test_part_order_is_creation_order_not_completion_order(
+    database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.journal.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
     run_id = await journal.recording_started(100, live_start_time=900)
     await journal.video_created(run_id, '/rec/p1.flv', record_start_time=901)
@@ -78,6 +85,14 @@ async def test_part_order_is_creation_order_not_completion_order(database) -> No
     assert [(part.part_index, part.source_path) for part in parts] == [
         (1, '/rec/p1.flv'),
         (2, '/rec/p2.flv'),
+    ]
+    names = [event for event, _fields in events]
+    assert names == [
+        'recording_started',
+        'recording_part_created',
+        'recording_part_created',
+        'recording_part_completed',
+        'recording_part_completed',
     ]
 
 

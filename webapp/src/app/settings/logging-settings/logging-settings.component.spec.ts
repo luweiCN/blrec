@@ -50,5 +50,6 @@ describe('LoggingSettingsComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+    expect(fixture.nativeElement.textContent).toContain('日志保留天数');
   });
 });

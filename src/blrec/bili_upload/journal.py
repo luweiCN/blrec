@@ -20,6 +20,8 @@ from typing import (
     TypeVar,
 )
 
+from blrec.logging.audit import audit
+
 from .artifact_recovery import RecoveredArtifact, probe_recording_artifact
 from .database import BiliUploadDatabase
 
@@ -358,7 +360,15 @@ class RecordingJournalBridge:
             )
             return run_id
 
-        return await self._database.write(write)
+        persisted_run_id = await self._database.write(write)
+        audit(
+            'recording_started',
+            room_id=room_id,
+            run_id=persisted_run_id,
+            live_start_time=live_start_time,
+            result='journaled',
+        )
+        return persisted_run_id
 
     async def cover_downloaded(
         self, run_id: str, path: str, *, event_id: Optional[str] = None
@@ -389,6 +399,12 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit(
+            'recording_cover_downloaded',
+            run_id=run_id,
+            path=cover_path,
+            result='journaled',
+        )
 
     async def reconcile_open_sessions(self) -> None:
         now = int(self._clock())
@@ -532,6 +548,12 @@ class RecordingJournalBridge:
                 )
 
         await self._database.write(write)
+        audit(
+            'recording_recovery_reconciled',
+            sessions=len(sessions),
+            recovered_parts=len(recoveries),
+            result='completed',
+        )
 
     async def finalize_cancelled_sessions(self, *, grace_seconds: int = 600) -> int:
         if grace_seconds < 0:
@@ -668,6 +690,13 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit(
+            'recording_part_created',
+            run_id=run_id,
+            path=source_path,
+            record_start_time=record_start_time,
+            result='journaled',
+        )
 
     async def video_completed(
         self, run_id: str, path: str, *, event_id: Optional[str] = None
@@ -703,6 +732,12 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit(
+            'recording_part_completed',
+            run_id=run_id,
+            path=source_path,
+            result='journaled',
+        )
 
     async def video_postprocessed(
         self,
@@ -749,6 +784,14 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit(
+            'recording_part_postprocessed',
+            run_id=run_id,
+            source_path=source,
+            final_path=final,
+            file_size_bytes=file_size_bytes,
+            result='ready',
+        )
 
     async def recording_cancelled(
         self, run_id: str, *, event_id: Optional[str] = None
@@ -791,6 +834,7 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit('recording_cancelled', run_id=run_id, result='journaled')
 
     async def recording_finished(
         self, run_id: str, *, event_id: Optional[str] = None
@@ -824,6 +868,7 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit('recording_finished', run_id=run_id, result='journaled')
 
     async def video_postprocessing_failed(
         self,
@@ -896,6 +941,15 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit(
+            'recording_postprocessing_failed',
+            level='WARNING' if artifact is not None else 'ERROR',
+            run_id=run_id,
+            source_path=source,
+            recovered=artifact is not None,
+            error_type=type(error).__name__,
+            result='recovered' if artifact is not None else 'failed',
+        )
 
     async def danmaku_completed(
         self, run_id: str, path: str, *, event_id: Optional[str] = None
@@ -947,6 +1001,13 @@ class RecordingJournalBridge:
             )
 
         await self._database.write(write)
+        audit(
+            'recording_danmaku_completed',
+            run_id=run_id,
+            path=xml_path,
+            danmaku_count=danmaku_count,
+            result='journaled',
+        )
 
     async def session_for_run(self, run_id: str) -> RecordingSession:
         row = await self._database.fetchone(

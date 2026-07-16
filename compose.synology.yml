@@ -1,8 +1,8 @@
 services:
-  blrec:
-    image: ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.1}
+  blrec-next:
+    image: ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.2}
     pull_policy: always
-    container_name: blrec
+    container_name: blrec-next
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 2m
@@ -13,6 +13,6 @@ services:
       BLREC_FORWARDED_ALLOW_IPS: ${BLREC_FORWARDED_ALLOW_IPS:-127.0.0.1}
       BLREC_CREDENTIAL_KEY_FILE: /cfg/credential.key
     volumes:
-      - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec/config}:/cfg
-      - ${BLREC_LOG_DIR:-/volume1/docker/blrec/log}:/log
-      - ${BLREC_RECORDING_DIR:-/volume1/video/blrec}:/rec
+      - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg
+      - ${BLREC_LOG_DIR:-/volume1/docker/blrec-next/log}:/log
+      - ${BLREC_RECORDING_DIR:-/volume1/docker/blrec-next/rec}:/rec

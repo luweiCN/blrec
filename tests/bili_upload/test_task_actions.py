@@ -588,8 +588,13 @@ async def test_repair_recovery_distinguishes_safe_resume_from_unknown_edit(
 
 @pytest.mark.asyncio
 async def test_repair_reuploads_only_failed_part_and_edits_existing_archive(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.task_actions.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
     await database.open()
     try:
@@ -651,6 +656,12 @@ async def test_repair_reuploads_only_failed_part_and_edits_existing_archive(
                 'repair_original_attempts': 1,
             },
         ]
+        assert any(
+            event == 'transcode_repair_submitted'
+            and fields['job_id'] == 9
+            and fields['failed_parts'] == 1
+            for event, fields in events
+        )
     finally:
         await database.close()
 
@@ -847,7 +858,9 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
     try:
         await seed_job(database, tmp_path, state='approved')
         await database.execute(
-            'UPDATE upload_jobs SET policy_snapshot_json=? WHERE id=9',
+            'UPDATE upload_jobs SET policy_snapshot_json=?,'
+            "submission_verification_state='passed',"
+            'submission_verified_at=123,submission_verification_json=? WHERE id=9',
             (
                 json.dumps(
                     {
@@ -856,6 +869,7 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
                         'collection_section_id': 88,
                     }
                 ),
+                '{"state":"passed"}',
             ),
         )
         manager, _, _ = make_manager(
@@ -867,7 +881,9 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
         assert message == '已保留原稿件记录，并重新排队投稿为新稿件'
         job = await database.fetchone(
             'SELECT state,submit_state,aid,bvid,comment_branch_state,'
-            'danmaku_branch_state,collection_branch_state FROM upload_jobs WHERE id=9'
+            'danmaku_branch_state,collection_branch_state,'
+            'submission_verification_state,submission_verified_at,'
+            'submission_verification_json FROM upload_jobs WHERE id=9'
         )
         assert job is not None
         assert dict(job) == {
@@ -878,6 +894,9 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
             'comment_branch_state': 'pending',
             'danmaku_branch_state': 'pending',
             'collection_branch_state': 'pending',
+            'submission_verification_state': 'pending',
+            'submission_verified_at': None,
+            'submission_verification_json': None,
         }
         archived = await database.fetchone(
             'SELECT aid,bvid,reason FROM upload_job_archives WHERE old_job_id=9'

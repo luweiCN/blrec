@@ -64,6 +64,7 @@ def test_verification_reports_differences_without_exposing_payload_values() -> N
 
     assert result.state == 'different'
     assert result.mismatches == ('is_only_self',)
+    assert result.differences == {'is_only_self': {'expected': True, 'actual': False}}
     assert '测试直播' not in result.to_json()
 
 
@@ -116,3 +117,39 @@ def test_legacy_snapshot_checks_only_fields_that_were_persisted() -> None:
     assert result.state == 'passed'
     assert 'is_only_self' not in result.checked
     assert result.missing == ()
+
+
+def test_cover_and_collection_are_explicitly_unverifiable_without_extra_reads() -> None:
+    expected = snapshot()
+    expected.update(
+        {
+            'cover_mode': 'custom',
+            'cover_asset_id': 7,
+            'collection_season_id': 88,
+            'collection_section_id': 99,
+        }
+    )
+
+    result = verify_submission(expected, detail(), scheduled_publish_at=10_000)
+
+    assert result.state == 'partial'
+    assert result.unverifiable == ('cover', 'collection')
+
+
+def test_empty_snapshot_cannot_be_reported_as_verified() -> None:
+    result = verify_submission({}, detail())
+
+    assert result.state == 'failed'
+    assert result.error == 'policy snapshot has no verifiable fields'
+
+
+def test_part_titles_are_compared_as_the_submitted_80_character_value() -> None:
+    expected = snapshot()
+    expected['part_titles'] = ['分' * 90, '第二段']
+    response = detail()
+    response['data']['videos'][0]['title'] = '分' * 80
+
+    result = verify_submission(expected, response, scheduled_publish_at=10_000)
+
+    assert result.state == 'passed'
+    assert result.mismatches == ()

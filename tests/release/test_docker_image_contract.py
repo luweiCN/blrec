@@ -11,6 +11,7 @@ def test_dockerfile_builds_frontend_wheel_and_runtime_separately() -> None:
     assert 'npm ci' in dockerfile
     assert 'npm run build' in dockerfile
     assert 'pip3 install --no-cache-dir -e .' not in dockerfile
+    assert 'scripts/migrate_legacy_settings.py' in dockerfile
     assert 'HEALTHCHECK' in dockerfile
     assert '/api/v1/auth/status' in dockerfile
 

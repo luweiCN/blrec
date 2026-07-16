@@ -2,7 +2,7 @@
 
 此部署使用主机网络模式，让容器直接看到群晖的物理网卡、内网 IP 和网关。管理页面会监听 `0.0.0.0:2233`，因此两个内网均可通过各自的 NAS IP 访问。应用只为连接绑定源 IP，不会修改群晖路由表。
 
-本文中的 `compose.synology.yml` 只运行一个 blrec 服务，并从公开镜像 `ghcr.io/luweicn/blrec` 拉取固定版本。Container Manager“项目”导入的也是同一份 Compose；不要另建容器配置。
+本文中的 `compose.synology.yml` 只运行一个 `blrec-next` 服务，并从公开镜像 `ghcr.io/luweicn/blrec` 拉取固定版本。Container Manager“项目”导入的也是同一份 Compose；不要另建容器配置。
 
 ## 前置设置
 
@@ -18,13 +18,13 @@
 
 ```bash
 set -eu
-mkdir -p /volume1/docker/blrec/config /volume1/docker/blrec/log /volume1/video/blrec
-credential_key=/volume1/docker/blrec/config/credential.key
+mkdir -p /volume1/docker/blrec-next/config /volume1/docker/blrec-next/log /volume1/docker/blrec-next/rec
+credential_key=/volume1/docker/blrec-next/config/credential.key
 if [ -e "$credential_key" ]; then
   test -s "$credential_key"
 else
   umask 077
-  openssl rand -base64 32 > /volume1/docker/blrec/config/credential.key
+  openssl rand -base64 32 > /volume1/docker/blrec-next/config/credential.key
 fi
 chmod 600 "$credential_key"
 test -s "$credential_key"
@@ -49,6 +49,25 @@ docker compose --env-file .env -f compose.synology.yml up -d
 
 `BLREC_FORWARDED_ALLOW_IPS` 默认只信任 `127.0.0.1`。只有通过群晖反向代理访问，并且确认代理连接来源地址后，才把该地址加入此变量；不要设置为 `*`，否则客户端可伪造来源 IP 绕过登录限速。
 
+## 从旧版迁移录像配置
+
+先让新版启动一次并生成 `/cfg/settings.toml`，随后停止项目。迁移工具只复制文件名模板、分段、UA、弹幕、录像、封面和后处理设置；新版的账号、网络、容量、通知及录制目录保持不变，Cookie、Webhook、通知密钥和旧磁盘策略不会复制。下面的示例仅迁移五个灰度房间，并在写入前备份新版设置与 SQLite：
+
+```bash
+set -eu
+docker run --rm --entrypoint python \
+  -v /volume1/docker/blrec/config:/legacy:ro \
+  -v /volume1/docker/blrec-next/config:/cfg \
+  -v /volume1/docker/blrec-next/log:/log \
+  -v /volume1/docker/blrec-next/rec:/rec \
+  ghcr.io/luweicn/blrec:3.0.0-beta.2 \
+  /app/scripts/migrate_legacy_settings.py \
+  /legacy/settings.toml /cfg/settings.toml \
+  --rooms 30038570 25654586 21045351 10802797 2604398
+```
+
+迁移完成后重新启动项目。首次灰度只启用监控和录制；没有可用的扫码主账号时，不要为这些房间启用投稿规则。
+
 ## 升级
 
 先停止服务并备份 `/cfg` 对应的宿主目录及当前 `.env`，确认备份成功后再修改 `BLREC_IMAGE_TAG`。下面的命令以示例中的目录为准；如果修改过 `BLREC_CONFIG_DIR`，请同步替换 `config_dir`：
@@ -56,7 +75,7 @@ docker compose --env-file .env -f compose.synology.yml up -d
 ```bash
 set -eu
 backup_id="$(date +%Y%m%d-%H%M%S)"
-config_dir=/volume1/docker/blrec/config
+config_dir=/volume1/docker/blrec-next/config
 backup_config_dir="${config_dir}.backup-${backup_id}"
 backup_env=".env.backup-${backup_id}"
 test -d "$config_dir"
@@ -94,7 +113,7 @@ Container Manager 的操作顺序相同：先停止项目并通过 File Station 
 ```bash
 set -eu
 backup_id=20260716-120000
-config_dir=/volume1/docker/blrec/config
+config_dir=/volume1/docker/blrec-next/config
 backup_config_dir="${config_dir}.backup-${backup_id}"
 backup_env=".env.backup-${backup_id}"
 restore_candidate="${config_dir}.restore-${backup_id}"
@@ -132,9 +151,9 @@ docker compose --env-file .env -f compose.synology.yml up -d
 ```bash
 docker compose --env-file .env -f compose.synology.yml config --services
 docker compose --env-file .env -f compose.synology.yml ps
-docker compose --env-file .env -f compose.synology.yml logs --tail=200 blrec
+docker compose --env-file .env -f compose.synology.yml logs --tail=200 blrec-next
 ```
 
-启动后分别访问 `http://<NAS-网络1-IP>:2233` 和 `http://<NAS-网络2-IP>:2233`。首次访问时用 `.env` 中的管理员用户名和 API Key 创建管理员密码。进入“网络管理”，执行“检测全部线路”，确认两块网卡的网关、公网出口 IP 和连通性，再分别为房间状态轮询、弹幕 WebSocket、录像下载、视频上传及其他 B 站请求设置主线路与备用线路。
+启动后分别访问 `http://<NAS-网络1-IP>:2233` 和 `http://<NAS-网络2-IP>:2233`。首次访问时用 `.env` 中的管理员用户名和 API Key 创建管理员密码。进入“网络管理”，执行“检测全部线路”，确认两块真实网卡的源地址、网关、公网出口 IP 和连通性，并禁用 `docker0` 等容器虚拟网卡。再分别为房间状态轮询、弹幕 WebSocket、录像下载、视频上传及其他 B 站请求选择固定线路或轮换模式。
 
-主线路连续出现两次传输失败后才会切换备用线路，冷却后再尝试主线路。已有 WebSocket 和录像连接不会被强制中断，会在自然重连时应用新设置。
+固定线路开启“自动切换”后，所选线路不可用时会切到下一条可用线路；上传始终使用固定线路。轮换仅用于短请求与新建连接，单场录像选定线路后会保持到本场结束。已有 WebSocket 和录像连接不会被强制中断，会在自然重连时应用新设置。

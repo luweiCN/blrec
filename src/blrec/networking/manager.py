@@ -337,7 +337,7 @@ class NetworkRouteManager:
                         return self._audited_selection(
                             self._selection(purpose, interface, 'primary'),
                             anonymous=anonymous,
-                            affinity=affinity_key is not None,
+                            affinity_key=affinity_key,
                         )
                     self._affinities.pop(affinity, None)
 
@@ -354,7 +354,7 @@ class NetworkRouteManager:
                 return self._audited_selection(
                     self._selection(purpose, interface, 'round_robin'),
                     anonymous=anonymous,
-                    affinity=affinity_key is not None,
+                    affinity_key=affinity_key,
                 )
 
             configured = interfaces.get(route.interface or '')
@@ -362,7 +362,7 @@ class NetworkRouteManager:
                 return self._audited_selection(
                     self._system_selection(purpose),
                     anonymous=anonymous,
-                    affinity=affinity_key is not None,
+                    affinity_key=affinity_key,
                 )
             if (
                 configured is not None
@@ -374,7 +374,7 @@ class NetworkRouteManager:
                 return self._audited_selection(
                     self._selection(purpose, configured, 'primary'),
                     anonymous=anonymous,
-                    affinity=affinity_key is not None,
+                    affinity_key=affinity_key,
                 )
 
             allow_failover = route.failover_enabled and purpose != 'upload'
@@ -393,7 +393,7 @@ class NetworkRouteManager:
                     return self._audited_selection(
                         self._selection(purpose, fallback, 'fallback'),
                         anonymous=anonymous,
-                        affinity=affinity_key is not None,
+                        affinity_key=affinity_key,
                     )
             self._audit_unavailable(purpose, route.interface)
             raise NetworkUnavailable(
@@ -520,21 +520,26 @@ class NetworkRouteManager:
         return getattr(self._settings_provider(), purpose)
 
     def _audited_selection(
-        self, selection: RouteSelection, *, anonymous: bool, affinity: bool
+        self, selection: RouteSelection, *, anonymous: bool, affinity_key: Optional[str]
     ) -> RouteSelection:
-        key = (selection.purpose, selection.interface_name, selection.role)
-        now = self._clock()
-        if now - self._selection_audit_at.get(key, float('-inf')) >= 300:
-            self._selection_audit_at[key] = now
-            audit(
-                'network_route_selected',
-                level='WARNING' if selection.role == 'fallback' else 'DEBUG',
-                purpose=selection.purpose,
-                interface=selection.interface_name,
-                role=selection.role,
-                anonymous=anonymous,
-                affinity=affinity,
-            )
+        reasons = {
+            'primary': 'configured',
+            'fallback': 'configured_unavailable',
+            'round_robin': 'round_robin',
+            'system': 'system_default',
+        }
+        audit(
+            'network_route_selected',
+            level='WARNING' if selection.role == 'fallback' else 'DEBUG',
+            purpose=selection.purpose,
+            interface=selection.interface_name,
+            source_address=selection.source_address,
+            role=selection.role,
+            reason=reasons[selection.role],
+            anonymous=anonymous,
+            affinity_key=affinity_key,
+            result='selected',
+        )
         return selection
 
     def _audit_unavailable(

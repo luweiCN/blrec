@@ -6,7 +6,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_synology_compose_pulls_one_pinned_public_image() -> None:
     compose = (ROOT / 'compose.synology.yml').read_text(encoding='utf8')
     assert 'build:' not in compose
-    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.1}' in compose
+    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.2}' in compose
+    assert 'container_name: blrec-next' in compose
     assert 'network_mode: host' in compose
     assert 'ports:' not in compose
     assert 'stop_grace_period: 2m' in compose
@@ -16,10 +17,12 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
 
 def test_environment_example_contains_no_credential() -> None:
     example = (ROOT / 'synology.env.example').read_text(encoding='utf8')
-    assert 'BLREC_IMAGE_TAG=3.0.0-beta.1' in example
+    assert 'BLREC_IMAGE_TAG=3.0.0-beta.2' in example
     assert 'BLREC_ADMIN_USERNAME=admin' in example
     assert 'BLREC_API_KEY=\n' in example
     assert 'BLREC_CREDENTIAL_KEY=' not in example
+    for directory in ('config', 'log', 'rec'):
+        assert f'/volume1/docker/blrec-next/{directory}' in example
 
 
 def test_synology_documentation_has_install_upgrade_and_rollback() -> None:
@@ -39,7 +42,7 @@ def test_first_install_preserves_credentials_and_secures_environment() -> None:
     install = document.split('## 首次安装', 1)[1].split('## 升级', 1)[0]
     key_guard = 'if [ -e "$credential_key" ]; then'
     generate_key = (
-        'openssl rand -base64 32 > ' '/volume1/docker/blrec/config/credential.key'
+        'openssl rand -base64 32 > ' '/volume1/docker/blrec-next/config/credential.key'
     )
     assert 'set -eu' in install
     assert key_guard in install

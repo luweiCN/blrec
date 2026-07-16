@@ -253,6 +253,11 @@ export interface SubmissionVerification {
   readonly checked: readonly string[];
   readonly missing: readonly string[];
   readonly mismatches: readonly string[];
+  readonly differences?: Readonly<
+    Record<string, { readonly expected: unknown; readonly actual: unknown }>
+  >;
+  readonly unverifiable?: readonly string[];
+  readonly error?: string | null;
 }
 
 export interface UploadJobProgress {

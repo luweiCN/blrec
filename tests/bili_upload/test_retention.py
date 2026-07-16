@@ -101,8 +101,13 @@ async def seed_recording(
 
 @pytest.mark.asyncio
 async def test_event_retention_deletes_only_video_and_preserves_danmaku(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.retention.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     root = tmp_path / 'records'
     root.mkdir()
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
@@ -134,6 +139,12 @@ async def test_event_retention_deletes_only_video_and_preserves_danmaku(
         assert row['video_delete_reason'] == 'submitted'
         assert row['video_delete_error'] is None
         assert row['xml_path'] == str(xml)
+        assert any(
+            event == 'recording_video_deleted'
+            and fields['part_id'] == 1
+            and fields['reason'] == 'submitted'
+            for event, fields in events
+        )
     finally:
         await database.close()
 

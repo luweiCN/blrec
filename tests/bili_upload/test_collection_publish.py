@@ -64,8 +64,13 @@ async def async_value(value: Any) -> Any:
 
 @pytest.mark.asyncio
 async def test_publisher_adds_the_approved_archive_using_its_first_cid(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.collection_publish.audit',
+        lambda event, **fields: events.append((event, fields)),
+    )
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
     await database.open()
     protocol = FakeProtocol()
@@ -92,6 +97,12 @@ async def test_publisher_adds_the_approved_archive_using_its_first_cid(
             'collection_branch_state': 'completed',
             'collection_error': None,
         }
+        assert any(
+            event == 'collection_episode_added'
+            and fields['job_id'] == 1
+            and fields['section_id'] == 21
+            for event, fields in events
+        )
     finally:
         await database.close()
 

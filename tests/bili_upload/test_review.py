@@ -328,6 +328,8 @@ async def test_review_persists_submission_setting_verification(
         assert row['submission_verified_at'] == 1000
         verification = json.loads(str(row['submission_verification_json']))
         assert verification['mismatches'] == []
+        assert verification['differences'] == {}
+        assert verification['unverifiable'] == []
         assert 'title' in verification['checked']
         assert '测试直播' not in str(row['submission_verification_json'])
         assert any(
@@ -336,6 +338,53 @@ async def test_review_persists_submission_setting_verification(
             and fields['state'] == 'passed'
             for event, fields in audit_events
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_does_not_audit_verification_lost_to_concurrent_state_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_events = []
+    monkeypatch.setattr(
+        'blrec.bili_upload.review.audit',
+        lambda event, **fields: audit_events.append((event, fields)),
+    )
+    database = await open_database(tmp_path / 'upload.sqlite3')
+
+    class StateChangingProtocol(FakeProtocol):
+        async def archive_view(
+            self, bundle: object, params: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            await database.execute("UPDATE upload_jobs SET state='paused' WHERE id=1")
+            return await super().archive_view(bundle, params)
+
+    protocol = StateChangingProtocol(
+        {1: archive_response()}, {'BVfixture': archive_detail([video('p1', 101, 1)])}
+    )
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 0
+        row = await database.fetchone(
+            'SELECT state,submission_verification_state FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'paused',
+            'submission_verification_state': 'pending',
+        }
+        assert all(event != 'submission_verified' for event, _ in audit_events)
     finally:
         await database.close()
 
@@ -578,11 +627,13 @@ async def test_review_pauses_on_part_mapping_mismatch(
         await review.run_once()
 
         row = await database.fetchone(
-            'SELECT state,review_reason FROM upload_jobs WHERE id=1'
+            'SELECT state,review_reason,submission_verification_state '
+            'FROM upload_jobs WHERE id=1'
         )
         assert row is not None
         assert row['state'] == 'paused'
         assert '分 P' in str(row['review_reason'])
+        assert row['submission_verification_state'] == 'failed'
         assert (
             await database.scalar(
                 'SELECT COUNT(*) FROM upload_parts WHERE job_id=1 AND cid IS NOT NULL'

@@ -12,7 +12,13 @@ class SubmissionVerification:
     state: str
     checked: Tuple[str, ...]
     missing: Tuple[str, ...]
-    mismatches: Tuple[str, ...]
+    differences: Dict[str, Dict[str, Any]]
+    unverifiable: Tuple[str, ...] = ()
+    error: Optional[str] = None
+
+    @property
+    def mismatches(self) -> Tuple[str, ...]:
+        return tuple(self.differences)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -21,6 +27,9 @@ class SubmissionVerification:
                 'checked': self.checked,
                 'missing': self.missing,
                 'mismatches': self.mismatches,
+                'differences': self.differences,
+                'unverifiable': self.unverifiable,
+                'error': self.error,
             },
             ensure_ascii=False,
             separators=(',', ':'),
@@ -39,16 +48,25 @@ def verify_submission(
 ) -> SubmissionVerification:
     data = response.get('data')
     if not isinstance(data, Mapping):
-        return SubmissionVerification('failed', (), ('archive',), ())
+        return SubmissionVerification(
+            'failed', (), ('archive',), {}, error='archive response is missing'
+        )
     archive = data.get('archive')
     if not isinstance(archive, Mapping):
-        return SubmissionVerification('failed', (), ('archive',), ())
+        return SubmissionVerification(
+            'failed', (), ('archive',), {}, error='archive response is missing'
+        )
 
     expected = _expected_fields(snapshot, scheduled_publish_at)
+    unverifiable = _unverifiable_fields(snapshot)
+    if not expected and not unverifiable:
+        return SubmissionVerification(
+            'failed', (), (), {}, error='policy snapshot has no verifiable fields'
+        )
     actual = _actual_fields(archive, data)
     checked = []
     missing = []
-    mismatches = []
+    differences: Dict[str, Dict[str, Any]] = {}
     for name, expected_value in expected.items():
         actual_value = actual.get(name, _MISSING)
         if actual_value is _MISSING:
@@ -56,11 +74,15 @@ def verify_submission(
             continue
         checked.append(name)
         if actual_value != expected_value:
-            mismatches.append(name)
+            differences[name] = {'expected': expected_value, 'actual': actual_value}
 
-    state = 'different' if mismatches else 'partial' if missing else 'passed'
+    state = (
+        'different'
+        if differences
+        else 'partial' if missing or unverifiable else 'passed'
+    )
     return SubmissionVerification(
-        state, tuple(checked), tuple(missing), tuple(mismatches)
+        state, tuple(checked), tuple(missing), differences, unverifiable
     )
 
 
@@ -88,13 +110,22 @@ def _expected_fields(
     }
     if 'part_titles' in snapshot:
         expected['part_titles'] = tuple(
-            _text(value) for value in snapshot.get('part_titles', ())
+            _text(value)[:80] for value in snapshot.get('part_titles', ())
         )
     if _integer(snapshot.get('copyright')) == 2 and 'source' in snapshot:
         expected['source'] = _text(snapshot.get('source'))
     if scheduled_publish_at is not None:
         expected['scheduled_publish_at'] = int(scheduled_publish_at)
     return expected
+
+
+def _unverifiable_fields(snapshot: Mapping[str, Any]) -> Tuple[str, ...]:
+    fields = []
+    if snapshot.get('cover_mode') in ('live', 'custom'):
+        fields.append('cover')
+    if snapshot.get('collection_section_id') is not None:
+        fields.append('collection')
+    return tuple(fields)
 
 
 def _actual_fields(

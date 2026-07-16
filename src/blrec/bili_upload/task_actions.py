@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
+from blrec.logging.audit import audit
+
 from .accounts import (
     AccountNotFound,
     AccountPaused,
@@ -735,6 +737,8 @@ class UploadTaskActionManager:
                 'lease_owner=NULL,lease_until=NULL,attempt=0,next_attempt_at=0,'
                 'scheduled_publish_at=NULL,collection_error=NULL,'
                 'upload_completed_at=NULL,submitted_at=NULL,approved_at=NULL,'
+                "submission_verification_state='pending',"
+                'submission_verified_at=NULL,submission_verification_json=NULL,'
                 "repair_state='idle',repair_message=NULL,repair_error=NULL,"
                 'repair_attempt=0,repair_requested_at=NULL,repair_completed_at=NULL,'
                 'updated_at=? WHERE id=?',
@@ -1370,6 +1374,15 @@ class UploadTaskActionManager:
     async def _process_repair(self, claim: LeaseClaim) -> None:
         try:
             job = await self._load_repair_job(claim)
+            audit(
+                'transcode_repair_started',
+                job_id=job.id,
+                account_id=job.account_id,
+                aid=job.aid,
+                bvid=job.bvid,
+                attempt=claim.attempt,
+                result='started',
+            )
             gate = self._account_gates.for_account(job.account_id)
             async with gate.hold(job.credential_version):
                 bundle = await self._bundle_loader(job.account_id)
@@ -1840,6 +1853,12 @@ class UploadTaskActionManager:
                 'repair_completed_at': int(self._clock()),
             },
         )
+        audit(
+            'transcode_repair_not_needed',
+            job_id=claim.id,
+            message=message,
+            result='not_needed',
+        )
 
     async def _finish_repair(
         self,
@@ -1888,6 +1907,15 @@ class UploadTaskActionManager:
             )
 
         await self._database.write(finish)
+        audit(
+            'transcode_repair_submitted',
+            job_id=claim.id,
+            failed_parts=len(failed),
+            remux_parts=sum(
+                1 for part in failed if repair_modes[part.local_id] == 'remux'
+            ),
+            result='waiting_review',
+        )
 
     @staticmethod
     def _repair_progress_message(
@@ -1914,6 +1942,13 @@ class UploadTaskActionManager:
                 'repair_completed_at': int(self._clock()),
             },
         )
+        audit(
+            'transcode_repair_failed',
+            level='ERROR',
+            job_id=claim.id,
+            reason=(reason or '转码修复失败')[:500],
+            result='failed',
+        )
 
     async def _unknown_repair(self, claim: LeaseClaim) -> None:
         await self._finish(
@@ -1926,6 +1961,12 @@ class UploadTaskActionManager:
                 'review_reason': '转码修复的稿件编辑结果未知，需要远端核对',
                 'repair_completed_at': int(self._clock()),
             },
+        )
+        audit(
+            'transcode_repair_unknown',
+            level='WARNING',
+            job_id=claim.id,
+            result='unknown_outcome',
         )
 
     async def _finish(self, claim: LeaseClaim, values: Mapping[str, Any]) -> None:
