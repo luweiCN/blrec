@@ -1,10 +1,12 @@
 import {
+  ChangeDetectorRef,
   Component,
   ElementRef,
   EventEmitter,
   Input,
   OnChanges,
   OnDestroy,
+  NgZone,
   Output,
   SimpleChanges,
   ViewChild,
@@ -42,7 +44,9 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
 
   constructor(
     private recordingSessions: RecordingSessionService,
-    private playerFactory: PartPlayerFactory
+    private playerFactory: PartPlayerFactory,
+    private changeDetector: ChangeDetectorRef,
+    private zone: NgZone
   ) {}
 
   @ViewChild('videoElement')
@@ -128,10 +132,12 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
           this.mediaUrl = this.recordingSessions.mediaUrl(this.part.id, access);
           this.loading = false;
           this.attachFlvPlayer();
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.loading = false;
           this.error = this.describeError(error, '本地视频加载失败');
+          this.changeDetector.markForCheck();
         },
       });
   }
@@ -150,8 +156,11 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
         fileSizeBytes: access?.fileSizeBytes ?? null,
       },
       (message) => {
-        this.error = message;
-        this.teardownPlayer();
+        this.zone.run(() => {
+          this.error = message;
+          this.teardownPlayer();
+          this.changeDetector.markForCheck();
+        });
       }
     );
     if (this.player === null) {

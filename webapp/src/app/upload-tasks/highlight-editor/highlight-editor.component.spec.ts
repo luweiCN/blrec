@@ -224,6 +224,21 @@ describe('HighlightEditorComponent', () => {
     expect(component.selectedMarkerId).toBe(7);
   });
 
+  it('marks the view after the timeline loads asynchronously', () => {
+    const timelineResponse = new Subject<HighlightTimeline>();
+    highlights.getTimeline.and.returnValue(timelineResponse);
+    const asyncFixture = TestBed.createComponent(HighlightEditorComponent);
+    const asyncComponent = asyncFixture.componentInstance;
+    const changeDetector = (asyncComponent as any).changeDetector;
+    spyOn(changeDetector, 'markForCheck');
+    asyncFixture.detectChanges();
+
+    timelineResponse.next(timeline);
+
+    expect(changeDetector.markForCheck).toHaveBeenCalled();
+    asyncFixture.destroy();
+  });
+
   it('blocks a range that reaches beyond the stable recording boundary', () => {
     component.startMs = 160_000;
     component.endMs = 175_000;

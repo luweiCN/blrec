@@ -3,7 +3,7 @@ import { OverlayContainer } from '@angular/cdk/overlay';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 
@@ -162,6 +162,32 @@ describe('PartVideoDialogComponent', () => {
       },
       jasmine.any(Function)
     );
+  });
+
+  it('marks the view after asynchronous media access completes', () => {
+    const access = new Subject<{
+      token: string;
+      expiresAt: number;
+      snapshotId: string;
+      durationMs: number;
+      fileSizeBytes: number;
+      recording: boolean;
+    }>();
+    service.createMediaAccess.and.returnValue(access);
+    const changeDetector = (fixture.componentInstance as any).changeDetector;
+    spyOn(changeDetector, 'markForCheck');
+    fixture.detectChanges();
+
+    access.next({
+      token: 'signed',
+      expiresAt: 123,
+      snapshotId: 'snapshot-id',
+      durationMs: 12_500,
+      fileSizeBytes: 2_048,
+      recording: true,
+    });
+
+    expect(changeDetector.markForCheck).toHaveBeenCalled();
   });
 
   it('destroys the FLV player when closed', () => {

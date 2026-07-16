@@ -1,3 +1,4 @@
+import { NgZone } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 
 import {
@@ -97,5 +98,28 @@ describe('RealtimeService', () => {
     }
 
     expect(received).toHaveBeenCalledWith({ type: 'resync', data: {} });
+  });
+
+  it('delivers native EventSource callbacks inside Angular', () => {
+    const source = new FakeEventSource();
+    TestBed.configureTestingModule({
+      providers: [
+        RealtimeService,
+        { provide: EVENT_SOURCE_FACTORY, useValue: () => source },
+        {
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
+        },
+      ],
+    });
+    const zone = TestBed.inject(NgZone);
+    let deliveredInsideAngular = false;
+    TestBed.inject(RealtimeService).events$.subscribe(() => {
+      deliveredInsideAngular = NgZone.isInAngularZone();
+    });
+
+    zone.runOutsideAngular(() => source.emit('tasks', { tasks: [] }));
+
+    expect(deliveredInsideAngular).toBeTrue();
   });
 });

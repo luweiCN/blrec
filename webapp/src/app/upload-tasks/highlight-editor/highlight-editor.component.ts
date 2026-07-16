@@ -1,6 +1,8 @@
 import {
+  ChangeDetectorRef,
   Component,
   ElementRef,
+  NgZone,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -81,6 +83,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     private highlights: HighlightService,
     private recordings: RecordingSessionService,
     private playerFactory: PartPlayerFactory,
+    private changeDetector: ChangeDetectorRef,
+    private zone: NgZone,
     realtime: RealtimeService
   ) {
     this.sessionId = Number(route.snapshot.paramMap.get('sessionId'));
@@ -219,10 +223,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           next: (inspection) => {
             this.inspection = inspection;
             this.inspecting = false;
+            this.changeDetector.markForCheck();
           },
           error: (error: unknown) => {
             this.inspecting = false;
             this.actionError = this.describeError(error, '无法检查裁剪范围');
+            this.changeDetector.markForCheck();
           },
         })
     );
@@ -247,10 +253,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           next: (clip) => {
             this.clips = [...this.clips, clip];
             this.creating = false;
+            this.changeDetector.markForCheck();
           },
           error: (error: unknown) => {
             this.creating = false;
             this.actionError = this.describeError(error, '创建高光片段失败');
+            this.changeDetector.markForCheck();
           },
         })
     );
@@ -264,9 +272,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           this.uploadJobIds.set(clip.id, jobId);
           this.taskEditJobIds = [jobId];
           this.taskEditVisible = true;
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '创建上传任务失败');
+          this.changeDetector.markForCheck();
         },
       })
     );
@@ -285,10 +295,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           }
           this.clipPreviewUrl = this.highlights.mediaUrl(clip.id, access);
           this.clipPreviewLoading = false;
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.clipPreviewLoading = false;
           this.actionError = this.describeError(error, '打开高光片段失败');
+          this.changeDetector.markForCheck();
         },
       })
     );
@@ -322,9 +334,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           if (rejected) {
             this.actionError = rejected.message;
           }
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '继续上传任务失败');
+          this.changeDetector.markForCheck();
         },
       })
     );
@@ -339,9 +353,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           if (this.clipPreviewId === clip.id) {
             this.closeClipPreview();
           }
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '删除高光片段失败');
+          this.changeDetector.markForCheck();
         },
       })
     );
@@ -381,9 +397,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
               this.clipName = marker.name;
             }
             this.cancelMarkerEdit();
+            this.changeDetector.markForCheck();
           },
           error: (error: unknown) => {
             this.actionError = this.describeError(error, '保存高光点失败');
+            this.changeDetector.markForCheck();
           },
         })
     );
@@ -408,9 +426,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           if (this.editingMarkerId === markerId) {
             this.cancelMarkerEdit();
           }
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '删除高光点失败');
+          this.changeDetector.markForCheck();
         },
       })
     );
@@ -499,10 +519,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
               this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
             }
           }
+          this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
           this.loading = false;
           this.error = this.describeError(error, '无法加载高光剪辑时间轴');
+          this.changeDetector.markForCheck();
         },
       })
     );
@@ -547,10 +569,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         this.mediaLoading = false;
         this.attachFlvPlayer();
         this.applyPendingSeek();
+        this.changeDetector.markForCheck();
       },
       error: (error: unknown) => {
         this.mediaLoading = false;
         this.mediaError = this.describeError(error, '无法打开本地视频');
+        this.changeDetector.markForCheck();
       },
     });
   }
@@ -573,8 +597,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         fileSizeBytes: this.mediaAccess?.fileSizeBytes ?? null,
       },
       (message) => {
-        this.mediaError = message;
-        this.teardownPlayer();
+        this.zone.run(() => {
+          this.mediaError = message;
+          this.teardownPlayer();
+          this.changeDetector.markForCheck();
+        });
       }
     );
     if (this.player === null) {
@@ -623,12 +650,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.clips = this.clips.map((clip) =>
         clip.id === item.id ? { ...clip, ...item } : clip
       );
+      this.changeDetector.markForCheck();
       if (item.state === 'ready' && previous.state !== 'ready') {
         this.subscriptions.add(
           this.highlights.getClip(item.id).subscribe((clip) => {
             this.clips = this.clips.map((value) =>
               value.id === clip.id ? clip : value
             );
+            this.changeDetector.markForCheck();
           })
         );
       }

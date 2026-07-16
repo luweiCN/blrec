@@ -1,4 +1,4 @@
-import { Inject, Injectable, InjectionToken } from '@angular/core';
+import { Inject, Injectable, InjectionToken, NgZone } from '@angular/core';
 import { Observable } from 'rxjs';
 import { share } from 'rxjs/operators';
 
@@ -42,6 +42,7 @@ export class RealtimeService {
 
   constructor(
     private url: UrlService,
+    private zone: NgZone,
     @Inject(EVENT_SOURCE_FACTORY) private eventSourceFactory: EventSourceFactory
   ) {
     this.events$ = new Observable<RealtimeEvent>((subscriber) => {
@@ -54,11 +55,13 @@ export class RealtimeService {
           if (!(event instanceof MessageEvent)) {
             return;
           }
+          let value: RealtimeEvent;
           try {
-            subscriber.next({ type, data: JSON.parse(String(event.data)) });
+            value = { type, data: JSON.parse(String(event.data)) };
           } catch (_error) {
-            subscriber.next({ type: 'resync', data: {} });
+            value = { type: 'resync', data: {} };
           }
+          this.zone.run(() => subscriber.next(value));
         };
         listeners.set(type, listener);
         source.addEventListener(type, listener);
