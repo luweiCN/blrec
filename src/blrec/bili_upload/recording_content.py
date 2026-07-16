@@ -7,7 +7,7 @@ import stat
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional, Tuple
+from typing import Any, Iterator, Literal, Mapping, Optional, Tuple
 
 from lxml import etree
 
@@ -56,6 +56,8 @@ class MediaResource:
     part_index: int
     bvid: Optional[str]
     remote_available: bool
+    playback_mode: Literal['seekable', 'sequential', 'active_snapshot']
+    index_state: str
 
 
 @dataclass(frozen=True)
@@ -240,7 +242,8 @@ class RecordingContentReader:
     async def media(self, part_id: int) -> MediaResource:
         row = await self._database.fetchone(
             'SELECT session.room_id,part.part_index,part.source_path,part.final_path,'
-            'part.artifact_state,job.state AS job_state,job.bvid '
+            'part.artifact_state,part.media_index_state,'
+            'job.state AS job_state,job.bvid '
             'FROM recording_parts part '
             'JOIN recording_sessions session ON session.id=part.session_id '
             'LEFT JOIN upload_jobs job ON job.session_id=part.session_id '
@@ -298,6 +301,17 @@ class RecordingContentReader:
         remote_available = bool(bvid and job_state in ('approved', 'completed'))
         if resolved_path is None and not remote_available:
             raise RecordingContentUnavailable('该分 P 的本地视频不可用')
+        index_state = str(row['media_index_state'])
+        suffix = '' if resolved_path is None else Path(resolved_path).suffix.lower()
+        playback_mode: Literal['seekable', 'sequential', 'active_snapshot']
+        if suffix != '.flv':
+            playback_mode = 'seekable'
+        elif recording:
+            playback_mode = 'active_snapshot'
+        elif index_state == 'ready':
+            playback_mode = 'seekable'
+        else:
+            playback_mode = 'sequential'
         return MediaResource(
             path=resolved_path,
             size=resolved_size,
@@ -313,6 +327,8 @@ class RecordingContentReader:
             part_index=int(row['part_index']),
             bvid=bvid,
             remote_available=remote_available,
+            playback_mode=playback_mode,
+            index_state=index_state,
         )
 
     @staticmethod

@@ -41,6 +41,22 @@ def test_probe_accepts_nonempty_file_with_video_stream(
     assert kwargs['check'] is False
 
 
+def test_probe_treats_zero_duration_as_unknown(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / 'interrupted.flv'
+    path.write_bytes(b'video')
+    monkeypatch.setattr(
+        subprocess,
+        'run',
+        lambda *args, **kwargs: completed_probe(
+            streams=[{'codec_type': 'video'}], duration='0'
+        ),
+    )
+
+    assert probe_recording_artifact(str(path)) == RecoveredArtifact(
+        path=str(path), size_bytes=5, duration_seconds=None
+    )
+
+
 def test_probe_rejects_file_without_video_stream(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / 'audio.flv'
     path.write_bytes(b'audio')

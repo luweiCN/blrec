@@ -172,6 +172,8 @@ class FakeContentReader:
             part_index=1,
             bvid=None,
             remote_available=False,
+            playback_mode='active_snapshot',
+            index_state='pending',
         )
 
     async def danmaku(self, part_id: int, *, cursor: int, limit: int) -> DanmakuPage:
@@ -438,6 +440,9 @@ def test_list_recording_sessions_returns_redacted_part_state(
                         'sourceExists': False,
                         'finalExists': True,
                         'errorMessage': None,
+                        'mediaIndexState': 'pending',
+                        'mediaIndexError': None,
+                        'mediaIndexProgress': 0.0,
                     }
                 ],
             }
@@ -792,6 +797,10 @@ def test_media_access_token_authorizes_range_requests_without_exposing_api_key(
     assert access.status_code == 200
     assert access.json()['token']
     assert access.json()['expiresAt'] > 0
+    assert access.json()['playbackMode'] == 'active_snapshot'
+    assert access.json()['indexState'] == 'pending'
+    assert access.json()['retryAfterMs'] is None
+    assert access.json()['requestId']
     assert 'test-api-key' not in access.text
 
     response = client.get(
@@ -832,6 +841,8 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
                 part_index=1,
                 bvid=None,
                 remote_available=False,
+                playback_mode='active_snapshot',
+                index_state='pending',
             )
 
     recording_sessions.content_reader = SnapshotContentReader(media)
@@ -859,6 +870,7 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
     assert body['durationMs'] == 12_500
     assert body['fileSizeBytes'] > media.stat().st_size
     assert body['recording'] is True
+    assert body['playbackMode'] == 'active_snapshot'
 
     response = client.get(
         '/api/v1/recording-sessions/parts/2/media',
@@ -896,6 +908,8 @@ def test_media_access_freezes_a_growing_flv_when_index_creation_fails(
                 part_index=1,
                 bvid=None,
                 remote_available=False,
+                playback_mode='active_snapshot',
+                index_state='pending',
             )
 
     recording_sessions.content_reader = GrowingContentReader(media)

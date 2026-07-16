@@ -15,6 +15,7 @@ from .database import (
     UnsupportedDatabaseFilesystem,
 )
 from .models import FeatureUnavailable, JobState, WriteState, validate_feature_gate
+from .media_index import MediaIndexResult, MediaIndexWorker
 from .retention import RetentionManager, RetentionStatus
 from .session_submission import (
     InvalidSessionSubmission,
@@ -38,6 +39,8 @@ __all__ = (
     'JobState',
     'LeaseClaim',
     'LeaseLost',
+    'MediaIndexResult',
+    'MediaIndexWorker',
     'RelatedUploadJob',
     'RemovalMode',
     'RecordingSessionNotFound',

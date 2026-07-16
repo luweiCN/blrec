@@ -74,7 +74,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 19
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 20
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -185,6 +185,10 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'video_delete_reason',
             'video_delete_error',
             'timeline_start_at_ms',
+            'media_index_state',
+            'media_index_error',
+            'media_index_progress',
+            'media_index_updated_at',
         } <= part_columns
 
         indexes = {
@@ -349,7 +353,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 19
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 20
     finally:
         await database.close()
 

@@ -65,6 +65,9 @@ class RecordingPart:
     record_duration_seconds: Optional[int] = None
     file_size_bytes: Optional[int] = None
     danmaku_count: int = 0
+    media_index_state: str = 'pending'
+    media_index_error: Optional[str] = None
+    media_index_progress: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1601,7 +1604,8 @@ class RecordingJournalBridge:
             'SELECT id,session_id,run_id,part_index,source_path,final_path,'
             'xml_path,record_start_time,record_end_time,record_duration_seconds,'
             'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
-            'error_message '
+            'error_message,media_index_state,media_index_error,'
+            'media_index_progress '
             'FROM recording_parts WHERE run_id=? ORDER BY part_index',
             (run_id,),
         )
@@ -1612,7 +1616,8 @@ class RecordingJournalBridge:
             'SELECT id,session_id,run_id,part_index,source_path,final_path,'
             'xml_path,record_start_time,record_end_time,record_duration_seconds,'
             'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
-            'error_message '
+            'error_message,media_index_state,media_index_error,'
+            'media_index_progress '
             'FROM recording_parts WHERE session_id=? ORDER BY part_index',
             (session_id,),
         )
@@ -1725,6 +1730,22 @@ class RecordingJournalBridge:
                 None if row['file_size_bytes'] is None else int(row['file_size_bytes'])
             ),
             danmaku_count=int(row['danmaku_count']),
+            media_index_state=(
+                str(row['media_index_state'])
+                if 'media_index_state' in row.keys()
+                else 'pending'
+            ),
+            media_index_error=(
+                None
+                if 'media_index_error' not in row.keys()
+                or row['media_index_error'] is None
+                else str(row['media_index_error'])
+            ),
+            media_index_progress=(
+                float(row['media_index_progress'])
+                if 'media_index_progress' in row.keys()
+                else 0.0
+            ),
         )
 
     def _new_event_id(self, event_id: Optional[str]) -> str:

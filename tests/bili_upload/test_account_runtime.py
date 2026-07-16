@@ -136,6 +136,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.task_actions is not None
         assert runtime.highlight_service is not None
         assert runtime.highlight_worker is not None
+        assert runtime.media_index_worker is not None
 
         for _ in range(100):
             if protocol.oauth_calls:
@@ -177,6 +178,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.task_actions is None
     assert runtime.highlight_service is None
     assert runtime.highlight_worker is None
+    assert runtime.media_index_worker is None
 
 
 @pytest.mark.asyncio
@@ -221,7 +223,8 @@ async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
     )
     journal = SimpleNamespace(finalize_cancelled_sessions=AsyncMock(return_value=1))
     coordinator = SimpleNamespace(
-        create_ready_jobs=AsyncMock(return_value=[1]),
+        resolve_finished_sessions=AsyncMock(return_value=[1]),
+        prepare_waiting_jobs=AsyncMock(return_value=[1]),
         run_once=AsyncMock(return_value=None),
     )
     review_watcher = SimpleNamespace(run_once=AsyncMock(return_value=None))
@@ -247,7 +250,8 @@ async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
     )
 
     journal.finalize_cancelled_sessions.assert_awaited_once_with()
-    coordinator.create_ready_jobs.assert_awaited_once_with()
+    coordinator.resolve_finished_sessions.assert_awaited_once_with()
+    coordinator.prepare_waiting_jobs.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -293,6 +297,7 @@ async def test_delete_open_session_stops_workers_and_current_recording() -> None
     runtime._task_actions = SimpleNamespace(
         delete_session=AsyncMock(return_value='已删除')
     )
+    runtime._session_submission_manager = SimpleNamespace()
     runtime._active_session_canceller = AsyncMock(
         side_effect=lambda room_id: calls.append(('cancel', room_id))
     )
@@ -326,6 +331,7 @@ async def test_session_action_maps_job_capability_to_job_id() -> None:
     runtime._task_actions = SimpleNamespace(
         retry_failed=AsyncMock(return_value='已重新排队')
     )
+    runtime._session_submission_manager = SimpleNamespace()
 
     message = await runtime.run_recording_session_action(
         'retry_failed', 7, manager_subject='manager'
@@ -349,6 +355,7 @@ async def test_session_action_maps_manual_danmaku_backfill_to_job_id() -> None:
     runtime._task_actions = SimpleNamespace(
         request_danmaku_backfill=AsyncMock(return_value='已排队回灌弹幕')
     )
+    runtime._session_submission_manager = SimpleNamespace()
 
     message = await runtime.run_recording_session_action(
         'backfill_danmaku', 7, manager_subject='manager'

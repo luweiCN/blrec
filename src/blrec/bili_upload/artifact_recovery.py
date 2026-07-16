@@ -78,6 +78,6 @@ def _duration_seconds(value: Any) -> Optional[int]:
         duration = float(raw_duration)
     except (TypeError, ValueError):
         return None
-    if duration < 0:
+    if duration <= 0:
         return None
     return int(duration + 0.5)

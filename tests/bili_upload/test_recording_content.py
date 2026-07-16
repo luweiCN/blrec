@@ -59,6 +59,8 @@ async def test_media_prefers_existing_final_file(
     assert resource.content_type == 'video/mp4'
     assert resource.recording is False
     assert resource.part_index == 1
+    assert resource.playback_mode == 'seekable'
+    assert resource.index_state == 'pending'
 
 
 @pytest.mark.asyncio
@@ -80,6 +82,27 @@ async def test_media_falls_back_to_growing_source_file(
     assert resource.content_type == 'video/x-flv'
     assert resource.recording is True
     assert resource.room_id == 100
+    assert resource.playback_mode == 'active_snapshot'
+
+
+@pytest.mark.asyncio
+async def test_completed_flv_is_sequential_until_its_index_is_ready(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'interrupted.flv'
+    part_id = await _seed_part(database, source)
+    reader = RecordingContentReader(database)
+
+    pending = await reader.media(part_id)
+    await database.execute(
+        "UPDATE recording_parts SET media_index_state='ready' WHERE id=?", (part_id,)
+    )
+    indexed = await reader.media(part_id)
+
+    assert pending.playback_mode == 'sequential'
+    assert pending.index_state == 'pending'
+    assert indexed.playback_mode == 'seekable'
+    assert indexed.index_state == 'ready'
 
 
 def test_flv_snapshot_exposes_duration_and_maps_virtual_ranges(tmp_path: Path) -> None:

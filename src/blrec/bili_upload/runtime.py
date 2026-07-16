@@ -31,6 +31,7 @@ from .highlight_danmaku import HighlightDanmakuClipper
 from .highlight_worker import HighlightWorker
 from .highlights import HighlightService
 from .journal import RecordingJournalBridge
+from .media_index import MediaIndexWorker
 from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
@@ -124,12 +125,15 @@ class BiliAccountRuntime:
         self._task_actions: Optional[UploadTaskActionManager] = None
         self._highlight_service: Optional[HighlightService] = None
         self._highlight_worker: Optional[HighlightWorker] = None
+        self._media_index_worker: Optional[MediaIndexWorker] = None
         self._notification_scanner: Optional[OperationalHealthScanner] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
         self._highlight_task: Optional[asyncio.Task[Any]] = None
         self._highlight_stop_event: Optional[asyncio.Event] = None
+        self._media_index_task: Optional[asyncio.Task[Any]] = None
+        self._media_index_stop_event: Optional[asyncio.Event] = None
         self._session_action_lock = asyncio.Lock()
         self._unavailable_reason: Optional[str] = (
             'Bilibili account management is not ready'
@@ -216,6 +220,10 @@ class BiliAccountRuntime:
         return self._highlight_worker
 
     @property
+    def media_index_worker(self) -> Optional[MediaIndexWorker]:
+        return self._media_index_worker
+
+    @property
     def unavailable_reason(self) -> Optional[str]:
         return self._unavailable_reason
 
@@ -253,6 +261,8 @@ class BiliAccountRuntime:
                 database, lossless_clipper, highlight_danmaku_clipper, clock=self._clock
             )
             await highlight_worker.recover_interrupted()
+            media_index_worker = MediaIndexWorker(database, clock=self._clock)
+            await media_index_worker.recover_interrupted()
             key_id = hashlib.sha256(self._credential_key).hexdigest()
             keys: Dict[str, bytes] = dict(self._old_credential_keys)
             keys[key_id] = self._credential_key
@@ -421,11 +431,13 @@ class BiliAccountRuntime:
         self._task_actions = task_actions
         self._highlight_service = highlight_service
         self._highlight_worker = highlight_worker
+        self._media_index_worker = media_index_worker
         self._notification_scanner = notification_scanner
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         await self._start_upload_worker()
         await self._start_highlight_worker()
+        await self._start_media_index_worker()
         return True
 
     async def primary_cookie_header(self, url: str) -> Optional[str]:
@@ -560,6 +572,7 @@ class BiliAccountRuntime:
         raise UploadTaskActionRejected('不支持的场次操作')
 
     async def close(self) -> None:
+        await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
         refresh_task, self._refresh_task = self._refresh_task, None
@@ -586,6 +599,7 @@ class BiliAccountRuntime:
         self._task_actions = None
         self._highlight_service = None
         self._highlight_worker = None
+        self._media_index_worker = None
         self._notification_scanner = None
         self._content_reader = None
         transport, self._transport = self._transport, None
@@ -627,6 +641,25 @@ class BiliAccountRuntime:
                 raise
             except Exception:
                 logger.exception('Highlight worker iteration failed')
+            delay = 0.0 if processed is not None else 2.0
+            if delay <= 0:
+                continue
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_media_indexes(
+        self, worker: MediaIndexWorker, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            processed = None
+            try:
+                processed = await worker.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Media index worker iteration failed')
             delay = 0.0 if processed is not None else 2.0
             if delay <= 0:
                 continue
@@ -769,7 +802,28 @@ class BiliAccountRuntime:
             self._run_highlights(worker, stop_event)
         )
 
+    async def _stop_media_index_worker(self) -> None:
+        stop_event, self._media_index_stop_event = (self._media_index_stop_event, None)
+        if stop_event is not None:
+            stop_event.set()
+        task, self._media_index_task = self._media_index_task, None
+        if task is not None:
+            await task
+
+    async def _start_media_index_worker(self) -> None:
+        if self._media_index_task is not None and not self._media_index_task.done():
+            return
+        worker = self._media_index_worker
+        if worker is None:
+            return
+        stop_event = asyncio.Event()
+        self._media_index_stop_event = stop_event
+        self._media_index_task = asyncio.create_task(
+            self._run_media_indexes(worker, stop_event)
+        )
+
     async def _close_partial(self, database: BiliUploadDatabase) -> None:
+        await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
         self._coordinator = None
@@ -789,6 +843,7 @@ class BiliAccountRuntime:
         self._task_actions = None
         self._highlight_service = None
         self._highlight_worker = None
+        self._media_index_worker = None
         self._notification_scanner = None
         self._journal = None
         self._content_reader = None

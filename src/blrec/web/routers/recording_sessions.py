@@ -100,6 +100,9 @@ class RecordingPartResponse(ApiModel):
     source_exists: bool
     final_exists: bool
     error_message: Optional[str]
+    media_index_state: str
+    media_index_error: Optional[str]
+    media_index_progress: float
 
 
 class UploadPartProgressResponse(ApiModel):
@@ -371,6 +374,10 @@ class MediaAccessResponse(ApiModel):
     duration_ms: Optional[int]
     file_size_bytes: int
     recording: bool
+    playback_mode: str
+    index_state: str
+    retry_after_ms: Optional[int]
+    request_id: str
 
 
 class MediaSnapshotStore:
@@ -620,6 +627,9 @@ def _part_response(part: RecordingPart) -> RecordingPartResponse:
         source_exists=part.source_exists,
         final_exists=part.final_exists,
         error_message=part.error_message,
+        media_index_state=part.media_index_state,
+        media_index_error=part.media_index_error,
+        media_index_progress=part.media_index_progress,
     )
 
 
@@ -1119,9 +1129,20 @@ async def create_recording_media_access(
     _subject: str = Depends(authenticated_manager_subject),
     reader: RecordingContentReader = Depends(get_content_reader),
 ) -> MediaAccessResponse:
+    request_id = secrets.token_hex(8)
+    started = time.monotonic()
     try:
         resource = await reader.media(part_id)
     except (RecordingContentNotFound, RecordingContentUnavailable) as error:
+        audit(
+            'media_access_failed',
+            level='WARNING',
+            request_id=request_id,
+            part_id=part_id,
+            elapsed_ms=int((time.monotonic() - started) * 1_000),
+            error=str(error)[:500],
+            result='failed',
+        )
         raise _content_error(error) from None
     if resource.path is None:
         raise HTTPException(
@@ -1149,14 +1170,30 @@ async def create_recording_media_access(
         snapshot_id = media_snapshot_store.add(part_id, expires_at, snapshot)
         duration_ms = snapshot.duration_ms
         file_size_bytes = snapshot.size
-    return MediaAccessResponse(
+    response = MediaAccessResponse(
         token=security.media_access_token(part_id, expires_at, snapshot_id),
         expires_at=expires_at,
         snapshot_id=snapshot_id,
         duration_ms=duration_ms,
         file_size_bytes=file_size_bytes,
         recording=resource.recording,
+        playback_mode=resource.playback_mode,
+        index_state=resource.index_state,
+        retry_after_ms=None,
+        request_id=request_id,
     )
+    audit(
+        'media_access_completed',
+        request_id=request_id,
+        part_id=part_id,
+        playback_mode=resource.playback_mode,
+        index_state=resource.index_state,
+        recording=resource.recording,
+        file_size_bytes=file_size_bytes,
+        elapsed_ms=int((time.monotonic() - started) * 1_000),
+        result='completed',
+    )
+    return response
 
 
 @router.get('/parts/{part_id}/media')
