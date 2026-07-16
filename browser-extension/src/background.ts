@@ -56,6 +56,12 @@ export async function handleBackgroundMessage(
       data: await api.addHighlight(message.roomId, {
         observedAtMs: message.observedAtMs,
         playerDelayMs: message.playerDelayMs,
+        currentTimeMs: message.currentTimeMs,
+        seekableEndMs: message.seekableEndMs,
+        rawDelayMs: message.rawDelayMs,
+        baselineDelayMs: message.baselineDelayMs,
+        effectiveRewindMs: message.effectiveRewindMs,
+        name: message.name,
         title: message.title,
         anchorName: message.anchorName,
       }),

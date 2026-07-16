@@ -2,7 +2,7 @@ import {
   BackgroundMessage,
   BackgroundResponse,
 } from './shared/messages';
-import { observePlayer } from './shared/player';
+import { PlayerDelayCalibrator } from './shared/player';
 import { parseRoomId } from './shared/room';
 
 interface ObserverLike {
@@ -41,6 +41,8 @@ export class HighlightContentController {
   private status: RoomStatus | null = null;
   private observer: ObserverLike | null = null;
   private cancelStatusRefresh: (() => void) | null = null;
+  private cancelNamePrompt: (() => void) | null = null;
+  private readonly playerDelay = new PlayerDelayCalibrator();
   private started = false;
 
   constructor(dependencies: ContentDependencies) {
@@ -84,8 +86,12 @@ export class HighlightContentController {
     this.observer = null;
     this.cancelStatusRefresh?.();
     this.cancelStatusRefresh = null;
+    this.cancelNamePrompt?.();
+    this.cancelNamePrompt = null;
     this.document
-      .querySelectorAll('.blrec-highlight-actions, .blrec-highlight-toast')
+      .querySelectorAll(
+        '.blrec-highlight-actions, .blrec-highlight-toast, .blrec-highlight-popover',
+      )
       .forEach((element) => element.remove());
   }
 
@@ -104,6 +110,9 @@ export class HighlightContentController {
       return;
     }
     this.status = response.data;
+    if (this.status.recording) {
+      this.playerDelay.sample(this.document);
+    }
     this.removeActions();
     this.ensureRendered();
   }
@@ -144,7 +153,10 @@ export class HighlightContentController {
     }
   }
 
-  private actionButton(label: string, action: () => Promise<void>): HTMLButtonElement {
+  private actionButton(
+    label: string,
+    action: () => Promise<void>,
+  ): HTMLButtonElement {
     const button = this.document.createElement('button');
     button.type = 'button';
     button.textContent = label;
@@ -179,12 +191,23 @@ export class HighlightContentController {
       return;
     }
     this.setDisabled(container, true);
-    const observation = observePlayer(this.document, this.now());
+    const observation = this.playerDelay.observe(this.document, this.now());
+    const name = await this.requestHighlightName(container);
+    if (name === null) {
+      this.setDisabled(container, false);
+      return;
+    }
     const response = await this.sendMessage({
       type: 'ADD_HIGHLIGHT',
       roomId: this.roomId,
       observedAtMs: observation.observedAtMs,
-      playerDelayMs: observation.playerDelayMs,
+      playerDelayMs: Math.min(300_000, observation.effectiveRewindMs),
+      currentTimeMs: observation.currentTimeMs,
+      seekableEndMs: observation.seekableEndMs,
+      rawDelayMs: observation.rawDelayMs,
+      baselineDelayMs: observation.baselineDelayMs,
+      effectiveRewindMs: observation.effectiveRewindMs,
+      name,
       title: this.document.title,
       anchorName: this.anchorName(),
     });
@@ -193,6 +216,56 @@ export class HighlightContentController {
       response.ok ? 'success' : 'error'
     );
     this.setDisabled(container, false);
+  }
+
+  private requestHighlightName(container: HTMLElement): Promise<string | null> {
+    this.cancelNamePrompt?.();
+    return new Promise((resolve) => {
+      const popover = this.document.createElement('form');
+      popover.className = 'blrec-highlight-popover';
+      popover.setAttribute('aria-label', '高光名称');
+      const input = this.document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 200;
+      input.placeholder = '高光名称（可不填）';
+      input.setAttribute('aria-label', '高光名称');
+      const actions = this.document.createElement('div');
+      const cancel = this.document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.dataset['action'] = 'cancel-highlight';
+      const save = this.document.createElement('button');
+      save.type = 'submit';
+      save.textContent = '保存';
+      save.dataset['action'] = 'save-highlight';
+      actions.append(cancel, save);
+      popover.append(input, actions);
+
+      let settled = false;
+      const finish = (value: string | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        popover.remove();
+        this.cancelNamePrompt = null;
+        resolve(value);
+      };
+      this.cancelNamePrompt = () => finish(null);
+      cancel.addEventListener('click', () => finish(null));
+      popover.addEventListener('submit', (event) => {
+        event.preventDefault();
+        finish(input.value.trim().slice(0, 200));
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(null);
+        }
+      });
+      container.append(popover);
+      input.focus();
+    });
   }
 
   private anchorName(): string {
@@ -230,6 +303,8 @@ export class HighlightContentController {
   }
 
   private removeActions(): void {
+    this.cancelNamePrompt?.();
+    this.cancelNamePrompt = null;
     this.document
       .querySelectorAll('.blrec-highlight-actions')
       .forEach((element) => element.remove());

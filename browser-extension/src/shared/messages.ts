@@ -20,6 +20,12 @@ export interface AddHighlightMessage {
   readonly roomId: number;
   readonly observedAtMs: number;
   readonly playerDelayMs: number;
+  readonly currentTimeMs: number | null;
+  readonly seekableEndMs: number | null;
+  readonly rawDelayMs: number;
+  readonly baselineDelayMs: number;
+  readonly effectiveRewindMs: number;
+  readonly name: string;
   readonly title: string;
   readonly anchorName: string;
 }

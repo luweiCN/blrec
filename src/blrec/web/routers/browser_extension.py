@@ -71,6 +71,12 @@ class CollectResponse(ApiModel):
 class HighlightRequest(ApiModel):
     observed_at_ms: int = Field(..., gt=0)
     player_delay_ms: int = Field(0, ge=0, le=300_000)
+    current_time_ms: Optional[int] = Field(None, ge=0, le=604_800_000)
+    seekable_end_ms: Optional[int] = Field(None, ge=0, le=604_800_000)
+    raw_delay_ms: int = Field(0, ge=0, le=86_400_000)
+    baseline_delay_ms: int = Field(0, ge=0, le=86_400_000)
+    effective_rewind_ms: Optional[int] = Field(None, ge=0, le=86_400_000)
+    name: str = Field('', max_length=200)
     title: str = Field('', max_length=200)
     anchor_name: str = Field('', max_length=100)
 
@@ -224,8 +230,14 @@ async def create_highlight(
         room_id=room_id,
         observed_at_ms=command.observed_at_ms,
         player_delay_ms=command.player_delay_ms,
+        current_time_ms=command.current_time_ms,
+        seekable_end_ms=command.seekable_end_ms,
+        raw_delay_ms=command.raw_delay_ms,
+        baseline_delay_ms=command.baseline_delay_ms,
+        effective_rewind_ms=command.effective_rewind_ms,
         title=command.title,
         anchor_name=command.anchor_name,
+        name=command.name,
         source='browser_extension',
     )
     audit(
@@ -234,6 +246,9 @@ async def create_highlight(
         room_id=room_id,
         marker_id=marker.id,
         player_delay_ms=command.player_delay_ms,
+        raw_delay_ms=command.raw_delay_ms,
+        baseline_delay_ms=command.baseline_delay_ms,
+        effective_rewind_ms=command.effective_rewind_ms,
         result='created',
     )
     return HighlightResponse(id=marker.id, name=marker.name)

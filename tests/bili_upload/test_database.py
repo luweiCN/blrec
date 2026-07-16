@@ -74,7 +74,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 20
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 21
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -190,6 +190,19 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'media_index_progress',
             'media_index_updated_at',
         } <= part_columns
+        marker_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(highlight_markers)')
+        }
+        assert {
+            'recording_part_id',
+            'part_anchor_at_ms',
+            'current_time_ms',
+            'seekable_end_ms',
+            'raw_delay_ms',
+            'baseline_delay_ms',
+            'effective_rewind_ms',
+        } <= marker_columns
 
         indexes = {
             row['name']
@@ -353,7 +366,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 20
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 21
     finally:
         await database.close()
 

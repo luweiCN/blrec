@@ -83,6 +83,101 @@ async def test_marker_uses_backend_clock_and_player_delay(database) -> None:
 
 
 @pytest.mark.asyncio
+async def test_marker_maps_normal_buffer_from_the_recording_first_byte_anchor(
+    database, tmp_path: Path
+) -> None:
+    first_byte_ms = 1_000_000
+    click_ms = first_byte_ms + 461_000
+    video = tmp_path / 'active.flv'
+    video.write_bytes(b'active')
+    await database.execute(
+        "INSERT INTO recording_sessions("
+        "id,room_id,broadcast_session_key,state,started_at,title,anchor_name) "
+        "VALUES(1,100,'100:anchor','open',1000,'测试直播','主播')"
+    )
+    await database.execute(
+        "INSERT INTO recording_runs(id,session_id,state,started_at) "
+        "VALUES('run',1,'recording',1000)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,record_start_time,'
+        'timeline_start_at_ms,artifact_state,created_at,updated_at) '
+        "VALUES(1,1,'run',1,?,1000,?,'recording',1000,1000)",
+        (str(video), first_byte_ms),
+    )
+    service = HighlightService(database, clock=lambda: click_ms / 1000)
+
+    marker = await service.create_marker(
+        room_id=100,
+        observed_at_ms=click_ms - 50,
+        player_delay_ms=0,
+        current_time_ms=456_000,
+        seekable_end_ms=461_000,
+        raw_delay_ms=5_000,
+        baseline_delay_ms=5_000,
+        effective_rewind_ms=0,
+        title='测试直播',
+        anchor_name='主播',
+        name='精彩操作',
+        source='browser_extension',
+    )
+
+    assert marker.content_at_ms == click_ms
+    assert marker.content_at_ms - first_byte_ms == 461_000
+    assert marker.recording_part_id == 1
+    assert marker.part_anchor_at_ms == first_byte_ms
+    assert marker.raw_delay_ms == 5_000
+    assert marker.baseline_delay_ms == 5_000
+    assert marker.effective_rewind_ms == 0
+    assert marker.name == '精彩操作'
+
+
+@pytest.mark.asyncio
+async def test_marker_subtracts_only_the_explicit_rewind(
+    database, tmp_path: Path
+) -> None:
+    first_byte_ms = 1_000_000
+    click_ms = first_byte_ms + 461_000
+    video = tmp_path / 'active.flv'
+    video.write_bytes(b'active')
+    await database.execute(
+        "INSERT INTO recording_sessions("
+        "id,room_id,broadcast_session_key,state,started_at) "
+        "VALUES(1,100,'100:anchor','open',1000)"
+    )
+    await database.execute(
+        "INSERT INTO recording_runs(id,session_id,state,started_at) "
+        "VALUES('run',1,'recording',1000)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,record_start_time,'
+        'timeline_start_at_ms,artifact_state,created_at,updated_at) '
+        "VALUES(1,1,'run',1,?,1000,?,'recording',1000,1000)",
+        (str(video), first_byte_ms),
+    )
+    marker = await HighlightService(
+        database, clock=lambda: click_ms / 1000
+    ).create_marker(
+        room_id=100,
+        observed_at_ms=click_ms,
+        player_delay_ms=60_000,
+        current_time_ms=396_000,
+        seekable_end_ms=461_000,
+        raw_delay_ms=65_000,
+        baseline_delay_ms=5_000,
+        effective_rewind_ms=60_000,
+        title='',
+        anchor_name='',
+        name='',
+        source='browser_extension',
+    )
+
+    assert marker.content_at_ms - first_byte_ms == 401_000
+
+
+@pytest.mark.asyncio
 async def test_timeline_preserves_gaps_and_only_maps_matching_markers(
     database, tmp_path: Path
 ) -> None:

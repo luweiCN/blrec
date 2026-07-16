@@ -31,6 +31,7 @@ class ClipSource:
     path: str
     requested_start_ms: int
     requested_end_ms: int
+    duration_ms: Optional[int] = None
     keyframes_ms: Tuple[int, ...] = ()
 
 
@@ -117,7 +118,13 @@ class LosslessClipper:
                 or source.requested_end_ms <= source.requested_start_ms
             ):
                 raise HighlightCutError('源视频剪辑范围无效')
-            profile, probed_keyframes = self._probe_media(str(path))
+            profile, probed_keyframes = self._probe_media(
+                str(path),
+                keyframe_at_ms=(
+                    None if source.keyframes_ms else source.requested_start_ms
+                ),
+                known_duration_ms=source.duration_ms,
+            )
             if source.requested_end_ms > profile.duration_ms:
                 raise HighlightCutError('剪辑范围超出源视频可用时长')
             if first_profile is None:
@@ -279,11 +286,36 @@ class LosslessClipper:
                 )
             )
 
-    def _probe_media(self, path: str) -> Tuple[MediaProfile, Tuple[int, ...]]:
+    def _probe_media(
+        self,
+        path: str,
+        *,
+        keyframe_at_ms: Optional[int] = None,
+        known_duration_ms: Optional[int] = None,
+    ) -> Tuple[MediaProfile, Tuple[int, ...]]:
         if self._probe_override is not None:
             profile, keyframes = self._probe_override(path)
             return profile, tuple(sorted(set(int(value) for value in keyframes)))
-        command = (
+        profile_command = (
+            self._ffprobe,
+            '-v',
+            'error',
+            '-show_entries',
+            'stream=codec_type,codec_name,width,height,'
+            'r_frame_rate,extradata_size:format=duration',
+            '-of',
+            'json',
+            path,
+        )
+        profile = self._parse_profile(
+            self._run_ffprobe(profile_command), known_duration_ms=known_duration_ms
+        )
+        if keyframe_at_ms is None:
+            return profile, ()
+        interval_start_ms = max(0, keyframe_at_ms - 120_000)
+        interval_end_ms = min(profile.duration_ms, keyframe_at_ms + 5_000)
+        interval_duration_ms = max(1, interval_end_ms - interval_start_ms)
+        keyframe_command = (
             self._ffprobe,
             '-v',
             'error',
@@ -291,38 +323,18 @@ class LosslessClipper:
             'v:0',
             '-skip_frame',
             'nokey',
+            '-read_intervals',
+            '{}%+{}'.format(
+                self._seconds(interval_start_ms), self._seconds(interval_duration_ms)
+            ),
             '-show_entries',
-            'frame=best_effort_timestamp_time:stream=codec_name,width,height,'
-            'r_frame_rate,extradata_size:format=duration',
+            'frame=best_effort_timestamp_time',
             '-of',
             'json',
             path,
         )
-        document = self._run_ffprobe(command)
-        has_audio = self._probe_has_audio(path)
-        return self._parse_probe(document, has_audio=has_audio)
-
-    def _probe_has_audio(self, path: str) -> bool:
-        command = (
-            self._ffprobe,
-            '-v',
-            'error',
-            '-select_streams',
-            'a',
-            '-show_entries',
-            'stream=codec_type',
-            '-of',
-            'json',
-            path,
-        )
-        document = self._run_ffprobe(command)
-        streams = document.get('streams')
-        if not isinstance(streams, Sequence) or isinstance(streams, (str, bytes)):
-            raise HighlightCutError('ffprobe 返回了无效的音频信息')
-        return any(
-            isinstance(stream, Mapping) and stream.get('codec_type') == 'audio'
-            for stream in streams
-        )
+        keyframes = self._parse_keyframes(self._run_ffprobe(keyframe_command))
+        return profile, keyframes
 
     def _run_ffprobe(self, command: Tuple[str, ...]) -> Mapping[str, Any]:
         try:
@@ -350,23 +362,27 @@ class LosslessClipper:
         return document
 
     @staticmethod
-    def _parse_probe(
-        document: Mapping[str, Any], *, has_audio: bool
-    ) -> Tuple[MediaProfile, Tuple[int, ...]]:
+    def _parse_profile(
+        document: Mapping[str, Any], *, known_duration_ms: Optional[int]
+    ) -> MediaProfile:
         streams = document.get('streams')
-        frames = document.get('frames')
         file_format = document.get('format')
         if (
             not isinstance(streams, Sequence)
             or isinstance(streams, (str, bytes))
             or not streams
-            or not isinstance(frames, Sequence)
-            or isinstance(frames, (str, bytes))
             or not isinstance(file_format, Mapping)
         ):
             raise HighlightCutError('ffprobe 返回了无效的视频信息')
-        stream = streams[0]
-        if not isinstance(stream, Mapping):
+        stream = next(
+            (
+                item
+                for item in streams
+                if isinstance(item, Mapping) and item.get('codec_type') == 'video'
+            ),
+            None,
+        )
+        if stream is None:
             raise HighlightCutError('ffprobe 返回了无效的视频流信息')
         try:
             codec_name = str(stream['codec_name'])
@@ -374,7 +390,11 @@ class LosslessClipper:
             height = int(stream['height'])
             r_frame_rate = str(stream['r_frame_rate'])
             extradata_size = int(stream.get('extradata_size', 0))
-            duration_seconds = float(file_format['duration'])
+            duration_ms = (
+                int(known_duration_ms)
+                if known_duration_ms is not None
+                else int(round(float(file_format['duration']) * 1000))
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise HighlightCutError('ffprobe 返回了无效的视频流信息') from error
         if (
@@ -383,10 +403,27 @@ class LosslessClipper:
             or height <= 0
             or not r_frame_rate
             or extradata_size < 0
-            or not math.isfinite(duration_seconds)
-            or duration_seconds <= 0
+            or duration_ms <= 0
         ):
             raise HighlightCutError('ffprobe 返回了无效的视频流信息')
+        return MediaProfile(
+            codec_name=codec_name,
+            width=width,
+            height=height,
+            r_frame_rate=r_frame_rate,
+            extradata_size=extradata_size,
+            duration_ms=duration_ms,
+            has_audio=any(
+                isinstance(item, Mapping) and item.get('codec_type') == 'audio'
+                for item in streams
+            ),
+        )
+
+    @staticmethod
+    def _parse_keyframes(document: Mapping[str, Any]) -> Tuple[int, ...]:
+        frames = document.get('frames')
+        if not isinstance(frames, Sequence) or isinstance(frames, (str, bytes)):
+            raise HighlightCutError('ffprobe 返回了无效的关键帧信息')
         keyframes = []
         for frame in frames:
             if not isinstance(frame, Mapping):
@@ -397,18 +434,7 @@ class LosslessClipper:
                 continue
             if math.isfinite(seconds) and seconds >= 0:
                 keyframes.append(int(round(seconds * 1000)))
-        return (
-            MediaProfile(
-                codec_name=codec_name,
-                width=width,
-                height=height,
-                r_frame_rate=r_frame_rate,
-                extradata_size=extradata_size,
-                duration_ms=int(round(duration_seconds * 1000)),
-                has_audio=has_audio,
-            ),
-            tuple(sorted(set(keyframes))),
-        )
+        return tuple(sorted(set(keyframes)))
 
     @staticmethod
     def _compatible(first: MediaProfile, second: MediaProfile) -> bool:

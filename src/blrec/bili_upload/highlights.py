@@ -44,6 +44,13 @@ class HighlightMarker:
     source: str
     created_at: int
     updated_at: int
+    recording_part_id: Optional[int] = None
+    part_anchor_at_ms: Optional[int] = None
+    current_time_ms: Optional[int] = None
+    seekable_end_ms: Optional[int] = None
+    raw_delay_ms: int = 0
+    baseline_delay_ms: int = 0
+    effective_rewind_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -137,6 +144,12 @@ class HighlightService:
         title: str,
         anchor_name: str,
         source: str,
+        current_time_ms: Optional[int] = None,
+        seekable_end_ms: Optional[int] = None,
+        raw_delay_ms: int = 0,
+        baseline_delay_ms: int = 0,
+        effective_rewind_ms: Optional[int] = None,
+        name: str = '',
     ) -> HighlightMarker:
         if room_id <= 0:
             raise ValueError('room_id must be positive')
@@ -145,19 +158,52 @@ class HighlightService:
         if source not in ('web', 'browser_extension'):
             raise ValueError('invalid highlight source')
         delay_ms = min(300_000, max(0, int(player_delay_ms)))
+        raw_delay = min(86_400_000, max(0, int(raw_delay_ms)))
+        baseline_delay = min(86_400_000, max(0, int(baseline_delay_ms)))
+        rewind_ms = (
+            delay_ms
+            if effective_rewind_ms is None
+            else min(86_400_000, max(0, int(effective_rewind_ms)))
+        )
+        current_time = self._optional_nonnegative(current_time_ms)
+        seekable_end = self._optional_nonnegative(seekable_end_ms)
         clock_now = self._clock()
-        content_at_ms = int(clock_now * 1000) - delay_ms
+        received_at_ms = int(clock_now * 1000)
+        content_at_ms = received_at_ms - rewind_ms
         if content_at_ms <= 0:
             raise ValueError('highlight content time must be positive')
         now = int(clock_now)
-        name = self._default_name(title, content_at_ms)
+        normalized_name = name.strip()
+        if len(normalized_name) > 200:
+            raise ValueError('highlight name must not exceed 200 characters')
+        marker_name = normalized_name or self._default_name(title, content_at_ms)
+        active_part = await self._database.fetchone(
+            'SELECT part.id,COALESCE(part.timeline_start_at_ms,'
+            'part.record_start_time*1000) AS anchor_at_ms '
+            'FROM recording_parts part '
+            'JOIN recording_sessions session ON session.id=part.session_id '
+            "WHERE session.room_id=? AND session.source_kind='live' "
+            "AND session.state='open' AND part.video_deleted_at IS NULL "
+            "AND part.artifact_state IN ('recording','postprocessing','ready') "
+            'AND COALESCE(part.timeline_start_at_ms,'
+            'part.record_start_time*1000)<=? '
+            'ORDER BY anchor_at_ms DESC,part.id DESC LIMIT 1',
+            (room_id, received_at_ms),
+        )
+        recording_part_id = None if active_part is None else int(active_part['id'])
+        part_anchor_at_ms = (
+            None if active_part is None else int(active_part['anchor_at_ms'])
+        )
 
         def write(connection: sqlite3.Connection) -> sqlite3.Row:
             cursor = connection.execute(
                 'INSERT INTO highlight_markers('
                 'room_id,observed_at_ms,player_delay_ms,content_at_ms,title,'
-                'anchor_name,name,note,source,created_at,updated_at) '
-                "VALUES(?,?,?,?,?,?,?,'',?,?,?)",
+                'anchor_name,name,note,source,created_at,updated_at,'
+                'recording_part_id,part_anchor_at_ms,current_time_ms,'
+                'seekable_end_ms,raw_delay_ms,baseline_delay_ms,'
+                'effective_rewind_ms) '
+                "VALUES(?,?,?,?,?,?,?,'',?,?,?,?,?,?,?,?,?,?)",
                 (
                     room_id,
                     int(observed_at_ms),
@@ -165,10 +211,17 @@ class HighlightService:
                     content_at_ms,
                     title,
                     anchor_name,
-                    name,
+                    marker_name,
                     source,
                     now,
                     now,
+                    recording_part_id,
+                    part_anchor_at_ms,
+                    current_time,
+                    seekable_end,
+                    raw_delay,
+                    baseline_delay,
+                    rewind_ms,
                 ),
             )
             row = connection.execute(
@@ -185,6 +238,11 @@ class HighlightService:
             room_id=room_id,
             observed_at_ms=observed_at_ms,
             player_delay_ms=delay_ms,
+            raw_delay_ms=raw_delay,
+            baseline_delay_ms=baseline_delay,
+            effective_rewind_ms=rewind_ms,
+            recording_part_id=recording_part_id,
+            part_anchor_at_ms=part_anchor_at_ms,
             content_at_ms=content_at_ms,
             source=source,
             result='saved',
@@ -430,6 +488,7 @@ class HighlightService:
                 path=part.path,
                 requested_start_ms=local_start_ms,
                 requested_end_ms=local_end_ms,
+                duration_ms=part.duration_ms,
             )
             for part, local_start_ms, local_end_ms in source_ranges
         )
@@ -855,6 +914,12 @@ class HighlightService:
         return '{}{}'.format(prefix[: 200 - len(suffix)], suffix)
 
     @staticmethod
+    def _optional_nonnegative(value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        return min(604_800_000, max(0, int(value)))
+
+    @staticmethod
     def _marker_from_row(row: sqlite3.Row) -> HighlightMarker:
         return HighlightMarker(
             id=int(row['id']),
@@ -869,6 +934,43 @@ class HighlightService:
             source=str(row['source']),
             created_at=int(row['created_at']),
             updated_at=int(row['updated_at']),
+            recording_part_id=(
+                None
+                if 'recording_part_id' not in row.keys()
+                or row['recording_part_id'] is None
+                else int(row['recording_part_id'])
+            ),
+            part_anchor_at_ms=(
+                None
+                if 'part_anchor_at_ms' not in row.keys()
+                or row['part_anchor_at_ms'] is None
+                else int(row['part_anchor_at_ms'])
+            ),
+            current_time_ms=(
+                None
+                if 'current_time_ms' not in row.keys() or row['current_time_ms'] is None
+                else int(row['current_time_ms'])
+            ),
+            seekable_end_ms=(
+                None
+                if 'seekable_end_ms' not in row.keys() or row['seekable_end_ms'] is None
+                else int(row['seekable_end_ms'])
+            ),
+            raw_delay_ms=(
+                int(row['raw_delay_ms'])
+                if 'raw_delay_ms' in row.keys()
+                else int(row['player_delay_ms'])
+            ),
+            baseline_delay_ms=(
+                int(row['baseline_delay_ms'])
+                if 'baseline_delay_ms' in row.keys()
+                else 0
+            ),
+            effective_rewind_ms=(
+                int(row['effective_rewind_ms'])
+                if 'effective_rewind_ms' in row.keys()
+                else int(row['player_delay_ms'])
+            ),
         )
 
     @staticmethod

@@ -50,6 +50,12 @@ export class ExtensionApi {
     payload: {
       readonly observedAtMs: number;
       readonly playerDelayMs: number;
+      readonly currentTimeMs: number | null;
+      readonly seekableEndMs: number | null;
+      readonly rawDelayMs: number;
+      readonly baselineDelayMs: number;
+      readonly effectiveRewindMs: number;
+      readonly name: string;
       readonly title: string;
       readonly anchorName: string;
     }

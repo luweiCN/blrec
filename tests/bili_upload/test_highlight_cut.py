@@ -118,20 +118,23 @@ def test_inspect_uses_safe_ffprobe_argument_arrays(
                 'frames': [
                     {'best_effort_timestamp_time': '0.0'},
                     {'best_effort_timestamp_time': '28.6'},
-                ],
+                ]
+            }
+        else:
+            document = {
                 'streams': [
                     {
+                        'codec_type': 'video',
                         'codec_name': 'h264',
                         'width': 1920,
                         'height': 1080,
                         'r_frame_rate': '60/1',
                         'extradata_size': 42,
-                    }
+                    },
+                    {'codec_type': 'audio'},
                 ],
                 'format': {'duration': '100.0'},
             }
-        else:
-            document = {'streams': [{'codec_type': 'audio'}]}
         return SimpleNamespace(
             returncode=0, stdout=json.dumps(document).encode('utf8'), stderr=b''
         )
@@ -144,23 +147,28 @@ def test_inspect_uses_safe_ffprobe_argument_arrays(
         stable_end_ms=100_000,
     )
 
-    command, options = calls[0]
-    assert command == (
+    profile_command, profile_options = calls[0]
+    keyframe_command, keyframe_options = calls[1]
+    assert profile_command == (
         'ffprobe',
         '-v',
         'error',
-        '-select_streams',
-        'v:0',
-        '-skip_frame',
-        'nokey',
         '-show_entries',
-        'frame=best_effort_timestamp_time:stream=codec_name,width,height,'
+        'stream=codec_type,codec_name,width,height,'
         'r_frame_rate,extradata_size:format=duration',
         '-of',
         'json',
         str(source),
     )
-    assert options['shell'] is False
+    assert '-read_intervals' in keyframe_command
+    interval = keyframe_command[keyframe_command.index('-read_intervals') + 1]
+    assert interval == '0.000%+35.000'
+    assert ('-skip_frame', 'nokey') == keyframe_command[
+        keyframe_command.index('-skip_frame') : keyframe_command.index('-skip_frame')
+        + 2
+    ]
+    assert profile_options['shell'] is False
+    assert keyframe_options['shell'] is False
     assert inspection.actual_start_ms == 28_600
 
 

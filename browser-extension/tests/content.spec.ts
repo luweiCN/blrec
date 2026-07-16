@@ -161,7 +161,7 @@ describe('Bilibili live controls', () => {
     await vi.waitFor(() => expect(statusRoomIds).toEqual([6, 3582149]));
   });
 
-  it('sends player-adjusted data and allows repeated highlights', async () => {
+  it('locks the click time, accepts a name and allows repeated highlights', async () => {
     document.title = '直播标题';
     document.body.insertAdjacentHTML(
       'beforeend',
@@ -172,15 +172,30 @@ describe('Bilibili live controls', () => {
     Object.defineProperty(video, 'seekable', {
       value: { length: 1, start: () => 0, end: () => 119 },
     });
+    let now = 1_000_000;
     const setup = makeController({ collected: true, recording: true });
+    (setup.controller as unknown as { now: () => number }).now = () => now;
     await setup.controller.start();
     const button = document.querySelector<HTMLButtonElement>(
       '.blrec-highlight-actions button'
     )!;
 
     button.click();
+    const input = document.querySelector<HTMLInputElement>(
+      '.blrec-highlight-popover input'
+    )!;
+    expect(input).not.toBeNull();
+    now = 1_005_000;
+    input.value = '精彩操作';
+    input.dispatchEvent(new Event('input'));
+    document
+      .querySelector<HTMLButtonElement>('[data-action="save-highlight"]')!
+      .click();
     await vi.waitFor(() => expect(button.disabled).toBe(false));
     button.click();
+    document
+      .querySelector<HTMLButtonElement>('[data-action="save-highlight"]')!
+      .click();
     await vi.waitFor(() =>
       expect(
         setup.sendMessage.mock.calls.filter(
@@ -193,9 +208,35 @@ describe('Bilibili live controls', () => {
       type: 'ADD_HIGHLIGHT',
       roomId: 100,
       observedAtMs: 1_000_000,
-      playerDelayMs: 18_500,
+      currentTimeMs: 100_500,
+      seekableEndMs: 119_000,
+      rawDelayMs: 18_500,
+      baselineDelayMs: 18_500,
+      effectiveRewindMs: 0,
+      playerDelayMs: 0,
+      name: '精彩操作',
       title: '直播标题',
       anchorName: '主播',
     });
+  });
+
+  it('cancels the naming popover with Escape without saving', async () => {
+    const setup = makeController({ collected: true, recording: true });
+    await setup.controller.start();
+    document
+      .querySelector<HTMLButtonElement>('.blrec-highlight-actions button')!
+      .click();
+
+    const input = document.querySelector<HTMLInputElement>(
+      '.blrec-highlight-popover input'
+    )!;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+    expect(document.querySelector('.blrec-highlight-popover')).toBeNull();
+    expect(
+      setup.sendMessage.mock.calls.some(
+        ([message]) => message.type === 'ADD_HIGHLIGHT'
+      )
+    ).toBe(false);
   });
 });

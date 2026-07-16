@@ -47,6 +47,12 @@ class CreateMarkerRequest(ApiModel):
     room_id: int = Field(..., gt=0)
     observed_at_ms: int = Field(..., gt=0)
     player_delay_ms: int = Field(0, ge=0, le=300_000)
+    current_time_ms: Optional[int] = Field(None, ge=0, le=604_800_000)
+    seekable_end_ms: Optional[int] = Field(None, ge=0, le=604_800_000)
+    raw_delay_ms: int = Field(0, ge=0, le=86_400_000)
+    baseline_delay_ms: int = Field(0, ge=0, le=86_400_000)
+    effective_rewind_ms: Optional[int] = Field(None, ge=0, le=86_400_000)
+    name: str = Field('', max_length=200)
     title: str = Field('', max_length=200)
     anchor_name: str = Field('', max_length=100)
     source: Literal['web', 'browser_extension'] = 'web'
@@ -77,6 +83,13 @@ class MarkerResponse(ApiModel):
     source: str
     created_at: int
     updated_at: int
+    recording_part_id: Optional[int]
+    part_anchor_at_ms: Optional[int]
+    current_time_ms: Optional[int]
+    seekable_end_ms: Optional[int]
+    raw_delay_ms: int
+    baseline_delay_ms: int
+    effective_rewind_ms: int
 
 
 class TimelinePartResponse(ApiModel):

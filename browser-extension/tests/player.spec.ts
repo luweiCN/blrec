@@ -2,14 +2,14 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { observePlayer } from '../src/shared/player';
+import { PlayerDelayCalibrator } from '../src/shared/player';
 
 describe('Bilibili player observation', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
   });
 
-  it('measures delay from the current position to the seekable live edge', () => {
+  it('treats the initial live buffer as a baseline instead of a rewind', () => {
     const video = document.createElement('video');
     video.currentTime = 100.5;
     Object.defineProperty(video, 'seekable', {
@@ -17,29 +17,63 @@ describe('Bilibili player observation', () => {
     });
     document.body.append(video);
 
-    expect(observePlayer(document, 1_000_000)).toEqual({
+    expect(new PlayerDelayCalibrator().observe(document, 1_000_000)).toEqual({
       observedAtMs: 1_000_000,
-      playerDelayMs: 18_500,
+      currentTimeMs: 100_500,
+      seekableEndMs: 119_000,
+      rawDelayMs: 18_500,
+      baselineDelayMs: 18_500,
+      effectiveRewindMs: 0,
     });
   });
 
   it('uses zero delay when no playable range exists', () => {
-    expect(observePlayer(document, 1_000_000)).toEqual({
+    expect(new PlayerDelayCalibrator().observe(document, 1_000_000)).toEqual({
       observedAtMs: 1_000_000,
-      playerDelayMs: 0,
+      currentTimeMs: null,
+      seekableEndMs: null,
+      rawDelayMs: 0,
+      baselineDelayMs: 0,
+      effectiveRewindMs: 0,
     });
   });
 
-  it('clamps extreme and negative delays', () => {
+  it('subtracts only a deliberate rewind beyond the sampled baseline', () => {
     const video = document.createElement('video');
-    video.currentTime = 400;
+    video.currentTime = 100.5;
     Object.defineProperty(video, 'seekable', {
-      value: { length: 1, start: () => 0, end: () => 1000 },
+      value: { length: 1, start: () => 0, end: () => 119 },
     });
     document.body.append(video);
-    expect(observePlayer(document, 1).playerDelayMs).toBe(300_000);
+    const observer = new PlayerDelayCalibrator();
+    observer.sample(document);
 
-    video.currentTime = 1100;
-    expect(observePlayer(document, 2).playerDelayMs).toBe(0);
+    video.currentTime = 40.5;
+    const rewound = observer.observe(document, 1_000_000);
+
+    expect(rewound.rawDelayMs).toBe(78_500);
+    expect(rewound.baselineDelayMs).toBe(18_500);
+    expect(rewound.effectiveRewindMs).toBe(60_000);
+  });
+
+  it('ignores small live-buffer drift and preserves long rewind observations', () => {
+    const video = document.createElement('video');
+    video.currentTime = 100;
+    Object.defineProperty(video, 'seekable', {
+      value: { length: 1, start: () => 0, end: () => 110 },
+      configurable: true,
+    });
+    document.body.append(video);
+    const observer = new PlayerDelayCalibrator();
+    observer.sample(document);
+
+    video.currentTime = 98;
+    expect(observer.observe(document, 1).effectiveRewindMs).toBe(0);
+
+    Object.defineProperty(video, 'seekable', {
+      value: { length: 1, start: () => 0, end: () => 1_000 },
+    });
+    video.currentTime = 0;
+    expect(observer.observe(document, 2).rawDelayMs).toBe(1_000_000);
   });
 });

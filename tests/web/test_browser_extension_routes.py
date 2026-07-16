@@ -219,6 +219,12 @@ def test_highlight_is_saved_independently_of_current_recording_state(
         json={
             'observedAtMs': 1_000_000,
             'playerDelayMs': 18_500,
+            'currentTimeMs': 100_500,
+            'seekableEndMs': 119_000,
+            'rawDelayMs': 18_500,
+            'baselineDelayMs': 18_500,
+            'effectiveRewindMs': 0,
+            'name': '精彩操作',
             'title': '直播标题',
             'anchorName': '主播',
         },
@@ -229,8 +235,14 @@ def test_highlight_is_saved_independently_of_current_recording_state(
         room_id=100,
         observed_at_ms=1_000_000,
         player_delay_ms=18_500,
+        current_time_ms=100_500,
+        seekable_end_ms=119_000,
+        raw_delay_ms=18_500,
+        baseline_delay_ms=18_500,
+        effective_rewind_ms=0,
         title='直播标题',
         anchor_name='主播',
+        name='精彩操作',
         source='browser_extension',
     )
 
