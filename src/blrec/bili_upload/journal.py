@@ -1359,6 +1359,33 @@ class RecordingJournalBridge:
             )
         return result
 
+    async def realtime_upload_progress(self) -> List[Dict[str, object]]:
+        cutoff = int(self._clock()) - 300
+        rows = await self._database.fetchall(
+            "SELECT session_id FROM upload_jobs WHERE state!='completed' "
+            'OR updated_at>=? ORDER BY id',
+            (cutoff,),
+        )
+        session_ids = tuple(int(row['session_id']) for row in rows)
+        jobs = await self.upload_jobs_for_sessions(session_ids)
+        return [
+            {
+                'jobId': job.id,
+                'sessionId': job.session_id,
+                'state': job.state,
+                'submitState': job.submit_state,
+                'aid': job.aid,
+                'bvid': job.bvid,
+                'confirmedBytes': job.confirmed_bytes,
+                'totalBytes': job.total_bytes,
+                'percent': job.percent,
+                'bytesPerSecond': job.bytes_per_second,
+                'etaSeconds': job.eta_seconds,
+                'currentPartIndex': job.current_part_index,
+            }
+            for job in sorted(jobs.values(), key=lambda item: item.id)
+        ]
+
     @staticmethod
     def _can_retry_upload_job(row: sqlite3.Row) -> bool:
         return (

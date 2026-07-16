@@ -4,12 +4,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from blrec.networking.manager import NetworkInterface, NetworkProbe
+from blrec.networking.traffic import TrafficMeter
 from blrec.web.routers import network
 
 
 class FakeNetworkManager:
     def __init__(self) -> None:
         self.probed: Optional[str] = None
+        self.traffic_meter = TrafficMeter()
+        self.traffic_meter.record('eth0', 'recording', 'down', 4096)
+        self.traffic_meter.record('eth0', 'upload', 'up', 1024)
         self._interface = NetworkInterface(
             name='eth0',
             address='192.168.1.20',
@@ -80,6 +84,10 @@ def test_lists_host_network_interfaces() -> None:
                 'kind': 'physical',
                 'enabled': True,
                 'uploadLimitBps': 0,
+                'uploadBps': 0.0,
+                'downloadBps': 0.0,
+                'uploadTotal': 1024,
+                'downloadTotal': 4096,
                 'probe': None,
             }
         ]

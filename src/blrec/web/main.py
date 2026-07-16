@@ -1,5 +1,5 @@
 import os
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import attr
 from brotli_asgi import BrotliMiddleware
@@ -32,6 +32,7 @@ from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
 from ..application import Application
 from . import security
 from .auth_store import AdminAuthStore
+from .realtime import RealtimeSampler
 from .routers import (
     application,
     auth,
@@ -39,6 +40,7 @@ from .routers import (
     bili_collections,
     live_status,
     network,
+    realtime,
     recording_retention,
     recording_sessions,
     room_upload_policies,
@@ -133,6 +135,27 @@ async def _persist_network_settings(value: object) -> None:
 
 
 _network_route_manager.set_settings_persister(_persist_network_settings)
+
+
+def _realtime_task_snapshot() -> List[Dict[str, Any]]:
+    if not _application_started:
+        return []
+    return [attr.asdict(data) for data in app.get_all_task_data()]
+
+
+async def _realtime_upload_snapshot() -> List[Dict[str, object]]:
+    journal = _bili_account_runtime.journal
+    if journal is None:
+        return []
+    return await journal.realtime_upload_progress()
+
+
+_realtime_sampler = RealtimeSampler(
+    realtime.broker,
+    task_provider=_realtime_task_snapshot,
+    network_provider=network.snapshot,
+    upload_provider=_realtime_upload_snapshot,
+)
 
 
 def _active_recording_metadata(resource: MediaResource) -> Optional[Mapping[str, Any]]:
@@ -273,7 +296,9 @@ async def on_startup() -> None:
         application_launched = True
         _application_started = True
         await app.refresh_managed_cookie()
+        _realtime_sampler.start()
     except BaseException:
+        await _realtime_sampler.stop()
         _application_started = False
         bili_accounts.manager = None
         recording_sessions.journal = None
@@ -297,6 +322,7 @@ async def on_startup() -> None:
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
     global _application_started
+    await _realtime_sampler.stop()
     _application_started = False
     bili_accounts.manager = None
     recording_sessions.journal = None
@@ -337,6 +363,7 @@ api.include_router(websockets.router)
 api.include_router(update.router)
 api.include_router(live_status.router, prefix='/api/v1')
 api.include_router(network.router, prefix='/api/v1')
+api.include_router(realtime.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
 api.include_router(recording_sessions.router, prefix='/api/v1')
 api.include_router(recording_retention.router, prefix='/api/v1')

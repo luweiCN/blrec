@@ -700,6 +700,55 @@ async def test_upload_progress_is_joined_to_its_recording_session(database) -> N
     assert failed_jobs[session.id].can_repair is True
 
 
+@pytest.mark.asyncio
+async def test_realtime_upload_progress_returns_active_job_bytes(database) -> None:
+    now = [1_000.0]
+    journal = RecordingJournalBridge(database, clock=lambda: now[0])
+    run_id = await journal.recording_started(100, live_start_time=900)
+    session = await journal.session_for_run(run_id)
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) VALUES(1,42,'账号',X'00',1,'k','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(3,?,1,'{}','uploading','prepared',1,1000)",
+        (session.id,),
+    )
+    await database.execute(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,artifact_state,upload_state) '
+        "VALUES(4,3,1,'/rec/p1.flv','ready','uploading')"
+    )
+    await database.execute(
+        'INSERT INTO upload_chunks('
+        'part_id,chunk_no,offset,size,state,attempt) '
+        "VALUES(4,0,0,4,'confirmed',1),(4,1,4,4,'prepared',0)"
+    )
+
+    progress = await journal.realtime_upload_progress()
+
+    assert progress == [
+        {
+            'jobId': 3,
+            'sessionId': session.id,
+            'state': 'uploading',
+            'submitState': 'prepared',
+            'aid': None,
+            'bvid': None,
+            'confirmedBytes': 4,
+            'totalBytes': 8,
+            'percent': 50.0,
+            'bytesPerSecond': None,
+            'etaSeconds': None,
+            'currentPartIndex': 1,
+        }
+    ]
+
+
 class FakeEmitter:
     def __init__(self) -> None:
         self.listeners: List[object] = []

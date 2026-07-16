@@ -36,12 +36,30 @@ def _manager() -> NetworkRouteManager:
     return manager
 
 
-def _snapshot() -> Dict[str, List[Dict[str, Any]]]:
+def snapshot() -> Dict[str, List[Dict[str, Any]]]:
     network_manager = _manager()
     probes = network_manager.cached_probes()
+    traffic: Dict[str, Dict[str, float]] = {}
+    for item in network_manager.traffic_meter.snapshot():
+        if item.interface_name is None:
+            continue
+        totals = traffic.setdefault(
+            item.interface_name,
+            {
+                'uploadBps': 0.0,
+                'downloadBps': 0.0,
+                'uploadTotal': 0.0,
+                'downloadTotal': 0.0,
+            },
+        )
+        totals['uploadBps'] += item.upload_bps
+        totals['downloadBps'] += item.download_bps
+        totals['uploadTotal'] += item.upload_total
+        totals['downloadTotal'] += item.download_total
     interfaces: List[Dict[str, Any]] = []
     for interface in network_manager.interfaces().values():
         probe = probes.get(interface.name)
+        interface_traffic = traffic.get(interface.name, {})
         interfaces.append(
             {
                 'name': interface.name,
@@ -55,6 +73,10 @@ def _snapshot() -> Dict[str, List[Dict[str, Any]]]:
                 'kind': interface.kind,
                 'enabled': interface.enabled,
                 'uploadLimitBps': interface.upload_limit_bps,
+                'uploadBps': interface_traffic.get('uploadBps', 0.0),
+                'downloadBps': interface_traffic.get('downloadBps', 0.0),
+                'uploadTotal': int(interface_traffic.get('uploadTotal', 0.0)),
+                'downloadTotal': int(interface_traffic.get('downloadTotal', 0.0)),
                 'probe': (
                     None
                     if probe is None
@@ -73,7 +95,7 @@ def _snapshot() -> Dict[str, List[Dict[str, Any]]]:
 
 @router.get('/interfaces')
 async def get_interfaces() -> Dict[str, List[Dict[str, Any]]]:
-    return _snapshot()
+    return snapshot()
 
 
 @router.patch('/interfaces/{interface_name}')
@@ -90,7 +112,7 @@ async def update_interface(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Network interface not found'
         ) from None
-    return _snapshot()
+    return snapshot()
 
 
 @router.post('/probe')
@@ -101,4 +123,4 @@ async def probe_networks(request: ProbeRequest) -> Dict[str, List[Dict[str, Any]
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Network interface not found'
         ) from None
-    return _snapshot()
+    return snapshot()
