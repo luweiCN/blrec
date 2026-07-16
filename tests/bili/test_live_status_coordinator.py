@@ -610,6 +610,10 @@ async def test_exhausted_wss_is_not_active_and_same_broadcast_retries_once() -> 
     assert listener.await_count == 1
     assert listener.await_args.args[0].status is ObservedStatus.LIVE
     assert registration.current is ObservedStatus.LIVE
+    assert coordinator.metrics(100.0).active_websockets == 0
+
+    await coordinator.observe_wss(1001, ObservedStatus.LIVE)
+
     assert coordinator.metrics(100.0).active_websockets == 1
 
 

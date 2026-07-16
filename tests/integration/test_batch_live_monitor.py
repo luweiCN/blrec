@@ -193,7 +193,7 @@ class FakeDanmakuConnection:
             self.fleet.max_concurrent_connections, self.fleet.active_connections
         )
 
-    async def stop(self) -> None:
+    async def stop(self, *, reset_mode: bool = False) -> None:
         assert self.active
         self.active = False
         self.fleet.active_connections -= 1
@@ -264,6 +264,7 @@ async def test_58_room_batch_live_monitor_rollout_scenario(
             anonymous_room_client=fake_single_room,  # type: ignore[arg-type]
         )
         task._danmaku_client = fake_danmaku.connection()
+        task._danmaku_connection = task._danmaku_client
         task._setup_live_monitor()
         assert isinstance(task._live_monitor, LiveMonitor)
         assert isinstance(task._connection_controller, LiveConnectionController)
@@ -275,6 +276,14 @@ async def test_58_room_batch_live_monitor_rollout_scenario(
     async def drain_notifications() -> None:
         while coordinator._notification_tasks:
             await asyncio.gather(*tuple(coordinator._notification_tasks))
+        connections = [
+            controller._connection_task
+            for controller in controllers.values()
+            if controller._connection_task is not None
+            and not controller._connection_task.done()
+        ]
+        if connections:
+            await asyncio.gather(*connections)
 
     async def poll(phase: str) -> None:
         fake_batch.begin_poll(phase)

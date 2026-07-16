@@ -89,6 +89,53 @@ def room_info(
 
 
 @pytest.mark.asyncio
+async def test_confirmed_live_starts_recording_before_websocket_is_ready() -> None:
+    websocket_release = asyncio.Event()
+    danmaku = mocked_danmaku()
+    danmaku.start.side_effect = websocket_release.wait
+    monitor = FakeMonitor()
+    controller = LiveConnectionController(
+        FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
+    )
+
+    await asyncio.wait_for(controller.on_confirmed_status(live_snapshot()), timeout=0.1)
+
+    assert monitor.confirmed == [ObservedStatus.LIVE]
+    assert monitor.enabled is True
+    assert controller.active is True
+
+    danmaku.start.assert_awaited_once_with()
+
+    await controller.on_confirmed_status(preparing_snapshot())
+    danmaku.stop.assert_awaited_once_with(reset_mode=True)
+
+
+@pytest.mark.asyncio
+async def test_failed_websocket_start_keeps_recording_and_requests_retry() -> None:
+    danmaku = mocked_danmaku()
+    danmaku.start.side_effect = RuntimeError('websocket failed')
+    monitor = FakeMonitor()
+    status_sink = AsyncMock()
+    controller = LiveConnectionController(
+        FakeLive(),
+        danmaku,
+        monitor,
+        AsyncMock(return_value=room_info()),
+        status_sink=status_sink,
+    )
+
+    await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
+
+    assert monitor.confirmed == [ObservedStatus.LIVE]
+    assert monitor.enabled is True
+    assert controller.active is True
+    status_sink.assert_awaited_once_with(1001, ObservedStatus.STALE)
+
+    await controller.close()
+
+
+@pytest.mark.asyncio
 async def test_offline_registration_does_not_start_websocket() -> None:
     danmaku = mocked_danmaku()
     monitor = FakeMonitor()
@@ -110,11 +157,12 @@ async def test_confirmed_live_starts_once_and_offline_releases_wss() -> None:
     controller = LiveConnectionController(live, danmaku, monitor, room_info_loader)
 
     await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
     await controller.on_confirmed_status(live_snapshot())
     await controller.on_confirmed_status(preparing_snapshot())
 
     danmaku.start.assert_awaited_once()
-    danmaku.stop.assert_awaited_once()
+    danmaku.stop.assert_awaited_once_with(reset_mode=True)
     room_info_loader.assert_awaited_once_with(1001)
     assert live.room_info.live_status is LiveStatus.PREPARING  # type: ignore
     assert monitor.confirmed == [ObservedStatus.LIVE, ObservedStatus.PREPARING]
@@ -178,6 +226,8 @@ async def test_failed_confirmed_end_rolls_back_room_info() -> None:
     assert observed_room_statuses == [LiveStatus.PREPARING]
     assert controller.active is True
 
+    await controller.close()
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('status', [ObservedStatus.UNKNOWN, ObservedStatus.STALE])
@@ -188,7 +238,8 @@ async def test_unknown_status_keeps_active_connection(status: ObservedStatus) ->
         FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
     )
     await controller.on_confirmed_status(live_snapshot())
-    danmaku.reset_mock()
+    await controller._connection_task
+    danmaku.stop.reset_mock()
 
     await controller.on_confirmed_status(
         StatusSnapshot(1, 1001, status, 130.0, StatusSource.BATCH, 10, '1:10')
@@ -198,6 +249,8 @@ async def test_unknown_status_keeps_active_connection(status: ObservedStatus) ->
     assert monitor.confirmed == [ObservedStatus.LIVE]
     assert monitor.enabled is True
     assert controller.active is True
+
+    await controller.close()
 
 
 @pytest.mark.asyncio
@@ -258,7 +311,7 @@ async def test_exhausted_wss_rebuilds_without_duplicate_live_events() -> None:
             self.stopped = False
             self.start_count += 1
 
-        async def stop(self) -> None:
+        async def stop(self, *, reset_mode: bool = False) -> None:
             self.stopped = True
             self.stop_count += 1
 
@@ -280,15 +333,17 @@ async def test_exhausted_wss_rebuilds_without_duplicate_live_events() -> None:
     monitor._status_sink = controller.on_wss_hint
 
     await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
     await monitor.on_client_retries_exhausted(
         RuntimeError('websocket retries exhausted')
     )
 
-    assert controller.active is False
+    assert controller.active is True
     assert danmaku.stop_count == 0
     status_sink.assert_awaited_with(1001, ObservedStatus.STALE)
 
     await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
 
     assert controller.active is True
     assert danmaku.start_count == 2
@@ -300,6 +355,7 @@ async def test_exhausted_wss_rebuilds_without_duplicate_live_events() -> None:
         RuntimeError('websocket retries exhausted again')
     )
     await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
 
     assert danmaku.start_count == 3
     assert listener.on_live_began.await_count == 1
@@ -345,7 +401,7 @@ async def test_pending_retry_receives_confirmed_end_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_websocket_start_rolls_back_monitor() -> None:
+async def test_failed_websocket_start_does_not_roll_back_monitor() -> None:
     failure = RuntimeError('websocket failed')
     danmaku = mocked_danmaku()
     danmaku.start.side_effect = failure
@@ -354,12 +410,14 @@ async def test_failed_websocket_start_rolls_back_monitor() -> None:
         FakeLive(), danmaku, monitor, AsyncMock(return_value=room_info())
     )
 
-    with pytest.raises(RuntimeError, match='websocket failed'):
-        await controller.on_confirmed_status(live_snapshot())
+    await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
 
-    danmaku.stop.assert_awaited_once()
-    assert monitor.enabled is False
-    assert controller.active is False
+    assert monitor.confirmed == [ObservedStatus.LIVE]
+    assert monitor.enabled is True
+    assert controller.active is True
+
+    await controller.close()
 
 
 @pytest.mark.asyncio
@@ -385,15 +443,14 @@ async def test_websocket_activation_timeout_is_bounded(
         LiveConnectionController, '_ACTIVATION_TIMEOUT_SECONDS', 0.01, raising=False
     )
 
-    activation = asyncio.create_task(controller.on_confirmed_status(live_snapshot()))
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(activation, timeout=0.1)
+    await asyncio.wait_for(controller.on_confirmed_status(live_snapshot()), timeout=0.1)
+    await controller._connection_task
 
-    assert activation.cancelled() is False
-    assert entered_tasks[0] is not activation
-    danmaku.stop.assert_awaited_once()
-    assert monitor.enabled is False
-    assert controller.active is False
+    assert entered_tasks
+    assert monitor.enabled is True
+    assert controller.active is True
+
+    await controller.close()
 
 
 @pytest.mark.asyncio
@@ -453,7 +510,6 @@ async def test_terminal_message_loop_error_does_not_block_disconnect() -> None:
 @pytest.mark.asyncio
 async def test_failed_stale_cleanup_does_not_stick_recovery_future() -> None:
     danmaku = mocked_danmaku()
-    danmaku.stop.side_effect = RuntimeError('cleanup failed')
     controller = LiveConnectionController(
         FakeLive(),
         danmaku,
@@ -461,6 +517,9 @@ async def test_failed_stale_cleanup_does_not_stick_recovery_future() -> None:
         AsyncMock(return_value=room_info()),
         status_sink=AsyncMock(),
     )
+    await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
+    danmaku.stop.side_effect = RuntimeError('cleanup failed')
     await controller.on_wss_hint(ObservedStatus.STALE)
 
     with pytest.raises(RuntimeError, match='cleanup failed'):
@@ -468,8 +527,9 @@ async def test_failed_stale_cleanup_does_not_stick_recovery_future() -> None:
 
     danmaku.stop.side_effect = None
     await controller.on_confirmed_status(live_snapshot())
+    await controller._connection_task
 
-    danmaku.start.assert_awaited_once_with()
+    assert danmaku.start.await_count == 2
     assert controller.active is True
 
 
@@ -722,7 +782,7 @@ async def test_redirect_uses_canonical_room_with_stable_task_ownership(
             self.stopped = False
             self.started += 1
 
-        async def stop(self) -> None:
+        async def stop(self, *, reset_mode: bool = False) -> None:
             self.stopped = True
             self.stopped_count += 1
 
@@ -830,15 +890,26 @@ async def test_batch_task_builds_external_monitor_for_real_room(
     live = Mock()
     live.room_id = 1001
     live.room_info = room_info(uid=7, room_id=2002)
+    live.session = Mock()
+    live.base_api_urls = []
+    live.base_live_api_urls = []
+    live.base_play_info_api_urls = []
+    live.stream_headers = {'User-Agent': 'fixture'}
+    live.headers = {'User-Agent': 'fixture', 'Cookie': 'DedeUserID=7;'}
+    live.cookie = 'DedeUserID=7;'
     monkeypatch.setattr(task_module, 'Live', Mock(return_value=live))
     danmaku = Mock()
+    danmaku.room_id = 2002
     danmaku_factory = Mock(return_value=danmaku)
+    connection = Mock()
+    connection_factory = Mock(return_value=connection)
     monitor = Mock()
     monitor_factory = Mock(return_value=monitor)
     controller = Mock()
     controller.on_wss_hint = AsyncMock()
     controller_factory = Mock(return_value=controller)
     monkeypatch.setattr(task_module, 'DanmakuClient', danmaku_factory)
+    monkeypatch.setattr(task_module, 'DanmakuConnection', connection_factory)
     monkeypatch.setattr(task_module, 'LiveMonitor', monitor_factory)
     monkeypatch.setattr(task_module, 'LiveConnectionController', controller_factory)
     coordinator = Mock()
@@ -858,6 +929,7 @@ async def test_batch_task_builds_external_monitor_for_real_room(
     await status_sink(ObservedStatus.PREPARING)
     controller.on_wss_hint.assert_awaited_once_with(ObservedStatus.PREPARING)
     controller_factory.assert_called_once()
+    assert controller_factory.call_args.args[1] is connection
     room_info_loader = controller_factory.call_args.args[3]
     assert await room_info_loader(2002) is live.room_info
     anonymous.load_room_info.assert_awaited_once_with(2002)

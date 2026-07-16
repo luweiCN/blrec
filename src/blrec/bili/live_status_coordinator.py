@@ -598,13 +598,6 @@ class LiveStatusCoordinator:
     ) -> None:
         try:
             await registration.listener(snapshot)
-            if (
-                snapshot.status is ObservedStatus.LIVE
-                and self._registrations.get(registration.registration_key)
-                is registration
-                and not registration.retry_pending
-            ):
-                registration.wss_active = True
         except asyncio.CancelledError:
             self._restore_registration_state(registration, previous)
             raise
