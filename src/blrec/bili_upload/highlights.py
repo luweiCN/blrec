@@ -4,10 +4,10 @@ import asyncio
 import os
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Callable, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from blrec.logging.audit import audit
 
@@ -115,10 +115,20 @@ class HighlightClip:
     created_at: int
     updated_at: int
     sources: Tuple[HighlightClipSource, ...] = ()
+    upload_job_id: Optional[int] = None
+    upload_state: Optional[str] = None
+    upload_percent: Optional[float] = None
+    upload_bvid: Optional[str] = None
 
 
 class HighlightService:
     ACTIVE_SAFE_TAIL_MS = 10_000
+    _CLIP_WITH_UPLOAD_SELECT = (
+        'SELECT clip.*,job.id AS upload_job_id,job.state AS upload_state,'
+        'job.bvid AS upload_bvid '
+        'FROM highlight_clips clip '
+        'LEFT JOIN upload_jobs job ON job.session_id=clip.upload_session_id '
+    )
 
     def __init__(
         self,
@@ -506,7 +516,7 @@ class HighlightService:
 
     async def get_clip(self, clip_id: int) -> HighlightClip:
         row = await self._database.fetchone(
-            'SELECT * FROM highlight_clips WHERE id=?', (clip_id,)
+            self._CLIP_WITH_UPLOAD_SELECT + 'WHERE clip.id=?', (clip_id,)
         )
         if row is None:
             raise ValueError("unknown highlight clip '{}'".format(clip_id))
@@ -516,9 +526,85 @@ class HighlightService:
             'WHERE clip_id=? ORDER BY ordinal',
             (clip_id,),
         )
-        return self._clip_from_row(
+        clip = self._clip_from_row(
             row, tuple(self._clip_source_from_row(source) for source in sources)
         )
+        progress = await self._upload_progress(
+            () if clip.upload_job_id is None else (clip.upload_job_id,)
+        )
+        return self._apply_upload_progress(clip, progress)
+
+    async def list_clips(self, session_id: int) -> Tuple[HighlightClip, ...]:
+        session = await self._database.fetchone(
+            "SELECT id FROM recording_sessions WHERE id=? AND source_kind='live'",
+            (session_id,),
+        )
+        if session is None:
+            raise ValueError("unknown recording session '{}'".format(session_id))
+        rows = await self._database.fetchall(
+            self._CLIP_WITH_UPLOAD_SELECT
+            + 'WHERE clip.source_session_id=? ORDER BY clip.created_at,clip.id',
+            (session_id,),
+        )
+        source_rows = await self._database.fetchall(
+            'SELECT source.clip_id,source.part_id,source.ordinal,'
+            'source.requested_start_ms,source.requested_end_ms,'
+            'source.actual_start_ms,source.actual_end_ms '
+            'FROM highlight_clip_sources source '
+            'JOIN highlight_clips clip ON clip.id=source.clip_id '
+            'WHERE clip.source_session_id=? ORDER BY source.clip_id,source.ordinal',
+            (session_id,),
+        )
+        sources_by_clip: Dict[int, List[HighlightClipSource]] = {}
+        for source_row in source_rows:
+            sources_by_clip.setdefault(int(source_row['clip_id']), []).append(
+                self._clip_source_from_row(source_row)
+            )
+        clips = tuple(
+            self._clip_from_row(row, tuple(sources_by_clip.get(int(row['id']), ())))
+            for row in rows
+        )
+        progress = await self._upload_progress(
+            tuple(
+                clip.upload_job_id for clip in clips if clip.upload_job_id is not None
+            )
+        )
+        return tuple(self._apply_upload_progress(clip, progress) for clip in clips)
+
+    async def _upload_progress(self, job_ids: Tuple[int, ...]) -> Dict[int, float]:
+        if not job_ids:
+            return {}
+        placeholders = ','.join('?' for _value in job_ids)
+        rows = await self._database.fetchall(
+            'SELECT part.job_id,COALESCE(SUM(chunk.size),0) AS total_bytes,'
+            "COALESCE(SUM(CASE WHEN chunk.state='confirmed' "
+            'THEN chunk.size ELSE 0 END),0) AS confirmed_bytes '
+            'FROM upload_parts part LEFT JOIN upload_chunks chunk '
+            'ON chunk.part_id=part.id WHERE part.job_id IN ({}) '
+            'GROUP BY part.job_id'.format(placeholders),
+            job_ids,
+        )
+        result: Dict[int, float] = {}
+        for row in rows:
+            total = int(row['total_bytes'])
+            confirmed = int(row['confirmed_bytes'])
+            result[int(row['job_id'])] = (
+                0.0 if total <= 0 else round(min(100.0, confirmed * 100.0 / total), 2)
+            )
+        return result
+
+    @staticmethod
+    def _apply_upload_progress(
+        clip: HighlightClip, progress: Mapping[int, float]
+    ) -> HighlightClip:
+        if clip.upload_job_id is None:
+            return clip
+        percent = (
+            100.0
+            if clip.upload_state in ('approved', 'completed')
+            else progress.get(clip.upload_job_id, 0.0)
+        )
+        return replace(clip, upload_percent=percent)
 
     async def clip_video_path(self, clip_id: int) -> Path:
         clip = await self.get_clip(clip_id)
@@ -1033,4 +1119,24 @@ class HighlightService:
             created_at=int(row['created_at']),
             updated_at=int(row['updated_at']),
             sources=sources,
+            upload_job_id=(
+                None
+                if 'upload_job_id' not in row.keys() or row['upload_job_id'] is None
+                else int(row['upload_job_id'])
+            ),
+            upload_state=(
+                None
+                if 'upload_state' not in row.keys() or row['upload_state'] is None
+                else str(row['upload_state'])
+            ),
+            upload_percent=(
+                None
+                if 'upload_percent' not in row.keys() or row['upload_percent'] is None
+                else float(row['upload_percent'])
+            ),
+            upload_bvid=(
+                None
+                if 'upload_bvid' not in row.keys() or row['upload_bvid'] is None
+                else str(row['upload_bvid'])
+            ),
         )

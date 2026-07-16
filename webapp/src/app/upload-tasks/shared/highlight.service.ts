@@ -46,6 +46,12 @@ export class HighlightService {
     return this.http.post<HighlightClip>(this.url.makeApiUrl(path), request);
   }
 
+  listClips(sessionId: number): Observable<readonly HighlightClip[]> {
+    return this.http.get<readonly HighlightClip[]>(
+      this.url.makeApiUrl(`/api/v1/highlights/sessions/${sessionId}/clips`)
+    );
+  }
+
   getClip(clipId: number): Observable<HighlightClip> {
     return this.http.get<HighlightClip>(
       this.url.makeApiUrl(`/api/v1/highlights/clips/${clipId}`)

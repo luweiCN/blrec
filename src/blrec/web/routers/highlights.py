@@ -177,6 +177,10 @@ class ClipResponse(ApiModel):
     created_at: int
     updated_at: int
     sources: List[ClipSourceResponse]
+    upload_job_id: Optional[int]
+    upload_state: Optional[str]
+    upload_percent: Optional[float]
+    upload_bvid: Optional[str]
 
 
 class UploadTaskResponse(ApiModel):
@@ -323,6 +327,10 @@ def _clip_response(value: HighlightClip) -> ClipResponse:
         created_at=value.created_at,
         updated_at=value.updated_at,
         sources=[ClipSourceResponse(**source.__dict__) for source in value.sources],
+        upload_job_id=value.upload_job_id,
+        upload_state=value.upload_state,
+        upload_percent=value.upload_percent,
+        upload_bvid=value.upload_bvid,
     )
 
 
@@ -453,6 +461,19 @@ async def create_clip(
     ) as error:
         raise _clip_conflict(error) from None
     return _clip_response(value)
+
+
+@router.get('/sessions/{session_id}/clips', response_model=List[ClipResponse])
+async def list_clips(
+    session_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> List[ClipResponse]:
+    try:
+        values = await highlight_service.list_clips(session_id)
+    except ValueError as error:
+        raise _not_found(error) from None
+    return [_clip_response(value) for value in values]
 
 
 @router.get('/clips/{clip_id}', response_model=ClipResponse)

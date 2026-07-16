@@ -130,6 +130,7 @@ describe('HighlightEditorComponent', () => {
   beforeEach(async () => {
     highlights = jasmine.createSpyObj<HighlightService>('HighlightService', [
       'getTimeline',
+      'listClips',
       'inspectClip',
       'createClip',
       'getClip',
@@ -141,6 +142,7 @@ describe('HighlightEditorComponent', () => {
       'deleteMarker',
     ]);
     highlights.getTimeline.and.returnValue(of(timeline));
+    highlights.listClips.and.returnValue(of([]));
     highlights.inspectClip.and.returnValue(of(inspection));
     highlights.createClip.and.returnValue(of(processingClip));
     highlights.getClip.and.returnValue(
@@ -228,6 +230,11 @@ describe('HighlightEditorComponent', () => {
     expect(component.selectedMarkerId).toBe(7);
   });
 
+  it('opens the first local recording and restores clips automatically', () => {
+    expect(recordings.createMediaAccess).toHaveBeenCalledWith(11);
+    expect(highlights.listClips).toHaveBeenCalledOnceWith(9);
+  });
+
   it('marks the view after the timeline loads asynchronously', () => {
     const timelineResponse = new Subject<HighlightTimeline>();
     highlights.getTimeline.and.returnValue(timelineResponse);
@@ -249,36 +256,49 @@ describe('HighlightEditorComponent', () => {
     component.selectionChanged();
     fixture.detectChanges();
 
-    const create = fixture.nativeElement.querySelector(
-      '[data-testid="inspect-clip"]'
+    const add = fixture.nativeElement.querySelector(
+      '[data-testid="add-draft"]'
     ) as HTMLButtonElement;
-    expect(create.disabled).toBeTrue();
+    expect(add.disabled).toBeTrue();
     expect(fixture.nativeElement.textContent).toContain(
       '结束位置仍在录制安全区之外'
     );
   });
 
-  it('shows selected and actual ranges and requires keyframe confirmation', () => {
+  it('adds multiple ranges from the current playhead', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    component.addDraft();
+
+    component.playheadMs = 30_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 45_000;
+    component.setSelectionEndFromPlayhead();
+    component.addDraft();
+
+    expect(component.drafts.map((draft) => [draft.startMs, draft.endMs])).toEqual([
+      [10_000, 20_000],
+      [30_000, 45_000],
+    ]);
+  });
+
+  it('checks a range automatically and asks only when keyframes need confirmation', () => {
     component.startMs = 110_000;
     component.endMs = 130_000;
     component.selectionChanged();
-    component.inspectSelection();
+    component.addDraft();
+    const draft = component.drafts[0];
+    component.createDraft(draft);
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain('选择范围 01:50–02:10');
     expect(fixture.nativeElement.textContent).toContain('实际范围 01:38–02:10');
-    const confirm = fixture.nativeElement.querySelector(
-      '[data-testid="confirm-keyframe"]'
-    ) as HTMLInputElement;
-    expect(confirm).not.toBeNull();
-    expect(
-      (fixture.nativeElement.querySelector(
-        '[data-testid="create-clip"]'
-      ) as HTMLButtonElement).disabled
-    ).toBeTrue();
+    expect(fixture.nativeElement.textContent).not.toContain('检查裁剪范围');
+    expect(highlights.createClip).not.toHaveBeenCalled();
 
-    component.confirmKeyframe = true;
-    component.createClip();
+    component.confirmDraft(draft);
 
     expect(highlights.createClip).toHaveBeenCalledWith(9, {
       markerId: null,
@@ -290,12 +310,7 @@ describe('HighlightEditorComponent', () => {
   });
 
   it('updates the active clip from the shared realtime stream', () => {
-    component.startMs = 110_000;
-    component.endMs = 130_000;
-    component.selectionChanged();
-    component.inspectSelection();
-    component.confirmKeyframe = true;
-    component.createClip();
+    component.clips = [processingClip];
 
     realtime.next({
       type: 'highlight_progress',
@@ -316,6 +331,36 @@ describe('HighlightEditorComponent', () => {
 
     expect(highlights.getClip).toHaveBeenCalledOnceWith(3);
     expect(component.clip?.state).toBe('ready');
+  });
+
+  it('updates a clip upload state from the shared realtime stream', () => {
+    component.clips = [
+      {
+        ...processingClip,
+        state: 'ready',
+        uploadJobId: 44,
+        uploadState: 'uploading',
+        uploadPercent: 25,
+      },
+    ];
+
+    realtime.next({
+      type: 'upload_progress',
+      data: {
+        jobs: [
+          {
+            jobId: 44,
+            state: 'waiting_review',
+            percent: 100,
+            bvid: 'BV1test',
+          },
+        ],
+      },
+    });
+
+    expect(component.clips[0].uploadState).toBe('waiting_review');
+    expect(component.clips[0].uploadPercent).toBe(100);
+    expect(component.clips[0].uploadBvid).toBe('BV1test');
   });
 
   it('opens task settings and resumes only after settings are saved', () => {

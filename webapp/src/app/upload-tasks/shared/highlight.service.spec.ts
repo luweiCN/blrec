@@ -46,6 +46,11 @@ describe('HighlightService', () => {
   });
 
   it('creates, loads, deletes and submits one independent clip', () => {
+    service.listClips(9).subscribe();
+    expect(
+      http.expectOne('/api/v1/highlights/sessions/9/clips').request.method
+    ).toBe('GET');
+
     service
       .createClip(9, {
         markerId: 1,

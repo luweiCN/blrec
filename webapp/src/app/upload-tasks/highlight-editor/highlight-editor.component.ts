@@ -31,6 +31,17 @@ import { HighlightService } from '../shared/highlight.service';
 import { RecordingMediaAccess } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 
+interface HighlightClipDraft {
+  readonly id: number;
+  markerId: number | null;
+  name: string;
+  startMs: number;
+  endMs: number;
+  inspection: HighlightClipInspection | null;
+  state: 'idle' | 'inspecting' | 'confirmation' | 'creating';
+  error: string | null;
+}
+
 @Component({
   selector: 'app-highlight-editor',
   templateUrl: './highlight-editor.component.html',
@@ -47,10 +58,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   startMs = 0;
   endMs = 0;
   clipName = '';
-  inspection: HighlightClipInspection | null = null;
-  confirmKeyframe = false;
+  drafts: HighlightClipDraft[] = [];
   clips: HighlightClip[] = [];
-  uploadJobIds = new Map<number, number>();
   taskEditVisible = false;
   taskEditJobIds: readonly number[] = [];
   clipPreviewId: number | null = null;
@@ -58,9 +67,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   clipPreviewLoading = false;
 
   loading = true;
+  clipsLoading = true;
   mediaLoading = false;
-  inspecting = false;
-  creating = false;
   error: string | null = null;
   mediaError: string | null = null;
   actionError: string | null = null;
@@ -76,6 +84,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private player: PartPlayer | null = null;
   private pendingSeekSeconds: number | null = null;
   private mediaRequest?: Subscription;
+  private clipsRequest?: Subscription;
+  private nextDraftId = 1;
+  private previewingDraftId: number | null = null;
   private readonly subscriptions = new Subscription();
 
   constructor(
@@ -141,20 +152,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (this.endMs > this.timeline.stableEndMs) {
       return '结束位置仍在录制安全区之外，请稍后刷新';
     }
+    if (!this.partAt(this.startMs) || !this.partAt(this.endMs)) {
+      return '开始或结束位置位于录像断档中';
+    }
     return null;
-  }
-
-  get canInspect(): boolean {
-    return this.selectionError === null && !this.inspecting && !this.creating;
-  }
-
-  get canCreate(): boolean {
-    return (
-      this.inspection !== null &&
-      this.inspection.compatible &&
-      (!this.inspection.confirmationRequired || this.confirmKeyframe) &&
-      !this.creating
-    );
   }
 
   ngOnInit(): void {
@@ -164,16 +165,19 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     this.loadTimeline(true);
+    this.loadClips();
   }
 
   ngOnDestroy(): void {
     this.mediaRequest?.unsubscribe();
+    this.clipsRequest?.unsubscribe();
     this.subscriptions.unsubscribe();
     this.teardownPlayer();
   }
 
   refreshTimeline(): void {
     this.loadTimeline(false);
+    this.loadClips();
   }
 
   selectMarker(item: MappedHighlight): void {
@@ -184,8 +188,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.timeline?.stableEndMs ?? item.timelineOffsetMs + 60_000,
       item.timelineOffsetMs + 60_000
     );
-    this.inspection = null;
-    this.confirmKeyframe = false;
     this.seekTimeline(item.timelineOffsetMs);
   }
 
@@ -202,66 +204,146 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   selectionChanged(): void {
-    this.inspection = null;
-    this.confirmKeyframe = false;
     this.actionError = null;
     if (this.selectedMarkerId === null) {
       this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
     }
   }
 
-  inspectSelection(): void {
-    if (!this.canInspect) {
+  setSelectionStartFromPlayhead(): void {
+    this.startMs = Math.round(this.playheadMs);
+    if (this.endMs <= this.startMs) {
+      this.endMs = Math.min(
+        this.timeline?.stableEndMs ?? this.startMs + 60_000,
+        this.startMs + 60_000
+      );
+    }
+    this.selectionChanged();
+  }
+
+  setSelectionEndFromPlayhead(): void {
+    this.endMs = Math.round(this.playheadMs);
+    this.selectionChanged();
+  }
+
+  addDraft(): void {
+    if (this.selectionError !== null) {
       return;
     }
-    this.inspecting = true;
+    this.drafts = [
+      ...this.drafts,
+      {
+        id: this.nextDraftId++,
+        markerId: this.selectedMarkerId,
+        name:
+          this.clipName.trim() || `高光片段 ${this.formatTime(this.startMs)}`,
+        startMs: this.startMs,
+        endMs: this.endMs,
+        inspection: null,
+        state: 'idle',
+        error: null,
+      },
+    ];
+    this.selectedMarkerId = null;
+    this.startMs = this.endMs;
+    this.endMs = Math.min(
+      this.timeline?.stableEndMs ?? this.startMs + 60_000,
+      this.startMs + 60_000
+    );
+    this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
+  }
+
+  updateDraft(draft: HighlightClipDraft): void {
+    draft.inspection = null;
+    draft.state = 'idle';
+    draft.error = null;
+  }
+
+  removeDraft(draft: HighlightClipDraft): void {
+    if (draft.state === 'inspecting' || draft.state === 'creating') {
+      return;
+    }
+    this.drafts = this.drafts.filter((item) => item.id !== draft.id);
+    if (this.previewingDraftId === draft.id) {
+      this.previewingDraftId = null;
+    }
+  }
+
+  createDraft(draft: HighlightClipDraft): void {
+    if (draft.state !== 'idle' || this.draftError(draft) !== null) {
+      return;
+    }
+    draft.state = 'inspecting';
+    draft.error = null;
     this.actionError = null;
     this.subscriptions.add(
       this.highlights
-        .inspectClip(this.sessionId, this.startMs, this.endMs)
+        .inspectClip(this.sessionId, draft.startMs, draft.endMs)
         .subscribe({
           next: (inspection) => {
-            this.inspection = inspection;
-            this.inspecting = false;
+            draft.inspection = inspection;
+            if (!inspection.compatible) {
+              draft.state = 'idle';
+              draft.error = '所选分段编码不兼容，无法无损合并';
+            } else if (inspection.confirmationRequired) {
+              draft.state = 'confirmation';
+            } else {
+              this.persistDraft(draft, false);
+            }
             this.changeDetector.markForCheck();
           },
           error: (error: unknown) => {
-            this.inspecting = false;
-            this.actionError = this.describeError(error, '无法检查裁剪范围');
+            draft.state = 'idle';
+            draft.error = this.describeError(error, '无法创建这个片段');
             this.changeDetector.markForCheck();
           },
         })
     );
   }
 
-  createClip(): void {
-    if (!this.canCreate) {
+  confirmDraft(draft: HighlightClipDraft): void {
+    if (draft.state !== 'confirmation') {
       return;
     }
-    this.creating = true;
-    this.actionError = null;
-    this.subscriptions.add(
-      this.highlights
-        .createClip(this.sessionId, {
-          markerId: this.selectedMarkerId,
-          name: this.clipName.trim() || `高光片段 ${this.formatTime(this.startMs)}`,
-          startMs: this.startMs,
-          endMs: this.endMs,
-          confirmKeyframe: this.confirmKeyframe,
-        })
-        .subscribe({
-          next: (clip) => {
-            this.clips = [...this.clips, clip];
-            this.creating = false;
-            this.changeDetector.markForCheck();
-          },
-          error: (error: unknown) => {
-            this.creating = false;
-            this.actionError = this.describeError(error, '创建高光片段失败');
-            this.changeDetector.markForCheck();
-          },
-        })
+    this.persistDraft(draft, true);
+  }
+
+  previewDraft(draft: HighlightClipDraft): void {
+    if (this.draftError(draft) !== null) {
+      return;
+    }
+    const targetPart = this.partAt(draft.startMs);
+    const partChanged = targetPart?.partId !== this.selectedPart?.partId;
+    this.previewingDraftId = draft.id;
+    this.seekTimeline(draft.startMs);
+    if (!partChanged && !this.mediaLoading) {
+      void this.videoElement?.play().catch(() => undefined);
+    }
+  }
+
+  seekFromTrack(event: MouseEvent, track: HTMLElement): void {
+    if (!this.timeline || this.timeline.durationMs <= 0) {
+      return;
+    }
+    const bounds = track.getBoundingClientRect();
+    const ratio = Math.max(
+      0,
+      Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))
     );
+    this.seekTimeline(Math.round(ratio * this.timeline.durationMs));
+  }
+
+  handleTimelineKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+      return;
+    }
+    event.preventDefault();
+    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+    const target = Math.max(
+      0,
+      Math.min(this.timeline?.stableEndMs ?? 0, this.playheadMs + direction * 5000)
+    );
+    this.seekTimeline(target);
   }
 
   createUploadTask(clip: HighlightClip): void {
@@ -269,7 +351,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.subscriptions.add(
       this.highlights.createUploadTask(clip.id).subscribe({
         next: ({ jobId }) => {
-          this.uploadJobIds.set(clip.id, jobId);
+          this.clips = this.clips.map((item) =>
+            item.id === clip.id
+              ? { ...item, uploadJobId: jobId, uploadState: 'paused' }
+              : item
+          );
           this.taskEditJobIds = [jobId];
           this.taskEditVisible = true;
           this.changeDetector.markForCheck();
@@ -349,7 +435,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.highlights.deleteClip(clip.id).subscribe({
         next: () => {
           this.clips = this.clips.filter((item) => item.id !== clip.id);
-          this.uploadJobIds.delete(clip.id);
           if (this.clipPreviewId === clip.id) {
             this.closeClipPreview();
           }
@@ -442,6 +527,45 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.playheadMs =
       this.selectedPart.timelineStartMs + this.videoElement.currentTime * 1000;
+    if (this.previewingDraftId === null) {
+      return;
+    }
+    const draft = this.drafts.find(
+      (item) => item.id === this.previewingDraftId
+    );
+    if (!draft || this.playheadMs < draft.endMs) {
+      return;
+    }
+    this.videoElement.pause();
+    this.previewingDraftId = null;
+  }
+
+  handleMediaCanPlay(): void {
+    if (this.previewingDraftId !== null) {
+      void this.videoElement?.play().catch(() => undefined);
+    }
+  }
+
+  handleMediaEnded(): void {
+    if (
+      this.previewingDraftId === null ||
+      !this.timeline ||
+      !this.selectedPart
+    ) {
+      return;
+    }
+    const draft = this.drafts.find(
+      (item) => item.id === this.previewingDraftId
+    );
+    const currentPart = this.selectedPart;
+    const nextPart = this.timeline.parts.find(
+      (part) => part.timelineStartMs > currentPart.timelineStartMs
+    );
+    if (!draft || !nextPart || nextPart.timelineStartMs >= draft.endMs) {
+      this.previewingDraftId = null;
+      return;
+    }
+    this.selectPart(nextPart);
   }
 
   handleMediaError(): void {
@@ -482,12 +606,107 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     return clip.id;
   }
 
+  trackDraft(_index: number, draft: HighlightClipDraft): number {
+    return draft.id;
+  }
+
   trackMarker(_index: number, item: MappedHighlight): number {
     return item.marker.id;
   }
 
   trackPart(_index: number, part: HighlightTimelinePart): number {
     return part.partId;
+  }
+
+  draftError(draft: HighlightClipDraft): string | null {
+    if (!draft.name.trim()) {
+      return '请输入片段名称';
+    }
+    if (!this.timeline || draft.startMs < 0) {
+      return '裁剪范围无效';
+    }
+    if (draft.endMs <= draft.startMs) {
+      return '结束位置必须晚于开始位置';
+    }
+    if (draft.endMs > this.timeline.stableEndMs) {
+      return '结束位置仍在录制安全区之外，请稍后刷新';
+    }
+    if (!this.partAt(draft.startMs) || !this.partAt(draft.endMs)) {
+      return '开始或结束位置位于录像断档中';
+    }
+    return null;
+  }
+
+  uploadStatus(clip: HighlightClip): string {
+    const labels: Record<string, string> = {
+      waiting_artifacts: '等待文件',
+      ready: '等待上传',
+      uploading: '正在上传',
+      submitting: '正在投稿',
+      waiting_review: '等待审核',
+      approved: '审核通过',
+      rejected: '审核未通过',
+      paused: '已暂停',
+      completed: '已完成',
+    };
+    return clip.uploadState ? labels[clip.uploadState] ?? clip.uploadState : '';
+  }
+
+  private persistDraft(
+    draft: HighlightClipDraft,
+    confirmKeyframe: boolean
+  ): void {
+    this.cancelClipLoad();
+    draft.state = 'creating';
+    draft.error = null;
+    this.subscriptions.add(
+      this.highlights
+        .createClip(this.sessionId, {
+          markerId: draft.markerId,
+          name: draft.name.trim(),
+          startMs: draft.startMs,
+          endMs: draft.endMs,
+          confirmKeyframe,
+        })
+        .subscribe({
+          next: (clip) => {
+            this.clips = [...this.clips, clip];
+            this.drafts = this.drafts.filter((item) => item.id !== draft.id);
+            this.changeDetector.markForCheck();
+          },
+          error: (error: unknown) => {
+            draft.state = draft.inspection?.confirmationRequired
+              ? 'confirmation'
+              : 'idle';
+            draft.error = this.describeError(error, '创建高光片段失败');
+            this.changeDetector.markForCheck();
+          },
+        })
+    );
+  }
+
+  private loadClips(): void {
+    this.clipsRequest?.unsubscribe();
+    this.clipsLoading = true;
+    this.clipsRequest = this.highlights.listClips(this.sessionId).subscribe({
+      next: (clips) => {
+        this.clips = [...clips];
+        this.clipsLoading = false;
+        this.changeDetector.markForCheck();
+      },
+      error: (error: unknown) => {
+        this.clipsLoading = false;
+        this.actionError = this.describeError(error, '无法加载已创建片段');
+        this.changeDetector.markForCheck();
+      },
+    });
+    this.subscriptions.add(this.clipsRequest);
+  }
+
+  private cancelClipLoad(): void {
+    this.clipsRequest?.unsubscribe();
+    this.clipsRequest = undefined;
+    this.clipsLoading = false;
   }
 
   private loadTimeline(initial: boolean): void {
@@ -642,6 +861,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.refreshTimeline();
       return;
     }
+    if (event.type === 'upload_progress') {
+      this.handleUploadProgress(event.data);
+      return;
+    }
     if (event.type !== 'highlight_progress') {
       return;
     }
@@ -677,11 +900,52 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     return Array.isArray(clips) ? (value as HighlightProgressEvent) : null;
   }
 
+  private handleUploadProgress(value: unknown): void {
+    if (typeof value !== 'object' || value === null || !('jobs' in value)) {
+      return;
+    }
+    const jobs = (value as { jobs?: unknown }).jobs;
+    if (!Array.isArray(jobs)) {
+      return;
+    }
+    let changed = false;
+    this.clips = this.clips.map((clip) => {
+      const job = jobs.find(
+        (item): item is Record<string, unknown> =>
+          typeof item === 'object' &&
+          item !== null &&
+          Number((item as Record<string, unknown>)['jobId']) === clip.uploadJobId
+      );
+      if (!job) {
+        return clip;
+      }
+      changed = true;
+      return {
+        ...clip,
+        uploadState: typeof job['state'] === 'string' ? job['state'] : null,
+        uploadPercent:
+          typeof job['percent'] === 'number' ? job['percent'] : null,
+        uploadBvid: typeof job['bvid'] === 'string' ? job['bvid'] : null,
+      };
+    });
+    if (changed) {
+      this.changeDetector.markForCheck();
+    }
+  }
+
   private describeError(error: unknown, fallback: string): string {
     if (typeof error === 'object' && error !== null && 'error' in error) {
       const detail = (error as { error?: { detail?: unknown } }).error?.detail;
       if (typeof detail === 'string') {
         return detail;
+      }
+      if (
+        typeof detail === 'object' &&
+        detail !== null &&
+        'message' in detail &&
+        typeof (detail as { message?: unknown }).message === 'string'
+      ) {
+        return (detail as { message: string }).message;
       }
     }
     return error instanceof Error && error.message ? error.message : fallback;

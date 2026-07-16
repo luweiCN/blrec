@@ -13,11 +13,14 @@
 .page-header,
 .section-heading,
 .range-fields,
+.selection-toolbar,
 .selection-actions,
 .inspection,
 .marker-list li,
 .clip-list li,
-.marker-edit {
+.marker-edit,
+.draft-fields,
+.draft-actions {
   display: flex;
   align-items: center;
 }
@@ -90,6 +93,8 @@ video {
   margin: 20px 8px 26px;
   border-radius: 7px;
   background: #dfe4ea;
+  cursor: pointer;
+  isolation: isolate;
 }
 
 .part-segment {
@@ -100,6 +105,9 @@ video {
   border: 2px solid #fff;
   background: #91caff;
   color: #102a43;
+  line-height: 50px;
+  text-align: center;
+  pointer-events: none;
 }
 
 .part-segment.active {
@@ -137,7 +145,10 @@ video {
 }
 
 .range-fields,
-.marker-edit {
+.marker-edit,
+.selection-toolbar,
+.draft-fields,
+.draft-actions {
   flex-wrap: wrap;
   gap: 12px;
 }
@@ -226,17 +237,6 @@ button:disabled {
   background: #f6f9fc;
 }
 
-.inspection div {
-  display: grid;
-  gap: 4px;
-}
-
-.confirm-row {
-  display: flex;
-  align-items: center;
-  grid-template-columns: auto 1fr;
-}
-
 .state-message,
 .error-message {
   padding: 14px;
@@ -290,6 +290,11 @@ button:disabled {
   flex: 1;
 }
 
+.upload-status {
+  min-width: 160px;
+  font-variant-numeric: tabular-nums;
+}
+
 .status-pill {
   padding: 2px 8px;
   border-radius: 999px;
@@ -317,7 +322,9 @@ button:disabled {
   }
 
   .range-fields label,
-  .range-fields input {
+  .range-fields input,
+  .selection-toolbar > *,
+  .draft-fields > * {
     width: 100%;
   }
 }

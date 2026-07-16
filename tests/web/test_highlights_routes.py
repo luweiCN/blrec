@@ -86,6 +86,7 @@ class FakeHighlightService:
         self.delete_marker = AsyncMock(return_value=None)
         self.inspect_clip = AsyncMock(return_value=inspection())
         self.create_clip = AsyncMock(return_value=clip())
+        self.list_clips = AsyncMock(return_value=(clip(),))
         self.get_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
         self.clip_video_path = AsyncMock()
@@ -207,6 +208,10 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     assert created.json()['state'] == 'queued'
     fetched = client.get('/api/v1/highlights/clips/3', headers=auth())
     assert fetched.status_code == 200
+
+    listed = client.get('/api/v1/highlights/sessions/9/clips', headers=auth())
+    assert listed.status_code == 200
+    assert listed.json()[0]['name'] == '第一段高光'
 
     upload = client.post('/api/v1/highlights/clips/3/upload-task', headers=auth())
     assert upload.status_code == 201

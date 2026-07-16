@@ -11,6 +11,13 @@ export interface HighlightMarker {
   readonly source: 'web' | 'browser_extension';
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly recordingPartId?: number | null;
+  readonly partAnchorAtMs?: number | null;
+  readonly currentTimeMs?: number | null;
+  readonly seekableEndMs?: number | null;
+  readonly rawDelayMs?: number;
+  readonly baselineDelayMs?: number;
+  readonly effectiveRewindMs?: number;
 }
 
 export interface HighlightTimelinePart {
@@ -94,6 +101,10 @@ export interface HighlightClip {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly sources: readonly HighlightClipSource[];
+  readonly uploadJobId?: number | null;
+  readonly uploadState?: string | null;
+  readonly uploadPercent?: number | null;
+  readonly uploadBvid?: string | null;
 }
 
 export interface CreateHighlightClipRequest {

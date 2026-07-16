@@ -271,3 +271,52 @@ async def test_ready_clip_exposes_only_an_owned_existing_video(
     await database.execute("UPDATE highlight_clips SET state='failed' WHERE id=1")
     with pytest.raises(ValueError, match='not ready'):
         await service.clip_video_path(1)
+
+
+@pytest.mark.asyncio
+async def test_list_clips_restores_upload_progress_for_a_recording(
+    database, tmp_path: Path
+) -> None:
+    await database.execute(
+        "INSERT INTO recording_sessions("
+        "id,room_id,broadcast_session_key,state,started_at,source_kind) "
+        "VALUES(1,100,'100:live','closed',1,'live'),"
+        "(2,100,'highlight:1','closed',2,'highlight')"
+    )
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(1,1000,'投稿账号',X'00',1,'test','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(7,2,1,'{}','uploading','prepared',2,2)"
+    )
+    await database.execute(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,artifact_state) '
+        "VALUES(8,7,1,'/rec/highlight.mp4','ready')"
+    )
+    await database.execute(
+        'INSERT INTO upload_chunks('
+        'part_id,chunk_no,offset,size,state,attempt) '
+        "VALUES(8,0,0,25,'confirmed',1),(8,1,25,75,'prepared',0)"
+    )
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,upload_session_id,name,'
+        'requested_start_ms,requested_end_ms,state,created_at,updated_at) '
+        "VALUES(1,100,1,2,'第二段',2000,3000,'ready',2,2),"
+        "(2,100,1,NULL,'第一段',0,1000,'ready',1,1)"
+    )
+
+    clips = await HighlightService(database).list_clips(1)
+
+    assert [clip.name for clip in clips] == ['第一段', '第二段']
+    assert clips[0].upload_job_id is None
+    assert clips[1].upload_job_id == 7
+    assert clips[1].upload_state == 'uploading'
+    assert clips[1].upload_percent == 25.0
