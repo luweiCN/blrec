@@ -877,20 +877,116 @@ def test_batch_task_uses_anonymous_sticky_websocket_route_without_cookie(
     live.session = Mock()
     live.appapi = Mock()
     live.webapi = Mock()
+    live.base_api_urls = ['https://api.example']
+    live.base_live_api_urls = ['https://live.example']
+    live.base_play_info_api_urls = ['https://play.example']
     live.stream_headers = {'User-Agent': 'fixture'}
+    live.headers = {'User-Agent': 'fixture', 'Cookie': 'DedeUserID=7;'}
+    live.cookie = 'DedeUserID=7;'
     monkeypatch.setattr(task_module, 'Live', Mock(return_value=live))
     pool = Mock()
     websocket_session = Mock()
     pool.client.return_value = websocket_session
     danmaku_factory = Mock()
     monkeypatch.setattr(task_module, 'DanmakuClient', danmaku_factory)
+    anonymous_appapi = Mock()
+    anonymous_webapi = Mock()
+    appapi_factory = Mock(return_value=anonymous_appapi)
+    webapi_factory = Mock(return_value=anonymous_webapi)
+    monkeypatch.setattr(task_module, 'AppApi', appapi_factory, raising=False)
+    monkeypatch.setattr(task_module, 'WebApi', webapi_factory, raising=False)
     task = task_module.RecordTask(1001, network_session_pool=pool)
 
     task._setup_danmaku_client()
 
     pool.client.assert_any_call('danmaku', anonymous=True, affinity_key='danmaku:2002')
     assert danmaku_factory.call_args.args[0] is websocket_session
+    assert danmaku_factory.call_args.args[1] is anonymous_appapi
+    assert danmaku_factory.call_args.args[2] is anonymous_webapi
     assert danmaku_factory.call_args.kwargs['headers'] == {'User-Agent': 'fixture'}
+
+
+@pytest.mark.asyncio
+async def test_batch_task_cookie_fallback_configures_one_coherent_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module = load_task_module(monkeypatch)
+    live = Mock()
+    live.room_id = 1001
+    live.room_info = room_info(uid=7, room_id=2002)
+    live.base_api_urls = ['https://api.example']
+    live.base_live_api_urls = ['https://live.example']
+    live.base_play_info_api_urls = ['https://play.example']
+    live.stream_headers = {'User-Agent': 'fixture'}
+    live.headers = {'User-Agent': 'fixture', 'Cookie': 'DedeUserID=7; buvid3=device;'}
+    live.cookie = 'DedeUserID=7; buvid3=device;'
+    monkeypatch.setattr(task_module, 'Live', Mock(return_value=live))
+    anonymous_session = Mock(name='anonymous_session')
+    authenticated_session = Mock(name='authenticated_session')
+    pool = Mock()
+    pool.client.side_effect = lambda _purpose, **options: (
+        anonymous_session if options.get('anonymous') else authenticated_session
+    )
+    danmaku = Mock()
+    danmaku.room_id = 2002
+    danmaku.start = AsyncMock(
+        side_effect=[OSError('anonymous connection failed'), None]
+    )
+    danmaku.stop = AsyncMock()
+    danmaku.configure = Mock()
+    monkeypatch.setattr(task_module, 'DanmakuClient', Mock(return_value=danmaku))
+    appapis = [
+        Mock(name='initial_anonymous_appapi'),
+        Mock(name='anonymous_appapi'),
+        Mock(name='authenticated_appapi'),
+    ]
+    webapis = [
+        Mock(name='initial_anonymous_webapi'),
+        Mock(name='anonymous_webapi'),
+        Mock(name='authenticated_webapi'),
+    ]
+    monkeypatch.setattr(task_module, 'AppApi', Mock(side_effect=appapis), raising=False)
+    monkeypatch.setattr(task_module, 'WebApi', Mock(side_effect=webapis), raising=False)
+    task = task_module.RecordTask(1001, network_session_pool=pool)
+    task._setup_danmaku_client()
+
+    await task._danmaku_connection.start()
+
+    assert danmaku.configure.call_args_list[0].args == (
+        anonymous_session,
+        appapis[1],
+        webapis[1],
+        live.stream_headers,
+    )
+    assert danmaku.configure.call_args_list[1].args == (
+        authenticated_session,
+        appapis[2],
+        webapis[2],
+        live.headers,
+    )
+    assert task._danmaku_connection.mode == 'authenticated'
+
+
+def test_batch_task_cookie_refresh_does_not_change_an_active_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module = load_task_module(monkeypatch)
+    live = Mock()
+    live.room_id = 1001
+    live.room_info = room_info(uid=7, room_id=2002)
+    live.cookie = 'old-cookie'
+    live.headers = {'Cookie': 'new-cookie'}
+    monkeypatch.setattr(task_module, 'Live', Mock(return_value=live))
+    task = task_module.RecordTask(
+        1001, live_status_coordinator=Mock(), anonymous_room_client=Mock()
+    )
+    danmaku = Mock()
+    danmaku.headers = {'Cookie': 'frozen-cookie'}
+    task._danmaku_client = danmaku
+
+    task.cookie = 'new-cookie'
+
+    assert danmaku.headers == {'Cookie': 'frozen-cookie'}
 
 
 @pytest.mark.asyncio

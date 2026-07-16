@@ -20,6 +20,32 @@ def bare_client() -> DanmakuClient:
     return client
 
 
+def test_configure_replaces_one_coherent_transport_while_stopped() -> None:
+    client = bare_client()
+    client._stopped = True
+    session = Mock()
+    appapi = Mock()
+    webapi = Mock()
+
+    client.configure(
+        session, appapi, webapi, {'Cookie': 'DedeUserID=7; buvid3=device;'}
+    )
+
+    assert client.session is session
+    assert client.appapi is appapi
+    assert client.webapi is webapi
+    assert client._uid == 7
+    assert client._buvid == 'device'
+
+
+def test_configure_rejects_transport_changes_while_connected() -> None:
+    client = bare_client()
+    client._stopped = False
+
+    with pytest.raises(RuntimeError, match='while stopped'):
+        client.configure(Mock(), Mock(), Mock(), {})
+
+
 @pytest.mark.asyncio
 async def test_connect_persistent_client_error_uses_bounded_retry_policy(
     monkeypatch: pytest.MonkeyPatch,

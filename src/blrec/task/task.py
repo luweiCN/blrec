@@ -1,9 +1,21 @@
 import os
 from contextlib import suppress
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Awaitable, Callable, Iterator, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
+from blrec.bili.api import AppApi, WebApi
 from blrec.bili.danmaku_client import DanmakuClient
+from blrec.bili.danmaku_connection import DanmakuConnection
 from blrec.bili.live import Live
 from blrec.bili.live_connection_controller import LiveConnectionController
 from blrec.bili.live_monitor import LiveMonitor
@@ -106,6 +118,7 @@ class RecordTask:
         self._anonymous_room_client = anonymous_room_client
         self._recording_journal = recording_journal
         self._network_session_pool = network_session_pool
+        self._auth_failure_reporter = auth_failure_reporter
         self._batch_monitoring = live_status_coordinator is not None
 
         self._ready = False
@@ -273,7 +286,7 @@ class RecordTask:
     @user_agent.setter
     def user_agent(self, value: str) -> None:
         self._live.user_agent = value
-        if hasattr(self, '_danmaku_client'):
+        if hasattr(self, '_danmaku_client') and not self._batch_monitoring:
             self._danmaku_client.headers = self._live.headers
 
     @property
@@ -283,7 +296,7 @@ class RecordTask:
     @cookie.setter
     def cookie(self, value: str) -> None:
         self._live.cookie = value
-        if hasattr(self, '_danmaku_client'):
+        if hasattr(self, '_danmaku_client') and not self._batch_monitoring:
             self._danmaku_client.headers = self._live.headers
 
     @property
@@ -580,20 +593,52 @@ class RecordTask:
         self._setup_postprocessor_event_submitter()
 
     def _setup_danmaku_client(self) -> None:
+        session, appapi, webapi, headers = self._make_danmaku_transport(False)
+        self._danmaku_client = DanmakuClient(
+            session, appapi, webapi, self._live.room_info.room_id, headers=headers
+        )
+        self._danmaku_connection = DanmakuConnection(
+            self._danmaku_client,
+            configure_anonymous=lambda: self._configure_danmaku_transport(False),
+            configure_authenticated=lambda: self._configure_danmaku_transport(True),
+        )
+
+    def _make_danmaku_transport(
+        self, authenticated: bool
+    ) -> Tuple[Any, AppApi, WebApi, Dict[str, str]]:
         session = self._live.session
         if self._network_session_pool is not None:
             session = self._network_session_pool.client(
                 'danmaku',
-                anonymous=True,
+                anonymous=not authenticated,
                 affinity_key='danmaku:{}'.format(self._live.room_info.room_id),
             )
-        self._danmaku_client = DanmakuClient(
+        headers = self._live.headers if authenticated else self._live.stream_headers
+        auth_failure_reporter = self._auth_failure_reporter if authenticated else None
+        appapi = AppApi(
             session,
-            self._live.appapi,
-            self._live.webapi,
-            self._live.room_info.room_id,
-            headers=self._live.stream_headers,
+            headers,
+            room_id=self._live.room_info.room_id,
+            auth_failure_reporter=auth_failure_reporter,
         )
+        webapi = WebApi(
+            session,
+            headers,
+            room_id=self._live.room_info.room_id,
+            auth_failure_reporter=auth_failure_reporter,
+        )
+        for api in (appapi, webapi):
+            api.base_api_urls = list(self._live.base_api_urls)
+            api.base_live_api_urls = list(self._live.base_live_api_urls)
+            api.base_play_info_api_urls = list(self._live.base_play_info_api_urls)
+        return session, appapi, webapi, headers
+
+    def _configure_danmaku_transport(self, authenticated: bool) -> bool:
+        if authenticated and not self._live.cookie:
+            return False
+        session, appapi, webapi, headers = self._make_danmaku_transport(authenticated)
+        self._danmaku_client.configure(session, appapi, webapi, headers)
+        return True
 
     def _setup_live_monitor(self) -> None:
         if not self._batch_monitoring:
@@ -609,7 +654,7 @@ class RecordTask:
         )
         self._connection_controller = LiveConnectionController(
             self._live,
-            self._danmaku_client,
+            self._danmaku_connection,
             self._live_monitor,
             anonymous_room_client.load_room_info,
             status_sink=live_status_coordinator.observe_wss,
@@ -667,6 +712,7 @@ class RecordTask:
 
     def _destroy_danmaku_client(self) -> None:
         with suppress(AttributeError):
+            del self._danmaku_connection
             del self._danmaku_client
 
     def _destroy_live_monitor(self) -> None:
