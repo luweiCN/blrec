@@ -18,7 +18,7 @@ class DanmakuConnection:
         self,
         client: DanmakuClient,
         *,
-        configure_anonymous: Callable[[], None],
+        configure_anonymous: Callable[[], object],
         configure_authenticated: Callable[[], bool],
     ) -> None:
         self._client = client
