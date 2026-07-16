@@ -83,7 +83,7 @@ export class ExtensionApi {
     }
     const url = `${this.backendUrl}/api/v1/browser-extension${path}`;
     try {
-      const response = await this.fetchFn(url, {
+      const response = await this.fetchFn.call(globalThis, url, {
         method: options.method ?? 'GET',
         headers,
         body:

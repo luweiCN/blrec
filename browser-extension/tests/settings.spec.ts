@@ -23,8 +23,8 @@ function memoryStorage(): SettingsStorage & { values: Record<string, unknown> } 
 
 describe('extension settings', () => {
   it('normalizes common NAS addresses', () => {
-    expect(normalizeBackendUrl('192.168.50.24:2233')).toBe(
-      'http://192.168.50.24:2233'
+    expect(normalizeBackendUrl('192.168.1.100:2233')).toBe(
+      'http://192.168.1.100:2233'
     );
     expect(normalizeBackendUrl(' https://nas.example/blrec/ ')).toBe(
       'https://nas.example/blrec'
@@ -44,8 +44,8 @@ describe('extension settings', () => {
     expect(normalizeBackendUrl('http://172.20.0.8:2233')).toBe(
       'http://172.20.0.8:2233'
     );
-    expect(normalizeBackendUrl('http://192.168.50.24:2233')).toBe(
-      'http://192.168.50.24:2233'
+    expect(normalizeBackendUrl('http://192.168.1.100:2233')).toBe(
+      'http://192.168.1.100:2233'
     );
     expect(normalizeBackendUrl('http://[fd00::1]:2233')).toBe(
       'http://[fd00::1]:2233'
@@ -70,7 +70,7 @@ describe('extension settings', () => {
     const storage = memoryStorage();
     await saveSettings(
       {
-        backendUrl: 'http://192.168.50.24:2233',
+        backendUrl: 'http://192.168.1.100:2233',
         username: 'LuWei',
         token: 'blrec_ext_secret',
       },
@@ -78,7 +78,7 @@ describe('extension settings', () => {
     );
 
     await expect(loadSettings(storage)).resolves.toEqual({
-      backendUrl: 'http://192.168.50.24:2233',
+      backendUrl: 'http://192.168.1.100:2233',
       username: 'LuWei',
       token: 'blrec_ext_secret',
     });
