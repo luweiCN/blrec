@@ -96,6 +96,18 @@ describe('NetworkComponent', () => {
     );
   });
 
+  it('keeps horizontal scrolling on the table instead of the whole panel', () => {
+    const panel = fixture.nativeElement.querySelector(
+      '.network-panel'
+    ) as HTMLElement;
+    const table = fixture.nativeElement.querySelector('nz-table') as HTMLElement & {
+      nzScroll?: { x?: string };
+    };
+
+    expect(getComputedStyle(panel).overflowX).toBe('visible');
+    expect(table.nzScroll?.x).toBe('1040px');
+  });
+
   it('saves interface enable state immediately without saving all routes', () => {
     fixture.componentInstance.setInterfaceEnabled(networkInterface, false);
 
