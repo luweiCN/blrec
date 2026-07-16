@@ -43,4 +43,18 @@ describe('NetworkService', () => {
     expect(request.request.body).toEqual({ interfaceName: null });
     request.flush({ interfaces: [] });
   });
+
+  it('updates one interface inline', () => {
+    service
+      .updateInterface('eth0', { enabled: false, uploadLimitBps: 1024 })
+      .subscribe();
+
+    const request = http.expectOne('/api/v1/network/interfaces/eth0');
+    expect(request.request.method).toBe('PATCH');
+    expect(request.request.body).toEqual({
+      enabled: false,
+      uploadLimitBps: 1024,
+    });
+    request.flush({ interfaces: [] });
+  });
 });

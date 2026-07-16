@@ -26,9 +26,17 @@ nz-page-header {
 
 .panel-heading {
   display: flex;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 16px;
   align-items: center;
   margin-bottom: 16px;
+
+}
+
+.panel-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 
   h2 {
     margin: 0;
@@ -44,12 +52,43 @@ nz-page-header {
 
 .route-grid {
   display: grid;
-  grid-template-columns: minmax(170px, 1fr) minmax(210px, 1.3fr) minmax(210px, 1.3fr) 90px;
+  grid-template-columns: minmax(170px, 1fr) minmax(150px, 0.8fr) minmax(230px, 1.3fr) 90px;
   gap: 16px;
   align-items: center;
   min-height: 64px;
   padding: 10px 12px;
   border-top: 1px solid #f0f0f0;
+}
+
+.interface-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.tabular-data {
+  font-variant-numeric: tabular-nums;
+}
+
+.traffic-cell {
+  line-height: 1.7;
+}
+
+.limit-editor {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+
+  nz-input-number {
+    width: 92px;
+  }
+}
+
+.secondary-text {
+  margin-top: 4px;
+  color: #8c8c8c;
+  font-size: 12px;
 }
 
 .route-grid-header {

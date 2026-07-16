@@ -3,6 +3,7 @@ import { NgModule } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzIconModule } from 'ng-zorro-antd/icon';
+import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
@@ -22,6 +23,7 @@ import { NetworkRoutingModule } from './network-routing.module';
     NetworkRoutingModule,
     NzButtonModule,
     NzIconModule,
+    NzInputNumberModule,
     NzPageHeaderModule,
     NzSelectModule,
     NzSpinModule,

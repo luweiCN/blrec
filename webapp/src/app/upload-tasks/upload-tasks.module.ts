@@ -15,6 +15,7 @@ import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
+import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzSwitchModule } from 'ng-zorro-antd/switch';
@@ -54,6 +55,7 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
     NzMenuModule,
     NzPageHeaderModule,
     NzPaginationModule,
+    NzProgressModule,
     NzSelectModule,
     NzSpinModule,
     NzSwitchModule,

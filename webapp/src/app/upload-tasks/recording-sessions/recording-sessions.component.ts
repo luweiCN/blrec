@@ -1,6 +1,12 @@
 import { Clipboard } from '@angular/cdk/clipboard';
-import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
+import {
+  ChangeDetectorRef,
+  Component,
+  OnDestroy,
+  OnInit,
+} from '@angular/core';
 
+import { Subscription } from 'rxjs';
 import { finalize } from 'rxjs/operators';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
@@ -22,17 +28,34 @@ import {
   UploadJobProgress,
   UploadJobRetryPreviewItem,
   UploadJobState,
+  UploadSubmitState,
   UploadPartProgress,
   UploadPartState,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
+import { RealtimeService } from '../../core/services/realtime.service';
+
+interface RealtimeUploadJobProgress {
+  readonly jobId: number;
+  readonly sessionId: number;
+  readonly state: UploadJobState;
+  readonly submitState: UploadSubmitState;
+  readonly aid: number | null;
+  readonly bvid: string | null;
+  readonly confirmedBytes: number;
+  readonly totalBytes: number;
+  readonly percent: number;
+  readonly bytesPerSecond: number | null;
+  readonly etaSeconds: number | null;
+  readonly currentPartIndex: number | null;
+}
 
 @Component({
   selector: 'app-recording-sessions',
   templateUrl: './recording-sessions.component.html',
   styleUrls: ['./recording-sessions.component.scss'],
 })
-export class RecordingSessionsComponent implements OnInit {
+export class RecordingSessionsComponent implements OnInit, OnDestroy {
   view: RecordingSessionsView = { state: 'loading' };
   pageIndex = 1;
   pageSize = 20;
@@ -66,6 +89,7 @@ export class RecordingSessionsComponent implements OnInit {
   retryPreviewItems: readonly UploadJobRetryPreviewItem[] = [];
   taskEditVisible = false;
   taskEditJobIds: readonly number[] = [];
+  private realtimeSubscription?: Subscription;
 
   readonly recordingStateOptions = [
     { label: '录制中', value: 'open' },
@@ -92,11 +116,27 @@ export class RecordingSessionsComponent implements OnInit {
     private recordingSessions: RecordingSessionService,
     private changeDetector: ChangeDetectorRef,
     private clipboard: Clipboard,
-    private message: NzMessageService
+    private message: NzMessageService,
+    private realtime: RealtimeService
   ) {}
 
   ngOnInit(): void {
     this.load();
+    this.realtimeSubscription = this.realtime.events$.subscribe((event) => {
+      if (event.type === 'resync') {
+        if (this.view.state !== 'loading') {
+          this.load();
+        }
+        return;
+      }
+      if (event.type === 'upload_progress') {
+        this.applyRealtimeUploadProgress(event.data);
+      }
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.realtimeSubscription?.unsubscribe();
   }
 
   get sessions(): readonly RecordingSession[] {
@@ -969,6 +1009,22 @@ export class RecordingSessionsComponent implements OnInit {
     return `${value.toFixed(precision)} ${units[unitIndex]}`;
   }
 
+  formatEta(seconds: number | null): string {
+    if (seconds === null) {
+      return '预计剩余 —';
+    }
+    if (seconds <= 0) {
+      return '即将完成';
+    }
+    return `预计剩余 ${this.formatDuration(seconds)}`;
+  }
+
+  formatRate(bytesPerSecond: number | null): string {
+    return bytesPerSecond === null
+      ? '速度 —'
+      : `${this.formatBytes(bytesPerSecond)}/s`;
+  }
+
   fileName(path: string): string {
     const segments = path.split(/[\\/]/).filter(Boolean);
     return segments[segments.length - 1] ?? path;
@@ -995,5 +1051,69 @@ export class RecordingSessionsComponent implements OnInit {
       return error.message;
     }
     return '录制会话加载失败';
+  }
+
+  private applyRealtimeUploadProgress(data: unknown): void {
+    const updates = this.realtimeUploadJobs(data);
+    if (updates === null || this.view.state !== 'ready') {
+      return;
+    }
+    const byJobId = new Map(updates.map((item) => [item.jobId, item]));
+    let stateChanged = false;
+    let changed = false;
+    const sessions = this.view.response.sessions.map((session) => {
+      const job = session.uploadJob;
+      const update = job ? byJobId.get(job.id) : undefined;
+      if (!job || !update) {
+        return session;
+      }
+      changed = true;
+      stateChanged =
+        stateChanged ||
+        job.state !== update.state ||
+        job.submitState !== update.submitState ||
+        job.aid !== update.aid ||
+        job.bvid !== update.bvid;
+      return {
+        ...session,
+        uploadJob: {
+          ...job,
+          state: update.state,
+          submitState: update.submitState,
+          aid: update.aid,
+          bvid: update.bvid,
+          confirmedBytes: update.confirmedBytes,
+          totalBytes: update.totalBytes,
+          percent: update.percent,
+          bytesPerSecond: update.bytesPerSecond,
+          etaSeconds: update.etaSeconds,
+          currentPartIndex: update.currentPartIndex,
+        },
+      };
+    });
+    if (!changed) {
+      return;
+    }
+    this.view = {
+      state: 'ready',
+      response: { ...this.view.response, sessions },
+    };
+    if (this.selectedSession !== null) {
+      this.selectedSession =
+        sessions.find((session) => session.id === this.selectedSession?.id) ??
+        null;
+    }
+    this.changeDetector.markForCheck();
+    if (stateChanged) {
+      this.load();
+    }
+  }
+
+  private realtimeUploadJobs(data: unknown): RealtimeUploadJobProgress[] | null {
+    if (typeof data !== 'object' || data === null || !('jobs' in data)) {
+      return null;
+    }
+    const jobs = (data as { jobs: unknown }).jobs;
+    return Array.isArray(jobs) ? (jobs as RealtimeUploadJobProgress[]) : null;
   }
 }

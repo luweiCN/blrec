@@ -21,7 +21,20 @@ export interface NetworkInterface {
   isUp: boolean;
   speedMbps: number;
   isDefault: boolean;
+  dnsServers: string[];
+  kind: 'physical' | 'bridge' | 'tunnel';
+  enabled: boolean;
+  uploadLimitBps: number;
+  uploadBps: number;
+  downloadBps: number;
+  uploadTotal: number;
+  downloadTotal: number;
   probe: NetworkProbe | null;
+}
+
+export interface NetworkInterfaceUpdate {
+  enabled?: boolean;
+  uploadLimitBps?: number;
 }
 
 export interface NetworkInterfaceResponse {

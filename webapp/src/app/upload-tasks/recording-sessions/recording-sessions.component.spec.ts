@@ -6,7 +6,7 @@ import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule } from '@angular/forms';
 
-import { of, throwError } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import {
   CopyOutline,
   MoreOutline,
@@ -35,7 +35,9 @@ import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
+import { NzProgressModule } from 'ng-zorro-antd/progress';
 
+import { RealtimeEvent, RealtimeService } from '../../core/services/realtime.service';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
 
@@ -52,6 +54,7 @@ describe('RecordingSessionsComponent', () => {
   let service: jasmine.SpyObj<RecordingSessionService>;
   let clipboard: jasmine.SpyObj<Clipboard>;
   let message: jasmine.SpyObj<NzMessageService>;
+  let realtimeEvents: Subject<RealtimeEvent>;
 
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
@@ -72,6 +75,7 @@ describe('RecordingSessionsComponent', () => {
       'warning',
       'info',
     ]);
+    realtimeEvents = new Subject<RealtimeEvent>();
     service.decideDanmakuItem.and.returnValue(of(void 0));
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
@@ -148,6 +152,12 @@ describe('RecordingSessionsComponent', () => {
               canPause: false,
               canResume: false,
               canEdit: false,
+              confirmedBytes: 4,
+              totalBytes: 8,
+              percent: 50,
+              bytesPerSecond: 2,
+              etaSeconds: 2,
+              currentPartIndex: 1,
               unknownDanmakuItems: [
                 {
                   id: 11,
@@ -168,6 +178,8 @@ describe('RecordingSessionsComponent', () => {
                   transcodeState: 'unknown',
                   transcodeFailCode: null,
                   transcodeFailDesc: null,
+                  confirmedBytes: 4,
+                  totalBytes: 8,
                 },
               ],
             },
@@ -214,6 +226,7 @@ describe('RecordingSessionsComponent', () => {
         NzModalModule,
         NzPageHeaderModule,
         NzPaginationModule,
+        NzProgressModule,
         NzSelectModule,
         NzTableModule,
         NzTagModule,
@@ -223,6 +236,10 @@ describe('RecordingSessionsComponent', () => {
         { provide: RecordingSessionService, useValue: service },
         { provide: Clipboard, useValue: clipboard },
         { provide: NzMessageService, useValue: message },
+        {
+          provide: RealtimeService,
+          useValue: { events$: realtimeEvents.asObservable() },
+        },
         {
           provide: NZ_ICONS,
           useValue: [
@@ -701,6 +718,36 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     expect(markForCheck).toHaveBeenCalled();
+  });
+
+  it('patches upload byte progress from SSE without reloading the page', () => {
+    fixture.detectChanges();
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: {
+        jobs: [
+          {
+            jobId: 9,
+            sessionId: 1,
+            state: 'waiting_review',
+            submitState: 'confirmed',
+            aid: 123,
+            bvid: 'BV1test',
+            confirmedBytes: 6,
+            totalBytes: 8,
+            percent: 75,
+            bytesPerSecond: 2,
+            etaSeconds: 1,
+            currentPartIndex: 1,
+          },
+        ],
+      },
+    });
+
+    expect(fixture.componentInstance.sessions[0].uploadJob?.percent).toBe(75);
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
   });
 
   it('shows a retry action when session loading fails', () => {

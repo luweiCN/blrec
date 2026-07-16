@@ -191,6 +191,8 @@ export interface UploadPartProgress {
   readonly transcodeFailDesc: string | null;
   readonly repairStage?: TranscodeRepairStage;
   readonly repairDiagnostic?: string | null;
+  readonly confirmedBytes: number;
+  readonly totalBytes: number;
 }
 
 export const DANMAKU_DECISION_ACTIONS = [
@@ -282,6 +284,12 @@ export interface UploadJobProgress {
   readonly canPause: boolean;
   readonly canResume: boolean;
   readonly canEdit: boolean;
+  readonly confirmedBytes: number;
+  readonly totalBytes: number;
+  readonly percent: number;
+  readonly bytesPerSecond: number | null;
+  readonly etaSeconds: number | null;
+  readonly currentPartIndex: number | null;
   readonly unknownDanmakuItems: readonly DanmakuItemProgress[];
   readonly parts: readonly UploadPartProgress[];
 }

@@ -303,6 +303,20 @@
           <div class="secondary-text" *ngIf="displayStateDetail(session) as detail">
             {{ detail }}
           </div>
+          <div class="secondary-text" *ngIf="session.uploadJob as job">
+            <ng-container *ngIf="job.totalBytes > 0 && job.state === 'uploading'">
+              <nz-progress
+                [nzPercent]="job.percent"
+                [nzShowInfo]="false"
+                nzSize="small"
+                style="display: block; width: 118px"
+              ></nz-progress>
+              <span>
+                {{ job.percent | number : '1.0-1' }}% ·
+                {{ formatRate(job.bytesPerSecond) }}
+              </span>
+            </ng-container>
+          </div>
         </td>
         <td>
           <ng-container *ngIf="session.uploadJob as job; else noAccount">
@@ -475,6 +489,25 @@
           <nz-tag>{{ commentBranchLabel(job.commentBranchState) }}</nz-tag>
           <nz-tag>{{ danmakuBranchLabel(job.danmakuBranchState) }}</nz-tag>
         </div>
+        <div *ngIf="job.totalBytes > 0">
+          <div class="session-summary">
+            <strong>视频上传进度</strong>
+            <span>{{ job.percent | number : '1.0-1' }}%</span>
+          </div>
+          <nz-progress
+            [nzPercent]="job.percent"
+            [nzShowInfo]="false"
+          ></nz-progress>
+          <div class="session-summary secondary-text">
+            <span>
+              {{ formatBytes(job.confirmedBytes) }} /
+              {{ formatBytes(job.totalBytes) }}
+            </span>
+            <span *ngIf="job.currentPartIndex">P{{ job.currentPartIndex }}</span>
+            <span>{{ formatRate(job.bytesPerSecond) }}</span>
+            <span>{{ formatEta(job.etaSeconds) }}</span>
+          </div>
+        </div>
         <div>投稿账号：{{ job.accountDisplayName }}</div>
         <div *ngIf="job.aid || job.bvid">
           稿件：
@@ -618,6 +651,10 @@
                   <nz-tag [nzColor]="uploadPartStateColor(uploadPart.uploadState)">
                     {{ uploadPartStateLabel(uploadPart.uploadState) }}
                   </nz-tag>
+                  <div class="part-metric" *ngIf="uploadPart.totalBytes > 0">
+                    {{ formatBytes(uploadPart.confirmedBytes) }} /
+                    {{ formatBytes(uploadPart.totalBytes) }}
+                  </div>
                   <div
                     class="part-metric"
                     *ngIf="uploadPart.transcodeState !== 'unknown'"

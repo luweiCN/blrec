@@ -1,148 +1,197 @@
 <div class="network-page">
   <div class="network-content primary-page">
-  <nz-page-header nzTitle="网络管理">
-    <nz-page-header-extra>
-      <button
-        nz-button
-        [nzLoading]="probing"
-        (click)="probe()"
-      >
-        <i nz-icon nzType="reload"></i>
-        检测全部线路
-      </button>
-      <button
-        nz-button
-        nzType="primary"
-        [nzLoading]="saving"
-        [disabled]="settings === null"
-        (click)="save()"
-      >
-        保存网络分工
-      </button>
-    </nz-page-header-extra>
-  </nz-page-header>
+    <nz-page-header nzTitle="网络管理"></nz-page-header>
 
-  <nz-spin [nzSpinning]="loading">
-    <section class="network-panel">
-      <div class="panel-heading">
-        <h2>网卡与出口</h2>
-        <i
-          nz-icon
-          nzType="question-circle"
-          nz-tooltip
-          nzTooltipTitle="检测会分别绑定每块网卡访问 B 站，并查询该线路的公网出口 IP。"
-        ></i>
-      </div>
-
-      <nz-table
-        #interfaceTable
-        [nzData]="interfaces"
-        [nzFrontPagination]="false"
-        [nzShowPagination]="false"
-        nzSize="middle"
-      >
-        <thead>
-          <tr>
-            <th>网卡</th>
-            <th>内网地址</th>
-            <th>网关</th>
-            <th>公网出口</th>
-            <th>连通性</th>
-            <th nzAlign="right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr *ngFor="let item of interfaceTable.data">
-            <td>
-              <strong>{{ item.name }}</strong>
-              <nz-tag *ngIf="item.isDefault">系统默认</nz-tag>
-            </td>
-            <td>{{ item.address }}</td>
-            <td>{{ item.gateway || '—' }}</td>
-            <td>{{ item.probe?.externalIp || '—' }}</td>
-            <td>
-              <nz-tag *ngIf="item.probe === null">未检测</nz-tag>
-              <nz-tag *ngIf="item.probe?.reachable" nzColor="success">
-                可用 · {{ item.probe?.latencyMs }} ms
-              </nz-tag>
-              <nz-tag
-                *ngIf="item.probe !== null && !item.probe.reachable"
-                nzColor="error"
-              >
-                不可用
-              </nz-tag>
-            </td>
-            <td nzAlign="right">
-              <button
-                nz-button
-                nzType="link"
-                [disabled]="probing"
-                (click)="probe(item.name)"
-              >
-                检测
-              </button>
-            </td>
-          </tr>
-        </tbody>
-      </nz-table>
-    </section>
-
-    <section class="network-panel" *ngIf="settings !== null">
-      <div class="panel-heading">
-        <h2>网络分工</h2>
-        <i
-          nz-icon
-          nzType="question-circle"
-          nz-tooltip
-          nzTooltipTitle="只绑定新建连接，不修改群晖路由表。主线路连续失败两次后切到备用线路，稳定一段时间后再尝试主线路。"
-        ></i>
-      </div>
-
-      <div class="route-grid route-grid-header">
-        <span>用途</span>
-        <span>主线路</span>
-        <span>备用线路</span>
-        <span>自动切换</span>
-      </div>
-      <div class="route-grid" *ngFor="let purpose of purposes">
-        <div class="purpose-name">
-          <strong>{{ purpose.name }}</strong>
-          <i
-            nz-icon
-            nzType="question-circle"
-            nz-tooltip
-            [nzTooltipTitle]="purpose.help"
-          ></i>
+    <nz-spin [nzSpinning]="loading">
+      <section class="network-panel">
+        <div class="panel-heading">
+          <div class="panel-title">
+            <h2>网卡与出口</h2>
+            <i
+              nz-icon
+              nzType="question-circle"
+              nz-tooltip
+              nzTooltipTitle="流量只统计 BLREC 自身实际收发的数据，不包含 NAS 上其他应用和 TCP/TLS 开销。"
+            ></i>
+          </div>
+          <button
+            nz-button
+            type="button"
+            data-testid="probe-all"
+            [nzLoading]="probingAll"
+            [disabled]="probingInterface !== null"
+            (click)="probe()"
+          >
+            <i nz-icon nzType="reload"></i>
+            检测全部线路
+          </button>
         </div>
-        <nz-select
-          [ngModel]="route(purpose.key).primaryInterface"
-          (ngModelChange)="route(purpose.key).primaryInterface = $event"
+
+        <nz-table
+          #interfaceTable
+          [nzData]="interfaces"
+          [nzFrontPagination]="false"
+          [nzShowPagination]="false"
+          [nzScroll]="{ x: '1180px' }"
+          nzSize="middle"
         >
-          <nz-option nzLabel="系统默认" [nzValue]="null"></nz-option>
-          <nz-option
-            *ngFor="let item of interfaces"
-            [nzLabel]="interfaceLabel(item.name)"
-            [nzValue]="item.name"
-          ></nz-option>
-        </nz-select>
-        <nz-select
-          [ngModel]="route(purpose.key).fallbackInterface"
-          (ngModelChange)="route(purpose.key).fallbackInterface = $event"
-        >
-          <nz-option nzLabel="不设置" [nzValue]="null"></nz-option>
-          <nz-option
-            *ngFor="let item of interfaces"
-            [nzLabel]="interfaceLabel(item.name)"
-            [nzValue]="item.name"
-            [nzDisabled]="item.name === route(purpose.key).primaryInterface"
-          ></nz-option>
-        </nz-select>
-        <nz-switch
-          [(ngModel)]="route(purpose.key).failoverEnabled"
-          [nzDisabled]="route(purpose.key).fallbackInterface === null"
-        ></nz-switch>
-      </div>
-    </section>
-  </nz-spin>
+          <thead>
+            <tr>
+              <th nzWidth="150px">网卡</th>
+              <th nzWidth="205px">地址与网关</th>
+              <th nzWidth="170px">出口状态</th>
+              <th nzWidth="210px">BLREC 实时流量</th>
+              <th nzWidth="80px">启用</th>
+              <th nzWidth="250px">上传限速</th>
+              <th nzWidth="90px" nzAlign="right">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let item of interfaceTable.data">
+              <td>
+                <strong>{{ item.name }}</strong>
+                <div class="interface-tags">
+                  <nz-tag *ngIf="item.isDefault">系统默认</nz-tag>
+                  <nz-tag *ngIf="item.kind === 'bridge'">容器网桥</nz-tag>
+                </div>
+              </td>
+              <td class="tabular-data">
+                <div>{{ item.address }}</div>
+                <div class="secondary-text">网关 {{ item.gateway || '—' }}</div>
+              </td>
+              <td>
+                <div class="tabular-data">{{ item.probe?.externalIp || '—' }}</div>
+                <nz-tag *ngIf="item.probe === null">未检测</nz-tag>
+                <nz-tag *ngIf="item.probe?.reachable" nzColor="success">
+                  可用 · {{ item.probe?.latencyMs }} ms
+                </nz-tag>
+                <nz-tag
+                  *ngIf="item.probe !== null && !item.probe.reachable"
+                  nzColor="error"
+                >
+                  不可用
+                </nz-tag>
+              </td>
+              <td class="traffic-cell tabular-data">
+                <div>↑ {{ formatRate(item.uploadBps) }}</div>
+                <div>↓ {{ formatRate(item.downloadBps) }}</div>
+                <div class="secondary-text">
+                  累计 ↑ {{ formatBytes(item.uploadTotal) }} · ↓
+                  {{ formatBytes(item.downloadTotal) }}
+                </div>
+              </td>
+              <td>
+                <nz-switch
+                  [ngModel]="item.enabled"
+                  [nzLoading]="isInterfaceSaving(item.name)"
+                  (ngModelChange)="setInterfaceEnabled(item, $event)"
+                ></nz-switch>
+              </td>
+              <td>
+                <div class="limit-editor">
+                  <nz-input-number
+                    [ngModel]="uploadLimitDraft[item.name]"
+                    [nzMin]="0"
+                    [nzStep]="0.5"
+                    [nzPrecision]="1"
+                    [disabled]="isInterfaceSaving(item.name)"
+                    (ngModelChange)="uploadLimitDraft[item.name] = $event || 0"
+                  ></nz-input-number>
+                  <span>MB/s</span>
+                  <button
+                    nz-button
+                    nzSize="small"
+                    type="button"
+                    [nzLoading]="isInterfaceSaving(item.name)"
+                    (click)="saveUploadLimit(item, uploadLimitDraft[item.name])"
+                  >
+                    应用
+                  </button>
+                </div>
+                <div class="secondary-text">0 表示不限速，仅限制上传</div>
+              </td>
+              <td nzAlign="right">
+                <button
+                  nz-button
+                  nzType="link"
+                  type="button"
+                  [nzLoading]="probingInterface === item.name"
+                  [disabled]="probingAll"
+                  (click)="probe(item.name)"
+                >
+                  检测
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </nz-table>
+      </section>
+
+      <section class="network-panel" *ngIf="settings !== null">
+        <div class="panel-heading">
+          <div class="panel-title">
+            <h2>网络分工</h2>
+            <i
+              nz-icon
+              nzType="question-circle"
+              nz-tooltip
+              nzTooltipTitle="固定线路始终使用所选网卡；轮换只用于匿名请求，并按请求批次、弹幕连接或直播场次保持稳定。"
+            ></i>
+          </div>
+          <button
+            nz-button
+            nzType="primary"
+            type="button"
+            data-testid="save-routes"
+            [nzLoading]="saving"
+            (click)="save()"
+          >
+            保存网络分工
+          </button>
+        </div>
+
+        <div class="route-grid route-grid-header">
+          <span>用途</span>
+          <span>策略</span>
+          <span>固定线路</span>
+          <span>自动接管</span>
+        </div>
+        <div class="route-grid" *ngFor="let purpose of purposes">
+          <div class="purpose-name">
+            <strong>{{ purpose.name }}</strong>
+            <i
+              nz-icon
+              nzType="question-circle"
+              nz-tooltip
+              [nzTooltipTitle]="purpose.help"
+            ></i>
+          </div>
+          <nz-select [(ngModel)]="route(purpose.key).mode">
+            <nz-option nzValue="fixed" nzLabel="固定线路"></nz-option>
+            <nz-option
+              nzValue="round_robin"
+              nzLabel="轮换可用线路"
+              [nzDisabled]="!supportsRoundRobin(purpose.key)"
+            ></nz-option>
+          </nz-select>
+          <nz-select
+            [(ngModel)]="route(purpose.key).interface"
+            [nzDisabled]="route(purpose.key).mode === 'round_robin'"
+          >
+            <nz-option nzLabel="系统默认" [nzValue]="null"></nz-option>
+            <nz-option
+              *ngFor="let item of interfaces"
+              [nzLabel]="interfaceLabel(item.name)"
+              [nzValue]="item.name"
+              [nzDisabled]="!item.enabled"
+            ></nz-option>
+          </nz-select>
+          <nz-switch
+            [(ngModel)]="route(purpose.key).failoverEnabled"
+            [nzDisabled]="purpose.key === 'upload'"
+          ></nz-switch>
+        </div>
+      </section>
+    </nz-spin>
   </div>
 </div>

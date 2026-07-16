@@ -2,8 +2,9 @@ import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute, convertToParamMap, Router } from '@angular/router';
 import { NzNotificationService } from 'ng-zorro-antd/notification';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 
+import { RealtimeEvent, RealtimeService } from '../../core/services/realtime.service';
 import { TaskService } from '../shared/services/task.service';
 import {
   PostprocessorStatus,
@@ -56,6 +57,7 @@ describe('TaskDetailComponent', () => {
   let component: TaskDetailComponent;
   let fixture: ComponentFixture<TaskDetailComponent>;
   let taskService: jasmine.SpyObj<TaskService>;
+  let realtimeEvents: Subject<RealtimeEvent>;
 
   beforeEach(async () => {
     taskService = jasmine.createSpyObj<TaskService>('TaskService', [
@@ -66,6 +68,7 @@ describe('TaskDetailComponent', () => {
     taskService.getTaskData.and.returnValue(of(taskData));
     taskService.getVideoFileDetails.and.returnValue(of([]));
     taskService.getDanmakuFileDetails.and.returnValue(of([]));
+    realtimeEvents = new Subject<RealtimeEvent>();
 
     await TestBed.configureTestingModule({
       declarations: [TaskDetailComponent],
@@ -91,6 +94,10 @@ describe('TaskDetailComponent', () => {
           provide: TaskService,
           useValue: taskService,
         },
+        {
+          provide: RealtimeService,
+          useValue: { events$: realtimeEvents.asObservable() },
+        },
       ],
       schemas: [NO_ERRORS_SCHEMA],
     })
@@ -109,5 +116,20 @@ describe('TaskDetailComponent', () => {
     expect(taskService.getTaskData).toHaveBeenCalledWith(1);
     expect(taskService.getVideoFileDetails).toHaveBeenCalledWith(1);
     expect(taskService.getDanmakuFileDetails).toHaveBeenCalledWith(1);
+  });
+
+  it('applies task SSE data without polling the task endpoint again', () => {
+    const updated = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        dl_rate: 4096,
+      },
+    };
+
+    realtimeEvents.next({ type: 'tasks', data: { tasks: [updated] } });
+
+    expect(component.taskData.task_status.dl_rate).toBe(4096);
+    expect(taskService.getTaskData).toHaveBeenCalledTimes(1);
   });
 });

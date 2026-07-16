@@ -14,12 +14,18 @@ export interface LiveMonitorSettings {
 }
 
 export interface NetworkRouteSettings {
-  primaryInterface: string | null;
-  fallbackInterface: string | null;
+  mode: 'fixed' | 'round_robin';
+  interface: string | null;
   failoverEnabled: boolean;
 }
 
+export interface NetworkInterfaceSettings {
+  enabled: boolean;
+  uploadLimitBps: number;
+}
+
 export interface NetworkSettings {
+  interfaces: Record<string, NetworkInterfaceSettings>;
   roomStatus: NetworkRouteSettings;
   danmaku: NetworkRouteSettings;
   recording: NetworkRouteSettings;
