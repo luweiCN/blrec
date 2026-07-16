@@ -382,6 +382,14 @@
                 本场不上传
               </li>
               <li
+                *ngIf="hasAction(session.id, 'edit_submission')"
+                nz-menu-item
+                data-testid="edit-submission-settings"
+                (click)="openSubmissionSettings(session)"
+              >
+                投稿设置
+              </li>
+              <li
                 *ngIf="hasAction(session.id, 'retry_failed')"
                 nz-menu-item
                 (click)="openSessionAction('retry_failed', [session.id])"
@@ -857,6 +865,16 @@
     </ng-container>
   </ng-container>
 </nz-drawer>
+
+<app-upload-policy-dialog
+  *ngIf="submissionSession as session"
+  [sessionId]="session.id"
+  [roomId]="session.roomId"
+  [roomName]="session.anchorName || session.title"
+  [liveAreaName]="session.areaName"
+  [liveParentAreaName]="session.parentAreaName"
+  (closed)="closeSubmissionSettings()"
+></app-upload-policy-dialog>
 
 <app-task-edit-dialog
   [visible]="taskEditVisible"

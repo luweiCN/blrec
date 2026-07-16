@@ -118,6 +118,7 @@ export type RecordingSessionAction =
   | 'repost_as_new'
   | 'pause_upload'
   | 'resume_upload'
+  | 'edit_submission'
   | 'edit_task'
   | 'delete_local';
 

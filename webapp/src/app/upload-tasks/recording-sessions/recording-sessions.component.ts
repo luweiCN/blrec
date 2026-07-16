@@ -92,6 +92,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   retryPreviewItems: readonly UploadJobRetryPreviewItem[] = [];
   taskEditVisible = false;
   taskEditJobIds: readonly number[] = [];
+  submissionSession: RecordingSession | null = null;
   private realtimeSubscription?: Subscription;
 
   readonly recordingStateOptions = [
@@ -467,6 +468,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       repost_as_new: '重新投稿',
       pause_upload: '暂停上传',
       resume_upload: '继续上传',
+      edit_submission: '投稿设置',
       edit_task: '修改任务',
       delete_local: '删除',
     }[this.uploadAction ?? 'retry_failed'];
@@ -486,6 +488,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         '系统会使用本地成品重新创建一个 B 站稿件。原稿件不会删除，旧 BV 号会保存在本地历史中。',
       pause_upload: '系统会在当前分片的安全检查点暂停，并保留已经完成的上传进度。',
       resume_upload: '系统会从已经保存的上传进度继续，不会重新上传已确认的分片。',
+      edit_submission: '修改本场投稿设置，不影响同一房间的其他直播。',
       edit_task: '只有尚未开始上传的任务可以修改投稿账号和本场投稿设置。',
       delete_local:
         '只删除本系统中的任务记录及该场次归属的本地录像、弹幕文件；绝不会删除或修改 B 站上的稿件。',
@@ -501,6 +504,16 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return session.availableActions.some((action) => action !== 'delete_local');
   }
 
+  openSubmissionSettings(session: RecordingSession): void {
+    this.submissionSession = session;
+    this.changeDetector.markForCheck();
+  }
+
+  closeSubmissionSettings(): void {
+    this.submissionSession = null;
+    this.load();
+  }
+
   canEditHighlight(session: RecordingSession): boolean {
     return (
       session.sourceKind === 'live' &&
@@ -508,7 +521,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     );
   }
 
-  highlightEditorLink(session: RecordingSession): readonly string[] {
+  highlightEditorLink(session: RecordingSession): string[] {
     return ['/', 'recordings', 'highlights', String(session.id)];
   }
 

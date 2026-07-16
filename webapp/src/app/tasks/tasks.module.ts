@@ -31,7 +31,6 @@ import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzStatisticModule } from 'ng-zorro-antd/statistic';
 import { NzDescriptionsModule } from 'ng-zorro-antd/descriptions';
-import { NzDatePickerModule } from 'ng-zorro-antd/date-picker';
 import { NgxEchartsModule } from 'ngx-echarts';
 
 import { SharedModule } from '../shared/shared.module';
@@ -53,7 +52,7 @@ import { TaskRecordingDetailComponent } from './task-detail/task-recording-detai
 import { TaskNetworkDetailComponent } from './task-detail/task-network-detail/task-network-detail.component';
 import { InfoPanelComponent } from './info-panel/info-panel.component';
 import { WaveGraphComponent } from './info-panel/wave-graph/wave-graph.component';
-import { UploadPolicyDialogComponent } from './upload-policy-dialog/upload-policy-dialog.component';
+import { UploadPolicyDialogModule } from './upload-policy-dialog/upload-policy-dialog.module';
 
 @NgModule({
   declarations: [
@@ -74,7 +73,6 @@ import { UploadPolicyDialogComponent } from './upload-policy-dialog/upload-polic
     TaskNetworkDetailComponent,
     InfoPanelComponent,
     WaveGraphComponent,
-    UploadPolicyDialogComponent,
   ],
   imports: [
     CommonModule,
@@ -111,13 +109,13 @@ import { UploadPolicyDialogComponent } from './upload-policy-dialog/upload-polic
     NzTableModule,
     NzStatisticModule,
     NzDescriptionsModule,
-    NzDatePickerModule,
     NgxEchartsModule.forRoot({
       echarts: () => import('echarts'),
     }),
 
     TasksRoutingModule,
     SharedModule,
+    UploadPolicyDialogModule,
   ],
 })
 export class TasksModule {}

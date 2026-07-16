@@ -50,6 +50,16 @@ class TaskEditDialogStubComponent {
   @Output() readonly saved = new EventEmitter<void>();
 }
 
+@Component({ selector: 'app-upload-policy-dialog', template: '' })
+class UploadPolicyDialogStubComponent {
+  @Input() sessionId: number | null = null;
+  @Input() roomId = 0;
+  @Input() roomName = '';
+  @Input() liveAreaName = '';
+  @Input() liveParentAreaName = '';
+  @Output() readonly closed = new EventEmitter<void>();
+}
+
 describe('RecordingSessionsComponent', () => {
   let fixture: ComponentFixture<RecordingSessionsComponent>;
   let service: jasmine.SpyObj<RecordingSessionService>;
@@ -227,7 +237,11 @@ describe('RecordingSessionsComponent', () => {
     );
 
     await TestBed.configureTestingModule({
-      declarations: [RecordingSessionsComponent, TaskEditDialogStubComponent],
+      declarations: [
+        RecordingSessionsComponent,
+        TaskEditDialogStubComponent,
+        UploadPolicyDialogStubComponent,
+      ],
       imports: [
         CommonModule,
         FormsModule,
@@ -387,6 +401,24 @@ describe('RecordingSessionsComponent', () => {
         '[data-testid="session-actions-trigger"]',
       )
     ).toBeNull();
+  });
+
+  it('opens the shared complete submission form for one recording', () => {
+    fixture.componentInstance.scope = 'recordings';
+    fixture.detectChanges();
+
+    fixture.componentInstance.openSubmissionSettings(
+      fixture.componentInstance.sessions[0],
+    );
+    fixture.detectChanges();
+
+    const dialog = fixture.debugElement.query(
+      By.directive(UploadPolicyDialogStubComponent),
+    );
+    expect(dialog).not.toBeNull();
+    expect(
+      dialog.componentInstance as UploadPolicyDialogStubComponent,
+    ).toEqual(jasmine.objectContaining({ sessionId: 1, roomId: 100 }));
   });
 
   it('keeps delete visible and uses concise operation names', () => {

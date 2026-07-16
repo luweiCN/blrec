@@ -23,6 +23,7 @@ import { NzTableModule } from 'ng-zorro-antd/table';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
+import { UploadPolicyDialogModule } from '../tasks/upload-policy-dialog/upload-policy-dialog.module';
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
 import { HighlightEditorComponent } from './highlight-editor/highlight-editor.component';
 import { PartDanmakuDialogComponent } from './part-danmaku-dialog/part-danmaku-dialog.component';
@@ -44,6 +45,7 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
     CommonModule,
     ClipboardModule,
     FormsModule,
+    UploadPolicyDialogModule,
     UploadTasksRoutingModule,
     NzAlertModule,
     NzButtonModule,

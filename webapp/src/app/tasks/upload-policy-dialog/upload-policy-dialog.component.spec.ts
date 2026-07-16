@@ -15,11 +15,13 @@ import {
 } from './room-upload-policy.model';
 import { RoomUploadPolicyService } from './room-upload-policy.service';
 import { UploadPolicyDialogComponent } from './upload-policy-dialog.component';
+import { RecordingSubmissionService } from './recording-submission.service';
 
 describe('UploadPolicyDialogComponent', () => {
   let fixture: ComponentFixture<UploadPolicyDialogComponent>;
   let component: UploadPolicyDialogComponent;
   let policyService: jasmine.SpyObj<RoomUploadPolicyService>;
+  let submissionService: jasmine.SpyObj<RecordingSubmissionService>;
 
   const account = {
     id: 7,
@@ -145,6 +147,17 @@ describe('UploadPolicyDialogComponent', () => {
     ],
   };
 
+  const submissionResponse = {
+    sessionId: 7,
+    roomId: 100,
+    decision: 'follow_room' as const,
+    inherited: true,
+    settingsSource: 'room' as const,
+    resolutionState: 'pending' as const,
+    resolutionError: null,
+    settings: existingPolicy,
+  };
+
   beforeEach(async () => {
     policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
       'RoomUploadPolicyService',
@@ -175,12 +188,20 @@ describe('UploadPolicyDialogComponent', () => {
     );
     policyService.save.and.returnValue(of(existingPolicy));
     policyService.delete.and.returnValue(of(undefined));
+    submissionService = jasmine.createSpyObj<RecordingSubmissionService>(
+      'RecordingSubmissionService',
+      ['get', 'save', 'clear', 'setDecision'],
+    );
+    submissionService.get.and.returnValue(of(submissionResponse));
+    submissionService.save.and.returnValue(of(submissionResponse));
+    submissionService.clear.and.returnValue(of(submissionResponse));
 
     await TestBed.configureTestingModule({
       declarations: [UploadPolicyDialogComponent],
       imports: [FormsModule],
       providers: [
         { provide: RoomUploadPolicyService, useValue: policyService },
+        { provide: RecordingSubmissionService, useValue: submissionService },
         {
           provide: BiliAccountService,
           useValue: {
@@ -384,6 +405,40 @@ describe('UploadPolicyDialogComponent', () => {
     );
 
     expect(policyService.delete).not.toHaveBeenCalled();
+  });
+
+  it('reuses the complete form for a recording-session override', () => {
+    fixture = TestBed.createComponent(UploadPolicyDialogComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('roomId', 100);
+    fixture.componentRef.setInput('roomName', '测试主播');
+    fixture.componentRef.setInput('sessionId', 7);
+    fixture.detectChanges();
+
+    expect(submissionService.get).toHaveBeenCalledOnceWith(7);
+    expect(component.modalTitle).toContain('本场投稿设置');
+    component.save();
+    expect(submissionService.save).toHaveBeenCalledWith(
+      7,
+      jasmine.objectContaining({ titleTemplate: '旧标题' }),
+    );
+    expect(policyService.save).not.toHaveBeenCalled();
+  });
+
+  it('can restore a recording session to inherited room settings', () => {
+    submissionService.get.and.returnValue(
+      of({ ...submissionResponse, inherited: false, settingsSource: 'session' }),
+    );
+    fixture = TestBed.createComponent(UploadPolicyDialogComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('roomId', 100);
+    fixture.componentRef.setInput('roomName', '测试主播');
+    fixture.componentRef.setInput('sessionId', 7);
+    fixture.detectChanges();
+
+    component.restoreInherited();
+
+    expect(submissionService.clear).toHaveBeenCalledOnceWith(7);
   });
 
   it('clears account-specific collection selection when the account changes', () => {

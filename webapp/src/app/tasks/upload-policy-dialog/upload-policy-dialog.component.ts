@@ -13,7 +13,7 @@ import {
 import type { NzCascaderOption } from 'ng-zorro-antd/cascader';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { Observable, Subject, forkJoin, of, throwError } from 'rxjs';
-import { catchError, finalize, takeUntil } from 'rxjs/operators';
+import { catchError, finalize, map, takeUntil } from 'rxjs/operators';
 
 import { BiliAccount } from '../../uploads/shared/bili-account.model';
 import { BiliAccountService } from '../../uploads/shared/bili-account.service';
@@ -21,7 +21,6 @@ import {
   BiliCollection,
   BiliCollectionCatalog,
   CoverAsset,
-  RoomUploadPolicy,
   RoomUploadPolicyDraft,
   RoomUploadPolicyRequest,
   UploadAccountMode,
@@ -32,6 +31,7 @@ import {
   UploadRetentionMode,
 } from './room-upload-policy.model';
 import { RoomUploadPolicyService } from './room-upload-policy.service';
+import { RecordingSubmissionService } from './recording-submission.service';
 
 const DEFAULT_DRAFT: RoomUploadPolicyDraft = {
   accountMode: 'primary',
@@ -112,6 +112,7 @@ type PolicyValidationErrors = Partial<
 export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   @Input() roomId!: number;
   @Input() roomIds: readonly number[] = [];
+  @Input() sessionId: number | null = null;
   @Input() roomName = '';
   @Input() liveAreaName = '';
   @Input() liveParentAreaName = '';
@@ -170,6 +171,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   constructor(
     private policyService: RoomUploadPolicyService,
+    private submissionService: RecordingSubmissionService,
     private accountService: BiliAccountService,
     private message: NzMessageService,
     private changeDetector: ChangeDetectorRef,
@@ -184,7 +186,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       .subscribe({
         next: ({ policy, accounts }) => {
           this.accounts = accounts;
-          this.existingPolicy = policy !== null;
+          if (this.sessionId === null) {
+            this.existingPolicy = policy !== null;
+          }
           this.draft = policy ? this.fromPolicy(policy) : this.newDraft();
           this.syncDependentControls();
           this.loading = false;
@@ -217,6 +221,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   get modalTitle(): string {
+    if (this.sessionId !== null) {
+      return `本场投稿设置 · ${this.roomName} · ${this.roomId}`;
+    }
     return this.targetRoomIds.length > 1
       ? `批量投稿设置 · ${this.targetRoomIds.length} 个房间`
       : `投稿设置 · ${this.roomName} · ${this.roomId}`;
@@ -542,7 +549,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       accountMode: this.draft.accountMode,
       accountId:
         this.draft.accountMode === 'fixed' ? this.draft.accountId : null,
-      enabled: this.draft.enabled,
+      enabled: this.sessionId === null ? this.draft.enabled : true,
       titleTemplate: this.draft.titleTemplate.trim(),
       descriptionTemplate: this.draft.descriptionTemplate.trim(),
       partTitleTemplate: this.draft.partTitleTemplate.trim(),
@@ -576,9 +583,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.error = null;
     const targetRoomIds = this.targetRoomIds;
     const operation: Observable<unknown> =
-      targetRoomIds.length === 1
-        ? this.policyService.save(targetRoomIds[0], request)
-        : this.policyService.saveMany(targetRoomIds, request);
+      this.sessionId !== null
+        ? this.submissionService.save(this.sessionId, request)
+        : targetRoomIds.length === 1
+          ? this.policyService.save(targetRoomIds[0], request)
+          : this.policyService.saveMany(targetRoomIds, request);
     operation
       .pipe(
         finalize(() => {
@@ -591,9 +600,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
         next: () => {
           this.existingPolicy = true;
           this.message.success(
-            targetRoomIds.length > 1
-              ? `已保存 ${targetRoomIds.length} 个房间的投稿设置`
-              : `房间 ${this.roomId} 的投稿设置已保存`,
+            this.sessionId !== null
+              ? '本场投稿设置已保存'
+              : targetRoomIds.length > 1
+                ? `已保存 ${targetRoomIds.length} 个房间的投稿设置`
+                : `房间 ${this.roomId} 的投稿设置已保存`,
           );
           this.visible = false;
           this.changeDetector.markForCheck();
@@ -611,7 +622,43 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     }
   }
 
-  private loadPolicy(): Observable<RoomUploadPolicy | null> {
+  restoreInherited(): void {
+    if (this.sessionId === null || !this.existingPolicy || this.saving) {
+      return;
+    }
+    this.saving = true;
+    this.error = null;
+    this.submissionService
+      .clear(this.sessionId)
+      .pipe(
+        finalize(() => {
+          this.saving = false;
+          this.changeDetector.markForCheck();
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe({
+        next: () => {
+          this.message.success('已恢复跟随房间投稿设置');
+          this.visible = false;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.error = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private loadPolicy(): Observable<RoomUploadPolicyRequest | null> {
+    if (this.sessionId !== null) {
+      return this.submissionService.get(this.sessionId).pipe(
+        map((value) => {
+          this.existingPolicy = !value.inherited;
+          return value.settings;
+        }),
+      );
+    }
     return this.policyService.get(this.roomId).pipe(
       catchError((error: unknown) => {
         if (error instanceof HttpErrorResponse && error.status === 404) {
@@ -870,7 +917,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     return { ...DEFAULT_DRAFT, filters: {} };
   }
 
-  private fromPolicy(policy: RoomUploadPolicy): RoomUploadPolicyDraft {
+  private fromPolicy(policy: RoomUploadPolicyRequest): RoomUploadPolicyDraft {
     return {
       accountMode: policy.accountMode,
       accountId: policy.accountId,

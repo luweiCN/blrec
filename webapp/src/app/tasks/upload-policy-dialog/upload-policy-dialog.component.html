@@ -26,7 +26,7 @@
       ></nz-alert>
 
       <div class="top-settings">
-        <div class="switch-field">
+        <div *ngIf="sessionId === null" class="switch-field">
           <div>
             <label for="policy-enabled">自动投稿</label>
             <p>关闭后，新结束的直播不再创建上传任务；已有任务不受影响。</p>
@@ -600,6 +600,16 @@
 
   <ng-template [nzModalFooter]>
     <div class="modal-footer">
+      <button
+        *ngIf="sessionId !== null && existingPolicy"
+        nz-button
+        type="button"
+        data-testid="restore-inherited-policy"
+        [disabled]="saving"
+        (click)="restoreInherited()"
+      >
+        恢复跟随房间设置
+      </button>
       <span class="footer-spacer"></span>
       <button
         nz-button
