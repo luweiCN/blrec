@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 EXTENSION = ROOT / 'browser-extension'
 
@@ -31,5 +30,6 @@ def test_options_disclose_data_use_before_connecting() -> None:
     assert '只发送到你填写的 BLREC 服务器' in options
     assert '点击“连接”表示同意上述用途' in options
     assert '浏览器插件隐私说明' in options
-    assert 'placeholder="http://nas.local:2233"' in options
+    assert 'placeholder="请输入 BLREC 的 IP 地址或域名"' in options
+    assert 'nas.local' not in options
     assert 'placeholder="http://192.168.' not in options
