@@ -4,6 +4,7 @@ import asyncio
 import socket
 import time
 from dataclasses import dataclass, replace
+from threading import RLock
 from typing import (
     TYPE_CHECKING,
     Awaitable,
@@ -19,6 +20,7 @@ from typing import (
 import aiohttp
 
 from .platform import NetworkInterface, discover_interfaces
+from .resolver import SourceBoundResolver
 
 if TYPE_CHECKING:
     from blrec.setting.models import NetworkRouteSettings, NetworkSettings
@@ -40,7 +42,7 @@ class RouteSelection:
     purpose: NetworkPurpose
     interface_name: Optional[str]
     source_address: Optional[str]
-    role: Literal['primary', 'fallback', 'system']
+    role: Literal['primary', 'fallback', 'round_robin', 'system']
 
 
 @dataclass(frozen=True)
@@ -61,11 +63,8 @@ class NetworkNotificationState:
     detail: str
 
 
-@dataclass
-class _RouteHealth:
-    primary_failures: int = 0
-    fallback_failures: int = 0
-    fallback_until: float = 0.0
+class NetworkUnavailable(RuntimeError):
+    pass
 
 
 class NetworkRouteManager:
@@ -88,9 +87,13 @@ class NetworkRouteManager:
         self._clock = clock
         self._failure_threshold = failure_threshold
         self._fallback_cooldown_seconds = fallback_cooldown_seconds
-        self._health: Dict[NetworkPurpose, _RouteHealth] = {}
         self._probes: Dict[str, NetworkProbe] = {}
         self._settings_persister = settings_persister
+        self._failures: Dict[Tuple[NetworkPurpose, str], int] = {}
+        self._unavailable_since: Dict[Tuple[NetworkPurpose, str], float] = {}
+        self._round_robin_cursors: Dict[NetworkPurpose, int] = {}
+        self._affinities: Dict[Tuple[NetworkPurpose, str], str] = {}
+        self._lock = RLock()
 
     def interfaces(self) -> Dict[str, NetworkInterface]:
         configured = self._settings_provider().interfaces
@@ -146,6 +149,11 @@ class NetworkRouteManager:
     def cached_probes(self) -> Dict[str, NetworkProbe]:
         return dict(self._probes)
 
+    def interface(self, interface_name: Optional[str]) -> Optional[NetworkInterface]:
+        if interface_name is None:
+            return None
+        return self.interfaces().get(interface_name)
+
     def notification_states(self) -> List[NetworkNotificationState]:
         states: List[NetworkNotificationState] = []
         for interface_name, probe in self._probes.items():
@@ -176,19 +184,29 @@ class NetworkRouteManager:
             route = self._route_settings(purpose)
             if route.interface is None:
                 continue
-            selection = self.select(purpose)
+            selection: Optional[RouteSelection]
+            try:
+                selection = self.select(purpose)
+            except NetworkUnavailable:
+                selection = None
             states.append(
                 NetworkNotificationState(
                     event='network_failover',
                     object_key='network-route:{}:failover'.format(purpose),
-                    healthy=selection.role != 'fallback',
+                    healthy=selection is not None and selection.role != 'fallback',
                     title=(
                         '网络路由已恢复主线路'
-                        if selection.role != 'fallback'
+                        if selection is not None and selection.role != 'fallback'
                         else '网络路由已切换备用线路'
                     ),
                     detail='{} 当前使用 {}'.format(
-                        purpose, selection.interface_name or '系统默认网络'
+                        purpose,
+                        (
+                            selection.interface_name
+                            if selection is not None
+                            else '无可用线路'
+                        )
+                        or '系统默认网络',
                     ),
                 )
             )
@@ -196,14 +214,20 @@ class NetworkRouteManager:
                 NetworkNotificationState(
                     event='network_unavailable',
                     object_key='network-route:{}:unavailable'.format(purpose),
-                    healthy=selection.role != 'system',
+                    healthy=selection is not None and selection.role != 'system',
                     title=(
                         '网络路由已恢复'
-                        if selection.role != 'system'
+                        if selection is not None and selection.role != 'system'
                         else '网络路由不可用'
                     ),
                     detail='{} 当前使用 {}'.format(
-                        purpose, selection.interface_name or '系统默认网络'
+                        purpose,
+                        (
+                            selection.interface_name
+                            if selection is not None
+                            else '无可用线路'
+                        )
+                        or '系统默认网络',
                     ),
                 )
             )
@@ -215,7 +239,9 @@ class NetworkRouteManager:
             interface = interfaces.get(interface_name)
             if interface is None:
                 raise KeyError(interface_name)
-            self._probes[interface_name] = await self._probe_interface(interface)
+            result = await self._probe_interface(interface)
+            self._probes[interface_name] = result
+            self._report_probe_result(interface_name, result)
             return
         results = await asyncio.gather(
             *(self._probe_interface(interface) for interface in interfaces.values())
@@ -224,76 +250,146 @@ class NetworkRouteManager:
             (interface.name, result)
             for interface, result in zip(interfaces.values(), results)
         )
+        for interface, result in zip(interfaces.values(), results):
+            self._report_probe_result(interface.name, result)
 
-    def select(self, purpose: NetworkPurpose) -> RouteSelection:
-        route = self._route_settings(purpose)
-        interfaces = self.interfaces()
-        health = self._health.setdefault(purpose, _RouteHealth())
-        now = self._clock()
-        primary = interfaces.get(route.interface or '')
-        fallback = next(
-            (
-                interface
-                for name, interface in interfaces.items()
-                if name != route.interface and interface.enabled
-            ),
-            None,
+    def _report_probe_result(self, interface_name: str, result: NetworkProbe) -> None:
+        purposes: Tuple[NetworkPurpose, ...] = (
+            'room_status',
+            'danmaku',
+            'recording',
+            'upload',
+            'bili_api',
         )
+        for purpose in purposes:
+            if result.reachable:
+                self.report_success(purpose, interface_name)
+            else:
+                self.report_failure(purpose, interface_name)
 
-        if health.fallback_until and now >= health.fallback_until:
-            health.primary_failures = 0
-            health.fallback_failures = 0
-            health.fallback_until = 0.0
+    def select(
+        self,
+        purpose: NetworkPurpose,
+        *,
+        affinity_key: Optional[str] = None,
+        anonymous: bool = False,
+    ) -> RouteSelection:
+        route = self._route_settings(purpose)
+        with self._lock:
+            interfaces = self.interfaces()
+            candidates = [
+                interface
+                for name, interface in sorted(interfaces.items())
+                if interface.enabled and self._is_healthy(purpose, name)
+            ]
+            affinity = (purpose, affinity_key) if affinity_key is not None else None
+            if affinity is not None:
+                name = self._affinities.get(affinity)
+                if name is not None:
+                    interface = interfaces.get(name)
+                    if (
+                        interface is not None
+                        and interface.enabled
+                        and (
+                            self._is_healthy(purpose, name)
+                            or not route.failover_enabled
+                            or purpose == 'upload'
+                        )
+                    ):
+                        return self._selection(purpose, interface, 'primary')
+                    self._affinities.pop(affinity, None)
 
-        if primary is None and route.interface is not None:
-            return self._fallback_or_system(purpose, fallback)
+            if route.mode == 'round_robin' and anonymous:
+                if not candidates:
+                    raise NetworkUnavailable(
+                        'No enabled and healthy interface for {}'.format(purpose)
+                    )
+                cursor = self._round_robin_cursors.get(purpose, 0)
+                interface = candidates[cursor % len(candidates)]
+                self._round_robin_cursors[purpose] = cursor + 1
+                if affinity is not None:
+                    self._affinities[affinity] = interface.name
+                return self._selection(purpose, interface, 'round_robin')
 
-        if (
-            route.failover_enabled
-            and fallback is not None
-            and health.fallback_until > now
-        ):
-            if health.fallback_failures < self._failure_threshold:
-                return self._selection(purpose, fallback, 'fallback')
-            return self._system_selection(purpose)
+            configured = interfaces.get(route.interface or '')
+            if route.interface is None:
+                return self._system_selection(purpose)
+            if (
+                configured is not None
+                and configured.enabled
+                and self._is_healthy(purpose, configured.name)
+            ):
+                if affinity is not None:
+                    self._affinities[affinity] = configured.name
+                return self._selection(purpose, configured, 'primary')
 
-        if primary is not None and primary.enabled:
-            return self._selection(purpose, primary, 'primary')
-        return self._system_selection(purpose)
+            allow_failover = route.failover_enabled and purpose != 'upload'
+            if allow_failover:
+                fallback = next(
+                    (
+                        interface
+                        for interface in candidates
+                        if interface.name != route.interface
+                    ),
+                    None,
+                )
+                if fallback is not None:
+                    if affinity is not None:
+                        self._affinities[affinity] = fallback.name
+                    return self._selection(purpose, fallback, 'fallback')
+            raise NetworkUnavailable(
+                'Configured network interface is unavailable for {}'.format(purpose)
+            )
+
+    def release_affinity(self, purpose: NetworkPurpose, affinity_key: str) -> None:
+        with self._lock:
+            self._affinities.pop((purpose, affinity_key), None)
 
     def report_failure(
         self, purpose: NetworkPurpose, interface_name: Optional[str]
     ) -> None:
-        route = self._route_settings(purpose)
-        health = self._health.setdefault(purpose, _RouteHealth())
-        if interface_name == route.interface:
-            health.primary_failures += 1
-            if (
-                route.failover_enabled
-                and any(
-                    name != route.interface and interface.enabled
-                    for name, interface in self.interfaces().items()
-                )
-                and health.primary_failures >= self._failure_threshold
-            ):
-                health.fallback_until = self._clock() + self._fallback_cooldown_seconds
-        elif interface_name is not None and interface_name != route.interface:
-            health.fallback_failures += 1
+        if interface_name is None:
+            return
+        key = (purpose, interface_name)
+        with self._lock:
+            failures = self._failures.get(key, 0) + 1
+            self._failures[key] = failures
+            if failures >= self._failure_threshold:
+                self._unavailable_since[key] = self._clock()
 
     def report_success(
         self, purpose: NetworkPurpose, interface_name: Optional[str]
     ) -> None:
-        route = self._route_settings(purpose)
-        health = self._health.setdefault(purpose, _RouteHealth())
-        if interface_name == route.interface:
-            health.primary_failures = 0
-        elif interface_name is not None and interface_name != route.interface:
-            health.fallback_failures = 0
+        if interface_name is None:
+            return
+        key = (purpose, interface_name)
+        with self._lock:
+            self._failures.pop(key, None)
+            self._unavailable_since.pop(key, None)
+
+    def report_http_result(
+        self, purpose: NetworkPurpose, interface_name: Optional[str], status: int
+    ) -> None:
+        # HTTP status codes are application results, not evidence that a route failed.
+        return None
+
+    def _is_healthy(self, purpose: NetworkPurpose, interface_name: str) -> bool:
+        key = (purpose, interface_name)
+        unavailable_at = self._unavailable_since.get(key)
+        if unavailable_at is None:
+            return True
+        if self._clock() - unavailable_at >= self._fallback_cooldown_seconds:
+            self._unavailable_since.pop(key, None)
+            self._failures.pop(key, None)
+            return True
+        return False
 
     async def _probe_interface(self, interface: NetworkInterface) -> NetworkProbe:
         started_at = self._clock()
         connector = aiohttp.TCPConnector(
-            family=socket.AF_INET, local_addr=(interface.address, 0)
+            family=socket.AF_INET,
+            local_addr=(interface.address, 0),
+            resolver=SourceBoundResolver(interface),
         )
         try:
             async with aiohttp.ClientSession(
@@ -321,7 +417,9 @@ class NetworkRouteManager:
         try:
             async with aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(
-                    family=socket.AF_INET, local_addr=(interface.address, 0)
+                    family=socket.AF_INET,
+                    local_addr=(interface.address, 0),
+                    resolver=SourceBoundResolver(interface),
                 ),
                 timeout=aiohttp.ClientTimeout(total=8),
                 trust_env=False,
@@ -352,7 +450,7 @@ class NetworkRouteManager:
     def _selection(
         purpose: NetworkPurpose,
         interface: NetworkInterface,
-        role: Literal['primary', 'fallback'],
+        role: Literal['primary', 'fallback', 'round_robin'],
     ) -> RouteSelection:
         return RouteSelection(
             purpose=purpose,
@@ -360,13 +458,6 @@ class NetworkRouteManager:
             source_address=interface.address,
             role=role,
         )
-
-    def _fallback_or_system(
-        self, purpose: NetworkPurpose, fallback: Optional[NetworkInterface]
-    ) -> RouteSelection:
-        if fallback is not None:
-            return self._selection(purpose, fallback, 'fallback')
-        return self._system_selection(purpose)
 
     @staticmethod
     def _system_selection(purpose: NetworkPurpose) -> RouteSelection:

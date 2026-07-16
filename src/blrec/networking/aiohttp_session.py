@@ -8,6 +8,7 @@ import aiohttp
 from blrec.bili.net import timeout
 
 from .manager import NetworkPurpose, NetworkRouteManager, RouteSelection
+from .resolver import SourceBoundResolver
 
 
 class RoutedAiohttpSession:
@@ -19,10 +20,12 @@ class RoutedAiohttpSession:
         purpose: NetworkPurpose,
         *,
         anonymous: bool = False,
+        affinity_key: Optional[str] = None,
     ) -> None:
         self._pool = pool
         self._purpose = purpose
         self._anonymous = anonymous
+        self._affinity_key = affinity_key
         self.cookie_jar = aiohttp.DummyCookieJar()
         self.auth = None
         self.trust_env = False
@@ -33,23 +36,29 @@ class RoutedAiohttpSession:
         return self._pool.closed
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
-        return self._pool.session(self._purpose, self._anonymous).request(
-            *args, **kwargs
-        )
+        return self._pool.session(
+            self._purpose, self._anonymous, self._affinity_key
+        ).request(*args, **kwargs)
 
     def get(self, *args: Any, **kwargs: Any) -> Any:
-        return self._pool.session(self._purpose, self._anonymous).get(*args, **kwargs)
+        return self._pool.session(
+            self._purpose, self._anonymous, self._affinity_key
+        ).get(*args, **kwargs)
 
     def head(self, *args: Any, **kwargs: Any) -> Any:
-        return self._pool.session(self._purpose, self._anonymous).head(*args, **kwargs)
+        return self._pool.session(
+            self._purpose, self._anonymous, self._affinity_key
+        ).head(*args, **kwargs)
 
     def post(self, *args: Any, **kwargs: Any) -> Any:
-        return self._pool.session(self._purpose, self._anonymous).post(*args, **kwargs)
+        return self._pool.session(
+            self._purpose, self._anonymous, self._affinity_key
+        ).post(*args, **kwargs)
 
     def ws_connect(self, *args: Any, **kwargs: Any) -> Any:
-        return self._pool.session(self._purpose, self._anonymous).ws_connect(
-            *args, **kwargs
-        )
+        return self._pool.session(
+            self._purpose, self._anonymous, self._affinity_key
+        ).ws_connect(*args, **kwargs)
 
     async def close(self) -> None:
         # The application owns the shared pool.
@@ -62,25 +71,38 @@ class AiohttpSessionPool:
         self._sessions: Dict[
             Tuple[NetworkPurpose, Optional[str], bool], aiohttp.ClientSession
         ] = {}
-        self._clients: Dict[Tuple[NetworkPurpose, bool], RoutedAiohttpSession] = {}
+        self._clients: Dict[
+            Tuple[NetworkPurpose, bool, Optional[str]], RoutedAiohttpSession
+        ] = {}
         self.closed = False
 
     def client(
-        self, purpose: NetworkPurpose, *, anonymous: bool = False
+        self,
+        purpose: NetworkPurpose,
+        *,
+        anonymous: bool = False,
+        affinity_key: Optional[str] = None,
     ) -> RoutedAiohttpSession:
-        key = (purpose, anonymous)
+        key = (purpose, anonymous, affinity_key)
         client = self._clients.get(key)
         if client is None:
-            client = RoutedAiohttpSession(self, purpose, anonymous=anonymous)
+            client = RoutedAiohttpSession(
+                self, purpose, anonymous=anonymous, affinity_key=affinity_key
+            )
             self._clients[key] = client
         return client
 
     def session(
-        self, purpose: NetworkPurpose, anonymous: bool = False
+        self,
+        purpose: NetworkPurpose,
+        anonymous: bool = False,
+        affinity_key: Optional[str] = None,
     ) -> aiohttp.ClientSession:
         if self.closed:
             raise RuntimeError('network session pool is closed')
-        selection = self._manager.select(purpose)
+        selection = self._manager.select(
+            purpose, anonymous=anonymous, affinity_key=affinity_key
+        )
         key = (purpose, selection.source_address, anonymous)
         session = self._sessions.get(key)
         if session is None or session.closed:
@@ -99,9 +121,15 @@ class AiohttpSessionPool:
             self._manager.report_success(purpose, selection.interface_name)
 
         async def request_exception(
-            _session: aiohttp.ClientSession, _context: Any, _params: Any
+            _session: aiohttp.ClientSession, _context: Any, params: Any
         ) -> None:
-            self._manager.report_failure(purpose, selection.interface_name)
+            error = getattr(params, 'exception', None)
+            if isinstance(error, aiohttp.ClientResponseError):
+                self._manager.report_http_result(
+                    purpose, selection.interface_name, error.status
+                )
+            else:
+                self._manager.report_failure(purpose, selection.interface_name)
 
         request_end_signal: Any = trace_config.on_request_end
         request_end_signal.append(request_end)
@@ -112,6 +140,9 @@ class AiohttpSessionPool:
             limit=200,
             local_addr=(
                 (selection.source_address, 0) if selection.source_address else None
+            ),
+            resolver=SourceBoundResolver(
+                self._manager.interface(selection.interface_name)
             ),
         )
         return aiohttp.ClientSession(

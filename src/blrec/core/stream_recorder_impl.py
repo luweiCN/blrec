@@ -307,7 +307,8 @@ class StreamRecorderImpl(
         self._logger.debug('Stopped stream recorder')
 
     def _on_start(self) -> None:
-        pass
+        if isinstance(self._session, RoutedRequestsSession):
+            self._session.begin_live()
 
     def _on_stop(self) -> None:
         pass

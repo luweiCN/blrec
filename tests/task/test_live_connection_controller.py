@@ -867,6 +867,32 @@ async def test_batch_task_builds_external_monitor_for_real_room(
     assert controller_factory.call_args.kwargs['registration_key'] == 1001
 
 
+def test_batch_task_uses_anonymous_sticky_websocket_route_without_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_module = load_task_module(monkeypatch)
+    live = Mock()
+    live.room_id = 1001
+    live.room_info = room_info(uid=7, room_id=2002)
+    live.session = Mock()
+    live.appapi = Mock()
+    live.webapi = Mock()
+    live.stream_headers = {'User-Agent': 'fixture'}
+    monkeypatch.setattr(task_module, 'Live', Mock(return_value=live))
+    pool = Mock()
+    websocket_session = Mock()
+    pool.client.return_value = websocket_session
+    danmaku_factory = Mock()
+    monkeypatch.setattr(task_module, 'DanmakuClient', danmaku_factory)
+    task = task_module.RecordTask(1001, network_session_pool=pool)
+
+    task._setup_danmaku_client()
+
+    pool.client.assert_any_call('danmaku', anonymous=True, affinity_key='danmaku:2002')
+    assert danmaku_factory.call_args.args[0] is websocket_session
+    assert danmaku_factory.call_args.kwargs['headers'] == {'User-Agent': 'fixture'}
+
+
 @pytest.mark.asyncio
 async def test_batch_task_does_not_restart_inactive_websocket(
     monkeypatch: pytest.MonkeyPatch,

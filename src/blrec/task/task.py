@@ -582,13 +582,17 @@ class RecordTask:
     def _setup_danmaku_client(self) -> None:
         session = self._live.session
         if self._network_session_pool is not None:
-            session = self._network_session_pool.client('danmaku')
+            session = self._network_session_pool.client(
+                'danmaku',
+                anonymous=True,
+                affinity_key='danmaku:{}'.format(self._live.room_info.room_id),
+            )
         self._danmaku_client = DanmakuClient(
             session,
             self._live.appapi,
             self._live.webapi,
             self._live.room_info.room_id,
-            headers=self._live.headers,
+            headers=self._live.stream_headers,
         )
 
     def _setup_live_monitor(self) -> None:

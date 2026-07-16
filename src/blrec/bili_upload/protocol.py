@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 import aiohttp
 
 from blrec.networking.manager import NetworkPurpose, NetworkRouteManager
+from blrec.networking.resolver import SourceBoundResolver
 
 from .crypto import CredentialBundle
 from .errors import (
@@ -115,7 +116,9 @@ class AiohttpProtocolTransport:
     async def send(self, request: ProtocolRequest) -> ProtocolResponse:
         purpose = self.purpose_for_operation(request.operation)
         selection = (
-            None if self._route_manager is None else self._route_manager.select(purpose)
+            None
+            if self._route_manager is None
+            else self._route_manager.select(purpose, anonymous=False)
         )
         session = await self._get_session(
             purpose, None if selection is None else selection.source_address
@@ -183,9 +186,13 @@ class AiohttpProtocolTransport:
             headers_signal.append(headers_sent)
             connector = None
             if self._route_manager is not None:
+                selection = self._route_manager.select(purpose, anonymous=False)
                 connector = aiohttp.TCPConnector(
                     family=socket.AF_INET,
                     local_addr=(source_address, 0) if source_address else None,
+                    resolver=SourceBoundResolver(
+                        self._route_manager.interface(selection.interface_name)
+                    ),
                 )
             session = aiohttp.ClientSession(
                 connector=connector, trace_configs=[trace_config], trust_env=False

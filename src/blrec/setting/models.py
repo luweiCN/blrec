@@ -356,6 +356,16 @@ class NetworkSettings(BaseModel):
     upload: NetworkRouteSettings = NetworkRouteSettings()
     bili_api: NetworkRouteSettings = NetworkRouteSettings()
 
+    @root_validator
+    def _credential_routes_must_be_fixed(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        for field in ('upload', 'bili_api'):
+            route = values.get(field)
+            if isinstance(route, NetworkRouteSettings) and route.mode != 'fixed':
+                raise ValueError('{} network route must use fixed mode'.format(field))
+        return values
+
 
 class HeaderOptions(BaseModel):
     user_agent: Optional[str]
