@@ -16,6 +16,7 @@ __all__ = (
     'RoomUploadPolicyManager',
     'RoomUploadPolicyNotFound',
     'RoomUploadPolicyView',
+    'room_upload_policy_command',
 )
 
 
@@ -136,6 +137,38 @@ def default_room_upload_policy() -> RoomUploadPolicyCommand:
     )
 
 
+def room_upload_policy_command(policy: RoomUploadPolicyView) -> RoomUploadPolicyCommand:
+    return RoomUploadPolicyCommand(
+        account_mode=policy.account_mode,
+        account_id=policy.account_id,
+        enabled=policy.enabled,
+        title_template=policy.title_template,
+        description_template=policy.description_template,
+        part_title_template=policy.part_title_template,
+        dynamic_template=policy.dynamic_template,
+        tid=policy.tid,
+        tags=policy.tags,
+        creation_statement_id=policy.creation_statement_id,
+        original_authorization=policy.original_authorization,
+        source=policy.source,
+        is_only_self=policy.is_only_self,
+        publish_dynamic=policy.publish_dynamic,
+        up_selection_reply=policy.up_selection_reply,
+        up_close_reply=policy.up_close_reply,
+        up_close_danmu=policy.up_close_danmu,
+        auto_comment=policy.auto_comment,
+        danmaku_backfill=policy.danmaku_backfill,
+        filters=policy.filters,
+        collection_season_id=policy.collection_season_id,
+        collection_section_id=policy.collection_section_id,
+        cover_mode=policy.cover_mode,
+        cover_asset_id=policy.cover_asset_id,
+        publish_delay_seconds=policy.publish_delay_seconds,
+        retention_mode=policy.retention_mode,
+        retention_days=policy.retention_days,
+    )
+
+
 class RoomUploadPolicyManager:
     def __init__(
         self, database: BiliUploadDatabase, *, clock: Callable[[], float] = time.time
@@ -178,9 +211,7 @@ class RoomUploadPolicyManager:
     async def upsert(
         self, room_id: int, command: RoomUploadPolicyCommand
     ) -> RoomUploadPolicyView:
-        self._validate(room_id, command)
-        await self._require_account(command)
-        await self._require_cover_asset(command)
+        await self.validate(room_id, command)
         now = int(self._clock())
         filter_json = json.dumps(
             dict(command.filters),
@@ -263,6 +294,11 @@ class RoomUploadPolicyManager:
             ),
         )
         return await self.get(room_id)
+
+    async def validate(self, room_id: int, command: RoomUploadPolicyCommand) -> None:
+        self._validate(room_id, command)
+        await self._require_account(command)
+        await self._require_cover_asset(command)
 
     async def delete(self, room_id: int) -> None:
         deleted = await self._database.execute(

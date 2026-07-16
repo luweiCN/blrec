@@ -378,7 +378,7 @@ class BiliUploadDatabase:
                 ).fetchone()
                 assert row is not None
                 current_version = int(row[0])
-            latest_version = 18
+            latest_version = 19
             if current_version > latest_version:
                 raise sqlite3.DatabaseError(
                     'database schema is newer than this application'

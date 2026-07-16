@@ -74,7 +74,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 18
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 19
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -166,6 +166,11 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'deletion_error',
             'deletion_requested_at',
             'source_kind',
+            'upload_decision',
+            'upload_override_json',
+            'upload_resolution_state',
+            'upload_resolution_error',
+            'upload_resolved_at',
         } <= session_columns
         part_columns = {
             row['name']
@@ -344,7 +349,80 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 18
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 19
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_nineteenth_migration_preserves_jobs_and_resets_open_auto_sessions(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 19):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',1,1)"
+        )
+        for session_id, state, intent in (
+            (1, 'open', 'auto'),
+            (2, 'open', 'upload'),
+            (3, 'open', 'skip'),
+            (4, 'closed', 'none'),
+            (5, 'closed', 'auto'),
+        ):
+            connection.execute(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at,upload_intent) '
+                'VALUES(?,?,?,?,1,?)',
+                (
+                    session_id,
+                    100 + session_id,
+                    'session-{}'.format(session_id),
+                    state,
+                    intent,
+                ),
+            )
+        connection.execute(
+            'INSERT INTO upload_jobs('
+            'session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'created_at,updated_at) '
+            "VALUES(5,1,'{}','ready','prepared',1,1)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        rows = await database.fetchall(
+            'SELECT id,upload_decision,upload_resolution_state '
+            'FROM recording_sessions ORDER BY id'
+        )
+        assert [tuple(row) for row in rows] == [
+            (1, 'follow_room', 'pending'),
+            (2, 'upload', 'pending'),
+            (3, 'skip', 'pending'),
+            (4, 'follow_room', 'not_requested'),
+            (5, 'follow_room', 'job_created'),
+        ]
     finally:
         await database.close()
 
