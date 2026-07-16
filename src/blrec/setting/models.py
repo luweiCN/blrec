@@ -51,6 +51,7 @@ __all__ = (
     'BiliApiSettings',
     'BiliUploadSettings',
     'NetworkRouteSettings',
+    'NetworkInterfaceSettings',
     'NetworkSettings',
     'LiveMonitorSettings',
     'HeaderOptions',
@@ -326,22 +327,29 @@ class LiveMonitorSettings(BaseModel):
 
 
 class NetworkRouteSettings(BaseModel):
-    primary_interface: Optional[str] = None
-    fallback_interface: Optional[str] = None
+    mode: Literal['fixed', 'round_robin'] = 'fixed'
+    interface: Optional[str] = None
     failover_enabled: bool = True
 
-    @root_validator
-    def _validate_distinct_interfaces(
-        cls, values: Dict[str, object]
-    ) -> Dict[str, object]:
-        primary = values.get('primary_interface')
-        fallback = values.get('fallback_interface')
-        if primary is not None and primary == fallback:
-            raise ValueError('primary and fallback interfaces must be different')
-        return values
+    @root_validator(pre=True)
+    def _migrate_legacy_route(cls, values: Dict[str, object]) -> Dict[str, object]:
+        migrated = dict(values)
+        if 'interface' not in migrated:
+            if 'primary_interface' in migrated:
+                migrated['interface'] = migrated.get('primary_interface')
+            elif 'primaryInterface' in migrated:
+                migrated['interface'] = migrated.get('primaryInterface')
+        migrated.setdefault('mode', 'fixed')
+        return migrated
+
+
+class NetworkInterfaceSettings(BaseModel):
+    enabled: bool = True
+    upload_limit_bps: Annotated[int, Field(ge=0)] = 0
 
 
 class NetworkSettings(BaseModel):
+    interfaces: Dict[str, NetworkInterfaceSettings] = {}
     room_status: NetworkRouteSettings = NetworkRouteSettings()
     danmaku: NetworkRouteSettings = NetworkRouteSettings()
     recording: NetworkRouteSettings = NetworkRouteSettings()

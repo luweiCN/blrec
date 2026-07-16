@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from blrec.networking.manager import NetworkRouteManager
 from blrec.utils.string import camel_case
@@ -12,6 +12,15 @@ manager: Optional[NetworkRouteManager] = None
 
 class ProbeRequest(BaseModel):
     interface_name: Optional[str] = None
+
+    class Config:
+        alias_generator = camel_case
+        allow_population_by_field_name = True
+
+
+class InterfaceUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    upload_limit_bps: Optional[int] = Field(None, ge=0)
 
     class Config:
         alias_generator = camel_case
@@ -42,6 +51,10 @@ def _snapshot() -> Dict[str, List[Dict[str, Any]]]:
                 'isUp': interface.is_up,
                 'speedMbps': interface.speed_mbps,
                 'isDefault': interface.is_default,
+                'dnsServers': list(interface.dns_servers),
+                'kind': interface.kind,
+                'enabled': interface.enabled,
+                'uploadLimitBps': interface.upload_limit_bps,
                 'probe': (
                     None
                     if probe is None
@@ -60,6 +73,23 @@ def _snapshot() -> Dict[str, List[Dict[str, Any]]]:
 
 @router.get('/interfaces')
 async def get_interfaces() -> Dict[str, List[Dict[str, Any]]]:
+    return _snapshot()
+
+
+@router.patch('/interfaces/{interface_name}')
+async def update_interface(
+    interface_name: str, request: InterfaceUpdateRequest
+) -> Dict[str, List[Dict[str, Any]]]:
+    try:
+        await _manager().update_interface(
+            interface_name,
+            enabled=request.enabled,
+            upload_limit_bps=request.upload_limit_bps,
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='Network interface not found'
+        ) from None
     return _snapshot()
 
 

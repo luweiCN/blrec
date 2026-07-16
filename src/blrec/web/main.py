@@ -24,7 +24,7 @@ from blrec.notification.providers import (
     Telegram,
 )
 from blrec.path.helpers import create_file, file_exists
-from blrec.setting import EnvSettings, Settings
+from blrec.setting import EnvSettings, Settings, SettingsIn
 from blrec.web.middlewares.base_herf import BaseHrefMiddleware
 from blrec.web.middlewares.route_redirect import RouteRedirectMiddleware
 from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
@@ -126,6 +126,13 @@ app = Application(
     recording_retention_provider=(lambda: _bili_account_runtime.retention_manager),
     network_route_manager=_network_route_manager,
 )
+
+
+async def _persist_network_settings(value: object) -> None:
+    await app.change_settings(SettingsIn(network=value))  # type: ignore[arg-type]
+
+
+_network_route_manager.set_settings_persister(_persist_network_settings)
 
 
 def _active_recording_metadata(resource: MediaResource) -> Optional[Mapping[str, Any]]:

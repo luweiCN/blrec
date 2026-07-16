@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import struct
-import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
     TYPE_CHECKING,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -18,7 +17,8 @@ from typing import (
 )
 
 import aiohttp
-import psutil
+
+from .platform import NetworkInterface, discover_interfaces
 
 if TYPE_CHECKING:
     from blrec.setting.models import NetworkRouteSettings, NetworkSettings
@@ -33,17 +33,6 @@ _PROBE_HEADERS = {
         'Chrome/136.0.0.0 Safari/537.36'
     ),
 }
-
-
-@dataclass(frozen=True)
-class NetworkInterface:
-    name: str
-    address: str
-    netmask: Optional[str]
-    gateway: Optional[str]
-    is_up: bool
-    speed_mbps: int
-    is_default: bool
 
 
 @dataclass(frozen=True)
@@ -79,77 +68,6 @@ class _RouteHealth:
     fallback_until: float = 0.0
 
 
-def _linux_gateways() -> Dict[str, str]:
-    gateways: Dict[str, str] = {}
-    try:
-        with open('/proc/net/route', 'rt', encoding='ascii') as route_file:
-            next(route_file, None)
-            for line in route_file:
-                fields = line.split()
-                if len(fields) < 4 or fields[1] != '00000000':
-                    continue
-                flags = int(fields[3], 16)
-                if not flags & 0x2:
-                    continue
-                gateways[fields[0]] = socket.inet_ntoa(
-                    struct.pack('<L', int(fields[2], 16))
-                )
-    except (OSError, ValueError):
-        pass
-    return gateways
-
-
-def _bsd_gateways() -> Dict[str, str]:
-    gateways: Dict[str, str] = {}
-    try:
-        result = subprocess.run(
-            ['netstat', '-rn', '-f', 'inet'],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return gateways
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) < 4 or fields[0] != 'default':
-            continue
-        gateways[fields[-1]] = fields[1]
-    return gateways
-
-
-def discover_interfaces() -> Dict[str, NetworkInterface]:
-    gateways = _linux_gateways() or _bsd_gateways()
-    stats = psutil.net_if_stats()
-    result: Dict[str, NetworkInterface] = {}
-    for name, addresses in psutil.net_if_addrs().items():
-        stat = stats.get(name)
-        if stat is None or not stat.isup:
-            continue
-        ipv4 = next(
-            (
-                address
-                for address in addresses
-                if address.family == socket.AF_INET
-                and not address.address.startswith('127.')
-            ),
-            None,
-        )
-        if ipv4 is None:
-            continue
-        result[name] = NetworkInterface(
-            name=name,
-            address=ipv4.address,
-            netmask=ipv4.netmask,
-            gateway=gateways.get(name),
-            is_up=True,
-            speed_mbps=max(stat.speed, 0),
-            is_default=name in gateways,
-        )
-    return result
-
-
 class NetworkRouteManager:
     def __init__(
         self,
@@ -161,6 +79,9 @@ class NetworkRouteManager:
         clock: Callable[[], float] = time.monotonic,
         failure_threshold: int = 2,
         fallback_cooldown_seconds: int = 60,
+        settings_persister: Optional[
+            Callable[['NetworkSettings'], Awaitable[None]]
+        ] = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._interface_provider = interface_provider
@@ -169,9 +90,58 @@ class NetworkRouteManager:
         self._fallback_cooldown_seconds = fallback_cooldown_seconds
         self._health: Dict[NetworkPurpose, _RouteHealth] = {}
         self._probes: Dict[str, NetworkProbe] = {}
+        self._settings_persister = settings_persister
 
     def interfaces(self) -> Dict[str, NetworkInterface]:
-        return dict(self._interface_provider())
+        configured = self._settings_provider().interfaces
+        result: Dict[str, NetworkInterface] = {}
+        for name, interface in self._interface_provider().items():
+            settings = configured.get(name)
+            if settings is None:
+                result[name] = interface
+            else:
+                result[name] = replace(
+                    interface,
+                    enabled=settings.enabled,
+                    upload_limit_bps=settings.upload_limit_bps,
+                )
+        return result
+
+    def set_settings_persister(
+        self, persister: Callable[['NetworkSettings'], Awaitable[None]]
+    ) -> None:
+        self._settings_persister = persister
+
+    async def update_interface(
+        self,
+        interface_name: str,
+        *,
+        enabled: Optional[bool] = None,
+        upload_limit_bps: Optional[int] = None,
+    ) -> None:
+        interfaces = self.interfaces()
+        interface = interfaces.get(interface_name)
+        if interface is None:
+            raise KeyError(interface_name)
+        from blrec.setting.models import NetworkInterfaceSettings
+
+        current = self._settings_provider()
+        updated = current.copy(deep=True)
+        item = updated.interfaces.get(
+            interface_name,
+            NetworkInterfaceSettings(
+                enabled=interface.enabled, upload_limit_bps=interface.upload_limit_bps
+            ),
+        )
+        if enabled is not None:
+            item.enabled = enabled
+        if upload_limit_bps is not None:
+            item.upload_limit_bps = upload_limit_bps
+        updated.interfaces[interface_name] = item
+        if self._settings_persister is not None:
+            await self._settings_persister(updated)
+        else:
+            current.interfaces = updated.interfaces
 
     def cached_probes(self) -> Dict[str, NetworkProbe]:
         return dict(self._probes)
@@ -204,7 +174,7 @@ class NetworkRouteManager:
         )
         for purpose in purposes:
             route = self._route_settings(purpose)
-            if route.primary_interface is None and route.fallback_interface is None:
+            if route.interface is None:
                 continue
             selection = self.select(purpose)
             states.append(
@@ -260,15 +230,22 @@ class NetworkRouteManager:
         interfaces = self.interfaces()
         health = self._health.setdefault(purpose, _RouteHealth())
         now = self._clock()
-        primary = interfaces.get(route.primary_interface or '')
-        fallback = interfaces.get(route.fallback_interface or '')
+        primary = interfaces.get(route.interface or '')
+        fallback = next(
+            (
+                interface
+                for name, interface in interfaces.items()
+                if name != route.interface and interface.enabled
+            ),
+            None,
+        )
 
         if health.fallback_until and now >= health.fallback_until:
             health.primary_failures = 0
             health.fallback_failures = 0
             health.fallback_until = 0.0
 
-        if primary is None and route.primary_interface is not None:
+        if primary is None and route.interface is not None:
             return self._fallback_or_system(purpose, fallback)
 
         if (
@@ -280,7 +257,7 @@ class NetworkRouteManager:
                 return self._selection(purpose, fallback, 'fallback')
             return self._system_selection(purpose)
 
-        if primary is not None:
+        if primary is not None and primary.enabled:
             return self._selection(purpose, primary, 'primary')
         return self._system_selection(purpose)
 
@@ -289,15 +266,18 @@ class NetworkRouteManager:
     ) -> None:
         route = self._route_settings(purpose)
         health = self._health.setdefault(purpose, _RouteHealth())
-        if interface_name == route.primary_interface:
+        if interface_name == route.interface:
             health.primary_failures += 1
             if (
                 route.failover_enabled
-                and route.fallback_interface
+                and any(
+                    name != route.interface and interface.enabled
+                    for name, interface in self.interfaces().items()
+                )
                 and health.primary_failures >= self._failure_threshold
             ):
                 health.fallback_until = self._clock() + self._fallback_cooldown_seconds
-        elif interface_name == route.fallback_interface:
+        elif interface_name is not None and interface_name != route.interface:
             health.fallback_failures += 1
 
     def report_success(
@@ -305,9 +285,9 @@ class NetworkRouteManager:
     ) -> None:
         route = self._route_settings(purpose)
         health = self._health.setdefault(purpose, _RouteHealth())
-        if interface_name == route.primary_interface:
+        if interface_name == route.interface:
             health.primary_failures = 0
-        elif interface_name == route.fallback_interface:
+        elif interface_name is not None and interface_name != route.interface:
             health.fallback_failures = 0
 
     async def _probe_interface(self, interface: NetworkInterface) -> NetworkProbe:

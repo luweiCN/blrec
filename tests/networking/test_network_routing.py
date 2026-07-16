@@ -1,7 +1,6 @@
 from typing import Any, Dict, List
 
 import pytest
-from pydantic import ValidationError
 
 from blrec.bili_upload.protocol import AiohttpProtocolTransport
 from blrec.networking.manager import NetworkInterface, NetworkRouteManager
@@ -32,18 +31,23 @@ def _interfaces() -> Dict[str, NetworkInterface]:
     }
 
 
-def test_network_route_rejects_same_primary_and_fallback() -> None:
-    with pytest.raises(ValidationError):
-        NetworkRouteSettings(primary_interface='lan1', fallback_interface='lan1')
+def test_legacy_network_route_migrates_to_fixed_interface() -> None:
+    route = NetworkRouteSettings(
+        primary_interface='lan1', fallback_interface='lan2', failover_enabled=True
+    )
+
+    assert route.mode == 'fixed'
+    assert route.interface == 'lan1'
+    assert route.failover_enabled is True
 
 
 def test_purposes_have_independent_routes() -> None:
     settings = NetworkSettings(
-        room_status={'primaryInterface': 'lan1'},
-        danmaku={'primaryInterface': 'lan2'},
-        recording={'primaryInterface': 'lan1'},
-        upload={'primaryInterface': 'lan2'},
-        bili_api={'primaryInterface': 'lan1'},
+        room_status={'interface': 'lan1'},
+        danmaku={'interface': 'lan2'},
+        recording={'interface': 'lan1'},
+        upload={'interface': 'lan2'},
+        bili_api={'interface': 'lan1'},
     )
     manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
 
@@ -54,45 +58,16 @@ def test_purposes_have_independent_routes() -> None:
     assert manager.select('bili_api').interface_name == 'lan1'
 
 
-def test_sticky_failover_returns_to_primary_after_cooldown() -> None:
-    now = [100.0]
+def test_interface_settings_override_discovery_defaults() -> None:
     settings = NetworkSettings(
-        upload={
-            'primaryInterface': 'lan1',
-            'fallbackInterface': 'lan2',
-            'failoverEnabled': True,
-        }
-    )
-    manager = NetworkRouteManager(
-        lambda: settings,
-        interface_provider=_interfaces,
-        clock=lambda: now[0],
-        failure_threshold=2,
-        fallback_cooldown_seconds=60,
-    )
-
-    assert manager.select('upload').interface_name == 'lan1'
-    manager.report_failure('upload', 'lan1')
-    assert manager.select('upload').interface_name == 'lan1'
-    manager.report_failure('upload', 'lan1')
-    assert manager.select('upload').interface_name == 'lan2'
-    assert manager.select('upload').interface_name == 'lan2'
-
-    now[0] = 161.0
-    assert manager.select('upload').interface_name == 'lan1'
-
-
-def test_missing_primary_uses_available_fallback() -> None:
-    settings = NetworkSettings(
-        recording={'primaryInterface': 'missing', 'fallbackInterface': 'lan2'}
+        interfaces={'lan1': {'enabled': False, 'uploadLimitBps': 1024}}
     )
     manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
 
-    selection = manager.select('recording')
+    interface = manager.interfaces()['lan1']
 
-    assert selection.interface_name == 'lan2'
-    assert selection.source_address == '192.168.2.10'
-    assert selection.role == 'fallback'
+    assert interface.enabled is False
+    assert interface.upload_limit_bps == 1024
 
 
 def test_source_address_adapter_passes_binding_to_urllib3() -> None:

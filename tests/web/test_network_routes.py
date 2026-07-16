@@ -18,6 +18,10 @@ class FakeNetworkManager:
             is_up=True,
             speed_mbps=1000,
             is_default=True,
+            dns_servers=('192.168.1.1',),
+            kind='physical',
+            enabled=True,
+            upload_limit_bps=0,
         )
 
     def interfaces(self) -> Dict[str, NetworkInterface]:
@@ -28,6 +32,27 @@ class FakeNetworkManager:
 
     async def probe(self, interface_name: Optional[str] = None) -> None:
         self.probed = interface_name
+
+    async def update_interface(
+        self,
+        interface_name: str,
+        *,
+        enabled: Optional[bool] = None,
+        upload_limit_bps: Optional[int] = None,
+    ) -> None:
+        if interface_name != self._interface.name:
+            raise KeyError(interface_name)
+        self._interface = NetworkInterface(
+            **{
+                **self._interface.__dict__,
+                'enabled': (self._interface.enabled if enabled is None else enabled),
+                'upload_limit_bps': (
+                    self._interface.upload_limit_bps
+                    if upload_limit_bps is None
+                    else upload_limit_bps
+                ),
+            }
+        )
 
 
 def client(manager: FakeNetworkManager) -> TestClient:
@@ -51,6 +76,10 @@ def test_lists_host_network_interfaces() -> None:
                 'isUp': True,
                 'speedMbps': 1000,
                 'isDefault': True,
+                'dnsServers': ['192.168.1.1'],
+                'kind': 'physical',
+                'enabled': True,
+                'uploadLimitBps': 0,
                 'probe': None,
             }
         ]
@@ -66,3 +95,17 @@ def test_probes_one_interface_before_returning_snapshot() -> None:
 
     assert response.status_code == 200
     assert manager.probed == 'eth0'
+
+
+def test_updates_interface_settings_inline() -> None:
+    manager = FakeNetworkManager()
+
+    response = client(manager).patch(
+        '/api/v1/network/interfaces/eth0',
+        json={'enabled': False, 'uploadLimitBps': 1048576},
+    )
+
+    assert response.status_code == 200
+    item = response.json()['interfaces'][0]
+    assert item['enabled'] is False
+    assert item['uploadLimitBps'] == 1048576

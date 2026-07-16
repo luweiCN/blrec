@@ -27,7 +27,7 @@ LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \
       org.opencontainers.image.description="Bilibili live recording and publishing service"
 WORKDIR /app
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg iproute2 && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=wheel-builder /wheels /wheels
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels blrec && \
