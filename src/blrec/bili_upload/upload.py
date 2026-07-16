@@ -40,6 +40,7 @@ from .policies import (
     RoomUploadPolicyCommand,
     RoomUploadPolicyManager,
     RoomUploadPolicyNotFound,
+    RoomUploadPolicyView,
     default_room_upload_policy,
     room_upload_policy_command,
 )
@@ -183,6 +184,7 @@ class UploadCoordinator:
         if decision == 'skip':
             await self._set_upload_resolution(session_id, 'not_requested', None)
             return None
+        room_policy: Optional[RoomUploadPolicyView]
         try:
             room_policy = await self._policy_manager.get(int(session['room_id']))
         except RoomUploadPolicyNotFound:
@@ -223,6 +225,8 @@ class UploadCoordinator:
                 '投稿账号不可用，请在本场投稿设置中重新选择',
             )
             return None
+        account_id = int(account['id'])
+        account_credential_version = int(account['credential_version'])
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path FROM recording_parts '
             'WHERE session_id=? ORDER BY part_index',
@@ -242,7 +246,7 @@ class UploadCoordinator:
             )
             for part in part_rows
         ]
-        candidate = self._command_candidate(session, account, command)
+        candidate = self._command_candidate(dict(session), dict(account), command)
         try:
             snapshot = self._policy_snapshot(candidate, parts)
         except InvalidUploadPolicy:
@@ -290,21 +294,22 @@ class UploadCoordinator:
                 return None
             current_account = connection.execute(
                 'SELECT state,credential_version FROM bili_accounts WHERE id=?',
-                (int(account['id']),),
+                (account_id,),
             ).fetchone()
             if (
                 current_account is None
                 or str(current_account['state']) != 'active'
                 or int(current_account['credential_version'])
-                != int(account['credential_version'])
+                != account_credential_version
             ):
                 return None
             if command.account_mode == 'primary':
                 primary_id = connection.execute(
                     'SELECT primary_account_id FROM bili_account_selection WHERE id=1'
                 ).fetchone()
-                if primary_id is None or int(primary_id['primary_account_id']) != int(
-                    account['id']
+                if (
+                    primary_id is None
+                    or int(primary_id['primary_account_id']) != account_id
                 ):
                     return None
             cursor = connection.execute(
@@ -315,7 +320,7 @@ class UploadCoordinator:
                 "VALUES(?,?,?,'waiting_artifacts','prepared',?,?,?,?,?)",
                 (
                     session_id,
-                    int(account['id']),
+                    account_id,
                     snapshot_json,
                     'pending' if command.auto_comment else 'disabled',
                     'pending' if command.danmaku_backfill else 'disabled',
@@ -344,7 +349,7 @@ class UploadCoordinator:
                 room_id=int(session['room_id']),
                 decision=decision,
                 settings_source=settings_source,
-                account_id=int(account['id']),
+                account_id=account_id,
                 parts=len(parts),
             )
             audit(
@@ -366,6 +371,7 @@ class UploadCoordinator:
         )
         if job is None:
             return False
+        job_session_id = int(job['session_id'])
         try:
             snapshot = json.loads(str(job['policy_snapshot_json']))
         except json.JSONDecodeError:
@@ -376,7 +382,7 @@ class UploadCoordinator:
             'SELECT id,part_index,source_path,final_path,xml_path,'
             'artifact_state,updated_at FROM recording_parts '
             "WHERE session_id=? AND artifact_state='ready' ORDER BY part_index",
-            (int(job['session_id']),),
+            (job_session_id,),
         )
         if not rows:
             return False
@@ -428,7 +434,7 @@ class UploadCoordinator:
                 'SELECT id,part_index,source_path,final_path,artifact_state,updated_at '
                 "FROM recording_parts WHERE session_id=? AND artifact_state='ready' "
                 'ORDER BY part_index',
-                (int(job['session_id']),),
+                (job_session_id,),
             ).fetchall()
             expected = [
                 (
@@ -485,7 +491,7 @@ class UploadCoordinator:
             audit(
                 'upload_job_artifacts_ready',
                 job_id=job_id,
-                session_id=int(job['session_id']),
+                session_id=job_session_id,
                 parts=len(parts),
             )
         return prepared
@@ -901,7 +907,9 @@ class UploadCoordinator:
     def _default_candidate(
         session: sqlite3.Row, account: sqlite3.Row, command: RoomUploadPolicyCommand
     ) -> Dict[str, Any]:
-        return UploadCoordinator._command_candidate(session, account, command)
+        return UploadCoordinator._command_candidate(
+            dict(session), dict(account), command
+        )
 
     @staticmethod
     def _command_candidate(

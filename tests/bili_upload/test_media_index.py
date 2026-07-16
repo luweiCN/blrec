@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Callable
 
 import pytest
 import pytest_asyncio

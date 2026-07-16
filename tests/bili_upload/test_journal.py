@@ -52,11 +52,11 @@ async def test_recording_start_does_not_freeze_room_upload_policy(database) -> N
     await seed_upload_policy(database)
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
 
-    first_run = await journal.recording_started(100, live_start_time=900)
+    await journal.recording_started(100, live_start_time=900)
     await database.execute(
         'UPDATE room_upload_policies SET enabled=0 WHERE room_id=100'
     )
-    second_run = await journal.recording_started(100, live_start_time=901)
+    await journal.recording_started(100, live_start_time=901)
 
     rows = await database.fetchall(
         'SELECT upload_intent,upload_decision FROM recording_sessions ORDER BY id'
