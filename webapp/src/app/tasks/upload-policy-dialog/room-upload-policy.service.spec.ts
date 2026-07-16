@@ -59,6 +59,14 @@ describe('RoomUploadPolicyService', () => {
 
   afterEach(() => http.verify());
 
+  it('loads all room policies in one request for room management', () => {
+    service.list().subscribe();
+
+    const request = http.expectOne('/api/v1/room-upload-policies');
+    expect(request.request.method).toBe('GET');
+    request.flush([]);
+  });
+
   it('loads only the requested room policy', () => {
     service.get(100).subscribe();
 

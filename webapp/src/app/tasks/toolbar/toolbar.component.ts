@@ -20,7 +20,10 @@ import {
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
-import { DataSelection } from '../shared/task.model';
+import {
+  AutomaticSubmissionFilter,
+  DataSelection,
+} from '../shared/task.model';
 import { TaskManagerService } from '../shared/services/task-manager.service';
 
 @Component({
@@ -38,8 +41,9 @@ export class ToolbarComponent implements OnInit, OnDestroy {
 
   @Output() filterChange = new EventEmitter<string>();
 
-  @Input() dateRange: Date[] | null = null;
-  @Output() dateRangeChange = new EventEmitter<Date[] | null>();
+  @Input() automaticSubmissionFilter: AutomaticSubmissionFilter = null;
+  @Output() automaticSubmissionFilterChange =
+    new EventEmitter<AutomaticSubmissionFilter>();
 
   destroyed = new Subject<void>();
 
@@ -53,6 +57,12 @@ export class ToolbarComponent implements OnInit, OnDestroy {
     { label: '直播', value: DataSelection.LIVING },
     { label: '轮播', value: DataSelection.ROUNDING },
     { label: '闲置', value: DataSelection.PREPARING },
+  ];
+  readonly automaticSubmissionOptions = [
+    { label: '全部投稿状态', value: null },
+    { label: '自动投稿已开启', value: 'enabled' },
+    { label: '自动投稿已关闭', value: 'disabled' },
+    { label: '未设置投稿', value: 'unconfigured' },
   ];
 
   constructor(
@@ -81,11 +91,6 @@ export class ToolbarComponent implements OnInit, OnDestroy {
 
   onFilterInput(term: string): void {
     this.filterTerms.next(term);
-  }
-
-  onDateRangeChanged(value: Date[] | null): void {
-    this.dateRange = value;
-    this.dateRangeChange.emit(value);
   }
 
   toggleReverse(): void {

@@ -60,6 +60,25 @@
     </span>
   </div>
 
+  <div class="upload-policy-cell">
+    <nz-switch
+      data-testid="automatic-submission-switch"
+      nz-tooltip
+      [nzTooltipTitle]="
+        uploadPolicy?.blockedReason ||
+        (uploadPolicy ? '录制结束后自动创建上传任务' : '首次开启需要先完成投稿设置')
+      "
+      [ngModel]="automaticSubmissionEnabled"
+      [nzControl]="true"
+      [nzLoading]="automaticSubmissionPending"
+      (click)="toggleAutomaticSubmission()"
+    ></nz-switch>
+    <span *ngIf="uploadPolicy?.blockedReason" class="policy-warning">
+      配置不可用
+    </span>
+    <span *ngIf="!uploadPolicy">未设置</span>
+  </div>
+
   <div class="actions-cell">
     <button nz-button nzType="link" type="button" [routerLink]="[roomId, 'detail']">
       详情
@@ -137,5 +156,5 @@
   [roomName]="data.user_info.name"
   [liveAreaName]="data.room_info.area_name"
   [liveParentAreaName]="data.room_info.parent_area_name"
-  (closed)="uploadPolicyDialogVisible = false"
+  (closed)="closeUploadPolicyDialog()"
 ></app-upload-policy-dialog>

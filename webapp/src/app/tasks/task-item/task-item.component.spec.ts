@@ -26,6 +26,44 @@ import {
   TaskData,
 } from '../shared/task.model';
 import { TaskItemComponent } from './task-item.component';
+import { RoomUploadPolicy } from '../upload-policy-dialog/room-upload-policy.model';
+import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-policy.service';
+
+const uploadPolicy: RoomUploadPolicy = {
+  roomId: 1,
+  accountMode: 'primary',
+  accountId: null,
+  resolvedAccountId: 1,
+  resolvedAccountName: '投稿账号',
+  enabled: true,
+  titleTemplate: '{{ title }}',
+  descriptionTemplate: '',
+  partTitleTemplate: 'P{{ part_index }}',
+  dynamicTemplate: '',
+  tid: 17,
+  tags: '直播,录播',
+  creationStatementId: -1,
+  originalAuthorization: true,
+  source: '',
+  isOnlySelf: false,
+  publishDynamic: true,
+  upSelectionReply: false,
+  upCloseReply: false,
+  upCloseDanmu: false,
+  autoComment: true,
+  danmakuBackfill: true,
+  filters: {},
+  collectionSeasonId: null,
+  collectionSectionId: null,
+  coverMode: 'live',
+  coverAssetId: null,
+  publishDelaySeconds: 0,
+  retentionMode: 'submitted',
+  retentionDays: 5,
+  blockedReason: null,
+  createdAt: 1,
+  updatedAt: 1,
+};
 
 @Pipe({ name: 'dataurl' })
 class DataurlStubPipe implements PipeTransform {
@@ -85,6 +123,7 @@ describe('TaskItemComponent', () => {
   let component: TaskItemComponent;
   let fixture: ComponentFixture<TaskItemComponent>;
   let taskManager: jasmine.SpyObj<TaskManagerService>;
+  let policyService: jasmine.SpyObj<RoomUploadPolicyService>;
 
   beforeEach(async () => {
     taskManager = jasmine.createSpyObj<TaskManagerService>(
@@ -93,6 +132,11 @@ describe('TaskItemComponent', () => {
     );
     taskManager.startTask.and.returnValue(of({ code: 0, message: '已开启' }));
     taskManager.stopTask.and.returnValue(of({ code: 0, message: '已关闭' }));
+    policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
+      'RoomUploadPolicyService',
+      ['save'],
+    );
+    policyService.save.and.returnValue(of({ ...uploadPolicy, enabled: false }));
     await TestBed.configureTestingModule({
       declarations: [TaskItemComponent, DataurlStubPipe],
       imports: [CommonModule, NzButtonModule, NzDropDownModule, NzIconModule],
@@ -110,7 +154,7 @@ describe('TaskItemComponent', () => {
           provide: NzMessageService,
           useValue: jasmine.createSpyObj<NzMessageService>(
             'NzMessageService',
-            ['warning']
+            ['warning', 'success', 'error']
           ),
         },
         {
@@ -129,6 +173,7 @@ describe('TaskItemComponent', () => {
           provide: TaskManagerService,
           useValue: taskManager,
         },
+        { provide: RoomUploadPolicyService, useValue: policyService },
       ],
       schemas: [NO_ERRORS_SCHEMA],
     })
@@ -217,5 +262,26 @@ describe('TaskItemComponent', () => {
 
     expect(taskManager.stopTask).toHaveBeenCalledOnceWith(1);
     expect(taskManager.startTask).not.toHaveBeenCalled();
+  });
+
+  it('opens投稿设置 before first enabling automatic submission', () => {
+    expect(component.uploadPolicy).toBeNull();
+
+    component.toggleAutomaticSubmission();
+
+    expect(component.uploadPolicyDialogVisible).toBeTrue();
+    expect(policyService.save).not.toHaveBeenCalled();
+  });
+
+  it('toggles an existing automatic submission policy directly', () => {
+    fixture.componentRef.setInput('uploadPolicy', uploadPolicy);
+    fixture.detectChanges();
+
+    component.toggleAutomaticSubmission();
+
+    expect(policyService.save).toHaveBeenCalledOnceWith(
+      1,
+      jasmine.objectContaining({ enabled: false }),
+    );
   });
 });

@@ -80,5 +80,12 @@ describe('ToolbarComponent', () => {
       '闲置',
     ]);
     expect(fixture.nativeElement.textContent).not.toContain('关闭录制');
+    expect(component.automaticSubmissionOptions.map((item) => item.label)).toEqual([
+      '全部投稿状态',
+      '自动投稿已开启',
+      '自动投稿已关闭',
+      '未设置投稿',
+    ]);
+    expect(fixture.nativeElement.textContent).not.toContain('开播开始日期');
   });
 });

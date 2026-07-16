@@ -115,6 +115,10 @@ describe('TasksComponent', () => {
     );
   });
 
+  it('identifies the page as room management', () => {
+    expect(fixture.nativeElement.textContent).toContain('房间管理');
+  });
+
   it('loads one snapshot and applies task SSE updates without polling HTTP', () => {
     expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
 

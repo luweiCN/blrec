@@ -23,6 +23,12 @@ export type TaskBatchAction =
   | 'cut'
   | 'delete';
 
+export type AutomaticSubmissionFilter =
+  | 'enabled'
+  | 'disabled'
+  | 'unconfigured'
+  | null;
+
 export interface TaskBatchActionResult {
   readonly roomId: number;
   readonly accepted: boolean;

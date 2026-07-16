@@ -1,4 +1,4 @@
-<div class="controls-wrapper" aria-label="录制任务筛选">
+<div class="controls-wrapper" aria-label="房间管理筛选">
   <nz-input-group class="filter" [nzPrefix]="searchIcon" [nzSuffix]="clearIcon">
     <input
       nz-input
@@ -28,12 +28,12 @@
     (ngModelChange)="selectionChange.emit($event)"
   ></nz-select>
 
-  <nz-range-picker
-    class="date-filter"
-    [ngModel]="dateRange"
-    [nzPlaceHolder]="['开播开始日期', '开播结束日期']"
-    (ngModelChange)="onDateRangeChanged($event)"
-  ></nz-range-picker>
+  <nz-select
+    class="selector upload-selector"
+    [nzOptions]="automaticSubmissionOptions"
+    [(ngModel)]="automaticSubmissionFilter"
+    (ngModelChange)="automaticSubmissionFilterChange.emit($event)"
+  ></nz-select>
 
   <button
     class="reverse-button"

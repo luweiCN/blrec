@@ -1,4 +1,4 @@
-<div class="empty-container" *ngIf="dataList.length === 0; else taskList">
+<div class="empty-container" *ngIf="visibleDataList.length === 0; else taskList">
   <nz-empty></nz-empty>
 </div>
 
@@ -83,7 +83,7 @@
     </button>
   </div>
 
-  <div class="task-table" role="table" aria-label="录制任务列表">
+  <div class="task-table" role="table" aria-label="房间管理列表">
     <div class="task-list-header" role="row">
       <div role="columnheader">
         <label
@@ -97,14 +97,17 @@
       <div role="columnheader">直播间</div>
       <div role="columnheader">直播状态</div>
       <div role="columnheader">监控与录制</div>
+      <div role="columnheader">自动投稿</div>
       <div role="columnheader">操作</div>
     </div>
     <app-task-item
-      *ngFor="let data of dataList; trackBy: trackByRoomId"
+      *ngFor="let data of visibleDataList; trackBy: trackByRoomId"
       role="row"
       [data]="data"
+      [uploadPolicy]="policyFor(data.room_info.room_id)"
       [selected]="isSelected(data.room_info.room_id)"
       (selectedChange)="setTaskSelected(data.room_info.room_id, $event)"
+      (uploadPolicyChanged)="refreshPolicies()"
     ></app-task-item>
   </div>
 </ng-template>

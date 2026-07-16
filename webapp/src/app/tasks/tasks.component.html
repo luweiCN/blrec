@@ -1,12 +1,16 @@
 <div class="tasks-page primary-page">
+  <header class="tasks-page-header">
+    <h2>房间管理</h2>
+    <p>管理直播间的监控录制状态和自动投稿设置</p>
+  </header>
   <app-toolbar
     [selection]="selection"
     (selectionChange)="onSelectionChanged($event)"
     [reverse]="reverse"
     (reverseChange)="onReverseChanged($event)"
     (filterChange)="filterTerm = $event"
-    [dateRange]="dateRange"
-    (dateRangeChange)="dateRange = $event"
+    [automaticSubmissionFilter]="automaticSubmissionFilter"
+    (automaticSubmissionFilterChange)="automaticSubmissionFilter = $event"
   ></app-toolbar>
 
   <nz-spin
@@ -17,7 +21,8 @@
   ></nz-spin>
   <ng-template #elseBlock>
     <app-task-list
-      [dataList]="dataList | filterTasks: filterTerm: dateRange"
+      [dataList]="dataList | filterTasks: filterTerm"
+      [automaticSubmissionFilter]="automaticSubmissionFilter"
     ></app-task-list>
   </ng-template>
 </div>

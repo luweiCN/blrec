@@ -25,6 +25,11 @@ import {
   GlobalTaskSettings,
   TaskOptionsIn,
 } from '../../settings/shared/setting.model';
+import {
+  RoomUploadPolicy,
+  RoomUploadPolicyRequest,
+} from '../upload-policy-dialog/room-upload-policy.model';
+import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-policy.service';
 
 @Component({
   selector: 'app-task-item',
@@ -35,7 +40,9 @@ import {
 export class TaskItemComponent implements OnChanges {
   @Input() data!: TaskData;
   @Input() selected = false;
+  @Input() uploadPolicy: RoomUploadPolicy | null = null;
   @Output() selectedChange = new EventEmitter<boolean>();
+  @Output() uploadPolicyChanged = new EventEmitter<void>();
   @HostBinding('class.stopped') stopped = false;
 
   taskOptions?: TaskOptions;
@@ -44,6 +51,7 @@ export class TaskItemComponent implements OnChanges {
   switchPending = false;
   settingsDialogVisible = false;
   uploadPolicyDialogVisible = false;
+  automaticSubmissionPending = false;
 
   readonly RunningStatus = RunningStatus;
 
@@ -52,7 +60,8 @@ export class TaskItemComponent implements OnChanges {
     private message: NzMessageService,
     private modal: NzModalService,
     private settingService: SettingService,
-    private taskManager: TaskManagerService
+    private taskManager: TaskManagerService,
+    private policyService: RoomUploadPolicyService
   ) {}
 
   get roomId() {
@@ -64,6 +73,10 @@ export class TaskItemComponent implements OnChanges {
       this.data.task_status.monitor_enabled ||
       this.data.task_status.recorder_enabled
     );
+  }
+
+  get automaticSubmissionEnabled(): boolean {
+    return this.uploadPolicy?.enabled ?? false;
   }
 
   setSelected(selected: boolean): void {
@@ -191,6 +204,44 @@ export class TaskItemComponent implements OnChanges {
     this.changeDetector.markForCheck();
   }
 
+  toggleAutomaticSubmission(): void {
+    if (this.automaticSubmissionPending) {
+      return;
+    }
+    if (this.uploadPolicy === null) {
+      this.openUploadPolicyDialog();
+      return;
+    }
+    this.automaticSubmissionPending = true;
+    const request = this.policyRequest(this.uploadPolicy);
+    this.policyService
+      .save(this.roomId, {
+        ...request,
+        enabled: !this.uploadPolicy.enabled,
+      })
+      .pipe(
+        finalize(() => {
+          this.automaticSubmissionPending = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (policy) => {
+          this.uploadPolicy = policy;
+          this.uploadPolicyChanged.emit();
+          this.message.success(policy.enabled ? '已开启自动投稿' : '已关闭自动投稿');
+        },
+        error: (error: HttpErrorResponse) => {
+          this.message.error(`修改自动投稿失败：${error.message}`);
+        },
+      });
+  }
+
+  closeUploadPolicyDialog(): void {
+    this.uploadPolicyDialogVisible = false;
+    this.uploadPolicyChanged.emit();
+  }
+
   cleanSettingsData(): void {
     delete this.taskOptions;
     delete this.globalSettings;
@@ -221,5 +272,18 @@ export class TaskItemComponent implements OnChanges {
           }
         });
     }
+  }
+
+  private policyRequest(policy: RoomUploadPolicy): RoomUploadPolicyRequest {
+    const {
+      roomId: _roomId,
+      resolvedAccountId: _resolvedAccountId,
+      resolvedAccountName: _resolvedAccountName,
+      blockedReason: _blockedReason,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      ...request
+    } = policy;
+    return request;
   }
 }

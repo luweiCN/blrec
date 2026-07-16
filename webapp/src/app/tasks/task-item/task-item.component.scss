@@ -6,7 +6,7 @@
 
 .task-row {
   display: grid;
-  grid-template-columns: 44px minmax(320px, 1fr) 120px 190px 230px;
+  grid-template-columns: 44px minmax(320px, 1fr) 120px 190px 130px 230px;
   align-items: center;
   min-height: 82px;
   padding: 10px 16px;
@@ -77,6 +77,22 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.upload-policy-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+
+  span {
+    color: #8c8c8c;
+    font-size: 12px;
+  }
+
+  .policy-warning {
+    color: #d46b08;
+  }
 }
 
 .actions-cell {

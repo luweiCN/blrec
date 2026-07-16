@@ -27,6 +27,11 @@ export class RoomUploadPolicyService {
     private url: UrlService,
   ) {}
 
+  list(): Observable<readonly RoomUploadPolicy[]> {
+    const url = this.url.makeApiUrl('/api/v1/room-upload-policies');
+    return this.http.get<readonly RoomUploadPolicy[]>(url);
+  }
+
   get(roomId: number): Observable<RoomUploadPolicy> {
     const url = this.url.makeApiUrl(
       `/api/v1/room-upload-policies/${roomId}`,

@@ -5,6 +5,7 @@ import {
   Component,
   Input,
   OnChanges,
+  OnInit,
 } from '@angular/core';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
@@ -21,10 +22,13 @@ import {
 import { SettingService } from '../../settings/shared/services/setting.service';
 import { TaskManagerService } from '../shared/services/task-manager.service';
 import {
+  AutomaticSubmissionFilter,
   RunningStatus,
   TaskBatchAction,
   TaskData,
 } from '../shared/task.model';
+import { RoomUploadPolicy } from '../upload-policy-dialog/room-upload-policy.model';
+import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-policy.service';
 
 @Component({
   selector: 'app-task-list',
@@ -32,8 +36,9 @@ import {
   styleUrls: ['./task-list.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TaskListComponent implements OnChanges {
+export class TaskListComponent implements OnChanges, OnInit {
   @Input() dataList: TaskData[] = [];
+  @Input() automaticSubmissionFilter: AutomaticSubmissionFilter = null;
   readonly selectedRoomIds = new Set<number>();
   batchLoading = false;
   batchSettingsLoading = false;
@@ -41,14 +46,20 @@ export class TaskListComponent implements OnChanges {
   batchUploadPolicyDialogVisible = false;
   batchTaskOptions?: TaskOptions;
   batchGlobalSettings?: GlobalTaskSettings;
+  policiesByRoomId = new Map<number, RoomUploadPolicy>();
 
   constructor(
     private changeDetector: ChangeDetectorRef,
     private message: NzMessageService,
     private modal: NzModalService,
     private settingService: SettingService,
-    private taskManager: TaskManagerService
+    private taskManager: TaskManagerService,
+    private policyService: RoomUploadPolicyService
   ) {}
+
+  ngOnInit(): void {
+    this.refreshPolicies();
+  }
 
   ngOnChanges(): void {
     const visibleRooms = new Set(
@@ -65,15 +76,31 @@ export class TaskListComponent implements OnChanges {
     return this.selectedRoomIds.size;
   }
 
+  get visibleDataList(): TaskData[] {
+    if (this.automaticSubmissionFilter === null) {
+      return this.dataList;
+    }
+    return this.dataList.filter((data) => {
+      const policy = this.policyFor(data.room_info.room_id);
+      if (this.automaticSubmissionFilter === 'unconfigured') {
+        return policy === null;
+      }
+      if (this.automaticSubmissionFilter === 'enabled') {
+        return policy?.enabled === true;
+      }
+      return policy !== null && !policy.enabled;
+    });
+  }
+
   get selectedRoomIdsArray(): number[] {
-    return this.dataList
+    return this.visibleDataList
       .map((data) => data.room_info.room_id)
       .filter((roomId) => this.selectedRoomIds.has(roomId));
   }
 
   get selectedReferenceTask(): TaskData | null {
     return (
-      this.dataList.find((data) =>
+      this.visibleDataList.find((data) =>
         this.selectedRoomIds.has(data.room_info.room_id)
       ) ?? null
     );
@@ -81,8 +108,8 @@ export class TaskListComponent implements OnChanges {
 
   get allSelected(): boolean {
     return (
-      this.dataList.length > 0 &&
-      this.dataList.every((data) =>
+      this.visibleDataList.length > 0 &&
+      this.visibleDataList.every((data) =>
         this.selectedRoomIds.has(data.room_info.room_id)
       )
     );
@@ -102,13 +129,31 @@ export class TaskListComponent implements OnChanges {
   }
 
   setAllSelected(selected: boolean): void {
-    for (const data of this.dataList) {
+    for (const data of this.visibleDataList) {
       this.setTaskSelected(data.room_info.room_id, selected);
     }
   }
 
   isSelected(roomId: number): boolean {
     return this.selectedRoomIds.has(roomId);
+  }
+
+  policyFor(roomId: number): RoomUploadPolicy | null {
+    return this.policiesByRoomId.get(roomId) ?? null;
+  }
+
+  refreshPolicies(): void {
+    this.policyService.list().subscribe({
+      next: (policies) => {
+        this.policiesByRoomId = new Map(
+          policies.map((policy) => [policy.roomId, policy]),
+        );
+        this.changeDetector.markForCheck();
+      },
+      error: () => {
+        this.message.error('获取房间投稿状态失败');
+      },
+    });
   }
 
   eligibleCount(action: TaskBatchAction): number {

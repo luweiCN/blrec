@@ -14,6 +14,7 @@ import { StorageService } from '../core/services/storage.service';
 import { RealtimeService } from '../core/services/realtime.service';
 import { TaskService } from './shared/services/task.service';
 import {
+  AutomaticSubmissionFilter,
   DataSelection,
   RunningStatus,
   TaskData,
@@ -34,7 +35,7 @@ export class TasksComponent implements OnInit, OnDestroy {
   selection: DataSelection;
   reverse: boolean;
   filterTerm = '';
-  dateRange: Date[] | null = null;
+  automaticSubmissionFilter: AutomaticSubmissionFilter = null;
 
   private dataSubscription?: Subscription;
   private realtimeSubscription?: Subscription;

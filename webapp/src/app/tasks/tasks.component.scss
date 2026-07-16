@@ -17,6 +17,21 @@
   flex-direction: column;
 }
 
+.tasks-page-header {
+  padding: 20px 24px 8px;
+
+  h2 {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.4;
+  }
+
+  p {
+    margin: 4px 0 0;
+    color: #8c8c8c;
+  }
+}
+
 .tasks-page app-task-list {
   min-height: 0;
   flex: 1;

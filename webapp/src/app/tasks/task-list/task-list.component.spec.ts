@@ -12,6 +12,8 @@ import {
   TaskData,
 } from '../shared/task.model';
 import { TaskListComponent } from './task-list.component';
+import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-policy.service';
+import { RoomUploadPolicy } from '../upload-policy-dialog/room-upload-policy.model';
 
 const taskData: TaskData = {
   user_info: {
@@ -64,6 +66,7 @@ describe('TaskListComponent', () => {
   let component: TaskListComponent;
   let fixture: ComponentFixture<TaskListComponent>;
   let taskManager: jasmine.SpyObj<TaskManagerService>;
+  let policyService: jasmine.SpyObj<RoomUploadPolicyService>;
 
   beforeEach(async () => {
     taskManager = jasmine.createSpyObj<TaskManagerService>(
@@ -71,10 +74,16 @@ describe('TaskListComponent', () => {
       ['runBatchAction']
     );
     taskManager.runBatchAction.and.returnValue(of({ results: [] }));
+    policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
+      'RoomUploadPolicyService',
+      ['list'],
+    );
+    policyService.list.and.returnValue(of([]));
     await TestBed.configureTestingModule({
       declarations: [TaskListComponent],
       providers: [
         { provide: TaskManagerService, useValue: taskManager },
+        { provide: RoomUploadPolicyService, useValue: policyService },
         {
           provide: SettingService,
           useValue: jasmine.createSpyObj<SettingService>('SettingService', [
@@ -135,7 +144,14 @@ describe('TaskListComponent', () => {
     const headers = Array.from(headerElements).map(
       (header) => header.textContent?.trim() ?? '',
     );
-    expect(headers).toEqual(['', '直播间', '直播状态', '监控与录制', '操作']);
+    expect(headers).toEqual([
+      '',
+      '直播间',
+      '直播状态',
+      '监控与录制',
+      '自动投稿',
+      '操作',
+    ]);
 
     component.setTaskSelected(1, true);
     fixture.detectChanges();
@@ -145,5 +161,19 @@ describe('TaskListComponent', () => {
     expect(actions.textContent).not.toContain('开启录制');
     expect(actions.textContent).not.toContain('关闭录制');
     expect(actions.textContent).not.toContain('强制关闭录制');
+  });
+
+  it('filters rooms by automatic submission state', () => {
+    fixture.componentRef.setInput('dataList', [taskData]);
+    component.policiesByRoomId.set(1, {
+      roomId: 1,
+      enabled: true,
+    } as RoomUploadPolicy);
+
+    fixture.componentRef.setInput('automaticSubmissionFilter', 'enabled');
+    expect(component.visibleDataList).toEqual([taskData]);
+
+    fixture.componentRef.setInput('automaticSubmissionFilter', 'disabled');
+    expect(component.visibleDataList).toEqual([]);
   });
 });
