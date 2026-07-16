@@ -37,6 +37,9 @@ REQUIRED_TABLES = {
     'upload_suppressions',
     'upload_job_archives',
     'operational_notification_states',
+    'highlight_markers',
+    'highlight_clips',
+    'highlight_clip_sources',
 }
 
 
@@ -71,7 +74,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 17
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 18
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -162,6 +165,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'deletion_state',
             'deletion_error',
             'deletion_requested_at',
+            'source_kind',
         } <= session_columns
         part_columns = {
             row['name']
@@ -175,6 +179,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'video_deleted_at',
             'video_delete_reason',
             'video_delete_error',
+            'timeline_start_at_ms',
         } <= part_columns
 
         indexes = {
@@ -187,6 +192,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'upload_jobs_claim_idx',
             'comment_items_claim_idx',
             'danmaku_items_claim_idx',
+            'highlight_clips_claim_idx',
         } <= indexes
 
         await database.execute(
@@ -338,7 +344,67 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 17
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 18
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_highlight_markers_are_independent_and_clips_are_claimable(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            "INSERT INTO highlight_markers("
+            "id,room_id,observed_at_ms,player_delay_ms,content_at_ms,title,"
+            "anchor_name,name,note,source,created_at,updated_at) "
+            "VALUES(1,100,20000,1500,18500,'直播标题','主播','高光 00:18','',"
+            "'browser_extension',20,20)"
+        )
+        marker = await database.fetchone(
+            'SELECT room_id,content_at_ms,name FROM highlight_markers WHERE id=1'
+        )
+        assert marker is not None
+        assert dict(marker) == {
+            'room_id': 100,
+            'content_at_ms': 18500,
+            'name': '高光 00:18',
+        }
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "INSERT INTO recording_sessions("
+                "room_id,broadcast_session_key,state,started_at,source_kind) "
+                "VALUES(100,'100:invalid','closed',1,'invalid')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "INSERT INTO highlight_clips("
+                "room_id,name,requested_start_ms,requested_end_ms,state,"
+                "created_at,updated_at) "
+                "VALUES(100,'错误区间',10000,10000,'queued',20,20)"
+            )
+
+        await database.execute(
+            "INSERT INTO highlight_clips("
+            "id,marker_id,room_id,name,requested_start_ms,requested_end_ms,state,"
+            "created_at,updated_at) "
+            "VALUES(1,1,100,'高光片段',10000,20000,'queued',20,20)"
+        )
+        claim = await database.claim(
+            'highlight_clips', ('queued',), 'highlight-worker', now=20
+        )
+        assert claim is not None
+        assert claim.id == 1
+        assert claim.lease_owner == 'highlight-worker'
+
+        await database.execute('DELETE FROM highlight_markers WHERE id=1')
+        assert (
+            await database.scalar('SELECT marker_id FROM highlight_clips WHERE id=1')
+            is None
+        )
     finally:
         await database.close()
 

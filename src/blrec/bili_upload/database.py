@@ -61,7 +61,9 @@ _T = TypeVar('_T')
 class BiliUploadDatabase:
     LEASE_TTL_SECONDS = 120
     RENEW_WINDOW_SECONDS = 60
-    _CLAIM_TABLES = frozenset(('upload_jobs', 'comment_items', 'danmaku_items'))
+    _CLAIM_TABLES = frozenset(
+        ('upload_jobs', 'comment_items', 'danmaku_items', 'highlight_clips')
+    )
     _UNSUPPORTED_FILESYSTEMS = frozenset(('nfs', 'nfs4', 'cifs', 'smb3', 'fuse.sshfs'))
 
     def __init__(self, path: str) -> None:
@@ -376,7 +378,7 @@ class BiliUploadDatabase:
                 ).fetchone()
                 assert row is not None
                 current_version = int(row[0])
-            latest_version = 17
+            latest_version = 18
             if current_version > latest_version:
                 raise sqlite3.DatabaseError(
                     'database schema is newer than this application'
