@@ -1,3 +1,64 @@
 .blrec-highlight-actions {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+  vertical-align: middle;
+}
+
+.blrec-highlight-actions button {
+  min-height: 30px;
+  padding: 4px 13px;
+  border: 1px solid rgb(255 255 255 / 24%);
+  border-radius: 15px;
+  background: rgb(255 255 255 / 10%);
+  color: #f5f7fa;
+  font: 500 13px/20px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.blrec-highlight-actions button:hover,
+.blrec-highlight-actions button:focus-visible {
+  border-color: #80c9ff;
+  background: rgb(0 161 214 / 28%);
+}
+
+.blrec-highlight-actions button:focus-visible {
+  outline: 2px solid #80c9ff;
+  outline-offset: 2px;
+}
+
+.blrec-highlight-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.blrec-highlight-actions--fallback {
+  position: fixed;
+  z-index: 2147483645;
+  top: 14px;
+  right: 180px;
+  margin: 0;
+  padding: 5px;
+  border-radius: 18px;
+  background: rgb(24 25 28 / 92%);
+  box-shadow: 0 3px 14px rgb(0 0 0 / 24%);
+}
+
+.blrec-highlight-toast {
+  position: fixed;
+  z-index: 2147483646;
+  top: 62px;
+  right: 24px;
+  max-width: 320px;
+  padding: 10px 14px;
+  border-radius: 7px;
+  background: rgb(24 25 28 / 94%);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 24%);
+  color: #fff;
+  font: 14px/20px system-ui, sans-serif;
+}
+
+.blrec-highlight-toast[data-state="error"] {
+  background: rgb(168 30 38 / 96%);
 }
