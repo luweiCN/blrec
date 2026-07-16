@@ -278,6 +278,7 @@ async def test_upload_transport_streams_limited_body_with_content_length(
 @pytest.mark.asyncio
 async def test_probe_uses_browser_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     session_options: List[Dict[str, Any]] = []
+    requested_urls: List[str] = []
 
     class FakeResponse:
         async def __aenter__(self) -> 'FakeResponse':
@@ -292,8 +293,8 @@ async def test_probe_uses_browser_user_agent(monkeypatch: pytest.MonkeyPatch) ->
         async def read(self) -> bytes:
             return b'{}'
 
-        async def json(self) -> Dict[str, str]:
-            return {'ip': '203.0.113.10'}
+        async def json(self) -> Dict[str, Dict[str, str]]:
+            return {'data': {'addr': '203.0.113.10'}}
 
     class FakeSession:
         def __init__(self, **kwargs: Any) -> None:
@@ -305,7 +306,8 @@ async def test_probe_uses_browser_user_agent(monkeypatch: pytest.MonkeyPatch) ->
         async def __aexit__(self, *args: object) -> None:
             return None
 
-        def get(self, *args: object, **kwargs: object) -> FakeResponse:
+        def get(self, url: str, **kwargs: object) -> FakeResponse:
+            requested_urls.append(url)
             return FakeResponse()
 
     monkeypatch.setattr(
@@ -316,4 +318,7 @@ async def test_probe_uses_browser_user_agent(monkeypatch: pytest.MonkeyPatch) ->
 
     await manager.probe('lan1')
 
+    assert len(session_options) == 1
     assert session_options[0]['headers']['User-Agent'].startswith('Mozilla/5.0')
+    assert requested_urls == ['https://api.bilibili.com/x/web-interface/zone']
+    assert manager.cached_probes()['lan1'].external_ip == '203.0.113.10'

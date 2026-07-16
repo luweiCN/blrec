@@ -459,6 +459,7 @@ class NetworkRouteManager:
 
     async def _probe_interface(self, interface: NetworkInterface) -> NetworkProbe:
         started_at = self._clock()
+        external_ip: Optional[str] = None
         connector = aiohttp.TCPConnector(
             family=socket.AF_INET,
             local_addr=(interface.address, 0),
@@ -472,11 +473,16 @@ class NetworkRouteManager:
                 headers=_PROBE_HEADERS,
             ) as session:
                 async with session.get(
-                    'https://api.bilibili.com/x/web-interface/nav',
+                    'https://api.bilibili.com/x/web-interface/zone',
                     allow_redirects=False,
                 ) as response:
                     response.raise_for_status()
-                    await response.read()
+                    payload = await response.json()
+                    data = payload.get('data')
+                    if isinstance(data, Mapping):
+                        value = data.get('addr')
+                        if isinstance(value, str):
+                            external_ip = value
                 latency_ms = max(0, round((self._clock() - started_at) * 1000))
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
             return NetworkProbe(
@@ -486,28 +492,6 @@ class NetworkRouteManager:
                 error=type(error).__name__,
                 checked_at=time.time(),
             )
-        external_ip: Optional[str] = None
-        try:
-            async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(
-                    family=socket.AF_INET,
-                    local_addr=(interface.address, 0),
-                    resolver=SourceBoundResolver(interface),
-                ),
-                timeout=aiohttp.ClientTimeout(total=8),
-                trust_env=False,
-                headers=_PROBE_HEADERS,
-            ) as session:
-                async with session.get(
-                    'https://api.ipify.org?format=json', allow_redirects=False
-                ) as response:
-                    response.raise_for_status()
-                    payload = await response.json()
-                    value = payload.get('ip')
-                    if isinstance(value, str):
-                        external_ip = value
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-            pass
         return NetworkProbe(
             reachable=True,
             latency_ms=latency_ms,

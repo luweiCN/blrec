@@ -9,7 +9,7 @@ def test_test_workflow_is_reusable_and_covers_runtime_python() -> None:
     assert 'workflow_call:' in workflow
     assert "'3.11'" in workflow
     assert 'scripts/docker-smoke.sh blrec:release-test' in workflow
-    assert 'VERSION=3.0.0-beta.2' in workflow
+    assert 'VERSION=3.0.0-beta.3' in workflow
 
 
 def test_release_workflow_has_test_gate_and_exact_image_contract() -> None:
