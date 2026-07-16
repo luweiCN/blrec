@@ -256,6 +256,14 @@
           </span>
           <span *ngIf="uploadJobIds.get(item.id) as jobId">任务 #{{ jobId }} 已创建</span>
           <button
+            *ngIf="item.state === 'ready'"
+            type="button"
+            class="secondary-button"
+            (click)="openClipPreview(item)"
+          >
+            预览
+          </button>
+          <button
             *ngIf="item.state === 'ready' && !uploadJobIds.has(item.id)"
             type="button"
             class="primary-button"
@@ -268,6 +276,31 @@
           </button>
         </li>
       </ul>
+      <div *ngIf="clipPreviewId !== null" class="clip-preview">
+        <div class="section-heading">
+          <strong>片段预览</strong>
+          <button type="button" class="text-button" (click)="closeClipPreview()">
+            关闭
+          </button>
+        </div>
+        <p *ngIf="clipPreviewLoading" class="state-message" aria-live="polite">
+          正在打开片段…
+        </p>
+        <video
+          *ngIf="clipPreviewUrl"
+          controls
+          preload="metadata"
+          [src]="clipPreviewUrl"
+          (error)="handleClipPreviewError()"
+        ></video>
+      </div>
     </section>
   </ng-container>
 </main>
+
+<app-task-edit-dialog
+  [visible]="taskEditVisible"
+  [jobIds]="taskEditJobIds"
+  (closed)="closeTaskEdit()"
+  (saved)="taskEditSaved()"
+></app-task-edit-dialog>

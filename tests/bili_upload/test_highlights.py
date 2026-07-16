@@ -152,3 +152,27 @@ async def test_timeline_falls_back_to_server_record_start_time(
 
     assert timeline.parts[0].absolute_start_at_ms == 2_000_000
     assert timeline.markers[0].local_offset_ms == 10_000
+
+
+@pytest.mark.asyncio
+async def test_ready_clip_exposes_only_an_owned_existing_video(
+    database, tmp_path: Path
+) -> None:
+    recording_root = tmp_path / 'recordings'
+    video = recording_root / 'highlights' / '100' / 'highlight-1.mp4'
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b'clip')
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,actual_start_ms,'
+        'actual_end_ms,output_video_path,state,created_at,updated_at) '
+        "VALUES(1,100,'高光',0,1000,0,1000,?,'ready',1,1)",
+        (str(video),),
+    )
+    service = HighlightService(database, recording_root=recording_root)
+
+    assert await service.clip_video_path(1) == video.resolve()
+
+    await database.execute("UPDATE highlight_clips SET state='failed' WHERE id=1")
+    with pytest.raises(ValueError, match='not ready'):
+        await service.clip_video_path(1)

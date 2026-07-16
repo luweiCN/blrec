@@ -1,4 +1,5 @@
 import { CommonModule } from '@angular/common';
+import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
@@ -19,6 +20,14 @@ import {
 import { HighlightService } from '../shared/highlight.service';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightEditorComponent } from './highlight-editor.component';
+
+@Component({ selector: 'app-task-edit-dialog', template: '' })
+class TaskEditDialogStubComponent {
+  @Input() visible = false;
+  @Input() jobIds: readonly number[] = [];
+  @Output() readonly closed = new EventEmitter<void>();
+  @Output() readonly saved = new EventEmitter<void>();
+}
 
 describe('HighlightEditorComponent', () => {
   let fixture: ComponentFixture<HighlightEditorComponent>;
@@ -126,6 +135,8 @@ describe('HighlightEditorComponent', () => {
       'getClip',
       'deleteClip',
       'createUploadTask',
+      'createMediaAccess',
+      'mediaUrl',
       'updateMarker',
       'deleteMarker',
     ]);
@@ -144,10 +155,14 @@ describe('HighlightEditorComponent', () => {
     );
     highlights.deleteMarker.and.returnValue(of(void 0));
     highlights.createUploadTask.and.returnValue(of({ jobId: 44 }));
+    highlights.createMediaAccess.and.returnValue(
+      of({ token: 'clip-token', expiresAt: 123, fileSizeBytes: 4096 })
+    );
+    highlights.mediaUrl.and.returnValue('/api/highlight-media');
 
     recordings = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['createMediaAccess', 'mediaUrl']
+      ['createMediaAccess', 'mediaUrl', 'runJobAction']
     );
     recordings.createMediaAccess.and.returnValue(
       of({
@@ -160,6 +175,9 @@ describe('HighlightEditorComponent', () => {
       })
     );
     recordings.mediaUrl.and.callFake((partId) => `/media/${partId}`);
+    recordings.runJobAction.and.returnValue(
+      of({ results: [{ jobId: 44, accepted: true, message: '已继续上传' }] })
+    );
 
     player = jasmine.createSpyObj<PartPlayer>('PartPlayer', [
       'pause',
@@ -175,7 +193,7 @@ describe('HighlightEditorComponent', () => {
     realtime = new Subject<RealtimeEvent>();
 
     await TestBed.configureTestingModule({
-      declarations: [HighlightEditorComponent],
+      declarations: [HighlightEditorComponent, TaskEditDialogStubComponent],
       imports: [CommonModule, FormsModule, RouterTestingModule],
       providers: [
         { provide: HighlightService, useValue: highlights },
@@ -279,6 +297,46 @@ describe('HighlightEditorComponent', () => {
 
     expect(highlights.getClip).toHaveBeenCalledOnceWith(3);
     expect(component.clip?.state).toBe('ready');
+  });
+
+  it('opens task settings and resumes only after settings are saved', () => {
+    const readyClip = {
+      ...processingClip,
+      state: 'ready' as const,
+      outputVideoPath: '/rec/highlight-3.mp4',
+    };
+    component.clips = [readyClip];
+
+    component.createUploadTask(readyClip);
+
+    expect(component.taskEditVisible).toBeTrue();
+    expect(component.taskEditJobIds).toEqual([44]);
+    expect(recordings.runJobAction).not.toHaveBeenCalled();
+
+    component.taskEditSaved();
+
+    expect(recordings.runJobAction).toHaveBeenCalledOnceWith(
+      'resume_upload',
+      [44]
+    );
+  });
+
+  it('previews a ready clip through its signed range URL', () => {
+    const readyClip = {
+      ...processingClip,
+      state: 'ready' as const,
+      outputVideoPath: '/rec/highlight-3.mp4',
+    };
+
+    component.openClipPreview(readyClip);
+
+    expect(highlights.createMediaAccess).toHaveBeenCalledOnceWith(3);
+    expect(highlights.mediaUrl).toHaveBeenCalledWith(3, {
+      token: 'clip-token',
+      expiresAt: 123,
+      fileSizeBytes: 4096,
+    });
+    expect(component.clipPreviewUrl).toBe('/api/highlight-media');
   });
 
   it('renames and deletes a marker without changing the clip range', () => {

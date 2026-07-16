@@ -35,7 +35,8 @@ whitelist: Set[str] = set()
 blacklist: Set[str] = set()
 attempting_clients: Dict[str, int] = {}
 
-_MEDIA_PATH = re.compile(r'^/api/v1/recording-sessions/parts/(\d+)/media$')
+_RECORDING_MEDIA_PATH = re.compile(r'^/api/v1/recording-sessions/parts/(\d+)/media$')
+_HIGHLIGHT_MEDIA_PATH = re.compile(r'^/api/v1/highlights/clips/(\d+)/media$')
 
 
 def configure(store: AdminAuthStore, *, bootstrap_api_key: str = '') -> None:
@@ -147,8 +148,8 @@ def _media_signing_key() -> bytes:
 def _valid_signed_media_request(request: Request) -> bool:
     if request.method not in {'GET', 'HEAD'}:
         return False
-    match = _MEDIA_PATH.fullmatch(request.url.path)
-    if match is None:
+    resource_id = _signed_media_resource_id(request.url.path)
+    if resource_id is None:
         return False
     token = request.query_params.get('media_token')
     expires = request.query_params.get('media_expires')
@@ -159,7 +160,17 @@ def _valid_signed_media_request(request: Request) -> bool:
         expires_at = int(expires)
     except ValueError:
         return False
-    return valid_media_access(int(match.group(1)), expires_at, token, snapshot_id)
+    return valid_media_access(resource_id, expires_at, token, snapshot_id)
+
+
+def _signed_media_resource_id(path: str) -> Optional[int]:
+    recording = _RECORDING_MEDIA_PATH.fullmatch(path)
+    if recording is not None:
+        return int(recording.group(1))
+    highlight = _HIGHLIGHT_MEDIA_PATH.fullmatch(path)
+    if highlight is not None:
+        return -int(highlight.group(1))
+    return None
 
 
 async def _legacy_test_authenticate(request: Request, x_api_key: Optional[str]) -> None:

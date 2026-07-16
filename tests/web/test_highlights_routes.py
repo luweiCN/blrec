@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Iterator
 from unittest.mock import AsyncMock
 
@@ -87,6 +88,7 @@ class FakeHighlightService:
         self.create_clip = AsyncMock(return_value=clip())
         self.get_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
+        self.clip_video_path = AsyncMock()
 
     async def timeline(self, session_id: int, active_durations_ms):
         value = marker()
@@ -228,3 +230,27 @@ def test_unsafe_clip_range_returns_conflict(client: TestClient) -> None:
 
     assert response.status_code == 409
     assert '最后 10 秒' in response.json()['detail']
+
+
+def test_ready_clip_supports_signed_byte_range_playback(
+    client: TestClient, tmp_path: Path
+) -> None:
+    video = tmp_path / 'highlight-3.mp4'
+    video.write_bytes(b'0123456789')
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.clip_video_path.return_value = video
+
+    access = client.post('/api/v1/highlights/clips/3/media-access', headers=auth())
+
+    assert access.status_code == 200
+    payload = access.json()
+    media = client.get(
+        '/api/v1/highlights/clips/3/media',
+        params={'media_token': payload['token'], 'media_expires': payload['expiresAt']},
+        headers={'Range': 'bytes=2-5'},
+    )
+    assert media.status_code == 206
+    assert media.content == b'2345'
+    assert media.headers['content-range'] == 'bytes 2-5/10'
+    assert media.headers['accept-ranges'] == 'bytes'

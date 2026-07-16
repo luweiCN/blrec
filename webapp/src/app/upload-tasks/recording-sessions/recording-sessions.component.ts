@@ -480,6 +480,13 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return session.availableActions.some((action) => action !== 'delete_local');
   }
 
+  canEditHighlight(session: RecordingSession): boolean {
+    return (
+      session.sourceKind === 'live' &&
+      session.parts.some((part) => part.sourceExists || part.finalExists)
+    );
+  }
+
   openTaskEdit(jobIds: readonly number[]): void {
     const uniqueJobIds = [...new Set(jobIds.filter((jobId) => jobId > 0))];
     if (uniqueJobIds.length === 0) {

@@ -510,7 +510,7 @@ def parse_byte_range(value: str, size: int) -> Tuple[int, int]:
     return start, end
 
 
-def _file_chunks(
+def file_chunks(
     file: BinaryIO, *, start: int, length: int, chunk_size: int = 64 * 1024
 ) -> Iterator[bytes]:
     try:
@@ -1070,7 +1070,7 @@ async def stream_recording_media(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
             ) from None
-        chunks = _file_chunks(file, start=start, length=length)
+        chunks = file_chunks(file, start=start, length=length)
     return StreamingResponse(
         chunks,
         status_code=response_status,

@@ -63,6 +63,8 @@ describe('PartVideoDialogComponent', () => {
     uploadSuppressed: false,
     deletionState: 'none',
     deletionError: null,
+    sourceKind: 'live',
+    highlightClipId: null,
     displayState: 'recording',
     availableActions: ['set_skip', 'delete_local'],
     uploadJob: null,

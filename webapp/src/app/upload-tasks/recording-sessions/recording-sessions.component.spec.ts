@@ -5,6 +5,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule } from '@angular/forms';
+import { RouterTestingModule } from '@angular/router/testing';
 
 import { of, Subject, throwError } from 'rxjs';
 import {
@@ -112,6 +113,8 @@ describe('RecordingSessionsComponent', () => {
             uploadSuppressed: false,
             deletionState: 'none',
             deletionError: null,
+            sourceKind: 'live',
+            highlightClipId: null,
             displayState: 'waiting_review',
             availableActions: ['delete_local'],
             uploadJob: {
@@ -225,6 +228,7 @@ describe('RecordingSessionsComponent', () => {
         CommonModule,
         FormsModule,
         NoopAnimationsModule,
+        RouterTestingModule,
         NzAlertModule,
         NzButtonModule,
         NzCheckboxModule,
@@ -298,6 +302,43 @@ describe('RecordingSessionsComponent', () => {
     expect(text).not.toContain('UID 42');
     expect(text).not.toContain('/rec/p1.mp4');
     expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
+  });
+
+  it('links local live recordings to the highlight editor', () => {
+    fixture.detectChanges();
+
+    const link = fixture.nativeElement.querySelector(
+      '[data-testid="edit-highlight"]'
+    ) as HTMLAnchorElement | null;
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('href')).toBe('/upload-tasks/highlights/1');
+  });
+
+  it('labels derived highlight tasks without offering another cut', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready recording-session view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            sourceKind: 'highlight',
+            highlightClipId: 3,
+          },
+        ],
+      },
+    };
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('高光');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="edit-highlight"]')
+    ).toBeNull();
   });
 
   it('renders more actions with the shared ellipsis dropdown', () => {

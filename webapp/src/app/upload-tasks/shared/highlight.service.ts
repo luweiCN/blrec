@@ -9,6 +9,7 @@ import {
   HighlightClip,
   HighlightClipInspection,
   HighlightMarker,
+  HighlightMediaAccess,
   HighlightTimeline,
   HighlightUploadTaskResponse,
 } from './highlight.model';
@@ -63,6 +64,19 @@ export class HighlightService {
       this.url.makeApiUrl(path),
       null
     );
+  }
+
+  createMediaAccess(clipId: number): Observable<HighlightMediaAccess> {
+    const path = `/api/v1/highlights/clips/${clipId}/media-access`;
+    return this.http.post<HighlightMediaAccess>(this.url.makeApiUrl(path), null);
+  }
+
+  mediaUrl(clipId: number, access: HighlightMediaAccess): string {
+    const token = encodeURIComponent(access.token);
+    const path =
+      `/api/v1/highlights/clips/${clipId}/media` +
+      `?media_token=${token}&media_expires=${access.expiresAt}`;
+    return this.url.makeApiUrl(path);
   }
 
   updateMarker(

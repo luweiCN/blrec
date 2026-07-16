@@ -36,6 +36,7 @@ import { RecordingSessionService } from '../shared/recording-session.service';
 })
 export class HighlightEditorComponent implements OnInit, OnDestroy {
   readonly sessionId: number;
+  readonly initialPartId: number | null;
 
   timeline: HighlightTimeline | null = null;
   selectedPart: HighlightTimelinePart | null = null;
@@ -48,6 +49,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   confirmKeyframe = false;
   clips: HighlightClip[] = [];
   uploadJobIds = new Map<number, number>();
+  taskEditVisible = false;
+  taskEditJobIds: readonly number[] = [];
+  clipPreviewId: number | null = null;
+  clipPreviewUrl: string | null = null;
+  clipPreviewLoading = false;
 
   loading = true;
   mediaLoading = false;
@@ -78,6 +84,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     realtime: RealtimeService
   ) {
     this.sessionId = Number(route.snapshot.paramMap.get('sessionId'));
+    const partId = Number(route.snapshot.queryParamMap?.get('partId'));
+    this.initialPartId = Number.isInteger(partId) && partId > 0 ? partId : null;
     this.subscriptions.add(
       realtime.events$.subscribe((event) => this.handleRealtimeEvent(event))
     );
@@ -254,9 +262,69 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.highlights.createUploadTask(clip.id).subscribe({
         next: ({ jobId }) => {
           this.uploadJobIds.set(clip.id, jobId);
+          this.taskEditJobIds = [jobId];
+          this.taskEditVisible = true;
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '创建上传任务失败');
+        },
+      })
+    );
+  }
+
+  openClipPreview(clip: HighlightClip): void {
+    this.clipPreviewId = clip.id;
+    this.clipPreviewUrl = null;
+    this.clipPreviewLoading = true;
+    this.actionError = null;
+    this.subscriptions.add(
+      this.highlights.createMediaAccess(clip.id).subscribe({
+        next: (access) => {
+          if (this.clipPreviewId !== clip.id) {
+            return;
+          }
+          this.clipPreviewUrl = this.highlights.mediaUrl(clip.id, access);
+          this.clipPreviewLoading = false;
+        },
+        error: (error: unknown) => {
+          this.clipPreviewLoading = false;
+          this.actionError = this.describeError(error, '打开高光片段失败');
+        },
+      })
+    );
+  }
+
+  closeClipPreview(): void {
+    this.clipPreviewId = null;
+    this.clipPreviewUrl = null;
+    this.clipPreviewLoading = false;
+  }
+
+  handleClipPreviewError(): void {
+    this.actionError = '高光片段播放失败';
+  }
+
+  closeTaskEdit(): void {
+    this.taskEditVisible = false;
+    this.taskEditJobIds = [];
+  }
+
+  taskEditSaved(): void {
+    const jobIds = this.taskEditJobIds;
+    this.closeTaskEdit();
+    if (jobIds.length === 0) {
+      return;
+    }
+    this.subscriptions.add(
+      this.recordings.runJobAction('resume_upload', jobIds).subscribe({
+        next: ({ results }) => {
+          const rejected = results.find((result) => !result.accepted);
+          if (rejected) {
+            this.actionError = rejected.message;
+          }
+        },
+        error: (error: unknown) => {
+          this.actionError = this.describeError(error, '继续上传任务失败');
         },
       })
     );
@@ -268,6 +336,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         next: () => {
           this.clips = this.clips.filter((item) => item.id !== clip.id);
           this.uploadJobIds.delete(clip.id);
+          if (this.clipPreviewId === clip.id) {
+            this.closeClipPreview();
+          }
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '删除高光片段失败');
@@ -407,15 +478,26 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         next: (timeline) => {
           this.timeline = timeline;
           this.loading = false;
-          if (initial) {
-            this.startMs = 0;
-            this.endMs = Math.min(60_000, timeline.stableEndMs);
-            this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
-          }
           const playhead = Math.min(this.playheadMs, timeline.stableEndMs);
-          const part = this.partAt(playhead) ?? timeline.parts[0] ?? null;
+          const requestedPart = initial
+            ? timeline.parts.find((part) => part.partId === this.initialPartId)
+            : undefined;
+          const part =
+            requestedPart ?? this.partAt(playhead) ?? timeline.parts[0] ?? null;
           if (part) {
-            this.selectPart(part, Math.max(0, playhead - part.timelineStartMs));
+            const localOffset = requestedPart
+              ? 0
+              : Math.max(0, playhead - part.timelineStartMs);
+            this.selectPart(part, localOffset);
+            if (initial) {
+              this.startMs = part.timelineStartMs;
+              this.endMs = Math.min(
+                part.timelineStartMs + 60_000,
+                part.stableEndMs,
+                timeline.stableEndMs
+              );
+              this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
+            }
           }
         },
         error: (error: unknown) => {

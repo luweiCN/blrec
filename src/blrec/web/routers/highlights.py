@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
+from pathlib import Path
 from typing import Awaitable, Callable, List, Literal, Mapping, Optional
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from blrec.bili_upload.highlight_cut import ClipInspection, HighlightCutError
 from blrec.bili_upload.highlight_worker import HighlightWorker
@@ -21,7 +23,9 @@ from blrec.bili_upload.task_actions import UploadTaskActionRejected
 from blrec.bili_upload.upload import InvalidUploadPolicy
 from blrec.utils.string import camel_case
 
+from .. import security
 from .bili_accounts import authenticated_manager_subject
+from .recording_sessions import RangeNotSatisfiable, file_chunks, parse_byte_range
 
 service: Optional[HighlightService] = None
 worker: Optional[HighlightWorker] = None
@@ -30,6 +34,7 @@ active_durations_provider: Optional[Callable[[int], Awaitable[Mapping[int, int]]
     None
 )
 unavailable_reason: Optional[str] = 'Highlight editing is not ready'
+_MEDIA_ACCESS_TTL_SECONDS = 2 * 60 * 60
 
 
 class ApiModel(BaseModel):
@@ -165,6 +170,12 @@ class UploadTaskResponse(ApiModel):
     job_id: int
 
 
+class ClipMediaAccessResponse(ApiModel):
+    token: str
+    expires_at: int
+    file_size_bytes: int
+
+
 def get_service() -> HighlightService:
     if service is None:
         raise HTTPException(
@@ -187,6 +198,39 @@ async def _active_durations(session_id: int) -> Mapping[int, int]:
     if active_durations_provider is None:
         return {}
     return await active_durations_provider(session_id)
+
+
+async def authenticated_clip_media_subject(
+    request: Request,
+    clip_id: int,
+    media_token: Optional[str] = Query(None),
+    media_expires: Optional[int] = Query(None),
+    x_api_key: Optional[str] = Header(None),
+) -> str:
+    if media_token is not None or media_expires is not None:
+        if (
+            media_token is not None
+            and media_expires is not None
+            and security.valid_media_access(-clip_id, media_expires, media_token)
+        ):
+            return 'highlight-media-access'
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail='播放凭据无效或已过期'
+        )
+    return await authenticated_manager_subject(request, x_api_key)
+
+
+async def _clip_video_path(clip_id: int, highlight_service: HighlightService) -> Path:
+    try:
+        return await highlight_service.clip_video_path(clip_id)
+    except ValueError as error:
+        message = str(error)
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if 'unknown highlight clip' in message
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=message) from None
 
 
 def _marker_response(value: HighlightMarker) -> MarkerResponse:
@@ -409,6 +453,69 @@ async def get_clip(
     except ValueError as error:
         raise _not_found(error) from None
     return _clip_response(value)
+
+
+@router.post('/clips/{clip_id}/media-access', response_model=ClipMediaAccessResponse)
+async def create_clip_media_access(
+    clip_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> ClipMediaAccessResponse:
+    path = await _clip_video_path(clip_id, highlight_service)
+    expires_at = int(time.time()) + _MEDIA_ACCESS_TTL_SECONDS
+    return ClipMediaAccessResponse(
+        token=security.media_access_token(-clip_id, expires_at),
+        expires_at=expires_at,
+        file_size_bytes=path.stat().st_size,
+    )
+
+
+@router.get('/clips/{clip_id}/media')
+async def stream_clip_media(
+    clip_id: int,
+    range_header: Optional[str] = Header(None, alias='Range'),
+    _subject: str = Depends(authenticated_clip_media_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> StreamingResponse:
+    path = await _clip_video_path(clip_id, highlight_service)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='高光片段文件不可用'
+        ) from None
+    start, end = 0, size - 1
+    response_status = status.HTTP_200_OK
+    if range_header is not None:
+        try:
+            start, end = parse_byte_range(range_header, size)
+        except RangeNotSatisfiable:
+            raise HTTPException(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                detail='请求的视频范围不可用',
+                headers={'Content-Range': 'bytes */{}'.format(size)},
+            ) from None
+        response_status = status.HTTP_206_PARTIAL_CONTENT
+    length = end - start + 1
+    headers = {
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store',
+        'Content-Length': str(length),
+    }
+    if response_status == status.HTTP_206_PARTIAL_CONTENT:
+        headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)
+    try:
+        file = open(path, 'rb')
+    except OSError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='高光片段文件不可用'
+        ) from None
+    return StreamingResponse(
+        file_chunks(file, start=start, length=length),
+        status_code=response_status,
+        media_type='video/mp4',
+        headers=headers,
+    )
 
 
 @router.delete('/clips/{clip_id}', status_code=status.HTTP_204_NO_CONTENT)

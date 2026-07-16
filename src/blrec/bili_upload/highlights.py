@@ -461,6 +461,15 @@ class HighlightService:
             row, tuple(self._clip_source_from_row(source) for source in sources)
         )
 
+    async def clip_video_path(self, clip_id: int) -> Path:
+        clip = await self.get_clip(clip_id)
+        if clip.state != 'ready' or clip.output_video_path is None:
+            raise ValueError('highlight clip is not ready')
+        path = self._owned_highlight_path(clip.output_video_path)
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise ValueError('highlight clip video is missing')
+        return path
+
     async def delete_clip(self, clip_id: int) -> str:
         clip = await self.get_clip(clip_id)
         if clip.upload_session_id is not None:

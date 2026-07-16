@@ -361,6 +361,8 @@ export interface RecordingSession {
   readonly uploadSuppressed: boolean;
   readonly deletionState: 'none' | 'requested' | 'deleting' | 'failed';
   readonly deletionError: string | null;
+  readonly sourceKind: 'live' | 'highlight';
+  readonly highlightClipId: number | null;
   readonly displayState: RecordingSessionDisplayState;
   readonly availableActions: readonly RecordingSessionAction[];
   readonly uploadJob: UploadJobProgress | null;

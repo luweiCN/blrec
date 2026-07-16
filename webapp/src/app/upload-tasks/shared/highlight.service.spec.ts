@@ -95,4 +95,27 @@ describe('HighlightService', () => {
     expect(remove.request.method).toBe('DELETE');
     remove.flush(null, { status: 204, statusText: 'No Content' });
   });
+
+  it('creates a signed streaming URL for a ready clip', () => {
+    service.createMediaAccess(3).subscribe();
+    const access = http.expectOne('/api/v1/highlights/clips/3/media-access');
+    expect(access.request.method).toBe('POST');
+    expect(access.request.body).toBeNull();
+    access.flush({
+      token: 'signed token',
+      expiresAt: 123,
+      fileSizeBytes: 2048,
+    });
+
+    expect(
+      service.mediaUrl(3, {
+        token: 'signed token',
+        expiresAt: 123,
+        fileSizeBytes: 2048,
+      })
+    ).toBe(
+      '/api/v1/highlights/clips/3/media' +
+        '?media_token=signed%20token&media_expires=123'
+    );
+  });
 });

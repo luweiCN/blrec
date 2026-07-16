@@ -108,6 +108,12 @@ export interface HighlightUploadTaskResponse {
   readonly jobId: number;
 }
 
+export interface HighlightMediaAccess {
+  readonly token: string;
+  readonly expiresAt: number;
+  readonly fileSizeBytes: number;
+}
+
 export interface HighlightProgressItem {
   readonly id: number;
   readonly roomId: number;

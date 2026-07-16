@@ -265,6 +265,9 @@
               referrerpolicy="no-referrer"
             />
             <div class="session-cell-text">
+              <nz-tag *ngIf="session.sourceKind === 'highlight'" nzColor="orange">
+                高光
+              </nz-tag>
               <ng-container *ngIf="archiveUrl(session) as url; else plainTitle">
                 <a
                   class="archive-title"
@@ -325,6 +328,15 @@
           <ng-template #noAccount>—</ng-template>
         </td>
         <td nzRight>
+          <a
+            *ngIf="canEditHighlight(session)"
+            nz-button
+            nzType="link"
+            data-testid="edit-highlight"
+            [routerLink]="['/upload-tasks/highlights', session.id]"
+          >
+            剪辑
+          </a>
           <button nz-button nzType="link" type="button" (click)="openDetails(session)">
             详情
           </button>
@@ -460,7 +472,12 @@
           referrerpolicy="no-referrer"
         />
         <div class="session-identity">
-          <h3>{{ session.title || '未记录直播标题' }}</h3>
+          <h3>
+            <nz-tag *ngIf="session.sourceKind === 'highlight'" nzColor="orange">
+              高光
+            </nz-tag>
+            {{ session.title || '未记录直播标题' }}
+          </h3>
           <div>
             主播 {{ session.anchorName || '未知' }} · 房间 {{ session.roomId }}
           </div>
@@ -806,6 +823,17 @@
                 >
                   播放
                 </button>
+                <a
+                  *ngIf="session.sourceKind === 'live'"
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  data-testid="edit-highlight-part"
+                  [routerLink]="['/upload-tasks/highlights', session.id]"
+                  [queryParams]="{ partId: part.id }"
+                >
+                  剪辑
+                </a>
               </td>
               <td class="part-count">
                 <div>{{ part.danmakuCount }} 条</div>
