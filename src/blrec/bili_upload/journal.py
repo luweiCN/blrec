@@ -632,7 +632,9 @@ class RecordingJournalBridge:
         record_start_time: int,
         event_id: Optional[str] = None,
     ) -> None:
-        now = int(self._clock())
+        clock_now = self._clock()
+        now = int(clock_now)
+        timeline_start_at_ms = int(clock_now * 1000)
         source_path = self._normalize_path(path)
         journal_id = self._new_event_id(event_id)
 
@@ -666,14 +668,15 @@ class RecordingJournalBridge:
                 connection.execute(
                     'INSERT INTO recording_parts('
                     'session_id,run_id,part_index,source_path,record_start_time,'
-                    'artifact_state,created_at,updated_at) '
-                    "VALUES(?,?,?,?,?,'recording',?,?)",
+                    'timeline_start_at_ms,artifact_state,created_at,updated_at) '
+                    "VALUES(?,?,?,?,?,?,'recording',?,?)",
                     (
                         session_id,
                         run_id,
                         part_index,
                         source_path,
                         int(record_start_time),
+                        timeline_start_at_ms,
                         now,
                         now,
                     ),
@@ -685,7 +688,10 @@ class RecordingJournalBridge:
                 int(row['room_id']),
                 run_id,
                 source_path,
-                {'record_start_time': int(record_start_time)},
+                {
+                    'record_start_time': int(record_start_time),
+                    'timeline_start_at_ms': timeline_start_at_ms,
+                },
                 now,
             )
 
@@ -695,6 +701,7 @@ class RecordingJournalBridge:
             run_id=run_id,
             path=source_path,
             record_start_time=record_start_time,
+            timeline_start_at_ms=timeline_start_at_ms,
             result='journaled',
         )
 

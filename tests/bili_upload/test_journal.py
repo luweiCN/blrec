@@ -65,6 +65,22 @@ async def test_recording_start_freezes_room_upload_intent(database) -> None:
 
 
 @pytest.mark.asyncio
+async def test_video_created_records_local_media_timeline_anchor(database) -> None:
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000.250)
+    run_id = await journal.recording_started(100, live_start_time=900)
+
+    await journal.video_created(run_id, '/rec/p1.flv', record_start_time=990)
+
+    row = await database.fetchone(
+        'SELECT record_start_time,timeline_start_at_ms '
+        'FROM recording_parts WHERE run_id=?',
+        (run_id,),
+    )
+    assert row is not None
+    assert dict(row) == {'record_start_time': 990, 'timeline_start_at_ms': 1_000_250}
+
+
+@pytest.mark.asyncio
 async def test_part_order_is_creation_order_not_completion_order(
     database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
