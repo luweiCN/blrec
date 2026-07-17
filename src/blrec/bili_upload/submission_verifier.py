@@ -94,7 +94,10 @@ def _matches_expected(
     if name != 'description' or expected.get('copyright') != 2:
         return False
     source = _text(expected.get('source'))
-    return bool(source) and actual_value == '{}\n{}'.format(source, expected_value)
+    prefixed_description = (
+        source if not expected_value else '{}\n{}'.format(source, expected_value)
+    )
+    return bool(source) and actual_value == prefixed_description
 
 
 def _expected_fields(

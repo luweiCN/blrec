@@ -108,6 +108,26 @@ def test_repost_description_accepts_bilibili_source_prefix() -> None:
     assert result.mismatches == ()
 
 
+def test_repost_description_accepts_source_as_the_whole_empty_description() -> None:
+    expected = snapshot()
+    expected.update(
+        {'copyright': 2, 'source': 'https://live.bilibili.com/100', 'description': ''}
+    )
+    response = detail()
+    response['data']['archive'].update(
+        {
+            'copyright': 2,
+            'source': 'https://live.bilibili.com/100',
+            'desc': 'https://live.bilibili.com/100',
+        }
+    )
+
+    result = verify_submission(expected, response, scheduled_publish_at=10_000)
+
+    assert result.state == 'passed'
+    assert result.mismatches == ()
+
+
 def test_legacy_snapshot_checks_only_fields_that_were_persisted() -> None:
     expected = {
         'format_version': 1,
