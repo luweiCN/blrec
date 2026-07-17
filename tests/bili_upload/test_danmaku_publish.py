@@ -364,7 +364,7 @@ async def test_startup_recovery_exposes_every_in_flight_item(
         database, 1, [0, 0, 0], states=['in_flight', 'in_flight', 'in_flight']
     )
     await database.execute(
-        "UPDATE upload_jobs SET danmaku_branch_state='paused' WHERE id=1"
+        "UPDATE upload_jobs SET danmaku_branch_state='publishing' WHERE id=1"
     )
     await database.execute(
         'UPDATE danmaku_items SET lease_owner=?,lease_until=? WHERE id=2',
@@ -381,6 +381,10 @@ async def test_startup_recovery_exposes_every_in_flight_item(
     assert [row['state'] for row in rows] == ['unknown_outcome'] * 3
     assert all('B 站是否收到无法确认' in row['error_message'] for row in rows)
     assert all(row['lease_owner'] is None for row in rows)
+    assert (
+        await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
+        == 'paused'
+    )
 
 
 @pytest.mark.asyncio

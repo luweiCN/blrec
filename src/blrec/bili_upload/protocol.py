@@ -570,7 +570,7 @@ class BiliProtocolClient:
             if self._wbi_keys is not None and now < self._wbi_keys_expires_at:
                 return self._wbi_keys
             response = await self._standard_request(
-                'web_nav', headers=self._tv_headers()
+                'web_nav', headers=self._tv_headers(), check_code=False
             )
             data = response.get('data')
             wbi_images = data.get('wbi_img') if isinstance(data, dict) else None

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
 import pytest
+from yarl import URL
 
 from blrec.bili_upload.crypto import CookieRecord, CredentialBundle
 from blrec.bili_upload.errors import (
@@ -94,7 +95,7 @@ class WbiDiscoveryTransport:
         self.requests.append(request)
         if request.operation == 'web_nav':
             payload = {
-                'code': 0,
+                'code': -101,
                 'data': {
                     'wbi_img': {
                         'img_url': (
@@ -216,10 +217,49 @@ async def test_wbi_signing_matches_the_pinned_vector() -> None:
 
     assert signed == {
         'bar': '2333',
-        'foo': '-_-%20F%20%E5%93%94~',
+        'foo': '-_- F 哔~',
         'wts': '1748867128',
         'w_rid': '6ba96e28a3f09b40e704f1e4b4f8e3e3',
     }
+
+
+@pytest.mark.asyncio
+async def test_wbi_query_values_are_encoded_once_by_the_http_transport() -> None:
+    transport = ScriptedTransport({'post_danmaku': {'code': 0, 'data': {'dmid': 9001}}})
+    client = protocol_client(transport)
+
+    await client.post_danmaku(
+        credential_fixture(), {'oid': 202, 'msg': '中文弹幕', 'progress': 1}
+    )
+
+    request = transport.requests[-1]
+    encoded_url = str(URL(request.url).with_query(list(request.query)))
+    assert '%E4%B8%AD%E6%96%87%E5%BC%B9%E5%B9%95' in encoded_url
+    assert '%25E4%25B8%25AD' not in encoded_url
+
+
+@pytest.mark.asyncio
+async def test_post_danmaku_marks_send_started_before_transport() -> None:
+    events: List[str] = []
+
+    class OrderedTransport(ScriptedTransport):
+        async def send(self, request: ProtocolRequest) -> ProtocolResponse:
+            events.append('transport')
+            return await super().send(request)
+
+    transport = OrderedTransport({'post_danmaku': {'code': 0, 'data': {'dmid': 9001}}})
+    client = protocol_client(transport)
+
+    async def mark_send_started() -> None:
+        events.append('send_started')
+
+    await client.post_danmaku(
+        credential_fixture(),
+        {'oid': 202, 'msg': '测试', 'progress': 1},
+        on_prepared=mark_send_started,
+    )
+
+    assert events == ['send_started', 'transport']
 
 
 def test_web_cookie_jar_honours_domain_path_expiry_and_csrf() -> None:

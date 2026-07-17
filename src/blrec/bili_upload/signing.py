@@ -2,7 +2,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Tuple
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
 
 from blrec.bili import wbi
 
@@ -134,7 +134,7 @@ class WbiSigner:
         signed = {}
         for part in query.split('&'):
             name, value = part.split('=', 1)
-            signed[name] = value
+            signed[name] = unquote(value)
         return signed
 
 
