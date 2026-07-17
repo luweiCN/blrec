@@ -82,4 +82,10 @@ describe('TaskSettingsDialogComponent', () => {
     expect(component.options).toEqual(taskOptions);
     expect(component.model).toBeDefined();
   });
+
+  it('uses the standard settings dialog width', () => {
+    const modal = fixture.nativeElement.querySelector('nz-modal');
+
+    expect(modal.getAttribute('nzwidth')).toBe('760px');
+  });
 });

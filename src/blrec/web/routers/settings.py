@@ -49,8 +49,5 @@ async def change_task_options(room_id: int, options: TaskOptions) -> TaskOptions
 
     Task-specific options will shadow the corresponding global settings.
     Explicitly set options to **null** will remove the value shadowing.
-
-    Change network request headers will cause
-    the Danmaku client be **reconnected**!
     """
     return await app.change_task_options(room_id, options)

@@ -18,9 +18,8 @@ from typing import (
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import StreamingResponse
 
-from blrec.bili_upload.danmaku_publish import DanmakuPublisher
 from blrec.bili_upload.journal import (
     DanmakuItemProgress,
     RecordingJournalBridge,
@@ -58,7 +57,6 @@ from .bili_accounts import authenticated_manager_subject
 from .room_upload_policies import RoomUploadPolicyRequest
 
 journal: Optional[RecordingJournalBridge] = None
-danmaku_publisher: Optional[DanmakuPublisher] = None
 content_reader: Optional[RecordingContentReader] = None
 task_actions: Optional[UploadTaskActionManager] = None
 session_action_runner: Optional[Callable[..., Awaitable[str]]] = None
@@ -178,18 +176,6 @@ class UploadJobProgressResponse(ApiModel):
     current_part_index: Optional[int]
     unknown_danmaku_items: List[DanmakuItemProgressResponse]
     parts: List[UploadPartProgressResponse]
-
-
-class DanmakuDecisionRequest(ApiModel):
-    action: Literal['assume_success', 'retry_accept_duplicate_risk']
-    reason: str = Field(..., min_length=1, max_length=500)
-
-    @validator('reason')
-    def reason_must_not_be_blank(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError('reason must not be blank')
-        return normalized
 
 
 class UploadJobActionRequest(ApiModel):
@@ -420,15 +406,6 @@ def get_recording_journal() -> RecordingJournalBridge:
             detail=unavailable_reason or 'Recording journal is unavailable',
         )
     return journal
-
-
-def get_danmaku_publisher() -> DanmakuPublisher:
-    if danmaku_publisher is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=unavailable_reason or 'Danmaku backfill is unavailable',
-        )
-    return danmaku_publisher
 
 
 def get_content_reader() -> RecordingContentReader:
@@ -1296,31 +1273,3 @@ async def list_recording_danmaku(
         ],
         next_cursor=page.next_cursor,
     )
-
-
-@router.post(
-    '/danmaku-items/{item_id}/decision', status_code=status.HTTP_204_NO_CONTENT
-)
-async def decide_unknown_danmaku(
-    item_id: int,
-    command: DanmakuDecisionRequest,
-    subject: str = Depends(authenticated_manager_subject),
-    publisher: DanmakuPublisher = Depends(get_danmaku_publisher),
-) -> Response:
-    try:
-        if command.action == 'assume_success':
-            await publisher.assume_success(
-                item_id, manager_subject=subject, reason=command.reason
-            )
-        else:
-            await publisher.retry_accept_duplicate_risk(
-                item_id, manager_subject=subject, reason=command.reason
-            )
-    except ValueError as error:
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if str(error).startswith('unknown danmaku item')
-            else status.HTTP_409_CONFLICT
-        )
-        raise HTTPException(status_code=code, detail=str(error)) from None
-    return Response(status_code=status.HTTP_204_NO_CONTENT)

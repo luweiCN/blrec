@@ -226,7 +226,6 @@ async def _active_highlight_durations(session_id: int) -> Mapping[int, int]:
 bili_accounts.manager = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_sessions.journal = None
-recording_sessions.danmaku_publisher = None
 recording_sessions.content_reader = None
 recording_sessions.task_actions = None
 recording_sessions.session_action_runner = None
@@ -331,7 +330,6 @@ async def on_startup() -> None:
         bili_accounts.manager = _bili_account_runtime.manager
         bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_sessions.journal = _bili_account_runtime.journal
-        recording_sessions.danmaku_publisher = _bili_account_runtime.danmaku_publisher
         recording_sessions.content_reader = _bili_account_runtime.content_reader
         recording_sessions.task_actions = _bili_account_runtime.task_actions
         recording_sessions.session_action_runner = (
@@ -374,7 +372,6 @@ async def on_startup() -> None:
         _application_started = False
         bili_accounts.manager = None
         recording_sessions.journal = None
-        recording_sessions.danmaku_publisher = None
         recording_sessions.content_reader = None
         recording_sessions.task_actions = None
         recording_sessions.session_action_runner = None
@@ -403,7 +400,6 @@ async def on_shuntdown() -> None:
     _application_started = False
     bili_accounts.manager = None
     recording_sessions.journal = None
-    recording_sessions.danmaku_publisher = None
     recording_sessions.content_reader = None
     recording_sessions.task_actions = None
     recording_sessions.session_action_runner = None

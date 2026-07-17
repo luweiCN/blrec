@@ -26,7 +26,6 @@ import {
   TIMEOUT_OPTIONS,
   DISCONNECTION_TIMEOUT_OPTIONS,
   BUFFER_OPTIONS,
-  DELETE_STRATEGIES,
   COVER_SAVE_STRATEGIES,
   RECORDING_MODE_OPTIONS,
 } from '../../settings/shared/constants/form';
@@ -54,8 +53,6 @@ export class TaskSettingsDialogComponent implements OnChanges {
   @ViewChild(NgForm)
   ngForm?: NgForm;
 
-  readonly warningTip =
-    '需要重启弹幕客户端才能生效，如果任务正在录制可能会丢失弹幕！';
   readonly pathTemplatePattern = PATH_TEMPLATE_PATTERN;
   readonly streamFormatOptions = cloneDeep(STREAM_FORMAT_OPTIONS) as Mutable<
     typeof STREAM_FORMAT_OPTIONS
@@ -77,9 +74,6 @@ export class TaskSettingsDialogComponent implements OnChanges {
   ) as Mutable<typeof DISCONNECTION_TIMEOUT_OPTIONS>;
   readonly bufferOptions = cloneDeep(BUFFER_OPTIONS) as Mutable<
     typeof BUFFER_OPTIONS
-  >;
-  readonly deleteStrategies = cloneDeep(DELETE_STRATEGIES) as Mutable<
-    typeof DELETE_STRATEGIES
   >;
   readonly coverSaveStrategies = cloneDeep(COVER_SAVE_STRATEGIES) as Mutable<
     typeof COVER_SAVE_STRATEGIES

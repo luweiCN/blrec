@@ -72,7 +72,6 @@ describe('RecordingSessionsComponent', () => {
       'RecordingSessionService',
       [
         'listSessions',
-        'decideDanmakuItem',
         'runJobAction',
         'runSessionAction',
         'retryFailedJobs',
@@ -87,7 +86,6 @@ describe('RecordingSessionsComponent', () => {
       'info',
     ]);
     realtimeEvents = new Subject<RealtimeEvent>();
-    service.decideDanmakuItem.and.returnValue(of(void 0));
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
     service.retryFailedJobs.and.returnValue(of({ results: [] }));
@@ -748,11 +746,14 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.detailVisible).toBeTrue();
     expect(fixture.componentInstance.selectedSession).toBe(session);
     expect(drawer.nzWidth).toBe('1180px');
-    expect(document.body.textContent).toContain('投稿配置核验：部分完成');
-    expect(document.body.textContent).toContain('1 项可核验设置未返回');
-    expect(document.body.textContent).toContain(
+    expect(document.body.textContent).not.toContain('投稿配置核验');
+    expect(document.body.textContent).not.toContain('可核验设置未返回');
+    expect(document.body.textContent).not.toContain(
       '2 项设置暂时无法从 B 站稿件详情核验',
     );
+    expect(document.body.textContent).not.toContain('视为已发送');
+    expect(document.body.textContent).not.toContain('接受重复风险并重试');
+    expect(document.body.textContent).not.toContain('需要确认的弹幕');
     expect(document.body.textContent).not.toContain('remote-p1');
     fixture.componentInstance.closeDetails();
     expect(fixture.componentInstance.detailVisible).toBeFalse();
@@ -914,25 +915,4 @@ describe('RecordingSessionsComponent', () => {
     ).not.toBeNull();
   });
 
-  it('requires a reason before accepting duplicate danmaku risk', () => {
-    fixture.detectChanges();
-    const item =
-      fixture.componentInstance.sessions[0].uploadJob!.unknownDanmakuItems[0];
-
-    fixture.componentInstance.openDanmakuDecision(
-      item,
-      'retry_accept_duplicate_risk',
-    );
-    fixture.componentInstance.decisionReason = '';
-    fixture.componentInstance.submitDanmakuDecision();
-    expect(service.decideDanmakuItem).not.toHaveBeenCalled();
-
-    fixture.componentInstance.decisionReason = '已人工核对，接受重复风险';
-    fixture.componentInstance.submitDanmakuDecision();
-
-    expect(service.decideDanmakuItem).toHaveBeenCalledOnceWith(11, {
-      action: 'retry_accept_duplicate_risk',
-      reason: '已人工核对，接受重复风险',
-    });
-  });
 });

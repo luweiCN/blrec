@@ -1,5 +1,6 @@
 <nz-modal
   [nzTitle]="title"
+  nzWidth="760px"
   nzCentered
   [nzVisible]="visible"
   [nzOkDisabled]="ngForm?.form?.invalid"
@@ -654,125 +655,6 @@
             (nzCheckedChange)="
               options.postprocessing.remuxToMp4 = $event
                 ? globalSettings.postprocessing.remuxToMp4
-                : null
-            "
-            >覆盖全局设置</label
-          >
-        </nz-form-item>
-        <nz-form-item class="setting-item">
-          <nz-form-label
-            class="setting-label"
-            nzNoColon
-            [nzTooltipTitle]="deleteSourceTip"
-            >源文件删除策略</nz-form-label
-          >
-          <ng-template #deleteSourceTip>
-            <p>
-              自动: 没出错就删除源文件<br />
-              谨慎: 没出错且没警告才删除源文件<br />
-              从不: 总是保留源文件<br />
-            </p>
-          </ng-template>
-          <nz-form-control class="setting-control select">
-            <nz-select
-              name="deleteSource"
-              [(ngModel)]="model.postprocessing.deleteSource"
-              [disabled]="
-                options.postprocessing.deleteSource === null ||
-                !options.postprocessing.remuxToMp4
-              "
-              [nzOptions]="deleteStrategies"
-            ></nz-select>
-          </nz-form-control>
-          <label
-            nz-checkbox
-            [nzChecked]="options.postprocessing.deleteSource !== null"
-            (nzCheckedChange)="
-              options.postprocessing.deleteSource = $event
-                ? globalSettings.postprocessing.deleteSource
-                : null
-            "
-            >覆盖全局设置</label
-          >
-        </nz-form-item>
-      </div>
-
-      <div ngModelGroup="header" class="form-group header">
-        <h2>网络请求</h2>
-        <nz-form-item class="setting-item textarea">
-          <nz-form-label class="setting-label" nzFor="userAgent" nzNoColon
-            >User Agent</nz-form-label
-          >
-          <nz-form-control
-            class="setting-control textarea"
-            [nzWarningTip]="warningTip"
-            [nzValidateStatus]="
-              userAgent.valid &&
-              options.header.userAgent !== taskOptions.header.userAgent &&
-              options.header.userAgent !== globalSettings.header.userAgent
-                ? 'warning'
-                : userAgent
-            "
-            [nzErrorTip]="userAgentErrorTip"
-          >
-            <textarea
-              #userAgent="ngModel"
-              nz-input
-              required
-              id="userAgent"
-              name="userAgent"
-              [rows]="3"
-              [(ngModel)]="model.header.userAgent"
-              [disabled]="options.header.userAgent === null"
-            ></textarea>
-          </nz-form-control>
-          <ng-template #userAgentErrorTip let-control>
-            <ng-container *ngIf="control.hasError('required')">
-              请输入 User Agent
-            </ng-container>
-          </ng-template>
-          <label
-            nz-checkbox
-            [nzChecked]="options.header.userAgent !== null"
-            (nzCheckedChange)="
-              options.header.userAgent = $event
-                ? globalSettings.header.userAgent
-                : null
-            "
-            >覆盖全局设置</label
-          >
-        </nz-form-item>
-        <nz-form-item class="setting-item textarea">
-          <nz-form-label class="setting-label" nzFor="cookie" nzNoColon
-            >Cookie</nz-form-label
-          >
-          <nz-form-control
-            class="setting-control textarea"
-            [nzWarningTip]="warningTip"
-            [nzValidateStatus]="
-              cookie.valid &&
-              options.header.cookie !== taskOptions.header.cookie &&
-              options.header.cookie !== globalSettings.header.cookie
-                ? 'warning'
-                : cookie
-            "
-          >
-            <textarea
-              #cookie="ngModel"
-              nz-input
-              id="cookie"
-              name="cookie"
-              [rows]="3"
-              [(ngModel)]="model.header.cookie"
-              [disabled]="options.header.cookie === null"
-            ></textarea>
-          </nz-form-control>
-          <label
-            nz-checkbox
-            [nzChecked]="options.header.cookie !== null"
-            (nzCheckedChange)="
-              options.header.cookie = $event
-                ? globalSettings.header.cookie
                 : null
             "
             >覆盖全局设置</label

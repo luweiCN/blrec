@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_synology_compose_pulls_one_pinned_public_image() -> None:
     compose = (ROOT / 'compose.synology.yml').read_text(encoding='utf8')
     assert 'build:' not in compose
-    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.10}' in compose
+    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.11}' in compose
     assert 'container_name: blrec-next' in compose
     assert 'network_mode: host' in compose
     assert 'ports:' not in compose
@@ -17,7 +17,7 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
 
 def test_environment_example_contains_no_credential() -> None:
     example = (ROOT / 'synology.env.example').read_text(encoding='utf8')
-    assert 'BLREC_IMAGE_TAG=3.0.0-beta.10' in example
+    assert 'BLREC_IMAGE_TAG=3.0.0-beta.11' in example
     assert 'BLREC_ADMIN_USERNAME=admin' in example
     assert 'BLREC_API_KEY=\n' in example
     assert 'BLREC_CREDENTIAL_KEY=' not in example

@@ -59,25 +59,6 @@ describe('RecordingSessionService', () => {
     request.flush({ degradedReason: null, total: 0, sessions: [] });
   });
 
-  it('sends one explicit decision for an unknown danmaku item', () => {
-    service
-      .decideDanmakuItem(11, {
-        action: 'retry_accept_duplicate_risk',
-        reason: '已人工核对，接受重复风险',
-      })
-      .subscribe();
-
-    const request = http.expectOne(
-      '/api/v1/recording-sessions/danmaku-items/11/decision'
-    );
-    expect(request.request.method).toBe('POST');
-    expect(request.request.body).toEqual({
-      action: 'retry_accept_duplicate_risk',
-      reason: '已人工核对，接受重复风险',
-    });
-    request.flush(null, { status: 204, statusText: 'No Content' });
-  });
-
   it('uses one endpoint for single and batch upload-job actions', () => {
     service.runJobAction('repair_transcode', [9, 10]).subscribe();
 

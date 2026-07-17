@@ -60,6 +60,7 @@ def test_migration_keeps_safe_recording_settings_but_not_secrets(
                 output={'path_template': '{roomid}/task_{year}', 'duration_limit': 300},
                 header={'user_agent': 'legacy-task-agent', 'cookie': 'task-secret'},
                 recorder={'quality_number': 10000},
+                postprocessing={'delete_source': 'safe'},
             ),
             TaskSettings(room_id=200),
         ],
@@ -115,8 +116,9 @@ def test_migration_keeps_safe_recording_settings_but_not_secrets(
     assert tasks[100].enable_monitor is False
     assert tasks[100].enable_recorder is False
     assert tasks[100].output.path_template == '{roomid}/task_{year}'
-    assert tasks[100].header.user_agent == 'legacy-task-agent'
+    assert tasks[100].header.user_agent is None
     assert tasks[100].header.cookie is None
+    assert tasks[100].postprocessing.delete_source is None
     assert tasks[100].recorder.quality_number == 10000
 
     assert report.settings_backup.read_text(encoding='utf8') == new_before

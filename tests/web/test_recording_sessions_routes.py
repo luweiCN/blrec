@@ -249,7 +249,6 @@ class FakeSubmissionManager:
 def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
     old_reason = recording_sessions.unavailable_reason
-    old_publisher = recording_sessions.danmaku_publisher
     old_task_actions = getattr(recording_sessions, 'task_actions', None)
     old_session_action_runner = getattr(
         recording_sessions, 'session_action_runner', None
@@ -264,7 +263,6 @@ def restore_router_state() -> Iterator[None]:
     yield
     recording_sessions.journal = old_journal
     recording_sessions.unavailable_reason = old_reason
-    recording_sessions.danmaku_publisher = old_publisher
     recording_sessions.task_actions = old_task_actions
     recording_sessions.session_action_runner = old_session_action_runner
     recording_sessions.submission_manager = old_submission_manager
@@ -284,7 +282,6 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     api.include_router(recording_sessions.router, prefix='/api/v1')
     security.api_key = 'test-api-key'
     recording_sessions.journal = FakeJournal()  # type: ignore[assignment]
-    recording_sessions.danmaku_publisher = AsyncMock()
     recording_sessions.task_actions = AsyncMock()
     recording_sessions.session_action_runner = AsyncMock()
     recording_sessions.submission_manager = FakeSubmissionManager()
@@ -589,31 +586,6 @@ def test_unavailable_journal_returns_503(client: TestClient) -> None:
 
     assert response.status_code == 503
     assert response.json()['detail'] == 'upload database is unavailable'
-
-
-def test_unknown_danmaku_decision_requires_auth_and_reason(client: TestClient) -> None:
-    publisher = recording_sessions.danmaku_publisher
-    assert isinstance(publisher, AsyncMock)
-
-    response = client.post(
-        '/api/v1/recording-sessions/danmaku-items/11/decision',
-        headers={'x-api-key': 'test-api-key'},
-        json={'action': 'assume_success', 'reason': '已在稿件页面确认存在'},
-    )
-
-    assert response.status_code == 204
-    publisher.assume_success.assert_awaited_once()
-    assert (
-        publisher.assume_success.await_args.kwargs['reason'] == '已在稿件页面确认存在'
-    )
-    assert publisher.assume_success.await_args.kwargs['manager_subject']
-
-    invalid = client.post(
-        '/api/v1/recording-sessions/danmaku-items/11/decision',
-        headers={'x-api-key': 'test-api-key'},
-        json={'action': 'retry_accept_duplicate_risk', 'reason': ''},
-    )
-    assert invalid.status_code == 422
 
 
 def test_upload_job_actions_return_partial_batch_results(

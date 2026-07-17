@@ -13,8 +13,6 @@ import { NzMessageService } from 'ng-zorro-antd/message';
 
 import {
   CommentBranchState,
-  DanmakuDecisionAction,
-  DanmakuItemProgress,
   DanmakuBranchState,
   DanmakuImportState,
   RecordingArtifactState,
@@ -65,11 +63,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   readonly pageSizeOptions = [20, 50, 100];
   selectedSession: RecordingSession | null = null;
   detailVisible = false;
-  decisionItem: DanmakuItemProgress | null = null;
-  decisionAction: DanmakuDecisionAction | null = null;
-  decisionReason = '';
-  decisionSubmitting = false;
-  decisionError: string | null = null;
   videoVisible = false;
   videoSession: RecordingSession | null = null;
   videoPart: RecordingPart | null = null;
@@ -177,14 +170,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   get errorMessage(): string | null {
     return this.view.state === 'error' ? this.view.message : null;
-  }
-
-  get decisionVisible(): boolean {
-    return this.decisionItem !== null && this.decisionAction !== null;
-  }
-
-  get canSubmitDecision(): boolean {
-    return !this.decisionSubmitting && this.decisionReason.trim().length > 0;
   }
 
   get selectedSessionCount(): number {
@@ -850,18 +835,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }[state];
   }
 
-  submissionVerificationLabel(
-    state: UploadJobProgress['submissionVerificationState'],
-  ): string {
-    return {
-      pending: '等待核验',
-      passed: '可核验项一致',
-      different: '发现差异',
-      partial: '部分完成',
-      failed: '核验失败',
-    }[state];
-  }
-
   uploadPartStateLabel(state: UploadPartState): string {
     return {
       prepared: '等待上传',
@@ -919,65 +892,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       completed: '自动修复完成',
       exhausted: '自动修复失败',
     }[stage];
-  }
-
-  openDanmakuDecision(
-    item: DanmakuItemProgress,
-    action: DanmakuDecisionAction,
-  ): void {
-    this.decisionItem = item;
-    this.decisionAction = action;
-    this.decisionReason = '';
-    this.decisionError = null;
-    this.changeDetector.markForCheck();
-  }
-
-  closeDanmakuDecision(): void {
-    if (this.decisionSubmitting) {
-      return;
-    }
-    this.decisionItem = null;
-    this.decisionAction = null;
-    this.decisionReason = '';
-    this.decisionError = null;
-    this.changeDetector.markForCheck();
-  }
-
-  submitDanmakuDecision(): void {
-    const item = this.decisionItem;
-    const action = this.decisionAction;
-    const reason = this.decisionReason.trim();
-    if (!item || !action || !reason || this.decisionSubmitting) {
-      return;
-    }
-    this.decisionSubmitting = true;
-    this.decisionError = null;
-    this.recordingSessions
-      .decideDanmakuItem(item.id, { action, reason })
-      .pipe(
-        finalize(() => {
-          this.decisionSubmitting = false;
-          this.changeDetector.markForCheck();
-        }),
-      )
-      .subscribe({
-        next: () => {
-          this.decisionItem = null;
-          this.decisionAction = null;
-          this.decisionReason = '';
-          this.load();
-        },
-        error: (error: unknown) => {
-          this.decisionError = this.describeError(error);
-          this.changeDetector.markForCheck();
-        },
-      });
-  }
-
-  decisionTitle(): string {
-    return this.decisionAction === 'assume_success'
-      ? '将弹幕视为已发送'
-      : '接受重复风险并重试';
   }
 
   formatDanmakuProgress(progressMs: number): string {

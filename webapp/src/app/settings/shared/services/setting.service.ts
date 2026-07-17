@@ -58,8 +58,6 @@ export class SettingService {
    * Task-specific options will shadow the corresponding global settings.
    * Explicitly set options to **null** will remove the value shadowing.
    *
-   * Change network request headers will cause the Danmaku client be **reconnected**!
-   *
    * @param roomId the real room id of the task
    * @param options options to change
    * @returns changed options

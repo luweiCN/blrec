@@ -562,6 +562,21 @@ class TaskOptions(BaseModel):
     recorder: RecorderOptions = RecorderOptions()
     postprocessing: PostprocessingOptions = PostprocessingOptions()
 
+    @root_validator
+    def _use_global_network_and_delete_settings(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        header = values.get('header')
+        if isinstance(header, HeaderOptions):
+            header.user_agent = None
+            header.cookie = None
+
+        postprocessing = values.get('postprocessing')
+        if isinstance(postprocessing, PostprocessingOptions):
+            postprocessing.delete_source = None
+
+        return values
+
     @classmethod
     def from_settings(cls, settings: TaskSettings) -> TaskOptions:
         return cls(

@@ -142,46 +142,39 @@ class DanmakuPublisher:
 
     async def recover_interrupted(self) -> int:
         now = int(self._clock())
-        message = '弹幕在发起请求阶段被中断，B 站是否收到无法确认'
-        legacy_message = '弹幕在进程中断前已发出，结果无法安全确认'
+        message = '弹幕发送被中断，已自动重新排队'
 
         def recover(connection: sqlite3.Connection) -> List[sqlite3.Row]:
-            connection.execute(
-                'UPDATE danmaku_items SET error_message=? '
-                "WHERE state='unknown_outcome' AND error_message=?",
-                (message, legacy_message),
-            )
-            connection.execute(
-                'UPDATE upload_jobs SET review_reason=?,updated_at=? '
-                "WHERE danmaku_branch_state='paused' AND review_reason=?",
-                (message, now, legacy_message),
-            )
             rows = connection.execute(
                 'SELECT item.id,item.attempt,item.progress_ms,part.id AS part_id,'
                 'part.job_id,part.cid FROM danmaku_items item '
                 'JOIN upload_parts part ON part.id=item.part_id '
-                "WHERE item.state='in_flight'"
+                "WHERE item.state IN ('in_flight','unknown_outcome')"
             ).fetchall()
             for row in rows:
                 connection.execute(
-                    "UPDATE danmaku_items SET state='unknown_outcome',"
+                    "UPDATE danmaku_items SET state='prepared',"
                     'error_code=NULL,error_message=?,next_attempt_at=?,'
                     'lease_owner=NULL,lease_until=NULL WHERE id=? '
-                    "AND state='in_flight'",
-                    (message, _DORMANT_UNTIL, int(row['id'])),
+                    "AND state IN ('in_flight','unknown_outcome')",
+                    (message, now, int(row['id'])),
                 )
+            job_ids = {int(row['job_id']) for row in rows}
+            for job_id in job_ids:
                 connection.execute(
-                    "UPDATE upload_jobs SET danmaku_branch_state='paused',"
-                    'review_reason=?,updated_at=? WHERE id=? '
-                    "AND danmaku_branch_state IN ('publishing','paused')",
-                    (message, now, int(row['job_id'])),
+                    "UPDATE upload_jobs SET danmaku_branch_state='publishing',"
+                    'review_reason=NULL,updated_at=? WHERE id=? AND state='
+                    "'approved' AND danmaku_branch_state='paused' AND EXISTS("
+                    'SELECT 1 FROM bili_accounts account WHERE account.id='
+                    "upload_jobs.account_id AND account.state='active')",
+                    (now, job_id),
                 )
             return rows
 
         recovered = await self._database.write(recover)
         for row in recovered:
             audit(
-                'danmaku_outcome_unknown',
+                'danmaku_requeued',
                 level='WARNING',
                 job_id=int(row['job_id']),
                 part_id=int(row['part_id']),
@@ -191,7 +184,7 @@ class DanmakuPublisher:
                 attempt=int(row['attempt']),
                 reason=message,
                 recovery=True,
-                result='unknown_outcome',
+                result='prepared',
             )
         return len(recovered)
 
@@ -207,29 +200,6 @@ class DanmakuPublisher:
         self._last_job_by_account[candidate.account_id] = candidate.job_id
         await self._process(claim)
         return claim.id
-
-    async def retry_accept_duplicate_risk(
-        self, item_id: int, *, manager_subject: str, reason: str
-    ) -> None:
-        await self._manual_transition(
-            item_id,
-            manager_subject=manager_subject,
-            reason=reason,
-            action='retry_danmaku_accept_duplicate_risk',
-            new_state='prepared',
-        )
-
-    async def assume_success(
-        self, item_id: int, *, manager_subject: str, reason: str
-    ) -> None:
-        job_id = await self._manual_transition(
-            item_id,
-            manager_subject=manager_subject,
-            reason=reason,
-            action='assume_danmaku_success',
-            new_state='confirmed',
-        )
-        await self._complete_if_done(job_id)
 
     async def _select_candidate(self, now: float) -> Optional[_Candidate]:
         rows = await self._database.fetchall(
@@ -322,9 +292,7 @@ class DanmakuPublisher:
     async def _process(self, claim: LeaseClaim) -> None:
         work = await self._load(claim)
         if work.state == 'in_flight':
-            await self._mark_unknown(
-                claim, work, '弹幕在发起请求阶段被中断，B 站是否收到无法确认'
-            )
+            await self._retry_uncertain(claim, work, '弹幕在发起请求阶段被中断')
             return
         if work.branch_state != 'publishing':
             await self._release(claim, _DORMANT_UNTIL)
@@ -349,7 +317,7 @@ class DanmakuPublisher:
             await self._safe_retry(claim, work, '弹幕请求确认未发出，将自动重试')
             return
         except RemoteOutcomeUnknown:
-            await self._mark_unknown(claim, work, '弹幕请求可能已送达，禁止自动重发')
+            await self._retry_uncertain(claim, work, '弹幕请求结果未返回')
             return
         except BiliApiError as error:
             await self._handle_api_error(claim, work, error)
@@ -361,12 +329,9 @@ class DanmakuPublisher:
             await self._pause_branch(claim, work, '投稿账号凭据无法读取')
             return
         except ProtocolContractError:
-            await self._mark_unknown(claim, work, '弹幕接口响应异常，无法确认发送结果')
+            await self._retry_uncertain(claim, work, '弹幕接口响应异常')
             return
         dmid = self._response_dmid(response)
-        if dmid is None:
-            await self._mark_unknown(claim, work, '弹幕接口未返回 DMID，禁止自动重发')
-            return
         await self._confirm(claim, work, dmid)
         audit(
             'danmaku_confirmed',
@@ -548,21 +513,23 @@ class DanmakuPublisher:
             release=True,
         )
 
-    async def _mark_unknown(
+    async def _retry_uncertain(
         self, claim: LeaseClaim, work: _DanmakuWork, message: str
     ) -> None:
+        delay = max(self._interval_seconds, min(300, 2 ** min(claim.attempt, 8)))
+        retry_message = '{}，已自动重新排队'.format(message)
         await self._update_item(
             claim,
             {
-                'state': 'unknown_outcome',
+                'state': 'prepared',
                 'error_code': None,
-                'error_message': message,
-                'next_attempt_at': _DORMANT_UNTIL,
+                'error_message': retry_message,
+                'next_attempt_at': self._deadline(delay),
             },
             release=True,
         )
         audit(
-            'danmaku_outcome_unknown',
+            'danmaku_requeued',
             level='WARNING',
             job_id=work.job_id,
             part_id=work.part_id,
@@ -570,11 +537,10 @@ class DanmakuPublisher:
             cid=work.cid,
             progress_ms=work.progress_ms,
             attempt=claim.attempt,
-            reason=message,
+            reason=retry_message,
             recovery=False,
-            result='unknown_outcome',
+            result='prepared',
         )
-        await self._pause_job_without_claim(work.job_id, message)
 
     async def _pause_branch(
         self,
@@ -679,72 +645,6 @@ class DanmakuPublisher:
             (branch_state, int(self._clock()), job_id),
         )
 
-    async def _manual_transition(
-        self,
-        item_id: int,
-        *,
-        manager_subject: str,
-        reason: str,
-        action: str,
-        new_state: str,
-    ) -> int:
-        if not manager_subject.strip() or not reason.strip():
-            raise ValueError('manager subject and reason must not be empty')
-        now = int(self._clock())
-
-        def transition(connection: sqlite3.Connection) -> int:
-            row = connection.execute(
-                'SELECT part.job_id,item.state FROM danmaku_items item '
-                'JOIN upload_parts part ON part.id=item.part_id WHERE item.id=?',
-                (item_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("unknown danmaku item '{}'".format(item_id))
-            old_state = str(row['state'])
-            if old_state != 'unknown_outcome':
-                raise ValueError('only an unknown danmaku outcome can be decided')
-            job_id = int(row['job_id'])
-            connection.execute(
-                'UPDATE danmaku_items SET state=?,error_code=NULL,error_message=NULL,'
-                'next_attempt_at=?,lease_owner=NULL,lease_until=NULL WHERE id=?',
-                (new_state, now, item_id),
-            )
-            unknown_remaining = int(
-                connection.execute(
-                    'SELECT COUNT(*) FROM danmaku_items item '
-                    'JOIN upload_parts part ON part.id=item.part_id '
-                    "WHERE part.job_id=? AND item.state='unknown_outcome'",
-                    (job_id,),
-                ).fetchone()[0]
-            )
-            if unknown_remaining == 0:
-                connection.execute(
-                    "UPDATE upload_jobs SET danmaku_branch_state='publishing',"
-                    "review_reason=NULL,updated_at=? WHERE id=? AND state='approved' "
-                    "AND danmaku_branch_state='paused' AND EXISTS("
-                    'SELECT 1 FROM bili_accounts account WHERE account.id='
-                    "upload_jobs.account_id AND account.state='active')",
-                    (now, job_id),
-                )
-            connection.execute(
-                'INSERT INTO management_audit('
-                'manager_subject,action,target_type,target_id,old_state,new_state,'
-                'reason,created_at) VALUES(?,?,?,?,?,?,?,?)',
-                (
-                    manager_subject.strip(),
-                    action,
-                    'danmaku_item',
-                    str(item_id),
-                    old_state,
-                    new_state,
-                    reason.strip(),
-                    now,
-                ),
-            )
-            return job_id
-
-        return await self._database.write(transition)
-
     async def _load(self, claim: LeaseClaim) -> _DanmakuWork:
         row = await self._database.fetchone(
             'SELECT item.id,item.part_id,item.state,item.progress_ms,item.mode,'
@@ -817,7 +717,9 @@ class DanmakuPublisher:
             result='started',
         )
 
-    async def _confirm(self, claim: LeaseClaim, work: _DanmakuWork, dmid: int) -> None:
+    async def _confirm(
+        self, claim: LeaseClaim, work: _DanmakuWork, dmid: Optional[int]
+    ) -> None:
         def confirm(connection: sqlite3.Connection) -> None:
             updated = connection.execute(
                 "UPDATE danmaku_items SET state='confirmed',dmid=?,error_code=NULL,"
