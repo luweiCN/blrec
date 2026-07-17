@@ -13,6 +13,8 @@ __all__ = ('Dumper',)
 
 
 class Dumper:
+    _LIVE_READ_FLUSH_BYTES = 1024**2
+
     def __init__(
         self,
         path_provider: Callable[..., Tuple[str, int]],
@@ -30,6 +32,7 @@ class Dumper:
         self._path: str = ''
         self._file: Optional[io.BufferedReader] = None
         self._flv_writer: Optional[FlvWriter] = None
+        self._unflushed_bytes = 0
 
     @property
     def path(self) -> str:
@@ -66,6 +69,14 @@ class Dumper:
             logger.debug(f'Closed file: {self._path}')
             self._file_closed.on_next(self._path)
 
+    def _record_write(self, size: int) -> None:
+        self._unflushed_bytes += size
+        flush_threshold = min(self.buffer_size, self._LIVE_READ_FLUSH_BYTES)
+        if self._file is not None and self._unflushed_bytes >= flush_threshold:
+            self._file.flush()
+            self._unflushed_bytes = 0
+        self._size_updates.on_next(size)
+
     def _dump(self, source: FLVStream) -> FLVStream:
         def subscribe(
             observer: abc.ObserverBase[FLVStreamItem],
@@ -84,12 +95,12 @@ class Dumper:
                         assert self._file is not None
                         self._flv_writer = FlvWriter(self._file)
                         size = self._flv_writer.write_header(item)
-                        self._size_updates.on_next(size)
+                        self._record_write(size)
                         self._timestamp_updates.on_next(0)
                     else:
                         if self._flv_writer is not None:
                             size = self._flv_writer.write_tag(item)
-                            self._size_updates.on_next(size)
+                            self._record_write(size)
                             self._timestamp_updates.on_next(item.timestamp)
 
                     observer.on_next(item)
