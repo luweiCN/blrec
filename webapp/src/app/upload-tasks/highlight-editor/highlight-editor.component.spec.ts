@@ -352,6 +352,18 @@ describe('HighlightEditorComponent', () => {
     expect(highlights.listClips).toHaveBeenCalledOnceWith(9);
   });
 
+  it('places the timeline directly below the video preview', () => {
+    const video = fixture.nativeElement.querySelector('video') as HTMLElement;
+    const timelinePanel = fixture.nativeElement.querySelector(
+      '.timeline-panel',
+    ) as HTMLElement;
+
+    expect(video.nextElementSibling).toBe(timelinePanel);
+    expect(timelinePanel.firstElementChild?.classList).toContain(
+      'timeline-track',
+    );
+  });
+
   it('marks the view after the timeline loads asynchronously', () => {
     const timelineResponse = new Subject<HighlightTimeline>();
     highlights.getTimeline.and.returnValue(timelineResponse);

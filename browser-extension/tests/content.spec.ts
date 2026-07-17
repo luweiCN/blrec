@@ -185,6 +185,9 @@ describe('Bilibili live controls', () => {
       '.blrec-highlight-popover input'
     )!;
     expect(input).not.toBeNull();
+    expect(input.autocomplete).toBe('off');
+    expect(input.getAttribute('data-1p-ignore')).toBe('true');
+    expect(input.getAttribute('data-op-ignore')).toBe('true');
     now = 1_005_000;
     input.value = '精彩操作';
     input.dispatchEvent(new Event('input'));

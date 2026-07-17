@@ -21,6 +21,9 @@
           <h2 id="preview-heading">视频预览</h2>
           <span *ngIf="selectedPart">
             P{{ selectedPart.partIndex }} · {{ formatTime(playheadMs) }}
+            <ng-container *ngIf="mediaAccess?.snapshotId">
+              · 录制中，以本次打开的内容为准
+            </ng-container>
           </span>
         </div>
         <button
@@ -54,21 +57,8 @@
         (error)="handleMediaError()"
         (stalled)="handleMediaStalled()"
       ></video>
-      <p *ngIf="mediaAccess?.snapshotId" class="compact-hint">
-        录制中的视频以本次打开时的内容为准。
-      </p>
 
-      <div class="timeline-panel" aria-labelledby="timeline-heading">
-        <div class="section-heading">
-          <div>
-            <h2 id="timeline-heading">选择片段</h2>
-            <span>
-              {{ formatTime(startMs) }}–{{ formatTime(endMs) }}，共
-              {{ formatTime(endMs - startMs) }}
-            </span>
-          </div>
-        </div>
-
+      <div class="timeline-panel" aria-label="选择片段">
         <div
           #timelineTrack
           class="timeline-track"
@@ -131,6 +121,14 @@
             [style.left.%]="positionPercent(playheadMs)"
             aria-hidden="true"
           ></span>
+        </div>
+
+        <div class="timeline-summary">
+          <strong>选择片段</strong>
+          <span>
+            {{ formatTime(startMs) }}–{{ formatTime(endMs) }}，共
+            {{ formatTime(endMs - startMs) }}
+          </span>
         </div>
 
         <div class="selection-toolbar">

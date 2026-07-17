@@ -223,12 +223,17 @@ export class HighlightContentController {
     return new Promise((resolve) => {
       const popover = this.document.createElement('form');
       popover.className = 'blrec-highlight-popover';
+      popover.autocomplete = 'off';
       popover.setAttribute('aria-label', '高光名称');
       const input = this.document.createElement('input');
       input.type = 'text';
+      input.name = 'blrec-highlight-name';
+      input.autocomplete = 'off';
       input.maxLength = 200;
       input.placeholder = '高光名称（可不填）';
       input.setAttribute('aria-label', '高光名称');
+      input.setAttribute('data-1p-ignore', 'true');
+      input.setAttribute('data-op-ignore', 'true');
       const actions = this.document.createElement('div');
       const cancel = this.document.createElement('button');
       cancel.type = 'button';
