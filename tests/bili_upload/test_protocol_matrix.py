@@ -86,6 +86,35 @@ class ScriptedTransport:
         )
 
 
+class WbiDiscoveryTransport:
+    def __init__(self) -> None:
+        self.requests: List[ProtocolRequest] = []
+
+    async def send(self, request: ProtocolRequest) -> ProtocolResponse:
+        self.requests.append(request)
+        if request.operation == 'web_nav':
+            payload = {
+                'code': 0,
+                'data': {
+                    'wbi_img': {
+                        'img_url': (
+                            'https://i0.hdslb.com/bfs/wbi/'
+                            '7cd084941338484aae1ad9425b84077c.png'
+                        ),
+                        'sub_url': (
+                            'https://i0.hdslb.com/bfs/wbi/'
+                            '4932caff0ff746eab6f01bf08b70ac45.png'
+                        ),
+                    }
+                },
+            }
+        else:
+            payload = {'code': 0, 'data': {'dmid': 9001}}
+        return ProtocolResponse(
+            status=200, headers={}, body=json.dumps(payload).encode('utf8')
+        )
+
+
 def protocol_client(transport: Any) -> BiliProtocolClient:
     return BiliProtocolClient(
         transport=transport,
@@ -93,6 +122,28 @@ def protocol_client(transport: Any) -> BiliProtocolClient:
         web_session_builder=WebSessionBuilder(clock=lambda: 100),
         clock=lambda: 100,
     )
+
+
+@pytest.mark.asyncio
+async def test_default_wbi_signer_discovers_and_caches_remote_keys() -> None:
+    transport = WbiDiscoveryTransport()
+    client = BiliProtocolClient(
+        transport=transport,
+        web_session_builder=WebSessionBuilder(clock=lambda: 100),
+        clock=lambda: 100,
+    )
+    bundle = credential_fixture()
+
+    await client.post_danmaku(bundle, {'oid': 202, 'msg': 'one', 'progress': 1})
+    await client.post_danmaku(bundle, {'oid': 202, 'msg': 'two', 'progress': 2})
+
+    assert [request.operation for request in transport.requests] == [
+        'web_nav',
+        'post_danmaku',
+        'post_danmaku',
+    ]
+    for request in transport.requests[1:]:
+        assert 'w_rid' in dict(request.query)
 
 
 @pytest.mark.parametrize(

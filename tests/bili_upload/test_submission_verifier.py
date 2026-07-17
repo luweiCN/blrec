@@ -90,6 +90,24 @@ def test_verification_accepts_no_disturbance_zero_when_dynamic_is_enabled() -> N
     assert result.state == 'passed'
 
 
+def test_repost_description_accepts_bilibili_source_prefix() -> None:
+    expected = snapshot()
+    expected.update({'copyright': 2, 'source': 'https://live.bilibili.com/100'})
+    response = detail()
+    response['data']['archive'].update(
+        {
+            'copyright': 2,
+            'source': 'https://live.bilibili.com/100',
+            'desc': 'https://live.bilibili.com/100\n主播：测试主播',
+        }
+    )
+
+    result = verify_submission(expected, response, scheduled_publish_at=10_000)
+
+    assert result.state == 'passed'
+    assert result.mismatches == ()
+
+
 def test_legacy_snapshot_checks_only_fields_that_were_persisted() -> None:
     expected = {
         'format_version': 1,

@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 from loguru import logger
 
@@ -43,7 +43,7 @@ from .recording_content import RecordingContentReader
 from .retention import RetentionManager
 from .review import ReviewWatcher
 from .session_submission import SessionSubmissionManager
-from .signing import WbiSigner, WebSessionBuilder
+from .signing import WebSessionBuilder
 from .task_actions import UploadTaskActionManager, UploadTaskActionRejected
 from .upload import UploadCoordinator
 from .upos import UposUploader
@@ -52,10 +52,6 @@ __all__ = ('BiliAccountRuntime',)
 
 _COMMENT_ACTION_INTERVAL_SECONDS = 5
 _DANMAKU_ACTION_INTERVAL_SECONDS = 25
-
-
-async def _unavailable_wbi_keys() -> Tuple[str, str]:
-    raise RuntimeError('WBI key provider is not configured')
 
 
 class BiliAccountRuntime:
@@ -371,6 +367,7 @@ class BiliAccountRuntime:
                 auth_refresh=manager.refresh_account,
                 clock=self._clock,
             )
+            await danmaku_publisher.recover_interrupted()
             review_watcher = ReviewWatcher(
                 database,
                 protocol,
@@ -650,7 +647,6 @@ class BiliAccountRuntime:
         self._transport = transport
         return BiliProtocolClient(
             transport=transport,
-            wbi_signer=WbiSigner(_unavailable_wbi_keys, clock=self._clock),
             web_session_builder=WebSessionBuilder(clock=self._clock),
             clock=self._clock,
         )

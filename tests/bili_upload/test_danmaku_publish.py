@@ -112,8 +112,14 @@ class FakeProtocol:
         self.results: List[Any] = []
 
     async def post_danmaku(
-        self, _bundle: object, params: Mapping[str, Any]
+        self,
+        _bundle: object,
+        params: Mapping[str, Any],
+        *,
+        on_prepared: Optional[Any] = None,
     ) -> Mapping[str, Any]:
+        if on_prepared is not None:
+            await on_prepared()
         self.calls.append(dict(params))
         result = (
             self.results.pop(0)
@@ -250,6 +256,13 @@ async def test_success_uses_recorded_style_and_saves_dmid(
         and fields['dmid'] == 9001
         for event, fields in events
     )
+    assert any(
+        event == 'danmaku_send_started'
+        and fields['job_id'] == 1
+        and fields['item_id'] == 1
+        and fields['progress_ms'] == 0
+        for event, fields in events
+    )
 
 
 @pytest.mark.asyncio
@@ -267,6 +280,32 @@ async def test_definitely_not_sent_retries_safely(database: BiliUploadDatabase) 
     assert row['state'] == 'prepared'
     assert row['next_attempt_at'] > clock.value
     assert row['lease_owner'] is None
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_happens_before_item_is_marked_in_flight(
+    database: BiliUploadDatabase,
+) -> None:
+    await seed_job(database, 1, [0])
+
+    class PreflightFailingProtocol(FakeProtocol):
+        async def post_danmaku(
+            self,
+            _bundle: object,
+            params: Mapping[str, Any],
+            *,
+            on_prepared: Optional[Any] = None,
+        ) -> Mapping[str, Any]:
+            assert await database.scalar('SELECT state FROM danmaku_items') == (
+                'prepared'
+            )
+            raise DefinitelyNotSent('post_danmaku')
+
+    protocol = PreflightFailingProtocol()
+
+    await publisher(database, protocol, FakeClock()).run_once()
+
+    assert await database.scalar('SELECT state FROM danmaku_items') == 'prepared'
 
 
 @pytest.mark.asyncio
@@ -315,6 +354,61 @@ async def test_crash_interrupted_in_flight_item_is_not_sent_again(
 
     assert protocol.calls == []
     assert await database.scalar('SELECT state FROM danmaku_items') == 'unknown_outcome'
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_exposes_every_in_flight_item(
+    database: BiliUploadDatabase,
+) -> None:
+    await seed_job(
+        database, 1, [0, 0, 0], states=['in_flight', 'in_flight', 'in_flight']
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET danmaku_branch_state='paused' WHERE id=1"
+    )
+    await database.execute(
+        'UPDATE danmaku_items SET lease_owner=?,lease_until=? WHERE id=2',
+        ('previous-process', 999_999),
+    )
+    worker = publisher(database, FakeProtocol(), FakeClock())
+
+    recovered = await worker.recover_interrupted()
+
+    assert recovered == 3
+    rows = await database.fetchall(
+        'SELECT state,error_message,lease_owner FROM danmaku_items ORDER BY id'
+    )
+    assert [row['state'] for row in rows] == ['unknown_outcome'] * 3
+    assert all('B 站是否收到无法确认' in row['error_message'] for row in rows)
+    assert all(row['lease_owner'] is None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_rewords_legacy_unknown_message(
+    database: BiliUploadDatabase,
+) -> None:
+    legacy_message = '弹幕在进程中断前已发出，结果无法安全确认'
+    await seed_job(database, 1, [0], states=['unknown_outcome'])
+    await database.execute(
+        'UPDATE danmaku_items SET error_message=?', (legacy_message,)
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET danmaku_branch_state='paused',review_reason=? "
+        'WHERE id=1',
+        (legacy_message,),
+    )
+
+    recovered = await publisher(
+        database, FakeProtocol(), FakeClock()
+    ).recover_interrupted()
+
+    assert recovered == 0
+    assert 'B 站是否收到无法确认' in str(
+        await database.scalar('SELECT error_message FROM danmaku_items')
+    )
+    assert 'B 站是否收到无法确认' in str(
+        await database.scalar('SELECT review_reason FROM upload_jobs WHERE id=1')
+    )
 
 
 @pytest.mark.asyncio

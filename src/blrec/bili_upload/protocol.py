@@ -6,11 +6,12 @@ import secrets
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
+from blrec.bili import wbi
 from blrec.networking.manager import NetworkPurpose, NetworkRouteManager
 from blrec.networking.resolver import SourceBoundResolver
 
@@ -264,16 +265,19 @@ class BiliProtocolClient:
         self,
         *,
         transport: Any,
-        wbi_signer: WbiSigner,
+        wbi_signer: Optional[WbiSigner] = None,
         web_session_builder: WebSessionBuilder,
         tv_signer: Optional[BiliTvSigner] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._transport = transport
-        self._wbi_signer = wbi_signer
         self._web = web_session_builder
         self._tv = tv_signer or BiliTvSigner()
         self._clock = clock
+        self._wbi_key_lock = asyncio.Lock()
+        self._wbi_keys: Optional[Tuple[str, str]] = None
+        self._wbi_keys_expires_at = 0.0
+        self._wbi_signer = wbi_signer or WbiSigner(self._load_wbi_keys, clock=clock)
         self._owner_token = secrets.token_hex(16)
 
     async def create_qr(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -557,6 +561,35 @@ class BiliProtocolClient:
     async def web_nav(self, bundle: CredentialBundle) -> Mapping[str, Any]:
         return await self._web_request('web_nav', bundle)
 
+    async def _load_wbi_keys(self) -> Tuple[str, str]:
+        now = self._clock()
+        if self._wbi_keys is not None and now < self._wbi_keys_expires_at:
+            return self._wbi_keys
+        async with self._wbi_key_lock:
+            now = self._clock()
+            if self._wbi_keys is not None and now < self._wbi_keys_expires_at:
+                return self._wbi_keys
+            response = await self._standard_request(
+                'web_nav', headers=self._tv_headers()
+            )
+            data = response.get('data')
+            wbi_images = data.get('wbi_img') if isinstance(data, dict) else None
+            if not isinstance(wbi_images, dict):
+                raise ProtocolContractError('Web nav response has no WBI keys')
+            img_url = wbi_images.get('img_url')
+            sub_url = wbi_images.get('sub_url')
+            if not isinstance(img_url, str) or not isinstance(sub_url, str):
+                raise ProtocolContractError('Web nav response has no WBI keys')
+            keys = (wbi.extract_key(img_url), wbi.extract_key(sub_url))
+            if any(
+                len(key) != 32 or any(char not in '0123456789abcdef' for char in key)
+                for key in keys
+            ):
+                raise ProtocolContractError('Web nav returned invalid WBI keys')
+            self._wbi_keys = keys
+            self._wbi_keys_expires_at = now + 600
+            return keys
+
     async def list_replies(
         self, bundle: CredentialBundle, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
@@ -582,11 +615,31 @@ class BiliProtocolClient:
         return await self._csrf_request('top_reply', bundle, params)
 
     async def post_danmaku(
-        self, bundle: CredentialBundle, params: Mapping[str, Any]
+        self,
+        bundle: CredentialBundle,
+        params: Mapping[str, Any],
+        *,
+        on_prepared: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Mapping[str, Any]:
-        form = {**params, 'csrf': self._web.csrf(bundle)}
-        query = await self._wbi_signer.sign(form)
-        return await self._web_request('post_danmaku', bundle, query=query, form=form)
+        try:
+            form = {**params, 'csrf': self._web.csrf(bundle)}
+            query = await self._wbi_signer.sign(form)
+            url = self._url_for('post_danmaku')
+            request = ProtocolRequest(
+                operation='post_danmaku',
+                method='POST',
+                url=url,
+                headers=self._web_headers(bundle, url),
+                query=self._parameters(query),
+                form=self._parameters(form),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise DefinitelyNotSent('post_danmaku') from None
+        if on_prepared is not None:
+            await on_prepared()
+        return await self._execute(request, idempotent=False)
 
     async def _csrf_request(
         self, operation: str, bundle: CredentialBundle, params: Mapping[str, Any]

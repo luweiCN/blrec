@@ -140,6 +140,61 @@ class DanmakuPublisher:
             account_id, DanmakuBreaker(self._interval_seconds)
         )
 
+    async def recover_interrupted(self) -> int:
+        now = int(self._clock())
+        message = '弹幕在发起请求阶段被中断，B 站是否收到无法确认'
+        legacy_message = '弹幕在进程中断前已发出，结果无法安全确认'
+
+        def recover(connection: sqlite3.Connection) -> List[sqlite3.Row]:
+            connection.execute(
+                'UPDATE danmaku_items SET error_message=? '
+                "WHERE state='unknown_outcome' AND error_message=?",
+                (message, legacy_message),
+            )
+            connection.execute(
+                'UPDATE upload_jobs SET review_reason=?,updated_at=? '
+                "WHERE danmaku_branch_state='paused' AND review_reason=?",
+                (message, now, legacy_message),
+            )
+            rows = connection.execute(
+                'SELECT item.id,item.attempt,item.progress_ms,part.id AS part_id,'
+                'part.job_id,part.cid FROM danmaku_items item '
+                'JOIN upload_parts part ON part.id=item.part_id '
+                "WHERE item.state='in_flight'"
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    "UPDATE danmaku_items SET state='unknown_outcome',"
+                    'error_code=NULL,error_message=?,next_attempt_at=?,'
+                    'lease_owner=NULL,lease_until=NULL WHERE id=? '
+                    "AND state='in_flight'",
+                    (message, _DORMANT_UNTIL, int(row['id'])),
+                )
+                connection.execute(
+                    "UPDATE upload_jobs SET danmaku_branch_state='paused',"
+                    'review_reason=?,updated_at=? WHERE id=? '
+                    "AND danmaku_branch_state IN ('publishing','paused')",
+                    (message, now, int(row['job_id'])),
+                )
+            return rows
+
+        recovered = await self._database.write(recover)
+        for row in recovered:
+            audit(
+                'danmaku_outcome_unknown',
+                level='WARNING',
+                job_id=int(row['job_id']),
+                part_id=int(row['part_id']),
+                item_id=int(row['id']),
+                cid=None if row['cid'] is None else int(row['cid']),
+                progress_ms=int(row['progress_ms']),
+                attempt=int(row['attempt']),
+                reason=message,
+                recovery=True,
+                result='unknown_outcome',
+            )
+        return len(recovered)
+
     async def run_once(self) -> Optional[int]:
         now = self._clock()
         candidate = await self._select_candidate(now)
@@ -268,7 +323,7 @@ class DanmakuPublisher:
         work = await self._load(claim)
         if work.state == 'in_flight':
             await self._mark_unknown(
-                claim, work, '弹幕在进程中断前已发出，结果无法安全确认'
+                claim, work, '弹幕在发起请求阶段被中断，B 站是否收到无法确认'
             )
             return
         if work.branch_state != 'publishing':
@@ -282,10 +337,13 @@ class DanmakuPublisher:
             async with gate.hold(work.credential_version):
                 bundle = await self._bundle_loader(work.account_id)
                 send_at = self._clock()
-                await self._start_send(claim, work, send_at)
-                self.breaker_for(work.account_id).reserve_send(send_at)
+
+                async def mark_send_started() -> None:
+                    await self._start_send(claim, work, send_at)
+                    self.breaker_for(work.account_id).reserve_send(send_at)
+
                 response = await self._protocol.post_danmaku(
-                    bundle, self._request_params(work)
+                    bundle, self._request_params(work), on_prepared=mark_send_started
                 )
         except DefinitelyNotSent:
             await self._safe_retry(claim, work, '弹幕请求确认未发出，将自动重试')
@@ -509,6 +567,11 @@ class DanmakuPublisher:
             job_id=work.job_id,
             part_id=work.part_id,
             item_id=work.id,
+            cid=work.cid,
+            progress_ms=work.progress_ms,
+            attempt=claim.attempt,
+            reason=message,
+            recovery=False,
             result='unknown_outcome',
         )
         await self._pause_job_without_claim(work.job_id, message)
@@ -743,6 +806,16 @@ class DanmakuPublisher:
             )
 
         await self._database.write(start)
+        audit(
+            'danmaku_send_started',
+            job_id=work.job_id,
+            part_id=work.part_id,
+            item_id=work.id,
+            cid=work.cid,
+            progress_ms=work.progress_ms,
+            attempt=claim.attempt,
+            result='started',
+        )
 
     async def _confirm(self, claim: LeaseClaim, work: _DanmakuWork, dmid: int) -> None:
         def confirm(connection: sqlite3.Connection) -> None:

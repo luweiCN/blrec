@@ -73,7 +73,7 @@ def verify_submission(
             missing.append(name)
             continue
         checked.append(name)
-        if actual_value != expected_value:
+        if not _matches_expected(name, expected_value, actual_value, expected):
             differences[name] = {'expected': expected_value, 'actual': actual_value}
 
     state = (
@@ -84,6 +84,17 @@ def verify_submission(
     return SubmissionVerification(
         state, tuple(checked), tuple(missing), differences, unverifiable
     )
+
+
+def _matches_expected(
+    name: str, expected_value: Any, actual_value: Any, expected: Mapping[str, Any]
+) -> bool:
+    if actual_value == expected_value:
+        return True
+    if name != 'description' or expected.get('copyright') != 2:
+        return False
+    source = _text(expected.get('source'))
+    return bool(source) and actual_value == '{}\n{}'.format(source, expected_value)
 
 
 def _expected_fields(
