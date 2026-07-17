@@ -1,7 +1,4 @@
-<nz-page-header
-  [nzTitle]="pageTitle"
-  [nzSubtitle]="pageSubtitle"
->
+<nz-page-header [nzTitle]="pageTitle" [nzSubtitle]="pageSubtitle">
   <nz-page-header-extra>
     <div class="header-actions">
       <button
@@ -266,7 +263,10 @@
               referrerpolicy="no-referrer"
             />
             <div class="session-cell-text">
-              <nz-tag *ngIf="session.sourceKind === 'highlight'" nzColor="orange">
+              <nz-tag
+                *ngIf="session.sourceKind === 'highlight'"
+                nzColor="orange"
+              >
                 高光
               </nz-tag>
               <ng-container *ngIf="archiveUrl(session) as url; else plainTitle">
@@ -277,21 +277,21 @@
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  <strong>{{ session.title || '未记录直播标题' }}</strong>
+                  <strong>{{ session.title || "未记录直播标题" }}</strong>
                 </a>
               </ng-container>
               <ng-template #plainTitle>
-                <strong>{{ session.title || '未记录直播标题' }}</strong>
+                <strong>{{ session.title || "未记录直播标题" }}</strong>
               </ng-template>
               <span>
-                {{ session.anchorName || '未知主播' }} · 房间
+                {{ session.anchorName || "未知主播" }} · 房间
                 {{ session.roomId }}
               </span>
             </div>
           </div>
         </td>
         <td class="nowrap">
-          {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm' }}
+          {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
         </td>
         <td>
           <div>{{ session.partCount }} 个分 P</div>
@@ -304,11 +304,16 @@
           <nz-tag [nzColor]="displayStateColor(session.displayState)">
             {{ displayStateLabel(session.displayState) }}
           </nz-tag>
-          <div class="secondary-text" *ngIf="displayStateDetail(session) as detail">
+          <div
+            class="secondary-text"
+            *ngIf="displayStateDetail(session) as detail"
+          >
             {{ detail }}
           </div>
           <div class="secondary-text" *ngIf="session.uploadJob as job">
-            <ng-container *ngIf="job.totalBytes > 0 && job.state === 'uploading'">
+            <ng-container
+              *ngIf="job.totalBytes > 0 && job.state === 'uploading'"
+            >
               <nz-progress
                 [nzPercent]="job.percent"
                 [nzShowInfo]="false"
@@ -316,7 +321,7 @@
                 style="display: block; width: 118px"
               ></nz-progress>
               <span>
-                {{ job.percent | number : '1.0-1' }}% ·
+                {{ job.percent | number: "1.0-1" }}% ·
                 {{ formatRate(job.bytesPerSecond) }}
               </span>
             </ng-container>
@@ -329,16 +334,12 @@
           <ng-template #noAccount>—</ng-template>
         </td>
         <td nzRight>
-          <a
-            *ngIf="isRecordingScope && canEditHighlight(session)"
+          <button
             nz-button
             nzType="link"
-            data-testid="edit-highlight"
-            [routerLink]="highlightEditorLink(session)"
+            type="button"
+            (click)="openDetails(session)"
           >
-            剪辑
-          </a>
-          <button nz-button nzType="link" type="button" (click)="openDetails(session)">
             详情
           </button>
           <button
@@ -485,10 +486,10 @@
             <nz-tag *ngIf="session.sourceKind === 'highlight'" nzColor="orange">
               高光
             </nz-tag>
-            {{ session.title || '未记录直播标题' }}
+            {{ session.title || "未记录直播标题" }}
           </h3>
           <div>
-            主播 {{ session.anchorName || '未知' }} · 房间 {{ session.roomId }}
+            主播 {{ session.anchorName || "未知" }} · 房间 {{ session.roomId }}
           </div>
           <div *ngIf="areaLabel(session) as area">{{ area }}</div>
         </div>
@@ -499,7 +500,7 @@
           {{ sessionStateLabel(session.state) }}
         </nz-tag>
         <span>
-          开始于 {{ session.startedAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
+          开始于 {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm:ss" }}
         </span>
         <span>录制 {{ formatDuration(session.recordDurationSeconds) }}</span>
         <span>{{ session.partCount }} 个分 P</span>
@@ -518,7 +519,7 @@
         <div *ngIf="job.totalBytes > 0">
           <div class="session-summary">
             <strong>视频上传进度</strong>
-            <span>{{ job.percent | number : '1.0-1' }}%</span>
+            <span>{{ job.percent | number: "1.0-1" }}%</span>
           </div>
           <nz-progress
             [nzPercent]="job.percent"
@@ -529,7 +530,9 @@
               {{ formatBytes(job.confirmedBytes) }} /
               {{ formatBytes(job.totalBytes) }}
             </span>
-            <span *ngIf="job.currentPartIndex">P{{ job.currentPartIndex }}</span>
+            <span *ngIf="job.currentPartIndex"
+              >P{{ job.currentPartIndex }}</span
+            >
             <span>{{ formatRate(job.bytesPerSecond) }}</span>
             <span>{{ formatEta(job.etaSeconds) }}</span>
           </div>
@@ -544,7 +547,8 @@
             [href]="url"
             target="_blank"
             rel="noopener noreferrer"
-          >{{ job.bvid }}</a>
+            >{{ job.bvid }}</a
+          >
           <span *ngIf="job.bvid && !archiveUrl(session)">{{ job.bvid }}</span>
         </div>
         <div class="upload-reason" *ngIf="job.reviewReason">
@@ -557,7 +561,9 @@
           转码修复：{{ job.repairError }}
         </div>
         <div *ngIf="job.scheduledPublishAt">
-          定时发布：{{ job.scheduledPublishAt * 1000 | date : 'yyyy-MM-dd HH:mm:ss' }}
+          定时发布：{{
+            job.scheduledPublishAt * 1000 | date: "yyyy-MM-dd HH:mm:ss"
+          }}
         </div>
         <div>合集：{{ collectionBranchLabel(job.collectionBranchState) }}</div>
         <div class="repair-error" *ngIf="job.collectionError">
@@ -597,7 +603,9 @@
 
         <div class="danmaku-progress" *ngIf="job.danmakuTotal > 0">
           <strong>弹幕回灌进度</strong>
-          <span>已发送 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}</span>
+          <span
+            >已发送 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}</span
+          >
           <span>待发送 {{ job.danmakuPending }}</span>
           <span *ngIf="job.danmakuUnknown > 0">
             结果未知 {{ job.danmakuUnknown }}
@@ -640,7 +648,9 @@
                 nzSize="small"
                 nzDanger
                 type="button"
-                (click)="openDanmakuDecision(item, 'retry_accept_duplicate_risk')"
+                (click)="
+                  openDanmakuDecision(item, 'retry_accept_duplicate_risk')
+                "
               >
                 接受重复风险并重试
               </button>
@@ -657,7 +667,11 @@
       <div class="parts-table-wrap">
         <table class="parts-table">
           <caption>
-            房间 {{ session.roomId }} 的录制文件
+            房间
+            {{
+              session.roomId
+            }}
+            的录制文件
           </caption>
           <thead>
             <tr>
@@ -674,7 +688,10 @@
             <tr *ngFor="let part of session.parts; trackBy: trackPart">
               <th scope="row">
                 <a
-                  *ngIf="remotePartUrl(session, part.partIndex) as url; else plainPart"
+                  *ngIf="
+                    remotePartUrl(session, part.partIndex) as url;
+                    else plainPart
+                  "
                   [href]="url"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -699,7 +716,9 @@
                     else notUploaded
                   "
                 >
-                  <nz-tag [nzColor]="uploadPartStateColor(uploadPart.uploadState)">
+                  <nz-tag
+                    [nzColor]="uploadPartStateColor(uploadPart.uploadState)"
+                  >
                     {{ uploadPartStateLabel(uploadPart.uploadState) }}
                   </nz-tag>
                   <div class="part-metric" *ngIf="uploadPart.totalBytes > 0">
@@ -717,7 +736,10 @@
                   </div>
                   <div
                     class="part-metric"
-                    *ngIf="uploadPart.repairStage && uploadPart.repairStage !== 'none'"
+                    *ngIf="
+                      uploadPart.repairStage &&
+                      uploadPart.repairStage !== 'none'
+                    "
                   >
                     {{ transcodeRepairStageLabel(uploadPart.repairStage) }}
                     <span *ngIf="uploadPart.repairDiagnostic">
@@ -732,7 +754,9 @@
                   *ngIf="uploadPartFor(session, part.partIndex) as uploadPart"
                 >
                   <div>
-                    {{ uploadPart.cid ? 'CID ' + uploadPart.cid : 'CID 待回填' }}
+                    {{
+                      uploadPart.cid ? "CID " + uploadPart.cid : "CID 待回填"
+                    }}
                   </div>
                   <div class="part-metric">
                     {{ danmakuImportStateLabel(uploadPart.danmakuImportState) }}
@@ -742,7 +766,7 @@
               </td>
               <td>
                 <div>
-                  {{ part.recordStartTime * 1000 | date : 'MM-dd HH:mm:ss' }}
+                  {{ part.recordStartTime * 1000 | date: "MM-dd HH:mm:ss" }}
                 </div>
                 <div class="part-metric">
                   {{ formatDuration(part.recordDurationSeconds) }}
@@ -833,7 +857,11 @@
                   播放
                 </button>
                 <a
-                  *ngIf="isRecordingScope && session.sourceKind === 'live'"
+                  *ngIf="
+                    isRecordingScope &&
+                    session.sourceKind === 'live' &&
+                    (part.sourceExists || part.finalExists)
+                  "
                   nz-button
                   nzType="link"
                   nzSize="small"
@@ -927,7 +955,9 @@
     ></nz-alert>
 
     <div class="decision-target" *ngIf="decisionItem as item">
-      <div>P{{ item.partIndex }} · {{ formatDanmakuProgress(item.progressMs) }}</div>
+      <div>
+        P{{ item.partIndex }} · {{ formatDanmakuProgress(item.progressMs) }}
+      </div>
       <div>{{ item.content }}</div>
     </div>
 
@@ -968,14 +998,12 @@
     <p>找到 {{ retryPreviewItems.length }} 个可以安全重试的失败任务：</p>
     <ul class="retry-list">
       <li *ngFor="let item of retryPreviewItems">
-        <strong>{{ item.title || '未记录直播标题' }}</strong>
+        <strong>{{ item.title || "未记录直播标题" }}</strong>
         <span>房间 {{ item.roomId }} · {{ item.accountDisplayName }}</span>
         <span *ngIf="item.reason">{{ item.reason }}</span>
       </li>
     </ul>
-    <p class="secondary-text">
-      结果未知的任务不会列在这里，也不会被自动重试。
-    </p>
+    <p class="secondary-text">结果未知的任务不会列在这里，也不会被自动重试。</p>
   </ng-container>
 </nz-modal>
 

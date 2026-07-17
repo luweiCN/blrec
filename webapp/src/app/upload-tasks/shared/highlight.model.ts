@@ -65,11 +65,7 @@ export interface HighlightClipInspection {
 }
 
 export type HighlightClipState =
-  | 'queued'
-  | 'processing'
-  | 'ready'
-  | 'failed'
-  | 'cancelled';
+  'queued' | 'processing' | 'ready' | 'failed' | 'cancelled';
 
 export interface HighlightClipSource {
   readonly partId: number;
@@ -117,6 +113,10 @@ export interface CreateHighlightClipRequest {
 
 export interface HighlightUploadTaskResponse {
   readonly jobId: number;
+}
+
+export interface HighlightUploadSessionResponse {
+  readonly sessionId: number;
 }
 
 export interface HighlightMediaAccess {

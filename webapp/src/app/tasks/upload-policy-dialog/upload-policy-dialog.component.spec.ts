@@ -417,17 +417,52 @@ describe('UploadPolicyDialogComponent', () => {
 
     expect(submissionService.get).toHaveBeenCalledOnceWith(7);
     expect(component.modalTitle).toContain('本场投稿设置');
+    const saved = jasmine.createSpy('saved');
+    component.saved.subscribe(saved);
     component.save();
     expect(submissionService.save).toHaveBeenCalledWith(
       7,
       jasmine.objectContaining({ titleTemplate: '旧标题' }),
     );
     expect(policyService.save).not.toHaveBeenCalled();
+    expect(saved).toHaveBeenCalled();
+  });
+
+  it('returns complete settings without writing a room policy for a highlight', () => {
+    policyService.get.and.returnValue(of(existingPolicy));
+    fixture = TestBed.createComponent(UploadPolicyDialogComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('roomId', 100);
+    fixture.componentRef.setInput('roomName', '精彩片段');
+    fixture.componentRef.setInput('deferredSave', true);
+    const confirmed = jasmine.createSpy('confirmed');
+    component.settingsConfirmed.subscribe(confirmed);
+    fixture.detectChanges();
+
+    component.save();
+
+    expect(component.modalTitle).toContain('片段投稿设置');
+    expect(confirmed).toHaveBeenCalledWith(
+      jasmine.objectContaining({
+        enabled: true,
+        titleTemplate: '旧标题',
+        collectionSeasonId: 20,
+        collectionSectionId: 21,
+        coverMode: 'custom',
+        publishDelaySeconds: 21_600,
+      }),
+    );
+    expect(policyService.save).not.toHaveBeenCalled();
+    expect(submissionService.save).not.toHaveBeenCalled();
   });
 
   it('can restore a recording session to inherited room settings', () => {
     submissionService.get.and.returnValue(
-      of({ ...submissionResponse, inherited: false, settingsSource: 'session' }),
+      of({
+        ...submissionResponse,
+        inherited: false,
+        settingsSource: 'session',
+      }),
     );
     fixture = TestBed.createComponent(UploadPolicyDialogComponent);
     component = fixture.componentInstance;
@@ -439,6 +474,27 @@ describe('UploadPolicyDialogComponent', () => {
     component.restoreInherited();
 
     expect(submissionService.clear).toHaveBeenCalledOnceWith(7);
+  });
+
+  it('hides restore-to-inherited when explicit session settings are required', () => {
+    submissionService.get.and.returnValue(
+      of({
+        ...submissionResponse,
+        inherited: false,
+        settingsSource: 'session',
+      }),
+    );
+    fixture = TestBed.createComponent(UploadPolicyDialogComponent);
+    fixture.componentRef.setInput('roomId', 100);
+    fixture.componentRef.setInput('sessionId', 7);
+    fixture.componentRef.setInput('allowRestoreInherited', false);
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="restore-inherited-policy"]',
+      ),
+    ).toBeNull();
   });
 
   it('clears account-specific collection selection when the account changes', () => {

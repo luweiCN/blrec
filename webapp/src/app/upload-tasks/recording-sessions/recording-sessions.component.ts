@@ -121,7 +121,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     private changeDetector: ChangeDetectorRef,
     private clipboard: Clipboard,
     private message: NzMessageService,
-    private realtime: RealtimeService
+    private realtime: RealtimeService,
   ) {}
 
   ngOnInit(): void {
@@ -207,14 +207,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return (
       this.pageSessionIds.length > 0 &&
       this.pageSessionIds.every((sessionId) =>
-        this.selectedSessionIds.has(sessionId)
+        this.selectedSessionIds.has(sessionId),
       )
     );
   }
 
   get somePageSessionsSelected(): boolean {
     const selected = this.pageSessionIds.filter((sessionId) =>
-      this.selectedSessionIds.has(sessionId)
+      this.selectedSessionIds.has(sessionId),
     ).length;
     return selected > 0 && selected < this.pageSessionIds.length;
   }
@@ -228,7 +228,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         next: (response) => {
           this.view = { state: 'ready', response };
           const currentSessionIds = new Set(
-            response.sessions.map((session) => session.id)
+            response.sessions.map((session) => session.id),
           );
           for (const sessionId of this.selectedSessionIds) {
             if (!currentSessionIds.has(sessionId)) {
@@ -238,7 +238,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
           if (this.detailVisible && this.selectedSession) {
             this.selectedSession =
               response.sessions.find(
-                (session) => session.id === this.selectedSession?.id
+                (session) => session.id === this.selectedSession?.id,
               ) ?? null;
             this.detailVisible = this.selectedSession !== null;
           }
@@ -282,7 +282,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         finalize(() => {
           this.retryPreviewLoading = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: (response) => {
@@ -320,15 +320,17 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         finalize(() => {
           this.retryAllLoading = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: (response) => {
           const accepted = response.results.filter((result) => result.accepted);
-          const rejected = response.results.filter((result) => !result.accepted);
+          const rejected = response.results.filter(
+            (result) => !result.accepted,
+          );
           if (rejected.length > 0) {
             this.message.warning(
-              `已重新排队 ${accepted.length} 个任务，跳过 ${rejected.length} 个：${rejected[0].message}`
+              `已重新排队 ${accepted.length} 个任务，跳过 ${rejected.length} 个：${rejected[0].message}`,
             );
           } else {
             this.message.success(`已重新排队 ${accepted.length} 个失败任务`);
@@ -386,7 +388,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   openSessionAction(
     action: RecordingSessionAction,
-    sessionIds: readonly number[]
+    sessionIds: readonly number[],
   ): void {
     const uniqueSessionIds = [
       ...new Set(sessionIds.filter((sessionId) => sessionId > 0)),
@@ -424,12 +426,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         finalize(() => {
           this.uploadActionSubmitting = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: (response) => {
           const accepted = response.results.filter((result) => result.accepted);
-          const rejected = response.results.filter((result) => !result.accepted);
+          const rejected = response.results.filter(
+            (result) => !result.accepted,
+          );
           if (accepted.length === 0) {
             this.uploadActionError = rejected
               .map((result) => `场次 ${result.sessionId}：${result.message}`)
@@ -439,7 +443,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
           }
           if (rejected.length > 0) {
             this.message.warning(
-              `已接受 ${accepted.length} 个任务，${rejected.length} 个未执行：${rejected[0].message}`
+              `已接受 ${accepted.length} 个任务，${rejected.length} 个未执行：${rejected[0].message}`,
             );
           } else if (accepted.length === 1) {
             this.message.success(accepted[0].message);
@@ -486,8 +490,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       set_skip: '本场不会上传；录制任务本身仍会继续监控下一场直播。',
       repost_as_new:
         '系统会使用本地成品重新创建一个 B 站稿件。原稿件不会删除，旧 BV 号会保存在本地历史中。',
-      pause_upload: '系统会在当前分片的安全检查点暂停，并保留已经完成的上传进度。',
-      resume_upload: '系统会从已经保存的上传进度继续，不会重新上传已确认的分片。',
+      pause_upload:
+        '系统会在当前分片的安全检查点暂停，并保留已经完成的上传进度。',
+      resume_upload:
+        '系统会从已经保存的上传进度继续，不会重新上传已确认的分片。',
       edit_submission: '修改本场投稿设置，不影响同一房间的其他直播。',
       edit_task: '只有尚未开始上传的任务可以修改投稿账号和本场投稿设置。',
       delete_local:
@@ -512,13 +518,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   closeSubmissionSettings(): void {
     this.submissionSession = null;
     this.load();
-  }
-
-  canEditHighlight(session: RecordingSession): boolean {
-    return (
-      session.sourceKind === 'live' &&
-      session.parts.some((part) => part.sourceExists || part.finalExists)
-    );
   }
 
   highlightEditorLink(session: RecordingSession): string[] {
@@ -553,7 +552,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         (session) =>
           this.selectedSessionIds.has(session.id) &&
           session.availableActions.includes('edit_task') &&
-          session.uploadJob !== null
+          session.uploadJob !== null,
       )
       .map((session) => session.uploadJob?.id)
       .filter((jobId): jobId is number => jobId !== undefined);
@@ -563,7 +562,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return this.sessions.some(
       (session) =>
         this.selectedSessionIds.has(session.id) &&
-        session.availableActions.includes(action)
+        session.availableActions.includes(action),
     );
   }
 
@@ -715,17 +714,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }[state];
   }
 
-  archiveUrl(
-    session: RecordingSession,
-    partIndex?: number
-  ): string | null {
+  archiveUrl(session: RecordingSession, partIndex?: number): string | null {
     const job = session.uploadJob;
     if (!job?.bvid || (job.state !== 'approved' && job.state !== 'completed')) {
       return null;
     }
     const part = partIndex === undefined ? '' : `?p=${partIndex}`;
     return `https://www.bilibili.com/video/${encodeURIComponent(
-      job.bvid
+      job.bvid,
     )}${part}`;
   }
 
@@ -843,7 +839,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   collectionBranchLabel(
-    state: UploadJobProgress['collectionBranchState']
+    state: UploadJobProgress['collectionBranchState'],
   ): string {
     return {
       disabled: '未加入',
@@ -855,7 +851,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   submissionVerificationLabel(
-    state: UploadJobProgress['submissionVerificationState']
+    state: UploadJobProgress['submissionVerificationState'],
   ): string {
     return {
       pending: '等待核验',
@@ -912,7 +908,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   transcodeRepairStageLabel(
-    stage: NonNullable<UploadPartProgress['repairStage']>
+    stage: NonNullable<UploadPartProgress['repairStage']>,
   ): string {
     return {
       none: '未修复',
@@ -927,7 +923,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   openDanmakuDecision(
     item: DanmakuItemProgress,
-    action: DanmakuDecisionAction
+    action: DanmakuDecisionAction,
   ): void {
     this.decisionItem = item;
     this.decisionAction = action;
@@ -962,7 +958,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         finalize(() => {
           this.decisionSubmitting = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: () => {
@@ -996,7 +992,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   uploadPartFor(
     session: RecordingSession,
-    partIndex: number
+    partIndex: number,
   ): UploadPartProgress | null {
     return (
       session.uploadJob?.parts.find((part) => part.partIndex === partIndex) ??
@@ -1017,7 +1013,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   sessionHeader(session: RecordingSession): string {
     const title = session.title || `房间 ${session.roomId}`;
     return `${title} · 房间 ${session.roomId} · ${this.sessionStateLabel(
-      session.state
+      session.state,
     )}`;
   }
 
@@ -1026,7 +1022,9 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   areaLabel(session: RecordingSession): string {
-    return [session.parentAreaName, session.areaName].filter(Boolean).join(' / ');
+    return [session.parentAreaName, session.areaName]
+      .filter(Boolean)
+      .join(' / ');
   }
 
   formatDuration(seconds: number | null): string {
@@ -1167,7 +1165,9 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }
   }
 
-  private realtimeUploadJobs(data: unknown): RealtimeUploadJobProgress[] | null {
+  private realtimeUploadJobs(
+    data: unknown,
+  ): RealtimeUploadJobProgress[] | null {
     if (typeof data !== 'object' || data === null || !('jobs' in data)) {
       return null;
     }

@@ -13,6 +13,7 @@ import {
   SettingOutline,
   UnorderedListOutline,
   UserOutline,
+  VideoCameraOutline,
 } from '@ant-design/icons-angular/icons';
 import { NZ_ICONS } from 'ng-zorro-antd/icon';
 
@@ -37,6 +38,7 @@ describe('AppComponent', () => {
             SettingOutline,
             UnorderedListOutline,
             UserOutline,
+            VideoCameraOutline,
           ],
         },
       ],
@@ -96,6 +98,23 @@ describe('AppComponent', () => {
     expect(network.textContent?.trim()).toBe('网络管理');
   });
 
+  it('uses distinct icons for room management and recording tasks', () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.detectChanges();
+
+    const roomIcon = fixture.nativeElement
+      .querySelector('a[href="/tasks"]')
+      ?.closest('li')
+      ?.querySelector('i');
+    const recordingIcon = fixture.nativeElement
+      .querySelector('a[href="/recordings"]')
+      ?.closest('li')
+      ?.querySelector('i');
+
+    expect(roomIcon?.classList).toContain('anticon-unordered-list');
+    expect(recordingIcon?.classList).toContain('anticon-video-camera');
+  });
+
   it('shows primary navigation in the expected order', () => {
     const fixture = TestBed.createComponent(AppComponent);
     fixture.detectChanges();
@@ -133,7 +152,7 @@ describe('AppComponent', () => {
   it('lazy loads the independent notification settings page', () => {
     const router = TestBed.inject(Router);
     const route = router.config.find(
-      (candidate) => candidate.path === 'notifications'
+      (candidate) => candidate.path === 'notifications',
     );
 
     expect(route?.loadChildren).toBeDefined();

@@ -5,6 +5,7 @@ import {
 import { TestBed } from '@angular/core/testing';
 
 import { UrlService } from 'src/app/core/services/url.service';
+import { RoomUploadPolicyRequest } from 'src/app/tasks/upload-policy-dialog/room-upload-policy.model';
 import { HighlightService } from './highlight.service';
 
 describe('HighlightService', () => {
@@ -16,7 +17,10 @@ describe('HighlightService', () => {
       imports: [HttpClientTestingModule],
       providers: [
         HighlightService,
-        { provide: UrlService, useValue: { makeApiUrl: (path: string) => path } },
+        {
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
+        },
       ],
     });
     service = TestBed.inject(HighlightService);
@@ -27,15 +31,13 @@ describe('HighlightService', () => {
 
   it('uses the session timeline and inspection endpoints', () => {
     service.getTimeline(9).subscribe();
-    const timeline = http.expectOne(
-      '/api/v1/highlights/sessions/9/timeline'
-    );
+    const timeline = http.expectOne('/api/v1/highlights/sessions/9/timeline');
     expect(timeline.request.method).toBe('GET');
     timeline.flush({ parts: [], markers: [] });
 
     service.inspectClip(9, 20_000, 70_000).subscribe();
     const inspection = http.expectOne(
-      '/api/v1/highlights/sessions/9/clips/inspect'
+      '/api/v1/highlights/sessions/9/clips/inspect',
     );
     expect(inspection.request.method).toBe('POST');
     expect(inspection.request.body).toEqual({
@@ -48,7 +50,7 @@ describe('HighlightService', () => {
   it('creates, loads, deletes and submits one independent clip', () => {
     service.listClips(9).subscribe();
     expect(
-      http.expectOne('/api/v1/highlights/sessions/9/clips').request.method
+      http.expectOne('/api/v1/highlights/sessions/9/clips').request.method,
     ).toBe('GET');
 
     service
@@ -73,7 +75,7 @@ describe('HighlightService', () => {
 
     service.getClip(3).subscribe();
     expect(http.expectOne('/api/v1/highlights/clips/3').request.method).toBe(
-      'GET'
+      'GET',
     );
 
     service.deleteClip(3).subscribe();
@@ -81,10 +83,45 @@ describe('HighlightService', () => {
     expect(remove.request.method).toBe('DELETE');
     remove.flush(null, { status: 204, statusText: 'No Content' });
 
-    service.createUploadTask(3).subscribe();
+    service.prepareUploadSession(3).subscribe();
+    const prepare = http.expectOne('/api/v1/highlights/clips/3/upload-session');
+    expect(prepare.request.method).toBe('POST');
+    expect(prepare.request.body).toBeNull();
+    prepare.flush({ sessionId: 12 });
+
+    const settings: RoomUploadPolicyRequest = {
+      accountMode: 'primary',
+      accountId: null,
+      enabled: true,
+      titleTemplate: '{{ title }} 精选',
+      descriptionTemplate: '高光片段',
+      partTitleTemplate: 'P{{ part_index }}',
+      dynamicTemplate: '高光片段',
+      tid: 21,
+      tags: '高光,直播',
+      creationStatementId: -1,
+      originalAuthorization: false,
+      source: '',
+      isOnlySelf: false,
+      publishDynamic: true,
+      upSelectionReply: false,
+      upCloseReply: false,
+      upCloseDanmu: false,
+      autoComment: true,
+      danmakuBackfill: true,
+      filters: {},
+      collectionSeasonId: 20,
+      collectionSectionId: 21,
+      coverMode: 'live',
+      coverAssetId: null,
+      publishDelaySeconds: 0,
+      retentionMode: 'submitted',
+      retentionDays: 5,
+    };
+    service.createUploadTask(3, settings).subscribe();
     const upload = http.expectOne('/api/v1/highlights/clips/3/upload-task');
     expect(upload.request.method).toBe('POST');
-    expect(upload.request.body).toBeNull();
+    expect(upload.request.body).toEqual(settings);
     upload.flush({ jobId: 17 });
   });
 
@@ -117,10 +154,20 @@ describe('HighlightService', () => {
         token: 'signed token',
         expiresAt: 123,
         fileSizeBytes: 2048,
-      })
+      }),
     ).toBe(
       '/api/v1/highlights/clips/3/media' +
-        '?media_token=signed%20token&media_expires=123'
+        '?media_token=signed%20token&media_expires=123',
+    );
+    expect(
+      service.downloadUrl(3, {
+        token: 'signed token',
+        expiresAt: 123,
+        fileSizeBytes: 2048,
+      }),
+    ).toBe(
+      '/api/v1/highlights/clips/3/media' +
+        '?media_token=signed%20token&media_expires=123&download=1',
     );
   });
 });

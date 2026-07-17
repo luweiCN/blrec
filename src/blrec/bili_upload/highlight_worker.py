@@ -36,6 +36,8 @@ class _WorkSource:
     xml_path: Optional[str]
     requested_start_ms: int
     requested_end_ms: int
+    actual_start_ms: Optional[int]
+    actual_end_ms: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -203,8 +205,9 @@ class HighlightWorker:
             raise HighlightCutError('高光剪辑输出路径不存在')
         source_rows = await self._database.fetchall(
             'SELECT source.part_id,source.ordinal,source.requested_start_ms,'
-            'source.requested_end_ms,part.source_path,part.final_path,part.xml_path,'
-            'part.video_deleted_at FROM highlight_clip_sources source '
+            'source.requested_end_ms,source.actual_start_ms,source.actual_end_ms,'
+            'part.source_path,part.final_path,part.xml_path,part.video_deleted_at '
+            'FROM highlight_clip_sources source '
             'JOIN recording_parts part ON part.id=source.part_id '
             'WHERE source.clip_id=? ORDER BY source.ordinal',
             (claim.id,),
@@ -226,6 +229,16 @@ class HighlightWorker:
                     ),
                     requested_start_ms=int(source['requested_start_ms']),
                     requested_end_ms=int(source['requested_end_ms']),
+                    actual_start_ms=(
+                        None
+                        if source['actual_start_ms'] is None
+                        else int(source['actual_start_ms'])
+                    ),
+                    actual_end_ms=(
+                        None
+                        if source['actual_end_ms'] is None
+                        else int(source['actual_end_ms'])
+                    ),
                 )
             )
         if not sources:
@@ -248,6 +261,10 @@ class HighlightWorker:
                 source.video_path,
                 source.requested_start_ms,
                 source.requested_end_ms,
+                duration_ms=max(source.requested_end_ms, source.actual_end_ms or 0),
+                keyframes_ms=(
+                    () if source.actual_start_ms is None else (source.actual_start_ms,)
+                ),
             )
             for source in work.sources
         )
@@ -361,12 +378,29 @@ class HighlightWorker:
                 None if row['output_xml_path'] is None else str(row['output_xml_path']),
                 include_final=True,
             )
-        transient = self._transient(error)
-        next_attempt_at = (
-            int(self._clock()) + min(300, 2 ** min(claim.attempt, 8))
-            if transient
-            else 0
+        source_state = await self._database.fetchone(
+            'SELECT MAX(part.updated_at) AS updated_at,'
+            'MAX(CASE WHEN part.artifact_state IN '
+            "('recording','postprocessing') THEN 1 ELSE 0 END) AS growing "
+            'FROM highlight_clip_sources source '
+            'JOIN recording_parts part ON part.id=source.part_id '
+            'WHERE source.clip_id=?',
+            (claim.id,),
         )
+        now = int(self._clock())
+        recently_finalized = bool(
+            source_state is not None
+            and source_state['updated_at'] is not None
+            and now - int(source_state['updated_at']) <= 600
+        )
+        retry_incomplete_probe = (
+            bool(source_state is not None and source_state['growing'])
+            or recently_finalized
+        )
+        transient = self._transient(
+            error, retry_incomplete_probe=retry_incomplete_probe
+        )
+        next_attempt_at = now + min(300, 2 ** min(claim.attempt, 8)) if transient else 0
         state = 'queued' if transient else 'failed'
         await self._database.execute(
             'UPDATE highlight_clips SET state=?,error_message=?,lease_owner=NULL,'
@@ -376,7 +410,7 @@ class HighlightWorker:
                 state,
                 '{}: {}'.format(type(error).__name__, error)[:1000],
                 next_attempt_at,
-                int(self._clock()),
+                now,
                 claim.id,
                 claim.lease_owner,
                 claim.lease_generation,
@@ -393,14 +427,22 @@ class HighlightWorker:
         )
 
     @staticmethod
-    def _transient(error: Exception) -> bool:
+    def _transient(error: Exception, *, retry_incomplete_probe: bool) -> bool:
         if isinstance(error, OSError):
             return True
         if isinstance(error, (HighlightCutError, DanmakuCutError)):
             text = str(error)
-            return any(
+            if any(token in text for token in ('超时', 'temporarily')):
+                return True
+            return retry_incomplete_probe and any(
                 token in text
-                for token in ('可用时长', 'ffprobe 无法读取', '超时', 'temporarily')
+                for token in (
+                    '可用时长',
+                    'ffprobe 无法读取',
+                    'ffprobe 返回了无效的视频信息',
+                    'ffprobe 返回了无效的视频流信息',
+                    'ffprobe 返回了无效的关键帧信息',
+                )
             )
         return False
 

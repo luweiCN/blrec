@@ -617,8 +617,6 @@ class HighlightService:
 
     async def delete_clip(self, clip_id: int) -> str:
         clip = await self.get_clip(clip_id)
-        if clip.upload_session_id is not None:
-            raise ValueError('highlight clip already has an upload task')
         if clip.state in ('queued', 'processing'):
             updated = await self._database.execute(
                 "UPDATE highlight_clips SET state='cancelled',lease_owner=NULL,"
@@ -636,10 +634,90 @@ class HighlightService:
                 result='cancelled',
             )
             return 'cancelled'
-        await self._remove_clip_outputs(clip, partial_only=False)
-        deleted = await self._database.execute(
-            'DELETE FROM highlight_clips WHERE id=?', (clip_id,)
-        )
+        self._clip_output_paths(clip, partial_only=False)
+
+        now = int(self._clock())
+
+        def begin_delete(connection: sqlite3.Connection) -> Optional[int]:
+            current = connection.execute(
+                'SELECT upload_session_id FROM highlight_clips WHERE id=?', (clip_id,)
+            ).fetchone()
+            if current is None:
+                raise ValueError('highlight clip state changed')
+            upload_session_id = current['upload_session_id']
+            if upload_session_id is not None:
+                has_job = connection.execute(
+                    'SELECT 1 FROM upload_jobs WHERE session_id=?', (upload_session_id,)
+                ).fetchone()
+                if has_job is not None:
+                    raise ValueError('highlight clip already has an upload task')
+            updated = connection.execute(
+                "UPDATE highlight_clips SET state='cancelled',lease_owner=NULL,"
+                'lease_until=NULL,next_attempt_at=0,updated_at=? WHERE id=?',
+                (now, clip_id),
+            )
+            if updated.rowcount != 1:
+                raise ValueError('highlight clip state changed')
+            return None if upload_session_id is None else int(upload_session_id)
+
+        upload_session_id = await self._database.write(begin_delete)
+        try:
+            await self._remove_clip_outputs(clip, partial_only=False)
+        except OSError as error:
+            audit(
+                'highlight_clip_delete_pending',
+                level='ERROR',
+                clip_id=clip_id,
+                room_id=clip.room_id,
+                reason=str(error)[:500],
+                result='cancelled',
+            )
+            raise
+
+        def finish_delete(connection: sqlite3.Connection) -> int:
+            current = connection.execute(
+                'SELECT state,upload_session_id FROM highlight_clips WHERE id=?',
+                (clip_id,),
+            ).fetchone()
+            if current is None or str(current['state']) != 'cancelled':
+                return 0
+            current_session_id = current['upload_session_id']
+            expected_session_id = upload_session_id
+            if current_session_id != expected_session_id:
+                return 0
+            if current_session_id is not None:
+                has_job = connection.execute(
+                    'SELECT 1 FROM upload_jobs WHERE session_id=?',
+                    (current_session_id,),
+                ).fetchone()
+                if has_job is not None:
+                    raise ValueError('highlight clip already has an upload task')
+            cursor = connection.execute(
+                'DELETE FROM highlight_clips WHERE id=?', (clip_id,)
+            )
+            if cursor.rowcount == 1 and current_session_id is not None:
+                connection.execute(
+                    'DELETE FROM event_journal WHERE run_id IN ('
+                    'SELECT id FROM recording_runs WHERE session_id=?)',
+                    (current_session_id,),
+                )
+                connection.execute(
+                    'DELETE FROM recording_parts WHERE session_id=?',
+                    (current_session_id,),
+                )
+                connection.execute(
+                    'DELETE FROM recording_runs WHERE session_id=?',
+                    (current_session_id,),
+                )
+                connection.execute(
+                    "DELETE FROM recording_sessions WHERE id=? "
+                    "AND source_kind='highlight' "
+                    'AND NOT EXISTS(SELECT 1 FROM upload_jobs WHERE session_id=?)',
+                    (current_session_id, current_session_id),
+                )
+            return cursor.rowcount
+
+        deleted = await self._database.write(finish_delete)
         if deleted != 1:
             raise ValueError('highlight clip state changed')
         audit(
@@ -924,14 +1002,7 @@ class HighlightService:
     async def _remove_clip_outputs(
         self, clip: HighlightClip, *, partial_only: bool
     ) -> None:
-        paths = []
-        for value in (clip.output_video_path, clip.output_xml_path):
-            if value is None:
-                continue
-            path = self._owned_highlight_path(value)
-            paths.append(Path(str(path) + '.partial'))
-            if not partial_only:
-                paths.append(path)
+        paths = self._clip_output_paths(clip, partial_only=partial_only)
 
         def remove() -> None:
             for path in paths:
@@ -941,6 +1012,19 @@ class HighlightService:
                     pass
 
         await asyncio.get_running_loop().run_in_executor(None, remove)
+
+    def _clip_output_paths(
+        self, clip: HighlightClip, *, partial_only: bool
+    ) -> Tuple[Path, ...]:
+        paths = []
+        for value in (clip.output_video_path, clip.output_xml_path):
+            if value is None:
+                continue
+            path = self._owned_highlight_path(value)
+            paths.append(Path(str(path) + '.partial'))
+            if not partial_only:
+                paths.append(path)
+        return tuple(paths)
 
     def _owned_highlight_path(self, value: str) -> Path:
         if self._recording_root is None:

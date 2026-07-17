@@ -44,7 +44,7 @@ from .policies import (
     default_room_upload_policy,
     room_upload_policy_command,
 )
-from .session_submission import decode_submission_settings
+from .session_submission import InvalidSessionSubmission, decode_submission_settings
 from .upos import FileIdentity, UposUploader, UposUploadPaused, UposUploadStopped
 
 __all__ = ('InvalidUploadPolicy', 'UploadCoordinator')
@@ -534,14 +534,12 @@ class UploadCoordinator:
             )
 
     async def create_highlight_job(self, session_id: int) -> int:
-        row, has_saved_policy = await self._highlight_candidate(session_id)
+        row, policy_source = await self._highlight_candidate(session_id)
         job_id = await self._create_candidate(
             row,
-            initial_state='paused',
-            operator_paused=True,
-            operator_resume_state='ready',
+            initial_state='ready',
             required_source_kind='highlight',
-            require_saved_policy=has_saved_policy,
+            policy_source=policy_source,
             require_stability=False,
             return_existing=True,
         )
@@ -633,7 +631,7 @@ class UploadCoordinator:
         operator_paused: bool = False,
         operator_resume_state: Optional[str] = None,
         required_source_kind: str = 'live',
-        require_saved_policy: bool = True,
+        policy_source: str = 'room',
         require_stability: bool = True,
         return_existing: bool = False,
     ) -> Optional[int]:
@@ -691,32 +689,48 @@ class UploadCoordinator:
             if existing is not None:
                 return int(existing['id']) if return_existing else None
             session = connection.execute(
-                'SELECT state,source_kind FROM recording_sessions WHERE id=?',
+                'SELECT state,source_kind,upload_override_json '
+                'FROM recording_sessions WHERE id=?',
                 (int(row['session_id']),),
             ).fetchone()
             if (
                 session is None
                 or str(session['state']) != 'closed'
                 or str(session['source_kind']) != required_source_kind
+                or session['upload_override_json'] != row['upload_override_json']
             ):
                 return None
+            if required_source_kind == 'highlight':
+                clip = connection.execute(
+                    'SELECT state FROM highlight_clips WHERE upload_session_id=?',
+                    (int(row['session_id']),),
+                ).fetchone()
+                if clip is None or str(clip['state']) != 'ready':
+                    return None
             policy = connection.execute(
                 'SELECT account_mode,account_id,updated_at '
                 'FROM room_upload_policies WHERE room_id=?',
                 (int(row['room_id']),),
             ).fetchone()
-            if require_saved_policy:
+            if policy_source == 'room':
                 if policy is None or int(policy['updated_at']) != int(
                     row['policy_updated_at']
                 ):
                     return None
                 account_mode = str(policy['account_mode'])
                 policy_account_id = policy['account_id']
-            else:
+            elif policy_source == 'session':
+                if session['upload_override_json'] is None:
+                    return None
+                account_mode = str(row['account_mode'])
+                policy_account_id = row['account_id']
+            elif policy_source == 'default':
                 if policy is not None:
                     return None
                 account_mode = str(row['account_mode'])
                 policy_account_id = row['account_id']
+            else:
+                return None
             resolved_account_id = int(row['resolved_account_id'])
             if account_mode == 'fixed':
                 current_account_id = policy_account_id
@@ -837,71 +851,38 @@ class UploadCoordinator:
             )
         return job_id
 
-    async def _highlight_candidate(self, session_id: int) -> Tuple[Any, bool]:
-        policy_exists = bool(
-            await self._database.scalar(
-                'SELECT COUNT(*) FROM room_upload_policies policy '
-                'JOIN recording_sessions session ON session.room_id=policy.room_id '
-                'WHERE session.id=?',
-                (session_id,),
-            )
-        )
-        if policy_exists:
-            row = await self._database.fetchone(
-                'SELECT session.id AS session_id,session.room_id,'
-                'session.broadcast_session_key,session.live_start_time,'
-                'session.live_end_time,session.title,session.cover_url,'
-                'session.cover_path,session.anchor_uid,session.anchor_name,'
-                'session.area_id,session.area_name,session.parent_area_id,'
-                'session.parent_area_name,policy.account_mode,policy.account_id,'
-                'policy.title_template,policy.description_template,'
-                'policy.part_title_template,policy.dynamic_template,policy.tid,'
-                'policy.tags,policy.creation_statement_id,'
-                'policy.original_authorization,policy.copyright,policy.source,'
-                'policy.is_only_self,policy.publish_dynamic,policy.no_reprint,'
-                'policy.up_selection_reply,policy.up_close_reply,'
-                'policy.up_close_danmu,policy.auto_comment,'
-                'policy.danmaku_backfill,policy.filter_json,'
-                'policy.collection_season_id,policy.collection_section_id,'
-                'policy.cover_mode,policy.cover_asset_id,'
-                'policy.publish_delay_seconds,policy.updated_at AS policy_updated_at,'
-                'account.id AS resolved_account_id,'
-                'account.uid AS resolved_account_uid,'
-                'account.credential_version AS credential_version '
-                'FROM recording_sessions session '
-                'JOIN room_upload_policies policy ON policy.room_id=session.room_id '
-                'JOIN bili_accounts account ON account.id=CASE '
-                "WHEN policy.account_mode='fixed' THEN policy.account_id "
-                'ELSE (SELECT primary_account_id FROM bili_account_selection '
-                'WHERE id=1) END '
-                "WHERE session.id=? AND session.state='closed' "
-                "AND session.source_kind='highlight' AND account.state='active'",
-                (session_id,),
-            )
-            if row is None:
-                raise InvalidUploadPolicy('highlight upload account is unavailable')
-            return row, True
-
+    async def _highlight_candidate(self, session_id: int) -> Tuple[Any, str]:
         session = await self._database.fetchone(
             'SELECT id AS session_id,room_id,broadcast_session_key,'
             'live_start_time,live_end_time,title,cover_url,cover_path,anchor_uid,'
-            'anchor_name,area_id,area_name,parent_area_id,parent_area_name '
+            'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
+            'upload_override_json '
             "FROM recording_sessions WHERE id=? AND state='closed' "
             "AND source_kind='highlight'",
             (session_id,),
         )
-        account = await self._database.fetchone(
-            'SELECT account.id,account.uid,account.credential_version '
-            'FROM bili_account_selection selection JOIN bili_accounts account '
-            'ON account.id=selection.primary_account_id '
-            "WHERE selection.id=1 AND account.state='active'"
-        )
         if session is None:
             raise InvalidUploadPolicy('highlight upload session does not exist')
+
+        override_json = session['upload_override_json']
+        if override_json is None:
+            raise InvalidUploadPolicy(
+                'highlight submission settings must be saved before upload'
+            )
+        try:
+            command = decode_submission_settings(str(override_json))
+        except InvalidSessionSubmission as error:
+            raise InvalidUploadPolicy(
+                'highlight submission settings are invalid'
+            ) from error
+
+        account = await self._resolved_account(command)
         if account is None:
             raise InvalidUploadPolicy('highlight upload account is unavailable')
-        command = default_room_upload_policy()
-        return self._default_candidate(session, account, command), False
+        row = self._default_candidate(session, account, command)
+        row['policy_updated_at'] = None
+        row['upload_override_json'] = override_json
+        return row, 'session'
 
     @staticmethod
     def _default_candidate(
@@ -1338,7 +1319,7 @@ class UploadCoordinator:
             up_selection_reply = bool(snapshot.get('up_selection_reply'))
             up_close_reply = bool(snapshot.get('up_close_reply'))
             up_close_danmu = bool(snapshot.get('up_close_danmu'))
-        if format_version == 3:
+        if format_version >= 3:
             creation_statement_id = snapshot.get('creation_statement_id')
             original_authorization = snapshot.get('original_authorization')
             if (

@@ -58,7 +58,7 @@ export class RecorderSettingsComponent implements OnInit, OnChanges {
     typeof TIMEOUT_OPTIONS
   >;
   readonly disconnectionTimeoutOptions = cloneDeep(
-    DISCONNECTION_TIMEOUT_OPTIONS
+    DISCONNECTION_TIMEOUT_OPTIONS,
   ) as Mutable<typeof DISCONNECTION_TIMEOUT_OPTIONS>;
   readonly bufferOptions = cloneDeep(BUFFER_OPTIONS) as Mutable<
     typeof BUFFER_OPTIONS
@@ -70,7 +70,7 @@ export class RecorderSettingsComponent implements OnInit, OnChanges {
   constructor(
     formBuilder: FormBuilder,
     private changeDetector: ChangeDetectorRef,
-    private settingsSyncService: SettingsSyncService
+    private settingsSyncService: SettingsSyncService,
   ) {
     this.settingsForm = formBuilder.group({
       streamFormat: [''],
@@ -82,6 +82,7 @@ export class RecorderSettingsComponent implements OnInit, OnChanges {
       bufferSize: [''],
       saveCover: [''],
       coverSaveStrategy: [''],
+      titleKeywords: [[]],
     });
   }
 
@@ -121,6 +122,10 @@ export class RecorderSettingsComponent implements OnInit, OnChanges {
     return this.settingsForm.get('coverSaveStrategy') as FormControl;
   }
 
+  get titleKeywordsControl() {
+    return this.settingsForm.get('titleKeywords') as FormControl;
+  }
+
   ngOnChanges(): void {
     this.syncStatus = mapValues(this.settings, () => true);
     this.settingsForm.setValue(this.settings);
@@ -131,7 +136,7 @@ export class RecorderSettingsComponent implements OnInit, OnChanges {
       .syncSettings(
         'recorder',
         this.settings,
-        this.settingsForm.valueChanges as Observable<RecorderSettings>
+        this.settingsForm.valueChanges as Observable<RecorderSettings>,
       )
       .subscribe((detail) => {
         this.syncStatus = { ...this.syncStatus, ...calcSyncStatus(detail) };

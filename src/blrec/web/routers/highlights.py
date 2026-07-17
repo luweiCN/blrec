@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, List, Literal, Mapping, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
@@ -19,6 +20,7 @@ from blrec.bili_upload.highlights import (
     HighlightService,
     HighlightTimeline,
 )
+from blrec.bili_upload.policies import InvalidRoomUploadPolicy
 from blrec.bili_upload.task_actions import UploadTaskActionRejected
 from blrec.bili_upload.upload import InvalidUploadPolicy
 from blrec.utils.string import camel_case
@@ -26,6 +28,7 @@ from blrec.utils.string import camel_case
 from .. import security
 from .bili_accounts import authenticated_manager_subject
 from .recording_sessions import RangeNotSatisfiable, file_chunks, parse_byte_range
+from .room_upload_policies import RoomUploadPolicyRequest
 
 service: Optional[HighlightService] = None
 worker: Optional[HighlightWorker] = None
@@ -185,6 +188,10 @@ class ClipResponse(ApiModel):
 
 class UploadTaskResponse(ApiModel):
     job_id: int
+
+
+class UploadSessionResponse(ApiModel):
+    session_id: int
 
 
 class ClipMediaAccessResponse(ApiModel):
@@ -508,6 +515,7 @@ async def create_clip_media_access(
 async def stream_clip_media(
     clip_id: int,
     range_header: Optional[str] = Header(None, alias='Range'),
+    download: bool = Query(False),
     _subject: str = Depends(authenticated_clip_media_subject),
     highlight_service: HighlightService = Depends(get_service),
 ) -> StreamingResponse:
@@ -536,6 +544,10 @@ async def stream_clip_media(
         'Cache-Control': 'no-store',
         'Content-Length': str(length),
     }
+    if download:
+        headers['Content-Disposition'] = "attachment; filename*=UTF-8''{}".format(
+            quote(path.name)
+        )
     if response_status == status.HTTP_206_PARTIAL_CONTENT:
         headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)
     try:
@@ -568,17 +580,42 @@ async def delete_clip(
 
 
 @router.post(
+    '/clips/{clip_id}/upload-session',
+    response_model=UploadSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def prepare_upload_session(
+    clip_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> UploadSessionResponse:
+    try:
+        session_id = await highlight_service.ensure_upload_session(clip_id)
+    except ValueError as error:
+        raise _clip_conflict(error) from None
+    return UploadSessionResponse(session_id=session_id)
+
+
+@router.post(
     '/clips/{clip_id}/upload-task',
     response_model=UploadTaskResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_upload_task(
     clip_id: int,
+    payload: RoomUploadPolicyRequest,
     subject: str = Depends(authenticated_manager_subject),
     creator: Callable[..., Awaitable[int]] = Depends(get_upload_task_creator),
 ) -> UploadTaskResponse:
     try:
-        job_id = await creator(clip_id, manager_subject=subject)
-    except (ValueError, InvalidUploadPolicy, UploadTaskActionRejected) as error:
+        job_id = await creator(
+            clip_id, settings=payload.to_command(), manager_subject=subject
+        )
+    except (
+        ValueError,
+        InvalidRoomUploadPolicy,
+        InvalidUploadPolicy,
+        UploadTaskActionRejected,
+    ) as error:
         raise _clip_conflict(error) from None
     return UploadTaskResponse(job_id=job_id)

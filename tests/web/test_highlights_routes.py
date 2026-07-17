@@ -90,6 +90,7 @@ class FakeHighlightService:
         self.get_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
         self.clip_video_path = AsyncMock()
+        self.ensure_upload_session = AsyncMock(return_value=12)
 
     async def timeline(self, session_id: int, active_durations_ms):
         value = marker()
@@ -144,6 +145,38 @@ def client() -> Iterator[TestClient]:
 
 def auth() -> dict:
     return {'x-api-key': 'test-api-key'}
+
+
+def upload_settings() -> dict:
+    return {
+        'accountMode': 'primary',
+        'accountId': None,
+        'enabled': True,
+        'titleTemplate': '{{ title }} 精选',
+        'descriptionTemplate': '高光片段',
+        'partTitleTemplate': 'P{{ part_index }}',
+        'dynamicTemplate': '高光片段',
+        'tid': 21,
+        'tags': '高光,直播',
+        'creationStatementId': -1,
+        'originalAuthorization': False,
+        'source': '',
+        'isOnlySelf': False,
+        'publishDynamic': True,
+        'upSelectionReply': False,
+        'upCloseReply': False,
+        'upCloseDanmu': False,
+        'autoComment': True,
+        'danmakuBackfill': True,
+        'filters': {},
+        'collectionSeasonId': 20,
+        'collectionSectionId': 21,
+        'coverMode': 'live',
+        'coverAssetId': None,
+        'publishDelaySeconds': 0,
+        'retentionMode': 'submitted',
+        'retentionDays': 5,
+    }
 
 
 def test_marker_crud_is_authenticated_and_uses_camel_case(client: TestClient) -> None:
@@ -213,9 +246,18 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     assert listed.status_code == 200
     assert listed.json()[0]['name'] == '第一段高光'
 
-    upload = client.post('/api/v1/highlights/clips/3/upload-task', headers=auth())
+    prepared = client.post('/api/v1/highlights/clips/3/upload-session', headers=auth())
+    assert prepared.status_code == 201
+    assert prepared.json() == {'sessionId': 12}
+
+    upload = client.post(
+        '/api/v1/highlights/clips/3/upload-task', headers=auth(), json=upload_settings()
+    )
     assert upload.status_code == 201
     assert upload.json() == {'jobId': 17}
+    creator = highlights.upload_task_creator
+    assert isinstance(creator, AsyncMock)
+    assert creator.await_args.kwargs['settings'].collection_section_id == 21
     deleted = client.delete('/api/v1/highlights/clips/3', headers=auth())
     assert deleted.status_code == 204
 
@@ -259,3 +301,14 @@ def test_ready_clip_supports_signed_byte_range_playback(
     assert media.content == b'2345'
     assert media.headers['content-range'] == 'bytes 2-5/10'
     assert media.headers['accept-ranges'] == 'bytes'
+
+    download = client.get(
+        '/api/v1/highlights/clips/3/media',
+        params={
+            'media_token': payload['token'],
+            'media_expires': payload['expiresAt'],
+            'download': 1,
+        },
+    )
+    assert download.status_code == 200
+    assert download.headers['content-disposition'].startswith('attachment;')

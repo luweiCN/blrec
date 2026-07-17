@@ -130,6 +130,34 @@
           <nz-form-label
             class="setting-label"
             nzNoColon
+            nzTooltipTitle="直播标题命中任意一个关键词才开始录制；留空表示所有直播都录制。"
+            >录制标题关键词</nz-form-label
+          >
+          <nz-form-control class="setting-control select">
+            <nz-select
+              name="titleKeywords"
+              nzMode="tags"
+              nzPlaceHolder="输入关键词后按回车，可添加多个"
+              [nzTokenSeparators]="[',', '，']"
+              [(ngModel)]="model.recorder.titleKeywords"
+              [disabled]="options.recorder.titleKeywords === null"
+            ></nz-select>
+          </nz-form-control>
+          <label
+            nz-checkbox
+            [nzChecked]="options.recorder.titleKeywords !== null"
+            (nzCheckedChange)="
+              options.recorder.titleKeywords = $event
+                ? globalSettings.recorder.titleKeywords.slice()
+                : null
+            "
+            >覆盖全局设置</label
+          >
+        </nz-form-item>
+        <nz-form-item class="setting-item">
+          <nz-form-label
+            class="setting-label"
+            nzNoColon
             [nzTooltipTitle]="streamFormatTip"
             >直播流格式</nz-form-label
           >

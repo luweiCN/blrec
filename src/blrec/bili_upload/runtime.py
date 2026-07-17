@@ -16,7 +16,11 @@ from blrec.notification.operational import (
 from blrec.setting.models import BiliUploadSettings, OperationalNotificationSettings
 
 from .accounts import AccountManager, AccountWriteGate
-from .categories import UploadCategoryCatalog
+from .categories import (
+    InvalidUploadCategoryRequest,
+    UploadCategoryCatalog,
+    UploadCategoryUnavailable,
+)
 from .collection_publish import CollectionPublisher
 from .collections import CollectionManager
 from .comments import CommentPlanner, CommentPublisher
@@ -33,7 +37,7 @@ from .highlights import HighlightService
 from .journal import RecordingJournalBridge
 from .media_index import MediaIndexWorker
 from .models import FeatureUnavailable, validate_feature_gate
-from .policies import RoomUploadPolicyManager
+from .policies import RoomUploadPolicyCommand, RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .recording_content import RecordingContentReader
 from .retention import RetentionManager
@@ -455,18 +459,49 @@ class BiliAccountRuntime:
             await self._manager.report_primary_auth_failure()
 
     async def create_highlight_upload_task(
-        self, clip_id: int, *, manager_subject: str
+        self, clip_id: int, *, settings: RoomUploadPolicyCommand, manager_subject: str
     ) -> int:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         service = self._highlight_service
         coordinator = self._coordinator
-        if service is None or coordinator is None:
+        submissions = self._session_submission_manager
+        policy_manager = self._policy_manager
+        category_catalog = self._category_catalog
+        if (
+            service is None
+            or coordinator is None
+            or submissions is None
+            or policy_manager is None
+            or category_catalog is None
+        ):
             raise UploadTaskActionRejected('高光投稿当前不可用')
+        clip = await service.get_clip(clip_id)
+        await policy_manager.validate(clip.room_id, settings)
+        try:
+            catalog = await category_catalog.list(
+                settings.account_mode, settings.account_id
+            )
+        except (InvalidUploadCategoryRequest, UploadCategoryUnavailable) as error:
+            raise UploadTaskActionRejected(str(error)) from error
+        if not any(
+            child.id == settings.tid
+            for parent in catalog.categories
+            for child in parent.children
+        ):
+            raise UploadTaskActionRejected('请选择有效的二级投稿分区')
+        if not any(
+            statement.id == settings.creation_statement_id
+            for statement in catalog.creation_statements
+        ):
+            raise UploadTaskActionRejected('请选择当前账号支持的创作声明')
         async with self._session_action_lock:
             await self._stop_upload_worker()
             try:
                 session_id = await service.ensure_upload_session(clip_id)
+                await submissions.save_override(
+                    session_id, settings, manager_subject=manager_subject
+                )
                 return await coordinator.create_highlight_job(session_id)
             finally:
                 await self._start_upload_worker()

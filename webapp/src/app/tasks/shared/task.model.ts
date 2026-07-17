@@ -24,10 +24,7 @@ export type TaskBatchAction =
   | 'delete';
 
 export type AutomaticSubmissionFilter =
-  | 'enabled'
-  | 'disabled'
-  | 'unconfigured'
-  | null;
+  'enabled' | 'disabled' | 'unconfigured' | null;
 
 export interface TaskBatchActionResult {
   readonly roomId: number;
@@ -150,6 +147,7 @@ export interface TaskParam {
   readonly disconnection_timeout: number;
   readonly buffer_size: number;
   readonly save_cover: boolean;
+  readonly title_keywords: readonly string[];
 
   readonly remux_to_mp4: boolean;
   readonly inject_extra_metadata: boolean;

@@ -21,10 +21,7 @@ import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCheckboxModule } from 'ng-zorro-antd/checkbox';
 import { NzDatePickerModule } from 'ng-zorro-antd/date-picker';
 import { NzDrawerComponent, NzDrawerModule } from 'ng-zorro-antd/drawer';
-import {
-  NzDropDownDirective,
-  NzDropDownModule,
-} from 'ng-zorro-antd/dropdown';
+import { NzDropDownDirective, NzDropDownModule } from 'ng-zorro-antd/dropdown';
 import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
@@ -38,7 +35,10 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 import { NzProgressModule } from 'ng-zorro-antd/progress';
 
-import { RealtimeEvent, RealtimeService } from '../../core/services/realtime.service';
+import {
+  RealtimeEvent,
+  RealtimeService,
+} from '../../core/services/realtime.service';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
 
@@ -77,7 +77,7 @@ describe('RecordingSessionsComponent', () => {
         'runSessionAction',
         'retryFailedJobs',
         'previewRetryFailedJobs',
-      ]
+      ],
     );
     clipboard = jasmine.createSpyObj<Clipboard>('Clipboard', ['copy']);
     message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
@@ -233,7 +233,7 @@ describe('RecordingSessionsComponent', () => {
             ],
           },
         ],
-      })
+      }),
     );
 
     await TestBed.configureTestingModule({
@@ -309,9 +309,9 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('录制概要');
     expect(text).toContain('投稿状态');
     expect(text).toContain('房间 100');
-    expect(fixture.nativeElement.querySelector('thead').textContent).not.toContain(
-      '录制状态'
-    );
+    expect(
+      fixture.nativeElement.querySelector('thead').textContent,
+    ).not.toContain('录制状态');
     expect(text).toContain('今晚挑战通关');
     expect(text).toContain('主播名');
     expect(text).toContain('59 秒');
@@ -320,18 +320,64 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('投稿账号');
     expect(text).not.toContain('UID 42');
     expect(text).not.toContain('/rec/p1.mp4');
-    expect(fixture.nativeElement.querySelector('.pagination-bar')).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('.pagination-bar'),
+    ).not.toBeNull();
   });
 
-  it('links local live recordings to the recording highlight editor', () => {
+  it('offers highlight editing from a concrete recording part', () => {
     fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
 
-    const link = fixture.nativeElement.querySelector(
-      '[data-testid="edit-highlight"]'
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="edit-highlight"]'),
+    ).toBeNull();
+
+    fixture.componentInstance.openDetails(
+      fixture.componentInstance.sessions[0],
+    );
+    fixture.detectChanges();
+    const link = document.body.querySelector(
+      '[data-testid="edit-highlight-part"]',
     ) as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
-    expect(link?.getAttribute('href')).toBe('/recordings/highlights/1');
+    expect(link?.getAttribute('href')).toContain('/recordings/highlights/1');
+    expect(link?.getAttribute('href')).toContain(
+      `partId=${fixture.componentInstance.sessions[0].parts[0].id}`,
+    );
+  });
+
+  it('does not offer highlight editing when a part has no local video', () => {
+    fixture.componentInstance.scope = 'recordings';
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready recording-session view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            parts: session.parts.map((part) => ({
+              ...part,
+              sourceExists: false,
+              finalExists: false,
+            })),
+          },
+        ],
+      },
+    };
+    fixture.componentInstance.openDetails(
+      fixture.componentInstance.sessions[0],
+    );
+    fixture.detectChanges();
+
+    expect(
+      document.body.querySelector('[data-testid="edit-highlight-part"]'),
+    ).toBeNull();
   });
 
   it('labels derived highlight tasks without offering another cut', () => {
@@ -357,7 +403,7 @@ describe('RecordingSessionsComponent', () => {
 
     expect(fixture.nativeElement.textContent).toContain('高光');
     expect(
-      fixture.nativeElement.querySelector('[data-testid="edit-highlight"]')
+      fixture.nativeElement.querySelector('[data-testid="edit-highlight"]'),
     ).toBeNull();
   });
 
@@ -371,13 +417,15 @@ describe('RecordingSessionsComponent', () => {
       state: 'ready',
       response: {
         ...fixture.componentInstance.view.response,
-        sessions: [{ ...session, availableActions: ['retry_failed', 'delete_local'] }],
+        sessions: [
+          { ...session, availableActions: ['retry_failed', 'delete_local'] },
+        ],
       },
     };
     fixture.detectChanges();
 
     const trigger = fixture.nativeElement.querySelector(
-      '[data-testid="session-actions-trigger"]'
+      '[data-testid="session-actions-trigger"]',
     ) as HTMLButtonElement | null;
     const dropdown = fixture.debugElement
       .query(By.directive(NzDropDownDirective))
@@ -394,12 +442,12 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     expect(
-      fixture.nativeElement.querySelector('[data-testid="delete-session"]')
+      fixture.nativeElement.querySelector('[data-testid="delete-session"]'),
     ).not.toBeNull();
     expect(
       fixture.nativeElement.querySelector(
         '[data-testid="session-actions-trigger"]',
-      )
+      ),
     ).toBeNull();
   });
 
@@ -416,9 +464,9 @@ describe('RecordingSessionsComponent', () => {
       By.directive(UploadPolicyDialogStubComponent),
     );
     expect(dialog).not.toBeNull();
-    expect(
-      dialog.componentInstance as UploadPolicyDialogStubComponent,
-    ).toEqual(jasmine.objectContaining({ sessionId: 1, roomId: 100 }));
+    expect(dialog.componentInstance as UploadPolicyDialogStubComponent).toEqual(
+      jasmine.objectContaining({ sessionId: 1, roomId: 100 }),
+    );
   });
 
   it('keeps delete visible and uses concise operation names', () => {
@@ -469,14 +517,12 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     const archiveLink = fixture.nativeElement.querySelector(
-      '[data-testid="archive-link"]'
+      '[data-testid="archive-link"]',
     ) as HTMLAnchorElement | null;
     expect(fixture.nativeElement.textContent).toContain('审核通过');
     expect(fixture.nativeElement.textContent).not.toContain('投稿：已确认');
     expect(archiveLink?.textContent).toContain('今晚挑战通关');
-    expect(archiveLink?.href).toBe(
-      'https://www.bilibili.com/video/BV1test'
-    );
+    expect(archiveLink?.href).toBe('https://www.bilibili.com/video/BV1test');
   });
 
   it('links an approved part only after its cid is available', () => {
@@ -497,7 +543,7 @@ describe('RecordingSessionsComponent', () => {
     };
 
     expect(fixture.componentInstance.remotePartUrl(approved, 1)).toBe(
-      'https://www.bilibili.com/video/BV1test?p=1'
+      'https://www.bilibili.com/video/BV1test?p=1',
     );
     expect(fixture.componentInstance.remotePartUrl(session, 1)).toBeNull();
   });
@@ -509,7 +555,7 @@ describe('RecordingSessionsComponent', () => {
     expect(service.listSessions).toHaveBeenCalledWith(
       20,
       20,
-      jasmine.any(Object)
+      jasmine.any(Object),
     );
 
     fixture.componentInstance.pageSizeChanged(50);
@@ -517,7 +563,7 @@ describe('RecordingSessionsComponent', () => {
     expect(service.listSessions).toHaveBeenCalledWith(
       50,
       0,
-      jasmine.any(Object)
+      jasmine.any(Object),
     );
   });
 
@@ -556,7 +602,7 @@ describe('RecordingSessionsComponent', () => {
             reason: '网络失败',
           },
         ],
-      })
+      }),
     );
     service.retryFailedJobs.and.returnValue(
       of({
@@ -564,7 +610,7 @@ describe('RecordingSessionsComponent', () => {
           { jobId: 9, accepted: true, message: '失败任务已重新排队' },
           { jobId: 10, accepted: false, message: '本地视频不可用' },
         ],
-      })
+      }),
     );
     fixture.detectChanges();
 
@@ -578,7 +624,7 @@ describe('RecordingSessionsComponent', () => {
 
     expect(service.retryFailedJobs).toHaveBeenCalledTimes(1);
     expect(message.warning).toHaveBeenCalledWith(
-      '已重新排队 1 个任务，跳过 1 个：本地视频不可用'
+      '已重新排队 1 个任务，跳过 1 个：本地视频不可用',
     );
   });
 
@@ -590,7 +636,7 @@ describe('RecordingSessionsComponent', () => {
 
     expect(fixture.componentInstance.selectedSessionCount).toBe(1);
     expect(
-      fixture.nativeElement.querySelector('[data-testid="batch-action-bar"]')
+      fixture.nativeElement.querySelector('[data-testid="batch-action-bar"]'),
     ).not.toBeNull();
   });
 
@@ -598,10 +644,10 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     const fixedHeader = fixture.nativeElement.querySelector(
-      'thead th.ant-table-cell-fix-right'
+      'thead th.ant-table-cell-fix-right',
     );
     const fixedCell = fixture.nativeElement.querySelector(
-      'tbody td.ant-table-cell-fix-right'
+      'tbody td.ant-table-cell-fix-right',
     );
 
     expect(fixedHeader?.textContent).toContain('操作');
@@ -614,7 +660,7 @@ describe('RecordingSessionsComponent', () => {
         results: [
           { sessionId: 1, accepted: true, message: '已排队检查 B 站转码状态' },
         ],
-      })
+      }),
     );
     fixture.detectChanges();
 
@@ -623,7 +669,7 @@ describe('RecordingSessionsComponent', () => {
 
     expect(service.runSessionAction).toHaveBeenCalledOnceWith(
       'repair_transcode',
-      [1]
+      [1],
     );
     expect(message.success).toHaveBeenCalledWith('已排队检查 B 站转码状态');
     expect(fixture.componentInstance.uploadActionVisible).toBeFalse();
@@ -639,7 +685,7 @@ describe('RecordingSessionsComponent', () => {
             message: '投稿结果未知，自动重试可能产生重复稿件',
           },
         ],
-      })
+      }),
     );
     fixture.detectChanges();
 
@@ -647,7 +693,9 @@ describe('RecordingSessionsComponent', () => {
     fixture.componentInstance.submitUploadAction();
 
     expect(fixture.componentInstance.uploadActionVisible).toBeTrue();
-    expect(fixture.componentInstance.uploadActionError).toContain('投稿结果未知');
+    expect(fixture.componentInstance.uploadActionError).toContain(
+      '投稿结果未知',
+    );
   });
 
   it('allows a session without an upload job to be uploaded or deleted', () => {
@@ -674,12 +722,16 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.componentInstance.pageSessionIds).toEqual([1]);
-    expect(fixture.componentInstance.hasAction(session.id, 'set_upload')).toBeTrue();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="session-select"]')
+      fixture.componentInstance.hasAction(session.id, 'set_upload'),
+    ).toBeTrue();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="session-select"]'),
     ).not.toBeNull();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="session-actions-trigger"]')
+      fixture.nativeElement.querySelector(
+        '[data-testid="session-actions-trigger"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -699,7 +751,7 @@ describe('RecordingSessionsComponent', () => {
     expect(document.body.textContent).toContain('投稿配置核验：部分完成');
     expect(document.body.textContent).toContain('1 项可核验设置未返回');
     expect(document.body.textContent).toContain(
-      '2 项设置暂时无法从 B 站稿件详情核验'
+      '2 项设置暂时无法从 B 站稿件详情核验',
     );
     expect(document.body.textContent).not.toContain('remote-p1');
     fixture.componentInstance.closeDetails();
@@ -741,7 +793,9 @@ describe('RecordingSessionsComponent', () => {
 
   it('does not reopen a closed detail drawer when the list refreshes', () => {
     fixture.detectChanges();
-    fixture.componentInstance.openDetails(fixture.componentInstance.sessions[0]);
+    fixture.componentInstance.openDetails(
+      fixture.componentInstance.sessions[0],
+    );
     fixture.componentInstance.closeDetails();
 
     fixture.componentInstance.load();
@@ -754,13 +808,13 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.componentInstance.fileName('/rec/path/very-long.flv')).toBe(
-      'very-long.flv'
+      'very-long.flv',
     );
     expect(fixture.componentInstance.sessionStateLabel('manual_review')).toBe(
-      '自动恢复中'
+      '自动恢复中',
     );
     expect(fixture.componentInstance.artifactStateLabel('manual_review')).toBe(
-      '自动恢复中'
+      '自动恢复中',
     );
   });
 
@@ -769,9 +823,7 @@ describe('RecordingSessionsComponent', () => {
 
     fixture.componentInstance.copyPath('/rec/path/very-long.flv');
 
-    expect(clipboard.copy).toHaveBeenCalledOnceWith(
-      '/rec/path/very-long.flv'
-    );
+    expect(clipboard.copy).toHaveBeenCalledOnceWith('/rec/path/very-long.flv');
     expect(message.success).toHaveBeenCalledOnceWith('已复制完整路径');
     expect(message.error).not.toHaveBeenCalled();
   });
@@ -779,20 +831,22 @@ describe('RecordingSessionsComponent', () => {
   it('shows explicit copy controls beside every visible file path', () => {
     fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
-    fixture.componentInstance.openDetails(fixture.componentInstance.sessions[0]);
+    fixture.componentInstance.openDetails(
+      fixture.componentInstance.sessions[0],
+    );
     fixture.detectChanges();
 
     const finalButton = document.body.querySelector(
-      '[data-testid="copy-final-path"]'
+      '[data-testid="copy-final-path"]',
     );
     const xmlButton = document.body.querySelector(
-      '[data-testid="copy-xml-path"]'
+      '[data-testid="copy-xml-path"]',
     );
 
     expect(finalButton?.getAttribute('aria-label')).toBe('复制完整路径');
     expect(xmlButton?.getAttribute('aria-label')).toBe('复制完整路径');
     expect(
-      document.body.querySelector('[data-testid="copy-source-path"]')
+      document.body.querySelector('[data-testid="copy-source-path"]'),
     ).toBeNull();
   });
 
@@ -801,9 +855,7 @@ describe('RecordingSessionsComponent', () => {
 
     fixture.componentInstance.copyPath('/rec/path/very-long.xml');
 
-    expect(clipboard.copy).toHaveBeenCalledOnceWith(
-      '/rec/path/very-long.xml'
-    );
+    expect(clipboard.copy).toHaveBeenCalledOnceWith('/rec/path/very-long.xml');
     expect(message.error).toHaveBeenCalledOnceWith('复制失败，请重试');
     expect(message.success).not.toHaveBeenCalled();
   });
@@ -849,27 +901,27 @@ describe('RecordingSessionsComponent', () => {
 
   it('shows a retry action when session loading fails', () => {
     service.listSessions.and.returnValue(
-      throwError(() => new Error('upload database is unavailable'))
+      throwError(() => new Error('upload database is unavailable')),
     );
 
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain(
-      'upload database is unavailable'
+      'upload database is unavailable',
     );
     expect(
-      fixture.nativeElement.querySelector('[data-testid="retry-sessions"]')
+      fixture.nativeElement.querySelector('[data-testid="retry-sessions"]'),
     ).not.toBeNull();
   });
 
   it('requires a reason before accepting duplicate danmaku risk', () => {
     fixture.detectChanges();
-    const item = fixture.componentInstance.sessions[0].uploadJob!
-      .unknownDanmakuItems[0];
+    const item =
+      fixture.componentInstance.sessions[0].uploadJob!.unknownDanmakuItems[0];
 
     fixture.componentInstance.openDanmakuDecision(
       item,
-      'retry_accept_duplicate_risk'
+      'retry_accept_duplicate_risk',
     );
     fixture.componentInstance.decisionReason = '';
     fixture.componentInstance.submitDanmakuDecision();

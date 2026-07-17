@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Sequence, Tuple
 
 import humanize
 from loguru import logger
@@ -10,11 +10,12 @@ from loguru import logger
 from blrec.bili.danmaku_client import DanmakuClient
 from blrec.bili.live import Live
 from blrec.bili.live_monitor import LiveEventListener, LiveMonitor
-from blrec.bili.models import RoomInfo
+from blrec.bili.models import LiveStatus, RoomInfo
 from blrec.bili.typing import QualityNumber, StreamFormat
 from blrec.core.typing import MetaData
 from blrec.event.event_emitter import EventEmitter, EventListener
 from blrec.flv.operators import StreamProfile
+from blrec.logging.audit import audit
 from blrec.setting.typing import RecordingMode
 from blrec.utils.mixins import AsyncStoppableMixin
 
@@ -100,6 +101,7 @@ class Recorder(
         save_cover: bool = False,
         cover_save_strategy: CoverSaveStrategy = CoverSaveStrategy.DEFAULT,
         save_raw_danmaku: bool = False,
+        title_keywords: Sequence[str] = (),
     ) -> None:
         super().__init__()
         self._logger_context = {'room_id': live.room_id}
@@ -114,6 +116,9 @@ class Recorder(
         self._stream_available: bool = False
         self._record_start_time: Optional[int] = None
         self._suppressed_live_start_time: Optional[int] = None
+        self._title_keywords: Tuple[str, ...] = ()
+        self._last_title_filter_decision: Optional[Tuple[int, str, bool]] = None
+        self.title_keywords = tuple(title_keywords)
 
         self._stream_recorder = StreamRecorder(
             live,
@@ -390,6 +395,8 @@ class Recorder(
         if self._current_live_is_suppressed():
             self._logger.info('The current live was manually suppressed')
             return
+        if not self._title_filter_allows_start():
+            return
         self._suppressed_live_start_time = None
         await self._start_recording()
 
@@ -406,11 +413,16 @@ class Recorder(
         self._logger.debug('The live stream becomes available')
         self._stream_available = True
         self._stream_recorder.stream_available_time = await live.get_timestamp()
-        await self._stream_recorder.start()
+        if self._recording:
+            await self._stream_recorder.start()
 
     async def on_live_stream_reset(self, live: Live) -> None:
         self._logger.warning('The live stream has been reset')
-        if not self._recording and not self._current_live_is_suppressed():
+        if (
+            not self._recording
+            and not self._current_live_is_suppressed()
+            and self._title_filter_allows_start()
+        ):
             await self._start_recording()
 
     async def suppress_current_live(self) -> None:
@@ -420,6 +432,13 @@ class Recorder(
     async def on_room_changed(self, room_info: RoomInfo) -> None:
         self._print_changed_room_info(room_info)
         self._stream_recorder.update_progress_bar_info()
+        if (
+            not self._recording
+            and room_info.live_status == LiveStatus.LIVE
+            and not self._current_live_is_suppressed()
+            and self._title_filter_allows_start()
+        ):
+            await self._start_recording()
 
     async def on_video_file_created(self, path: str, record_start_time: int) -> None:
         self._record_start_time = int(record_start_time)
@@ -455,12 +474,14 @@ class Recorder(
         self._logger.debug('Started recorder')
 
         self._print_live_info()
-        if (
+        current_live = (
             self._live_monitor.enabled
             and self._live.is_living()
             and not self._current_live_is_suppressed()
-        ):
+        )
+        if current_live:
             self._stream_available = True
+        if current_live and self._title_filter_allows_start():
             await self._start_recording()
         else:
             self._print_waiting_message()
@@ -519,6 +540,66 @@ class Recorder(
         return suppressed is not None and (
             suppressed == self._live.room_info.live_start_time
         )
+
+    @property
+    def title_keywords(self) -> Tuple[str, ...]:
+        return self._title_keywords
+
+    @title_keywords.setter
+    def title_keywords(self, values: Tuple[str, ...]) -> None:
+        normalized = []
+        seen = set()
+        for value in values:
+            keyword = str(value).strip()
+            folded = keyword.casefold()
+            if not keyword or folded in seen:
+                continue
+            normalized.append(keyword)
+            seen.add(folded)
+        self._title_keywords = tuple(normalized)
+        self._last_title_filter_decision = None
+
+    def _title_filter_allows_start(self) -> bool:
+        if not self._title_keywords:
+            return True
+        room_info = self._live.room_info
+        title = room_info.title
+        folded_title = title.casefold()
+        matched = next(
+            (
+                keyword
+                for keyword in self._title_keywords
+                if keyword.casefold() in folded_title
+            ),
+            None,
+        )
+        allowed = matched is not None
+        decision = (room_info.live_start_time, title, allowed)
+        if decision != self._last_title_filter_decision:
+            self._last_title_filter_decision = decision
+            if allowed:
+                self._logger.info('Recording title matched keyword: {}', matched)
+                audit(
+                    'recording_title_filter_matched',
+                    room_id=room_info.room_id,
+                    live_start_time=room_info.live_start_time,
+                    title=title,
+                    matched_keyword=matched,
+                    result='starting',
+                )
+            else:
+                self._logger.info(
+                    'Waiting because the live title did not match recording keywords'
+                )
+                audit(
+                    'recording_title_filter_skipped',
+                    room_id=room_info.room_id,
+                    live_start_time=room_info.live_start_time,
+                    title=title,
+                    keywords=list(self._title_keywords),
+                    result='waiting',
+                )
+        return allowed
 
     async def _prepare(self) -> None:
         live_start_time = self._live.room_info.live_start_time

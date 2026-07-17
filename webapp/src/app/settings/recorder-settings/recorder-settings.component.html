@@ -3,6 +3,28 @@
     <nz-form-label
       class="setting-label"
       nzNoColon
+      nzTooltipTitle="标题命中任意一个关键词才开始录制；留空表示所有直播都录制。"
+      >录制标题关键词</nz-form-label
+    >
+    <nz-form-control
+      class="setting-control select"
+      [nzWarningTip]="syncFailedWarningTip"
+      [nzValidateStatus]="
+        syncStatus.titleKeywords ? titleKeywordsControl : 'warning'
+      "
+    >
+      <nz-select
+        formControlName="titleKeywords"
+        nzMode="tags"
+        nzPlaceHolder="输入关键词后按回车，可添加多个"
+        [nzTokenSeparators]="[',', '，']"
+      ></nz-select>
+    </nz-form-control>
+  </nz-form-item>
+  <nz-form-item class="setting-item">
+    <nz-form-label
+      class="setting-label"
+      nzNoColon
       [nzTooltipTitle]="streamFormatTip"
       >直播流格式</nz-form-label
     >

@@ -356,6 +356,14 @@ class RecordTask:
         self._recorder.cover_save_strategy = value
 
     @property
+    def title_keywords(self) -> Tuple[str, ...]:
+        return self._recorder.title_keywords
+
+    @title_keywords.setter
+    def title_keywords(self, value: Tuple[str, ...]) -> None:
+        self._recorder.title_keywords = value
+
+    @property
     def save_raw_danmaku(self) -> bool:
         return self._recorder.save_raw_danmaku
 

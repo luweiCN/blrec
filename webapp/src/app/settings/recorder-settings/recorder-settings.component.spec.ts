@@ -4,10 +4,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 
 import { SettingsModule } from '../settings.module';
-import {
-  CoverSaveStrategy,
-  RecorderSettings,
-} from '../shared/setting.model';
+import { CoverSaveStrategy, RecorderSettings } from '../shared/setting.model';
 import { SettingsSyncService } from '../shared/services/settings-sync.service';
 import { RecorderSettingsComponent } from './recorder-settings.component';
 
@@ -18,7 +15,7 @@ describe('RecorderSettingsComponent', () => {
   beforeEach(async () => {
     const settingsSyncService = jasmine.createSpyObj<SettingsSyncService>(
       'SettingsSyncService',
-      ['syncSettings']
+      ['syncSettings'],
     );
     settingsSyncService.syncSettings.and.returnValue(of());
 
@@ -43,6 +40,7 @@ describe('RecorderSettingsComponent', () => {
       bufferSize: 8192,
       saveCover: false,
       coverSaveStrategy: CoverSaveStrategy.DEFAULT,
+      titleKeywords: [],
     } satisfies RecorderSettings;
     component.ngOnChanges();
     fixture.detectChanges();
@@ -50,5 +48,15 @@ describe('RecorderSettingsComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('edits multiple recording title keywords as tags', () => {
+    component.titleKeywordsControl.setValue(['比赛', '高光']);
+
+    expect(component.settingsForm.value.titleKeywords).toEqual([
+      '比赛',
+      '高光',
+    ]);
+    expect(fixture.nativeElement.textContent).toContain('录制标题关键词');
   });
 });

@@ -10,6 +10,7 @@ from blrec.bili_upload.highlight_cut import (
     ClipInspection,
     ClipSource,
     CutArtifact,
+    HighlightCutError,
     InspectedClipSource,
     MediaProfile,
 )
@@ -258,6 +259,161 @@ async def test_worker_completes_video_and_danmaku_atomically(
     assert Path(str(row['output_xml_path'])).exists()
     assert len(clipper.cut_calls) == 1
     assert len(danmaku.calls) == 1
+    worker_sources = clipper.inspect_calls[-1][0]
+    assert worker_sources[0].duration_ms == 70_000
+    assert worker_sources[0].keyframes_ms == (18_000,)
+
+
+@pytest.mark.asyncio
+async def test_worker_cuts_the_same_final_file_used_by_preview(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(database, recording_root=root, clipper=clipper)
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='成品文件',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    final_path = root / 'room-100-final.mp4'
+    final_path.write_bytes(b'final-video')
+    await database.execute(
+        "UPDATE recording_parts SET artifact_state='ready',final_path=? WHERE id=1",
+        (str(final_path),),
+    )
+    worker = HighlightWorker(
+        database, clipper, FakeDanmakuClipper(), worker_id='worker', clock=lambda: 1_000
+    )
+
+    assert await worker.run_once() == clip.id
+
+    worker_sources = clipper.inspect_calls[-1][0]
+    assert worker_sources[0].path == str(final_path)
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_incomplete_ffprobe_metadata_for_growing_recording(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    service = HighlightService(database, recording_root=root, clipper=FakeClipper())
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='录制中片段',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    failing = FakeClipper()
+    failing.inspect = lambda *args, **kwargs: (_ for _ in ()).throw(
+        HighlightCutError('ffprobe 返回了无效的视频流信息')
+    )
+    worker = HighlightWorker(
+        database, failing, FakeDanmakuClipper(), worker_id='worker', clock=lambda: 1_000
+    )
+
+    assert await worker.run_once() == clip.id
+
+    row = await database.fetchone(
+        'SELECT state,next_attempt_at,error_message FROM highlight_clips WHERE id=?',
+        (clip.id,),
+    )
+    assert row is not None
+    assert row['state'] == 'queued'
+    assert row['next_attempt_at'] > 1_000
+    assert '无效的视频流信息' in row['error_message']
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_retrying_incomplete_ffprobe_metadata_after_source_closes(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    service = HighlightService(database, recording_root=root, clipper=FakeClipper())
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='结束边界片段',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    await database.execute(
+        "UPDATE recording_parts SET artifact_state='ready',final_path=source_path "
+        'WHERE id=1'
+    )
+    await database.execute(
+        'UPDATE highlight_clips SET attempt=4 WHERE id=?', (clip.id,)
+    )
+    failing = FakeClipper()
+    failing.inspect = lambda *args, **kwargs: (_ for _ in ()).throw(
+        HighlightCutError('ffprobe 返回了无效的视频流信息')
+    )
+    worker = HighlightWorker(
+        database, failing, FakeDanmakuClipper(), worker_id='worker', clock=lambda: 1_000
+    )
+
+    assert await worker.run_once() == clip.id
+
+    row = await database.fetchone(
+        'SELECT state,next_attempt_at FROM highlight_clips WHERE id=?', (clip.id,)
+    )
+    assert row is not None
+    assert row['state'] == 'queued'
+    assert row['next_attempt_at'] > 1_000
+
+
+@pytest.mark.asyncio
+async def test_worker_stops_retrying_invalid_metadata_after_finalization_grace(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    service = HighlightService(database, recording_root=root, clipper=FakeClipper())
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='损坏片段',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    await database.execute(
+        "UPDATE recording_parts SET artifact_state='ready',final_path=source_path,"
+        'updated_at=1 WHERE id=1'
+    )
+    failing = FakeClipper()
+    failing.inspect = lambda *args, **kwargs: (_ for _ in ()).throw(
+        HighlightCutError('ffprobe 返回了无效的视频流信息')
+    )
+    worker = HighlightWorker(
+        database, failing, FakeDanmakuClipper(), worker_id='worker', clock=lambda: 1_000
+    )
+
+    assert await worker.run_once() == clip.id
+
+    assert (
+        await database.scalar(
+            'SELECT state FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+        == 'failed'
+    )
 
 
 @pytest.mark.asyncio
@@ -360,6 +516,7 @@ async def test_delete_clip_cancels_pending_and_removes_only_ready_outputs(
     await database.execute(
         "UPDATE highlight_clips SET state='ready' WHERE id=?", (clip.id,)
     )
+    upload_session_id = await service.ensure_upload_session(clip.id)
 
     assert await service.delete_clip(clip.id) == 'deleted'
     assert (
@@ -370,4 +527,119 @@ async def test_delete_clip_cancels_pending_and_removes_only_ready_outputs(
     )
     assert not Path(clip.output_video_path).exists()
     assert not Path(clip.output_xml_path).exists()
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM recording_sessions WHERE id=?', (upload_session_id,)
+        )
+        == 0
+    )
     assert source_video.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_clip_keeps_files_when_upload_job_exists(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    service = HighlightService(database, recording_root=root, clipper=FakeClipper())
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='投稿中的片段',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    assert clip.output_video_path is not None
+    assert clip.output_xml_path is not None
+    Path(clip.output_video_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(clip.output_video_path).write_bytes(b'output')
+    Path(clip.output_xml_path).write_text('<i/>', encoding='utf8')
+    await database.execute(
+        "UPDATE highlight_clips SET state='ready' WHERE id=?", (clip.id,)
+    )
+    upload_session_id = await service.ensure_upload_session(clip.id)
+    await database.execute(
+        'INSERT INTO bili_accounts('
+        'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+        'state,created_at,updated_at) '
+        "VALUES(1,1000,'投稿账号',X'00',1,'test','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(?,1,'{}','ready','prepared',1,1)",
+        (upload_session_id,),
+    )
+
+    with pytest.raises(ValueError, match='already has an upload task'):
+        await service.delete_clip(clip.id)
+
+    assert Path(clip.output_video_path).exists()
+    assert Path(clip.output_xml_path).exists()
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_clip_keeps_retryable_database_record_when_unlink_fails(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    service = HighlightService(database, recording_root=root, clipper=FakeClipper())
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='待删除片段',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    assert clip.output_video_path is not None
+    Path(clip.output_video_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(clip.output_video_path).write_bytes(b'output')
+    await database.execute(
+        "UPDATE highlight_clips SET state='ready' WHERE id=?", (clip.id,)
+    )
+    upload_session_id = await service.ensure_upload_session(clip.id)
+
+    async def fail_remove(*args, **kwargs) -> None:
+        raise PermissionError('NAS temporarily refused deletion')
+
+    monkeypatch.setattr(service, '_remove_clip_outputs', fail_remove)
+    with pytest.raises(PermissionError, match='temporarily refused'):
+        await service.delete_clip(clip.id)
+
+    assert (
+        await database.scalar(
+            'SELECT state FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+        == 'cancelled'
+    )
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM recording_sessions WHERE id=?', (upload_session_id,)
+        )
+        == 1
+    )
+
+    monkeypatch.undo()
+    assert await service.delete_clip(clip.id) == 'deleted'
+    assert not Path(clip.output_video_path).exists()
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM recording_sessions WHERE id=?', (upload_session_id,)
+        )
+        == 0
+    )

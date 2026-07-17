@@ -11,7 +11,11 @@ import {
   RealtimeEvent,
   RealtimeService,
 } from 'src/app/core/services/realtime.service';
-import { PartPlayer, PartPlayerFactory } from '../part-video-dialog/part-player.factory';
+import { RoomUploadPolicyRequest } from 'src/app/tasks/upload-policy-dialog/room-upload-policy.model';
+import {
+  PartPlayer,
+  PartPlayerFactory,
+} from '../part-video-dialog/part-player.factory';
 import {
   HighlightClip,
   HighlightClipInspection,
@@ -21,12 +25,19 @@ import { HighlightService } from '../shared/highlight.service';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightEditorComponent } from './highlight-editor.component';
 
-@Component({ selector: 'app-task-edit-dialog', template: '' })
-class TaskEditDialogStubComponent {
-  @Input() visible = false;
-  @Input() jobIds: readonly number[] = [];
+@Component({ selector: 'app-upload-policy-dialog', template: '' })
+class UploadPolicyDialogStubComponent {
+  @Input() sessionId: number | null = null;
+  @Input() roomId = 0;
+  @Input() roomName = '';
+  @Input() liveAreaName = '';
+  @Input() liveParentAreaName = '';
+  @Input() allowRestoreInherited = true;
+  @Input() deferredSave = false;
   @Output() readonly closed = new EventEmitter<void>();
   @Output() readonly saved = new EventEmitter<void>();
+  @Output() readonly settingsConfirmed =
+    new EventEmitter<RoomUploadPolicyRequest>();
 }
 
 describe('HighlightEditorComponent', () => {
@@ -86,6 +97,36 @@ describe('HighlightEditorComponent', () => {
     ],
   };
 
+  const submissionSettings: RoomUploadPolicyRequest = {
+    accountMode: 'primary',
+    accountId: null,
+    enabled: true,
+    titleTemplate: '{{ title }} 精选',
+    descriptionTemplate: '高光片段',
+    partTitleTemplate: 'P{{ part_index }}',
+    dynamicTemplate: '高光片段',
+    tid: 21,
+    tags: '高光,直播',
+    creationStatementId: -1,
+    originalAuthorization: false,
+    source: '',
+    isOnlySelf: false,
+    publishDynamic: true,
+    upSelectionReply: false,
+    upCloseReply: false,
+    upCloseDanmu: false,
+    autoComment: true,
+    danmakuBackfill: true,
+    filters: {},
+    collectionSeasonId: 20,
+    collectionSectionId: 21,
+    coverMode: 'live',
+    coverAssetId: null,
+    publishDelaySeconds: 0,
+    retentionMode: 'submitted',
+    retentionDays: 5,
+  };
+
   const inspection: HighlightClipInspection = {
     requestedStartMs: 110_000,
     requestedEndMs: 130_000,
@@ -135,6 +176,7 @@ describe('HighlightEditorComponent', () => {
       'createClip',
       'getClip',
       'deleteClip',
+      'prepareUploadSession',
       'createUploadTask',
       'createMediaAccess',
       'mediaUrl',
@@ -150,21 +192,22 @@ describe('HighlightEditorComponent', () => {
         ...processingClip,
         state: 'ready',
         outputVideoPath: '/rec/highlight-3.mp4',
-      })
+      }),
     );
     highlights.updateMarker.and.callFake((id, name, note) =>
-      of({ ...timeline.markers[0].marker, id, name, note })
+      of({ ...timeline.markers[0].marker, id, name, note }),
     );
     highlights.deleteMarker.and.returnValue(of(void 0));
     highlights.createUploadTask.and.returnValue(of({ jobId: 44 }));
+    highlights.prepareUploadSession.and.returnValue(of({ sessionId: 77 }));
     highlights.createMediaAccess.and.returnValue(
-      of({ token: 'clip-token', expiresAt: 123, fileSizeBytes: 4096 })
+      of({ token: 'clip-token', expiresAt: 123, fileSizeBytes: 4096 }),
     );
     highlights.mediaUrl.and.returnValue('/api/highlight-media');
 
     recordings = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['createMediaAccess', 'mediaUrl', 'runJobAction']
+      ['createMediaAccess', 'mediaUrl', 'runJobAction'],
     );
     recordings.createMediaAccess.and.returnValue(
       of({
@@ -178,11 +221,11 @@ describe('HighlightEditorComponent', () => {
         indexState: 'pending',
         retryAfterMs: null,
         requestId: 'request-editor',
-      })
+      }),
     );
     recordings.mediaUrl.and.callFake((partId) => `/media/${partId}`);
     recordings.runJobAction.and.returnValue(
-      of({ results: [{ jobId: 44, accepted: true, message: '已继续上传' }] })
+      of({ results: [{ jobId: 44, accepted: true, message: '已继续上传' }] }),
     );
 
     player = jasmine.createSpyObj<PartPlayer>('PartPlayer', [
@@ -193,13 +236,13 @@ describe('HighlightEditorComponent', () => {
     ]);
     playerFactory = jasmine.createSpyObj<PartPlayerFactory>(
       'PartPlayerFactory',
-      ['attachFlv']
+      ['attachFlv'],
     );
     playerFactory.attachFlv.and.returnValue(player);
     realtime = new Subject<RealtimeEvent>();
 
     await TestBed.configureTestingModule({
-      declarations: [HighlightEditorComponent, TaskEditDialogStubComponent],
+      declarations: [HighlightEditorComponent, UploadPolicyDialogStubComponent],
       imports: [CommonModule, FormsModule, RouterTestingModule],
       providers: [
         { provide: HighlightService, useValue: highlights },
@@ -209,7 +252,10 @@ describe('HighlightEditorComponent', () => {
         {
           provide: ActivatedRoute,
           useValue: {
-            snapshot: { paramMap: { get: () => '9' } },
+            snapshot: {
+              paramMap: { get: () => '9' },
+              queryParamMap: { get: () => '11' },
+            },
           },
         },
       ],
@@ -228,6 +274,77 @@ describe('HighlightEditorComponent', () => {
     expect(component.playheadMs).toBe(115_000);
     expect(recordings.createMediaAccess).toHaveBeenCalledWith(12);
     expect(component.selectedMarkerId).toBe(7);
+  });
+
+  it('does not silently fall back when the requested recording part is missing', () => {
+    Object.defineProperty(component, 'initialPartId', { value: 999 });
+
+    (component as unknown as { loadTimeline(initial: boolean): void }).loadTimeline(
+      true,
+    );
+
+    expect(component.selectedPart).toBeNull();
+    expect(component.error).toContain('本地录像已不存在');
+  });
+
+  it('requires a concrete recording part in the editor URL', () => {
+    Object.defineProperty(component, 'initialPartId', { value: null });
+
+    (component as unknown as { loadTimeline(initial: boolean): void }).loadTimeline(
+      true,
+    );
+
+    expect(component.selectedPart).toBeNull();
+    expect(component.error).toContain('具体分段');
+  });
+
+  it('drags the playhead and snaps near a highlight marker', () => {
+    const track = fixture.nativeElement.querySelector(
+      '.timeline-track',
+    ) as HTMLElement;
+    spyOn(track, 'getBoundingClientRect').and.returnValue({
+      left: 0,
+      width: 180,
+      right: 180,
+      top: 0,
+      bottom: 54,
+      height: 54,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    const start = {
+      button: 0,
+      pointerId: 1,
+      clientX: 112,
+      target: track,
+      preventDefault: jasmine.createSpy('preventDefault'),
+    } as unknown as PointerEvent;
+
+    component.startTimelineDrag(start, track);
+
+    expect(component.draggingPlayhead).toBeTrue();
+    expect(component.playheadMs).toBe(115_000);
+
+    component.moveTimelineDrag(
+      { pointerId: 1, clientX: 140 } as PointerEvent,
+      track,
+    );
+    expect(component.playheadMs).toBe(140_000);
+
+    component.endTimelineDrag({ pointerId: 1 } as PointerEvent, track);
+    expect(component.draggingPlayhead).toBeFalse();
+  });
+
+  it('adjusts the selected boundaries in whole seconds', () => {
+    component.startMs = 10_000;
+    component.endMs = 20_000;
+
+    component.adjustSelection('start', -1);
+    component.adjustSelection('end', 1);
+
+    expect(component.startMs).toBe(9_000);
+    expect(component.endMs).toBe(21_000);
   });
 
   it('opens the first local recording and restores clips automatically', () => {
@@ -257,11 +374,11 @@ describe('HighlightEditorComponent', () => {
     fixture.detectChanges();
 
     const add = fixture.nativeElement.querySelector(
-      '[data-testid="add-draft"]'
+      '[data-testid="add-draft"]',
     ) as HTMLButtonElement;
     expect(add.disabled).toBeTrue();
     expect(fixture.nativeElement.textContent).toContain(
-      '结束位置仍在录制安全区之外'
+      '结束位置仍在录制安全区之外',
     );
   });
 
@@ -278,7 +395,9 @@ describe('HighlightEditorComponent', () => {
     component.setSelectionEndFromPlayhead();
     component.addDraft();
 
-    expect(component.drafts.map((draft) => [draft.startMs, draft.endMs])).toEqual([
+    expect(
+      component.drafts.map((draft) => [draft.startMs, draft.endMs]),
+    ).toEqual([
       [10_000, 20_000],
       [30_000, 45_000],
     ]);
@@ -333,6 +452,12 @@ describe('HighlightEditorComponent', () => {
     expect(component.clip?.state).toBe('ready');
   });
 
+  it('selects the following part at an exact adjacent-part boundary', () => {
+    const part = component['partAt'](90_000);
+
+    expect(part?.partId).toBe(12);
+  });
+
   it('updates a clip upload state from the shared realtime stream', () => {
     component.clips = [
       {
@@ -363,7 +488,7 @@ describe('HighlightEditorComponent', () => {
     expect(component.clips[0].uploadBvid).toBe('BV1test');
   });
 
-  it('opens task settings and resumes only after settings are saved', () => {
+  it('opens complete submission settings before creating an upload task', () => {
     const readyClip = {
       ...processingClip,
       state: 'ready' as const,
@@ -371,18 +496,21 @@ describe('HighlightEditorComponent', () => {
     };
     component.clips = [readyClip];
 
-    component.createUploadTask(readyClip);
+    component.openClipSubmission(readyClip);
 
-    expect(component.taskEditVisible).toBeTrue();
-    expect(component.taskEditJobIds).toEqual([44]);
-    expect(recordings.runJobAction).not.toHaveBeenCalled();
+    expect(highlights.prepareUploadSession).not.toHaveBeenCalled();
+    expect(component.submissionClip?.id).toBe(3);
+    expect(highlights.createUploadTask).not.toHaveBeenCalled();
 
-    component.taskEditSaved();
+    component.clipSubmissionSaved(submissionSettings);
 
-    expect(recordings.runJobAction).toHaveBeenCalledOnceWith(
-      'resume_upload',
-      [44]
+    expect(highlights.createUploadTask).toHaveBeenCalledOnceWith(
+      3,
+      submissionSettings,
     );
+    expect(recordings.runJobAction).not.toHaveBeenCalled();
+    expect(component.clips[0].uploadJobId).toBe(44);
+    expect(component.clips[0].uploadState).toBe('ready');
   });
 
   it('previews a ready clip through its signed range URL', () => {
@@ -409,11 +537,7 @@ describe('HighlightEditorComponent', () => {
     component.markerNote = '备注';
     component.saveMarker();
 
-    expect(highlights.updateMarker).toHaveBeenCalledWith(
-      7,
-      '新的名称',
-      '备注'
-    );
+    expect(highlights.updateMarker).toHaveBeenCalledWith(7, '新的名称', '备注');
 
     component.deleteMarker(timeline.markers[0]);
     expect(highlights.deleteMarker).toHaveBeenCalledOnceWith(7);

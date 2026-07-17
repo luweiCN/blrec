@@ -20,6 +20,7 @@ from typing import (
 from blrec.logging.audit import audit
 
 from .database import BiliUploadDatabase
+from .session_submission import InvalidSessionSubmission, decode_submission_settings
 
 __all__ = ('RetentionManager', 'RetentionStatus')
 
@@ -121,7 +122,8 @@ class RetentionManager:
 
     async def _event_candidates(self, now: int) -> List[_Candidate]:
         rows = await self._database.fetchall(
-            'SELECT part.id,part.source_path,part.final_path,session.started_at,'
+            'SELECT part.id,part.source_path,part.final_path,session.id AS session_id,'
+            'session.started_at,session.upload_override_json,'
             "COALESCE(policy.retention_mode,'submitted') AS retention_mode,"
             'COALESCE(policy.retention_days,5) AS retention_days,'
             'job.upload_completed_at,job.submitted_at,job.approved_at '
@@ -143,12 +145,12 @@ class RetentionManager:
             'approved': 'approved_at',
         }
         for row in rows:
-            mode = str(row['retention_mode'])
+            mode, retention_days = self._retention_policy(row)
             milestone_column = milestone_columns.get(mode)
             if milestone_column is None or row[milestone_column] is None:
                 continue
             milestone = int(row[milestone_column])
-            due_at = milestone + int(row['retention_days']) * _DAY_SECONDS
+            due_at = milestone + retention_days * _DAY_SECONDS
             if due_at > now:
                 continue
             candidates.append(self._candidate(row, mode, due_at))
@@ -157,18 +159,21 @@ class RetentionManager:
     async def _capacity_candidates(self) -> List[_Candidate]:
         now = int(self._clock())
         rows = await self._database.fetchall(
-            'SELECT part.id,part.source_path,part.final_path,session.started_at,'
+            'SELECT part.id,part.source_path,part.final_path,session.id AS session_id,'
+            'session.started_at,session.upload_override_json,'
+            "COALESCE(policy.retention_mode,'submitted') AS retention_mode,"
+            'COALESCE(policy.retention_days,5) AS retention_days,'
             'CASE WHEN job.id IS NULL THEN '
             'COALESCE(session.ended_at,session.started_at) '
             'ELSE job.submitted_at END AS order_at '
             'FROM recording_parts part '
             'JOIN recording_sessions session ON session.id=part.session_id '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
-            'JOIN room_upload_policies policy ON policy.room_id=session.room_id '
+            'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             "WHERE part.video_deleted_at IS NULL AND session.state='closed' "
             "AND session.deletion_state='none' "
             "AND part.artifact_state NOT IN ('recording','postprocessing') "
-            "AND policy.retention_mode='capacity' AND ((job.id IS NULL "
+            'AND ((job.id IS NULL '
             "AND session.upload_intent IN ('none','skip')) OR "
             '(job.id IS NOT NULL AND job.submitted_at IS NOT NULL)) '
             'AND (job.id IS NULL OR job.lease_until IS NULL OR job.lease_until<=?) '
@@ -179,7 +184,29 @@ class RetentionManager:
             'ORDER BY order_at,session.started_at,part.part_index,part.id',
             (now,),
         )
-        return [self._candidate(row, 'capacity', int(row['order_at'])) for row in rows]
+        return [
+            self._candidate(row, 'capacity', int(row['order_at']))
+            for row in rows
+            if self._retention_policy(row)[0] == 'capacity'
+        ]
+
+    @staticmethod
+    def _retention_policy(row: Any) -> Tuple[str, int]:
+        override = row['upload_override_json']
+        if override is None:
+            return str(row['retention_mode']), int(row['retention_days'])
+        try:
+            command = decode_submission_settings(str(override))
+        except InvalidSessionSubmission as error:
+            audit(
+                'recording_retention_policy_invalid',
+                level='ERROR',
+                session_id=int(row['session_id']),
+                error_type=type(error).__name__,
+                result='kept',
+            )
+            return 'never', 0
+        return command.retention_mode, command.retention_days
 
     @staticmethod
     def _candidate(row: Any, reason: str, order_at: int) -> _Candidate:

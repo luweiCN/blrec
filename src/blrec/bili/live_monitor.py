@@ -117,6 +117,8 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
         self._logger.warning('The Danmaku Client Reconnected')
 
         if self._status_sink is not None:
+            await self._live.update_room_info()
+            await self._emit('room_changed', self._live.room_info)
             return
 
         await self._live.update_room_info()
@@ -163,6 +165,9 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
             }.get(danmu_cmd)
             if status is not None:
                 await self._status_sink(status)
+            elif danmu_cmd == DanmakuCommand.ROOM_CHANGE.value:
+                await self._live.update_room_info()
+                await self._emit('room_changed', self._live.room_info)
             return
 
         if danmu_cmd == DanmakuCommand.LIVE.value:

@@ -15,7 +15,9 @@ import {
   ReloadOutline,
   SearchOutline,
   SwapOutline,
+  UnorderedListOutline,
   UserOutline,
+  VideoCameraOutline,
 } from '@ant-design/icons-angular/icons';
 
 const icons = [
@@ -32,7 +34,9 @@ const icons = [
   ReloadOutline,
   SearchOutline,
   SwapOutline,
+  UnorderedListOutline,
   UserOutline,
+  VideoCameraOutline,
 ];
 
 @NgModule({

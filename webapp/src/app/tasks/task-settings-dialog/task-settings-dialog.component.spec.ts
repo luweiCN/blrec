@@ -40,6 +40,7 @@ const globalSettings: GlobalTaskSettings = {
     bufferSize: 0,
     saveCover: false,
     coverSaveStrategy: CoverSaveStrategy.DEFAULT,
+    titleKeywords: [],
   },
   postprocessing: {
     injectExtraMetadata: false,
@@ -65,8 +66,7 @@ describe('TaskSettingsDialogComponent', () => {
     await TestBed.configureTestingModule({
       declarations: [TaskSettingsDialogComponent],
       schemas: [NO_ERRORS_SCHEMA],
-    })
-      .compileComponents();
+    }).compileComponents();
   });
 
   beforeEach(() => {

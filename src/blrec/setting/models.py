@@ -409,6 +409,24 @@ class RecorderOptions(BaseModel):
     ]
     save_cover: Optional[bool]
     cover_save_strategy: Optional[CoverSaveStrategy]
+    title_keywords: Optional[List[str]]
+
+    @validator('title_keywords', pre=True)
+    def _normalize_title_keywords(
+        cls, value: Optional[List[str]]
+    ) -> Optional[List[str]]:
+        if value is None:
+            return None
+        normalized: List[str] = []
+        seen = set()
+        for item in value:
+            keyword = str(item).strip()
+            folded = keyword.casefold()
+            if not keyword or folded in seen:
+                continue
+            normalized.append(keyword)
+            seen.add(folded)
+        return normalized
 
     @validator('fmp4_stream_timeout')
     def _validate_fmp4_stream_timeout(cls, v: Optional[int]) -> Optional[int]:
@@ -442,6 +460,7 @@ class RecorderSettings(RecorderOptions):
     buffer_size: Annotated[int, Field(ge=4096, le=1024**2 * 512, multiple_of=2)] = 8192
     save_cover: bool = False
     cover_save_strategy: CoverSaveStrategy = CoverSaveStrategy.DEFAULT
+    title_keywords: List[str] = Field(default_factory=list)
 
 
 class PostprocessingOptions(BaseModel):

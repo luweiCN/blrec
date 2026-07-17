@@ -116,7 +116,12 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   @Input() roomName = '';
   @Input() liveAreaName = '';
   @Input() liveParentAreaName = '';
+  @Input() allowRestoreInherited = true;
+  @Input() deferredSave = false;
   @Output() closed = new EventEmitter<void>();
+  @Output() saved = new EventEmitter<void>();
+  @Output() settingsConfirmed =
+    new EventEmitter<RoomUploadPolicyRequest>();
 
   visible = true;
   loading = true;
@@ -221,6 +226,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   get modalTitle(): string {
+    if (this.deferredSave) {
+      return `片段投稿设置 · ${this.roomName}`;
+    }
     if (this.sessionId !== null) {
       return `本场投稿设置 · ${this.roomName} · ${this.roomId}`;
     }
@@ -257,9 +265,8 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   get selectedCover(): CoverAsset | null {
     return (
-      this.coverAssets.find(
-        (asset) => asset.id === this.draft.coverAssetId,
-      ) ?? null
+      this.coverAssets.find((asset) => asset.id === this.draft.coverAssetId) ??
+      null
     );
   }
 
@@ -549,7 +556,10 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       accountMode: this.draft.accountMode,
       accountId:
         this.draft.accountMode === 'fixed' ? this.draft.accountId : null,
-      enabled: this.sessionId === null ? this.draft.enabled : true,
+      enabled:
+        this.sessionId === null && !this.deferredSave
+          ? this.draft.enabled
+          : true,
       titleTemplate: this.draft.titleTemplate.trim(),
       descriptionTemplate: this.draft.descriptionTemplate.trim(),
       partTitleTemplate: this.draft.partTitleTemplate.trim(),
@@ -579,6 +589,12 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       retentionMode: this.draft.retentionMode,
       retentionDays: this.draft.retentionDays,
     };
+    if (this.deferredSave) {
+      this.settingsConfirmed.emit(request);
+      this.visible = false;
+      this.changeDetector.markForCheck();
+      return;
+    }
     this.saving = true;
     this.error = null;
     const targetRoomIds = this.targetRoomIds;
@@ -606,6 +622,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
                 ? `已保存 ${targetRoomIds.length} 个房间的投稿设置`
                 : `房间 ${this.roomId} 的投稿设置已保存`,
           );
+          this.saved.emit();
           this.visible = false;
           this.changeDetector.markForCheck();
         },
@@ -640,6 +657,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       .subscribe({
         next: () => {
           this.message.success('已恢复跟随房间投稿设置');
+          this.saved.emit();
           this.visible = false;
           this.changeDetector.markForCheck();
         },
@@ -680,11 +698,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.categoryLoading = true;
     this.categoryError = null;
     this.policyService
-      .categories(
-        this.draft.accountMode,
-        this.draft.accountId,
-        forceRefresh,
-      )
+      .categories(this.draft.accountMode, this.draft.accountId, forceRefresh)
       .pipe(
         finalize(() => {
           this.categoryLoading = false;
@@ -889,10 +903,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     ) {
       errors.collection = '请重新选择合集';
     }
-    if (
-      this.draft.coverMode === 'custom' &&
-      this.draft.coverAssetId === null
-    ) {
+    if (this.draft.coverMode === 'custom' && this.draft.coverAssetId === null) {
       errors.cover = '请选择或上传一张封面';
     }
     if (

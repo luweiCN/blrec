@@ -1,10 +1,13 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Tuple
 
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.policies import default_room_upload_policy
 from blrec.bili_upload.retention import RetentionManager
+from blrec.bili_upload.session_submission import encode_submission_settings
 
 
 async def seed_account(database: BiliUploadDatabase) -> None:
@@ -145,6 +148,38 @@ async def test_event_retention_deletes_only_video_and_preserves_danmaku(
             and fields['reason'] == 'submitted'
             for event, fields in events
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_session_retention_override_wins_over_room_policy(tmp_path: Path) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        video, _xml = await seed_recording(
+            database,
+            root,
+            identifier=1,
+            room_id=100,
+            retention_mode='never',
+            retention_days=30,
+            submitted_at=1_000,
+        )
+        override = replace(
+            default_room_upload_policy(), retention_mode='submitted', retention_days=0
+        )
+        await database.execute(
+            'UPDATE recording_sessions SET upload_override_json=? WHERE id=1',
+            (encode_submission_settings(override),),
+        )
+        manager = RetentionManager(database, root, clock=lambda: 1_001)
+
+        assert await manager.run_once() == 1
+        assert not video.exists()
     finally:
         await database.close()
 

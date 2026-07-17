@@ -1,7 +1,9 @@
+import { DOCUMENT } from '@angular/common';
 import {
   ChangeDetectorRef,
   Component,
   ElementRef,
+  Inject,
   NgZone,
   OnDestroy,
   OnInit,
@@ -19,6 +21,7 @@ import {
   PartPlayer,
   PartPlayerFactory,
 } from '../part-video-dialog/part-player.factory';
+import { RoomUploadPolicyRequest } from '../../tasks/upload-policy-dialog/room-upload-policy.model';
 import {
   HighlightClip,
   HighlightClipInspection,
@@ -60,8 +63,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   clipName = '';
   drafts: HighlightClipDraft[] = [];
   clips: HighlightClip[] = [];
-  taskEditVisible = false;
-  taskEditJobIds: readonly number[] = [];
+  submissionClip: HighlightClip | null = null;
+  submittingClipId: number | null = null;
+  downloadingClipId: number | null = null;
+  draggingPlayhead = false;
   clipPreviewId: number | null = null;
   clipPreviewUrl: string | null = null;
   clipPreviewLoading = false;
@@ -87,22 +92,24 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private clipsRequest?: Subscription;
   private nextDraftId = 1;
   private previewingDraftId: number | null = null;
+  private draggingPointerId: number | null = null;
   private readonly subscriptions = new Subscription();
 
   constructor(
+    @Inject(DOCUMENT) private document: Document,
     route: ActivatedRoute,
     private highlights: HighlightService,
     private recordings: RecordingSessionService,
     private playerFactory: PartPlayerFactory,
     private changeDetector: ChangeDetectorRef,
     private zone: NgZone,
-    realtime: RealtimeService
+    realtime: RealtimeService,
   ) {
     this.sessionId = Number(route.snapshot.paramMap.get('sessionId'));
     const partId = Number(route.snapshot.queryParamMap?.get('partId'));
     this.initialPartId = Number.isInteger(partId) && partId > 0 ? partId : null;
     this.subscriptions.add(
-      realtime.events$.subscribe((event) => this.handleRealtimeEvent(event))
+      realtime.events$.subscribe((event) => this.handleRealtimeEvent(event)),
     );
   }
 
@@ -119,24 +126,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   get clip(): HighlightClip | null {
     return this.clips.length > 0 ? this.clips[this.clips.length - 1] : null;
-  }
-
-  get selectionStartSeconds(): number {
-    return this.startMs / 1000;
-  }
-
-  set selectionStartSeconds(value: number) {
-    this.startMs = Math.round(Number(value) * 1000);
-    this.selectionChanged();
-  }
-
-  get selectionEndSeconds(): number {
-    return this.endMs / 1000;
-  }
-
-  set selectionEndSeconds(value: number) {
-    this.endMs = Math.round(Number(value) * 1000);
-    this.selectionChanged();
   }
 
   get selectionError(): string | null {
@@ -186,7 +175,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.startMs = Math.max(0, item.timelineOffsetMs - 30_000);
     this.endMs = Math.min(
       this.timeline?.stableEndMs ?? item.timelineOffsetMs + 60_000,
-      item.timelineOffsetMs + 60_000
+      item.timelineOffsetMs + 60_000,
     );
     this.seekTimeline(item.timelineOffsetMs);
   }
@@ -215,7 +204,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (this.endMs <= this.startMs) {
       this.endMs = Math.min(
         this.timeline?.stableEndMs ?? this.startMs + 60_000,
-        this.startMs + 60_000
+        this.startMs + 60_000,
       );
     }
     this.selectionChanged();
@@ -223,6 +212,22 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   setSelectionEndFromPlayhead(): void {
     this.endMs = Math.round(this.playheadMs);
+    this.selectionChanged();
+  }
+
+  adjustSelection(boundary: 'start' | 'end', seconds: number): void {
+    const deltaMs = Math.round(seconds * 1000);
+    if (boundary === 'start') {
+      this.startMs = Math.max(
+        0,
+        Math.min(this.endMs - 1000, this.startMs + deltaMs),
+      );
+    } else {
+      this.endMs = Math.min(
+        this.timeline?.stableEndMs ?? this.endMs,
+        Math.max(this.startMs + 1000, this.endMs + deltaMs),
+      );
+    }
     this.selectionChanged();
   }
 
@@ -248,7 +253,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.startMs = this.endMs;
     this.endMs = Math.min(
       this.timeline?.stableEndMs ?? this.startMs + 60_000,
-      this.startMs + 60_000
+      this.startMs + 60_000,
     );
     this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
   }
@@ -297,7 +302,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             draft.error = this.describeError(error, '无法创建这个片段');
             this.changeDetector.markForCheck();
           },
-        })
+        }),
     );
   }
 
@@ -322,15 +327,81 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   seekFromTrack(event: MouseEvent, track: HTMLElement): void {
+    if (this.draggingPlayhead) {
+      return;
+    }
+    this.seekFromPointer(event.clientX, track);
+  }
+
+  startTimelineDrag(event: PointerEvent, track: HTMLElement): void {
+    if (event.button !== 0 || this.isMarkerTarget(event.target)) {
+      return;
+    }
+    event.preventDefault();
+    this.draggingPointerId = event.pointerId;
+    this.draggingPlayhead = true;
+    try {
+      track.setPointerCapture(event.pointerId);
+    } catch (_error) {
+      // Synthetic test events and older browsers may not own pointer capture.
+    }
+    this.seekFromPointer(event.clientX, track);
+  }
+
+  moveTimelineDrag(event: PointerEvent, track: HTMLElement): void {
+    if (event.pointerId !== this.draggingPointerId) {
+      return;
+    }
+    this.seekFromPointer(event.clientX, track);
+  }
+
+  endTimelineDrag(event: PointerEvent, track: HTMLElement): void {
+    if (event.pointerId !== this.draggingPointerId) {
+      return;
+    }
+    try {
+      track.releasePointerCapture(event.pointerId);
+    } catch (_error) {
+      // Pointer capture may already have been released by the browser.
+    }
+    this.draggingPointerId = null;
+    this.draggingPlayhead = false;
+  }
+
+  private seekFromPointer(clientX: number, track: HTMLElement): void {
     if (!this.timeline || this.timeline.durationMs <= 0) {
       return;
     }
     const bounds = track.getBoundingClientRect();
     const ratio = Math.max(
       0,
-      Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))
+      Math.min(1, (clientX - bounds.left) / Math.max(1, bounds.width)),
     );
-    this.seekTimeline(Math.round(ratio * this.timeline.durationMs));
+    const valueMs = Math.round(ratio * this.timeline.durationMs);
+    this.seekTimeline(this.snapToMarker(valueMs, bounds.width));
+  }
+
+  private snapToMarker(valueMs: number, trackWidth: number): number {
+    if (!this.timeline || this.timeline.markers.length === 0) {
+      return valueMs;
+    }
+    const thresholdMs = Math.max(
+      500,
+      Math.round((this.timeline.durationMs * 10) / Math.max(1, trackWidth)),
+    );
+    const nearest = this.timeline.markers.reduce((current, item) =>
+      Math.abs(item.timelineOffsetMs - valueMs) <
+      Math.abs(current.timelineOffsetMs - valueMs)
+        ? item
+        : current,
+    );
+    return Math.abs(nearest.timelineOffsetMs - valueMs) <= thresholdMs
+      ? nearest.timelineOffsetMs
+      : valueMs;
+  }
+
+  private isMarkerTarget(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest('.marker-pin') !== null;
   }
 
   handleTimelineKeydown(event: KeyboardEvent): void {
@@ -341,30 +412,51 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     const direction = event.key === 'ArrowLeft' ? -1 : 1;
     const target = Math.max(
       0,
-      Math.min(this.timeline?.stableEndMs ?? 0, this.playheadMs + direction * 5000)
+      Math.min(
+        this.timeline?.stableEndMs ?? 0,
+        this.playheadMs + direction * 5000,
+      ),
     );
     this.seekTimeline(target);
   }
 
-  createUploadTask(clip: HighlightClip): void {
+  openClipSubmission(clip: HighlightClip): void {
+    if (clip.uploadJobId || this.submittingClipId !== null) {
+      return;
+    }
+    this.actionError = null;
+    this.submissionClip = clip;
+    this.changeDetector.markForCheck();
+  }
+
+  closeClipSubmission(): void {
+    this.submissionClip = null;
+  }
+
+  clipSubmissionSaved(settings: RoomUploadPolicyRequest): void {
+    const clip = this.submissionClip;
+    if (!clip || clip.uploadJobId || this.submittingClipId !== null) {
+      return;
+    }
+    this.submittingClipId = clip.id;
     this.actionError = null;
     this.subscriptions.add(
-      this.highlights.createUploadTask(clip.id).subscribe({
+      this.highlights.createUploadTask(clip.id, settings).subscribe({
         next: ({ jobId }) => {
           this.clips = this.clips.map((item) =>
             item.id === clip.id
-              ? { ...item, uploadJobId: jobId, uploadState: 'paused' }
-              : item
+              ? { ...item, uploadJobId: jobId, uploadState: 'ready' }
+              : item,
           );
-          this.taskEditJobIds = [jobId];
-          this.taskEditVisible = true;
+          this.submittingClipId = null;
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
+          this.submittingClipId = null;
           this.actionError = this.describeError(error, '创建上传任务失败');
           this.changeDetector.markForCheck();
         },
-      })
+      }),
     );
   }
 
@@ -388,7 +480,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           this.actionError = this.describeError(error, '打开高光片段失败');
           this.changeDetector.markForCheck();
         },
-      })
+      }),
     );
   }
 
@@ -402,31 +494,32 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.actionError = '高光片段播放失败';
   }
 
-  closeTaskEdit(): void {
-    this.taskEditVisible = false;
-    this.taskEditJobIds = [];
-  }
-
-  taskEditSaved(): void {
-    const jobIds = this.taskEditJobIds;
-    this.closeTaskEdit();
-    if (jobIds.length === 0) {
+  downloadClip(clip: HighlightClip): void {
+    if (clip.state !== 'ready' || this.downloadingClipId !== null) {
       return;
     }
+    this.downloadingClipId = clip.id;
+    this.actionError = null;
     this.subscriptions.add(
-      this.recordings.runJobAction('resume_upload', jobIds).subscribe({
-        next: ({ results }) => {
-          const rejected = results.find((result) => !result.accepted);
-          if (rejected) {
-            this.actionError = rejected.message;
-          }
+      this.highlights.createMediaAccess(clip.id).subscribe({
+        next: (access) => {
+          const link = this.document.createElement('a');
+          link.href = this.highlights.downloadUrl(clip.id, access);
+          link.download = '';
+          link.rel = 'noopener noreferrer';
+          link.style.display = 'none';
+          this.document.body.appendChild(link);
+          link.click();
+          link.remove();
+          this.downloadingClipId = null;
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
-          this.actionError = this.describeError(error, '继续上传任务失败');
+          this.downloadingClipId = null;
+          this.actionError = this.describeError(error, '下载高光片段失败');
           this.changeDetector.markForCheck();
         },
-      })
+      }),
     );
   }
 
@@ -444,7 +537,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           this.actionError = this.describeError(error, '删除高光片段失败');
           this.changeDetector.markForCheck();
         },
-      })
+      }),
     );
   }
 
@@ -474,7 +567,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
               this.timeline = {
                 ...this.timeline,
                 markers: this.timeline.markers.map((item) =>
-                  item.marker.id === markerId ? { ...item, marker } : item
+                  item.marker.id === markerId ? { ...item, marker } : item,
                 ),
               };
             }
@@ -488,7 +581,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             this.actionError = this.describeError(error, '保存高光点失败');
             this.changeDetector.markForCheck();
           },
-        })
+        }),
     );
   }
 
@@ -501,7 +594,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             this.timeline = {
               ...this.timeline,
               markers: this.timeline.markers.filter(
-                (value) => value.marker.id !== markerId
+                (value) => value.marker.id !== markerId,
               ),
             };
           }
@@ -517,7 +610,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           this.actionError = this.describeError(error, '删除高光点失败');
           this.changeDetector.markForCheck();
         },
-      })
+      }),
     );
   }
 
@@ -531,7 +624,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     const draft = this.drafts.find(
-      (item) => item.id === this.previewingDraftId
+      (item) => item.id === this.previewingDraftId,
     );
     if (!draft || this.playheadMs < draft.endMs) {
       return;
@@ -555,11 +648,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     const draft = this.drafts.find(
-      (item) => item.id === this.previewingDraftId
+      (item) => item.id === this.previewingDraftId,
     );
     const currentPart = this.selectedPart;
     const nextPart = this.timeline.parts.find(
-      (part) => part.timelineStartMs > currentPart.timelineStartMs
+      (part) => part.timelineStartMs > currentPart.timelineStartMs,
     );
     if (!draft || !nextPart || nextPart.timelineStartMs >= draft.endMs) {
       this.previewingDraftId = null;
@@ -584,10 +677,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
-    const base = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(
-      2,
-      '0'
-    )}`;
+    const base = `${String(minutes).padStart(2, '0')}:${String(
+      seconds,
+    ).padStart(2, '0')}`;
     return hours > 0 ? `${String(hours).padStart(2, '0')}:${base}` : base;
   }
 
@@ -595,7 +687,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (!this.timeline || this.timeline.durationMs <= 0) {
       return 0;
     }
-    return Math.max(0, Math.min(100, (valueMs / this.timeline.durationMs) * 100));
+    return Math.max(
+      0,
+      Math.min(100, (valueMs / this.timeline.durationMs) * 100),
+    );
   }
 
   partWidthPercent(part: HighlightTimelinePart): number {
@@ -649,12 +744,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       paused: '已暂停',
       completed: '已完成',
     };
-    return clip.uploadState ? labels[clip.uploadState] ?? clip.uploadState : '';
+    return clip.uploadState
+      ? (labels[clip.uploadState] ?? clip.uploadState)
+      : '';
   }
 
   private persistDraft(
     draft: HighlightClipDraft,
-    confirmKeyframe: boolean
+    confirmKeyframe: boolean,
   ): void {
     this.cancelClipLoad();
     draft.state = 'creating';
@@ -681,7 +778,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             draft.error = this.describeError(error, '创建高光片段失败');
             this.changeDetector.markForCheck();
           },
-        })
+        }),
     );
   }
 
@@ -710,6 +807,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private loadTimeline(initial: boolean): void {
+    if (initial && this.initialPartId === null) {
+      this.loading = false;
+      this.selectedPart = null;
+      this.mediaUrl = null;
+      this.error = '请从录制任务详情中的具体分段进入剪辑';
+      this.changeDetector.markForCheck();
+      return;
+    }
     this.loading = true;
     this.error = null;
     this.subscriptions.add(
@@ -721,6 +826,15 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           const requestedPart = initial
             ? timeline.parts.find((part) => part.partId === this.initialPartId)
             : undefined;
+          if (initial && this.initialPartId !== null && !requestedPart) {
+            this.mediaRequest?.unsubscribe();
+            this.teardownPlayer();
+            this.selectedPart = null;
+            this.mediaUrl = null;
+            this.error = '所选分段的本地录像已不存在，无法剪辑';
+            this.changeDetector.markForCheck();
+            return;
+          }
           const part =
             requestedPart ?? this.partAt(playhead) ?? timeline.parts[0] ?? null;
           if (part) {
@@ -733,7 +847,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
               this.endMs = Math.min(
                 part.timelineStartMs + 60_000,
                 part.stableEndMs,
-                timeline.stableEndMs
+                timeline.stableEndMs,
               );
               this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
             }
@@ -745,7 +859,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           this.error = this.describeError(error, '无法加载高光剪辑时间轴');
           this.changeDetector.markForCheck();
         },
-      })
+      }),
     );
   }
 
@@ -758,12 +872,16 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private partAt(valueMs: number): HighlightTimelinePart | null {
+    const parts = this.timeline?.parts ?? [];
     return (
-      this.timeline?.parts.find(
-        (part) =>
+      parts.find((part, index) => {
+        const endMs = part.timelineStartMs + part.durationMs;
+        return (
           valueMs >= part.timelineStartMs &&
-          valueMs <= part.timelineStartMs + part.durationMs
-      ) ?? null
+          (valueMs < endMs ||
+            (index === parts.length - 1 && valueMs === endMs))
+        );
+      }) ?? null
     );
   }
 
@@ -778,24 +896,26 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.mediaAccess = null;
     this.mediaError = null;
     this.mediaLoading = true;
-    this.mediaRequest = this.recordings.createMediaAccess(part.partId).subscribe({
-      next: (access) => {
-        if (this.selectedPart?.partId !== part.partId) {
-          return;
-        }
-        this.mediaAccess = access;
-        this.mediaUrl = this.recordings.mediaUrl(part.partId, access);
-        this.mediaLoading = false;
-        this.attachFlvPlayer();
-        this.applyPendingSeek();
-        this.changeDetector.markForCheck();
-      },
-      error: (error: unknown) => {
-        this.mediaLoading = false;
-        this.mediaError = this.describeError(error, '无法打开本地视频');
-        this.changeDetector.markForCheck();
-      },
-    });
+    this.mediaRequest = this.recordings
+      .createMediaAccess(part.partId)
+      .subscribe({
+        next: (access) => {
+          if (this.selectedPart?.partId !== part.partId) {
+            return;
+          }
+          this.mediaAccess = access;
+          this.mediaUrl = this.recordings.mediaUrl(part.partId, access);
+          this.mediaLoading = false;
+          this.attachFlvPlayer();
+          this.applyPendingSeek();
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.mediaLoading = false;
+          this.mediaError = this.describeError(error, '无法打开本地视频');
+          this.changeDetector.markForCheck();
+        },
+      });
   }
 
   private attachFlvPlayer(): void {
@@ -826,7 +946,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             this.changeDetector.markForCheck();
           }
         });
-      }
+      },
     );
     if (this.player === null) {
       this.mediaError = '当前浏览器不支持 FLV 播放';
@@ -876,17 +996,17 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       }
       const previous = this.clips[index];
       this.clips = this.clips.map((clip) =>
-        clip.id === item.id ? { ...clip, ...item } : clip
+        clip.id === item.id ? { ...clip, ...item } : clip,
       );
       this.changeDetector.markForCheck();
       if (item.state === 'ready' && previous.state !== 'ready') {
         this.subscriptions.add(
           this.highlights.getClip(item.id).subscribe((clip) => {
             this.clips = this.clips.map((value) =>
-              value.id === clip.id ? clip : value
+              value.id === clip.id ? clip : value,
             );
             this.changeDetector.markForCheck();
-          })
+          }),
         );
       }
     }
@@ -914,7 +1034,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         (item): item is Record<string, unknown> =>
           typeof item === 'object' &&
           item !== null &&
-          Number((item as Record<string, unknown>)['jobId']) === clip.uploadJobId
+          Number((item as Record<string, unknown>)['jobId']) ===
+            clip.uploadJobId,
       );
       if (!job) {
         return clip;

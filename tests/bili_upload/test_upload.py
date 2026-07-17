@@ -17,7 +17,7 @@ from blrec.bili_upload.policies import (
     default_room_upload_policy,
 )
 from blrec.bili_upload.session_submission import SessionSubmissionManager
-from blrec.bili_upload.upload import UploadCoordinator
+from blrec.bili_upload.upload import InvalidUploadPolicy, UploadCoordinator
 
 
 class FakeUploader:
@@ -259,7 +259,60 @@ async def seed_ready_highlight(
 
 
 @pytest.mark.asyncio
-async def test_highlight_creates_paused_single_part_jobs_with_saved_or_default_policy(
+async def test_highlight_upload_requires_explicitly_saved_submission_settings(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        session_id = await seed_ready_highlight(database, tmp_path, clip_id=1)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+
+        with pytest.raises(InvalidUploadPolicy, match='settings must be saved'):
+            await worker.create_highlight_job(session_id)
+
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_highlight_upload_rejects_clip_after_deletion_has_started(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        session_id = await seed_ready_highlight(database, tmp_path, clip_id=1)
+        await SessionSubmissionManager(
+            database,
+            policy_manager=RoomUploadPolicyManager(database),
+            clock=MutableClock(1000),
+        ).save_override(
+            session_id, default_room_upload_policy(), manager_subject='administrator'
+        )
+        await database.execute(
+            "UPDATE highlight_clips SET state='cancelled' WHERE upload_session_id=?",
+            (session_id,),
+        )
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+
+        with pytest.raises(InvalidUploadPolicy, match='could not be created'):
+            await worker.create_highlight_job(session_id)
+
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_highlight_creates_ready_single_part_jobs_with_session_policy(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
@@ -273,6 +326,18 @@ async def test_highlight_creates_paused_single_part_jobs_with_saved_or_default_p
         worker = coordinator(database, FakeProtocol(), FakeUploader(database), clock)
 
         first_session_id = await seed_ready_highlight(database, tmp_path, clip_id=1)
+        override = replace(
+            default_room_upload_policy(),
+            title_template='{{ title }} 精选',
+            part_title_template='片段 {{ part_index }}',
+            tid=122,
+            tags='片段,高光',
+            collection_season_id=20,
+            collection_section_id=21,
+        )
+        await SessionSubmissionManager(
+            database, policy_manager=RoomUploadPolicyManager(database), clock=clock
+        ).save_override(first_session_id, override, manager_subject='administrator')
         assert await worker.create_ready_jobs() == []
         first_job_id = await worker.create_highlight_job(first_session_id)
         assert await worker.create_highlight_job(first_session_id) == first_job_id
@@ -285,11 +350,23 @@ async def test_highlight_creates_paused_single_part_jobs_with_saved_or_default_p
         )
         assert first is not None
         assert dict(first) == {
-            'state': 'paused',
-            'operator_paused': 1,
-            'operator_resume_state': 'ready',
+            'state': 'ready',
+            'operator_paused': 0,
+            'operator_resume_state': None,
             'source_kind': 'highlight',
         }
+        first_snapshot = json.loads(
+            str(
+                await database.scalar(
+                    'SELECT policy_snapshot_json FROM upload_jobs WHERE id=?',
+                    (first_job_id,),
+                )
+            )
+        )
+        assert first_snapshot['title'] == '高光 1 精选'
+        assert first_snapshot['tid'] == 122
+        assert first_snapshot['collection_season_id'] == 20
+        assert first_snapshot['collection_section_id'] == 21
         first_parts = await database.fetchall(
             'SELECT part.part_index,part.artifact_state,part.source_path,'
             'part.final_path,part.xml_path FROM recording_parts part '
@@ -303,20 +380,8 @@ async def test_highlight_creates_paused_single_part_jobs_with_saved_or_default_p
 
         await database.execute('DELETE FROM room_upload_policies WHERE room_id=100')
         second_session_id = await seed_ready_highlight(database, tmp_path, clip_id=2)
-        second_job_id = await worker.create_highlight_job(second_session_id)
-        assert second_job_id > first_job_id
-        second_snapshot = json.loads(
-            str(
-                await database.scalar(
-                    'SELECT policy_snapshot_json FROM upload_jobs WHERE id=?',
-                    (second_job_id,),
-                )
-            )
-        )
-        assert second_snapshot['tid'] == 21
-        assert second_snapshot['copyright'] == 2
-        assert second_snapshot['auto_comment'] is True
-        assert second_snapshot['danmaku_backfill'] is True
+        with pytest.raises(InvalidUploadPolicy, match='settings must be saved'):
+            await worker.create_highlight_job(second_session_id)
         assert (
             await database.scalar(
                 'SELECT COUNT(*) FROM room_upload_policies WHERE room_id=100'
@@ -817,6 +882,32 @@ async def test_submission_uses_room_visibility_interaction_and_part_settings(
         assert payload['up_selection_reply'] is True
         assert payload['up_close_reply'] is False
         assert payload['up_close_danmu'] is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_format_four_submission_preserves_positive_creation_statement(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(
+            database, tmp_path, creation_statement_id=1, original_authorization=False
+        )
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+
+        await worker.create_ready_jobs()
+        await worker.run_once()
+
+        payload = protocol.submit_calls[0]
+        assert payload['copyright'] == 3
+        assert payload['creation_statement'] == {'id': 1}
+        assert payload['no_reprint'] == 0
     finally:
         await database.close()
 

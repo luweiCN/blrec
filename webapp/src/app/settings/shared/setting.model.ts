@@ -104,6 +104,7 @@ export interface RecorderSettings {
   bufferSize: number;
   saveCover: boolean;
   coverSaveStrategy: CoverSaveStrategy;
+  titleKeywords: string[];
 }
 
 export type RecorderOptions = Nullable<RecorderSettings>;
@@ -154,13 +155,7 @@ export interface OutputSettings {
 export type OutputOptions = Nullable<Omit<OutputSettings, 'outDir'>>;
 
 export type LogLevel =
-  | 'TRACE'
-  | 'DEBUG'
-  | 'INFO'
-  | 'SUCCESS'
-  | 'WARNING'
-  | 'ERROR'
-  | 'CRITICAL';
+  'TRACE' | 'DEBUG' | 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
 export interface LoggingSettings {
   logDir: string;
@@ -257,12 +252,7 @@ export type OperationalNotificationEvent =
   | 'capacity_warning';
 
 export type OperationalNotificationChannel =
-  | 'email'
-  | 'serverchan'
-  | 'pushdeer'
-  | 'pushplus'
-  | 'telegram'
-  | 'bark';
+  'email' | 'serverchan' | 'pushdeer' | 'pushplus' | 'telegram' | 'bark';
 
 export interface OperationalNotificationTarget {
   channel: OperationalNotificationChannel;
@@ -290,17 +280,13 @@ export type TextMessageType = 'text';
 export type HtmlMessageType = 'html';
 export type MarkdownMessageType = 'markdown';
 export type MessageType =
-  | TextMessageType
-  | MarkdownMessageType
-  | HtmlMessageType;
+  TextMessageType | MarkdownMessageType | HtmlMessageType;
 
 export type EmailMessageType = TextMessageType | HtmlMessageType;
 export type ServerchanMessageType = MarkdownMessageType;
 export type PushdeerMessageType = TextMessageType | MarkdownMessageType;
 export type PushplusMessageType =
-  | TextMessageType
-  | MarkdownMessageType
-  | HtmlMessageType;
+  TextMessageType | MarkdownMessageType | HtmlMessageType;
 export type TelegramMessageType = MarkdownMessageType | HtmlMessageType;
 export type BarkMessageType = TextMessageType;
 

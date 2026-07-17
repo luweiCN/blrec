@@ -63,6 +63,7 @@ async def test_suppressed_live_does_not_restart_until_next_broadcast() -> None:
     recorder._suppressed_live_start_time = None
     recorder._stop_recording = AsyncMock()
     recorder._start_recording = AsyncMock()
+    recorder.title_keywords = []
 
     await recorder.suppress_current_live()
     recorder._recording = False
@@ -75,3 +76,74 @@ async def test_suppressed_live_does_not_restart_until_next_broadcast() -> None:
     await recorder.on_live_began(recorder._live)
 
     recorder._start_recording.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_title_keywords_wait_for_any_match_then_start_recording() -> None:
+    recorder = object.__new__(Recorder)
+    recorder._live = Mock()
+    recorder._live.room_info.room_id = 100
+    recorder._live.room_info.live_start_time = 900
+    recorder._live.room_info.title = '普通聊天'
+    recorder._live.room_info.live_status = 1
+    recorder._logger = Mock()
+    recorder._recording = False
+    recorder._suppressed_live_start_time = None
+    recorder._last_title_filter_decision = None
+    recorder._print_live_info = Mock()
+    recorder._print_changed_room_info = Mock()
+    recorder._stream_recorder = Mock()
+    recorder._start_recording = AsyncMock()
+    recorder.title_keywords = ['比赛', 'HIGHLIGHT']
+
+    await recorder.on_live_began(recorder._live)
+
+    recorder._start_recording.assert_not_awaited()
+
+    recorder._live.room_info.title = '今晚 Highlight 时刻'
+    await recorder.on_room_changed(recorder._live.room_info)
+
+    recorder._start_recording.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_empty_title_keywords_keep_recording_unconditional() -> None:
+    recorder = object.__new__(Recorder)
+    recorder._live = Mock()
+    recorder._live.room_info.live_start_time = 900
+    recorder._logger = Mock()
+    recorder._recording = False
+    recorder._suppressed_live_start_time = None
+    recorder._print_live_info = Mock()
+    recorder._start_recording = AsyncMock()
+    recorder.title_keywords = []
+
+    await recorder.on_live_began(recorder._live)
+
+    recorder._start_recording.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_live_stream_remains_available_while_title_filter_waits() -> None:
+    recorder = object.__new__(Recorder)
+    recorder._live_monitor = Mock(enabled=True)
+    recorder._danmaku_dumper = Mock()
+    recorder._raw_danmaku_dumper = Mock()
+    recorder._cover_downloader = Mock()
+    recorder._logger = Mock()
+    recorder._live = Mock()
+    recorder._live.is_living.return_value = True
+    recorder._live.room_info.room_id = 100
+    recorder._live.room_info.live_start_time = 900
+    recorder._live.room_info.title = '普通聊天'
+    recorder._suppressed_live_start_time = None
+    recorder._stream_available = False
+    recorder._print_live_info = Mock()
+    recorder._print_waiting_message = Mock()
+    recorder._start_recording = AsyncMock()
+    recorder.title_keywords = ('比赛',)
+
+    await recorder._do_start()
+
+    assert recorder._stream_available is True
+    recorder._start_recording.assert_not_awaited()

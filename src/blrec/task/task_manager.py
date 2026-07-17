@@ -417,6 +417,7 @@ class RecordTaskManager:
         task.buffer_size = settings.buffer_size
         task.save_cover = settings.save_cover
         task.cover_save_strategy = settings.cover_save_strategy
+        task.title_keywords = tuple(settings.title_keywords)
 
     def apply_task_postprocessing_settings(
         self, room_id: int, settings: PostprocessingSettings
@@ -454,6 +455,7 @@ class RecordTaskManager:
             record_super_chat=task.record_super_chat,
             save_cover=task.save_cover,
             cover_save_strategy=task.cover_save_strategy,
+            title_keywords=list(task.title_keywords),
             save_raw_danmaku=task.save_raw_danmaku,
             stream_format=task.stream_format,
             recording_mode=task.recording_mode,

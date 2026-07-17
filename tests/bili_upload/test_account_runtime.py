@@ -8,6 +8,7 @@ import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.journal import RecordingJournalBridge
+from blrec.bili_upload.policies import default_room_upload_policy
 from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.setting.models import BiliUploadSettings
 
@@ -375,13 +376,30 @@ async def test_create_highlight_upload_task_pauses_worker_around_draft_creation(
     runtime = object.__new__(BiliAccountRuntime)
     runtime._session_action_lock = asyncio.Lock()
     runtime._highlight_service = SimpleNamespace(
+        get_clip=AsyncMock(return_value=SimpleNamespace(room_id=100)),
         ensure_upload_session=AsyncMock(
             side_effect=lambda clip_id: calls.append(('session', clip_id)) or 12
-        )
+        ),
     )
     runtime._coordinator = SimpleNamespace(
         create_highlight_job=AsyncMock(
             side_effect=lambda session_id: calls.append(('job', session_id)) or 9
+        )
+    )
+    runtime._policy_manager = SimpleNamespace(validate=AsyncMock())
+    runtime._category_catalog = SimpleNamespace(
+        list=AsyncMock(
+            return_value=SimpleNamespace(
+                categories=(SimpleNamespace(children=(SimpleNamespace(id=21),)),),
+                creation_statements=(SimpleNamespace(id=-2),),
+            )
+        )
+    )
+    runtime._session_submission_manager = SimpleNamespace(
+        save_override=AsyncMock(
+            side_effect=lambda session_id, settings, manager_subject: calls.append(
+                ('settings', session_id)
+            )
         )
     )
     runtime._stop_upload_worker = AsyncMock(
@@ -391,9 +409,17 @@ async def test_create_highlight_upload_task_pauses_worker_around_draft_creation(
         side_effect=lambda: calls.append(('start', None))
     )
 
+    settings = default_room_upload_policy()
     job_id = await runtime.create_highlight_upload_task(
-        3, manager_subject='administrator'
+        3, settings=settings, manager_subject='administrator'
     )
 
     assert job_id == 9
-    assert calls == [('stop', None), ('session', 3), ('job', 12), ('start', None)]
+    assert calls == [
+        ('stop', None),
+        ('session', 3),
+        ('settings', 12),
+        ('job', 12),
+        ('start', None),
+    ]
+    runtime._policy_manager.validate.assert_awaited_once_with(100, settings)

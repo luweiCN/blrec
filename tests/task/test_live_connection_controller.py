@@ -584,7 +584,7 @@ async def test_external_monitor_forwards_wss_status_hints() -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_monitor_ignores_room_change_legacy_read() -> None:
+async def test_external_monitor_forwards_room_change_to_existing_listeners() -> None:
     from blrec.bili.danmaku_client import DanmakuCommand
     from blrec.bili.live_monitor import LiveMonitor
 
@@ -594,11 +594,14 @@ async def test_external_monitor_ignores_room_change_legacy_read() -> None:
     live.update_room_info = AsyncMock()
     status_sink = AsyncMock()
     monitor = LiveMonitor(Mock(), live, status_sink=status_sink)
+    listener = AsyncMock()
+    monitor.add_listener(listener)
     monitor.enable()
 
     await monitor.on_danmaku_received({'cmd': DanmakuCommand.ROOM_CHANGE.value})
 
-    live.update_room_info.assert_not_awaited()
+    live.update_room_info.assert_awaited_once_with()
+    listener.on_room_changed.assert_awaited_once_with(live.room_info)
     status_sink.assert_not_awaited()
 
 
@@ -649,7 +652,7 @@ async def test_external_monitor_disable_skips_legacy_polling_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_monitor_skips_legacy_status_checks() -> None:
+async def test_external_monitor_refreshes_room_metadata_after_reconnect() -> None:
     from blrec.bili.live_monitor import LiveMonitor
 
     live = Mock()
@@ -657,12 +660,15 @@ async def test_external_monitor_skips_legacy_status_checks() -> None:
     live.room_info = SimpleNamespace(live_status=LiveStatus.PREPARING)
     live.update_room_info = AsyncMock()
     monitor = LiveMonitor(Mock(), live, status_sink=AsyncMock())
+    listener = AsyncMock()
+    monitor.add_listener(listener)
     monitor.enable()
 
     await monitor.on_client_reconnected()
     await monitor.check_live_status()
 
-    live.update_room_info.assert_not_awaited()
+    live.update_room_info.assert_awaited_once_with()
+    listener.on_room_changed.assert_awaited_once_with(live.room_info)
 
 
 @pytest.mark.asyncio
@@ -1137,6 +1143,7 @@ async def test_recorder_waits_until_external_monitor_is_active(
     recorder._print_live_info = Mock()
     recorder._print_waiting_message = Mock()
     recorder._start_recording = AsyncMock()
+    recorder.title_keywords = ()
 
     await recorder._do_start()
 
@@ -1163,6 +1170,7 @@ async def test_recorder_starts_when_monitor_is_active_and_live(
     recorder._print_live_info = Mock()
     recorder._print_waiting_message = Mock()
     recorder._start_recording = AsyncMock()
+    recorder.title_keywords = ()
 
     await recorder._do_start()
 
