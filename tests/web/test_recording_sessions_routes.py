@@ -347,6 +347,8 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'accountDisplayName': '投稿账号',
                     'state': 'waiting_review',
                     'submitState': 'confirmed',
+                    'preuploadFinalized': True,
+                    'displayState': 'standard',
                     'commentBranchState': 'pending',
                     'danmakuBranchState': 'pending',
                     'aid': 123,

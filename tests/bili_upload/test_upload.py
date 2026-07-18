@@ -27,6 +27,16 @@ class FakeUploader:
 
     async def upload_part(self, part_id: int, *, bundle: Any, claim: LeaseClaim) -> str:
         del bundle, claim
+        existing = await self._database.fetchone(
+            'SELECT upload_state,remote_filename FROM upload_parts WHERE id=?',
+            (part_id,),
+        )
+        if (
+            existing is not None
+            and str(existing['upload_state']) == 'confirmed'
+            and existing['remote_filename']
+        ):
+            return str(existing['remote_filename'])
         self.calls.append(part_id)
         remote = 'remote-{}'.format(part_id)
         await self._database.execute(
@@ -219,9 +229,10 @@ def coordinator(
     clock: MutableClock,
     *,
     cover_resolver: Optional[FakeCoverResolver] = None,
+    account_ids: Tuple[int, ...] = (1,),
 ) -> UploadCoordinator:
     async def load_bundle(account_id: int) -> Any:
-        assert account_id == 1
+        assert account_id in account_ids
         return object()
 
     return UploadCoordinator(
@@ -233,6 +244,20 @@ def coordinator(
         cover_resolver=cover_resolver or FakeCoverResolver(),
         worker_id='test-worker',
         clock=clock,
+    )
+
+
+async def make_session_open_with_one_closed_part(database: BiliUploadDatabase) -> None:
+    await database.execute(
+        "UPDATE recording_sessions SET state='open',ended_at=NULL,"
+        'live_end_time=NULL WHERE id=1'
+    )
+    await database.execute(
+        "UPDATE recording_runs SET state='recording',ended_at=NULL WHERE id='run'"
+    )
+    await database.execute(
+        "UPDATE recording_parts SET artifact_state='recording',final_path=NULL,"
+        'record_end_time=NULL,record_duration_seconds=NULL WHERE id=2'
     )
 
 
@@ -444,6 +469,243 @@ async def test_create_ready_job_locks_account_policy_and_part_order(
         assert all(str(part['artifact_state']) == 'ready' for part in parts)
         assert all(str(part['upload_state']) == 'prepared' for part in parts)
         assert all(part['file_identity'] for part in parts)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_open_session_preuploads_closed_part_without_submitting(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        protocol = FakeProtocol()
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, MutableClock(1000))
+
+        assert await worker.sync_live_sessions() == [1]
+        assert await worker.prepare_waiting_jobs() == [1]
+        job = await database.fetchone(
+            'SELECT state,preupload_finalized FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {'state': 'ready', 'preupload_finalized': 0}
+        assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 1
+
+        assert await worker.run_once() == 1
+
+        assert uploader.calls == [1]
+        assert protocol.submit_calls == []
+        completed = await database.fetchone(
+            'SELECT state,submit_state,preupload_finalized,upload_completed_at '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert completed is not None
+        assert dict(completed) == {
+            'state': 'waiting_artifacts',
+            'submit_state': 'prepared',
+            'preupload_finalized': 0,
+            'upload_completed_at': None,
+        }
+        assert (
+            await database.scalar(
+                'SELECT remote_filename FROM upload_parts WHERE part_index=1'
+            )
+            == 'remote-1'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_appends_only_new_part_and_submits_latest_snapshot(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        protocol = FakeProtocol()
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, MutableClock(1000))
+
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        await worker.run_once()
+
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='ready',final_path=?,"
+            'record_end_time=950,record_duration_seconds=100 WHERE id=2',
+            (str(paths[1]),),
+        )
+        assert await worker.prepare_waiting_jobs() == [1]
+        await worker.run_once()
+        assert uploader.calls == [1, 2]
+        assert protocol.submit_calls == []
+
+        await database.execute(
+            "UPDATE room_upload_policies SET title_template='最终 {{ title }}',"
+            'updated_at=2 WHERE room_id=100'
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET state='closed',ended_at=960,"
+            'live_end_time=960 WHERE id=1'
+        )
+        assert await worker.sync_live_sessions() == [1]
+        finalized = await database.fetchone(
+            'SELECT state,preupload_finalized,policy_snapshot_json '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert finalized is not None
+        assert finalized['state'] == 'ready'
+        assert finalized['preupload_finalized'] == 1
+        assert json.loads(str(finalized['policy_snapshot_json']))['title'] == (
+            '最终 测试直播'
+        )
+
+        await worker.run_once()
+        assert uploader.calls == [1, 2]
+        assert len(protocol.submit_calls) == 1
+        assert protocol.submit_calls[0]['title'] == '最终 测试直播'
+        assert [video['filename'] for video in protocol.submit_calls[0]['videos']] == [
+            'remote-1',
+            'remote-2',
+        ]
+        assert await worker.run_once() is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_restart_reuses_confirmed_part(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        protocol = FakeProtocol()
+        first_uploader = FakeUploader(database)
+        first = coordinator(database, protocol, first_uploader, MutableClock(1000))
+        await first.sync_live_sessions()
+        await first.prepare_waiting_jobs()
+        await first.run_once()
+        assert first_uploader.calls == [1]
+
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='ready',final_path=?,"
+            'record_end_time=950,record_duration_seconds=100 WHERE id=2',
+            (str(paths[1]),),
+        )
+        second_uploader = FakeUploader(database)
+        restarted = coordinator(database, protocol, second_uploader, MutableClock(1000))
+        await restarted.sync_live_sessions()
+        await restarted.prepare_waiting_jobs()
+        await restarted.run_once()
+
+        assert second_uploader.calls == [2]
+        assert protocol.submit_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_disabling_upload_cancels_preupload_without_deleting_recording(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        await worker.run_once()
+
+        await database.execute(
+            "UPDATE recording_sessions SET upload_decision='skip',"
+            "upload_resolution_state='pending' WHERE id=1"
+        )
+        await worker.sync_live_sessions()
+
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+        assert await database.scalar('SELECT COUNT(*) FROM recording_parts') == 2
+        assert all(path.exists() for path in paths)
+        assert (
+            await database.scalar(
+                'SELECT upload_resolution_state FROM recording_sessions WHERE id=1'
+            )
+            == 'not_requested'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_final_account_change_reuploads_preuploaded_parts(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(2,84,'新投稿账号',X'00',1,'k','active',1,1)"
+        )
+        protocol = FakeProtocol()
+        uploader = FakeUploader(database)
+        worker = coordinator(
+            database, protocol, uploader, MutableClock(1000), account_ids=(1, 2)
+        )
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        await worker.run_once()
+        await database.execute(
+            "INSERT INTO upload_chunks(part_id,chunk_no,offset,size,etag,state) "
+            "VALUES(1,0,0,6,'etag','confirmed')"
+        )
+
+        await database.execute(
+            "UPDATE room_upload_policies SET account_mode='fixed',account_id=2,"
+            'updated_at=2 WHERE room_id=100'
+        )
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='failed',final_path=NULL "
+            'WHERE id=2'
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET state='closed',ended_at=960,"
+            'live_end_time=960 WHERE id=1'
+        )
+
+        await worker.sync_live_sessions()
+
+        finalized = await database.fetchone(
+            'SELECT account_id,preupload_finalized,state FROM upload_jobs WHERE id=1'
+        )
+        assert finalized is not None
+        assert dict(finalized) == {
+            'account_id': 2,
+            'preupload_finalized': 1,
+            'state': 'ready',
+        }
+        assert await database.scalar('SELECT COUNT(*) FROM upload_chunks') == 0
+        assert (
+            await database.scalar('SELECT remote_filename FROM upload_parts WHERE id=1')
+            is None
+        )
+
+        await worker.run_once()
+        assert uploader.calls == [1, 1]
+        assert len(protocol.submit_calls) == 1
     finally:
         await database.close()
 

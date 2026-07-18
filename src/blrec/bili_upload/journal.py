@@ -14,6 +14,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Sequence,
     Tuple,
@@ -24,6 +25,10 @@ from blrec.logging.audit import audit
 
 from .artifact_recovery import RecoveredArtifact, probe_recording_artifact
 from .database import BiliUploadDatabase
+
+UploadJobDisplayState = Literal[
+    'standard', 'preuploading', 'preuploaded_waiting', 'preupload_paused'
+]
 
 if TYPE_CHECKING:
     from blrec.core.recorder import Recorder
@@ -197,6 +202,7 @@ class UploadJobProgress:
     eta_seconds: Optional[int] = None
     current_part_index: Optional[int] = None
     preupload_finalized: bool = True
+    display_state: UploadJobDisplayState = 'standard'
 
 
 @dataclass(frozen=True)
@@ -1389,6 +1395,20 @@ class RecordingJournalBridge:
                 ),
                 None if not parts else parts[-1].part_index,
             )
+            preupload_finalized = bool(row['preupload_finalized'])
+            display_state: UploadJobDisplayState
+            if preupload_finalized:
+                display_state = 'standard'
+            elif str(row['state']) == 'paused':
+                display_state = 'preupload_paused'
+            elif (
+                str(row['state']) in ('ready', 'uploading')
+                or not parts
+                or any(part.upload_state != 'confirmed' for part in parts)
+            ):
+                display_state = 'preuploading'
+            else:
+                display_state = 'preuploaded_waiting'
             submission_verification: Optional[Dict[str, object]] = None
             if row['submission_verification_json'] is not None:
                 try:
@@ -1477,7 +1497,8 @@ class RecordingJournalBridge:
                 bytes_per_second=bytes_per_second,
                 eta_seconds=eta_seconds,
                 current_part_index=current_part,
-                preupload_finalized=bool(row['preupload_finalized']),
+                preupload_finalized=preupload_finalized,
+                display_state=display_state,
             )
         return result
 
@@ -1496,6 +1517,8 @@ class RecordingJournalBridge:
                 'sessionId': job.session_id,
                 'state': job.state,
                 'submitState': job.submit_state,
+                'preuploadFinalized': job.preupload_finalized,
+                'displayState': job.display_state,
                 'aid': job.aid,
                 'bvid': job.bvid,
                 'confirmedBytes': job.confirmed_bytes,

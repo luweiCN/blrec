@@ -140,3 +140,42 @@ async def test_session_submission_is_immutable_after_upload_job_creation(
 
     with pytest.raises(SessionSubmissionLocked):
         await manager.set_decision(1, 'skip', manager_subject='administrator')
+
+
+@pytest.mark.asyncio
+async def test_preupload_submission_can_change_until_finalized(
+    database: BiliUploadDatabase,
+) -> None:
+    await seed(database)
+    await database.execute(
+        "UPDATE recording_sessions SET upload_resolution_state='job_created' "
+        'WHERE id=1'
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'preupload_finalized,created_at,updated_at) '
+        "VALUES(1,1,'{}','waiting_artifacts','prepared',0,1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_suppressions('
+        'session_id,reason,manager_subject,created_at) '
+        "VALUES(1,'manager_skipped','administrator',1)"
+    )
+    manager = SessionSubmissionManager(
+        database, policy_manager=RoomUploadPolicyManager(database)
+    )
+
+    changed = await manager.set_decision(1, 'upload', manager_subject='administrator')
+    saved = await manager.save_override(
+        1, command(title_template='最终标题'), manager_subject='administrator'
+    )
+
+    assert changed.decision == 'upload'
+    assert saved.settings.title_template == '最终标题'
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM upload_suppressions WHERE session_id=1'
+        )
+        == 0
+    )

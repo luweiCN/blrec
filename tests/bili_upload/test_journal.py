@@ -846,8 +846,8 @@ async def test_realtime_upload_progress_returns_active_job_bytes(database) -> No
     await database.execute(
         'INSERT INTO upload_jobs('
         'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
-        'created_at,updated_at) '
-        "VALUES(3,?,1,'{}','uploading','prepared',1,1000)",
+        'preupload_finalized,created_at,updated_at) '
+        "VALUES(3,?,1,'{}','uploading','prepared',0,1,1000)",
         (session.id,),
     )
     await database.execute(
@@ -869,6 +869,8 @@ async def test_realtime_upload_progress_returns_active_job_bytes(database) -> No
             'sessionId': session.id,
             'state': 'uploading',
             'submitState': 'prepared',
+            'preuploadFinalized': False,
+            'displayState': 'preuploading',
             'aid': None,
             'bvid': None,
             'confirmedBytes': 4,

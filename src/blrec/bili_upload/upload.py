@@ -84,6 +84,15 @@ class _Job:
     state: str
     submit_state: str
     upload_completed_at: Optional[int]
+    preupload_finalized: bool
+
+
+@dataclass(frozen=True)
+class _ResolvedLiveSettings:
+    command: RoomUploadPolicyCommand
+    settings_source: str
+    account: sqlite3.Row
+    policy_updated_at: Optional[int]
 
 
 class UploadCoordinator:
@@ -118,9 +127,57 @@ class UploadCoordinator:
         self._policy_manager = RoomUploadPolicyManager(database, clock=clock)
 
     async def create_ready_jobs(self) -> List[int]:
-        created = await self.resolve_finished_sessions()
+        created = await self.sync_live_sessions()
         await self.prepare_waiting_jobs()
         return created
+
+    async def sync_live_sessions(self) -> List[int]:
+        changed: List[int] = []
+        provisional = await self._database.fetchall(
+            'SELECT job.id,job.session_id,session.live_end_time '
+            'FROM upload_jobs job JOIN recording_sessions session '
+            'ON session.id=job.session_id '
+            "WHERE job.preupload_finalized=0 AND session.source_kind='live' "
+            'ORDER BY session.started_at,job.id'
+        )
+        for row in provisional:
+            job_id = int(row['id'])
+            session_id = int(row['session_id'])
+            if row['live_end_time'] is not None:
+                if await self._finalize_preupload_job(session_id, job_id):
+                    changed.append(job_id)
+                continue
+            session = await self._live_session(session_id)
+            if session is None:
+                continue
+            settings, resolution_state, _error = await self._resolve_live_settings(
+                session
+            )
+            if settings is None and resolution_state == 'not_requested':
+                await self._cancel_preupload_job(
+                    session_id, job_id, reason='本场已关闭自动投稿'
+                )
+
+        rows = await self._database.fetchall(
+            'SELECT session.id FROM recording_sessions session '
+            "WHERE session.source_kind='live' AND session.state='open' "
+            'AND session.live_end_time IS NULL '
+            "AND session.upload_resolution_state='pending' "
+            "AND session.deletion_state='none' "
+            'AND EXISTS(SELECT 1 FROM recording_parts part '
+            "WHERE part.session_id=session.id AND part.artifact_state='ready') "
+            'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
+            'WHERE job.session_id=session.id) ORDER BY session.started_at,session.id'
+        )
+        for row in rows:
+            created_job_id = await self._resolve_live_session(
+                int(row['id']), finalized=False
+            )
+            if created_job_id is not None:
+                changed.append(created_job_id)
+
+        changed.extend(await self.resolve_finished_sessions())
+        return list(dict.fromkeys(changed))
 
     async def resolve_finished_sessions(self) -> List[int]:
         rows = await self._database.fetchall(
@@ -142,7 +199,7 @@ class UploadCoordinator:
         rows = await self._database.fetchall(
             'SELECT job.id FROM upload_jobs job '
             'JOIN recording_sessions session ON session.id=job.session_id '
-            "WHERE job.state='waiting_artifacts' AND session.state='closed' "
+            "WHERE job.state='waiting_artifacts' "
             "AND session.source_kind='live' AND session.deletion_state='none' "
             'ORDER BY job.created_at,job.id'
         )
@@ -153,7 +210,10 @@ class UploadCoordinator:
         return prepared
 
     async def _resolve_finished_session(self, session_id: int) -> Optional[int]:
-        session = await self._database.fetchone(
+        return await self._resolve_live_session(session_id, finalized=True)
+
+    async def _live_session(self, session_id: int) -> Optional[sqlite3.Row]:
+        return await self._database.fetchone(
             'SELECT id AS session_id,room_id,broadcast_session_key,'
             'live_start_time,live_end_time,title,cover_url,cover_path,anchor_uid,'
             'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
@@ -161,70 +221,38 @@ class UploadCoordinator:
             'upload_resolution_state FROM recording_sessions WHERE id=?',
             (session_id,),
         )
+
+    async def _resolve_live_session(
+        self, session_id: int, *, finalized: bool
+    ) -> Optional[int]:
+        session = await self._live_session(session_id)
         if (
             session is None
             or str(session['upload_resolution_state']) != 'pending'
-            or session['live_end_time'] is None
+            or (finalized and session['live_end_time'] is None)
+            or (
+                not finalized
+                and (
+                    str(session['state']) != 'open'
+                    or session['live_end_time'] is not None
+                )
+            )
         ):
             return None
-        if str(session['deletion_state']) != 'none' or str(session['state']) in (
-            'cancelled',
-            'skipped',
-        ):
-            await self._set_upload_resolution(session_id, 'not_requested', None)
-            return None
-        suppressed = await self._database.scalar(
-            'SELECT 1 FROM upload_suppressions WHERE session_id=?', (session_id,)
+        settings, resolution_state, resolution_error = (
+            await self._resolve_live_settings(session)
         )
-        if suppressed == 1:
-            await self._set_upload_resolution(session_id, 'not_requested', None)
-            return None
-
-        decision = str(session['upload_decision'])
-        if decision == 'skip':
-            await self._set_upload_resolution(session_id, 'not_requested', None)
-            return None
-        room_policy: Optional[RoomUploadPolicyView]
-        try:
-            room_policy = await self._policy_manager.get(int(session['room_id']))
-        except RoomUploadPolicyNotFound:
-            room_policy = None
-        if decision == 'follow_room' and (
-            room_policy is None or not room_policy.enabled
-        ):
-            await self._set_upload_resolution(session_id, 'not_requested', None)
-            return None
-
-        override_json = session['upload_override_json']
-        settings_source: str
-        try:
-            if override_json is not None:
-                command = decode_submission_settings(str(override_json))
-                settings_source = 'session'
-            elif room_policy is not None:
-                command = room_upload_policy_command(room_policy)
-                settings_source = 'room'
-            else:
-                command = default_room_upload_policy()
-                settings_source = 'default'
-            command = replace(command, enabled=True)
-            await self._policy_manager.validate(int(session['room_id']), command)
-        except (InvalidRoomUploadPolicy, InvalidUploadPolicy, ValueError):
+        if settings is None:
             await self._set_upload_resolution(
-                session_id,
-                'configuration_required',
-                '投稿账号不可用，请在本场投稿设置中重新选择',
+                session_id, resolution_state, resolution_error
             )
             return None
-
-        account = await self._resolved_account(command)
-        if account is None:
-            await self._set_upload_resolution(
-                session_id,
-                'configuration_required',
-                '投稿账号不可用，请在本场投稿设置中重新选择',
-            )
-            return None
+        resolved_settings = settings
+        live_session = session
+        command = resolved_settings.command
+        account = resolved_settings.account
+        decision = str(live_session['upload_decision'])
+        override_json = live_session['upload_override_json']
         account_id = int(account['id'])
         account_credential_version = int(account['credential_version'])
         part_rows = await self._database.fetchall(
@@ -246,7 +274,7 @@ class UploadCoordinator:
             )
             for part in part_rows
         ]
-        candidate = self._command_candidate(dict(session), dict(account), command)
+        candidate = self._command_candidate(dict(live_session), dict(account), command)
         try:
             snapshot = self._policy_snapshot(candidate, parts)
         except InvalidUploadPolicy:
@@ -264,17 +292,24 @@ class UploadCoordinator:
         def create(connection: sqlite3.Connection) -> Optional[int]:
             current = connection.execute(
                 'SELECT upload_decision,upload_override_json,'
-                'upload_resolution_state,live_end_time,deletion_state '
+                'upload_resolution_state,live_end_time,deletion_state,state '
                 'FROM recording_sessions WHERE id=?',
                 (session_id,),
             ).fetchone()
             if (
                 current is None
                 or str(current['upload_resolution_state']) != 'pending'
-                or current['live_end_time'] is None
                 or str(current['deletion_state']) != 'none'
                 or str(current['upload_decision']) != decision
                 or current['upload_override_json'] != override_json
+                or (finalized and current['live_end_time'] is None)
+                or (
+                    not finalized
+                    and (
+                        str(current['state']) != 'open'
+                        or current['live_end_time'] is not None
+                    )
+                )
             ):
                 return None
             if (
@@ -312,12 +347,31 @@ class UploadCoordinator:
                     or int(primary_id['primary_account_id']) != account_id
                 ):
                     return None
+            if resolved_settings.settings_source == 'room':
+                current_policy = connection.execute(
+                    'SELECT updated_at FROM room_upload_policies WHERE room_id=?',
+                    (int(live_session['room_id']),),
+                ).fetchone()
+                if (
+                    current_policy is None
+                    or int(current_policy['updated_at'])
+                    != resolved_settings.policy_updated_at
+                ):
+                    return None
+            if not finalized:
+                ready = connection.execute(
+                    'SELECT 1 FROM recording_parts '
+                    "WHERE session_id=? AND artifact_state='ready' LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if ready is None:
+                    return None
             cursor = connection.execute(
                 'INSERT INTO upload_jobs('
                 'session_id,account_id,policy_snapshot_json,state,submit_state,'
                 'comment_branch_state,danmaku_branch_state,'
-                'collection_branch_state,created_at,updated_at) '
-                "VALUES(?,?,?,'waiting_artifacts','prepared',?,?,?,?,?)",
+                'collection_branch_state,preupload_finalized,created_at,updated_at) '
+                "VALUES(?,?,?,'waiting_artifacts','prepared',?,?,?,?,?,?)",
                 (
                     session_id,
                     account_id,
@@ -329,6 +383,7 @@ class UploadCoordinator:
                         if command.collection_section_id is not None
                         else 'disabled'
                     ),
+                    int(finalized),
                     now,
                     now,
                 ),
@@ -346,26 +401,373 @@ class UploadCoordinator:
                 'upload_job_resolved',
                 job_id=job_id,
                 session_id=session_id,
-                room_id=int(session['room_id']),
+                room_id=int(live_session['room_id']),
                 decision=decision,
-                settings_source=settings_source,
+                settings_source=resolved_settings.settings_source,
                 account_id=account_id,
                 parts=len(parts),
+                preupload=not finalized,
             )
             audit(
                 'upload_job_created',
                 job_id=job_id,
                 session_id=session_id,
-                room_id=int(session['room_id']),
+                room_id=int(live_session['room_id']),
                 account_id=int(account['id']),
                 parts=len(parts),
                 state='waiting_artifacts',
+                preupload=not finalized,
             )
         return job_id
 
+    async def _resolve_live_settings(
+        self, session: sqlite3.Row
+    ) -> Tuple[Optional[_ResolvedLiveSettings], str, Optional[str]]:
+        session_id = int(session['session_id'])
+        if str(session['deletion_state']) != 'none' or str(session['state']) in (
+            'cancelled',
+            'skipped',
+        ):
+            return None, 'not_requested', None
+        suppressed = await self._database.scalar(
+            'SELECT 1 FROM upload_suppressions WHERE session_id=?', (session_id,)
+        )
+        if suppressed == 1:
+            return None, 'not_requested', None
+        decision = str(session['upload_decision'])
+        if decision == 'skip':
+            return None, 'not_requested', None
+        room_policy: Optional[RoomUploadPolicyView]
+        try:
+            room_policy = await self._policy_manager.get(int(session['room_id']))
+        except RoomUploadPolicyNotFound:
+            room_policy = None
+        if decision == 'follow_room' and (
+            room_policy is None or not room_policy.enabled
+        ):
+            return None, 'not_requested', None
+        override_json = session['upload_override_json']
+        try:
+            if override_json is not None:
+                command = decode_submission_settings(str(override_json))
+                settings_source = 'session'
+                policy_updated_at = None
+            elif room_policy is not None:
+                command = room_upload_policy_command(room_policy)
+                settings_source = 'room'
+                policy_updated_at = room_policy.updated_at
+            else:
+                command = default_room_upload_policy()
+                settings_source = 'default'
+                policy_updated_at = None
+            command = replace(command, enabled=True)
+            await self._policy_manager.validate(int(session['room_id']), command)
+        except (
+            InvalidRoomUploadPolicy,
+            InvalidSessionSubmission,
+            InvalidUploadPolicy,
+            ValueError,
+        ):
+            return (
+                None,
+                'configuration_required',
+                '投稿账号不可用，请在本场投稿设置中重新选择',
+            )
+        account = await self._resolved_account(command)
+        if account is None:
+            return (
+                None,
+                'configuration_required',
+                '投稿账号不可用，请在本场投稿设置中重新选择',
+            )
+        return (
+            _ResolvedLiveSettings(
+                command=command,
+                settings_source=settings_source,
+                account=account,
+                policy_updated_at=policy_updated_at,
+            ),
+            'job_created',
+            None,
+        )
+
+    async def _finalize_preupload_job(self, session_id: int, job_id: int) -> bool:
+        session = await self._live_session(session_id)
+        if session is None or session['live_end_time'] is None:
+            return False
+        settings, resolution_state, resolution_error = (
+            await self._resolve_live_settings(session)
+        )
+        if settings is None:
+            if resolution_state == 'not_requested':
+                return await self._cancel_preupload_job(
+                    session_id, job_id, reason='直播结束时已关闭自动投稿'
+                )
+            now = int(self._clock())
+            updated = await self._database.execute(
+                "UPDATE upload_jobs SET state='paused',review_reason=?,"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? '
+                'WHERE id=? AND session_id=? AND preupload_finalized=0',
+                (resolution_error, now, job_id, session_id),
+            )
+            if updated:
+                await self._database.execute(
+                    'UPDATE recording_sessions SET upload_resolution_state=?,'
+                    'upload_resolution_error=?,upload_resolved_at=? WHERE id=?',
+                    (resolution_state, resolution_error, now, session_id),
+                )
+            return False
+
+        resolved_settings = settings
+        live_session = session
+
+        part_rows = await self._database.fetchall(
+            'SELECT id,part_index,source_path FROM recording_parts '
+            'WHERE session_id=? ORDER BY part_index',
+            (session_id,),
+        )
+        if not part_rows:
+            return False
+        snapshot_parts = [
+            _SnapshotPart(
+                part_index=int(part['part_index']),
+                snapshot_identity='recording-part:{}:{}'.format(
+                    int(part['id']), str(part['source_path'])
+                ),
+            )
+            for part in part_rows
+        ]
+        candidate = self._command_candidate(
+            dict(live_session),
+            dict(resolved_settings.account),
+            resolved_settings.command,
+        )
+        try:
+            snapshot = self._policy_snapshot(candidate, snapshot_parts)
+        except InvalidUploadPolicy:
+            return False
+        snapshot_json = json.dumps(
+            snapshot, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+        )
+        account_id = int(resolved_settings.account['id'])
+        credential_version = int(resolved_settings.account['credential_version'])
+        decision = str(live_session['upload_decision'])
+        override_json = live_session['upload_override_json']
+        now = int(self._clock())
+        expected_parts = [
+            (int(part['id']), int(part['part_index']), str(part['source_path']))
+            for part in part_rows
+        ]
+
+        def finalize(connection: sqlite3.Connection) -> Tuple[bool, bool, str]:
+            current_session = connection.execute(
+                'SELECT upload_decision,upload_override_json,live_end_time,'
+                'deletion_state FROM recording_sessions WHERE id=?',
+                (session_id,),
+            ).fetchone()
+            job = connection.execute(
+                'SELECT account_id,operator_paused,lease_until '
+                'FROM upload_jobs WHERE id=? AND session_id=? '
+                'AND preupload_finalized=0',
+                (job_id, session_id),
+            ).fetchone()
+            if (
+                current_session is None
+                or current_session['live_end_time'] is None
+                or str(current_session['deletion_state']) != 'none'
+                or str(current_session['upload_decision']) != decision
+                or current_session['upload_override_json'] != override_json
+                or job is None
+                or (job['lease_until'] is not None and int(job['lease_until']) > now)
+            ):
+                return False, False, 'waiting_artifacts'
+            current_parts = connection.execute(
+                'SELECT id,part_index,source_path FROM recording_parts '
+                'WHERE session_id=? ORDER BY part_index',
+                (session_id,),
+            ).fetchall()
+            if [
+                (int(part['id']), int(part['part_index']), str(part['source_path']))
+                for part in current_parts
+            ] != expected_parts:
+                return False, False, 'waiting_artifacts'
+            account = connection.execute(
+                'SELECT state,credential_version FROM bili_accounts WHERE id=?',
+                (account_id,),
+            ).fetchone()
+            if (
+                account is None
+                or str(account['state']) != 'active'
+                or int(account['credential_version']) != credential_version
+            ):
+                return False, False, 'waiting_artifacts'
+            if resolved_settings.command.account_mode == 'primary':
+                selected = connection.execute(
+                    'SELECT primary_account_id FROM bili_account_selection WHERE id=1'
+                ).fetchone()
+                if (
+                    selected is None
+                    or int(selected['primary_account_id']) != account_id
+                ):
+                    return False, False, 'waiting_artifacts'
+            if resolved_settings.settings_source == 'room':
+                policy = connection.execute(
+                    'SELECT updated_at FROM room_upload_policies WHERE room_id=?',
+                    (int(live_session['room_id']),),
+                ).fetchone()
+                if (
+                    policy is None
+                    or int(policy['updated_at']) != resolved_settings.policy_updated_at
+                ):
+                    return False, False, 'waiting_artifacts'
+
+            account_changed = int(job['account_id']) != account_id
+            if account_changed:
+                connection.execute(
+                    'DELETE FROM upload_chunks WHERE part_id IN('
+                    'SELECT id FROM upload_parts WHERE job_id=?)',
+                    (job_id,),
+                )
+                connection.execute(
+                    "UPDATE upload_parts SET upload_state='prepared',"
+                    'remote_filename=NULL,cid=NULL,upload_session_json=NULL '
+                    'WHERE job_id=?',
+                    (job_id,),
+                )
+            danmaku_backfill = bool(resolved_settings.command.danmaku_backfill)
+            part_rows_for_job = connection.execute(
+                'SELECT id,xml_path FROM upload_parts WHERE job_id=?', (job_id,)
+            ).fetchall()
+            for part in part_rows_for_job:
+                danmaku_state = 'disabled'
+                if danmaku_backfill:
+                    danmaku_state = 'pending' if part['xml_path'] else 'missing_source'
+                connection.execute(
+                    'UPDATE upload_parts SET danmaku_import_state=? WHERE id=?',
+                    (danmaku_state, int(part['id'])),
+                )
+            pending_artifact = connection.execute(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                "AND artifact_state NOT IN ('ready','failed','missing') LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            missing_ready = connection.execute(
+                'SELECT 1 FROM recording_parts part '
+                'LEFT JOIN upload_parts upload ON upload.job_id=? '
+                'AND upload.part_index=part.part_index '
+                "WHERE part.session_id=? AND part.artifact_state='ready' "
+                'AND upload.id IS NULL LIMIT 1',
+                (job_id, session_id),
+            ).fetchone()
+            part_count = int(
+                connection.execute(
+                    'SELECT COUNT(*) FROM upload_parts WHERE job_id=?', (job_id,)
+                ).fetchone()[0]
+            )
+            resume_state = (
+                'ready'
+                if pending_artifact is None and missing_ready is None and part_count > 0
+                else 'waiting_artifacts'
+            )
+            operator_paused = bool(job['operator_paused'])
+            state = 'paused' if operator_paused else resume_state
+            connection.execute(
+                'UPDATE upload_jobs SET account_id=?,policy_snapshot_json=?,'
+                'state=?,submit_state=\'prepared\',preupload_finalized=1,'
+                'comment_branch_state=?,danmaku_branch_state=?,'
+                'collection_branch_state=?,collection_error=NULL,'
+                'operator_resume_state=?,review_reason=?,next_attempt_at=0,'
+                'updated_at=? WHERE id=?',
+                (
+                    account_id,
+                    snapshot_json,
+                    state,
+                    (
+                        'pending'
+                        if resolved_settings.command.auto_comment
+                        else 'disabled'
+                    ),
+                    'pending' if danmaku_backfill else 'disabled',
+                    (
+                        'pending'
+                        if resolved_settings.command.collection_section_id is not None
+                        else 'disabled'
+                    ),
+                    resume_state if operator_paused else None,
+                    '管理员已暂停上传' if operator_paused else None,
+                    now,
+                    job_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE recording_sessions SET upload_resolution_state='job_created',"
+                'upload_resolution_error=NULL,upload_resolved_at=? WHERE id=?',
+                (now, session_id),
+            )
+            return True, account_changed, resume_state
+
+        finalized, account_changed, state = await self._database.write(finalize)
+        if finalized:
+            audit(
+                'upload_preupload_finalized',
+                job_id=job_id,
+                session_id=session_id,
+                account_id=account_id,
+                account_changed=account_changed,
+                next_state=state,
+                parts=len(snapshot_parts),
+            )
+        return finalized
+
+    async def _cancel_preupload_job(
+        self, session_id: int, job_id: int, *, reason: str
+    ) -> bool:
+        now = int(self._clock())
+
+        def cancel(connection: sqlite3.Connection) -> bool:
+            job = connection.execute(
+                'SELECT lease_until FROM upload_jobs WHERE id=? AND session_id=? '
+                'AND preupload_finalized=0',
+                (job_id, session_id),
+            ).fetchone()
+            if job is None or (
+                job['lease_until'] is not None and int(job['lease_until']) > now
+            ):
+                return False
+            connection.execute(
+                'DELETE FROM upload_chunks WHERE part_id IN('
+                'SELECT id FROM upload_parts WHERE job_id=?)',
+                (job_id,),
+            )
+            connection.execute(
+                'DELETE FROM danmaku_items WHERE part_id IN('
+                'SELECT id FROM upload_parts WHERE job_id=?)',
+                (job_id,),
+            )
+            connection.execute('DELETE FROM comment_items WHERE job_id=?', (job_id,))
+            connection.execute('DELETE FROM upload_parts WHERE job_id=?', (job_id,))
+            connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
+            connection.execute(
+                "UPDATE recording_sessions SET upload_resolution_state='not_requested',"
+                'upload_resolution_error=NULL,upload_resolved_at=? WHERE id=?',
+                (now, session_id),
+            )
+            return True
+
+        cancelled = await self._database.write(cancel)
+        if cancelled:
+            audit(
+                'upload_preupload_cancelled',
+                job_id=job_id,
+                session_id=session_id,
+                reason=reason,
+            )
+        return cancelled
+
     async def _prepare_waiting_job(self, job_id: int) -> bool:
         job = await self._database.fetchone(
-            'SELECT session_id,policy_snapshot_json FROM upload_jobs '
+            'SELECT session_id,policy_snapshot_json,preupload_finalized '
+            'FROM upload_jobs '
             "WHERE id=? AND state='waiting_artifacts'",
             (job_id,),
         )
@@ -386,20 +788,26 @@ class UploadCoordinator:
         )
         if not rows:
             return False
+        existing_rows = await self._database.fetchall(
+            'SELECT part_index FROM upload_parts WHERE job_id=?', (job_id,)
+        )
+        existing_indexes = {int(row['part_index']) for row in existing_rows}
         parts: List[_CandidatePart] = []
         stable_before_ns = int(
             (self._clock() - self._stability_seconds) * 1_000_000_000
         )
         for row in rows:
+            if int(row['part_index']) in existing_indexes:
+                continue
             if row['final_path'] is None:
-                return False
+                continue
             final_path = str(row['final_path'])
             try:
                 identity = await self._file_identity(final_path)
             except OSError:
-                return False
+                continue
             if identity.mtime_ns > stable_before_ns:
-                return False
+                continue
             parts.append(
                 _CandidatePart(
                     id=int(row['id']),
@@ -414,53 +822,52 @@ class UploadCoordinator:
                     identity=identity,
                 )
             )
+        if not parts:
+            return False
         now = int(self._clock())
         danmaku_backfill = bool(snapshot.get('danmaku_backfill'))
+        finalized = bool(job['preupload_finalized'])
 
         def prepare(connection: sqlite3.Connection) -> bool:
             current = connection.execute(
-                'SELECT state FROM upload_jobs WHERE id=?', (job_id,)
+                'SELECT state,preupload_finalized FROM upload_jobs WHERE id=?',
+                (job_id,),
             ).fetchone()
-            if current is None or str(current['state']) != 'waiting_artifacts':
-                return False
             if (
-                connection.execute(
-                    'SELECT 1 FROM upload_parts WHERE job_id=?', (job_id,)
-                ).fetchone()
-                is not None
+                current is None
+                or str(current['state']) != 'waiting_artifacts'
+                or bool(current['preupload_finalized']) != finalized
             ):
                 return False
-            current_parts = connection.execute(
-                'SELECT id,part_index,source_path,final_path,artifact_state,updated_at '
-                "FROM recording_parts WHERE session_id=? AND artifact_state='ready' "
-                'ORDER BY part_index',
-                (job_session_id,),
-            ).fetchall()
-            expected = [
-                (
-                    part.id,
+            for part in parts:
+                current_part = connection.execute(
+                    'SELECT part_index,source_path,final_path,artifact_state,'
+                    'updated_at '
+                    'FROM recording_parts WHERE id=? AND session_id=?',
+                    (part.id, job_session_id),
+                ).fetchone()
+                if current_part is None or (
+                    int(current_part['part_index']),
+                    str(current_part['source_path']),
+                    str(current_part['final_path']),
+                    str(current_part['artifact_state']),
+                    int(current_part['updated_at']),
+                ) != (
                     part.part_index,
                     part.source_path,
                     part.final_path,
                     part.artifact_state,
                     part.updated_at,
-                )
-                for part in parts
-            ]
-            actual = [
-                (
-                    int(part['id']),
-                    int(part['part_index']),
-                    str(part['source_path']),
-                    str(part['final_path']),
-                    str(part['artifact_state']),
-                    int(part['updated_at']),
-                )
-                for part in current_parts
-            ]
-            if actual != expected:
-                return False
-            for part in parts:
+                ):
+                    return False
+                if (
+                    connection.execute(
+                        'SELECT 1 FROM upload_parts WHERE job_id=? AND part_index=?',
+                        (job_id, part.part_index),
+                    ).fetchone()
+                    is not None
+                ):
+                    return False
                 danmaku_state = 'disabled'
                 if danmaku_backfill:
                     danmaku_state = 'pending' if part.xml_path else 'missing_source'
@@ -480,9 +887,26 @@ class UploadCoordinator:
                         danmaku_state,
                     ),
                 )
+            next_state = 'ready'
+            if finalized:
+                pending_artifact = connection.execute(
+                    'SELECT 1 FROM recording_parts WHERE session_id=? '
+                    "AND artifact_state NOT IN ('ready','failed','missing') LIMIT 1",
+                    (job_session_id,),
+                ).fetchone()
+                missing_ready = connection.execute(
+                    'SELECT 1 FROM recording_parts part '
+                    'LEFT JOIN upload_parts upload ON upload.job_id=? '
+                    'AND upload.part_index=part.part_index '
+                    "WHERE part.session_id=? AND part.artifact_state='ready' "
+                    'AND upload.id IS NULL LIMIT 1',
+                    (job_id, job_session_id),
+                ).fetchone()
+                if pending_artifact is not None or missing_ready is not None:
+                    next_state = 'waiting_artifacts'
             connection.execute(
-                "UPDATE upload_jobs SET state='ready',updated_at=? WHERE id=?",
-                (now, job_id),
+                'UPDATE upload_jobs SET state=?,updated_at=? WHERE id=?',
+                (next_state, now, job_id),
             )
             return True
 
@@ -493,6 +917,7 @@ class UploadCoordinator:
                 job_id=job_id,
                 session_id=job_session_id,
                 parts=len(parts),
+                preupload=not finalized,
             )
         return prepared
 
@@ -573,7 +998,8 @@ class UploadCoordinator:
     ) -> Mapping[str, Any]:
         row = await self._database.fetchone(
             'SELECT id,account_id,policy_snapshot_json,state,submit_state,'
-            'upload_completed_at,aid FROM upload_jobs WHERE id=?',
+            'upload_completed_at,preupload_finalized,aid '
+            'FROM upload_jobs WHERE id=?',
             (job_id,),
         )
         if row is None:
@@ -592,6 +1018,7 @@ class UploadCoordinator:
                 if row['upload_completed_at'] is None
                 else int(row['upload_completed_at'])
             ),
+            preupload_finalized=bool(row['preupload_finalized']),
         )
         if cover_url is not None and (
             not isinstance(cover_url, str) or not cover_url.startswith('https://')
@@ -1091,6 +1518,7 @@ class UploadCoordinator:
             account_id=job.account_id,
             state=job.state,
             submit_state=job.submit_state,
+            preupload=not job.preupload_finalized,
         )
         if job.state == 'submitting' and job.submit_state == 'in_flight':
             await self._update_job(
@@ -1139,6 +1567,28 @@ class UploadCoordinator:
                     account_id=job.account_id,
                     parts=len(parts),
                 )
+                finalized = await self._database.scalar(
+                    'SELECT preupload_finalized FROM upload_jobs '
+                    'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                    (claim.id, claim.lease_owner, claim.lease_generation),
+                )
+                if finalized == 0:
+                    await self._update_job(
+                        claim,
+                        {
+                            'state': 'waiting_artifacts',
+                            'review_reason': None,
+                            'updated_at': int(self._clock()),
+                        },
+                        release=True,
+                    )
+                    audit(
+                        'upload_preupload_waiting_for_part',
+                        job_id=job.id,
+                        account_id=job.account_id,
+                        parts=len(parts),
+                    )
+                    return
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
                 payload = await self._submit_payload(job)
@@ -1410,7 +1860,7 @@ class UploadCoordinator:
     async def _load_job(self, claim: LeaseClaim) -> _Job:
         row = await self._database.fetchone(
             'SELECT id,account_id,policy_snapshot_json,state,submit_state,'
-            'upload_completed_at '
+            'upload_completed_at,preupload_finalized '
             'FROM upload_jobs WHERE id=? AND lease_owner=? AND lease_generation=?',
             (claim.id, claim.lease_owner, claim.lease_generation),
         )
@@ -1427,6 +1877,7 @@ class UploadCoordinator:
                 if row['upload_completed_at'] is None
                 else int(row['upload_completed_at'])
             ),
+            preupload_finalized=bool(row['preupload_finalized']),
         )
 
     async def _retry_not_sent(self, claim: LeaseClaim, *, submit_started: bool) -> None:

@@ -590,7 +590,8 @@ class UploadTaskActionManager:
 
         def skip(connection: sqlite3.Connection) -> str:
             job = connection.execute(
-                'SELECT session_id,state,submit_state,repair_state,lease_until '
+                'SELECT session_id,state,submit_state,repair_state,lease_until,'
+                'preupload_finalized '
                 'FROM upload_jobs WHERE id=?',
                 (job_id,),
             ).fetchone()
@@ -608,7 +609,9 @@ class UploadTaskActionManager:
             parts = connection.execute(
                 'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
             ).fetchall()
-            if any(str(part['upload_state']) != 'prepared' for part in parts):
+            if bool(job['preupload_finalized']) and any(
+                str(part['upload_state']) != 'prepared' for part in parts
+            ):
                 raise UploadTaskActionRejected('任务已经开始上传，不能设为不上传')
             session_id = int(job['session_id'])
             self._delete_job_children(connection, job_id)

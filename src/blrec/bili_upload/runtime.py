@@ -723,7 +723,7 @@ class BiliAccountRuntime:
                 await review_watcher.run_once()
                 if task_actions is not None:
                     repair_processed = await task_actions.run_once()
-                await coordinator.resolve_finished_sessions()
+                await coordinator.sync_live_sessions()
                 await coordinator.prepare_waiting_jobs()
                 upload_processed = await coordinator.run_once()
                 comment_processed = await comment_publisher.run_once()

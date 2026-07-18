@@ -850,6 +850,33 @@ async def test_skip_upload_removes_unstarted_job_but_keeps_local_files(
 
 
 @pytest.mark.asyncio
+async def test_skip_preupload_removes_confirmed_remote_state_but_keeps_files(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database, tmp_path, state='waiting_artifacts', submit_state='prepared'
+        )
+        await database.execute(
+            'UPDATE upload_jobs SET preupload_finalized=0 WHERE id=9'
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        message = await manager.skip_upload(9, manager_subject='manager')
+
+        assert message == '该场录像已设为不上传'
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+        assert (tmp_path / 'p11.mp4').exists()
+        assert (tmp_path / 'p12.mp4').exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
     tmp_path: Path,
 ) -> None:

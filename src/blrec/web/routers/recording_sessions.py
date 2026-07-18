@@ -134,6 +134,10 @@ class UploadJobProgressResponse(ApiModel):
     account_display_name: str
     state: str
     submit_state: str
+    preupload_finalized: bool
+    display_state: Literal[
+        'standard', 'preuploading', 'preuploaded_waiting', 'preupload_paused'
+    ]
     comment_branch_state: str
     danmaku_branch_state: str
     aid: Optional[int]
@@ -646,6 +650,8 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         account_display_name=job.account_display_name,
         state=job.state,
         submit_state=job.submit_state,
+        preupload_finalized=job.preupload_finalized,
+        display_state=job.display_state,
         comment_branch_state=job.comment_branch_state,
         danmaku_branch_state=job.danmaku_branch_state,
         aid=job.aid,

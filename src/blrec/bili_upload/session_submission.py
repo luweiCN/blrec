@@ -135,12 +135,25 @@ class SessionSubmissionManager:
         def update(connection: sqlite3.Connection) -> None:
             row = self._mutable_session(connection, session_id)
             old_decision = str(row['upload_decision'])
+            upload_intent = {'follow_room': 'auto', 'upload': 'upload', 'skip': 'skip'}[
+                decision
+            ]
             connection.execute(
-                "UPDATE recording_sessions SET upload_decision=?,"
+                "UPDATE recording_sessions SET upload_decision=?,upload_intent=?,"
                 "upload_resolution_state='pending',upload_resolution_error=NULL,"
                 'upload_resolved_at=NULL WHERE id=?',
-                (decision, session_id),
+                (decision, upload_intent, session_id),
             )
+            if decision == 'skip':
+                connection.execute(
+                    'INSERT OR REPLACE INTO upload_suppressions('
+                    'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
+                    (session_id, 'manager_skipped', manager_subject, now),
+                )
+            else:
+                connection.execute(
+                    'DELETE FROM upload_suppressions WHERE session_id=?', (session_id,)
+                )
             self._audit(
                 connection,
                 manager_subject=manager_subject,
@@ -234,9 +247,12 @@ class SessionSubmissionManager:
         if row is None:
             raise RecordingSessionNotFound('recording session not found')
         job = connection.execute(
-            'SELECT 1 FROM upload_jobs WHERE session_id=?', (session_id,)
+            'SELECT preupload_finalized FROM upload_jobs WHERE session_id=?',
+            (session_id,),
         ).fetchone()
-        if job is not None or str(row['upload_resolution_state']) == 'job_created':
+        if (job is not None and bool(job['preupload_finalized'])) or (
+            job is None and str(row['upload_resolution_state']) == 'job_created'
+        ):
             raise SessionSubmissionLocked(
                 'submission settings are immutable after upload job creation'
             )
