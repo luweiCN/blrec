@@ -46,13 +46,6 @@ interface HighlightClipDraft {
   error: string | null;
 }
 
-interface TimelineThumbnail {
-  readonly timeMs: number;
-  readonly localTimeMs: number;
-  readonly label: string;
-  readonly url: string;
-}
-
 @Component({
   selector: 'app-highlight-editor',
   templateUrl: './highlight-editor.component.html',
@@ -79,8 +72,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   draggingPlayhead = false;
   editingDraftId: number | null = null;
   sourceClipId: number | null = null;
-  timelineThumbnails: readonly TimelineThumbnail[] = [];
-  hoveredThumbnail: TimelineThumbnail | null = null;
   clipPreviewId: number | null = null;
   clipPreviewUrl: string | null = null;
   clipPreviewLoading = false;
@@ -1107,7 +1098,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           }
           this.mediaAccess = access;
           this.mediaUrl = this.recordings.mediaUrl(part.partId, access);
-          this.timelineThumbnails = this.buildTimelineThumbnails(part, access);
           this.mediaLoading = false;
           this.attachFlvPlayer();
           this.applyPendingSeek();
@@ -1116,7 +1106,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         error: (error: unknown) => {
           this.mediaLoading = false;
           this.mediaError = this.describeError(error, '无法打开本地视频');
-          this.timelineThumbnails = [];
           this.changeDetector.markForCheck();
         },
       });
@@ -1169,20 +1158,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
   }
 
-  showThumbnailPreview(item: TimelineThumbnail): void {
-    this.hoveredThumbnail = item;
-  }
-
-  hideThumbnailPreview(item: TimelineThumbnail): void {
-    if (this.hoveredThumbnail === item) {
-      this.hoveredThumbnail = null;
-    }
-  }
-
-  seekThumbnail(item: TimelineThumbnail): void {
-    this.seekTimeline(item.timeMs);
-  }
-
   setBoundaryFromLocalSeconds(
     boundary: 'start' | 'end',
     value: number | string,
@@ -1212,39 +1187,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.videoElement?.pause();
     this.previewingDraftId = null;
     this.seekTimeline(boundary === 'start' ? this.startMs : this.endMs);
-  }
-
-  private buildTimelineThumbnails(
-    part: HighlightTimelinePart,
-    access: RecordingMediaAccess,
-  ): readonly TimelineThumbnail[] {
-    const stableDurationMs = Math.max(
-      0,
-      Math.min(
-        part.durationMs,
-        Math.max(0, part.stableEndMs - part.timelineStartMs),
-        access.durationMs ??
-          Math.max(0, part.stableEndMs - part.timelineStartMs),
-      ),
-    );
-    if (stableDurationMs < 1_000) {
-      return [];
-    }
-    const count = Math.min(
-      8,
-      Math.max(4, Math.ceil(stableDurationMs / 1_800_000) + 3),
-    );
-    return Array.from({ length: count }, (_value, index) => {
-      const localTimeMs = Math.round(
-        ((index + 0.5) / count) * stableDurationMs,
-      );
-      return {
-        timeMs: part.timelineStartMs + localTimeMs,
-        localTimeMs,
-        label: this.formatTime(localTimeMs),
-        url: this.recordings.thumbnailUrl(part.partId, access, localTimeMs),
-      };
-    });
   }
 
   private teardownPlayer(): void {

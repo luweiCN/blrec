@@ -18,7 +18,7 @@ from typing import (
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import StreamingResponse
 
 from blrec.bili_upload.journal import (
     DanmakuItemProgress,
@@ -37,10 +37,6 @@ from blrec.bili_upload.recording_content import (
     RecordingContentNotFound,
     RecordingContentReader,
     RecordingContentUnavailable,
-)
-from blrec.bili_upload.recording_thumbnail import (
-    RecordingThumbnailProvider,
-    RecordingThumbnailUnavailable,
 )
 from blrec.bili_upload.session_submission import (
     InvalidSessionSubmission,
@@ -68,10 +64,6 @@ submission_manager: Optional[SessionSubmissionManager] = None
 active_recording_metadata_provider: Optional[
     Callable[[MediaResource], Optional[Mapping[str, Any]]]
 ] = None
-_recording_thumbnail_cache = RecordingThumbnailProvider()
-recording_thumbnail_provider: Callable[
-    [str, int, int], Awaitable[Tuple[bytes, bool]]
-] = _recording_thumbnail_cache.get
 unavailable_reason: Optional[str] = 'Recording journal is not ready'
 
 _BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
@@ -1246,57 +1238,6 @@ async def stream_recording_media(
         status_code=response_status,
         media_type=resource.content_type,
         headers=headers,
-    )
-
-
-@router.get('/parts/{part_id}/thumbnail')
-async def recording_thumbnail(
-    part_id: int,
-    time_ms: int = Query(..., ge=0),
-    width: int = Query(240, ge=120, le=480),
-    _subject: str = Depends(authenticated_media_subject),
-    reader: RecordingContentReader = Depends(get_content_reader),
-) -> Response:
-    started = time.monotonic()
-    try:
-        resource = await reader.media(part_id)
-    except (RecordingContentNotFound, RecordingContentUnavailable) as error:
-        raise _content_error(error) from None
-    if resource.path is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
-        )
-    try:
-        content, cache_hit = await recording_thumbnail_provider(
-            resource.path, time_ms, width
-        )
-    except RecordingThumbnailUnavailable as error:
-        audit(
-            'recording_thumbnail_failed',
-            level='WARNING',
-            part_id=part_id,
-            time_ms=time_ms,
-            width=width,
-            elapsed_ms=int((time.monotonic() - started) * 1_000),
-            error=str(error)[:500],
-            result='failed',
-        )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(error)
-        ) from None
-    audit(
-        'recording_thumbnail_served',
-        part_id=part_id,
-        time_ms=time_ms,
-        width=width,
-        cache_hit=cache_hit,
-        elapsed_ms=int((time.monotonic() - started) * 1_000),
-        result='completed',
-    )
-    return Response(
-        content=content,
-        media_type='image/jpeg',
-        headers={'Cache-Control': 'private, max-age=300'},
     )
 
 

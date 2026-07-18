@@ -22,7 +22,6 @@ import {
   HighlightTimeline,
 } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
-import { RecordingMediaAccess } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightEditorComponent } from './highlight-editor.component';
 
@@ -212,7 +211,7 @@ describe('HighlightEditorComponent', () => {
 
     recordings = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['createMediaAccess', 'mediaUrl', 'thumbnailUrl', 'runJobAction'],
+      ['createMediaAccess', 'mediaUrl', 'runJobAction'],
     );
     recordings.createMediaAccess.and.returnValue(
       of({
@@ -229,10 +228,6 @@ describe('HighlightEditorComponent', () => {
       }),
     );
     recordings.mediaUrl.and.callFake((partId) => `/media/${partId}`);
-    recordings.thumbnailUrl.and.callFake(
-      (_partId: number, _access: RecordingMediaAccess, timeMs: number) =>
-        `/thumbnail/${timeMs}`,
-    );
     recordings.runJobAction.and.returnValue(
       of({ results: [{ jobId: 44, accepted: true, message: '已继续上传' }] }),
     );
@@ -423,11 +418,10 @@ describe('HighlightEditorComponent', () => {
     expect(component.startMs).toBe(12_000);
   });
 
-  it('builds a bounded thumbnail strip from the signed media access', () => {
-    expect(component.timelineThumbnails.length).toBeGreaterThan(1);
-    expect(component.timelineThumbnails.length).toBeLessThanOrEqual(8);
-    expect(recordings.thumbnailUrl).toHaveBeenCalled();
-    expect(component.timelineThumbnails[0].url).toContain('/thumbnail/');
+  it('does not render recording thumbnails on the timeline', () => {
+    expect(
+      fixture.nativeElement.querySelector('.thumbnail-strip'),
+    ).toBeNull();
   });
 
   it('opens the first local recording and restores clips automatically', () => {

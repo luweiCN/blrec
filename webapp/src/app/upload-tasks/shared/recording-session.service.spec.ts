@@ -138,27 +138,6 @@ describe('RecordingSessionService', () => {
       '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id',
     );
 
-    expect(
-      service.thumbnailUrl(
-        7,
-        {
-          token: 'signed token',
-          expiresAt: 123,
-          snapshotId: 'snapshot-id',
-          durationMs: 12_500,
-          fileSizeBytes: 2_048,
-          recording: true,
-          playbackMode: 'active_snapshot',
-          indexState: 'pending',
-          retryAfterMs: null,
-          requestId: 'request-service',
-        },
-        4_500,
-      ),
-    ).toBe(
-      '/api/v1/recording-sessions/parts/7/thumbnail?time_ms=4500&width=240&media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id',
-    );
-
     service.listDanmaku(7, 100, 50).subscribe();
     const danmakuRequest = http.expectOne(
       '/api/v1/recording-sessions/parts/7/danmaku?cursor=100&limit=50',

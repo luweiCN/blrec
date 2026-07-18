@@ -94,29 +94,6 @@
           (pointercancel)="endTimelineDrag($event, timelineTrack)"
           (keydown)="handleTimelineKeydown($event)"
         >
-          <div class="thumbnail-strip" aria-hidden="true">
-            <button
-              *ngFor="let item of timelineThumbnails"
-              type="button"
-              class="thumbnail-cell"
-              tabindex="-1"
-              (pointerdown)="$event.stopPropagation()"
-              (click)="$event.stopPropagation(); seekThumbnail(item)"
-              (mouseenter)="showThumbnailPreview(item)"
-              (mouseleave)="hideThumbnailPreview(item)"
-            >
-              <img [src]="item.url" alt="" loading="lazy" draggable="false" />
-              <span>{{ item.label }}</span>
-              <span *ngIf="hoveredThumbnail === item" class="thumbnail-popover">
-                <img [src]="item.url" alt="" />
-                <strong>{{ item.label }}</strong>
-              </span>
-            </button>
-            <span *ngIf="timelineThumbnails.length === 0" class="no-thumbnails">
-              预览画面生成中
-            </span>
-          </div>
-
           <button
             *ngFor="let clip of visibleClips; trackBy: trackClip"
             type="button"

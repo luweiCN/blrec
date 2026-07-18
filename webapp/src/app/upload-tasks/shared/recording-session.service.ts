@@ -131,24 +131,6 @@ export class RecordingSessionService {
     return this.url.makeApiUrl(path);
   }
 
-  thumbnailUrl(
-    partId: number,
-    access: RecordingMediaAccess,
-    timeMs: number,
-    width = 240,
-  ): string {
-    const token = encodeURIComponent(access.token);
-    let path =
-      `/api/v1/recording-sessions/parts/${partId}/thumbnail` +
-      `?time_ms=${Math.max(0, Math.round(timeMs))}` +
-      `&width=${width}` +
-      `&media_token=${token}&media_expires=${access.expiresAt}`;
-    if (access.snapshotId !== null) {
-      path += `&media_snapshot=${encodeURIComponent(access.snapshotId)}`;
-    }
-    return this.url.makeApiUrl(path);
-  }
-
   listDanmaku(
     partId: number,
     cursor = 0,

@@ -789,47 +789,12 @@ def test_media_access_token_authorizes_range_requests_without_exposing_api_key(
     assert response.content == b'56789'
 
 
-def test_thumbnail_uses_the_scoped_media_token_and_returns_a_cached_jpeg(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    render = AsyncMock(return_value=(b'jpeg-preview', True))
-    monkeypatch.setattr(
-        recording_sessions, 'recording_thumbnail_provider', render, raising=False
-    )
-    access = client.post(
-        '/api/v1/recording-sessions/parts/2/media-access',
-        headers={'x-api-key': 'test-api-key'},
-    ).json()
-
+def test_recording_thumbnail_route_is_not_exposed(client: TestClient) -> None:
     response = client.get(
         '/api/v1/recording-sessions/parts/2/thumbnail',
-        params={
-            'time_ms': 4_500,
-            'width': 240,
-            'media_token': access['token'],
-            'media_expires': access['expiresAt'],
-            'media_snapshot': access['snapshotId'],
-        },
     )
 
-    assert response.status_code == 200
-    assert response.headers['content-type'] == 'image/jpeg'
-    assert response.content == b'jpeg-preview'
-    render.assert_awaited_once()
-
-
-def test_thumbnail_rejects_an_invalid_media_token(client: TestClient) -> None:
-    response = client.get(
-        '/api/v1/recording-sessions/parts/2/thumbnail',
-        params={
-            'time_ms': 1_000,
-            'width': 240,
-            'media_token': 'invalid',
-            'media_expires': int(time.time()) + 60,
-        },
-    )
-
-    assert response.status_code == 401
+    assert response.status_code == 404
 
 
 def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
