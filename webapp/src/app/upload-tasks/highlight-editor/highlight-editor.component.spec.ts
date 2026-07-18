@@ -1,11 +1,14 @@
 import { CommonModule } from '@angular/common';
+import { OverlayModule } from '@angular/cdk/overlay';
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { of, Subject } from 'rxjs';
+import { NzToolTipModule, NzTooltipDirective } from 'ng-zorro-antd/tooltip';
 
 import {
   RealtimeEvent,
@@ -247,7 +250,13 @@ describe('HighlightEditorComponent', () => {
 
     await TestBed.configureTestingModule({
       declarations: [HighlightEditorComponent, UploadPolicyDialogStubComponent],
-      imports: [CommonModule, FormsModule, RouterTestingModule],
+      imports: [
+        CommonModule,
+        FormsModule,
+        OverlayModule,
+        RouterTestingModule,
+        NzToolTipModule,
+      ],
       providers: [
         { provide: HighlightService, useValue: highlights },
         { provide: RecordingSessionService, useValue: recordings },
@@ -330,7 +339,7 @@ describe('HighlightEditorComponent', () => {
     expect(component.draggingPlayhead).toBeTrue();
     expect(component.playheadMs).toBe(56_000);
 
-    component.moveTimelineDrag(
+    component.handleTimelinePointerMove(
       { pointerId: 1, clientX: 140 } as PointerEvent,
       track,
     );
@@ -768,7 +777,7 @@ describe('HighlightEditorComponent', () => {
     expect(component.selectedDraftLocked).toBeTrue();
     expect(
       (
-        fixture.nativeElement.querySelector(
+        document.body.querySelector(
           '.timeline-popover input',
         ) as HTMLInputElement
       ).readOnly,
@@ -1084,7 +1093,7 @@ describe('HighlightEditorComponent', () => {
     fixture.detectChanges();
 
     const create = Array.from<HTMLButtonElement>(
-      fixture.nativeElement.querySelectorAll('.timeline-popover button'),
+      document.body.querySelectorAll('.timeline-popover button'),
     ).find((button) => button.textContent?.trim() === '创建片段');
 
     expect(create?.disabled).toBeTrue();
@@ -1184,10 +1193,119 @@ describe('HighlightEditorComponent', () => {
     });
     component.playheadMs = 10_000;
 
-    component.handleTimelineHover({ clientX: 90 } as MouseEvent, track);
+    component.handleTimelinePointerMove(
+      { clientX: 90, pointerId: 9 } as PointerEvent,
+      track,
+    );
 
     expect(component.hoverTimeMs).toBe(45_000);
     expect(component.playheadMs).toBe(10_000);
+  });
+
+  it('keeps hover guidance after a drag until the pointer leaves the track', () => {
+    const track = fixture.nativeElement.querySelector(
+      '.timeline-track',
+    ) as HTMLElement;
+    spyOn(track, 'getBoundingClientRect').and.returnValue({
+      left: 0,
+      width: 180,
+      right: 180,
+      top: 0,
+      bottom: 92,
+      height: 92,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    component.startTimelineDrag(
+      {
+        button: 0,
+        pointerId: 5,
+        clientX: 40,
+        target: track,
+        preventDefault: jasmine.createSpy('preventDefault'),
+      } as unknown as PointerEvent,
+      track,
+    );
+    component.endTimelineDrag({ pointerId: 5 } as PointerEvent, track);
+
+    component.handleTimelinePointerMove(
+      { pointerId: 5, clientX: 100 } as PointerEvent,
+      track,
+    );
+    expect(component.hoverTimeMs).toBe(50_000);
+
+    component.clearTimelineHover();
+    expect(component.hoverTimeMs).toBeNull();
+  });
+
+  it('aligns pending and created ranges with their explicit lanes', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    component.clips = [
+      {
+        ...processingClip,
+        state: 'ready',
+        requestedStartMs: 30_000,
+        requestedEndMs: 45_000,
+        actualStartMs: 30_000,
+        actualEndMs: 45_000,
+        sources: [
+          {
+            partId: 11,
+            ordinal: 0,
+            requestedStartMs: 30_000,
+            requestedEndMs: 45_000,
+            actualStartMs: 30_000,
+            actualEndMs: 45_000,
+          },
+        ],
+      },
+    ];
+    fixture.detectChanges();
+
+    const base = fixture.nativeElement.querySelector(
+      '.track-base',
+    ) as HTMLElement;
+    const draft = fixture.nativeElement.querySelector(
+      '.draft-range',
+    ) as HTMLElement;
+    const createdLane = fixture.nativeElement.querySelector(
+      '.created-lane',
+    ) as HTMLElement;
+    const clip = fixture.nativeElement.querySelector(
+      '.clip-range',
+    ) as HTMLElement;
+
+    expect(getComputedStyle(draft).top).toBe(getComputedStyle(base).top);
+    expect(getComputedStyle(draft).height).toBe(getComputedStyle(base).height);
+    expect(getComputedStyle(clip).top).toBe(getComputedStyle(createdLane).top);
+    expect(getComputedStyle(clip).height).toBe(
+      getComputedStyle(createdLane).height,
+    );
+  });
+
+  it('renders timeline actions and marker help through global overlays', () => {
+    component.selectPart(timeline.parts[1]);
+    component.timelinePopover = {
+      kind: 'point',
+      timeMs: 115_000,
+      markerId: 7,
+    };
+    fixture.detectChanges();
+
+    const workbench = fixture.nativeElement.querySelector(
+      '.editor-workbench',
+    ) as HTMLElement;
+    const marker = fixture.debugElement.query(By.css('.marker-pin'));
+
+    expect(workbench.querySelector('.timeline-popover')).toBeNull();
+    expect(
+      document.body.querySelector('.cdk-overlay-container .timeline-popover'),
+    ).not.toBeNull();
+    expect(marker.injector.get(NzTooltipDirective, null)).not.toBeNull();
   });
 
   it('keeps the custom playhead synchronized with video playback', () => {
@@ -1230,18 +1348,6 @@ describe('HighlightEditorComponent', () => {
     component.toggleFullscreen();
 
     expect(requestFullscreen).toHaveBeenCalled();
-  });
-
-  it('keeps the timeline popover inside a narrow editor', () => {
-    const track = fixture.nativeElement.querySelector(
-      '.timeline-track',
-    ) as HTMLElement;
-    Object.defineProperty(track, 'clientWidth', {
-      configurable: true,
-      value: 300,
-    });
-
-    expect(component.popoverTransform(18_000)).toBe('translateX(-60px)');
   });
 
   it('cancels only the selected pending range', () => {
@@ -1291,8 +1397,11 @@ describe('HighlightEditorComponent', () => {
     component.createDraft(draft);
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.textContent).toContain('实际会从 00:00 开始');
-    expect(fixture.nativeElement.textContent).not.toContain('检查裁剪范围');
+    const popoverText = document.body.querySelector(
+      '.timeline-popover',
+    )?.textContent;
+    expect(popoverText).toContain('实际会从 00:00 开始');
+    expect(popoverText).not.toContain('检查裁剪范围');
     expect(highlights.createClip).not.toHaveBeenCalled();
 
     component.clipName = '';

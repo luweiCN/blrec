@@ -301,12 +301,19 @@
           </div>
         </td>
         <td>
-          <nz-tag [nzColor]="displayStateColor(session.displayState)">
-            {{ displayStateLabel(session.displayState) }}
-          </nz-tag>
+          <ng-container *ngIf="session.uploadJob as statusJob; else sessionStatus">
+            <nz-tag [nzColor]="uploadDisplayStateColor(statusJob)">
+              {{ uploadDisplayStateLabel(statusJob) }}
+            </nz-tag>
+          </ng-container>
+          <ng-template #sessionStatus>
+            <nz-tag [nzColor]="displayStateColor(session.displayState)">
+              {{ displayStateLabel(session.displayState) }}
+            </nz-tag>
+          </ng-template>
           <div
             class="secondary-text"
-            *ngIf="displayStateDetail(session) as detail"
+            *ngIf="!session.uploadJob && displayStateDetail(session) as detail"
           >
             {{ detail }}
           </div>

@@ -1,4 +1,5 @@
 import { DOCUMENT } from '@angular/common';
+import { ConnectedPosition } from '@angular/cdk/overlay';
 import {
   ChangeDetectorRef,
   Component,
@@ -64,6 +65,36 @@ type TimelinePopover =
 export class HighlightEditorComponent implements OnInit, OnDestroy {
   readonly sessionId: number;
   readonly initialPartId: number | null;
+  readonly popoverPositions: ConnectedPosition[] = [
+    {
+      originX: 'center',
+      originY: 'bottom',
+      overlayX: 'center',
+      overlayY: 'top',
+      offsetY: 10,
+    },
+    {
+      originX: 'center',
+      originY: 'top',
+      overlayX: 'center',
+      overlayY: 'bottom',
+      offsetY: -10,
+    },
+    {
+      originX: 'start',
+      originY: 'bottom',
+      overlayX: 'start',
+      overlayY: 'top',
+      offsetY: 10,
+    },
+    {
+      originX: 'end',
+      originY: 'bottom',
+      overlayX: 'end',
+      overlayY: 'top',
+      offsetY: 10,
+    },
+  ];
 
   timeline: HighlightTimeline | null = null;
   selectedPart: HighlightTimelinePart | null = null;
@@ -108,7 +139,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   private videoElement: HTMLVideoElement | null = null;
   private editorWorkbenchElement: HTMLElement | null = null;
-  private timelineTrackElement: HTMLElement | null = null;
   private player: PartPlayer | null = null;
   private pendingSeekSeconds: number | null = null;
   private mediaRequest?: Subscription;
@@ -150,11 +180,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   @ViewChild('editorWorkbench')
   set editorWorkbenchRef(value: ElementRef<HTMLElement> | undefined) {
     this.editorWorkbenchElement = value?.nativeElement ?? null;
-  }
-
-  @ViewChild('timelineTrack')
-  set timelineTrackRef(value: ElementRef<HTMLElement> | undefined) {
-    this.timelineTrackElement = value?.nativeElement ?? null;
   }
 
   get clip(): HighlightClip | null {
@@ -585,11 +610,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.seekTimeline(valueMs);
   }
 
-  moveTimelineDrag(event: PointerEvent, track: HTMLElement): void {
-    if (event.pointerId !== this.draggingPointerId) {
-      return;
+  handleTimelinePointerMove(event: PointerEvent, track: HTMLElement): void {
+    this.hoverTimeMs = this.pointerTimeMs(event.clientX, track, false);
+    if (event.pointerId === this.draggingPointerId) {
+      this.seekFromPointer(event.clientX, track);
     }
-    this.seekFromPointer(event.clientX, track);
   }
 
   endTimelineDrag(event: PointerEvent, track: HTMLElement): void {
@@ -604,10 +629,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.draggingPointerId = null;
     this.draggingPlayhead = false;
     this.showPointActions(this.playheadMs, null);
-  }
-
-  handleTimelineHover(event: MouseEvent, track: HTMLElement): void {
-    this.hoverTimeMs = this.pointerTimeMs(event.clientX, track, false);
   }
 
   clearTimelineHover(): void {
@@ -741,27 +762,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         : this.playheadMs;
     }
     return this.playheadMs;
-  }
-
-  popoverTransform(valueMs: number): string {
-    const percent = this.positionPercent(valueMs);
-    const trackWidth = this.timelineTrackElement?.clientWidth ?? 0;
-    if (trackWidth > 0) {
-      const popoverWidth = Math.min(340, trackWidth);
-      const anchor = (percent / 100) * trackWidth;
-      const left = Math.max(
-        0,
-        Math.min(trackWidth - popoverWidth, anchor - popoverWidth / 2),
-      );
-      return `translateX(${Math.round(left - anchor)}px)`;
-    }
-    if (percent < 14) {
-      return 'translateX(0)';
-    }
-    if (percent > 86) {
-      return 'translateX(-100%)';
-    }
-    return 'translateX(-50%)';
   }
 
   togglePlayback(): void {

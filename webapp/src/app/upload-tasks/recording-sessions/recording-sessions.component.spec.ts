@@ -137,6 +137,8 @@ describe('RecordingSessionsComponent', () => {
               accountDisplayName: '投稿账号',
               state: 'waiting_review',
               submitState: 'confirmed',
+              preuploadFinalized: true,
+              displayState: 'standard',
               commentBranchState: 'pending',
               danmakuBranchState: 'pending',
               aid: 123,
@@ -345,6 +347,33 @@ describe('RecordingSessionsComponent', () => {
         uploadIntent: 'skip',
       }),
     ).toBe('本场不上传');
+  });
+
+  it('shows preupload phases instead of generic internal job states', () => {
+    fixture.detectChanges();
+    const job = fixture.componentInstance.sessions[0].uploadJob!;
+
+    expect(
+      fixture.componentInstance.uploadDisplayStateLabel({
+        ...job,
+        preuploadFinalized: false,
+        displayState: 'preuploading',
+      }),
+    ).toBe('录制中 · 正在预上传');
+    expect(
+      fixture.componentInstance.uploadDisplayStateLabel({
+        ...job,
+        preuploadFinalized: false,
+        displayState: 'preuploaded_waiting',
+      }),
+    ).toBe('录制中 · 已预上传，等待新分 P');
+    expect(
+      fixture.componentInstance.uploadDisplayStateLabel({
+        ...job,
+        preuploadFinalized: false,
+        displayState: 'preupload_paused',
+      }),
+    ).toBe('录制中 · 预上传已暂停');
   });
 
   it('offers highlight editing from a concrete recording part', () => {
@@ -907,6 +936,8 @@ describe('RecordingSessionsComponent', () => {
             sessionId: 1,
             state: 'waiting_review',
             submitState: 'confirmed',
+            preuploadFinalized: true,
+            displayState: 'standard',
             aid: 123,
             bvid: 'BV1test',
             confirmedBytes: 6,

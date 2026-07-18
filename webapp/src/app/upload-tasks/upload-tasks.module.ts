@@ -1,5 +1,10 @@
 import { CommonModule } from '@angular/common';
 import { ClipboardModule } from '@angular/cdk/clipboard';
+import {
+  FullscreenOverlayContainer,
+  OverlayContainer,
+  OverlayModule,
+} from '@angular/cdk/overlay';
 import { NgModule } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
@@ -44,6 +49,7 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
   imports: [
     CommonModule,
     ClipboardModule,
+    OverlayModule,
     FormsModule,
     UploadPolicyDialogModule,
     UploadTasksRoutingModule,
@@ -66,6 +72,9 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
     NzTableModule,
     NzTagModule,
     NzToolTipModule,
+  ],
+  providers: [
+    { provide: OverlayContainer, useClass: FullscreenOverlayContainer },
   ],
 })
 export class UploadTasksModule {}

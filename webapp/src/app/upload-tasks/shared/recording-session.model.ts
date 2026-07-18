@@ -39,6 +39,12 @@ export type UploadSubmitState =
   | 'unknown_outcome'
   | 'failed_permanent';
 
+export type UploadJobDisplayState =
+  | 'standard'
+  | 'preuploading'
+  | 'preuploaded_waiting'
+  | 'preupload_paused';
+
 export type CommentBranchState =
   | 'disabled'
   | 'pending'
@@ -262,6 +268,8 @@ export interface UploadJobProgress {
   readonly accountDisplayName: string;
   readonly state: UploadJobState;
   readonly submitState: UploadSubmitState;
+  readonly preuploadFinalized: boolean;
+  readonly displayState: UploadJobDisplayState;
   readonly commentBranchState: CommentBranchState;
   readonly danmakuBranchState: DanmakuBranchState;
   readonly aid: number | null;

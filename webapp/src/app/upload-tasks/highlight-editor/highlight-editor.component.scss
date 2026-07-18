@@ -211,10 +211,15 @@ video {
 
 .timeline-wrap {
   position: relative;
-  min-height: 284px;
+  min-height: 112px;
 }
 
 .timeline-track {
+  --primary-lane-top: 27px;
+  --primary-lane-height: 34px;
+  --created-lane-top: 72px;
+  --created-lane-height: 11px;
+
   position: relative;
   height: 92px;
   overflow: visible;
@@ -232,6 +237,7 @@ video {
 }
 
 .track-base,
+.created-lane,
 .draft-range,
 .clip-range,
 .selection-boundary,
@@ -239,23 +245,39 @@ video {
 .marker-pin,
 .hover-guide,
 .hover-time,
-.playhead {
+.playhead,
+.timeline-popover-origin {
   position: absolute;
 }
 
+.primary-lane {
+  top: var(--primary-lane-top);
+  height: var(--primary-lane-height);
+}
+
 .track-base {
-  top: 27px;
   right: 0;
   left: 0;
-  height: 34px;
   border-block: 1px solid #4b5a70;
   background: #2a3749;
 }
 
+.created-lane,
+.clip-range {
+  top: var(--created-lane-top);
+  height: var(--created-lane-height);
+}
+
+.created-lane {
+  right: 0;
+  left: 0;
+  border-block: 1px solid #39475b;
+  background: #1a2532;
+}
+
 .draft-range {
-  top: 30px;
   z-index: 7;
-  height: 28px;
+  min-height: 0;
   padding: 0;
   border: 2px solid #4e9cff;
   border-radius: 5px;
@@ -270,9 +292,8 @@ video {
 }
 
 .clip-range {
-  bottom: 8px;
   z-index: 6;
-  height: 10px;
+  min-height: 0;
   padding: 0;
   border: 1px solid #40c38b;
   border-radius: 3px;
@@ -285,10 +306,11 @@ video {
 }
 
 .selection-boundary {
-  top: 25px;
+  top: calc(var(--primary-lane-top) - 2px);
   z-index: 13;
   width: 13px;
-  height: 40px;
+  height: calc(var(--primary-lane-height) + 4px);
+  min-height: 0;
   padding: 0;
   transform: translateX(-50%);
   border: 2px solid #dcecff;
@@ -329,6 +351,7 @@ video {
   z-index: 12;
   width: 16px;
   height: 16px;
+  min-height: 0;
   padding: 0;
   transform: translateX(-50%);
   border: 2px solid #fff4e8;
@@ -348,22 +371,6 @@ video {
   content: "";
 }
 
-.marker-pin:hover::after {
-  position: absolute;
-  top: -33px;
-  left: 50%;
-  width: max-content;
-  max-width: 180px;
-  padding: 5px 8px;
-  transform: translateX(-50%);
-  border-radius: 5px;
-  background: #05080d;
-  color: #fff;
-  content: attr(data-label);
-  font-size: 12px;
-  pointer-events: none;
-}
-
 .marker-pin.active {
   background: #ff4d00;
   outline: 2px solid #ffd2b8;
@@ -372,14 +379,14 @@ video {
 .hover-guide,
 .playhead {
   top: 20px;
-  bottom: 22px;
+  bottom: 7px;
   width: 2px;
   transform: translateX(-1px);
   pointer-events: none;
 }
 
 .hover-guide {
-  z-index: 9;
+  z-index: 10;
   border-left: 1px dashed #b6c1d1;
 }
 
@@ -422,11 +429,10 @@ video {
 }
 
 .timeline-popover {
-  position: absolute;
-  top: 112px;
-  z-index: 30;
   display: grid;
-  width: min(340px, 100%);
+  width: min(340px, calc(100vw - 24px));
+  max-height: min(520px, calc(100vh - 24px));
+  overflow: auto;
   gap: 9px;
   padding: 12px;
   border: 1px solid #526177;
@@ -434,6 +440,13 @@ video {
   background: #0b111a;
   box-shadow: 0 10px 24px rgb(0 0 0 / 34%);
   color: #edf3fb;
+}
+
+.timeline-popover-origin {
+  top: calc(var(--primary-lane-top) + var(--primary-lane-height));
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
 }
 
 .timeline-popover strong {

@@ -129,14 +129,14 @@
             [attr.aria-valuemax]="editorStableEndMs - editorPartStartMs"
             [attr.aria-valuenow]="playheadMs - editorPartStartMs"
             (pointerdown)="startTimelineDrag($event, timelineTrack)"
-            (pointermove)="moveTimelineDrag($event, timelineTrack)"
+            (pointermove)="handleTimelinePointerMove($event, timelineTrack)"
             (pointerup)="endTimelineDrag($event, timelineTrack)"
             (pointercancel)="endTimelineDrag($event, timelineTrack)"
-            (mousemove)="handleTimelineHover($event, timelineTrack)"
-            (mouseleave)="clearTimelineHover()"
+            (pointerleave)="clearTimelineHover()"
             (keydown)="handleTimelineKeydown($event)"
           >
-            <span class="track-base" aria-hidden="true"></span>
+            <span class="track-base primary-lane" aria-hidden="true"></span>
+            <span class="created-lane" aria-hidden="true"></span>
 
             <button
               *ngFor="let clip of visibleClips; trackBy: trackClip"
@@ -159,7 +159,7 @@
             <button
               *ngFor="let draft of drafts; trackBy: trackDraft"
               type="button"
-              class="draft-range"
+              class="draft-range primary-lane"
               [class.active]="editingDraftId === draft.id"
               [style.left.%]="positionPercent(draft.startMs)"
               [style.width.%]="
@@ -203,9 +203,15 @@
               *ngFor="let item of visibleMarkers; trackBy: trackMarker"
               type="button"
               class="marker-pin"
+              nz-tooltip
               [class.active]="selectedMarkerId === item.marker.id"
               [style.left.%]="positionPercent(item.timelineOffsetMs)"
-              [attr.data-label]="item.marker.name"
+              [nzTooltipTitle]="
+                item.marker.name +
+                ' · ' +
+                formatTime(item.timelineOffsetMs - editorPartStartMs)
+              "
+              nzTooltipPlacement="top"
               [attr.aria-label]="
                 item.marker.name +
                 '，' +
@@ -235,6 +241,13 @@
               [style.left.%]="positionPercent(playheadMs)"
               aria-hidden="true"
             ></span>
+            <span
+              #popoverOrigin="cdkOverlayOrigin"
+              cdkOverlayOrigin
+              class="timeline-popover-origin"
+              [style.left.%]="positionPercent(popoverTimeMs)"
+              aria-hidden="true"
+            ></span>
           </div>
 
           <div class="timeline-ruler" aria-hidden="true">
@@ -243,12 +256,15 @@
             <span>{{ formatTime(editorDurationMs) }}</span>
           </div>
 
-          <div
-            *ngIf="timelinePopover.kind !== 'none'"
-            class="timeline-popover"
-            [style.left.%]="positionPercent(popoverTimeMs)"
-            [style.transform]="popoverTransform(popoverTimeMs)"
+          <ng-template
+            cdkConnectedOverlay
+            [cdkConnectedOverlayOrigin]="popoverOrigin"
+            [cdkConnectedOverlayOpen]="timelinePopover.kind !== 'none'"
+            [cdkConnectedOverlayPositions]="popoverPositions"
+            [cdkConnectedOverlayPush]="true"
+            [cdkConnectedOverlayViewportMargin]="12"
           >
+            <div class="timeline-popover">
             <ng-container *ngIf="timelinePopover.kind === 'point'">
               <strong
                 >位置
@@ -432,7 +448,8 @@
                 以此范围调整
               </button>
             </ng-container>
-          </div>
+            </div>
+          </ng-template>
         </div>
 
         <div class="timeline-status">

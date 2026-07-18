@@ -26,6 +26,7 @@ import {
   RecordingSessionsView,
   TranscodeState,
   UploadJobProgress,
+  UploadJobDisplayState,
   UploadJobRetryPreviewItem,
   UploadJobState,
   UploadSubmitState,
@@ -40,6 +41,8 @@ interface RealtimeUploadJobProgress {
   readonly sessionId: number;
   readonly state: UploadJobState;
   readonly submitState: UploadSubmitState;
+  readonly preuploadFinalized: boolean;
+  readonly displayState: UploadJobDisplayState;
   readonly aid: number | null;
   readonly bvid: string | null;
   readonly confirmedBytes: number;
@@ -733,6 +736,13 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   uploadDisplayStateLabel(job: UploadJobProgress): string {
+    if (job.displayState !== 'standard') {
+      return {
+        preuploading: '录制中 · 正在预上传',
+        preuploaded_waiting: '录制中 · 已预上传，等待新分 P',
+        preupload_paused: '录制中 · 预上传已暂停',
+      }[job.displayState];
+    }
     switch (job.repairState) {
       case 'queued':
         return '等待检查转码';
@@ -754,6 +764,12 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   uploadDisplayStateColor(job: UploadJobProgress): string {
+    if (job.displayState === 'preupload_paused') {
+      return 'warning';
+    }
+    if (job.displayState !== 'standard') {
+      return 'processing';
+    }
     if (
       ['queued', 'checking', 'reuploading', 'editing'].includes(job.repairState)
     ) {
@@ -1042,6 +1058,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         stateChanged ||
         job.state !== update.state ||
         job.submitState !== update.submitState ||
+        job.displayState !== update.displayState ||
         job.aid !== update.aid ||
         job.bvid !== update.bvid;
       return {
@@ -1050,6 +1067,8 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
           ...job,
           state: update.state,
           submitState: update.submitState,
+          preuploadFinalized: update.preuploadFinalized,
+          displayState: update.displayState,
           aid: update.aid,
           bvid: update.bvid,
           confirmedBytes: update.confirmedBytes,
