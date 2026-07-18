@@ -39,6 +39,7 @@ import {
   RealtimeEvent,
   RealtimeService,
 } from '../../core/services/realtime.service';
+import { RecordingSession } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
 
@@ -321,6 +322,29 @@ describe('RecordingSessionsComponent', () => {
     expect(
       fixture.nativeElement.querySelector('.pagination-bar'),
     ).not.toBeNull();
+  });
+
+  it('shows the derived upload intent while a recording is active', () => {
+    fixture.detectChanges();
+    const session = {
+      ...fixture.componentInstance.sessions[0],
+      state: 'open',
+      displayState: 'recording',
+      uploadJob: null,
+    } as RecordingSession;
+
+    expect(
+      fixture.componentInstance.displayStateDetail({
+        ...session,
+        uploadIntent: 'auto',
+      }),
+    ).toBe('本场结束后上传');
+    expect(
+      fixture.componentInstance.displayStateDetail({
+        ...session,
+        uploadIntent: 'skip',
+      }),
+    ).toBe('本场不上传');
   });
 
   it('offers highlight editing from a concrete recording part', () => {

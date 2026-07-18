@@ -1107,7 +1107,11 @@ class RecordingJournalBridge:
             'session.ended_at,session.title,session.cover_url,session.cover_path,'
             'session.anchor_uid,session.anchor_name,session.area_id,'
             'session.area_name,session.parent_area_id,session.parent_area_name,'
-            'session.live_end_time,session.upload_intent,'
+            'session.live_end_time,'
+            "CASE WHEN suppression.session_id IS NOT NULL "
+            "OR session.upload_decision='skip' THEN 'skip' "
+            "WHEN session.upload_decision='upload' THEN 'upload' "
+            "WHEN policy.enabled=1 THEN 'auto' ELSE 'none' END AS upload_intent,"
             'session.upload_decision,session.upload_override_json,'
             'session.upload_resolution_state,session.upload_resolution_error,'
             'session.deletion_state,session.deletion_error,'
@@ -1118,6 +1122,7 @@ class RecordingJournalBridge:
             'LEFT JOIN bili_accounts account ON account.id=job.account_id '
             'LEFT JOIN upload_suppressions suppression '
             'ON suppression.session_id=session.id '
+            'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
             + where_sql
             + ' ORDER BY session.started_at {},session.id {} LIMIT ? OFFSET ?'.format(

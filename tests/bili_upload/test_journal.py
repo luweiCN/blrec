@@ -68,6 +68,47 @@ async def test_recording_start_does_not_freeze_room_upload_policy(database) -> N
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_derives_current_upload_intent(database) -> None:
+    await seed_upload_policy(database)
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    run_id = await journal.recording_started(100, live_start_time=900)
+    session = await journal.session_for_run(run_id)
+
+    assert (await journal.list_sessions())[0].upload_intent == 'auto'
+
+    await database.execute(
+        "UPDATE recording_sessions SET upload_decision='upload' WHERE id=?",
+        (session.id,),
+    )
+    assert (await journal.list_sessions())[0].upload_intent == 'upload'
+
+    await database.execute(
+        "UPDATE recording_sessions SET upload_decision='skip' WHERE id=?",
+        (session.id,),
+    )
+    assert (await journal.list_sessions())[0].upload_intent == 'skip'
+
+    await database.execute(
+        "UPDATE recording_sessions SET upload_decision='follow_room' WHERE id=?",
+        (session.id,),
+    )
+    await database.execute(
+        'UPDATE room_upload_policies SET enabled=0 WHERE room_id=100'
+    )
+    assert (await journal.list_sessions())[0].upload_intent == 'none'
+
+    await database.execute(
+        'UPDATE room_upload_policies SET enabled=1 WHERE room_id=100'
+    )
+    await database.execute(
+        'INSERT INTO upload_suppressions('
+        'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
+        (session.id, 'operator', 'owner', 1_001),
+    )
+    assert (await journal.list_sessions())[0].upload_intent == 'skip'
+
+
+@pytest.mark.asyncio
 async def test_video_created_records_local_media_timeline_anchor(database) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000.250)
     run_id = await journal.recording_started(100, live_start_time=900)
