@@ -107,6 +107,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   mediaAccess: RecordingMediaAccess | null = null;
 
   private videoElement: HTMLVideoElement | null = null;
+  private editorWorkbenchElement: HTMLElement | null = null;
   private player: PartPlayer | null = null;
   private pendingSeekSeconds: number | null = null;
   private mediaRequest?: Subscription;
@@ -143,6 +144,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.attachFlvPlayer();
     this.applyPendingSeek();
+  }
+
+  @ViewChild('editorWorkbench')
+  set editorWorkbenchRef(value: ElementRef<HTMLElement> | undefined) {
+    this.editorWorkbenchElement = value?.nativeElement ?? null;
   }
 
   get clip(): HighlightClip | null {
@@ -235,6 +241,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     return this.selectionActive && this.startBoundarySet && this.endBoundarySet;
   }
 
+  get selectedDraftLocked(): boolean {
+    const state = this.selectedDraft?.state;
+    return state === 'inspecting' || state === 'creating';
+  }
+
   ngOnInit(): void {
     if (!Number.isInteger(this.sessionId) || this.sessionId <= 0) {
       this.loading = false;
@@ -285,6 +296,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   setSelectionStartFromPlayhead(): void {
+    if (this.selectedDraftLocked) {
+      return;
+    }
     if (!this.selectionActive) {
       this.beginBoundarySelection();
     }
@@ -301,6 +315,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   setSelectionEndFromPlayhead(): void {
+    if (this.selectedDraftLocked) {
+      return;
+    }
     if (!this.selectionActive) {
       this.beginBoundarySelection();
     }
@@ -317,21 +334,38 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   adjustSelection(boundary: 'start' | 'end', seconds: number): void {
+    if (this.selectedDraftLocked) {
+      return;
+    }
+    const boundarySet =
+      boundary === 'start' ? this.startBoundarySet : this.endBoundarySet;
+    if (!boundarySet) {
+      return;
+    }
     this.selectionActive = true;
-    this.startBoundarySet = true;
-    this.endBoundarySet = true;
     const deltaMs = Math.round(seconds * 1000);
     if (boundary === 'start') {
-      this.startMs = Math.max(
+      const candidate = Math.max(
         this.editorPartStartMs,
-        Math.min(this.endMs - 1000, this.startMs + deltaMs),
+        Math.min(this.editorStableEndMs, this.startMs + deltaMs),
       );
+      if (this.endBoundarySet && candidate >= this.endMs) {
+        this.actionError = '开始位置必须早于结束位置';
+        return;
+      }
+      this.startMs = candidate;
     } else {
-      this.endMs = Math.min(
-        this.editorStableEndMs || this.endMs,
-        Math.max(this.startMs + 1000, this.endMs + deltaMs),
+      const candidate = Math.max(
+        this.editorPartStartMs,
+        Math.min(this.editorStableEndMs, this.endMs + deltaMs),
       );
+      if (this.startBoundarySet && candidate <= this.startMs) {
+        this.actionError = '结束位置必须晚于开始位置';
+        return;
+      }
+      this.endMs = candidate;
     }
+    this.actionError = null;
     this.syncSelectedDraft();
     this.timelinePopover = { kind: 'boundary', boundary };
     this.previewBoundary(boundary);
@@ -340,6 +374,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   selectDraftForEditing(draft: HighlightClipDraft): void {
     if (draft.state === 'inspecting' || draft.state === 'creating') {
       return;
+    }
+    if (this.editingDraftId !== draft.id) {
+      this.syncSelectedDraft();
     }
     this.editingDraftId = draft.id;
     this.selectionActive = true;
@@ -494,6 +531,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (draft.state !== 'confirmation') {
       return;
     }
+    if (this.editingDraftId === draft.id) {
+      this.syncSelectedDraft();
+    }
+    if (draft.state !== 'confirmation') {
+      return;
+    }
     this.persistDraft(draft, true);
   }
 
@@ -514,6 +557,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (event.button !== 0 || this.isTimelineItemTarget(event.target)) {
       return;
     }
+    const valueMs = this.pointerTimeMs(event.clientX, track, true);
+    if (valueMs === null) {
+      return;
+    }
     event.preventDefault();
     this.pausePlayback();
     this.prepareForTimelinePoint(null);
@@ -524,7 +571,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     } catch (_error) {
       // Synthetic test events and older browsers may not own pointer capture.
     }
-    this.seekFromPointer(event.clientX, track);
+    this.seekTimeline(valueMs);
   }
 
   moveTimelineDrag(event: PointerEvent, track: HTMLElement): void {
@@ -557,7 +604,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   showBoundaryActions(boundary: 'start' | 'end'): void {
-    if (!this.hasCompleteSelection) {
+    if (!this.hasCompleteSelection || this.selectedDraftLocked) {
       return;
     }
     this.timelinePopover = { kind: 'boundary', boundary };
@@ -578,7 +625,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     } else {
       this.setSelectionEndFromPlayhead();
     }
-    if (!this.hasCompleteSelection) {
+    const boundarySet =
+      boundary === 'start' ? this.startBoundarySet : this.endBoundarySet;
+    if (!this.hasCompleteSelection && boundarySet) {
       this.timelinePopover = { kind: 'boundary', boundary };
     }
   }
@@ -604,10 +653,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       0,
       Math.min(1, (clientX - bounds.left) / Math.max(1, bounds.width)),
     );
-    const valueMs = Math.min(
-      this.editorStableEndMs,
-      this.editorPartStartMs + Math.round(ratio * this.editorDurationMs),
-    );
+    const valueMs =
+      this.editorPartStartMs + Math.round(ratio * this.editorDurationMs);
+    if (valueMs > this.editorStableEndMs) {
+      return null;
+    }
     return snap ? this.snapToMarker(valueMs, bounds.width) : valueMs;
   }
 
@@ -726,7 +776,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   toggleFullscreen(): void {
-    void this.videoElement?.requestFullscreen?.().catch(() => undefined);
+    void this.editorWorkbenchElement
+      ?.requestFullscreen?.()
+      .catch(() => undefined);
   }
 
   openClipSubmission(clip: HighlightClip): void {
@@ -1126,19 +1178,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     const name = this.clipName.trim() || draft.name;
-    const changed =
-      draft.markerId !== this.selectedMarkerId ||
-      draft.name !== name ||
-      draft.startMs !== this.startMs ||
-      draft.endMs !== this.endMs;
-    if (!changed) {
+    const rangeChanged =
+      draft.startMs !== this.startMs || draft.endMs !== this.endMs;
+    const metadataChanged =
+      draft.markerId !== this.selectedMarkerId || draft.name !== name;
+    if (!rangeChanged && !metadataChanged) {
       return;
     }
     draft.markerId = this.selectedMarkerId;
     draft.name = name;
     draft.startMs = this.startMs;
     draft.endMs = this.endMs;
-    this.updateDraft(draft);
+    if (rangeChanged) {
+      this.updateDraft(draft);
+    }
     this.drafts = [...this.drafts];
   }
 

@@ -16,7 +16,11 @@
   </section>
 
   <ng-container *ngIf="timeline && selectedPart as part">
-    <section class="editor-workbench" aria-label="视频剪辑工作台">
+    <section
+      #editorWorkbench
+      class="editor-workbench"
+      aria-label="视频剪辑工作台"
+    >
       <div class="editor-toolbar">
         <div>
           <strong>P{{ part.partIndex }}</strong>
@@ -341,15 +345,14 @@
                   type="text"
                   maxlength="200"
                   autocomplete="off"
+                  [readOnly]="selectedDraftLocked"
                   [(ngModel)]="clipName"
                 />
               </label>
               <div *ngIf="draft.inspection as checked" class="inspection">
                 <span>
                   实际会从
-                  {{
-                    formatTime(checked.actualStartMs - editorPartStartMs)
-                  }}
+                  {{ formatTime(checked.actualStartMs - editorPartStartMs) }}
                   开始
                 </span>
                 <span *ngIf="checked.confirmationRequired">
@@ -369,7 +372,9 @@
                   type="button"
                   class="primary-button"
                   [disabled]="
-                    draft.state !== 'idle' || draftError(draft) !== null
+                    draft.state !== 'idle' ||
+                    draftError(draft) !== null ||
+                    !clipName.trim()
                   "
                   (click)="createSelectedDraft()"
                 >

@@ -340,9 +340,46 @@ describe('HighlightEditorComponent', () => {
     expect(component.draggingPlayhead).toBeFalse();
   });
 
+  it('ignores pointer actions in the unstable recording tail', () => {
+    component.selectPart(timeline.parts[1]);
+    const track = fixture.nativeElement.querySelector(
+      '.timeline-track',
+    ) as HTMLElement;
+    spyOn(track, 'getBoundingClientRect').and.returnValue({
+      left: 0,
+      width: 180,
+      right: 180,
+      top: 0,
+      bottom: 54,
+      height: 54,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    const initialPlayhead = component.playheadMs;
+
+    component.startTimelineDrag(
+      {
+        button: 0,
+        pointerId: 2,
+        clientX: 178,
+        target: track,
+        preventDefault: jasmine.createSpy('preventDefault'),
+      } as unknown as PointerEvent,
+      track,
+    );
+
+    expect(component.draggingPlayhead).toBeFalse();
+    expect(component.playheadMs).toBe(initialPlayhead);
+    expect(component.timelinePopover.kind).toBe('none');
+  });
+
   it('adjusts the selected boundaries in whole seconds', () => {
     component.startMs = 10_000;
     component.endMs = 20_000;
+    component.selectionActive = true;
+    component.startBoundarySet = true;
+    component.endBoundarySet = true;
     const video = fixture.nativeElement.querySelector(
       '[data-testid="editor-video"]',
     ) as HTMLVideoElement;
@@ -359,9 +396,40 @@ describe('HighlightEditorComponent', () => {
     expect(video.currentTime).toBe(21);
   });
 
+  it('adjusts only a boundary that has already been set', () => {
+    component.startMs = 10_000;
+    component.endMs = 0;
+    component.selectionActive = true;
+    component.startBoundarySet = true;
+    component.endBoundarySet = false;
+
+    component.adjustSelection('start', 1);
+
+    expect(component.startMs).toBe(11_000);
+    expect(component.endBoundarySet).toBeFalse();
+    expect(component.drafts).toEqual([]);
+  });
+
+  it('keeps a valid boundary when a one-second adjustment would cross it', () => {
+    component.startMs = 10_000;
+    component.endMs = 10_500;
+    component.selectionActive = true;
+    component.startBoundarySet = true;
+    component.endBoundarySet = true;
+
+    component.adjustSelection('start', 1);
+
+    expect(component.startMs).toBe(10_000);
+    expect(component.endMs).toBe(10_500);
+    expect(component.actionError).toBe('开始位置必须早于结束位置');
+  });
+
   it('keeps the selected P when previewing its exact end boundary', () => {
     component.startMs = 80_000;
     component.endMs = 89_000;
+    component.selectionActive = true;
+    component.startBoundarySet = true;
+    component.endBoundarySet = true;
 
     component.adjustSelection('end', 1);
 
@@ -521,6 +589,192 @@ describe('HighlightEditorComponent', () => {
     expect(component.drafts[1].startMs).toBe(30_000);
   });
 
+  it('persists a pending range name before selecting another range', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    const first = component.drafts[0];
+    component.clearTimelineSelection();
+    component.playheadMs = 30_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 40_000;
+    component.setSelectionEndFromPlayhead();
+    const second = component.drafts[1];
+    component.selectDraftForEditing(first);
+    component.clipName = '重新命名的片段';
+
+    component.selectDraftForEditing(second);
+
+    expect(component.drafts[0].name).toBe('重新命名的片段');
+    expect(component.editingDraftId).toBe(second.id);
+  });
+
+  it('locks a pending range while it is being created', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    const draft = component.drafts[0];
+    draft.state = 'creating';
+    fixture.detectChanges();
+    component.playheadMs = 12_000;
+
+    component.setSelectionStartFromPlayhead();
+    component.adjustSelection('end', 1);
+    fixture.detectChanges();
+
+    expect(draft.startMs).toBe(10_000);
+    expect(draft.endMs).toBe(20_000);
+    expect(component.selectedDraftLocked).toBeTrue();
+    expect(
+      (
+        fixture.nativeElement.querySelector(
+          '.timeline-popover input',
+        ) as HTMLInputElement
+      ).readOnly,
+    ).toBeTrue();
+  });
+
+  it('keeps the submitted range stable while inspection is in flight', () => {
+    const inspectionResponse = new Subject<HighlightClipInspection>();
+    highlights.inspectClip.and.returnValue(inspectionResponse);
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    const draft = component.drafts[0];
+
+    component.createSelectedDraft();
+    component.playheadMs = 12_000;
+    component.setSelectionStartFromPlayhead();
+    component.adjustSelection('end', 1);
+
+    expect(component.selectedDraftLocked).toBeTrue();
+    expect([draft.startMs, draft.endMs]).toEqual([10_000, 20_000]);
+
+    inspectionResponse.next({
+      ...inspection,
+      requestedStartMs: 10_000,
+      requestedEndMs: 20_000,
+      actualStartMs: 10_000,
+      actualEndMs: 20_000,
+      extraLeadMs: 0,
+      confirmationRequired: false,
+      sources: [
+        {
+          partId: 11,
+          actualStartMs: 10_000,
+          actualEndMs: 20_000,
+          outputOffsetMs: 0,
+        },
+      ],
+    });
+
+    expect(highlights.createClip).toHaveBeenCalledWith(
+      9,
+      jasmine.objectContaining({ startMs: 10_000, endMs: 20_000 }),
+    );
+  });
+
+  it('turns a blue pending range green after the clip is created', () => {
+    highlights.inspectClip.and.returnValue(
+      of({
+        ...inspection,
+        requestedStartMs: 10_000,
+        requestedEndMs: 20_000,
+        actualStartMs: 10_000,
+        actualEndMs: 20_000,
+        extraLeadMs: 0,
+        confirmationRequired: false,
+        sources: [
+          {
+            partId: 11,
+            actualStartMs: 10_000,
+            actualEndMs: 20_000,
+            outputOffsetMs: 0,
+          },
+        ],
+      }),
+    );
+    highlights.createClip.and.returnValue(
+      of({
+        ...processingClip,
+        requestedStartMs: 10_000,
+        requestedEndMs: 20_000,
+        actualStartMs: 10_000,
+        actualEndMs: 20_000,
+        sources: [
+          {
+            partId: 11,
+            ordinal: 0,
+            requestedStartMs: 10_000,
+            requestedEndMs: 20_000,
+            actualStartMs: 10_000,
+            actualEndMs: 20_000,
+          },
+        ],
+      }),
+    );
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelectorAll('.draft-range').length).toBe(
+      1,
+    );
+
+    component.createSelectedDraft();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelectorAll('.draft-range').length).toBe(
+      0,
+    );
+    expect(fixture.nativeElement.querySelectorAll('.clip-range').length).toBe(
+      1,
+    );
+  });
+
+  it('keeps pending ranges clickable above overlapping created clips', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    component.clips = [
+      {
+        ...processingClip,
+        state: 'ready',
+        requestedStartMs: 10_000,
+        requestedEndMs: 25_000,
+        actualStartMs: 10_000,
+        actualEndMs: 25_000,
+        sources: [
+          {
+            partId: 11,
+            ordinal: 0,
+            requestedStartMs: 10_000,
+            requestedEndMs: 25_000,
+            actualStartMs: 10_000,
+            actualEndMs: 25_000,
+          },
+        ],
+      },
+    ];
+    fixture.detectChanges();
+
+    const draft = fixture.nativeElement.querySelector(
+      '.draft-range',
+    ) as HTMLElement;
+    const clip = fixture.nativeElement.querySelector(
+      '.clip-range',
+    ) as HTMLElement;
+
+    expect(Number(getComputedStyle(draft).zIndex)).toBeGreaterThan(
+      Number(getComputedStyle(clip).zIndex),
+    );
+  });
+
   it('copies a green created clip into a new blue pending range', () => {
     const readyClip: HighlightClip = {
       ...processingClip,
@@ -629,6 +883,21 @@ describe('HighlightEditorComponent', () => {
     expect(component.clipName).toBe('高光片段 00:10');
   });
 
+  it('does not create a pending range with an empty inline name', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    component.clipName = '';
+    fixture.detectChanges();
+
+    const create = Array.from<HTMLButtonElement>(
+      fixture.nativeElement.querySelectorAll('.timeline-popover button'),
+    ).find((button) => button.textContent?.trim() === '创建片段');
+
+    expect(create?.disabled).toBeTrue();
+  });
+
   it('shows marker editing only while the marker point itself is selected', () => {
     component.selectPart(timeline.parts[1]);
     component.selectMarker(timeline.markers[0]);
@@ -648,14 +917,19 @@ describe('HighlightEditorComponent', () => {
   it('keeps the valid boundary when the other endpoint is invalid', () => {
     component.playheadMs = 20_000;
     component.setSelectionStartFromPlayhead();
-    component.playheadMs = 10_000;
+    component.timelinePopover = {
+      kind: 'point',
+      timeMs: 10_000,
+      markerId: null,
+    };
 
-    component.setSelectionEndFromPlayhead();
+    component.setPointAsBoundary('end');
 
     expect(component.startMs).toBe(20_000);
     expect(component.endBoundarySet).toBeFalse();
     expect(component.drafts).toEqual([]);
     expect(component.actionError).toBe('结束位置必须晚于开始位置');
+    expect(component.timelinePopover.kind).toBe('point');
 
     component.playheadMs = 30_000;
     component.setSelectionEndFromPlayhead();
@@ -686,6 +960,48 @@ describe('HighlightEditorComponent', () => {
 
     expect(component.hoverTimeMs).toBe(45_000);
     expect(component.playheadMs).toBe(10_000);
+  });
+
+  it('keeps the custom playhead synchronized with video playback', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    video.currentTime = 12;
+
+    component.handleTimeUpdate();
+
+    expect(component.playheadMs).toBe(12_000);
+  });
+
+  it('pauses playback once from the custom control', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    Object.defineProperty(video, 'paused', {
+      configurable: true,
+      value: false,
+    });
+    const pause = spyOn(video, 'pause');
+
+    component.togglePlayback();
+
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the custom timeline visible in fullscreen mode', () => {
+    const workbench = fixture.nativeElement.querySelector(
+      '.editor-workbench',
+    ) as HTMLElement;
+    const requestFullscreen = jasmine
+      .createSpy('requestFullscreen')
+      .and.returnValue(Promise.resolve());
+    Object.defineProperty(workbench, 'requestFullscreen', {
+      value: requestFullscreen,
+    });
+
+    component.toggleFullscreen();
+
+    expect(requestFullscreen).toHaveBeenCalled();
   });
 
   it('cancels only the selected pending range', () => {
@@ -739,11 +1055,12 @@ describe('HighlightEditorComponent', () => {
     expect(fixture.nativeElement.textContent).not.toContain('检查裁剪范围');
     expect(highlights.createClip).not.toHaveBeenCalled();
 
+    component.clipName = '重命名片段';
     component.confirmDraft(draft);
 
     expect(highlights.createClip).toHaveBeenCalledWith(9, {
       markerId: null,
-      name: '高光片段 00:10',
+      name: '重命名片段',
       startMs: 10_000,
       endMs: 30_000,
       confirmKeyframe: true,
