@@ -648,6 +648,46 @@ async def test_disabling_upload_cancels_preupload_without_deleting_recording(
 
 
 @pytest.mark.asyncio
+async def test_reenabling_room_policy_recreates_cancelled_live_preupload(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        await worker.sync_live_sessions()
+
+        await database.execute(
+            'UPDATE room_upload_policies SET enabled=0,updated_at=2 WHERE room_id=100'
+        )
+        await worker.sync_live_sessions()
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+        assert (
+            await database.scalar(
+                'SELECT upload_resolution_state FROM recording_sessions WHERE id=1'
+            )
+            == 'not_requested'
+        )
+
+        await database.execute(
+            'UPDATE room_upload_policies SET enabled=1,updated_at=3 WHERE room_id=100'
+        )
+
+        assert len(await worker.sync_live_sessions()) == 1
+        recreated = await database.fetchone(
+            'SELECT preupload_finalized FROM upload_jobs WHERE session_id=1'
+        )
+        assert recreated is not None
+        assert recreated['preupload_finalized'] == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_final_account_change_reuploads_preuploaded_parts(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
     await database.open()

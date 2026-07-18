@@ -162,7 +162,11 @@ class UploadCoordinator:
             'SELECT session.id FROM recording_sessions session '
             "WHERE session.source_kind='live' AND session.state='open' "
             'AND session.live_end_time IS NULL '
-            "AND session.upload_resolution_state='pending' "
+            "AND (session.upload_resolution_state='pending' OR ("
+            "session.upload_resolution_state='not_requested' "
+            "AND session.upload_decision='follow_room' "
+            'AND NOT EXISTS(SELECT 1 FROM upload_suppressions suppression '
+            'WHERE suppression.session_id=session.id))) '
             "AND session.deletion_state='none' "
             'AND EXISTS(SELECT 1 FROM recording_parts part '
             "WHERE part.session_id=session.id AND part.artifact_state='ready') "
@@ -228,7 +232,12 @@ class UploadCoordinator:
         session = await self._live_session(session_id)
         if (
             session is None
-            or str(session['upload_resolution_state']) != 'pending'
+            or (finalized and str(session['upload_resolution_state']) != 'pending')
+            or (
+                not finalized
+                and str(session['upload_resolution_state'])
+                not in ('pending', 'not_requested')
+            )
             or (finalized and session['live_end_time'] is None)
             or (
                 not finalized
@@ -298,7 +307,12 @@ class UploadCoordinator:
             ).fetchone()
             if (
                 current is None
-                or str(current['upload_resolution_state']) != 'pending'
+                or (finalized and str(current['upload_resolution_state']) != 'pending')
+                or (
+                    not finalized
+                    and str(current['upload_resolution_state'])
+                    not in ('pending', 'not_requested')
+                )
                 or str(current['deletion_state']) != 'none'
                 or str(current['upload_decision']) != decision
                 or current['upload_override_json'] != override_json

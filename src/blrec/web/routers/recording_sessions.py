@@ -491,7 +491,7 @@ def _session_display(
         actions.append('set_skip')
     else:
         actions.append('set_upload')
-    if upload_job is None:
+    if upload_job is None or not upload_job.preupload_finalized:
         actions.append('edit_submission')
     actions.append('delete_local')
 

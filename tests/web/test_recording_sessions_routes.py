@@ -451,6 +451,26 @@ def test_list_recording_sessions_returns_redacted_part_state(
     assert 'token' not in response.text.lower()
 
 
+@pytest.mark.asyncio
+async def test_preupload_session_keeps_submission_settings_editable() -> None:
+    journal = FakeJournal()
+    session = (await journal.list_sessions(limit=20, offset=40))[0]
+    upload_job = (await journal.upload_jobs_for_sessions((session.id,)))[session.id]
+
+    _display_state, actions = recording_sessions._session_display(
+        replace(session, state='open', live_end_time=None, ended_at=None),
+        replace(
+            upload_job,
+            state='waiting_artifacts',
+            submit_state='prepared',
+            preupload_finalized=False,
+            display_state='preuploaded_waiting',
+        ),
+    )
+
+    assert 'edit_submission' in actions
+
+
 def test_list_recording_sessions_passes_server_side_filters(client: TestClient) -> None:
     response = client.get(
         '/api/v1/recording-sessions',
