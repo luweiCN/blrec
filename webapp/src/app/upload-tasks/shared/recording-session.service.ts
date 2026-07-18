@@ -20,12 +20,15 @@ import {
 
 @Injectable({ providedIn: 'root' })
 export class RecordingSessionService {
-  constructor(private http: HttpClient, private url: UrlService) {}
+  constructor(
+    private http: HttpClient,
+    private url: UrlService,
+  ) {}
 
   listSessions(
     limit = 20,
     offset = 0,
-    filters?: RecordingSessionFilters
+    filters?: RecordingSessionFilters,
   ): Observable<RecordingSessionsResponse> {
     const path = '/api/v1/recording-sessions';
     let params = new HttpParams()
@@ -50,31 +53,30 @@ export class RecordingSessionService {
       }
       params = params.set('sort', filters.sort);
     }
-    return this.http.get<RecordingSessionsResponse>(
-      this.url.makeApiUrl(path),
-      { params }
-    );
+    return this.http.get<RecordingSessionsResponse>(this.url.makeApiUrl(path), {
+      params,
+    });
   }
 
   runJobAction(
     action: UploadJobAction,
-    jobIds: readonly number[]
+    jobIds: readonly number[],
   ): Observable<UploadJobActionResponse> {
     const path = '/api/v1/recording-sessions/upload-jobs/actions';
-    return this.http.post<UploadJobActionResponse>(
-      this.url.makeApiUrl(path),
-      { action, jobIds }
-    );
+    return this.http.post<UploadJobActionResponse>(this.url.makeApiUrl(path), {
+      action,
+      jobIds,
+    });
   }
 
   runSessionAction(
     action: RecordingSessionAction,
-    sessionIds: readonly number[]
+    sessionIds: readonly number[],
   ): Observable<RecordingSessionActionResponse> {
     const path = '/api/v1/recording-sessions/actions';
     return this.http.post<RecordingSessionActionResponse>(
       this.url.makeApiUrl(path),
-      { action, sessionIds }
+      { action, sessionIds },
     );
   }
 
@@ -82,15 +84,14 @@ export class RecordingSessionService {
     const path = '/api/v1/recording-sessions/upload-jobs/retry-failed';
     return this.http.post<UploadJobActionResponse>(
       this.url.makeApiUrl(path),
-      null
+      null,
     );
   }
 
   previewRetryFailedJobs(): Observable<UploadJobRetryPreviewResponse> {
-    const path =
-      '/api/v1/recording-sessions/upload-jobs/retry-failed-preview';
+    const path = '/api/v1/recording-sessions/upload-jobs/retry-failed-preview';
     return this.http.get<UploadJobRetryPreviewResponse>(
-      this.url.makeApiUrl(path)
+      this.url.makeApiUrl(path),
     );
   }
 
@@ -102,12 +103,12 @@ export class RecordingSessionService {
   updateTaskSettings(
     jobId: number,
     accountId: number,
-    changes: Readonly<Record<string, unknown>>
+    changes: Readonly<Record<string, unknown>>,
   ): Observable<UploadTaskSettingsUpdateResponse> {
     const path = `/api/v1/recording-sessions/upload-jobs/${jobId}/settings`;
     return this.http.put<UploadTaskSettingsUpdateResponse>(
       this.url.makeApiUrl(path),
-      { accountId, changes }
+      { accountId, changes },
     );
   }
 
@@ -115,7 +116,7 @@ export class RecordingSessionService {
     const path = `/api/v1/recording-sessions/parts/${partId}/media-access`;
     return this.http.post<RecordingMediaAccess>(
       this.url.makeApiUrl(path),
-      null
+      null,
     );
   }
 
@@ -130,10 +131,28 @@ export class RecordingSessionService {
     return this.url.makeApiUrl(path);
   }
 
+  thumbnailUrl(
+    partId: number,
+    access: RecordingMediaAccess,
+    timeMs: number,
+    width = 240,
+  ): string {
+    const token = encodeURIComponent(access.token);
+    let path =
+      `/api/v1/recording-sessions/parts/${partId}/thumbnail` +
+      `?time_ms=${Math.max(0, Math.round(timeMs))}` +
+      `&width=${width}` +
+      `&media_token=${token}&media_expires=${access.expiresAt}`;
+    if (access.snapshotId !== null) {
+      path += `&media_snapshot=${encodeURIComponent(access.snapshotId)}`;
+    }
+    return this.url.makeApiUrl(path);
+  }
+
   listDanmaku(
     partId: number,
     cursor = 0,
-    limit = 100
+    limit = 100,
   ): Observable<RecordingDanmakuPage> {
     const path =
       `/api/v1/recording-sessions/parts/${partId}/danmaku` +

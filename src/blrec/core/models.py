@@ -46,7 +46,9 @@ class DanmuMsg:
             uname=sender[1],
             text=info[1],
             source_event_id=source_event_id,
-            is_system=uid == 0,
+            # Bilibili now masks many ordinary senders as uid=0. The command is
+            # still DANMU_MSG, so uid alone cannot identify a system message.
+            is_system=False,
             is_lottery=_optional_bool(head, 9),
             user_level=_optional_int(info[4] if len(info) > 4 else (), 0),
             fan_medal_name=_optional_text(info[3] if len(info) > 3 else (), 1),

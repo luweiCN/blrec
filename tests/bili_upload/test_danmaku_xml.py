@@ -76,3 +76,13 @@ def test_receiver_extracts_optional_filter_metadata() -> None:
     assert message.user_level == 6
     assert message.fan_medal_name == '粉丝牌'
     assert message.fan_medal_level == 12
+
+
+def test_privacy_masked_sender_is_not_treated_as_a_system_message() -> None:
+    info_head = [0, 1, 25, 16777215, 1000, 9, 0, '', 0, 0]
+    info = [info_head, '匿名用户弹幕', [0, ''], [], []]
+
+    message = DanmuMsg.from_danmu({'cmd': 'DANMU_MSG', 'info': info})
+
+    assert message.uid == 0
+    assert message.is_system is False

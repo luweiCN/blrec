@@ -499,6 +499,7 @@ class HighlightService:
                 requested_start_ms=local_start_ms,
                 requested_end_ms=local_end_ms,
                 duration_ms=part.duration_ms,
+                recording=part.recording,
             )
             for part, local_start_ms, local_end_ms in source_ranges
         )
@@ -614,6 +615,27 @@ class HighlightService:
         if not path.is_file() or path.stat().st_size <= 0:
             raise ValueError('highlight clip video is missing')
         return path
+
+    async def retry_clip(self, clip_id: int) -> HighlightClip:
+        clip = await self.get_clip(clip_id)
+        if clip.state != 'failed':
+            raise ValueError('only a failed highlight clip can be retried')
+        updated = await self._database.execute(
+            "UPDATE highlight_clips SET state='queued',error_message=NULL,"
+            'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,updated_at=? '
+            "WHERE id=? AND state='failed'",
+            (int(self._clock()), clip_id),
+        )
+        if updated != 1:
+            raise ValueError('highlight clip state changed')
+        audit(
+            'highlight_clip_manually_retried',
+            clip_id=clip_id,
+            room_id=clip.room_id,
+            previous_attempt=clip.attempt,
+            result='queued',
+        )
+        return await self.get_clip(clip_id)
 
     async def delete_clip(self, clip_id: int) -> str:
         clip = await self.get_clip(clip_id)

@@ -61,6 +61,13 @@ export class HighlightService {
     );
   }
 
+  retryClip(clipId: number): Observable<HighlightClip> {
+    return this.http.post<HighlightClip>(
+      this.url.makeApiUrl(`/api/v1/highlights/clips/${clipId}/retry`),
+      null,
+    );
+  }
+
   deleteClip(clipId: number): Observable<void> {
     return this.http.delete<void>(
       this.url.makeApiUrl(`/api/v1/highlights/clips/${clipId}`),

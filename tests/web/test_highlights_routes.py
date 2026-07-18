@@ -88,6 +88,7 @@ class FakeHighlightService:
         self.create_clip = AsyncMock(return_value=clip())
         self.list_clips = AsyncMock(return_value=(clip(),))
         self.get_clip = AsyncMock(return_value=clip())
+        self.retry_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
         self.clip_video_path = AsyncMock()
         self.ensure_upload_session = AsyncMock(return_value=12)
@@ -241,6 +242,12 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     assert created.json()['state'] == 'queued'
     fetched = client.get('/api/v1/highlights/clips/3', headers=auth())
     assert fetched.status_code == 200
+
+    retried = client.post('/api/v1/highlights/clips/3/retry', headers=auth())
+    assert retried.status_code == 200
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.retry_clip.assert_awaited_once_with(3)
 
     listed = client.get('/api/v1/highlights/sessions/9/clips', headers=auth())
     assert listed.status_code == 200

@@ -38,6 +38,7 @@ class _WorkSource:
     requested_end_ms: int
     actual_start_ms: Optional[int]
     actual_end_ms: Optional[int]
+    recording: bool
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,8 @@ class HighlightWorker:
         source_rows = await self._database.fetchall(
             'SELECT source.part_id,source.ordinal,source.requested_start_ms,'
             'source.requested_end_ms,source.actual_start_ms,source.actual_end_ms,'
-            'part.source_path,part.final_path,part.xml_path,part.video_deleted_at '
+            'part.source_path,part.final_path,part.xml_path,part.video_deleted_at,'
+            'part.artifact_state '
             'FROM highlight_clip_sources source '
             'JOIN recording_parts part ON part.id=source.part_id '
             'WHERE source.clip_id=? ORDER BY source.ordinal',
@@ -239,6 +241,7 @@ class HighlightWorker:
                         if source['actual_end_ms'] is None
                         else int(source['actual_end_ms'])
                     ),
+                    recording=str(source['artifact_state']) == 'recording',
                 )
             )
         if not sources:
@@ -265,6 +268,7 @@ class HighlightWorker:
                 keyframes_ms=(
                     () if source.actual_start_ms is None else (source.actual_start_ms,)
                 ),
+                recording=source.recording,
             )
             for source in work.sources
         )

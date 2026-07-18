@@ -11,6 +11,10 @@ from .manager import NetworkPurpose, NetworkRouteManager, RouteSelection
 from .resolver import SourceBoundResolver
 
 
+def is_route_transport_failure(error: BaseException) -> bool:
+    return isinstance(error, aiohttp.ClientConnectorError)
+
+
 class RoutedAiohttpSession:
     """Small ClientSession-compatible facade that selects a route per call."""
 
@@ -153,7 +157,7 @@ class AiohttpSessionPool:
                 self._manager.report_http_result(
                     purpose, selection.interface_name, error.status
                 )
-            else:
+            elif isinstance(error, BaseException) and is_route_transport_failure(error):
                 self._manager.report_failure(purpose, selection.interface_name)
 
         request_end_signal: Any = trace_config.on_request_end

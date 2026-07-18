@@ -203,6 +203,45 @@ async def test_create_marks_missing_xml_without_affecting_other_branches(
 
 
 @pytest.mark.asyncio
+async def test_create_imports_available_parts_when_another_xml_is_missing(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    missing = tmp_path / 'missing.xml'
+    available = write_xml(
+        tmp_path / 'available.xml', '<d p="1,1,25,1,1,0,h,1">仍然回灌</d>'
+    )
+    await seed_part(database, missing, branch_state='pending')
+    await database.execute(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,final_path,xml_path,artifact_state,'
+        'upload_state,danmaku_import_state,remote_filename,cid) '
+        "VALUES(2,1,2,'/rec/p2.flv','/rec/p2.mp4',?,'ready','confirmed',"
+        "'pending','remote-p2',1002)",
+        (str(available),),
+    )
+
+    await DanmakuImporter(database, space_threshold_bytes=0).create(1)
+
+    assert await database.scalar('SELECT COUNT(*) FROM danmaku_items') == 1
+    assert (
+        await database.scalar(
+            'SELECT danmaku_import_state FROM upload_parts WHERE id=1'
+        )
+        == 'missing_source'
+    )
+    assert (
+        await database.scalar(
+            'SELECT danmaku_import_state FROM upload_parts WHERE id=2'
+        )
+        == 'completed'
+    )
+    assert (
+        await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
+        == 'publishing'
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_uses_frozen_policy_filters_and_queues_for_publish(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:

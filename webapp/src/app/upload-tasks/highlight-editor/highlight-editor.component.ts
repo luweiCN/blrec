@@ -3,6 +3,7 @@ import {
   ChangeDetectorRef,
   Component,
   ElementRef,
+  HostListener,
   Inject,
   NgZone,
   OnDestroy,
@@ -45,6 +46,13 @@ interface HighlightClipDraft {
   error: string | null;
 }
 
+interface TimelineThumbnail {
+  readonly timeMs: number;
+  readonly localTimeMs: number;
+  readonly label: string;
+  readonly url: string;
+}
+
 @Component({
   selector: 'app-highlight-editor',
   templateUrl: './highlight-editor.component.html',
@@ -61,12 +69,18 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   startMs = 0;
   endMs = 0;
   clipName = '';
+  selectionActive = false;
   drafts: HighlightClipDraft[] = [];
   clips: HighlightClip[] = [];
   submissionClip: HighlightClip | null = null;
   submittingClipId: number | null = null;
   downloadingClipId: number | null = null;
+  retryingClipId: number | null = null;
   draggingPlayhead = false;
+  editingDraftId: number | null = null;
+  sourceClipId: number | null = null;
+  timelineThumbnails: readonly TimelineThumbnail[] = [];
+  hoveredThumbnail: TimelineThumbnail | null = null;
   clipPreviewId: number | null = null;
   clipPreviewUrl: string | null = null;
   clipPreviewLoading = false;
@@ -129,22 +143,66 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   get selectionError(): string | null {
-    if (!this.timeline) {
+    if (!this.selectionActive || !this.timeline || !this.selectedPart) {
       return null;
     }
-    if (this.startMs < 0 || this.endMs > this.timeline.durationMs) {
-      return '裁剪范围超出录像时长';
+    if (
+      this.startMs < this.editorPartStartMs ||
+      this.endMs > this.editorPartEndMs
+    ) {
+      return '片段只能位于当前分 P 内';
     }
     if (this.endMs <= this.startMs) {
       return '结束位置必须晚于开始位置';
     }
-    if (this.endMs > this.timeline.stableEndMs) {
-      return '结束位置仍在录制安全区之外，请稍后刷新';
-    }
-    if (!this.partAt(this.startMs) || !this.partAt(this.endMs)) {
-      return '开始或结束位置位于录像断档中';
+    if (this.endMs > this.editorStableEndMs) {
+      return '结束位置仍在录制安全区之外，请稍后再试';
     }
     return null;
+  }
+
+  get editorPartStartMs(): number {
+    return this.selectedPart?.timelineStartMs ?? 0;
+  }
+
+  get editorPartEndMs(): number {
+    const part = this.selectedPart;
+    return part ? part.timelineStartMs + part.durationMs : 0;
+  }
+
+  get editorStableEndMs(): number {
+    const part = this.selectedPart;
+    return part
+      ? Math.min(part.timelineStartMs + part.durationMs, part.stableEndMs)
+      : 0;
+  }
+
+  get editorDurationMs(): number {
+    return this.selectedPart?.durationMs ?? 0;
+  }
+
+  get visibleMarkers(): readonly MappedHighlight[] {
+    const partId = this.selectedPart?.partId;
+    return (this.timeline?.markers ?? []).filter(
+      (item) => item.partId === partId,
+    );
+  }
+
+  get visibleClips(): readonly HighlightClip[] {
+    const partId = this.selectedPart?.partId;
+    return this.clips.filter((clip) =>
+      clip.sources.some((source) => source.partId === partId),
+    );
+  }
+
+  get selectionActionLabel(): string {
+    if (this.editingDraftId !== null) {
+      return '保存调整';
+    }
+    if (this.sourceClipId !== null) {
+      return '基于此范围添加片段';
+    }
+    return '添加片段';
   }
 
   ngOnInit(): void {
@@ -170,11 +228,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   selectMarker(item: MappedHighlight): void {
+    if (item.partId !== this.selectedPart?.partId) {
+      return;
+    }
+    this.editingDraftId = null;
+    this.sourceClipId = null;
+    this.selectionActive = true;
     this.selectedMarkerId = item.marker.id;
     this.clipName = item.marker.name;
-    this.startMs = Math.max(0, item.timelineOffsetMs - 30_000);
+    this.startMs = Math.max(
+      this.editorPartStartMs,
+      item.timelineOffsetMs - 30_000,
+    );
     this.endMs = Math.min(
-      this.timeline?.stableEndMs ?? item.timelineOffsetMs + 60_000,
+      this.editorStableEndMs,
       item.timelineOffsetMs + 60_000,
     );
     this.seekTimeline(item.timelineOffsetMs);
@@ -194,16 +261,22 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   selectionChanged(): void {
     this.actionError = null;
-    if (this.selectedMarkerId === null) {
-      this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
+    this.selectionActive = true;
+    if (this.selectedMarkerId === null && !this.clipName.trim()) {
+      this.clipName = `高光片段 ${this.formatTime(
+        this.startMs - this.editorPartStartMs,
+      )}`;
     }
   }
 
   setSelectionStartFromPlayhead(): void {
+    if (!this.selectionActive) {
+      this.beginNewClip();
+    }
     this.startMs = Math.round(this.playheadMs);
     if (this.endMs <= this.startMs) {
       this.endMs = Math.min(
-        this.timeline?.stableEndMs ?? this.startMs + 60_000,
+        this.editorStableEndMs || this.startMs + 60_000,
         this.startMs + 60_000,
       );
     }
@@ -211,51 +284,130 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   setSelectionEndFromPlayhead(): void {
+    if (!this.selectionActive) {
+      this.beginNewClip();
+      this.startMs = Math.max(this.editorPartStartMs, this.playheadMs - 60_000);
+    }
     this.endMs = Math.round(this.playheadMs);
     this.selectionChanged();
   }
 
   adjustSelection(boundary: 'start' | 'end', seconds: number): void {
+    this.selectionActive = true;
     const deltaMs = Math.round(seconds * 1000);
     if (boundary === 'start') {
       this.startMs = Math.max(
-        0,
+        this.editorPartStartMs,
         Math.min(this.endMs - 1000, this.startMs + deltaMs),
       );
     } else {
       this.endMs = Math.min(
-        this.timeline?.stableEndMs ?? this.endMs,
+        this.editorStableEndMs || this.endMs,
         Math.max(this.startMs + 1000, this.endMs + deltaMs),
       );
     }
     this.selectionChanged();
+    this.previewBoundary(boundary);
+  }
+
+  beginNewClip(): void {
+    this.editingDraftId = null;
+    this.sourceClipId = null;
+    this.selectedMarkerId = null;
+    this.selectionActive = true;
+    const start = Math.max(
+      this.editorPartStartMs,
+      Math.min(this.playheadMs, this.editorStableEndMs - 1000),
+    );
+    this.startMs = start;
+    this.endMs = Math.min(this.editorStableEndMs, start + 60_000);
+    this.clipName = `高光片段 ${this.formatTime(start - this.editorPartStartMs)}`;
+  }
+
+  selectDraftForEditing(draft: HighlightClipDraft): void {
+    if (draft.state === 'inspecting' || draft.state === 'creating') {
+      return;
+    }
+    this.editingDraftId = draft.id;
+    this.selectionActive = true;
+    this.sourceClipId = null;
+    this.selectedMarkerId = draft.markerId;
+    this.clipName = draft.name;
+    this.startMs = draft.startMs;
+    this.endMs = draft.endMs;
+    this.previewBoundary('start');
+  }
+
+  selectClipForEditing(clip: HighlightClip): void {
+    if (
+      !clip.sources.some(
+        (source) => source.partId === this.selectedPart?.partId,
+      )
+    ) {
+      return;
+    }
+    this.editingDraftId = null;
+    this.selectionActive = true;
+    this.sourceClipId = clip.id;
+    this.selectedMarkerId = clip.markerId;
+    this.clipName = clip.name;
+    this.startMs = clip.requestedStartMs;
+    this.endMs = clip.requestedEndMs;
+    this.previewBoundary('start');
+  }
+
+  @HostListener('document:keydown', ['$event'])
+  handleEditorShortcut(event: KeyboardEvent): void {
+    const target = event.target;
+    if (
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      (target instanceof HTMLElement &&
+        (target.matches('input, textarea, select') || target.isContentEditable))
+    ) {
+      return;
+    }
+    if (event.key.toLowerCase() === 'i') {
+      event.preventDefault();
+      this.setSelectionStartFromPlayhead();
+    } else if (event.key.toLowerCase() === 'o') {
+      event.preventDefault();
+      this.setSelectionEndFromPlayhead();
+    }
   }
 
   addDraft(): void {
-    if (this.selectionError !== null) {
+    if (!this.selectionActive || this.selectionError !== null) {
       return;
     }
-    this.drafts = [
-      ...this.drafts,
-      {
-        id: this.nextDraftId++,
-        markerId: this.selectedMarkerId,
-        name:
-          this.clipName.trim() || `高光片段 ${this.formatTime(this.startMs)}`,
-        startMs: this.startMs,
-        endMs: this.endMs,
-        inspection: null,
-        state: 'idle',
-        error: null,
-      },
-    ];
-    this.selectedMarkerId = null;
-    this.startMs = this.endMs;
-    this.endMs = Math.min(
-      this.timeline?.stableEndMs ?? this.startMs + 60_000,
-      this.startMs + 60_000,
+    const editing = this.drafts.find(
+      (draft) => draft.id === this.editingDraftId,
     );
-    this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
+    if (editing) {
+      editing.markerId = this.selectedMarkerId;
+      editing.name = this.clipName.trim();
+      editing.startMs = this.startMs;
+      editing.endMs = this.endMs;
+      this.updateDraft(editing);
+      this.drafts = [...this.drafts];
+      return;
+    }
+    const draft: HighlightClipDraft = {
+      id: this.nextDraftId++,
+      markerId: this.selectedMarkerId,
+      name:
+        this.clipName.trim() ||
+        `高光片段 ${this.formatTime(this.startMs - this.editorPartStartMs)}`,
+      startMs: this.startMs,
+      endMs: this.endMs,
+      inspection: null,
+      state: 'idle',
+      error: null,
+    };
+    this.drafts = [...this.drafts, draft];
+    this.editingDraftId = draft.id;
+    this.sourceClipId = null;
   }
 
   updateDraft(draft: HighlightClipDraft): void {
@@ -269,6 +421,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     this.drafts = this.drafts.filter((item) => item.id !== draft.id);
+    if (this.editingDraftId === draft.id) {
+      this.editingDraftId = null;
+      this.selectionActive = false;
+    }
     if (this.previewingDraftId === draft.id) {
       this.previewingDraftId = null;
     }
@@ -369,7 +525,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private seekFromPointer(clientX: number, track: HTMLElement): void {
-    if (!this.timeline || this.timeline.durationMs <= 0) {
+    if (!this.selectedPart || this.editorDurationMs <= 0) {
       return;
     }
     const bounds = track.getBoundingClientRect();
@@ -377,19 +533,22 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       0,
       Math.min(1, (clientX - bounds.left) / Math.max(1, bounds.width)),
     );
-    const valueMs = Math.round(ratio * this.timeline.durationMs);
+    const valueMs = Math.min(
+      this.editorStableEndMs,
+      this.editorPartStartMs + Math.round(ratio * this.editorDurationMs),
+    );
     this.seekTimeline(this.snapToMarker(valueMs, bounds.width));
   }
 
   private snapToMarker(valueMs: number, trackWidth: number): number {
-    if (!this.timeline || this.timeline.markers.length === 0) {
+    if (!this.selectedPart || this.visibleMarkers.length === 0) {
       return valueMs;
     }
     const thresholdMs = Math.max(
       500,
-      Math.round((this.timeline.durationMs * 10) / Math.max(1, trackWidth)),
+      Math.round((this.editorDurationMs * 10) / Math.max(1, trackWidth)),
     );
-    const nearest = this.timeline.markers.reduce((current, item) =>
+    const nearest = this.visibleMarkers.reduce((current, item) =>
       Math.abs(item.timelineOffsetMs - valueMs) <
       Math.abs(current.timelineOffsetMs - valueMs)
         ? item
@@ -411,11 +570,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     event.preventDefault();
     const direction = event.key === 'ArrowLeft' ? -1 : 1;
     const target = Math.max(
-      0,
-      Math.min(
-        this.timeline?.stableEndMs ?? 0,
-        this.playheadMs + direction * 5000,
-      ),
+      this.editorPartStartMs,
+      Math.min(this.editorStableEndMs, this.playheadMs + direction * 5000),
     );
     this.seekTimeline(target);
   }
@@ -535,6 +691,30 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         },
         error: (error: unknown) => {
           this.actionError = this.describeError(error, '删除高光片段失败');
+          this.changeDetector.markForCheck();
+        },
+      }),
+    );
+  }
+
+  retryClip(clip: HighlightClip): void {
+    if (clip.state !== 'failed' || this.retryingClipId !== null) {
+      return;
+    }
+    this.retryingClipId = clip.id;
+    this.actionError = null;
+    this.subscriptions.add(
+      this.highlights.retryClip(clip.id).subscribe({
+        next: (updated) => {
+          this.clips = this.clips.map((item) =>
+            item.id === updated.id ? updated : item,
+          );
+          this.retryingClipId = null;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.retryingClipId = null;
+          this.actionError = this.describeError(error, '重试高光片段失败');
           this.changeDetector.markForCheck();
         },
       }),
@@ -684,17 +864,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   positionPercent(valueMs: number): number {
-    if (!this.timeline || this.timeline.durationMs <= 0) {
+    if (!this.selectedPart || this.editorDurationMs <= 0) {
       return 0;
     }
     return Math.max(
       0,
-      Math.min(100, (valueMs / this.timeline.durationMs) * 100),
+      Math.min(
+        100,
+        ((valueMs - this.editorPartStartMs) / this.editorDurationMs) * 100,
+      ),
     );
   }
 
   partWidthPercent(part: HighlightTimelinePart): number {
-    return this.positionPercent(part.durationMs);
+    return Math.min(100, (part.durationMs / this.editorDurationMs) * 100);
   }
 
   trackClip(_index: number, clip: HighlightClip): number {
@@ -717,17 +900,19 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (!draft.name.trim()) {
       return '请输入片段名称';
     }
-    if (!this.timeline || draft.startMs < 0) {
+    if (
+      !this.timeline ||
+      !this.selectedPart ||
+      draft.startMs < this.editorPartStartMs ||
+      draft.endMs > this.editorPartEndMs
+    ) {
       return '裁剪范围无效';
     }
     if (draft.endMs <= draft.startMs) {
       return '结束位置必须晚于开始位置';
     }
-    if (draft.endMs > this.timeline.stableEndMs) {
-      return '结束位置仍在录制安全区之外，请稍后刷新';
-    }
-    if (!this.partAt(draft.startMs) || !this.partAt(draft.endMs)) {
-      return '开始或结束位置位于录像断档中';
+    if (draft.endMs > this.editorStableEndMs) {
+      return '结束位置仍在录制安全区之外，请稍后再试';
     }
     return null;
   }
@@ -769,6 +954,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           next: (clip) => {
             this.clips = [...this.clips, clip];
             this.drafts = this.drafts.filter((item) => item.id !== draft.id);
+            if (this.editingDraftId === draft.id) {
+              this.editingDraftId = null;
+            }
             this.changeDetector.markForCheck();
           },
           error: (error: unknown) => {
@@ -851,6 +1039,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
               );
               this.clipName = `高光片段 ${this.formatTime(this.startMs)}`;
             }
+            if (!initial && part.recording) {
+              this.loadMedia();
+            }
           }
           this.changeDetector.markForCheck();
         },
@@ -864,6 +1055,18 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private seekTimeline(valueMs: number): void {
+    const selected = this.selectedPart;
+    if (
+      selected &&
+      valueMs >= selected.timelineStartMs &&
+      valueMs <= selected.timelineStartMs + selected.durationMs
+    ) {
+      this.selectPart(
+        selected,
+        Math.min(selected.durationMs, valueMs - selected.timelineStartMs),
+      );
+      return;
+    }
     const part = this.partAt(valueMs);
     if (!part) {
       return;
@@ -878,8 +1081,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         const endMs = part.timelineStartMs + part.durationMs;
         return (
           valueMs >= part.timelineStartMs &&
-          (valueMs < endMs ||
-            (index === parts.length - 1 && valueMs === endMs))
+          (valueMs < endMs || (index === parts.length - 1 && valueMs === endMs))
         );
       }) ?? null
     );
@@ -905,6 +1107,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           }
           this.mediaAccess = access;
           this.mediaUrl = this.recordings.mediaUrl(part.partId, access);
+          this.timelineThumbnails = this.buildTimelineThumbnails(part, access);
           this.mediaLoading = false;
           this.attachFlvPlayer();
           this.applyPendingSeek();
@@ -913,6 +1116,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         error: (error: unknown) => {
           this.mediaLoading = false;
           this.mediaError = this.describeError(error, '无法打开本地视频');
+          this.timelineThumbnails = [];
           this.changeDetector.markForCheck();
         },
       });
@@ -963,6 +1167,84 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     } catch (_error) {
       // Metadata may not be ready yet; loadedmetadata will retry.
     }
+  }
+
+  showThumbnailPreview(item: TimelineThumbnail): void {
+    this.hoveredThumbnail = item;
+  }
+
+  hideThumbnailPreview(item: TimelineThumbnail): void {
+    if (this.hoveredThumbnail === item) {
+      this.hoveredThumbnail = null;
+    }
+  }
+
+  seekThumbnail(item: TimelineThumbnail): void {
+    this.seekTimeline(item.timeMs);
+  }
+
+  setBoundaryFromLocalSeconds(
+    boundary: 'start' | 'end',
+    value: number | string,
+  ): void {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) {
+      return;
+    }
+    this.selectionActive = true;
+    const absoluteMs = this.editorPartStartMs + Math.round(seconds * 1000);
+    if (boundary === 'start') {
+      this.startMs = Math.max(
+        this.editorPartStartMs,
+        Math.min(this.endMs - 1000, absoluteMs),
+      );
+    } else {
+      this.endMs = Math.min(
+        this.editorStableEndMs,
+        Math.max(this.startMs + 1000, absoluteMs),
+      );
+    }
+    this.selectionChanged();
+    this.previewBoundary(boundary);
+  }
+
+  private previewBoundary(boundary: 'start' | 'end'): void {
+    this.videoElement?.pause();
+    this.previewingDraftId = null;
+    this.seekTimeline(boundary === 'start' ? this.startMs : this.endMs);
+  }
+
+  private buildTimelineThumbnails(
+    part: HighlightTimelinePart,
+    access: RecordingMediaAccess,
+  ): readonly TimelineThumbnail[] {
+    const stableDurationMs = Math.max(
+      0,
+      Math.min(
+        part.durationMs,
+        Math.max(0, part.stableEndMs - part.timelineStartMs),
+        access.durationMs ??
+          Math.max(0, part.stableEndMs - part.timelineStartMs),
+      ),
+    );
+    if (stableDurationMs < 1_000) {
+      return [];
+    }
+    const count = Math.min(
+      8,
+      Math.max(4, Math.ceil(stableDurationMs / 1_800_000) + 3),
+    );
+    return Array.from({ length: count }, (_value, index) => {
+      const localTimeMs = Math.round(
+        ((index + 0.5) / count) * stableDurationMs,
+      );
+      return {
+        timeMs: part.timelineStartMs + localTimeMs,
+        localTimeMs,
+        label: this.formatTime(localTimeMs),
+        url: this.recordings.thumbnailUrl(part.partId, access, localTimeMs),
+      };
+    });
   }
 
   private teardownPlayer(): void {

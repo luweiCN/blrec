@@ -1,13 +1,17 @@
+import asyncio
 from typing import Any, Dict, List, Tuple
 
 import pytest
+import requests
 from pydantic import ValidationError
 
+from blrec.networking.aiohttp_session import is_route_transport_failure
 from blrec.networking.manager import (
     NetworkInterface,
     NetworkRouteManager,
     NetworkUnavailable,
 )
+from blrec.networking.requests_session import is_route_connection_failure
 from blrec.setting.models import NetworkSettings
 
 
@@ -136,3 +140,12 @@ def test_business_http_error_does_not_change_route_health() -> None:
     manager.report_http_result('room_status', 'eth0', 500)
 
     assert manager.select('room_status').interface_name == 'eth0'
+
+
+def test_remote_read_timeout_does_not_mark_a_network_interface_unhealthy() -> None:
+    assert is_route_connection_failure(requests.ReadTimeout()) is False
+    assert is_route_transport_failure(asyncio.TimeoutError()) is False
+
+
+def test_connection_setup_failure_is_treated_as_a_route_failure() -> None:
+    assert is_route_connection_failure(requests.ConnectionError()) is True

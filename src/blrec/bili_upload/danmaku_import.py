@@ -163,9 +163,14 @@ class DanmakuImporter:
             if row['xml_path'] is None or not os.path.isfile(str(row['xml_path']))
         ]
         if missing_ids:
-            await self._mark_job_missing(job_id, missing_ids)
-            return
-        if any(self._positive_int(row['cid']) is None for row in parts):
+            placeholders = ','.join('?' for _ in missing_ids)
+            await self._database.execute(
+                "UPDATE upload_parts SET danmaku_import_state='missing_source' "
+                'WHERE job_id=? AND id IN ({})'.format(placeholders),
+                (job_id, *missing_ids),
+            )
+        available_parts = [row for row in parts if int(row['id']) not in missing_ids]
+        if any(self._positive_int(row['cid']) is None for row in available_parts):
             raise ValueError('danmaku job has a part without CID')
         updated = await self._database.execute(
             "UPDATE upload_jobs SET danmaku_branch_state='importing',updated_at=? "
@@ -174,7 +179,7 @@ class DanmakuImporter:
         )
         if updated != 1:
             return
-        for row in parts:
+        for row in available_parts:
             await self.import_part(int(row['id']), str(row['xml_path']))
             state = await self._database.scalar(
                 'SELECT danmaku_import_state FROM upload_parts WHERE id=?',
@@ -421,11 +426,12 @@ class DanmakuImporter:
                 (job_id,),
             )
         }
+        active_states = {'pending', 'importing', 'waiting_capacity'}
         if 'failed' in states:
             branch_state = 'failed'
-        elif 'missing_source' in states:
-            branch_state = 'skipped_source_missing'
-        elif states and states <= {'completed'}:
+        elif states & active_states:
+            branch_state = 'importing'
+        elif states:
             item_count = int(
                 await self._database.scalar(
                     'SELECT COUNT(*) FROM danmaku_items item '
@@ -434,9 +440,14 @@ class DanmakuImporter:
                     (job_id,),
                 )
             )
-            branch_state = 'publishing' if item_count else 'completed'
+            if item_count:
+                branch_state = 'publishing'
+            elif 'missing_source' in states:
+                branch_state = 'skipped_source_missing'
+            else:
+                branch_state = 'completed'
         else:
-            branch_state = 'importing'
+            branch_state = 'completed'
         await self._database.execute(
             'UPDATE upload_jobs SET danmaku_branch_state=?,updated_at=? '
             "WHERE id=? AND state='approved' AND danmaku_branch_state IN "

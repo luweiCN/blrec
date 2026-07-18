@@ -36,6 +36,9 @@ blacklist: Set[str] = set()
 attempting_clients: Dict[str, int] = {}
 
 _RECORDING_MEDIA_PATH = re.compile(r'^/api/v1/recording-sessions/parts/(\d+)/media$')
+_RECORDING_THUMBNAIL_PATH = re.compile(
+    r'^/api/v1/recording-sessions/parts/(\d+)/thumbnail$'
+)
 _HIGHLIGHT_MEDIA_PATH = re.compile(r'^/api/v1/highlights/clips/(\d+)/media$')
 
 
@@ -186,6 +189,9 @@ def _signed_media_resource_id(path: str) -> Optional[int]:
     recording = _RECORDING_MEDIA_PATH.fullmatch(path)
     if recording is not None:
         return int(recording.group(1))
+    thumbnail = _RECORDING_THUMBNAIL_PATH.fullmatch(path)
+    if thumbnail is not None:
+        return int(thumbnail.group(1))
     highlight = _HIGHLIGHT_MEDIA_PATH.fullmatch(path)
     if highlight is not None:
         return -int(highlight.group(1))

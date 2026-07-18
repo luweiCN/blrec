@@ -78,6 +78,12 @@ describe('HighlightService', () => {
       'GET',
     );
 
+    service.retryClip(3).subscribe();
+    const retry = http.expectOne('/api/v1/highlights/clips/3/retry');
+    expect(retry.request.method).toBe('POST');
+    expect(retry.request.body).toBeNull();
+    retry.flush({});
+
     service.deleteClip(3).subscribe();
     const remove = http.expectOne('/api/v1/highlights/clips/3');
     expect(remove.request.method).toBe('DELETE');

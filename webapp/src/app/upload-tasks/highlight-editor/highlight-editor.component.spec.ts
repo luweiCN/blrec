@@ -22,6 +22,7 @@ import {
   HighlightTimeline,
 } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
+import { RecordingMediaAccess } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightEditorComponent } from './highlight-editor.component';
 
@@ -69,7 +70,7 @@ describe('HighlightEditorComponent', () => {
         partIndex: 2,
         timelineStartMs: 90_000,
         durationMs: 90_000,
-        stableEndMs: 80_000,
+        stableEndMs: 170_000,
         recording: true,
         mediaKind: 'flv',
       },
@@ -175,6 +176,7 @@ describe('HighlightEditorComponent', () => {
       'inspectClip',
       'createClip',
       'getClip',
+      'retryClip',
       'deleteClip',
       'prepareUploadSession',
       'createUploadTask',
@@ -194,6 +196,9 @@ describe('HighlightEditorComponent', () => {
         outputVideoPath: '/rec/highlight-3.mp4',
       }),
     );
+    highlights.retryClip.and.returnValue(
+      of({ ...processingClip, state: 'queued', errorMessage: null }),
+    );
     highlights.updateMarker.and.callFake((id, name, note) =>
       of({ ...timeline.markers[0].marker, id, name, note }),
     );
@@ -207,7 +212,7 @@ describe('HighlightEditorComponent', () => {
 
     recordings = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['createMediaAccess', 'mediaUrl', 'runJobAction'],
+      ['createMediaAccess', 'mediaUrl', 'thumbnailUrl', 'runJobAction'],
     );
     recordings.createMediaAccess.and.returnValue(
       of({
@@ -224,6 +229,10 @@ describe('HighlightEditorComponent', () => {
       }),
     );
     recordings.mediaUrl.and.callFake((partId) => `/media/${partId}`);
+    recordings.thumbnailUrl.and.callFake(
+      (_partId: number, _access: RecordingMediaAccess, timeMs: number) =>
+        `/thumbnail/${timeMs}`,
+    );
     recordings.runJobAction.and.returnValue(
       of({ results: [{ jobId: 44, accepted: true, message: '已继续上传' }] }),
     );
@@ -266,22 +275,22 @@ describe('HighlightEditorComponent', () => {
     fixture.detectChanges();
   });
 
-  it('switches to the marker part and seeks to its local position', () => {
-    component.selectMarker(timeline.markers[0]);
+  it('keeps the editor scoped to the selected recording part', () => {
     fixture.detectChanges();
 
-    expect(component.selectedPart?.partId).toBe(12);
-    expect(component.playheadMs).toBe(115_000);
-    expect(recordings.createMediaAccess).toHaveBeenCalledWith(12);
-    expect(component.selectedMarkerId).toBe(7);
+    expect(component.selectedPart?.partId).toBe(11);
+    expect(component.positionPercent(45_000)).toBe(50);
+    expect(fixture.nativeElement.querySelectorAll('.marker-pin').length).toBe(
+      0,
+    );
   });
 
   it('does not silently fall back when the requested recording part is missing', () => {
     Object.defineProperty(component, 'initialPartId', { value: 999 });
 
-    (component as unknown as { loadTimeline(initial: boolean): void }).loadTimeline(
-      true,
-    );
+    (
+      component as unknown as { loadTimeline(initial: boolean): void }
+    ).loadTimeline(true);
 
     expect(component.selectedPart).toBeNull();
     expect(component.error).toContain('本地录像已不存在');
@@ -290,15 +299,15 @@ describe('HighlightEditorComponent', () => {
   it('requires a concrete recording part in the editor URL', () => {
     Object.defineProperty(component, 'initialPartId', { value: null });
 
-    (component as unknown as { loadTimeline(initial: boolean): void }).loadTimeline(
-      true,
-    );
+    (
+      component as unknown as { loadTimeline(initial: boolean): void }
+    ).loadTimeline(true);
 
     expect(component.selectedPart).toBeNull();
     expect(component.error).toContain('具体分段');
   });
 
-  it('drags the playhead and snaps near a highlight marker', () => {
+  it('drags the playhead within the selected recording part', () => {
     const track = fixture.nativeElement.querySelector(
       '.timeline-track',
     ) as HTMLElement;
@@ -324,13 +333,13 @@ describe('HighlightEditorComponent', () => {
     component.startTimelineDrag(start, track);
 
     expect(component.draggingPlayhead).toBeTrue();
-    expect(component.playheadMs).toBe(115_000);
+    expect(component.playheadMs).toBe(56_000);
 
     component.moveTimelineDrag(
       { pointerId: 1, clientX: 140 } as PointerEvent,
       track,
     );
-    expect(component.playheadMs).toBe(140_000);
+    expect(component.playheadMs).toBe(70_000);
 
     component.endTimelineDrag({ pointerId: 1 } as PointerEvent, track);
     expect(component.draggingPlayhead).toBeFalse();
@@ -339,12 +348,86 @@ describe('HighlightEditorComponent', () => {
   it('adjusts the selected boundaries in whole seconds', () => {
     component.startMs = 10_000;
     component.endMs = 20_000;
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    spyOn(video, 'pause');
 
     component.adjustSelection('start', -1);
+    expect(video.pause).toHaveBeenCalled();
+    expect(video.currentTime).toBe(9);
+
     component.adjustSelection('end', 1);
 
     expect(component.startMs).toBe(9_000);
     expect(component.endMs).toBe(21_000);
+    expect(video.currentTime).toBe(21);
+  });
+
+  it('keeps the selected P when previewing its exact end boundary', () => {
+    component.startMs = 80_000;
+    component.endMs = 89_000;
+
+    component.adjustSelection('end', 1);
+
+    expect(component.selectedPart?.partId).toBe(11);
+    expect(component.playheadMs).toBe(90_000);
+  });
+
+  it('loads an existing clip into the range editor as a new draft basis', () => {
+    const readyClip: HighlightClip = {
+      ...processingClip,
+      state: 'ready',
+      requestedStartMs: 10_000,
+      requestedEndMs: 25_000,
+      actualStartMs: 8_000,
+      actualEndMs: 25_000,
+      sources: [
+        {
+          partId: 11,
+          ordinal: 0,
+          requestedStartMs: 10_000,
+          requestedEndMs: 25_000,
+          actualStartMs: 8_000,
+          actualEndMs: 25_000,
+        },
+      ],
+    };
+
+    component.selectClipForEditing(readyClip);
+
+    expect(component.clipName).toBe('精彩操作');
+    expect(component.startMs).toBe(10_000);
+    expect(component.endMs).toBe(25_000);
+    expect(component.playheadMs).toBe(10_000);
+  });
+
+  it('sets clip boundaries with I and O shortcuts while leaving inputs alone', () => {
+    component.playheadMs = 12_000;
+    const startEvent = new KeyboardEvent('keydown', { key: 'i' });
+    component.handleEditorShortcut(startEvent);
+    component.playheadMs = 24_000;
+    const endEvent = new KeyboardEvent('keydown', { key: 'o' });
+    component.handleEditorShortcut(endEvent);
+
+    expect(component.startMs).toBe(12_000);
+    expect(component.endMs).toBe(24_000);
+
+    component.playheadMs = 30_000;
+    const inputEvent = new KeyboardEvent('keydown', { key: 'i' });
+    Object.defineProperty(inputEvent, 'target', {
+      value: document.createElement('input'),
+    });
+    component.handleEditorShortcut(inputEvent);
+
+    expect(component.startMs).toBe(12_000);
+  });
+
+  it('builds a bounded thumbnail strip from the signed media access', () => {
+    expect(component.timelineThumbnails.length).toBeGreaterThan(1);
+    expect(component.timelineThumbnails.length).toBeLessThanOrEqual(8);
+    expect(recordings.thumbnailUrl).toHaveBeenCalled();
+    expect(component.timelineThumbnails[0].url).toContain('/thumbnail/');
   });
 
   it('opens the first local recording and restores clips automatically', () => {
@@ -353,15 +436,15 @@ describe('HighlightEditorComponent', () => {
   });
 
   it('places the timeline directly below the video preview', () => {
-    const video = fixture.nativeElement.querySelector('video') as HTMLElement;
+    const videoStage = fixture.nativeElement.querySelector(
+      '.video-stage',
+    ) as HTMLElement;
     const timelinePanel = fixture.nativeElement.querySelector(
       '.timeline-panel',
     ) as HTMLElement;
 
-    expect(video.nextElementSibling).toBe(timelinePanel);
-    expect(timelinePanel.firstElementChild?.classList).toContain(
-      'timeline-track',
-    );
+    expect(videoStage.nextElementSibling).toBe(timelinePanel);
+    expect(timelinePanel.querySelector('.timeline-track')).not.toBeNull();
   });
 
   it('marks the view after the timeline loads asynchronously', () => {
@@ -380,6 +463,7 @@ describe('HighlightEditorComponent', () => {
   });
 
   it('blocks a range that reaches beyond the stable recording boundary', () => {
+    component.selectPart(timeline.parts[1]);
     component.startMs = 160_000;
     component.endMs = 175_000;
     component.selectionChanged();
@@ -401,6 +485,7 @@ describe('HighlightEditorComponent', () => {
     component.setSelectionEndFromPlayhead();
     component.addDraft();
 
+    component.beginNewClip();
     component.playheadMs = 30_000;
     component.setSelectionStartFromPlayhead();
     component.playheadMs = 45_000;
@@ -416,16 +501,33 @@ describe('HighlightEditorComponent', () => {
   });
 
   it('checks a range automatically and asks only when keyframes need confirmation', () => {
-    component.startMs = 110_000;
-    component.endMs = 130_000;
+    const partInspection: HighlightClipInspection = {
+      ...inspection,
+      requestedStartMs: 10_000,
+      requestedEndMs: 30_000,
+      actualStartMs: 0,
+      actualEndMs: 30_000,
+      extraLeadMs: 10_000,
+      sources: [
+        {
+          partId: 11,
+          actualStartMs: 0,
+          actualEndMs: 30_000,
+          outputOffsetMs: 0,
+        },
+      ],
+    };
+    highlights.inspectClip.and.returnValue(of(partInspection));
+    component.startMs = 10_000;
+    component.endMs = 30_000;
+    component.clipName = '';
     component.selectionChanged();
     component.addDraft();
     const draft = component.drafts[0];
     component.createDraft(draft);
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.textContent).toContain('选择范围 01:50–02:10');
-    expect(fixture.nativeElement.textContent).toContain('实际范围 01:38–02:10');
+    expect(fixture.nativeElement.textContent).toContain('实际会从 00:00 开始');
     expect(fixture.nativeElement.textContent).not.toContain('检查裁剪范围');
     expect(highlights.createClip).not.toHaveBeenCalled();
 
@@ -433,9 +535,9 @@ describe('HighlightEditorComponent', () => {
 
     expect(highlights.createClip).toHaveBeenCalledWith(9, {
       markerId: null,
-      name: '高光片段 01:50',
-      startMs: 110_000,
-      endMs: 130_000,
+      name: '高光片段 00:10',
+      startMs: 10_000,
+      endMs: 30_000,
       confirmKeyframe: true,
     });
   });
@@ -462,6 +564,20 @@ describe('HighlightEditorComponent', () => {
 
     expect(highlights.getClip).toHaveBeenCalledOnceWith(3);
     expect(component.clip?.state).toBe('ready');
+  });
+
+  it('retries a failed clip without recreating its range', () => {
+    const failed = {
+      ...processingClip,
+      state: 'failed' as const,
+      errorMessage: 'ffprobe failed',
+    };
+    component.clips = [failed];
+
+    component.retryClip(failed);
+
+    expect(highlights.retryClip).toHaveBeenCalledOnceWith(3);
+    expect(component.clips[0].state).toBe('queued');
   });
 
   it('selects the following part at an exact adjacent-part boundary', () => {

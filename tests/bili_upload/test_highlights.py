@@ -274,6 +274,26 @@ async def test_ready_clip_exposes_only_an_owned_existing_video(
 
 
 @pytest.mark.asyncio
+async def test_failed_clip_can_be_queued_for_retry(database, tmp_path: Path) -> None:
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,state,error_message,'
+        'next_attempt_at,created_at,updated_at) '
+        "VALUES(1,100,'失败片段',0,1000,'failed','ffprobe failed',99,1,1)"
+    )
+    service = HighlightService(database, recording_root=tmp_path)
+
+    clip = await service.retry_clip(1)
+
+    assert clip.state == 'queued'
+    assert clip.error_message is None
+    assert (
+        await database.scalar('SELECT next_attempt_at FROM highlight_clips WHERE id=1')
+        == 0
+    )
+
+
+@pytest.mark.asyncio
 async def test_list_clips_restores_upload_progress_for_a_recording(
     database, tmp_path: Path
 ) -> None:

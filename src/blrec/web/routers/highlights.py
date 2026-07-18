@@ -496,6 +496,21 @@ async def get_clip(
     return _clip_response(value)
 
 
+@router.post('/clips/{clip_id}/retry', response_model=ClipResponse)
+async def retry_clip(
+    clip_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> ClipResponse:
+    try:
+        value = await highlight_service.retry_clip(clip_id)
+    except ValueError as error:
+        if 'only a failed' in str(error) or 'state changed' in str(error):
+            raise _clip_conflict(error) from None
+        raise _not_found(error) from None
+    return _clip_response(value)
+
+
 @router.post('/clips/{clip_id}/media-access', response_model=ClipMediaAccessResponse)
 async def create_clip_media_access(
     clip_id: int,

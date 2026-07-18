@@ -4,9 +4,10 @@
       <a routerLink="/recordings">← 返回录制任务</a>
       <h1>高光剪辑</h1>
     </div>
-    <button type="button" class="secondary-button" (click)="refreshTimeline()">
-      刷新可播放进度
-    </button>
+    <span *ngIf="selectedPart" class="part-badge">
+      P{{ selectedPart.partIndex }}
+      <ng-container *ngIf="selectedPart.recording"> · 录制中</ng-container>
+    </span>
   </header>
 
   <p *ngIf="loading" class="state-message" aria-live="polite">正在加载录像…</p>
@@ -14,61 +15,78 @@
     {{ error }}
   </section>
 
-  <ng-container *ngIf="timeline as currentTimeline">
-    <section class="panel preview-panel" aria-labelledby="preview-heading">
-      <div class="section-heading">
+  <ng-container *ngIf="timeline && selectedPart as part">
+    <section class="editor-workbench" aria-label="视频剪辑工作台">
+      <div class="editor-toolbar">
         <div>
-          <h2 id="preview-heading">视频预览</h2>
-          <span *ngIf="selectedPart">
-            P{{ selectedPart.partIndex }} · {{ formatTime(playheadMs) }}
-            <ng-container *ngIf="mediaAccess?.snapshotId">
-              · 录制中，以本次打开的内容为准
-            </ng-container>
+          <strong>P{{ part.partIndex }}</strong>
+          <span>
+            {{ formatTime(playheadMs - editorPartStartMs) }} /
+            {{ formatTime(editorDurationMs) }}
           </span>
         </div>
-        <button
-          *ngIf="selectedPart"
-          type="button"
-          class="text-button"
-          (click)="
-            selectPart(selectedPart, playheadMs - selectedPart.timelineStartMs)
-          "
-        >
-          重新打开当前分段
-        </button>
+        <div class="editor-toolbar-actions">
+          <button type="button" class="dark-button" (click)="beginNewClip()">
+            ＋ 新建片段
+          </button>
+          <button
+            type="button"
+            class="dark-text-button"
+            (click)="selectPart(part, playheadMs - editorPartStartMs)"
+          >
+            重新打开录像
+          </button>
+        </div>
       </div>
 
-      <div *ngIf="mediaLoading" class="state-message" aria-live="polite">
-        正在打开本地视频…
+      <div class="video-stage">
+        <div *ngIf="mediaLoading" class="video-state" aria-live="polite">
+          正在打开本地视频…
+        </div>
+        <div *ngIf="mediaError" class="video-error" role="alert">
+          {{ mediaError }}
+        </div>
+        <video
+          *ngIf="mediaUrl && !mediaError"
+          #videoElement
+          data-testid="editor-video"
+          controls
+          preload="metadata"
+          [attr.src]="part.mediaKind === 'flv' ? null : mediaUrl"
+          (loadedmetadata)="handleTimeUpdate()"
+          (canplay)="handleMediaCanPlay()"
+          (timeupdate)="handleTimeUpdate()"
+          (ended)="handleMediaEnded()"
+          (error)="handleMediaError()"
+          (stalled)="handleMediaStalled()"
+        ></video>
+        <div *ngIf="mediaUrl && !mediaError" class="quick-cut-actions">
+          <button type="button" (click)="setSelectionStartFromPlayhead()">
+            设为开始 <kbd>I</kbd>
+          </button>
+          <button type="button" (click)="setSelectionEndFromPlayhead()">
+            设为结束 <kbd>O</kbd>
+          </button>
+        </div>
       </div>
-      <div *ngIf="mediaError" class="error-message" role="alert">
-        {{ mediaError }}
-      </div>
-      <video
-        *ngIf="mediaUrl && selectedPart && !mediaError"
-        #videoElement
-        controls
-        preload="metadata"
-        [attr.src]="selectedPart.mediaKind === 'flv' ? null : mediaUrl"
-        (loadedmetadata)="handleTimeUpdate()"
-        (canplay)="handleMediaCanPlay()"
-        (timeupdate)="handleTimeUpdate()"
-        (ended)="handleMediaEnded()"
-        (error)="handleMediaError()"
-        (stalled)="handleMediaStalled()"
-      ></video>
 
-      <div class="timeline-panel" aria-label="选择片段">
+      <div class="timeline-panel" aria-label="当前分 P 时间轴">
+        <div class="timeline-caption">
+          <span>画面时间轴</span>
+          <span>
+            可剪到 {{ formatTime(editorStableEndMs - editorPartStartMs) }}
+          </span>
+        </div>
         <div
           #timelineTrack
           class="timeline-track"
           [class.dragging]="draggingPlayhead"
-          aria-label="录像时间轴，点击可跳转"
           role="slider"
           tabindex="0"
+          aria-label="当前分 P 时间轴，点击或拖动可跳转"
           aria-valuemin="0"
-          [attr.aria-valuemax]="currentTimeline.stableEndMs"
-          [attr.aria-valuenow]="playheadMs"
+          [attr.aria-valuemax]="editorStableEndMs - editorPartStartMs"
+          [attr.aria-valuenow]="playheadMs - editorPartStartMs"
           (click)="seekFromTrack($event, timelineTrack)"
           (pointerdown)="startTimelineDrag($event, timelineTrack)"
           (pointermove)="moveTimelineDrag($event, timelineTrack)"
@@ -76,44 +94,85 @@
           (pointercancel)="endTimelineDrag($event, timelineTrack)"
           (keydown)="handleTimelineKeydown($event)"
         >
+          <div class="thumbnail-strip" aria-hidden="true">
+            <button
+              *ngFor="let item of timelineThumbnails"
+              type="button"
+              class="thumbnail-cell"
+              tabindex="-1"
+              (pointerdown)="$event.stopPropagation()"
+              (click)="$event.stopPropagation(); seekThumbnail(item)"
+              (mouseenter)="showThumbnailPreview(item)"
+              (mouseleave)="hideThumbnailPreview(item)"
+            >
+              <img [src]="item.url" alt="" loading="lazy" draggable="false" />
+              <span>{{ item.label }}</span>
+              <span *ngIf="hoveredThumbnail === item" class="thumbnail-popover">
+                <img [src]="item.url" alt="" />
+                <strong>{{ item.label }}</strong>
+              </span>
+            </button>
+            <span *ngIf="timelineThumbnails.length === 0" class="no-thumbnails">
+              预览画面生成中
+            </span>
+          </div>
+
+          <button
+            *ngFor="let clip of visibleClips; trackBy: trackClip"
+            type="button"
+            class="clip-range"
+            [class.active]="sourceClipId === clip.id"
+            [style.left.%]="positionPercent(clip.requestedStartMs)"
+            [style.width.%]="
+              positionPercent(
+                clip.requestedEndMs - clip.requestedStartMs + editorPartStartMs
+              )
+            "
+            [attr.aria-label]="'基于片段 ' + clip.name + ' 新建'"
+            (pointerdown)="$event.stopPropagation()"
+            (click)="$event.stopPropagation(); selectClipForEditing(clip)"
+          ></button>
+          <button
+            *ngFor="let draft of drafts; trackBy: trackDraft"
+            type="button"
+            class="draft-range"
+            [class.active]="editingDraftId === draft.id"
+            [style.left.%]="positionPercent(draft.startMs)"
+            [style.width.%]="
+              positionPercent(draft.endMs - draft.startMs + editorPartStartMs)
+            "
+            [attr.aria-label]="'编辑待创建片段 ' + draft.name"
+            (pointerdown)="$event.stopPropagation()"
+            (click)="$event.stopPropagation(); selectDraftForEditing(draft)"
+          ></button>
           <span
-            *ngFor="let part of currentTimeline.parts; trackBy: trackPart"
-            class="part-segment"
-            [class.active]="selectedPart?.partId === part.partId"
-            [style.left.%]="positionPercent(part.timelineStartMs)"
-            [style.width.%]="partWidthPercent(part)"
-          >
-            P{{ part.partIndex }}
-          </span>
-          <span
+            *ngIf="selectionActive"
             class="active-range"
             [style.left.%]="positionPercent(startMs)"
-            [style.width.%]="positionPercent(endMs - startMs)"
+            [style.width.%]="
+              positionPercent(endMs - startMs + editorPartStartMs)
+            "
             aria-hidden="true"
           ></span>
           <span
-            *ngFor="let draft of drafts; trackBy: trackDraft"
-            class="draft-range"
-            [style.left.%]="positionPercent(draft.startMs)"
-            [style.width.%]="positionPercent(draft.endMs - draft.startMs)"
-            aria-hidden="true"
-          ></span>
-          <span
-            *ngIf="currentTimeline.stableEndMs < currentTimeline.durationMs"
+            *ngIf="editorStableEndMs < editorPartEndMs"
             class="unsafe-tail"
-            [style.left.%]="positionPercent(currentTimeline.stableEndMs)"
-            [style.width.%]="100 - positionPercent(currentTimeline.stableEndMs)"
+            [style.left.%]="positionPercent(editorStableEndMs)"
+            [style.width.%]="100 - positionPercent(editorStableEndMs)"
             aria-hidden="true"
           ></span>
           <button
-            *ngFor="let item of currentTimeline.markers; trackBy: trackMarker"
+            *ngFor="let item of visibleMarkers; trackBy: trackMarker"
             type="button"
             class="marker-pin"
             [class.active]="selectedMarkerId === item.marker.id"
             [style.left.%]="positionPercent(item.timelineOffsetMs)"
             [attr.aria-label]="
-              item.marker.name + '，' + formatTime(item.timelineOffsetMs)
+              item.marker.name +
+              '，' +
+              formatTime(item.timelineOffsetMs - editorPartStartMs)
             "
+            (pointerdown)="$event.stopPropagation()"
             (click)="$event.stopPropagation(); selectMarker(item)"
           ></button>
           <span
@@ -122,392 +181,412 @@
             aria-hidden="true"
           ></span>
         </div>
-
-        <div class="timeline-summary">
-          <strong>选择片段</strong>
-          <span>
-            {{ formatTime(startMs) }}–{{ formatTime(endMs) }}，共
-            {{ formatTime(endMs - startMs) }}
-          </span>
+        <div class="timeline-ruler" aria-hidden="true">
+          <span>00:00</span>
+          <span>{{ formatTime(editorDurationMs / 2) }}</span>
+          <span>{{ formatTime(editorDurationMs) }}</span>
         </div>
+      </div>
+    </section>
 
-        <div class="selection-toolbar">
-          <div class="selection-point">
-            <span>开始 {{ formatTime(startMs) }}</span>
-            <div class="time-actions">
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="adjustSelection('start', -1)"
-              >
-                −1 秒
-              </button>
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="setSelectionStartFromPlayhead()"
-              >
-                设为当前位置
-              </button>
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="adjustSelection('start', 1)"
-              >
-                +1 秒
-              </button>
-            </div>
+    <section class="clip-workspace" aria-labelledby="selection-heading">
+      <div class="selection-editor">
+        <div class="section-heading">
+          <div>
+            <h2 id="selection-heading">片段编辑器</h2>
+            <span *ngIf="selectionActive">
+              {{ formatTime(startMs - editorPartStartMs) }}–{{
+                formatTime(endMs - editorPartStartMs)
+              }}，共 {{ formatTime(endMs - startMs) }}
+            </span>
           </div>
-          <div class="selection-point">
-            <span>结束 {{ formatTime(endMs) }}</span>
-            <div class="time-actions">
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="adjustSelection('end', -1)"
-              >
-                −1 秒
-              </button>
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="setSelectionEndFromPlayhead()"
-              >
-                设为当前位置
-              </button>
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="adjustSelection('end', 1)"
-              >
-                +1 秒
-              </button>
-            </div>
-          </div>
-          <label class="clip-name-field">
-            片段名称
-            <input type="text" maxlength="200" [(ngModel)]="clipName" />
-          </label>
-        </div>
-
-        <p *ngIf="selectionError" class="error-text" role="alert">
-          {{ selectionError }}
-        </p>
-        <div class="selection-actions">
           <button
             type="button"
-            class="primary-button"
-            data-testid="add-draft"
-            [disabled]="selectionError !== null || !clipName.trim()"
-            (click)="addDraft()"
+            class="secondary-button"
+            (click)="beginNewClip()"
           >
-            添加片段
+            新建片段
           </button>
         </div>
 
-        <div *ngIf="drafts.length > 0" class="draft-list" aria-live="polite">
-          <article
-            *ngFor="let draft of drafts; trackBy: trackDraft"
-            class="draft-card"
-          >
-            <div class="draft-fields">
-              <label class="clip-name-field">
-                片段名称
-                <input
-                  type="text"
-                  maxlength="200"
-                  [disabled]="
-                    draft.state === 'inspecting' || draft.state === 'creating'
-                  "
-                  [(ngModel)]="draft.name"
-                  (ngModelChange)="updateDraft(draft)"
-                />
-              </label>
-              <label>
-                开始（秒）
+        <div *ngIf="!selectionActive" class="selection-empty">
+          播放到目标位置后按 <kbd>I</kbd> 设开始、按
+          <kbd>O</kbd> 设结束，或点击“新建片段”。
+        </div>
+
+        <ng-container *ngIf="selectionActive">
+          <div class="boundary-grid">
+            <fieldset>
+              <legend>开始时间</legend>
+              <div class="boundary-input">
+                <button type="button" (click)="adjustSelection('start', -1)">
+                  −1 秒
+                </button>
                 <input
                   type="number"
                   min="0"
                   step="1"
-                  [disabled]="
-                    draft.state === 'inspecting' || draft.state === 'creating'
-                  "
-                  [ngModel]="draft.startMs / 1000"
-                  (ngModelChange)="
-                    draft.startMs = $event * 1000; updateDraft(draft)
-                  "
+                  [ngModel]="(startMs - editorPartStartMs) / 1000"
+                  (ngModelChange)="setBoundaryFromLocalSeconds('start', $event)"
+                  aria-label="片段开始秒数"
                 />
-              </label>
-              <label>
-                结束（秒）
+                <button type="button" (click)="adjustSelection('start', 1)">
+                  +1 秒
+                </button>
+              </div>
+              <button
+                type="button"
+                class="position-button"
+                (click)="setSelectionStartFromPlayhead()"
+              >
+                使用播放位置
+              </button>
+            </fieldset>
+            <fieldset>
+              <legend>结束时间</legend>
+              <div class="boundary-input">
+                <button type="button" (click)="adjustSelection('end', -1)">
+                  −1 秒
+                </button>
                 <input
                   type="number"
                   min="1"
                   step="1"
-                  [disabled]="
-                    draft.state === 'inspecting' || draft.state === 'creating'
-                  "
-                  [ngModel]="draft.endMs / 1000"
-                  (ngModelChange)="
-                    draft.endMs = $event * 1000; updateDraft(draft)
-                  "
+                  [ngModel]="(endMs - editorPartStartMs) / 1000"
+                  (ngModelChange)="setBoundaryFromLocalSeconds('end', $event)"
+                  aria-label="片段结束秒数"
                 />
-              </label>
-            </div>
+                <button type="button" (click)="adjustSelection('end', 1)">
+                  +1 秒
+                </button>
+              </div>
+              <button
+                type="button"
+                class="position-button"
+                (click)="setSelectionEndFromPlayhead()"
+              >
+                使用播放位置
+              </button>
+            </fieldset>
+          </div>
 
-            <div *ngIf="draft.inspection as checked" class="inspection">
-              <strong>
-                选择范围 {{ formatTime(checked.requestedStartMs) }}–{{
-                  formatTime(checked.requestedEndMs)
-                }}
-              </strong>
-              <span>
-                实际范围 {{ formatTime(checked.actualStartMs) }}–{{
-                  formatTime(checked.actualEndMs)
-                }}
-              </span>
-              <span *ngIf="checked.confirmationRequired">
-                无损裁剪会向前多保留 {{ formatTime(checked.extraLeadMs) }}
-              </span>
-            </div>
-            <p
-              *ngIf="draft.error || draftError(draft)"
-              class="error-text"
-              role="alert"
-            >
-              {{ draft.error || draftError(draft) }}
-            </p>
-            <div class="draft-actions">
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="previewDraft(draft)"
-              >
-                预览范围
-              </button>
-              <button
-                *ngIf="draft.state !== 'confirmation'"
-                type="button"
-                class="primary-button"
-                [disabled]="
-                  draft.state !== 'idle' || draftError(draft) !== null
-                "
-                (click)="createDraft(draft)"
-              >
-                {{
-                  draft.state === "inspecting"
-                    ? "正在准备…"
-                    : draft.state === "creating"
-                      ? "正在创建…"
-                      : "创建片段"
-                }}
-              </button>
-              <button
-                *ngIf="draft.state === 'confirmation'"
-                type="button"
-                class="primary-button"
-                (click)="confirmDraft(draft)"
-              >
-                接受并创建
-              </button>
-              <button
-                type="button"
-                class="danger-button"
-                [disabled]="
-                  draft.state === 'inspecting' || draft.state === 'creating'
-                "
-                (click)="removeDraft(draft)"
-              >
-                移除
-              </button>
-            </div>
-          </article>
-        </div>
-        <p *ngIf="actionError" class="error-text" role="alert">
-          {{ actionError }}
-        </p>
-      </div>
-    </section>
-
-    <section class="panel marker-panel" aria-labelledby="marker-heading">
-      <div class="section-heading">
-        <div>
-          <h2 id="marker-heading">高光点</h2>
-          <span>{{ currentTimeline.markers.length }} 个</span>
-        </div>
-      </div>
-      <p *ngIf="currentTimeline.markers.length === 0" class="empty-state">
-        当前录像没有可映射的高光点。
-      </p>
-      <ul class="marker-list">
-        <li *ngFor="let item of currentTimeline.markers; trackBy: trackMarker">
-          <ng-container
-            *ngIf="editingMarkerId !== item.marker.id; else editMarker"
-          >
+          <label class="clip-name-field">
+            片段名称
+            <input type="text" maxlength="200" [(ngModel)]="clipName" />
+          </label>
+          <p *ngIf="selectionError" class="error-text" role="alert">
+            {{ selectionError }}
+          </p>
+          <div class="selection-actions">
             <button
               type="button"
-              class="marker-main"
-              (click)="selectMarker(item)"
+              class="primary-button"
+              data-testid="add-draft"
+              [disabled]="selectionError !== null || !clipName.trim()"
+              (click)="addDraft()"
             >
-              <strong>{{ item.marker.name }}</strong>
-              <span>{{ formatTime(item.timelineOffsetMs) }}</span>
+              {{ selectionActionLabel }}
+            </button>
+          </div>
+        </ng-container>
+      </div>
+
+      <aside class="draft-panel" aria-labelledby="draft-heading">
+        <div class="section-heading compact-heading">
+          <div>
+            <h2 id="draft-heading">待创建片段</h2>
+            <span>{{ drafts.length }} 个</span>
+          </div>
+        </div>
+        <p *ngIf="drafts.length === 0" class="empty-state">
+          设置范围后添加，片段会保留在这里。
+        </p>
+        <article
+          *ngFor="let draft of drafts; trackBy: trackDraft"
+          class="draft-item"
+          [class.active]="editingDraftId === draft.id"
+        >
+          <button
+            type="button"
+            class="draft-main"
+            (click)="selectDraftForEditing(draft)"
+          >
+            <strong>{{ draft.name }}</strong>
+            <span>
+              {{ formatTime(draft.startMs - editorPartStartMs) }}–{{
+                formatTime(draft.endMs - editorPartStartMs)
+              }}
+            </span>
+          </button>
+          <div *ngIf="draft.inspection as checked" class="inspection">
+            <span>
+              实际会从
+              {{ formatTime(checked.actualStartMs - editorPartStartMs) }}
+              开始
+            </span>
+            <span *ngIf="checked.confirmationRequired">
+              为保留完整关键帧，会向前多保留
+              {{ formatTime(checked.extraLeadMs) }}
+            </span>
+          </div>
+          <p *ngIf="draft.error || draftError(draft)" class="error-text">
+            {{ draft.error || draftError(draft) }}
+          </p>
+          <div class="draft-actions">
+            <button
+              type="button"
+              class="secondary-button"
+              (click)="previewDraft(draft)"
+            >
+              预览
             </button>
             <button
+              *ngIf="draft.state !== 'confirmation'"
               type="button"
-              class="text-button"
-              (click)="beginMarkerEdit(item)"
+              class="primary-button"
+              [disabled]="draft.state !== 'idle' || draftError(draft) !== null"
+              (click)="createDraft(draft)"
             >
-              编辑
+              {{
+                draft.state === "inspecting"
+                  ? "正在准备…"
+                  : draft.state === "creating"
+                    ? "正在创建…"
+                    : "创建片段"
+              }}
+            </button>
+            <button
+              *ngIf="draft.state === 'confirmation'"
+              type="button"
+              class="primary-button"
+              (click)="confirmDraft(draft)"
+            >
+              接受并创建
             </button>
             <button
               type="button"
               class="danger-button"
-              (click)="deleteMarker(item)"
+              [disabled]="
+                draft.state === 'inspecting' || draft.state === 'creating'
+              "
+              (click)="removeDraft(draft)"
             >
-              删除
+              移除
             </button>
-          </ng-container>
-          <ng-template #editMarker>
-            <div class="marker-edit">
-              <label>
-                名称
-                <input type="text" maxlength="200" [(ngModel)]="markerName" />
-              </label>
-              <label>
-                备注
-                <input type="text" maxlength="1000" [(ngModel)]="markerNote" />
-              </label>
-              <button
-                type="button"
-                class="primary-button"
-                [disabled]="!markerName.trim()"
-                (click)="saveMarker()"
-              >
-                保存
-              </button>
-              <button
-                type="button"
-                class="secondary-button"
-                (click)="cancelMarkerEdit()"
-              >
-                取消
-              </button>
-            </div>
-          </ng-template>
-        </li>
-      </ul>
+          </div>
+        </article>
+      </aside>
     </section>
 
-    <section
-      *ngIf="clipsLoading || clips.length > 0"
-      class="panel clip-panel"
-      aria-labelledby="clips-heading"
-    >
-      <div class="section-heading">
-        <div>
-          <h2 id="clips-heading">已创建片段</h2>
-          <span>{{ clips.length }} 个片段</span>
-        </div>
-      </div>
-      <p *ngIf="clipsLoading" class="state-message" aria-live="polite">
-        正在加载片段…
-      </p>
-      <ul class="clip-list" aria-live="polite">
-        <li *ngFor="let item of clips; trackBy: trackClip">
-          <div>
-            <strong>{{ item.name }}</strong>
-            <span
-              >{{ formatTime(item.actualStartMs) }}–{{
-                formatTime(item.actualEndMs)
-              }}</span
-            >
-          </div>
-          <span class="status-pill" [attr.data-state]="item.state">
-            {{
-              item.state === "ready"
-                ? "可投稿"
-                : item.state === "failed"
-                  ? "处理失败"
-                  : "处理中"
-            }}
-          </span>
-          <span *ngIf="item.uploadJobId as jobId" class="upload-status">
-            上传任务 #{{ jobId }} · {{ uploadStatus(item) }}
-            <ng-container
-              *ngIf="
-                item.uploadPercent !== null && item.uploadPercent !== undefined
-              "
-            >
-              {{ item.uploadPercent | number: "1.0-1" }}%
-            </ng-container>
-          </span>
-          <a
-            *ngIf="item.uploadBvid"
-            [href]="'https://www.bilibili.com/video/' + item.uploadBvid"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            查看稿件
-          </a>
-          <button
-            *ngIf="item.state === 'ready'"
-            type="button"
-            class="secondary-button"
-            (click)="openClipPreview(item)"
-          >
-            预览
-          </button>
-          <button
-            *ngIf="item.state === 'ready'"
-            type="button"
-            class="secondary-button"
-            [disabled]="downloadingClipId === item.id"
-            (click)="downloadClip(item)"
-          >
-            {{ downloadingClipId === item.id ? "正在下载…" : "下载" }}
-          </button>
-          <button
-            *ngIf="item.state === 'ready' && !item.uploadJobId"
-            type="button"
-            class="primary-button"
-            [disabled]="submittingClipId === item.id"
-            (click)="openClipSubmission(item)"
-          >
-            {{ submittingClipId === item.id ? "正在创建…" : "投稿设置" }}
-          </button>
-          <button
-            *ngIf="!item.uploadJobId"
-            type="button"
-            class="danger-button"
-            [disabled]="submittingClipId === item.id"
-            (click)="deleteClip(item)"
-          >
-            删除
-          </button>
-        </li>
-      </ul>
-      <div *ngIf="clipPreviewId !== null" class="clip-preview">
+    <p *ngIf="actionError" class="error-message" role="alert">
+      {{ actionError }}
+    </p>
+
+    <div class="support-grid">
+      <section class="panel marker-panel" aria-labelledby="marker-heading">
         <div class="section-heading">
-          <strong>片段预览</strong>
-          <button
-            type="button"
-            class="text-button"
-            (click)="closeClipPreview()"
-          >
-            关闭
-          </button>
+          <div>
+            <h2 id="marker-heading">高光点</h2>
+            <span>{{ visibleMarkers.length }} 个</span>
+          </div>
         </div>
-        <p *ngIf="clipPreviewLoading" class="state-message" aria-live="polite">
-          正在打开片段…
+        <p *ngIf="visibleMarkers.length === 0" class="empty-state">
+          当前分 P 没有高光点。
         </p>
-        <video
-          *ngIf="clipPreviewUrl"
-          controls
-          preload="metadata"
-          [src]="clipPreviewUrl"
-          (error)="handleClipPreviewError()"
-        ></video>
+        <ul class="marker-list">
+          <li *ngFor="let item of visibleMarkers; trackBy: trackMarker">
+            <ng-container
+              *ngIf="editingMarkerId !== item.marker.id; else editMarker"
+            >
+              <button
+                type="button"
+                class="marker-main"
+                (click)="selectMarker(item)"
+              >
+                <strong>{{ item.marker.name }}</strong>
+                <span>
+                  {{ formatTime(item.timelineOffsetMs - editorPartStartMs) }}
+                </span>
+              </button>
+              <button
+                type="button"
+                class="text-button"
+                (click)="beginMarkerEdit(item)"
+              >
+                编辑
+              </button>
+              <button
+                type="button"
+                class="danger-button"
+                (click)="deleteMarker(item)"
+              >
+                删除
+              </button>
+            </ng-container>
+            <ng-template #editMarker>
+              <div class="marker-edit">
+                <label>
+                  名称
+                  <input type="text" maxlength="200" [(ngModel)]="markerName" />
+                </label>
+                <label>
+                  备注
+                  <input
+                    type="text"
+                    maxlength="1000"
+                    [(ngModel)]="markerNote"
+                  />
+                </label>
+                <button
+                  type="button"
+                  class="primary-button"
+                  [disabled]="!markerName.trim()"
+                  (click)="saveMarker()"
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  class="secondary-button"
+                  (click)="cancelMarkerEdit()"
+                >
+                  取消
+                </button>
+              </div>
+            </ng-template>
+          </li>
+        </ul>
+      </section>
+
+      <section class="panel clip-panel" aria-labelledby="clips-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="clips-heading">已创建片段</h2>
+            <span>{{ visibleClips.length }} 个</span>
+          </div>
+        </div>
+        <p *ngIf="clipsLoading" class="state-message" aria-live="polite">
+          正在加载片段…
+        </p>
+        <p
+          *ngIf="!clipsLoading && visibleClips.length === 0"
+          class="empty-state"
+        >
+          当前分 P 还没有已创建片段。
+        </p>
+        <ul class="clip-list" aria-live="polite">
+          <li *ngFor="let item of visibleClips; trackBy: trackClip">
+            <button
+              type="button"
+              class="clip-main"
+              (click)="selectClipForEditing(item)"
+            >
+              <strong>{{ item.name }}</strong>
+              <span>
+                {{ formatTime(item.requestedStartMs - editorPartStartMs) }}–{{
+                  formatTime(item.requestedEndMs - editorPartStartMs)
+                }}
+              </span>
+              <span *ngIf="item.errorMessage" class="clip-error">
+                {{ item.errorMessage }}
+              </span>
+            </button>
+            <span class="status-pill" [attr.data-state]="item.state">
+              {{
+                item.state === "ready"
+                  ? "可投稿"
+                  : item.state === "failed"
+                    ? "处理失败"
+                    : "处理中"
+              }}
+            </span>
+            <span *ngIf="item.uploadJobId as jobId" class="upload-status">
+              #{{ jobId }} · {{ uploadStatus(item) }}
+              <ng-container
+                *ngIf="
+                  item.uploadPercent !== null &&
+                  item.uploadPercent !== undefined
+                "
+              >
+                {{ item.uploadPercent | number: "1.0-1" }}%
+              </ng-container>
+            </span>
+            <a
+              *ngIf="item.uploadBvid"
+              [href]="'https://www.bilibili.com/video/' + item.uploadBvid"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看稿件
+            </a>
+            <div class="clip-actions">
+              <button
+                *ngIf="item.state === 'failed'"
+                type="button"
+                class="secondary-button"
+                [disabled]="retryingClipId !== null"
+                (click)="retryClip(item)"
+              >
+                {{ retryingClipId === item.id ? "正在重试…" : "重试" }}
+              </button>
+              <button
+                *ngIf="item.state === 'ready'"
+                type="button"
+                class="secondary-button"
+                (click)="openClipPreview(item)"
+              >
+                预览
+              </button>
+              <button
+                *ngIf="item.state === 'ready'"
+                type="button"
+                class="secondary-button"
+                [disabled]="downloadingClipId === item.id"
+                (click)="downloadClip(item)"
+              >
+                {{ downloadingClipId === item.id ? "下载中…" : "下载" }}
+              </button>
+              <button
+                *ngIf="item.state === 'ready' && !item.uploadJobId"
+                type="button"
+                class="primary-button"
+                [disabled]="submittingClipId === item.id"
+                (click)="openClipSubmission(item)"
+              >
+                投稿设置
+              </button>
+              <button
+                *ngIf="!item.uploadJobId"
+                type="button"
+                class="danger-button"
+                [disabled]="submittingClipId === item.id"
+                (click)="deleteClip(item)"
+              >
+                删除
+              </button>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <section *ngIf="clipPreviewId !== null" class="panel clip-preview">
+      <div class="section-heading">
+        <strong>片段预览</strong>
+        <button type="button" class="text-button" (click)="closeClipPreview()">
+          关闭
+        </button>
       </div>
+      <p *ngIf="clipPreviewLoading" class="state-message" aria-live="polite">
+        正在打开片段…
+      </p>
+      <video
+        *ngIf="clipPreviewUrl"
+        controls
+        preload="metadata"
+        [src]="clipPreviewUrl"
+        (error)="handleClipPreviewError()"
+      ></video>
     </section>
   </ng-container>
 </main>

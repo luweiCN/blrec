@@ -214,6 +214,40 @@ def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
     assert artifact.duration_ms == 51_400
 
 
+def test_cut_seeks_after_opening_a_growing_flv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'growing.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+
+    def probe(path: str):
+        if path == str(source):
+            return profile(), (0, 28_600)
+        return profile(duration_ms=51_400), (0,)
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=probe)
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 30_000, 80_000, recording=True),),
+        requested_start_ms=30_000,
+        requested_end_ms=80_000,
+        stable_end_ms=100_000,
+    )
+
+    clipper.cut(inspection, str(output))
+
+    command = calls[0]
+    assert command.index('-i') < command.index('-ss')
+
+
 def test_cut_rejects_output_that_loses_audio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

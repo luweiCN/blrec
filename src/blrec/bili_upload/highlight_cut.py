@@ -33,6 +33,7 @@ class ClipSource:
     requested_end_ms: int
     duration_ms: Optional[int] = None
     keyframes_ms: Tuple[int, ...] = ()
+    recording: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class InspectedClipSource:
     actual_end_ms: int
     output_offset_ms: int
     profile: MediaProfile
+    recording: bool = False
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,7 @@ class LosslessClipper:
                     actual_end_ms=source.requested_end_ms,
                     output_offset_ms=output_offset_ms,
                     profile=profile,
+                    recording=source.recording,
                 )
             )
             output_offset_ms += source.requested_end_ms - actual_start_ms
@@ -242,14 +245,26 @@ class LosslessClipper:
                 self._remove(concat_path)
 
     def _cut_source(self, source: InspectedClipSource, output_path: str) -> None:
+        input_options: Tuple[str, ...]
+        if source.recording:
+            input_options = (
+                '-i',
+                source.path,
+                '-ss',
+                self._seconds(source.actual_start_ms),
+            )
+        else:
+            input_options = (
+                '-ss',
+                self._seconds(source.actual_start_ms),
+                '-i',
+                source.path,
+            )
         command = (
             self._ffmpeg,
             '-hide_banner',
             '-nostdin',
-            '-ss',
-            self._seconds(source.actual_start_ms),
-            '-i',
-            source.path,
+            *input_options,
             '-t',
             self._seconds(source.actual_end_ms - source.actual_start_ms),
             '-map',

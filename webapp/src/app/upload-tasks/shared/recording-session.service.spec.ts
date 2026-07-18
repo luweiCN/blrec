@@ -1,4 +1,7 @@
-import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
+import {
+  HttpClientTestingModule,
+  HttpTestingController,
+} from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
 import { UrlService } from 'src/app/core/services/url.service';
@@ -13,7 +16,10 @@ describe('RecordingSessionService', () => {
       imports: [HttpClientTestingModule],
       providers: [
         RecordingSessionService,
-        { provide: UrlService, useValue: { makeApiUrl: (path: string) => path } },
+        {
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
+        },
       ],
     });
     service = TestBed.inject(RecordingSessionService);
@@ -26,7 +32,7 @@ describe('RecordingSessionService', () => {
     service.listSessions(20, 40).subscribe();
 
     const request = http.expectOne(
-      '/api/v1/recording-sessions?limit=20&offset=40&scope=recordings'
+      '/api/v1/recording-sessions?limit=20&offset=40&scope=recordings',
     );
     expect(request.request.method).toBe('GET');
     request.flush({ degradedReason: null, total: 0, sessions: [] });
@@ -48,7 +54,7 @@ describe('RecordingSessionService', () => {
     const request = http.expectOne(
       (candidate) =>
         candidate.url === '/api/v1/recording-sessions' &&
-        candidate.params.get('q') === '主播 名'
+        candidate.params.get('q') === '主播 名',
     );
     expect(request.request.params.get('recordingState')).toBe('closed');
     expect(request.request.params.get('scope')).toBe('uploads');
@@ -63,7 +69,7 @@ describe('RecordingSessionService', () => {
     service.runJobAction('repair_transcode', [9, 10]).subscribe();
 
     const request = http.expectOne(
-      '/api/v1/recording-sessions/upload-jobs/actions'
+      '/api/v1/recording-sessions/upload-jobs/actions',
     );
     expect(request.request.method).toBe('POST');
     expect(request.request.body).toEqual({
@@ -89,7 +95,7 @@ describe('RecordingSessionService', () => {
     service.retryFailedJobs().subscribe();
 
     const request = http.expectOne(
-      '/api/v1/recording-sessions/upload-jobs/retry-failed'
+      '/api/v1/recording-sessions/upload-jobs/retry-failed',
     );
     expect(request.request.method).toBe('POST');
     expect(request.request.body).toBeNull();
@@ -99,7 +105,7 @@ describe('RecordingSessionService', () => {
   it('creates a scoped media access URL and pages danmaku', () => {
     service.createMediaAccess(7).subscribe();
     const accessRequest = http.expectOne(
-      '/api/v1/recording-sessions/parts/7/media-access'
+      '/api/v1/recording-sessions/parts/7/media-access',
     );
     expect(accessRequest.request.method).toBe('POST');
     accessRequest.flush({
@@ -127,14 +133,35 @@ describe('RecordingSessionService', () => {
         indexState: 'pending',
         retryAfterMs: null,
         requestId: 'request-service',
-      })
+      }),
     ).toBe(
-      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id'
+      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id',
+    );
+
+    expect(
+      service.thumbnailUrl(
+        7,
+        {
+          token: 'signed token',
+          expiresAt: 123,
+          snapshotId: 'snapshot-id',
+          durationMs: 12_500,
+          fileSizeBytes: 2_048,
+          recording: true,
+          playbackMode: 'active_snapshot',
+          indexState: 'pending',
+          retryAfterMs: null,
+          requestId: 'request-service',
+        },
+        4_500,
+      ),
+    ).toBe(
+      '/api/v1/recording-sessions/parts/7/thumbnail?time_ms=4500&width=240&media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id',
     );
 
     service.listDanmaku(7, 100, 50).subscribe();
     const danmakuRequest = http.expectOne(
-      '/api/v1/recording-sessions/parts/7/danmaku?cursor=100&limit=50'
+      '/api/v1/recording-sessions/parts/7/danmaku?cursor=100&limit=50',
     );
     expect(danmakuRequest.request.method).toBe('GET');
     danmakuRequest.flush({ items: [], nextCursor: null });

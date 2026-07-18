@@ -15,6 +15,12 @@ from .resolver import SyncSourceBoundResolver
 Resolver = Callable[[str], Sequence[str]]
 
 
+def is_route_connection_failure(error: BaseException) -> bool:
+    if isinstance(error, requests.ReadTimeout):
+        return False
+    return isinstance(error, (requests.ConnectionError, OSError))
+
+
 class _MeteredRaw:
     def __init__(self, raw: Any, callback: Callable[[int], None]) -> None:
         self._raw = raw
@@ -148,8 +154,9 @@ class RoutedRequestsSession(requests.Session):
         session = self._session_for(selection)
         try:
             response = session.request(method, url, **kwargs)
-        except (requests.RequestException, OSError):
-            self._manager.report_failure('recording', selection.interface_name)
+        except (requests.RequestException, OSError) as error:
+            if is_route_connection_failure(error):
+                self._manager.report_failure('recording', selection.interface_name)
             raise
         self._manager.report_success('recording', selection.interface_name)
         response.raw = _MeteredRaw(
