@@ -74,7 +74,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 21
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 22
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -130,7 +130,31 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'submission_verification_state',
             'submission_verified_at',
             'submission_verification_json',
+            'preupload_finalized',
         } <= job_columns
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(99,99,'迁移测试账号',X'00',1,'k','active',1,1)"
+        )
+        await database.execute(
+            "INSERT INTO recording_sessions("
+            "id,room_id,broadcast_session_key,state,started_at) "
+            "VALUES(99,99,'migration:99','closed',1)"
+        )
+        await database.execute(
+            "INSERT INTO upload_jobs("
+            "id,session_id,account_id,policy_snapshot_json,state,submit_state,"
+            "created_at,updated_at) "
+            "VALUES(99,99,99,'{}','waiting_artifacts','prepared',1,1)"
+        )
+        assert (
+            await database.scalar(
+                'SELECT preupload_finalized FROM upload_jobs WHERE id=99'
+            )
+            == 1
+        )
         upload_part_columns = {
             row['name']
             for row in await database.fetchall('PRAGMA table_info(upload_parts)')
@@ -366,7 +390,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 21
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 22
     finally:
         await database.close()
 

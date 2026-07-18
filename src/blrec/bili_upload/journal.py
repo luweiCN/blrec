@@ -196,6 +196,7 @@ class UploadJobProgress:
     bytes_per_second: Optional[float] = None
     eta_seconds: Optional[int] = None
     current_part_index: Optional[int] = None
+    preupload_finalized: bool = True
 
 
 @dataclass(frozen=True)
@@ -1240,7 +1241,8 @@ class RecordingJournalBridge:
             'job.repair_error,job.lease_until,job.operator_paused,'
             'job.scheduled_publish_at,job.collection_branch_state,'
             'job.collection_error,job.submission_verification_state,'
-            'job.submission_verified_at,job.submission_verification_json '
+            'job.submission_verified_at,job.submission_verification_json,'
+            'job.preupload_finalized '
             'FROM upload_jobs job '
             'JOIN bili_accounts account ON account.id=job.account_id '
             'WHERE job.session_id IN ({})'.format(placeholders),
@@ -1475,6 +1477,7 @@ class RecordingJournalBridge:
                 bytes_per_second=bytes_per_second,
                 eta_seconds=eta_seconds,
                 current_part_index=current_part,
+                preupload_finalized=bool(row['preupload_finalized']),
             )
         return result
 
