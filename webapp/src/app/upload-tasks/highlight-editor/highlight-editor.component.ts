@@ -3,7 +3,6 @@ import {
   ChangeDetectorRef,
   Component,
   ElementRef,
-  HostListener,
   Inject,
   NgZone,
   OnDestroy,
@@ -46,6 +45,17 @@ interface HighlightClipDraft {
   error: string | null;
 }
 
+type TimelinePopover =
+  | { readonly kind: 'none' }
+  | {
+      readonly kind: 'point';
+      readonly timeMs: number;
+      readonly markerId: number | null;
+    }
+  | { readonly kind: 'boundary'; readonly boundary: 'start' | 'end' }
+  | { readonly kind: 'draft'; readonly draftId: number }
+  | { readonly kind: 'clip'; readonly clipId: number };
+
 @Component({
   selector: 'app-highlight-editor',
   templateUrl: './highlight-editor.component.html',
@@ -63,6 +73,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   endMs = 0;
   clipName = '';
   selectionActive = false;
+  startBoundarySet = false;
+  endBoundarySet = false;
   drafts: HighlightClipDraft[] = [];
   clips: HighlightClip[] = [];
   submissionClip: HighlightClip | null = null;
@@ -70,6 +82,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   downloadingClipId: number | null = null;
   retryingClipId: number | null = null;
   draggingPlayhead = false;
+  hoverTimeMs: number | null = null;
+  timelinePopover: TimelinePopover = { kind: 'none' };
+  isPlaying = false;
+  isMuted = false;
   editingDraftId: number | null = null;
   sourceClipId: number | null = null;
   clipPreviewId: number | null = null;
@@ -134,7 +150,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   get selectionError(): string | null {
-    if (!this.selectionActive || !this.timeline || !this.selectedPart) {
+    if (
+      !this.selectionActive ||
+      !this.startBoundarySet ||
+      !this.endBoundarySet ||
+      !this.timeline ||
+      !this.selectedPart
+    ) {
       return null;
     }
     if (
@@ -186,14 +208,31 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     );
   }
 
-  get selectionActionLabel(): string {
-    if (this.editingDraftId !== null) {
-      return '保存调整';
+  get selectedDraft(): HighlightClipDraft | null {
+    return (
+      this.drafts.find((draft) => draft.id === this.editingDraftId) ?? null
+    );
+  }
+
+  get selectedTimelineClip(): HighlightClip | null {
+    return this.clips.find((clip) => clip.id === this.sourceClipId) ?? null;
+  }
+
+  get selectedTimelineMarker(): MappedHighlight | null {
+    const markerId =
+      this.timelinePopover.kind === 'point'
+        ? this.timelinePopover.markerId
+        : null;
+    if (markerId === null) {
+      return null;
     }
-    if (this.sourceClipId !== null) {
-      return '基于此范围添加片段';
-    }
-    return '添加片段';
+    return (
+      this.visibleMarkers.find((item) => item.marker.id === markerId) ?? null
+    );
+  }
+
+  get hasCompleteSelection(): boolean {
+    return this.selectionActive && this.startBoundarySet && this.endBoundarySet;
   }
 
   ngOnInit(): void {
@@ -222,20 +261,15 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (item.partId !== this.selectedPart?.partId) {
       return;
     }
-    this.editingDraftId = null;
-    this.sourceClipId = null;
-    this.selectionActive = true;
+    this.prepareForTimelinePoint(item.marker.id);
     this.selectedMarkerId = item.marker.id;
-    this.clipName = item.marker.name;
-    this.startMs = Math.max(
-      this.editorPartStartMs,
-      item.timelineOffsetMs - 30_000,
-    );
-    this.endMs = Math.min(
-      this.editorStableEndMs,
-      item.timelineOffsetMs + 60_000,
-    );
     this.seekTimeline(item.timelineOffsetMs);
+    this.pausePlayback();
+    this.timelinePopover = {
+      kind: 'point',
+      timeMs: item.timelineOffsetMs,
+      markerId: item.marker.id,
+    };
   }
 
   selectPart(part: HighlightTimelinePart, localOffsetMs = 0): void {
@@ -250,41 +284,42 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
   }
 
-  selectionChanged(): void {
-    this.actionError = null;
-    this.selectionActive = true;
-    if (this.selectedMarkerId === null && !this.clipName.trim()) {
-      this.clipName = `高光片段 ${this.formatTime(
-        this.startMs - this.editorPartStartMs,
-      )}`;
-    }
-  }
-
   setSelectionStartFromPlayhead(): void {
     if (!this.selectionActive) {
-      this.beginNewClip();
+      this.beginBoundarySelection();
     }
-    this.startMs = Math.round(this.playheadMs);
-    if (this.endMs <= this.startMs) {
-      this.endMs = Math.min(
-        this.editorStableEndMs || this.startMs + 60_000,
-        this.startMs + 60_000,
-      );
+    const startMs = Math.round(this.playheadMs);
+    if (this.endBoundarySet && startMs >= this.endMs) {
+      this.actionError = '开始位置必须早于结束位置';
+      return;
     }
-    this.selectionChanged();
+    this.startMs = startMs;
+    this.startBoundarySet = true;
+    this.selectionActive = true;
+    this.actionError = null;
+    this.finishSelectionIfReady();
   }
 
   setSelectionEndFromPlayhead(): void {
     if (!this.selectionActive) {
-      this.beginNewClip();
-      this.startMs = Math.max(this.editorPartStartMs, this.playheadMs - 60_000);
+      this.beginBoundarySelection();
     }
-    this.endMs = Math.round(this.playheadMs);
-    this.selectionChanged();
+    const endMs = Math.round(this.playheadMs);
+    if (this.startBoundarySet && endMs <= this.startMs) {
+      this.actionError = '结束位置必须晚于开始位置';
+      return;
+    }
+    this.endMs = endMs;
+    this.endBoundarySet = true;
+    this.selectionActive = true;
+    this.actionError = null;
+    this.finishSelectionIfReady();
   }
 
   adjustSelection(boundary: 'start' | 'end', seconds: number): void {
     this.selectionActive = true;
+    this.startBoundarySet = true;
+    this.endBoundarySet = true;
     const deltaMs = Math.round(seconds * 1000);
     if (boundary === 'start') {
       this.startMs = Math.max(
@@ -297,22 +332,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         Math.max(this.startMs + 1000, this.endMs + deltaMs),
       );
     }
-    this.selectionChanged();
+    this.syncSelectedDraft();
+    this.timelinePopover = { kind: 'boundary', boundary };
     this.previewBoundary(boundary);
-  }
-
-  beginNewClip(): void {
-    this.editingDraftId = null;
-    this.sourceClipId = null;
-    this.selectedMarkerId = null;
-    this.selectionActive = true;
-    const start = Math.max(
-      this.editorPartStartMs,
-      Math.min(this.playheadMs, this.editorStableEndMs - 1000),
-    );
-    this.startMs = start;
-    this.endMs = Math.min(this.editorStableEndMs, start + 60_000);
-    this.clipName = `高光片段 ${this.formatTime(start - this.editorPartStartMs)}`;
   }
 
   selectDraftForEditing(draft: HighlightClipDraft): void {
@@ -321,11 +343,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.editingDraftId = draft.id;
     this.selectionActive = true;
+    this.startBoundarySet = true;
+    this.endBoundarySet = true;
     this.sourceClipId = null;
     this.selectedMarkerId = draft.markerId;
     this.clipName = draft.name;
     this.startMs = draft.startMs;
     this.endMs = draft.endMs;
+    this.timelinePopover = { kind: 'draft', draftId: draft.id };
     this.previewBoundary('start');
   }
 
@@ -337,39 +362,34 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     ) {
       return;
     }
-    this.editingDraftId = null;
-    this.selectionActive = true;
+    this.clearTimelineSelection();
     this.sourceClipId = clip.id;
     this.selectedMarkerId = clip.markerId;
-    this.clipName = clip.name;
-    this.startMs = clip.requestedStartMs;
-    this.endMs = clip.requestedEndMs;
-    this.previewBoundary('start');
+    this.timelinePopover = { kind: 'clip', clipId: clip.id };
+    this.pausePlayback();
+    this.seekTimeline(clip.requestedStartMs);
   }
 
-  @HostListener('document:keydown', ['$event'])
-  handleEditorShortcut(event: KeyboardEvent): void {
-    const target = event.target;
+  copyClipToDraft(clip: HighlightClip): void {
     if (
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey ||
-      (target instanceof HTMLElement &&
-        (target.matches('input, textarea, select') || target.isContentEditable))
+      !clip.sources.some(
+        (source) => source.partId === this.selectedPart?.partId,
+      )
     ) {
       return;
     }
-    if (event.key.toLowerCase() === 'i') {
-      event.preventDefault();
-      this.setSelectionStartFromPlayhead();
-    } else if (event.key.toLowerCase() === 'o') {
-      event.preventDefault();
-      this.setSelectionEndFromPlayhead();
-    }
+    const draft = this.makeDraft(
+      clip.markerId,
+      `${clip.name} 副本`,
+      clip.requestedStartMs,
+      clip.requestedEndMs,
+    );
+    this.drafts = [...this.drafts, draft];
+    this.selectDraftForEditing(draft);
   }
 
   addDraft(): void {
-    if (!this.selectionActive || this.selectionError !== null) {
+    if (!this.hasCompleteSelection || this.selectionError !== null) {
       return;
     }
     const editing = this.drafts.find(
@@ -382,23 +402,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       editing.endMs = this.endMs;
       this.updateDraft(editing);
       this.drafts = [...this.drafts];
+      this.timelinePopover = { kind: 'draft', draftId: editing.id };
       return;
     }
-    const draft: HighlightClipDraft = {
-      id: this.nextDraftId++,
-      markerId: this.selectedMarkerId,
-      name:
-        this.clipName.trim() ||
-        `高光片段 ${this.formatTime(this.startMs - this.editorPartStartMs)}`,
-      startMs: this.startMs,
-      endMs: this.endMs,
-      inspection: null,
-      state: 'idle',
-      error: null,
-    };
+    const draft = this.makeDraft(
+      this.selectedMarkerId,
+      this.clipName,
+      this.startMs,
+      this.endMs,
+    );
     this.drafts = [...this.drafts, draft];
     this.editingDraftId = draft.id;
     this.sourceClipId = null;
+    this.clipName = draft.name;
+    this.timelinePopover = { kind: 'draft', draftId: draft.id };
   }
 
   updateDraft(draft: HighlightClipDraft): void {
@@ -413,12 +430,32 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.drafts = this.drafts.filter((item) => item.id !== draft.id);
     if (this.editingDraftId === draft.id) {
-      this.editingDraftId = null;
-      this.selectionActive = false;
+      this.resetWorkingSelection();
     }
     if (this.previewingDraftId === draft.id) {
       this.previewingDraftId = null;
     }
+  }
+
+  clearTimelineSelection(): void {
+    this.syncSelectedDraft();
+    this.resetWorkingSelection();
+  }
+
+  cancelSelectedDraft(): void {
+    const draft = this.selectedDraft;
+    if (draft) {
+      this.removeDraft(draft);
+    }
+  }
+
+  createSelectedDraft(): void {
+    const draft = this.selectedDraft;
+    if (!draft) {
+      return;
+    }
+    this.syncSelectedDraft();
+    this.createDraft(draft);
   }
 
   createDraft(draft: HighlightClipDraft): void {
@@ -473,18 +510,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
   }
 
-  seekFromTrack(event: MouseEvent, track: HTMLElement): void {
-    if (this.draggingPlayhead) {
-      return;
-    }
-    this.seekFromPointer(event.clientX, track);
-  }
-
   startTimelineDrag(event: PointerEvent, track: HTMLElement): void {
-    if (event.button !== 0 || this.isMarkerTarget(event.target)) {
+    if (event.button !== 0 || this.isTimelineItemTarget(event.target)) {
       return;
     }
     event.preventDefault();
+    this.pausePlayback();
+    this.prepareForTimelinePoint(null);
     this.draggingPointerId = event.pointerId;
     this.draggingPlayhead = true;
     try {
@@ -513,11 +545,59 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.draggingPointerId = null;
     this.draggingPlayhead = false;
+    this.showPointActions(this.playheadMs, null);
+  }
+
+  handleTimelineHover(event: MouseEvent, track: HTMLElement): void {
+    this.hoverTimeMs = this.pointerTimeMs(event.clientX, track, false);
+  }
+
+  clearTimelineHover(): void {
+    this.hoverTimeMs = null;
+  }
+
+  showBoundaryActions(boundary: 'start' | 'end'): void {
+    if (!this.hasCompleteSelection) {
+      return;
+    }
+    this.timelinePopover = { kind: 'boundary', boundary };
+    this.previewBoundary(boundary);
+  }
+
+  setPointAsBoundary(boundary: 'start' | 'end'): void {
+    if (this.timelinePopover.kind !== 'point') {
+      return;
+    }
+    const point = this.timelinePopover;
+    if (!this.selectionActive) {
+      this.beginBoundarySelection(point.markerId);
+    }
+    this.playheadMs = point.timeMs;
+    if (boundary === 'start') {
+      this.setSelectionStartFromPlayhead();
+    } else {
+      this.setSelectionEndFromPlayhead();
+    }
+    if (!this.hasCompleteSelection) {
+      this.timelinePopover = { kind: 'boundary', boundary };
+    }
   }
 
   private seekFromPointer(clientX: number, track: HTMLElement): void {
-    if (!this.selectedPart || this.editorDurationMs <= 0) {
+    const valueMs = this.pointerTimeMs(clientX, track, true);
+    if (valueMs === null) {
       return;
+    }
+    this.seekTimeline(valueMs);
+  }
+
+  private pointerTimeMs(
+    clientX: number,
+    track: HTMLElement,
+    snap: boolean,
+  ): number | null {
+    if (!this.selectedPart || this.editorDurationMs <= 0) {
+      return null;
     }
     const bounds = track.getBoundingClientRect();
     const ratio = Math.max(
@@ -528,7 +608,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.editorStableEndMs,
       this.editorPartStartMs + Math.round(ratio * this.editorDurationMs),
     );
-    this.seekTimeline(this.snapToMarker(valueMs, bounds.width));
+    return snap ? this.snapToMarker(valueMs, bounds.width) : valueMs;
   }
 
   private snapToMarker(valueMs: number, trackWidth: number): number {
@@ -550,8 +630,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       : valueMs;
   }
 
-  private isMarkerTarget(target: EventTarget | null): boolean {
-    return target instanceof Element && target.closest('.marker-pin') !== null;
+  private isTimelineItemTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof Element &&
+      target.closest(
+        '.marker-pin, .draft-range, .clip-range, .selection-boundary',
+      ) !== null
+    );
   }
 
   handleTimelineKeydown(event: KeyboardEvent): void {
@@ -565,6 +650,83 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       Math.min(this.editorStableEndMs, this.playheadMs + direction * 5000),
     );
     this.seekTimeline(target);
+  }
+
+  get popoverTimeMs(): number {
+    const popover = this.timelinePopover;
+    if (popover.kind === 'point') {
+      return popover.timeMs;
+    }
+    if (popover.kind === 'boundary') {
+      return popover.boundary === 'start' ? this.startMs : this.endMs;
+    }
+    if (popover.kind === 'draft') {
+      const draft = this.selectedDraft;
+      return draft ? (draft.startMs + draft.endMs) / 2 : this.playheadMs;
+    }
+    if (popover.kind === 'clip') {
+      const clip = this.selectedTimelineClip;
+      return clip
+        ? (clip.requestedStartMs + clip.requestedEndMs) / 2
+        : this.playheadMs;
+    }
+    return this.playheadMs;
+  }
+
+  popoverTransform(valueMs: number): string {
+    const percent = this.positionPercent(valueMs);
+    if (percent < 14) {
+      return 'translateX(0)';
+    }
+    if (percent > 86) {
+      return 'translateX(-100%)';
+    }
+    return 'translateX(-50%)';
+  }
+
+  togglePlayback(): void {
+    if (!this.videoElement) {
+      return;
+    }
+    this.timelinePopover = { kind: 'none' };
+    if (this.videoElement.paused) {
+      void this.videoElement.play().catch(() => undefined);
+    } else {
+      this.videoElement.pause();
+    }
+  }
+
+  handleMediaPlay(): void {
+    this.isPlaying = true;
+  }
+
+  handleMediaPause(): void {
+    this.isPlaying = false;
+  }
+
+  toggleMute(): void {
+    if (!this.videoElement) {
+      return;
+    }
+    this.videoElement.muted = !this.videoElement.muted;
+    this.isMuted = this.videoElement.muted;
+  }
+
+  setVolume(value: number | string): void {
+    if (!this.videoElement) {
+      return;
+    }
+    const volume = Math.max(0, Math.min(1, Number(value)));
+    if (!Number.isFinite(volume)) {
+      return;
+    }
+    this.videoElement.volume = volume;
+    this.videoElement.muted = volume === 0;
+    this.isMuted = this.videoElement.muted;
+  }
+
+  toggleFullscreen(): void {
+    void this.videoElement?.requestFullscreen?.().catch(() => undefined);
   }
 
   openClipSubmission(clip: HighlightClip): void {
@@ -867,10 +1029,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     );
   }
 
-  partWidthPercent(part: HighlightTimelinePart): number {
-    return Math.min(100, (part.durationMs / this.editorDurationMs) * 100);
-  }
-
   trackClip(_index: number, clip: HighlightClip): number {
     return clip.id;
   }
@@ -881,10 +1039,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   trackMarker(_index: number, item: MappedHighlight): number {
     return item.marker.id;
-  }
-
-  trackPart(_index: number, part: HighlightTimelinePart): number {
-    return part.partId;
   }
 
   draftError(draft: HighlightClipDraft): string | null {
@@ -925,6 +1079,105 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       : '';
   }
 
+  private beginBoundarySelection(markerId: number | null = null): void {
+    this.editingDraftId = null;
+    this.sourceClipId = null;
+    this.selectedMarkerId = markerId;
+    this.selectionActive = true;
+    this.startBoundarySet = false;
+    this.endBoundarySet = false;
+    this.clipName = '';
+  }
+
+  private finishSelectionIfReady(): void {
+    if (!this.hasCompleteSelection) {
+      return;
+    }
+    if (this.selectionError !== null) {
+      this.actionError = this.selectionError;
+      return;
+    }
+    this.addDraft();
+  }
+
+  private makeDraft(
+    markerId: number | null,
+    name: string,
+    startMs: number,
+    endMs: number,
+  ): HighlightClipDraft {
+    return {
+      id: this.nextDraftId++,
+      markerId,
+      name:
+        name.trim() ||
+        `高光片段 ${this.formatTime(startMs - this.editorPartStartMs)}`,
+      startMs,
+      endMs,
+      inspection: null,
+      state: 'idle',
+      error: null,
+    };
+  }
+
+  private syncSelectedDraft(): void {
+    const draft = this.selectedDraft;
+    if (!draft || !this.hasCompleteSelection) {
+      return;
+    }
+    const name = this.clipName.trim() || draft.name;
+    const changed =
+      draft.markerId !== this.selectedMarkerId ||
+      draft.name !== name ||
+      draft.startMs !== this.startMs ||
+      draft.endMs !== this.endMs;
+    if (!changed) {
+      return;
+    }
+    draft.markerId = this.selectedMarkerId;
+    draft.name = name;
+    draft.startMs = this.startMs;
+    draft.endMs = this.endMs;
+    this.updateDraft(draft);
+    this.drafts = [...this.drafts];
+  }
+
+  private resetWorkingSelection(): void {
+    this.editingDraftId = null;
+    this.sourceClipId = null;
+    this.selectedMarkerId = null;
+    this.selectionActive = false;
+    this.startBoundarySet = false;
+    this.endBoundarySet = false;
+    this.clipName = '';
+    this.timelinePopover = { kind: 'none' };
+  }
+
+  private prepareForTimelinePoint(markerId: number | null): void {
+    const hasUnfinishedBoundary =
+      this.selectionActive &&
+      this.editingDraftId === null &&
+      this.startBoundarySet !== this.endBoundarySet;
+    if (hasUnfinishedBoundary) {
+      if (markerId !== null) {
+        this.selectedMarkerId = markerId;
+      }
+      this.sourceClipId = null;
+      this.timelinePopover = { kind: 'none' };
+      return;
+    }
+    this.clearTimelineSelection();
+  }
+
+  private showPointActions(timeMs: number, markerId: number | null): void {
+    this.timelinePopover = { kind: 'point', timeMs, markerId };
+  }
+
+  private pausePlayback(): void {
+    this.videoElement?.pause();
+    this.isPlaying = false;
+  }
+
   private persistDraft(
     draft: HighlightClipDraft,
     confirmKeyframe: boolean,
@@ -946,7 +1199,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             this.clips = [...this.clips, clip];
             this.drafts = this.drafts.filter((item) => item.id !== draft.id);
             if (this.editingDraftId === draft.id) {
-              this.editingDraftId = null;
+              this.resetWorkingSelection();
             }
             this.changeDetector.markForCheck();
           },
@@ -1156,31 +1409,6 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     } catch (_error) {
       // Metadata may not be ready yet; loadedmetadata will retry.
     }
-  }
-
-  setBoundaryFromLocalSeconds(
-    boundary: 'start' | 'end',
-    value: number | string,
-  ): void {
-    const seconds = Number(value);
-    if (!Number.isFinite(seconds)) {
-      return;
-    }
-    this.selectionActive = true;
-    const absoluteMs = this.editorPartStartMs + Math.round(seconds * 1000);
-    if (boundary === 'start') {
-      this.startMs = Math.max(
-        this.editorPartStartMs,
-        Math.min(this.endMs - 1000, absoluteMs),
-      );
-    } else {
-      this.endMs = Math.min(
-        this.editorStableEndMs,
-        Math.max(this.startMs + 1000, absoluteMs),
-      );
-    }
-    this.selectionChanged();
-    this.previewBoundary(boundary);
   }
 
   private previewBoundary(boundary: 'start' | 'end'): void {
