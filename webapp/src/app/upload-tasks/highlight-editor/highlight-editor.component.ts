@@ -108,6 +108,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   private videoElement: HTMLVideoElement | null = null;
   private editorWorkbenchElement: HTMLElement | null = null;
+  private timelineTrackElement: HTMLElement | null = null;
   private player: PartPlayer | null = null;
   private pendingSeekSeconds: number | null = null;
   private mediaRequest?: Subscription;
@@ -149,6 +150,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   @ViewChild('editorWorkbench')
   set editorWorkbenchRef(value: ElementRef<HTMLElement> | undefined) {
     this.editorWorkbenchElement = value?.nativeElement ?? null;
+  }
+
+  @ViewChild('timelineTrack')
+  set timelineTrackRef(value: ElementRef<HTMLElement> | undefined) {
+    this.timelineTrackElement = value?.nativeElement ?? null;
   }
 
   get clip(): HighlightClip | null {
@@ -299,13 +305,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (this.selectedDraftLocked) {
       return;
     }
+    const startMs = Math.round(this.playheadMs);
+    const error = this.boundaryCandidateError('start', startMs);
+    if (error !== null) {
+      this.actionError = error;
+      return;
+    }
     if (!this.selectionActive) {
       this.beginBoundarySelection();
-    }
-    const startMs = Math.round(this.playheadMs);
-    if (this.endBoundarySet && startMs >= this.endMs) {
-      this.actionError = '开始位置必须早于结束位置';
-      return;
     }
     this.startMs = startMs;
     this.startBoundarySet = true;
@@ -318,13 +325,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (this.selectedDraftLocked) {
       return;
     }
+    const endMs = Math.round(this.playheadMs);
+    const error = this.boundaryCandidateError('end', endMs);
+    if (error !== null) {
+      this.actionError = error;
+      return;
+    }
     if (!this.selectionActive) {
       this.beginBoundarySelection();
-    }
-    const endMs = Math.round(this.playheadMs);
-    if (this.startBoundarySet && endMs <= this.startMs) {
-      this.actionError = '结束位置必须晚于开始位置';
-      return;
     }
     this.endMs = endMs;
     this.endBoundarySet = true;
@@ -344,25 +352,16 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.selectionActive = true;
     const deltaMs = Math.round(seconds * 1000);
+    const candidate =
+      boundary === 'start' ? this.startMs + deltaMs : this.endMs + deltaMs;
+    const error = this.boundaryCandidateError(boundary, candidate);
+    if (error !== null) {
+      this.actionError = error;
+      return;
+    }
     if (boundary === 'start') {
-      const candidate = Math.max(
-        this.editorPartStartMs,
-        Math.min(this.editorStableEndMs, this.startMs + deltaMs),
-      );
-      if (this.endBoundarySet && candidate >= this.endMs) {
-        this.actionError = '开始位置必须早于结束位置';
-        return;
-      }
       this.startMs = candidate;
     } else {
-      const candidate = Math.max(
-        this.editorPartStartMs,
-        Math.min(this.editorStableEndMs, this.endMs + deltaMs),
-      );
-      if (this.startBoundarySet && candidate <= this.startMs) {
-        this.actionError = '结束位置必须晚于开始位置';
-        return;
-      }
       this.endMs = candidate;
     }
     this.actionError = null;
@@ -375,9 +374,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (draft.state === 'inspecting' || draft.state === 'creating') {
       return;
     }
-    if (this.editingDraftId !== draft.id) {
+    if (this.editingDraftId === draft.id) {
       this.syncSelectedDraft();
+      this.timelinePopover = { kind: 'draft', draftId: draft.id };
+      this.previewBoundary('start');
+      return;
     }
+    this.syncSelectedDraft();
     this.editingDraftId = draft.id;
     this.selectionActive = true;
     this.startBoundarySet = true;
@@ -491,6 +494,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (!draft) {
       return;
     }
+    if (!this.clipName.trim()) {
+      this.actionError = '请输入片段名称';
+      return;
+    }
     this.syncSelectedDraft();
     this.createDraft(draft);
   }
@@ -529,6 +536,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   confirmDraft(draft: HighlightClipDraft): void {
     if (draft.state !== 'confirmation') {
+      return;
+    }
+    if (!this.clipName.trim()) {
+      this.actionError = '请输入片段名称';
       return;
     }
     if (this.editingDraftId === draft.id) {
@@ -658,7 +669,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (valueMs > this.editorStableEndMs) {
       return null;
     }
-    return snap ? this.snapToMarker(valueMs, bounds.width) : valueMs;
+    if (!snap) {
+      return valueMs;
+    }
+    const snappedMs = this.snapToMarker(valueMs, bounds.width);
+    return snappedMs <= this.editorStableEndMs ? snappedMs : valueMs;
   }
 
   private snapToMarker(valueMs: number, trackWidth: number): number {
@@ -725,6 +740,16 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   popoverTransform(valueMs: number): string {
     const percent = this.positionPercent(valueMs);
+    const trackWidth = this.timelineTrackElement?.clientWidth ?? 0;
+    if (trackWidth > 0) {
+      const popoverWidth = Math.min(340, trackWidth);
+      const anchor = (percent / 100) * trackWidth;
+      const left = Math.max(
+        0,
+        Math.min(trackWidth - popoverWidth, anchor - popoverWidth / 2),
+      );
+      return `translateX(${Math.round(left - anchor)}px)`;
+    }
     if (percent < 14) {
       return 'translateX(0)';
     }
@@ -983,6 +1008,24 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
               ),
             };
           }
+          for (const draft of this.drafts) {
+            if (draft.markerId === markerId) {
+              draft.markerId = null;
+            }
+          }
+          this.drafts = [...this.drafts];
+          this.clips = this.clips.map((clip) =>
+            clip.markerId === markerId ? { ...clip, markerId: null } : clip,
+          );
+          if (
+            this.timelinePopover.kind === 'point' &&
+            this.timelinePopover.markerId === markerId
+          ) {
+            this.timelinePopover = {
+              ...this.timelinePopover,
+              markerId: null,
+            };
+          }
           if (this.selectedMarkerId === markerId) {
             this.selectedMarkerId = null;
           }
@@ -1174,7 +1217,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   private syncSelectedDraft(): void {
     const draft = this.selectedDraft;
-    if (!draft || !this.hasCompleteSelection) {
+    if (!draft || !this.hasCompleteSelection || this.selectionError !== null) {
       return;
     }
     const name = this.clipName.trim() || draft.name;
@@ -1193,6 +1236,36 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.updateDraft(draft);
     }
     this.drafts = [...this.drafts];
+  }
+
+  private boundaryCandidateError(
+    boundary: 'start' | 'end',
+    candidateMs: number,
+  ): string | null {
+    if (
+      candidateMs < this.editorPartStartMs ||
+      candidateMs > this.editorPartEndMs
+    ) {
+      return '片段只能位于当前分 P 内';
+    }
+    if (candidateMs > this.editorStableEndMs) {
+      return '该位置仍在录制安全区之外，请稍后再试';
+    }
+    if (
+      boundary === 'start' &&
+      this.endBoundarySet &&
+      candidateMs >= this.endMs
+    ) {
+      return '开始位置必须早于结束位置';
+    }
+    if (
+      boundary === 'end' &&
+      this.startBoundarySet &&
+      candidateMs <= this.startMs
+    ) {
+      return '结束位置必须晚于开始位置';
+    }
+    return null;
   }
 
   private resetWorkingSelection(): void {

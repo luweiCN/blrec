@@ -374,6 +374,47 @@ describe('HighlightEditorComponent', () => {
     expect(component.timelinePopover.kind).toBe('none');
   });
 
+  it('does not snap a stable pointer position to an unstable highpoint', () => {
+    component.timeline = {
+      ...timeline,
+      markers: [
+        {
+          ...timeline.markers[0],
+          localOffsetMs: 81_000,
+          timelineOffsetMs: 171_000,
+        },
+      ],
+    };
+    component.selectPart(timeline.parts[1]);
+    const track = fixture.nativeElement.querySelector(
+      '.timeline-track',
+    ) as HTMLElement;
+    spyOn(track, 'getBoundingClientRect').and.returnValue({
+      left: 0,
+      width: 180,
+      right: 180,
+      top: 0,
+      bottom: 54,
+      height: 54,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    component.startTimelineDrag(
+      {
+        button: 0,
+        pointerId: 4,
+        clientX: 156,
+        target: track,
+        preventDefault: jasmine.createSpy('preventDefault'),
+      } as unknown as PointerEvent,
+      track,
+    );
+
+    expect(component.playheadMs).toBe(168_000);
+  });
+
   it('adjusts the selected boundaries in whole seconds', () => {
     component.startMs = 10_000;
     component.endMs = 20_000;
@@ -424,6 +465,36 @@ describe('HighlightEditorComponent', () => {
     expect(component.actionError).toBe('开始位置必须早于结束位置');
   });
 
+  it('does not overwrite a valid draft with an unstable playback position', () => {
+    component.selectPart(timeline.parts[1]);
+    component.playheadMs = 110_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 120_000;
+    component.setSelectionEndFromPlayhead();
+    const draft = component.drafts[0];
+
+    component.playheadMs = 175_000;
+    component.setSelectionEndFromPlayhead();
+    component.clearTimelineSelection();
+
+    expect(draft.endMs).toBe(120_000);
+    expect(component.actionError).toBe('该位置仍在录制安全区之外，请稍后再试');
+  });
+
+  it('reports an adjustment beyond the stable endpoint instead of clamping', () => {
+    component.selectPart(timeline.parts[1]);
+    component.startMs = 160_000;
+    component.endMs = 170_000;
+    component.selectionActive = true;
+    component.startBoundarySet = true;
+    component.endBoundarySet = true;
+
+    component.adjustSelection('end', 1);
+
+    expect(component.endMs).toBe(170_000);
+    expect(component.actionError).toBe('该位置仍在录制安全区之外，请稍后再试');
+  });
+
   it('keeps the selected P when previewing its exact end boundary', () => {
     component.startMs = 80_000;
     component.endMs = 89_000;
@@ -471,6 +542,9 @@ describe('HighlightEditorComponent', () => {
     ) as HTMLVideoElement;
 
     expect(video.hasAttribute('controls')).toBeFalse();
+    expect(
+      fixture.nativeElement.querySelectorAll('.timeline-track').length,
+    ).toBe(1);
     expect(
       fixture.nativeElement.querySelector('.timeline-capture-actions'),
     ).not.toBeNull();
@@ -589,6 +663,34 @@ describe('HighlightEditorComponent', () => {
     expect(component.drafts[1].startMs).toBe(30_000);
   });
 
+  it('shows handles only for the pending range clicked in the timeline', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    const first = component.drafts[0];
+    component.clearTimelineSelection();
+    component.playheadMs = 30_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 40_000;
+    component.setSelectionEndFromPlayhead();
+    fixture.detectChanges();
+
+    const ranges = fixture.nativeElement.querySelectorAll(
+      '.draft-range',
+    ) as NodeListOf<HTMLButtonElement>;
+    ranges[0].click();
+    fixture.detectChanges();
+
+    expect(component.editingDraftId).toBe(first.id);
+    expect(
+      fixture.nativeElement.querySelectorAll('.draft-range.active').length,
+    ).toBe(1);
+    expect(
+      fixture.nativeElement.querySelectorAll('.selection-boundary').length,
+    ).toBe(2);
+  });
+
   it('persists a pending range name before selecting another range', () => {
     component.playheadMs = 10_000;
     component.setSelectionStartFromPlayhead();
@@ -608,6 +710,20 @@ describe('HighlightEditorComponent', () => {
 
     expect(component.drafts[0].name).toBe('重新命名的片段');
     expect(component.editingDraftId).toBe(second.id);
+  });
+
+  it('keeps an edited name when the selected pending range is clicked again', () => {
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    const draft = component.drafts[0];
+    component.clipName = '不要丢失的名称';
+
+    component.selectDraftForEditing(draft);
+
+    expect(component.clipName).toBe('不要丢失的名称');
+    expect(component.drafts[0].name).toBe('不要丢失的名称');
   });
 
   it('locks a pending range while it is being created', () => {
@@ -633,6 +749,13 @@ describe('HighlightEditorComponent', () => {
           '.timeline-popover input',
         ) as HTMLInputElement
       ).readOnly,
+    ).toBeTrue();
+    expect(
+      Array.from<HTMLButtonElement>(
+        fixture.nativeElement.querySelectorAll(
+          '.timeline-capture-actions button, .selection-boundary',
+        ),
+      ).every((button) => button.disabled),
     ).toBeTrue();
   });
 
@@ -775,6 +898,52 @@ describe('HighlightEditorComponent', () => {
     );
   });
 
+  it('keeps timeline item pointer events from falling through to the track', () => {
+    component.selectPart(timeline.parts[1]);
+    component.playheadMs = 110_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 120_000;
+    component.setSelectionEndFromPlayhead();
+    component.clips = [
+      {
+        ...processingClip,
+        state: 'ready',
+        requestedStartMs: 110_000,
+        requestedEndMs: 125_000,
+        actualStartMs: 110_000,
+        actualEndMs: 125_000,
+        sources: [
+          {
+            partId: 12,
+            ordinal: 0,
+            requestedStartMs: 20_000,
+            requestedEndMs: 35_000,
+            actualStartMs: 20_000,
+            actualEndMs: 35_000,
+          },
+        ],
+      },
+    ];
+    fixture.detectChanges();
+    const startDrag = spyOn(component, 'startTimelineDrag');
+    const items = fixture.nativeElement.querySelectorAll(
+      '.draft-range, .clip-range, .selection-boundary',
+    ) as NodeListOf<HTMLElement>;
+
+    items.forEach((item, index) =>
+      item.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerId: index + 10,
+        }),
+      ),
+    );
+
+    expect(items.length).toBe(4);
+    expect(startDrag).not.toHaveBeenCalled();
+  });
+
   it('copies a green created clip into a new blue pending range', () => {
     const readyClip: HighlightClip = {
       ...processingClip,
@@ -896,6 +1065,11 @@ describe('HighlightEditorComponent', () => {
     ).find((button) => button.textContent?.trim() === '创建片段');
 
     expect(create?.disabled).toBeTrue();
+
+    component.createSelectedDraft();
+
+    expect(highlights.inspectClip).not.toHaveBeenCalled();
+    expect(component.actionError).toBe('请输入片段名称');
   });
 
   it('shows marker editing only while the marker point itself is selected', () => {
@@ -912,6 +1086,37 @@ describe('HighlightEditorComponent', () => {
     };
 
     expect(component.selectedTimelineMarker).toBeNull();
+  });
+
+  it('clicks a highpoint at its exact time without starting a track drag', () => {
+    component.selectPart(timeline.parts[1]);
+    fixture.detectChanges();
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    const pause = spyOn(video, 'pause');
+    const startDrag = spyOn(component, 'startTimelineDrag');
+    const marker = fixture.nativeElement.querySelector(
+      '.marker-pin',
+    ) as HTMLButtonElement;
+
+    marker.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerId: 3,
+      }),
+    );
+    marker.click();
+
+    expect(startDrag).not.toHaveBeenCalled();
+    expect(pause).toHaveBeenCalled();
+    expect(component.playheadMs).toBe(115_000);
+    expect(component.timelinePopover).toEqual({
+      kind: 'point',
+      timeMs: 115_000,
+      markerId: 7,
+    });
   });
 
   it('keeps the valid boundary when the other endpoint is invalid', () => {
@@ -1004,6 +1209,18 @@ describe('HighlightEditorComponent', () => {
     expect(requestFullscreen).toHaveBeenCalled();
   });
 
+  it('keeps the timeline popover inside a narrow editor', () => {
+    const track = fixture.nativeElement.querySelector(
+      '.timeline-track',
+    ) as HTMLElement;
+    Object.defineProperty(track, 'clientWidth', {
+      configurable: true,
+      value: 300,
+    });
+
+    expect(component.popoverTransform(18_000)).toBe('translateX(-60px)');
+  });
+
   it('cancels only the selected pending range', () => {
     component.playheadMs = 10_000;
     component.setSelectionStartFromPlayhead();
@@ -1054,6 +1271,12 @@ describe('HighlightEditorComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('实际会从 00:00 开始');
     expect(fixture.nativeElement.textContent).not.toContain('检查裁剪范围');
     expect(highlights.createClip).not.toHaveBeenCalled();
+
+    component.clipName = '';
+    component.confirmDraft(draft);
+
+    expect(highlights.createClip).not.toHaveBeenCalled();
+    expect(component.actionError).toBe('请输入片段名称');
 
     component.clipName = '重命名片段';
     component.confirmDraft(draft);
@@ -1195,6 +1418,60 @@ describe('HighlightEditorComponent', () => {
     component.deleteMarker(timeline.markers[0]);
     expect(highlights.deleteMarker).toHaveBeenCalledOnceWith(7);
     expect(component.timeline?.markers.length).toBe(0);
+  });
+
+  it('removes a deleted marker from pending and created clip associations', () => {
+    component.selectPart(timeline.parts[1]);
+    component.selectMarker(timeline.markers[0]);
+    component.setPointAsBoundary('start');
+    component.playheadMs = 130_000;
+    component.setSelectionEndFromPlayhead();
+    component.clips = [
+      {
+        ...processingClip,
+        markerId: 7,
+        state: 'ready',
+        requestedStartMs: 115_000,
+        requestedEndMs: 130_000,
+        actualStartMs: 115_000,
+        actualEndMs: 130_000,
+        sources: [
+          {
+            partId: 12,
+            ordinal: 0,
+            requestedStartMs: 25_000,
+            requestedEndMs: 40_000,
+            actualStartMs: 25_000,
+            actualEndMs: 40_000,
+          },
+        ],
+      },
+    ];
+
+    component.deleteMarker(timeline.markers[0]);
+
+    expect(component.drafts[0].markerId).toBeNull();
+    expect(component.clips[0].markerId).toBeNull();
+    expect(component.selectedMarkerId).toBeNull();
+  });
+
+  it('does not reuse a deleted highpoint from its open timeline popover', () => {
+    component.selectPart(timeline.parts[1]);
+    component.selectMarker(timeline.markers[0]);
+
+    component.deleteMarker(timeline.markers[0]);
+
+    expect(component.timelinePopover).toEqual({
+      kind: 'point',
+      timeMs: 115_000,
+      markerId: null,
+    });
+
+    component.setPointAsBoundary('start');
+    component.playheadMs = 130_000;
+    component.setSelectionEndFromPlayhead();
+
+    expect(component.drafts[0].markerId).toBeNull();
   });
 
   it('destroys the FLV player with the page', () => {

@@ -100,10 +100,18 @@
             >点击或拖动时间轴后，可就地设置片段边界</span
           >
           <div class="timeline-capture-actions">
-            <button type="button" (click)="setSelectionStartFromPlayhead()">
+            <button
+              type="button"
+              [disabled]="selectedDraftLocked"
+              (click)="setSelectionStartFromPlayhead()"
+            >
               设为开始
             </button>
-            <button type="button" (click)="setSelectionEndFromPlayhead()">
+            <button
+              type="button"
+              [disabled]="selectedDraftLocked"
+              (click)="setSelectionEndFromPlayhead()"
+            >
               设为结束
             </button>
           </div>
@@ -168,6 +176,7 @@
               class="selection-boundary start-boundary"
               [style.left.%]="positionPercent(startMs)"
               aria-label="调整片段开始位置"
+              [disabled]="selectedDraftLocked"
               (pointerdown)="$event.stopPropagation()"
               (click)="$event.stopPropagation(); showBoundaryActions('start')"
             ></button>
@@ -177,6 +186,7 @@
               class="selection-boundary end-boundary"
               [style.left.%]="positionPercent(endMs)"
               aria-label="调整片段结束位置"
+              [disabled]="selectedDraftLocked"
               (pointerdown)="$event.stopPropagation()"
               (click)="$event.stopPropagation(); showBoundaryActions('end')"
             ></button>
@@ -390,6 +400,7 @@
                   *ngIf="draft.state === 'confirmation'"
                   type="button"
                   class="primary-button"
+                  [disabled]="!clipName.trim()"
                   (click)="confirmDraft(draft)"
                 >
                   接受并创建

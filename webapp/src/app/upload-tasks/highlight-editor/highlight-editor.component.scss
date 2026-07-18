@@ -426,7 +426,7 @@ video {
   top: 112px;
   z-index: 30;
   display: grid;
-  width: min(340px, calc(100vw - 80px));
+  width: min(340px, 100%);
   gap: 9px;
   padding: 12px;
   border: 1px solid #526177;
