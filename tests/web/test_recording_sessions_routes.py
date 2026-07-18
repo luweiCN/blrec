@@ -1,4 +1,3 @@
-import time
 from dataclasses import asdict, replace
 from io import BytesIO
 from pathlib import Path
@@ -790,9 +789,7 @@ def test_media_access_token_authorizes_range_requests_without_exposing_api_key(
 
 
 def test_recording_thumbnail_route_is_not_exposed(client: TestClient) -> None:
-    response = client.get(
-        '/api/v1/recording-sessions/parts/2/thumbnail',
-    )
+    response = client.get('/api/v1/recording-sessions/parts/2/thumbnail')
 
     assert response.status_code == 404
 

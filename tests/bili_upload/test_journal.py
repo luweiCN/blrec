@@ -83,8 +83,7 @@ async def test_list_sessions_derives_current_upload_intent(database) -> None:
     assert (await journal.list_sessions())[0].upload_intent == 'upload'
 
     await database.execute(
-        "UPDATE recording_sessions SET upload_decision='skip' WHERE id=?",
-        (session.id,),
+        "UPDATE recording_sessions SET upload_decision='skip' WHERE id=?", (session.id,)
     )
     assert (await journal.list_sessions())[0].upload_intent == 'skip'
 
