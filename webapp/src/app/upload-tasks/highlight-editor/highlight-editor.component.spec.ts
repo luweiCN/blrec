@@ -1202,6 +1202,42 @@ describe('HighlightEditorComponent', () => {
     expect(component.playheadMs).toBe(10_000);
   });
 
+  it('renders hover guidance from a real mousemove event on the timeline', () => {
+    const track = fixture.nativeElement.querySelector(
+      '.timeline-track',
+    ) as HTMLElement;
+    spyOn(track, 'getBoundingClientRect').and.returnValue({
+      left: 0,
+      width: 180,
+      right: 180,
+      top: 0,
+      bottom: 92,
+      height: 92,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    track.dispatchEvent(
+      new MouseEvent('mousemove', { bubbles: true, clientX: 90 }),
+    );
+    fixture.detectChanges();
+
+    expect(component.hoverTimeMs).toBe(45_000);
+    expect(
+      fixture.nativeElement.querySelector('.hover-guide'),
+    ).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('.hover-time')?.textContent).toContain(
+      '00:45',
+    );
+
+    track.dispatchEvent(new MouseEvent('mouseleave'));
+    fixture.detectChanges();
+
+    expect(component.hoverTimeMs).toBeNull();
+    expect(fixture.nativeElement.querySelector('.hover-guide')).toBeNull();
+  });
+
   it('keeps hover guidance after a drag until the pointer leaves the track', () => {
     const track = fixture.nativeElement.querySelector(
       '.timeline-track',

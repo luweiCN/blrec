@@ -133,6 +133,8 @@
             (pointerup)="endTimelineDrag($event, timelineTrack)"
             (pointercancel)="endTimelineDrag($event, timelineTrack)"
             (pointerleave)="clearTimelineHover()"
+            (mousemove)="handleTimelineHover($event, timelineTrack)"
+            (mouseleave)="clearTimelineHover()"
             (keydown)="handleTimelineKeydown($event)"
           >
             <span class="track-base primary-lane" aria-hidden="true"></span>

@@ -560,8 +560,13 @@ async def stream_clip_media(
         'Content-Length': str(length),
     }
     if download:
+        clip = await highlight_service.get_clip(clip_id)
+        extension = path.suffix or '.mp4'
+        filename = clip.name.strip()
+        if not filename.lower().endswith(extension.lower()):
+            filename += extension
         headers['Content-Disposition'] = "attachment; filename*=UTF-8''{}".format(
-            quote(path.name)
+            quote(filename, safe='')
         )
     if response_status == status.HTTP_206_PARTIAL_CONTENT:
         headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)

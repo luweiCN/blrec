@@ -318,4 +318,7 @@ def test_ready_clip_supports_signed_byte_range_playback(
         },
     )
     assert download.status_code == 200
-    assert download.headers['content-disposition'].startswith('attachment;')
+    assert download.headers['content-disposition'] == (
+        "attachment; filename*=UTF-8''"
+        '%E7%AC%AC%E4%B8%80%E6%AE%B5%E9%AB%98%E5%85%89.mp4'
+    )

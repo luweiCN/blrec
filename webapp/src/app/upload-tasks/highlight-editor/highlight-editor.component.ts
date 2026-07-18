@@ -620,6 +620,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
   }
 
+  handleTimelineHover(event: MouseEvent, track: HTMLElement): void {
+    this.hoverTimeMs = this.pointerTimeMs(event.clientX, track, false);
+  }
+
   endTimelineDrag(event: PointerEvent, track: HTMLElement): void {
     if (event.pointerId !== this.draggingPointerId) {
       return;
