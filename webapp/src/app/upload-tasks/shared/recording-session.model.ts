@@ -315,6 +315,8 @@ export interface UploadJobProgress {
   readonly bytesPerSecond: number | null;
   readonly etaSeconds: number | null;
   readonly currentPartIndex: number | null;
+  readonly confirmedPartCount: number;
+  readonly discoveredPartCount: number;
   readonly unknownDanmakuItems: readonly DanmakuItemProgress[];
   readonly parts: readonly UploadPartProgress[];
 }

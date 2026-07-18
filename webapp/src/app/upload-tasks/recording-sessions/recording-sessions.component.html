@@ -294,7 +294,7 @@
           {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
         </td>
         <td>
-          <div>{{ session.partCount }} 个分 P</div>
+          <div>{{ recordingPartCountLabel(session) }}</div>
           <div class="secondary-text">
             {{ formatDuration(session.recordDurationSeconds) }} ·
             {{ formatBytes(session.totalFileSizeBytes) }}
@@ -516,7 +516,7 @@
           开始于 {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm:ss" }}
         </span>
         <span>录制 {{ formatDuration(session.recordDurationSeconds) }}</span>
-        <span>{{ session.partCount }} 个分 P</span>
+        <span>{{ recordingPartCountLabel(session) }}</span>
         <span>{{ formatBytes(session.totalFileSizeBytes) }}</span>
         <span>{{ session.danmakuCount }} 条弹幕</span>
       </div>

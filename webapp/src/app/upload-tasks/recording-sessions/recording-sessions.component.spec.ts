@@ -61,6 +61,30 @@ class UploadPolicyDialogStubComponent {
   @Output() readonly closed = new EventEmitter<void>();
 }
 
+function realtimeUploadJob(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    jobId: 9,
+    sessionId: 1,
+    state: 'waiting_review',
+    submitState: 'confirmed',
+    preuploadFinalized: true,
+    displayState: 'standard',
+    aid: 123,
+    bvid: 'BV1test',
+    confirmedBytes: 4,
+    totalBytes: 8,
+    percent: 50,
+    bytesPerSecond: 2,
+    etaSeconds: 2,
+    currentPartIndex: 1,
+    confirmedPartCount: 1,
+    discoveredPartCount: 1,
+    ...overrides,
+  };
+}
+
 describe('RecordingSessionsComponent', () => {
   let fixture: ComponentFixture<RecordingSessionsComponent>;
   let service: jasmine.SpyObj<RecordingSessionService>;
@@ -187,6 +211,8 @@ describe('RecordingSessionsComponent', () => {
               bytesPerSecond: 2,
               etaSeconds: 2,
               currentPartIndex: 1,
+              confirmedPartCount: 1,
+              discoveredPartCount: 1,
               unknownDanmakuItems: [
                 {
                   id: 11,
@@ -931,22 +957,11 @@ describe('RecordingSessionsComponent', () => {
       type: 'upload_progress',
       data: {
         jobs: [
-          {
-            jobId: 9,
-            sessionId: 1,
-            state: 'waiting_review',
-            submitState: 'confirmed',
-            preuploadFinalized: true,
-            displayState: 'standard',
-            aid: 123,
-            bvid: 'BV1test',
+          realtimeUploadJob({
             confirmedBytes: 6,
-            totalBytes: 8,
             percent: 75,
-            bytesPerSecond: 2,
             etaSeconds: 1,
-            currentPartIndex: 1,
-          },
+          }),
         ],
       },
     });
@@ -957,12 +972,19 @@ describe('RecordingSessionsComponent', () => {
 
   it('reloads when SSE announces a new visible preupload task', () => {
     fixture.detectChanges();
+    const existingJob = realtimeUploadJob();
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: { jobs: [existingJob] },
+    });
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
 
     realtimeEvents.next({
       type: 'upload_progress',
       data: {
         jobs: [
-          {
+          existingJob,
+          realtimeUploadJob({
             jobId: 10,
             sessionId: 2,
             state: 'waiting_artifacts',
@@ -972,12 +994,11 @@ describe('RecordingSessionsComponent', () => {
             aid: null,
             bvid: null,
             confirmedBytes: 0,
-            totalBytes: 8,
             percent: 0,
             bytesPerSecond: null,
             etaSeconds: null,
-            currentPartIndex: 1,
-          },
+            confirmedPartCount: 0,
+          }),
         ],
       },
     });
@@ -998,11 +1019,28 @@ describe('RecordingSessionsComponent', () => {
         sessions: [
           {
             ...session,
-            uploadJob: { ...session.uploadJob, preuploadFinalized: false },
+            uploadJob: {
+              ...session.uploadJob,
+              preuploadFinalized: false,
+              displayState: 'preuploaded_waiting',
+            },
           },
         ],
       },
     };
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: {
+        jobs: [
+          realtimeUploadJob({
+            preuploadFinalized: false,
+            displayState: 'preuploaded_waiting',
+          }),
+        ],
+      },
+    });
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
 
     realtimeEvents.next({ type: 'upload_progress', data: { jobs: [] } });
 
@@ -1036,6 +1074,97 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.nativeElement.textContent).toContain(
       '已预上传 1 / 1 个已封口分 P',
     );
+  });
+
+  it('updates preupload part counts from SSE without a state change', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready' || !session.uploadJob) {
+      throw new Error('expected a ready upload-task view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            uploadJob: {
+              ...session.uploadJob,
+              preuploadFinalized: false,
+              displayState: 'preuploaded_waiting',
+            },
+          },
+        ],
+      },
+    };
+    const progress = realtimeUploadJob({
+      preuploadFinalized: false,
+      displayState: 'preuploaded_waiting',
+    });
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: { jobs: [progress] },
+    });
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: {
+        jobs: [
+          realtimeUploadJob({
+            ...progress,
+            confirmedPartCount: 2,
+            discoveredPartCount: 2,
+          }),
+        ],
+      },
+    });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain(
+      '已预上传 2 / 2 个已封口分 P',
+    );
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('reloads when a paginated-out job disappears from the SSE snapshot', () => {
+    fixture.detectChanges();
+    const currentJob = realtimeUploadJob();
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: {
+        jobs: [
+          currentJob,
+          realtimeUploadJob({ jobId: 10, sessionId: 2 }),
+        ],
+      },
+    });
+    service.listSessions.calls.reset();
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: { jobs: [currentJob] },
+    });
+
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('labels open-session parts as discovered rather than final', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready upload-task view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [{ ...session, state: 'open' }],
+      },
+    };
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('1 个已发现分 P');
   });
 
   it('shows a retry action when session loading fails', () => {

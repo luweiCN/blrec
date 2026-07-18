@@ -394,6 +394,8 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'bytesPerSecond': None,
                     'etaSeconds': None,
                     'currentPartIndex': None,
+                    'confirmedPartCount': 1,
+                    'discoveredPartCount': 1,
                     'unknownDanmakuItems': [
                         {
                             'id': 11,

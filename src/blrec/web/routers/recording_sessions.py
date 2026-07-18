@@ -178,6 +178,8 @@ class UploadJobProgressResponse(ApiModel):
     bytes_per_second: Optional[float]
     eta_seconds: Optional[int]
     current_part_index: Optional[int]
+    confirmed_part_count: int
+    discovered_part_count: int
     unknown_danmaku_items: List[DanmakuItemProgressResponse]
     parts: List[UploadPartProgressResponse]
 
@@ -692,6 +694,10 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
         bytes_per_second=job.bytes_per_second,
         eta_seconds=job.eta_seconds,
         current_part_index=job.current_part_index,
+        confirmed_part_count=sum(
+            part.upload_state == 'confirmed' for part in job.parts
+        ),
+        discovered_part_count=len(job.parts),
         unknown_danmaku_items=[
             _danmaku_item_response(item) for item in job.unknown_danmaku_items
         ],

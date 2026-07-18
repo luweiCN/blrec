@@ -879,6 +879,8 @@ async def test_realtime_upload_progress_returns_active_job_bytes(database) -> No
             'bytesPerSecond': None,
             'etaSeconds': None,
             'currentPartIndex': 1,
+            'confirmedPartCount': 0,
+            'discoveredPartCount': 1,
         }
     ]
 

@@ -1527,6 +1527,10 @@ class RecordingJournalBridge:
                 'bytesPerSecond': job.bytes_per_second,
                 'etaSeconds': job.eta_seconds,
                 'currentPartIndex': job.current_part_index,
+                'confirmedPartCount': sum(
+                    part.upload_state == 'confirmed' for part in job.parts
+                ),
+                'discoveredPartCount': len(job.parts),
             }
             for job in sorted(jobs.values(), key=lambda item: item.id)
         ]

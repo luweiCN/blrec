@@ -51,6 +51,8 @@ interface RealtimeUploadJobProgress {
   readonly bytesPerSecond: number | null;
   readonly etaSeconds: number | null;
   readonly currentPartIndex: number | null;
+  readonly confirmedPartCount: number;
+  readonly discoveredPartCount: number;
 }
 
 @Component({
@@ -90,7 +92,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   taskEditJobIds: readonly number[] = [];
   submissionSession: RecordingSession | null = null;
   private realtimeSubscription?: Subscription;
-  private realtimeUploadJobIds = new Set<number>();
+  private realtimeUploadJobIds: Set<number> | null = null;
 
   readonly recordingStateOptions = [
     { label: '录制中', value: 'open' },
@@ -1016,10 +1018,13 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     if (job.preuploadFinalized) {
       return null;
     }
-    const confirmed = job.parts.filter(
-      (part) => part.uploadState === 'confirmed',
-    ).length;
-    return `已预上传 ${confirmed} / ${job.parts.length} 个已封口分 P`;
+    return `已预上传 ${job.confirmedPartCount} / ${job.discoveredPartCount} 个已封口分 P`;
+  }
+
+  recordingPartCountLabel(session: RecordingSession): string {
+    return session.state === 'open'
+      ? `${session.partCount} 个已发现分 P`
+      : `${session.partCount} 个分 P`;
   }
 
   fileName(path: string): string {
@@ -1062,20 +1067,23 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         .map((session) => session.uploadJob?.id)
         .filter((jobId): jobId is number => jobId !== undefined),
     );
-    const hasNewJob = updates.some(
-      (item) =>
-        !pageJobIds.has(item.jobId) &&
-        !this.realtimeUploadJobIds.has(item.jobId),
+    const trackedPageJobIds = new Set(
+      this.sessions
+        .filter(
+          (session) =>
+            session.uploadJob !== null &&
+            (!session.uploadJob.preuploadFinalized ||
+              session.uploadJob.state !== 'completed'),
+        )
+        .map((session) => session.uploadJob!.id),
     );
-    const hasRemovedJob = this.sessions.some(
-      (session) =>
-        session.uploadJob !== null &&
-        (!session.uploadJob.preuploadFinalized ||
-          session.uploadJob.state !== 'completed') &&
-        !nextJobIds.has(session.uploadJob.id),
-    );
+    const collectionChanged =
+      this.realtimeUploadJobIds === null
+        ? updates.some((item) => !pageJobIds.has(item.jobId)) ||
+          [...trackedPageJobIds].some((jobId) => !nextJobIds.has(jobId))
+        : !this.sameJobIds(this.realtimeUploadJobIds, nextJobIds);
     this.realtimeUploadJobIds = nextJobIds;
-    if (hasNewJob || hasRemovedJob) {
+    if (collectionChanged) {
       this.load();
       return;
     }
@@ -1111,6 +1119,8 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
           bytesPerSecond: update.bytesPerSecond,
           etaSeconds: update.etaSeconds,
           currentPartIndex: update.currentPartIndex,
+          confirmedPartCount: update.confirmedPartCount,
+          discoveredPartCount: update.discoveredPartCount,
         },
       };
     });
@@ -1140,5 +1150,11 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }
     const jobs = (data as { jobs: unknown }).jobs;
     return Array.isArray(jobs) ? (jobs as RealtimeUploadJobProgress[]) : null;
+  }
+
+  private sameJobIds(left: Set<number>, right: Set<number>): boolean {
+    return (
+      left.size === right.size && [...left].every((jobId) => right.has(jobId))
+    );
   }
 }
