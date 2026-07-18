@@ -415,6 +415,29 @@ describe('HighlightEditorComponent', () => {
     expect(component.playheadMs).toBe(168_000);
   });
 
+  it('does not carry an unstable highpoint into a later valid range', () => {
+    const unstableMarker = {
+      ...timeline.markers[0],
+      localOffsetMs: 81_000,
+      timelineOffsetMs: 171_000,
+    };
+    component.timeline = { ...timeline, markers: [unstableMarker] };
+    component.selectPart(timeline.parts[1]);
+    component.selectMarker(unstableMarker);
+
+    component.setPointAsBoundary('start');
+
+    expect(component.selectionActive).toBeFalse();
+    expect(component.startBoundarySet).toBeFalse();
+
+    component.playheadMs = 150_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 160_000;
+    component.setSelectionEndFromPlayhead();
+
+    expect(component.drafts[0].markerId).toBeNull();
+  });
+
   it('adjusts the selected boundaries in whole seconds', () => {
     component.startMs = 10_000;
     component.endMs = 20_000;

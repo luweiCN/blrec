@@ -627,6 +627,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     const point = this.timelinePopover;
+    const error = this.boundaryCandidateError(boundary, point.timeMs);
+    if (error !== null) {
+      this.actionError = error;
+      return;
+    }
     if (!this.selectionActive) {
       this.beginBoundarySelection(point.markerId);
     }
