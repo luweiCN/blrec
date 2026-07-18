@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { OverlayModule } from '@angular/cdk/overlay';
+import { CdkConnectedOverlay, OverlayModule } from '@angular/cdk/overlay';
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
@@ -1285,6 +1285,16 @@ describe('HighlightEditorComponent', () => {
     expect(getComputedStyle(clip).height).toBe(
       getComputedStyle(createdLane).height,
     );
+    const boundary = fixture.nativeElement.querySelector(
+      '.selection-boundary',
+    ) as HTMLElement;
+    const boundaryStyle = getComputedStyle(boundary);
+    const createdStyle = getComputedStyle(createdLane);
+    expect(
+      parseFloat(boundaryStyle.top) + parseFloat(boundaryStyle.height),
+    ).toBeGreaterThanOrEqual(
+      parseFloat(createdStyle.top) + parseFloat(createdStyle.height),
+    );
   });
 
   it('renders timeline actions and marker help through global overlays', () => {
@@ -1306,6 +1316,32 @@ describe('HighlightEditorComponent', () => {
       document.body.querySelector('.cdk-overlay-container .timeline-popover'),
     ).not.toBeNull();
     expect(marker.injector.get(NzTooltipDirective, null)).not.toBeNull();
+  });
+
+  it('repositions the open timeline overlay when its anchor moves', () => {
+    component.selectPart(timeline.parts[1]);
+    component.selectMarker(timeline.markers[0]);
+    fixture.detectChanges();
+    const overlay = (
+      component as unknown as {
+        timelineOverlay?: CdkConnectedOverlay;
+      }
+    ).timelineOverlay;
+    if (!overlay) {
+      throw new Error('expected a connected timeline overlay');
+    }
+    if (!overlay.overlayRef) {
+      throw new Error('expected an open timeline overlay');
+    }
+    const updatePosition = spyOn(overlay.overlayRef, 'updatePosition');
+
+    component.selectMarker({
+      ...timeline.markers[0],
+      localOffsetMs: 35_000,
+      timelineOffsetMs: 125_000,
+    });
+
+    expect(updatePosition).toHaveBeenCalled();
   });
 
   it('keeps the custom playhead synchronized with video playback', () => {

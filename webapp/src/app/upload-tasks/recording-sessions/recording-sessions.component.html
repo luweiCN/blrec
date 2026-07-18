@@ -317,6 +317,12 @@
           >
             {{ detail }}
           </div>
+          <div
+            class="secondary-text"
+            *ngIf="session.uploadJob && preuploadPartDetail(session.uploadJob) as detail"
+          >
+            {{ detail }}
+          </div>
           <div class="secondary-text" *ngIf="session.uploadJob as job">
             <ng-container
               *ngIf="job.totalBytes > 0 && job.state === 'uploading'"

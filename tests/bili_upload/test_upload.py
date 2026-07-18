@@ -613,6 +613,112 @@ async def test_preupload_restart_reuses_confirmed_part(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalized_preupload_advances_after_pending_tail_fails(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        await worker.run_once()
+
+        await database.execute(
+            "UPDATE recording_sessions SET state='closed',ended_at=960,"
+            'live_end_time=960 WHERE id=1'
+        )
+        await worker.sync_live_sessions()
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_artifacts'
+        )
+
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='failed',final_path=NULL,"
+            "error_message='尾部分 P 处理失败' WHERE id=2"
+        )
+
+        assert await worker.prepare_waiting_jobs() == [1]
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'ready'
+        )
+        await worker.run_once()
+        assert len(protocol.submit_calls) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_final_preupload_settings_pause_with_actionable_error(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        await worker.sync_live_sessions()
+        await database.execute(
+            'UPDATE room_upload_policies SET title_template=?,updated_at=2 '
+            'WHERE room_id=100',
+            ('x' * 81,),
+        )
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='failed',final_path=NULL "
+            'WHERE id=2'
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET state='closed',ended_at=960,"
+            'live_end_time=960 WHERE id=1'
+        )
+
+        await worker.sync_live_sessions()
+
+        job = await database.fetchone(
+            'SELECT state,preupload_finalized,review_reason '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'preupload_finalized': 0,
+            'review_reason': '投稿设置无法生成稿件，请检查标题、分区和标签',
+        }
+        session = await database.fetchone(
+            'SELECT upload_resolution_state,upload_resolution_error '
+            'FROM recording_sessions WHERE id=1'
+        )
+        assert session is not None
+        assert dict(session) == {
+            'upload_resolution_state': 'configuration_required',
+            'upload_resolution_error': ('投稿设置无法生成稿件，请检查标题、分区和标签'),
+        }
+
+        await database.execute(
+            "UPDATE recording_sessions SET upload_resolution_state='pending',"
+            'upload_resolution_error=NULL WHERE id=1'
+        )
+        await worker.sync_live_sessions()
+        assert (
+            await database.scalar(
+                'SELECT upload_resolution_state FROM recording_sessions WHERE id=1'
+            )
+            == 'configuration_required'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_disabling_upload_cancels_preupload_without_deleting_recording(
     tmp_path: Path,
 ) -> None:
@@ -907,6 +1013,25 @@ async def test_unstable_file_creates_waiting_job_without_starting_upload(
             == 'waiting_artifacts'
         )
         assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unstable_open_part_does_not_create_visible_preupload(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path, stable=False)
+        await make_session_open_with_one_closed_part(database)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+
+        assert await worker.sync_live_sessions() == []
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
     finally:
         await database.close()
 

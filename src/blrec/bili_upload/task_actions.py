@@ -622,8 +622,10 @@ class UploadTaskActionManager:
                 (session_id, 'manager_skipped', manager_subject, now),
             )
             connection.execute(
-                "UPDATE recording_sessions SET upload_intent='skip' WHERE id=?",
-                (session_id,),
+                "UPDATE recording_sessions SET upload_intent='skip',"
+                "upload_decision='skip',upload_resolution_state='not_requested',"
+                'upload_resolution_error=NULL,upload_resolved_at=? WHERE id=?',
+                (now, session_id),
             )
             self._audit(
                 connection,

@@ -955,6 +955,89 @@ describe('RecordingSessionsComponent', () => {
     expect(service.listSessions).toHaveBeenCalledTimes(1);
   });
 
+  it('reloads when SSE announces a new visible preupload task', () => {
+    fixture.detectChanges();
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: {
+        jobs: [
+          {
+            jobId: 10,
+            sessionId: 2,
+            state: 'waiting_artifacts',
+            submitState: 'prepared',
+            preuploadFinalized: false,
+            displayState: 'preuploading',
+            aid: null,
+            bvid: null,
+            confirmedBytes: 0,
+            totalBytes: 8,
+            percent: 0,
+            bytesPerSecond: null,
+            etaSeconds: null,
+            currentPartIndex: 1,
+          },
+        ],
+      },
+    });
+
+    expect(service.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('reloads when the current provisional task disappears from SSE', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready' || !session.uploadJob) {
+      throw new Error('expected a ready upload-task view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            uploadJob: { ...session.uploadJob, preuploadFinalized: false },
+          },
+        ],
+      },
+    };
+
+    realtimeEvents.next({ type: 'upload_progress', data: { jobs: [] } });
+
+    expect(service.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows completed and discovered part counts during preupload', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready' || !session.uploadJob) {
+      throw new Error('expected a ready upload-task view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            uploadJob: {
+              ...session.uploadJob,
+              preuploadFinalized: false,
+              displayState: 'preuploaded_waiting',
+            },
+          },
+        ],
+      },
+    };
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain(
+      '已预上传 1 / 1 个已封口分 P',
+    );
+  });
+
   it('shows a retry action when session loading fails', () => {
     service.listSessions.and.returnValue(
       throwError(() => new Error('upload database is unavailable')),

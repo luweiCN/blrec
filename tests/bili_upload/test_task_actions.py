@@ -872,6 +872,16 @@ async def test_skip_preupload_removes_confirmed_remote_state_but_keeps_files(
         assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
         assert (tmp_path / 'p11.mp4').exists()
         assert (tmp_path / 'p12.mp4').exists()
+        session = await database.fetchone(
+            'SELECT upload_intent,upload_decision,upload_resolution_state '
+            'FROM recording_sessions WHERE id=1'
+        )
+        assert session is not None
+        assert dict(session) == {
+            'upload_intent': 'skip',
+            'upload_decision': 'skip',
+            'upload_resolution_state': 'not_requested',
+        }
     finally:
         await database.close()
 

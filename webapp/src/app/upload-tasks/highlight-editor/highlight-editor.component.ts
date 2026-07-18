@@ -1,5 +1,5 @@
 import { DOCUMENT } from '@angular/common';
-import { ConnectedPosition } from '@angular/cdk/overlay';
+import { CdkConnectedOverlay, ConnectedPosition } from '@angular/cdk/overlay';
 import {
   ChangeDetectorRef,
   Component,
@@ -182,6 +182,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.editorWorkbenchElement = value?.nativeElement ?? null;
   }
 
+  @ViewChild(CdkConnectedOverlay)
+  private timelineOverlay?: CdkConnectedOverlay;
+
   get clip(): HighlightClip | null {
     return this.clips.length > 0 ? this.clips[this.clips.length - 1] : null;
   }
@@ -307,11 +310,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.selectedMarkerId = item.marker.id;
     this.seekTimeline(item.timelineOffsetMs);
     this.pausePlayback();
-    this.timelinePopover = {
+    this.setTimelinePopover({
       kind: 'point',
       timeMs: item.timelineOffsetMs,
       markerId: item.marker.id,
-    };
+    });
   }
 
   selectPart(part: HighlightTimelinePart, localOffsetMs = 0): void {
@@ -391,7 +394,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     this.actionError = null;
     this.syncSelectedDraft();
-    this.timelinePopover = { kind: 'boundary', boundary };
+    this.setTimelinePopover({ kind: 'boundary', boundary });
     this.previewBoundary(boundary);
   }
 
@@ -401,7 +404,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     if (this.editingDraftId === draft.id) {
       this.syncSelectedDraft();
-      this.timelinePopover = { kind: 'draft', draftId: draft.id };
+      this.setTimelinePopover({ kind: 'draft', draftId: draft.id });
       this.previewBoundary('start');
       return;
     }
@@ -415,7 +418,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.clipName = draft.name;
     this.startMs = draft.startMs;
     this.endMs = draft.endMs;
-    this.timelinePopover = { kind: 'draft', draftId: draft.id };
+    this.setTimelinePopover({ kind: 'draft', draftId: draft.id });
     this.previewBoundary('start');
   }
 
@@ -430,7 +433,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.clearTimelineSelection();
     this.sourceClipId = clip.id;
     this.selectedMarkerId = clip.markerId;
-    this.timelinePopover = { kind: 'clip', clipId: clip.id };
+    this.setTimelinePopover({ kind: 'clip', clipId: clip.id });
     this.pausePlayback();
     this.seekTimeline(clip.requestedStartMs);
   }
@@ -467,7 +470,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       editing.endMs = this.endMs;
       this.updateDraft(editing);
       this.drafts = [...this.drafts];
-      this.timelinePopover = { kind: 'draft', draftId: editing.id };
+      this.setTimelinePopover({ kind: 'draft', draftId: editing.id });
       return;
     }
     const draft = this.makeDraft(
@@ -480,7 +483,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.editingDraftId = draft.id;
     this.sourceClipId = null;
     this.clipName = draft.name;
-    this.timelinePopover = { kind: 'draft', draftId: draft.id };
+    this.setTimelinePopover({ kind: 'draft', draftId: draft.id });
   }
 
   updateDraft(draft: HighlightClipDraft): void {
@@ -639,7 +642,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (!this.hasCompleteSelection || this.selectedDraftLocked) {
       return;
     }
-    this.timelinePopover = { kind: 'boundary', boundary };
+    this.setTimelinePopover({ kind: 'boundary', boundary });
     this.previewBoundary(boundary);
   }
 
@@ -665,7 +668,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     const boundarySet =
       boundary === 'start' ? this.startBoundarySet : this.endBoundarySet;
     if (!this.hasCompleteSelection && boundarySet) {
-      this.timelinePopover = { kind: 'boundary', boundary };
+      this.setTimelinePopover({ kind: 'boundary', boundary });
     }
   }
 
@@ -1301,7 +1304,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private showPointActions(timeMs: number, markerId: number | null): void {
-    this.timelinePopover = { kind: 'point', timeMs, markerId };
+    this.setTimelinePopover({ kind: 'point', timeMs, markerId });
+  }
+
+  private setTimelinePopover(popover: TimelinePopover): void {
+    this.timelinePopover = popover;
+    this.changeDetector.detectChanges();
+    this.timelineOverlay?.overlayRef?.updatePosition();
   }
 
   private pausePlayback(): void {

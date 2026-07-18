@@ -309,7 +309,10 @@ video {
   top: calc(var(--primary-lane-top) - 2px);
   z-index: 13;
   width: 13px;
-  height: calc(var(--primary-lane-height) + 4px);
+  height: calc(
+    var(--created-lane-top) + var(--created-lane-height) -
+      var(--primary-lane-top) + 4px
+  );
   min-height: 0;
   padding: 0;
   transform: translateX(-50%);
@@ -320,7 +323,7 @@ video {
 
 .selection-boundary::after {
   position: absolute;
-  bottom: -19px;
+  top: calc(var(--primary-lane-height) + 5px);
   left: 50%;
   transform: translateX(-50%);
   color: #c9d7e9;

@@ -248,6 +248,8 @@ class UploadCoordinator:
             )
         ):
             return None
+        if not finalized and not await self._has_stable_ready_part(session_id):
+            return None
         settings, resolution_state, resolution_error = (
             await self._resolve_live_settings(session)
         )
@@ -517,19 +519,12 @@ class UploadCoordinator:
                 return await self._cancel_preupload_job(
                     session_id, job_id, reason='直播结束时已关闭自动投稿'
                 )
-            now = int(self._clock())
-            updated = await self._database.execute(
-                "UPDATE upload_jobs SET state='paused',review_reason=?,"
-                'lease_owner=NULL,lease_until=NULL,updated_at=? '
-                'WHERE id=? AND session_id=? AND preupload_finalized=0',
-                (resolution_error, now, job_id, session_id),
+            await self._pause_preupload_for_configuration(
+                session_id,
+                job_id,
+                resolution_state=resolution_state,
+                error=resolution_error or '投稿设置不可用，请检查本场投稿设置',
             )
-            if updated:
-                await self._database.execute(
-                    'UPDATE recording_sessions SET upload_resolution_state=?,'
-                    'upload_resolution_error=?,upload_resolved_at=? WHERE id=?',
-                    (resolution_state, resolution_error, now, session_id),
-                )
             return False
 
         resolved_settings = settings
@@ -559,6 +554,12 @@ class UploadCoordinator:
         try:
             snapshot = self._policy_snapshot(candidate, snapshot_parts)
         except InvalidUploadPolicy:
+            await self._pause_preupload_for_configuration(
+                session_id,
+                job_id,
+                resolution_state='configuration_required',
+                error='投稿设置无法生成稿件，请检查标题、分区和标签',
+            )
             return False
         snapshot_json = json.dumps(
             snapshot, ensure_ascii=False, separators=(',', ':'), sort_keys=True
@@ -733,6 +734,44 @@ class UploadCoordinator:
             )
         return finalized
 
+    async def _pause_preupload_for_configuration(
+        self, session_id: int, job_id: int, *, resolution_state: str, error: str
+    ) -> bool:
+        now = int(self._clock())
+
+        def pause(connection: sqlite3.Connection) -> bool:
+            job = connection.execute(
+                'SELECT state,review_reason FROM upload_jobs '
+                'WHERE id=? AND session_id=? AND preupload_finalized=0',
+                (job_id, session_id),
+            ).fetchone()
+            if job is None:
+                return False
+            changed = str(job['state']) != 'paused' or job['review_reason'] != error
+            if changed:
+                connection.execute(
+                    "UPDATE upload_jobs SET state='paused',review_reason=?,"
+                    'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
+                    (error, now, job_id),
+                )
+            connection.execute(
+                'UPDATE recording_sessions SET upload_resolution_state=?,'
+                'upload_resolution_error=?,upload_resolved_at=? WHERE id=?',
+                (resolution_state, error, now, session_id),
+            )
+            return changed
+
+        paused = await self._database.write(pause)
+        if paused:
+            audit(
+                'upload_preupload_configuration_required',
+                level='WARNING',
+                job_id=job_id,
+                session_id=session_id,
+                error=error,
+            )
+        return paused
+
     async def _cancel_preupload_job(
         self, session_id: int, job_id: int, *, reason: str
     ) -> bool:
@@ -787,6 +826,7 @@ class UploadCoordinator:
         )
         if job is None:
             return False
+        finalized = bool(job['preupload_finalized'])
         job_session_id = int(job['session_id'])
         try:
             snapshot = json.loads(str(job['policy_snapshot_json']))
@@ -800,7 +840,7 @@ class UploadCoordinator:
             "WHERE session_id=? AND artifact_state='ready' ORDER BY part_index",
             (job_session_id,),
         )
-        if not rows:
+        if not rows and not finalized:
             return False
         existing_rows = await self._database.fetchall(
             'SELECT part_index FROM upload_parts WHERE job_id=?', (job_id,)
@@ -836,11 +876,10 @@ class UploadCoordinator:
                     identity=identity,
                 )
             )
-        if not parts:
+        if not parts and not finalized:
             return False
         now = int(self._clock())
         danmaku_backfill = bool(snapshot.get('danmaku_backfill'))
-        finalized = bool(job['preupload_finalized'])
 
         def prepare(connection: sqlite3.Connection) -> bool:
             current = connection.execute(
@@ -918,6 +957,15 @@ class UploadCoordinator:
                 ).fetchone()
                 if pending_artifact is not None or missing_ready is not None:
                     next_state = 'waiting_artifacts'
+                part_count = int(
+                    connection.execute(
+                        'SELECT COUNT(*) FROM upload_parts WHERE job_id=?', (job_id,)
+                    ).fetchone()[0]
+                )
+                if part_count == 0:
+                    next_state = 'waiting_artifacts'
+            if not parts and next_state == 'waiting_artifacts':
+                return False
             connection.execute(
                 'UPDATE upload_jobs SET state=?,updated_at=? WHERE id=?',
                 (next_state, now, job_id),
@@ -934,6 +982,26 @@ class UploadCoordinator:
                 preupload=not finalized,
             )
         return prepared
+
+    async def _has_stable_ready_part(self, session_id: int) -> bool:
+        rows = await self._database.fetchall(
+            'SELECT final_path FROM recording_parts '
+            "WHERE session_id=? AND artifact_state='ready' ORDER BY part_index",
+            (session_id,),
+        )
+        stable_before_ns = int(
+            (self._clock() - self._stability_seconds) * 1_000_000_000
+        )
+        for row in rows:
+            if row['final_path'] is None:
+                continue
+            try:
+                identity = await self._file_identity(str(row['final_path']))
+            except OSError:
+                continue
+            if identity.mtime_ns <= stable_before_ns:
+                return True
+        return False
 
     async def _resolved_account(
         self, command: RoomUploadPolicyCommand

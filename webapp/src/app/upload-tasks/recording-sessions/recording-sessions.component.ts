@@ -90,6 +90,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   taskEditJobIds: readonly number[] = [];
   submissionSession: RecordingSession | null = null;
   private realtimeSubscription?: Subscription;
+  private realtimeUploadJobIds = new Set<number>();
 
   readonly recordingStateOptions = [
     { label: '录制中', value: 'open' },
@@ -1011,6 +1012,16 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       : `${this.formatBytes(bytesPerSecond)}/s`;
   }
 
+  preuploadPartDetail(job: UploadJobProgress): string | null {
+    if (job.preuploadFinalized) {
+      return null;
+    }
+    const confirmed = job.parts.filter(
+      (part) => part.uploadState === 'confirmed',
+    ).length;
+    return `已预上传 ${confirmed} / ${job.parts.length} 个已封口分 P`;
+  }
+
   fileName(path: string): string {
     const segments = path.split(/[\\/]/).filter(Boolean);
     return segments[segments.length - 1] ?? path;
@@ -1045,6 +1056,29 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       return;
     }
     const byJobId = new Map(updates.map((item) => [item.jobId, item]));
+    const nextJobIds = new Set(byJobId.keys());
+    const pageJobIds = new Set(
+      this.sessions
+        .map((session) => session.uploadJob?.id)
+        .filter((jobId): jobId is number => jobId !== undefined),
+    );
+    const hasNewJob = updates.some(
+      (item) =>
+        !pageJobIds.has(item.jobId) &&
+        !this.realtimeUploadJobIds.has(item.jobId),
+    );
+    const hasRemovedJob = this.sessions.some(
+      (session) =>
+        session.uploadJob !== null &&
+        (!session.uploadJob.preuploadFinalized ||
+          session.uploadJob.state !== 'completed') &&
+        !nextJobIds.has(session.uploadJob.id),
+    );
+    this.realtimeUploadJobIds = nextJobIds;
+    if (hasNewJob || hasRemovedJob) {
+      this.load();
+      return;
+    }
     let stateChanged = false;
     let changed = false;
     const sessions = this.view.response.sessions.map((session) => {
