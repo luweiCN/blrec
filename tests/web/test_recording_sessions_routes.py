@@ -454,6 +454,44 @@ def test_list_recording_sessions_returns_redacted_part_state(
     assert 'token' not in response.text.lower()
 
 
+def test_highlight_upload_uses_the_final_submission_title() -> None:
+    session = RecordingSession(
+        id=2,
+        room_id=100,
+        broadcast_session_key='highlight:7',
+        live_start_time=900,
+        state='closed',
+        started_at=900,
+        ended_at=1_000,
+        title='本地片段名称',
+        source_kind='highlight',
+    )
+    job = UploadJobProgress(
+        id=9,
+        session_id=2,
+        account_id=7,
+        account_uid=42,
+        account_display_name='投稿账号',
+        state='ready',
+        submit_state='prepared',
+        comment_branch_state='disabled',
+        danmaku_branch_state='disabled',
+        aid=None,
+        bvid=None,
+        review_reason=None,
+        attempt=0,
+        next_attempt_at=0,
+        created_at=1_000,
+        updated_at=1_000,
+        parts=(),
+        title='最终投稿标题',
+    )
+
+    response = recording_sessions._session_response(session, job)
+
+    assert response.title == '最终投稿标题'
+
+
 @pytest.mark.asyncio
 async def test_preupload_session_keeps_submission_settings_editable() -> None:
     journal = FakeJournal()

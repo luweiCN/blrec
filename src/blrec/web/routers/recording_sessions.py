@@ -719,7 +719,13 @@ def _session_response(
         state=session.state,
         started_at=session.started_at,
         ended_at=session.ended_at,
-        title=session.title,
+        title=(
+            upload_job.title
+            if session.source_kind == 'highlight'
+            and upload_job is not None
+            and upload_job.title
+            else session.title
+        ),
         cover_url=session.cover_url,
         cover_path=session.cover_path,
         anchor_uid=session.anchor_uid,

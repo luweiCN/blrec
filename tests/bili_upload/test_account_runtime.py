@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -439,9 +440,7 @@ async def test_session_action_maps_manual_danmaku_backfill_to_job_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_highlight_upload_task_pauses_worker_around_draft_creation() -> (
-    None
-):
+async def test_create_highlight_upload_task_does_not_interrupt_active_upload() -> None:
     calls = []
     runtime = object.__new__(BiliAccountRuntime)
     runtime._session_action_lock = asyncio.Lock()
@@ -479,17 +478,24 @@ async def test_create_highlight_upload_task_pauses_worker_around_draft_creation(
         side_effect=lambda: calls.append(('start', None))
     )
 
-    settings = default_room_upload_policy()
+    settings = replace(
+        default_room_upload_policy(),
+        title_template='最终投稿标题',
+        part_title_template='不应保留的分 P 模板',
+        retention_mode='submitted',
+        retention_days=5,
+    )
     job_id = await runtime.create_highlight_upload_task(
         3, settings=settings, manager_subject='administrator'
     )
 
     assert job_id == 9
-    assert calls == [
-        ('stop', None),
-        ('session', 3),
-        ('settings', 12),
-        ('job', 12),
-        ('start', None),
-    ]
-    runtime._policy_manager.validate.assert_awaited_once_with(100, settings)
+    assert calls == [('session', 3), ('settings', 12), ('job', 12)]
+    normalized = runtime._session_submission_manager.save_override.await_args.args[1]
+    assert normalized.title_template == '最终投稿标题'
+    assert normalized.part_title_template == '最终投稿标题'
+    assert normalized.retention_mode == 'never'
+    assert normalized.retention_days == 0
+    runtime._policy_manager.validate.assert_awaited_once_with(100, normalized)
+    runtime._stop_upload_worker.assert_not_awaited()
+    runtime._start_upload_worker.assert_not_awaited()

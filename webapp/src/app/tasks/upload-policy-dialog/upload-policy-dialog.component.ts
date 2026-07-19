@@ -120,8 +120,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   @Input() deferredSave = false;
   @Output() closed = new EventEmitter<void>();
   @Output() saved = new EventEmitter<void>();
-  @Output() settingsConfirmed =
-    new EventEmitter<RoomUploadPolicyRequest>();
+  @Output() settingsConfirmed = new EventEmitter<RoomUploadPolicyRequest>();
 
   visible = true;
   loading = true;
@@ -194,7 +193,8 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
           if (this.sessionId === null) {
             this.existingPolicy = policy !== null;
           }
-          this.draft = policy ? this.fromPolicy(policy) : this.newDraft();
+          const draft = policy ? this.fromPolicy(policy) : this.newDraft();
+          this.draft = this.deferredSave ? this.highlightDraft(draft) : draft;
           this.syncDependentControls();
           this.loading = false;
           this.loadCategories();
@@ -396,6 +396,17 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   coverFileSelected(event: Event): void {
+    this.uploadCoverFile(event, 'manuscript');
+  }
+
+  collectionCoverFileSelected(event: Event): void {
+    this.uploadCoverFile(event, 'collection');
+  }
+
+  private uploadCoverFile(
+    event: Event,
+    target: 'manuscript' | 'collection',
+  ): void {
     const input = event.target as HTMLInputElement;
     const file = input.files?.item(0) ?? null;
     input.value = '';
@@ -403,12 +414,21 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       return;
     }
     if (file.size > 2 * 1024 * 1024) {
-      this.coverError = '封面不能超过 2 MiB。';
+      const message = '封面不能超过 2 MiB。';
+      if (target === 'collection') {
+        this.newCollectionError = message;
+      } else {
+        this.coverError = message;
+      }
       this.changeDetector.markForCheck();
       return;
     }
     this.coverUploading = true;
-    this.coverError = null;
+    if (target === 'collection') {
+      this.newCollectionError = null;
+    } else {
+      this.coverError = null;
+    }
     this.policyService
       .uploadCover(file)
       .pipe(
@@ -424,13 +444,21 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
             asset,
             ...this.coverAssets.filter((item) => item.id !== asset.id),
           ];
-          this.draft.coverMode = 'custom';
-          this.draft.coverAssetId = asset.id;
-          this.loadSelectedCoverPreview();
+          if (target === 'collection') {
+            this.newCollectionCoverAssetId = asset.id;
+          } else {
+            this.draft.coverMode = 'custom';
+            this.draft.coverAssetId = asset.id;
+            this.loadSelectedCoverPreview();
+          }
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
-          this.coverError = this.errorMessage(error);
+          if (target === 'collection') {
+            this.newCollectionError = this.errorMessage(error);
+          } else {
+            this.coverError = this.errorMessage(error);
+          }
           this.changeDetector.markForCheck();
         },
       });
@@ -466,7 +494,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   closeCreateCollection(): void {
-    if (!this.creatingCollection) {
+    if (!this.creatingCollection && !this.coverUploading) {
       this.newCollectionVisible = false;
     }
   }
@@ -474,7 +502,15 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   createCollection(): void {
     const title = this.newCollectionTitle.trim();
     const coverAssetId = this.newCollectionCoverAssetId;
-    if (!title || coverAssetId === null || this.creatingCollection) {
+    if (
+      !title ||
+      coverAssetId === null ||
+      this.creatingCollection ||
+      this.coverUploading
+    ) {
+      if (this.coverUploading) {
+        return;
+      }
       this.newCollectionError = !title
         ? '请填写合集名称。'
         : '请选择一张手动上传的合集封面。';
@@ -562,7 +598,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
           : true,
       titleTemplate: this.draft.titleTemplate.trim(),
       descriptionTemplate: this.draft.descriptionTemplate.trim(),
-      partTitleTemplate: this.draft.partTitleTemplate.trim(),
+      partTitleTemplate: this.deferredSave
+        ? this.draft.titleTemplate.trim()
+        : this.draft.partTitleTemplate.trim(),
       dynamicTemplate: this.draft.dynamicTemplate.trim(),
       tid,
       tags: this.draft.tags.trim(),
@@ -586,8 +624,8 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
         this.publishMode === 'scheduled'
           ? Math.round(this.publishDelayHours * 3600)
           : 0,
-      retentionMode: this.draft.retentionMode,
-      retentionDays: this.draft.retentionDays,
+      retentionMode: this.deferredSave ? 'never' : this.draft.retentionMode,
+      retentionDays: this.deferredSave ? 0 : this.draft.retentionDays,
     };
     if (this.deferredSave) {
       this.settingsConfirmed.emit(request);
@@ -872,9 +910,9 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       errors.account = '请选择投稿账号';
     }
     if (!this.draft.titleTemplate.trim()) {
-      errors.title = '请填写标题模板';
+      errors.title = this.deferredSave ? '请填写稿件标题' : '请填写标题模板';
     }
-    if (!this.draft.partTitleTemplate.trim()) {
+    if (!this.deferredSave && !this.draft.partTitleTemplate.trim()) {
       errors.partTitle = '请填写分 P 标题模板';
     }
     if (
@@ -915,9 +953,10 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       errors.schedule = '定时发布需设置为 2～360 个整小时';
     }
     if (
-      !Number.isInteger(this.draft.retentionDays) ||
-      this.draft.retentionDays < 0 ||
-      this.draft.retentionDays > 3650
+      !this.deferredSave &&
+      (!Number.isInteger(this.draft.retentionDays) ||
+        this.draft.retentionDays < 0 ||
+        this.draft.retentionDays > 3650)
     ) {
       errors.retention = '保留天数需填写 0～3650 的整数';
     }
@@ -926,6 +965,18 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
 
   private newDraft(): RoomUploadPolicyDraft {
     return { ...DEFAULT_DRAFT, filters: {} };
+  }
+
+  private highlightDraft(draft: RoomUploadPolicyDraft): RoomUploadPolicyDraft {
+    const title = this.roomName.trim();
+    return {
+      ...draft,
+      enabled: true,
+      titleTemplate: title,
+      partTitleTemplate: title,
+      retentionMode: 'never',
+      retentionDays: 0,
+    };
   }
 
   private fromPolicy(policy: RoomUploadPolicyRequest): RoomUploadPolicyDraft {

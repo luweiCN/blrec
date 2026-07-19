@@ -247,10 +247,13 @@ async def test_list_sessions_identifies_derived_highlight_media(database) -> Non
         'INSERT INTO upload_jobs('
         'session_id,account_id,policy_snapshot_json,state,submit_state,'
         'created_at,updated_at) '
-        "VALUES(2,1,'{}','paused','prepared',1,1)"
+        "VALUES(2,1,'{\"title\":\"最终投稿标题\"}','paused','prepared',1,1)"
     )
-    uploads = await RecordingJournalBridge(database).list_sessions(scope='uploads')
+    journal = RecordingJournalBridge(database)
+    uploads = await journal.list_sessions(scope='uploads')
     assert [item.id for item in uploads] == [2]
+    jobs = await journal.upload_jobs_for_sessions((2,))
+    assert jobs[2].title == '最终投稿标题'
 
 
 @pytest.mark.asyncio

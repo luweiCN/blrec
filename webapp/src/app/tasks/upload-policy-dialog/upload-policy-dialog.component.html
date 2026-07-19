@@ -80,22 +80,13 @@
       <section class="form-section" aria-labelledby="archive-content-heading">
         <h3 id="archive-content-heading">稿件内容</h3>
 
-        <nz-form-item>
-          <nz-form-label nzRequired>
-            标题模板
-            <span
-              class="help-mark"
-              nz-tooltip
-              [nzTooltipTitle]="templateTip"
-              tabindex="0"
-              >?</span
-            >
-          </nz-form-label>
+        <nz-form-item *ngIf="deferredSave; else recordingTitleTemplate">
+          <nz-form-label nzRequired>稿件标题</nz-form-label>
           <nz-form-control>
             <input
               nz-input
-              name="titleTemplate"
-              maxlength="500"
+              name="highlightTitle"
+              maxlength="80"
               [(ngModel)]="draft.titleTemplate"
             />
             <span *ngIf="validationErrors.title" class="field-error">
@@ -103,6 +94,32 @@
             </span>
           </nz-form-control>
         </nz-form-item>
+
+        <ng-template #recordingTitleTemplate>
+          <nz-form-item>
+            <nz-form-label nzRequired>
+              标题模板
+              <span
+                class="help-mark"
+                nz-tooltip
+                [nzTooltipTitle]="templateTip"
+                tabindex="0"
+                >?</span
+              >
+            </nz-form-label>
+            <nz-form-control>
+              <input
+                nz-input
+                name="titleTemplate"
+                maxlength="500"
+                [(ngModel)]="draft.titleTemplate"
+              />
+              <span *ngIf="validationErrors.title" class="field-error">
+                {{ validationErrors.title }}
+              </span>
+            </nz-form-control>
+          </nz-form-item>
+        </ng-template>
 
         <nz-form-item>
           <nz-form-label>
@@ -126,7 +143,7 @@
           </nz-form-control>
         </nz-form-item>
 
-        <nz-form-item>
+        <nz-form-item *ngIf="!deferredSave">
           <nz-form-label nzRequired>
             分 P 标题模板
             <span
@@ -179,11 +196,14 @@
             >
               <span>
                 直播分区：
-                {{ liveParentAreaName || '未记录' }} /
-                {{ liveAreaName || '未记录' }}
+                {{ liveParentAreaName || "未记录" }} /
+                {{ liveAreaName || "未记录" }}
               </span>
               <ng-container
-                *ngIf="categoryRecommendation as recommendation; else noRecommendation"
+                *ngIf="
+                  categoryRecommendation as recommendation;
+                  else noRecommendation
+                "
               >
                 <span>推荐投稿分区：{{ recommendation.label }}</span>
                 <button
@@ -360,8 +380,8 @@
               [nzMessage]="coverError"
             ></nz-alert>
             <span class="field-help">
-              手动上传的 JPEG / PNG 会保存在封面库中，其他房间也可复用；最大
-              2 MiB，尺寸至少 1146 × 717。
+              手动上传的 JPEG / PNG 会保存在封面库中，其他房间也可复用；最大 2
+              MiB，尺寸至少 1146 × 717。
             </span>
           </nz-form-control>
         </nz-form-item>
@@ -503,9 +523,7 @@
         </div>
 
         <div *ngIf="allowReplies" class="switch-field nested-switch-field">
-          <label for="selection-reply">
-            仅展示投稿账号精选的评论
-          </label>
+          <label for="selection-reply"> 仅展示投稿账号精选的评论 </label>
           <nz-switch
             id="selection-reply"
             name="upSelectionReply"
@@ -554,7 +572,11 @@
         </div>
       </section>
 
-      <section class="form-section" aria-labelledby="retention-heading">
+      <section
+        *ngIf="!deferredSave"
+        class="form-section"
+        aria-labelledby="retention-heading"
+      >
         <h3 id="retention-heading">本地录像</h3>
 
         <nz-form-item>
@@ -586,10 +608,7 @@
               只删除本地视频，弹幕 XML 和场次信息会一直保留。填写 0
               表示达到条件后立即删除。
             </span>
-            <span
-              *ngIf="draft.retentionMode === 'capacity'"
-              class="field-help"
-            >
+            <span *ngIf="draft.retentionMode === 'capacity'" class="field-help">
               按设置页的录像容量上限清理最旧且已投稿成功的视频。
             </span>
           </nz-form-control>
@@ -611,12 +630,7 @@
         恢复跟随房间设置
       </button>
       <span class="footer-spacer"></span>
-      <button
-        nz-button
-        type="button"
-        [disabled]="saving"
-        (click)="close()"
-      >
+      <button nz-button type="button" [disabled]="saving" (click)="close()">
         取消
       </button>
       <button
@@ -628,7 +642,7 @@
         [disabled]="saveDisabled"
         (click)="save()"
       >
-        保存设置
+        {{ deferredSave ? "创建上传任务" : "保存设置" }}
       </button>
     </div>
   </ng-template>
@@ -639,10 +653,11 @@
   nzWidth="560px"
   [nzVisible]="newCollectionVisible"
   [nzMaskClosable]="false"
-  [nzKeyboard]="!creatingCollection"
-  [nzClosable]="!creatingCollection"
+  [nzKeyboard]="!creatingCollection && !coverUploading"
+  [nzClosable]="!creatingCollection && !coverUploading"
   [nzOkLoading]="creatingCollection"
-  [nzOkDisabled]="creatingCollection"
+  [nzOkDisabled]="creatingCollection || coverUploading"
+  [nzCancelDisabled]="creatingCollection || coverUploading"
   nzOkText="创建合集"
   nzCancelText="取消"
   (nzOnCancel)="closeCreateCollection()"
@@ -686,20 +701,38 @@
       <nz-form-item>
         <nz-form-label nzRequired>合集封面</nz-form-label>
         <nz-form-control>
-          <nz-select
-            name="newCollectionCoverAssetId"
-            nzPlaceHolder="选择手动上传的封面"
-            [nzDisabled]="coverAssets.length === 0"
-            [(ngModel)]="newCollectionCoverAssetId"
-          >
-            <nz-option
-              *ngFor="let asset of coverAssets"
-              [nzValue]="asset.id"
-              [nzLabel]="asset.filename"
-            ></nz-option>
-          </nz-select>
+          <div class="asset-control">
+            <nz-select
+              name="newCollectionCoverAssetId"
+              nzPlaceHolder="选择手动上传的封面"
+              [nzDisabled]="coverAssets.length === 0"
+              [(ngModel)]="newCollectionCoverAssetId"
+            >
+              <nz-option
+                *ngFor="let asset of coverAssets"
+                [nzValue]="asset.id"
+                [nzLabel]="asset.filename"
+              ></nz-option>
+            </nz-select>
+            <input
+              #collectionCoverInput
+              class="visually-hidden"
+              type="file"
+              accept="image/jpeg,image/png"
+              (change)="collectionCoverFileSelected($event)"
+            />
+            <button
+              nz-button
+              type="button"
+              [nzLoading]="coverUploading"
+              [disabled]="coverUploading"
+              (click)="collectionCoverInput.click()"
+            >
+              上传封面
+            </button>
+          </div>
           <span class="field-help">
-            合集封面从上方手动封面库中选择；没有可选封面时，请先关闭此窗口并上传。
+            可选择封面库中的图片，也可在这里上传；新上传的图片会自动选中。
           </span>
         </nz-form-control>
       </nz-form-item>

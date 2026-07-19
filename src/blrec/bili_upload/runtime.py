@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
@@ -467,6 +468,17 @@ class BiliAccountRuntime:
     ) -> int:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
+        title = settings.title_template.strip()
+        if not title or len(title) > 80:
+            raise UploadTaskActionRejected('片段稿件标题需填写 1～80 个字符')
+        settings = replace(
+            settings,
+            enabled=True,
+            title_template=title,
+            part_title_template=title,
+            retention_mode='never',
+            retention_days=0,
+        )
         service = self._highlight_service
         coordinator = self._coordinator
         submissions = self._session_submission_manager
@@ -500,15 +512,11 @@ class BiliAccountRuntime:
         ):
             raise UploadTaskActionRejected('请选择当前账号支持的创作声明')
         async with self._session_action_lock:
-            await self._stop_upload_worker()
-            try:
-                session_id = await service.ensure_upload_session(clip_id)
-                await submissions.save_override(
-                    session_id, settings, manager_subject=manager_subject
-                )
-                return await coordinator.create_highlight_job(session_id)
-            finally:
-                await self._start_upload_worker()
+            session_id = await service.ensure_upload_session(clip_id)
+            await submissions.save_override(
+                session_id, settings, manager_subject=manager_subject
+            )
+            return await coordinator.create_highlight_job(session_id)
 
     async def delete_highlight_clip(self, clip_id: int) -> str:
         service = self._highlight_service

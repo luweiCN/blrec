@@ -428,7 +428,7 @@ describe('UploadPolicyDialogComponent', () => {
     expect(saved).toHaveBeenCalled();
   });
 
-  it('returns complete settings without writing a room policy for a highlight', () => {
+  it('uses a clip-specific form and returns the final submission title', () => {
     policyService.get.and.returnValue(of(existingPolicy));
     fixture = TestBed.createComponent(UploadPolicyDialogComponent);
     component = fixture.componentInstance;
@@ -439,21 +439,47 @@ describe('UploadPolicyDialogComponent', () => {
     component.settingsConfirmed.subscribe(confirmed);
     fixture.detectChanges();
 
+    expect(component.draft.titleTemplate).toBe('精彩片段');
+    component.draft.titleTemplate = '最终投稿标题';
     component.save();
 
     expect(component.modalTitle).toContain('片段投稿设置');
     expect(confirmed).toHaveBeenCalledWith(
       jasmine.objectContaining({
         enabled: true,
-        titleTemplate: '旧标题',
+        titleTemplate: '最终投稿标题',
+        partTitleTemplate: '最终投稿标题',
         collectionSeasonId: 20,
         collectionSectionId: 21,
         coverMode: 'custom',
         publishDelaySeconds: 21_600,
+        retentionMode: 'never',
+        retentionDays: 0,
       }),
     );
     expect(policyService.save).not.toHaveBeenCalled();
     expect(submissionService.save).not.toHaveBeenCalled();
+  });
+
+  it('uploads and selects a collection cover without changing the manuscript cover', () => {
+    const uploadedCover: CoverAsset = {
+      ...covers[0],
+      id: 8,
+      filename: '新合集封面.png',
+    };
+    policyService.get.and.returnValue(of(existingPolicy));
+    policyService.uploadCover.and.returnValue(of(uploadedCover));
+    create();
+    component.openCreateCollection();
+    const file = new File(['image'], '新合集封面.png', { type: 'image/png' });
+
+    component.collectionCoverFileSelected({
+      target: { files: { item: () => file }, value: 'selected' },
+    } as unknown as Event);
+
+    expect(policyService.uploadCover).toHaveBeenCalledOnceWith(file);
+    expect(component.newCollectionCoverAssetId).toBe(8);
+    expect(component.draft.coverAssetId).toBe(3);
   });
 
   it('can restore a recording session to inherited room settings', () => {

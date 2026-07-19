@@ -204,6 +204,7 @@ class UploadJobProgress:
     current_part_index: Optional[int] = None
     preupload_finalized: bool = True
     display_state: UploadJobDisplayState = 'standard'
+    title: str = ''
 
 
 @dataclass(frozen=True)
@@ -1242,6 +1243,7 @@ class RecordingJournalBridge:
         jobs = await self._database.fetchall(
             'SELECT job.id,job.session_id,job.account_id,account.uid AS account_uid,'
             'account.display_name AS account_display_name,job.state,'
+            'job.policy_snapshot_json,'
             'job.submit_state,job.comment_branch_state,job.danmaku_branch_state,'
             'job.aid,job.bvid,job.review_reason,job.attempt,job.next_attempt_at,'
             'job.created_at,job.updated_at,job.repair_state,job.repair_message,'
@@ -1418,6 +1420,15 @@ class RecordingJournalBridge:
                         submission_verification = decoded
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
+            upload_title = ''
+            try:
+                policy_snapshot = json.loads(str(row['policy_snapshot_json']))
+                if isinstance(policy_snapshot, dict) and isinstance(
+                    policy_snapshot.get('title'), str
+                ):
+                    upload_title = str(policy_snapshot['title']).strip()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
             result[session_id] = UploadJobProgress(
                 id=job_id,
                 session_id=session_id,
@@ -1438,6 +1449,7 @@ class RecordingJournalBridge:
                 created_at=int(row['created_at']),
                 updated_at=int(row['updated_at']),
                 parts=parts,
+                title=upload_title,
                 danmaku_total=danmaku[0],
                 danmaku_confirmed=danmaku[1],
                 danmaku_pending=danmaku[2],
