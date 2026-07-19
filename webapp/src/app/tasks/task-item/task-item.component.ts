@@ -41,6 +41,7 @@ export class TaskItemComponent implements OnChanges {
   @Input() data!: TaskData;
   @Input() selected = false;
   @Input() uploadPolicy: RoomUploadPolicy | null = null;
+  @Input() collectionLabel: string | null = null;
   @Output() selectedChange = new EventEmitter<boolean>();
   @Output() uploadPolicyChanged = new EventEmitter<void>();
   @HostBinding('class.stopped') stopped = false;
@@ -77,6 +78,50 @@ export class TaskItemComponent implements OnChanges {
 
   get automaticSubmissionEnabled(): boolean {
     return this.uploadPolicy?.enabled ?? false;
+  }
+
+  get titleKeywords(): readonly string[] {
+    return this.data.title_keywords ?? [];
+  }
+
+  get titleKeywordSummary(): string {
+    if (this.titleKeywords.length <= 2) {
+      return this.titleKeywords.join('、');
+    }
+    return `${this.titleKeywords.slice(0, 2).join('、')} 等 ${
+      this.titleKeywords.length
+    } 项`;
+  }
+
+  get creationTypeLabel(): string {
+    return this.uploadPolicy?.creationStatementId === -2 ? '转载' : '原创';
+  }
+
+  get publishTimingLabel(): string {
+    const delay = this.uploadPolicy?.publishDelaySeconds ?? 0;
+    if (delay <= 0) {
+      return '审核通过后发布';
+    }
+    const hours = delay / 3_600;
+    return `定时发布 · ${
+      Number.isInteger(hours) ? hours : hours.toFixed(1)
+    } 小时后`;
+  }
+
+  get retentionLabel(): string {
+    const policy = this.uploadPolicy;
+    if (policy === null) {
+      return '';
+    }
+    const suffix =
+      policy.retentionDays > 0 ? ` ${policy.retentionDays} 天后` : '立即';
+    return {
+      never: '永久保留本地录像',
+      upload_completed: `上传完成${suffix}删除`,
+      submitted: `投稿成功${suffix}删除`,
+      approved: `审核通过${suffix}删除`,
+      capacity: '容量超限时清理',
+    }[policy.retentionMode];
   }
 
   setSelected(selected: boolean): void {

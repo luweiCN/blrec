@@ -87,6 +87,7 @@ class FakeHighlightService:
         self.inspect_clip = AsyncMock(return_value=inspection())
         self.create_clip = AsyncMock(return_value=clip())
         self.list_clips = AsyncMock(return_value=(clip(),))
+        self.list_all_clips = AsyncMock(return_value=(1, (clip(),)))
         self.get_clip = AsyncMock(return_value=clip())
         self.retry_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
@@ -121,12 +122,14 @@ def restore_router_state() -> Iterator[None]:
     old_service = highlights.service
     old_worker = highlights.worker
     old_creator = highlights.upload_task_creator
+    old_deleter = highlights.clip_deleter
     old_durations = highlights.active_durations_provider
     old_key = security.api_key
     yield
     highlights.service = old_service
     highlights.worker = old_worker
     highlights.upload_task_creator = old_creator
+    highlights.clip_deleter = old_deleter
     highlights.active_durations_provider = old_durations
     security.api_key = old_key
 
@@ -139,6 +142,7 @@ def client() -> Iterator[TestClient]:
     highlights.service = FakeHighlightService()  # type: ignore[assignment]
     highlights.worker = AsyncMock()
     highlights.upload_task_creator = AsyncMock(return_value=17)
+    highlights.clip_deleter = AsyncMock(return_value='deleted')
     highlights.active_durations_provider = AsyncMock(return_value={1: 120_000})
     with TestClient(api) as value:
         yield value
@@ -146,6 +150,17 @@ def client() -> Iterator[TestClient]:
 
 def auth() -> dict:
     return {'x-api-key': 'test-api-key'}
+
+
+def test_global_clip_library_route_is_paginated(client: TestClient) -> None:
+    response = client.get('/api/v1/highlights/clips?limit=20&offset=0', headers=auth())
+
+    assert response.status_code == 200
+    assert response.json()['total'] == 1
+    assert response.json()['items'][0]['name'] == '第一段高光'
+    service = highlights.service
+    assert service is not None
+    service.list_all_clips.assert_awaited_once_with(limit=20, offset=0)
 
 
 def upload_settings() -> dict:
@@ -267,6 +282,9 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     assert creator.await_args.kwargs['settings'].collection_section_id == 21
     deleted = client.delete('/api/v1/highlights/clips/3', headers=auth())
     assert deleted.status_code == 204
+    deleter = highlights.clip_deleter
+    assert isinstance(deleter, AsyncMock)
+    deleter.assert_awaited_once_with(3)
 
 
 def test_unsafe_clip_range_returns_conflict(client: TestClient) -> None:

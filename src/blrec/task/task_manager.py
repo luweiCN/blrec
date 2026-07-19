@@ -49,7 +49,7 @@ class RecordTaskManager:
         managed_cookie_provider: Optional[
             Callable[[str], Awaitable[Optional[str]]]
         ] = None,
-        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
         recording_journal: Optional[RecordingJournalBridge] = None,
         network_session_pool: Optional[AiohttpSessionPool] = None,
         network_route_manager: Optional[NetworkRouteManager] = None,
@@ -471,5 +471,8 @@ class RecordTaskManager:
 
     def _make_task_data(self, task: RecordTask) -> TaskData:
         return TaskData(
-            user_info=task.user_info, room_info=task.room_info, task_status=task.status
+            user_info=task.user_info,
+            room_info=task.room_info,
+            task_status=task.status,
+            title_keywords=list(task.title_keywords),
         )

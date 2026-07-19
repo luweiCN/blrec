@@ -98,7 +98,7 @@ class Application:
         managed_cookie_provider: Optional[
             Callable[[str], Awaitable[Optional[str]]]
         ] = None,
-        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
         recording_journal_provider: Optional[
             Callable[[], Optional[RecordingJournalBridge]]
         ] = None,

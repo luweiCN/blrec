@@ -101,6 +101,15 @@ export interface HighlightClip {
   readonly uploadState?: string | null;
   readonly uploadPercent?: number | null;
   readonly uploadBvid?: string | null;
+  readonly sourceAnchorName?: string;
+  readonly sourceTitle?: string;
+  readonly durationMs?: number;
+  readonly fileSizeBytes?: number;
+}
+
+export interface HighlightClipList {
+  readonly total: number;
+  readonly items: readonly HighlightClip[];
 }
 
 export interface CreateHighlightClipRequest {

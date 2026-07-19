@@ -31,20 +31,20 @@ import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 import { UploadPolicyDialogModule } from '../tasks/upload-policy-dialog/upload-policy-dialog.module';
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
 import { HighlightEditorComponent } from './highlight-editor/highlight-editor.component';
-import { PartDanmakuDialogComponent } from './part-danmaku-dialog/part-danmaku-dialog.component';
 import { PartVideoDialogComponent } from './part-video-dialog/part-video-dialog.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
 import { UploadTasksComponent } from './upload-tasks.component';
 import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.component';
+import { ClipLibraryComponent } from './clip-library/clip-library.component';
 
 @NgModule({
   declarations: [
     UploadTasksComponent,
     RecordingSessionsComponent,
-    PartDanmakuDialogComponent,
     PartVideoDialogComponent,
     TaskEditDialogComponent,
     HighlightEditorComponent,
+    ClipLibraryComponent,
   ],
   imports: [
     CommonModule,

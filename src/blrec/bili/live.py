@@ -44,7 +44,7 @@ class Live:
         user_agent: str = '',
         cookie: str = '',
         *,
-        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
         session: Optional[Any] = None,
         network_route_manager: Optional['NetworkRouteManager'] = None,
     ) -> None:

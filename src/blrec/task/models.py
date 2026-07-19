@@ -86,6 +86,7 @@ class TaskData:
     user_info: UserInfo
     room_info: RoomInfo
     task_status: TaskStatus
+    title_keywords: List[str] = attr.Factory(list)
 
 
 class VideoFileStatus(str, Enum):

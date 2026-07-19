@@ -89,8 +89,8 @@ async def _managed_cookie_provider(url: str) -> Optional[str]:
     return await _bili_account_runtime.recording_cookie_header(url)
 
 
-async def _report_primary_auth_failure() -> None:
-    await _bili_account_runtime.report_primary_auth_failure()
+async def _report_primary_auth_failure(credential_fingerprint: str) -> None:
+    await _bili_account_runtime.report_primary_auth_failure(credential_fingerprint)
 
 
 async def _apply_primary_credential() -> None:
@@ -244,6 +244,7 @@ bili_collections.unavailable_reason = _bili_account_runtime.unavailable_reason
 highlights.service = None
 highlights.worker = None
 highlights.upload_task_creator = None
+highlights.clip_deleter = None
 highlights.active_durations_provider = _active_highlight_durations
 highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
 browser_extension.application = app
@@ -357,6 +358,7 @@ async def on_startup() -> None:
         highlights.upload_task_creator = (
             _bili_account_runtime.create_highlight_upload_task
         )
+        highlights.clip_deleter = _bili_account_runtime.delete_highlight_clip
         highlights.unavailable_reason = _bili_account_runtime.unavailable_reason
         browser_extension.highlight_service = _bili_account_runtime.highlight_service
         browser_extension.policy_manager = _bili_account_runtime.policy_manager
@@ -384,6 +386,7 @@ async def on_startup() -> None:
         highlights.service = None
         highlights.worker = None
         highlights.upload_task_creator = None
+        highlights.clip_deleter = None
         browser_extension.reset()
         try:
             if application_launched:
@@ -412,6 +415,7 @@ async def on_shuntdown() -> None:
     highlights.service = None
     highlights.worker = None
     highlights.upload_task_creator = None
+    highlights.clip_deleter = None
     browser_extension.reset()
     try:
         await app.exit()

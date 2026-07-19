@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sqlite3
 import time
 from dataclasses import dataclass, replace
@@ -119,6 +120,10 @@ class HighlightClip:
     upload_state: Optional[str] = None
     upload_percent: Optional[float] = None
     upload_bvid: Optional[str] = None
+    source_anchor_name: str = ''
+    source_title: str = ''
+    duration_ms: int = 0
+    file_size_bytes: int = 0
 
 
 class HighlightService:
@@ -129,21 +134,151 @@ class HighlightService:
         'FROM highlight_clips clip '
         'LEFT JOIN upload_jobs job ON job.session_id=clip.upload_session_id '
     )
+    _CLIP_LIBRARY_SELECT = (
+        'SELECT clip.*,job.id AS upload_job_id,job.state AS upload_state,'
+        'job.bvid AS upload_bvid,source.anchor_name AS source_anchor_name,'
+        'source.title AS source_title '
+        'FROM highlight_clips clip '
+        'LEFT JOIN upload_jobs job ON job.session_id=clip.upload_session_id '
+        'LEFT JOIN recording_sessions source ON source.id=clip.source_session_id '
+    )
 
     def __init__(
         self,
         database: BiliUploadDatabase,
         *,
         recording_root: Optional[Path] = None,
+        clip_root: Optional[Path] = None,
         clipper: Optional[LosslessClipper] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._database = database
-        self._recording_root = (
-            None if recording_root is None else Path(recording_root).resolve()
+        self._clip_root = (
+            Path(clip_root).resolve()
+            if clip_root is not None
+            else (
+                None
+                if recording_root is None
+                else Path(recording_root).resolve() / 'highlights'
+            )
         )
         self._clipper = clipper
         self._clock = clock
+
+    async def migrate_legacy_outputs(self, recording_root: Path) -> int:
+        if self._clip_root is None:
+            return 0
+        legacy_root = (Path(recording_root).resolve() / 'highlights').resolve()
+        rows = await self._database.fetchall(
+            'SELECT id,room_id,upload_session_id,output_video_path,output_xml_path '
+            'FROM highlight_clips WHERE output_video_path IS NOT NULL '
+            'OR output_xml_path IS NOT NULL ORDER BY id'
+        )
+        migrated = 0
+        for row in rows:
+            values = (row['output_video_path'], row['output_xml_path'])
+            mappings: List[Tuple[Optional[Path], Optional[Path]]] = []
+            eligible = False
+            for value in values:
+                if value is None:
+                    mappings.append((None, None))
+                    continue
+                source = Path(str(value)).resolve(strict=False)
+                try:
+                    source.relative_to(legacy_root)
+                except ValueError:
+                    mappings.append((source, source))
+                    continue
+                eligible = True
+                target = self._clip_root / str(int(row['room_id'])) / source.name
+                mappings.append((source, target.resolve(strict=False)))
+            if not eligible:
+                continue
+            copied = await asyncio.get_running_loop().run_in_executor(
+                None, self._copy_legacy_outputs, tuple(mappings)
+            )
+            if not copied:
+                audit(
+                    'highlight_clip_migration_skipped',
+                    level='WARNING',
+                    clip_id=int(row['id']),
+                    reason='source_missing',
+                )
+                continue
+            video_target = mappings[0][1]
+            xml_target = mappings[1][1]
+            video_path = None if video_target is None else str(video_target)
+            xml_path = None if xml_target is None else str(xml_target)
+
+            def update_paths(connection: sqlite3.Connection) -> int:
+                cursor = connection.execute(
+                    'UPDATE highlight_clips SET output_video_path=?,output_xml_path=? '
+                    'WHERE id=? AND output_video_path IS ? AND output_xml_path IS ?',
+                    (
+                        video_path,
+                        xml_path,
+                        int(row['id']),
+                        row['output_video_path'],
+                        row['output_xml_path'],
+                    ),
+                )
+                upload_session_id = row['upload_session_id']
+                if (
+                    cursor.rowcount != 1
+                    or upload_session_id is None
+                    or video_path is None
+                ):
+                    return cursor.rowcount
+                connection.execute(
+                    'UPDATE recording_parts SET source_path=?,final_path=?,xml_path=? '
+                    'WHERE session_id=?',
+                    (video_path, video_path, xml_path, int(upload_session_id)),
+                )
+                connection.execute(
+                    'UPDATE upload_parts SET source_path=?,final_path=?,xml_path=?,'
+                    'file_identity=NULL WHERE job_id IN('
+                    'SELECT id FROM upload_jobs WHERE session_id=?)',
+                    (video_path, video_path, xml_path, int(upload_session_id)),
+                )
+                return cursor.rowcount
+
+            updated = await self._database.write(update_paths)
+            if updated == 1:
+                migrated += 1
+                audit(
+                    'highlight_clip_migrated',
+                    clip_id=int(row['id']),
+                    room_id=int(row['room_id']),
+                    result='copied_to_clip_library',
+                )
+        return migrated
+
+    @staticmethod
+    def _copy_legacy_outputs(
+        mappings: Tuple[Tuple[Optional[Path], Optional[Path]], ...]
+    ) -> bool:
+        for source, target in mappings:
+            if source is None or target is None or source == target:
+                continue
+            source_partial = Path(str(source) + '.partial')
+            target_partial = Path(str(target) + '.partial')
+            if not source.exists() and not target.exists():
+                if not source_partial.exists() and not target_partial.exists():
+                    return False
+        for source, target in mappings:
+            if source is None or target is None or source == target:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for current_source, current_target in (
+                (source, target),
+                (Path(str(source) + '.partial'), Path(str(target) + '.partial')),
+            ):
+                if not current_source.exists():
+                    continue
+                temporary = Path(str(current_target) + '.migrating')
+                shutil.copy2(str(current_source), str(temporary))
+                os.replace(str(temporary), str(current_target))
+        return True
 
     async def create_marker(
         self,
@@ -333,7 +468,7 @@ class HighlightService:
         normalized_name = name.strip()
         if not normalized_name or len(normalized_name) > 200:
             raise ValueError('highlight clip name must contain 1 to 200 characters')
-        if self._recording_root is None or self._clipper is None:
+        if self._clip_root is None or self._clipper is None:
             raise RuntimeError('highlight clipping is not configured')
         _timeline, source_ranges, inspection = await self._prepare_clip(
             session_id=session_id,
@@ -345,7 +480,7 @@ class HighlightService:
             raise HighlightConfirmationRequired(inspection)
 
         now = int(self._clock())
-        root = self._recording_root
+        root = self._clip_root
         inspected_by_part = {source.part_id: source for source in inspection.sources}
 
         def write(connection: sqlite3.Connection) -> int:
@@ -422,7 +557,7 @@ class HighlightService:
                 ),
             )
             clip_id = int(cursor.lastrowid)
-            output_directory = root / 'highlights' / str(room_id)
+            output_directory = root / str(room_id)
             output_video_path = output_directory / 'highlight-{}.mp4'.format(clip_id)
             output_xml_path = output_directory / 'highlight-{}.xml'.format(clip_id)
             connection.execute(
@@ -544,7 +679,8 @@ class HighlightService:
             raise ValueError("unknown recording session '{}'".format(session_id))
         rows = await self._database.fetchall(
             self._CLIP_WITH_UPLOAD_SELECT
-            + 'WHERE clip.source_session_id=? ORDER BY clip.created_at,clip.id',
+            + "WHERE clip.source_session_id=? AND clip.state!='cancelled' "
+            'ORDER BY clip.created_at,clip.id',
             (session_id,),
         )
         source_rows = await self._database.fetchall(
@@ -553,7 +689,8 @@ class HighlightService:
             'source.actual_start_ms,source.actual_end_ms '
             'FROM highlight_clip_sources source '
             'JOIN highlight_clips clip ON clip.id=source.clip_id '
-            'WHERE clip.source_session_id=? ORDER BY source.clip_id,source.ordinal',
+            "WHERE clip.source_session_id=? AND clip.state!='cancelled' "
+            'ORDER BY source.clip_id,source.ordinal',
             (session_id,),
         )
         sources_by_clip: Dict[int, List[HighlightClipSource]] = {}
@@ -571,6 +708,44 @@ class HighlightService:
             )
         )
         return tuple(self._apply_upload_progress(clip, progress) for clip in clips)
+
+    async def list_all_clips(
+        self, *, limit: int, offset: int
+    ) -> Tuple[int, Tuple[HighlightClip, ...]]:
+        if limit < 1 or limit > 100:
+            raise ValueError('clip list limit must be between 1 and 100')
+        if offset < 0:
+            raise ValueError('clip list offset must not be negative')
+        total = int(
+            await self._database.scalar(
+                "SELECT COUNT(*) FROM highlight_clips WHERE state!='cancelled'"
+            )
+        )
+        rows = await self._database.fetchall(
+            self._CLIP_LIBRARY_SELECT + "WHERE clip.state!='cancelled' "
+            'ORDER BY clip.created_at DESC,clip.id DESC LIMIT ? OFFSET ?',
+            (limit, offset),
+        )
+        clips = tuple(self._clip_from_row(row) for row in rows)
+        progress = await self._upload_progress(
+            tuple(
+                clip.upload_job_id for clip in clips if clip.upload_job_id is not None
+            )
+        )
+        clips = tuple(self._apply_upload_progress(clip, progress) for clip in clips)
+
+        async def with_size(clip: HighlightClip) -> HighlightClip:
+            if clip.output_video_path is None:
+                return clip
+            try:
+                size = await asyncio.get_running_loop().run_in_executor(
+                    None, os.path.getsize, clip.output_video_path
+                )
+            except OSError:
+                size = 0
+            return replace(clip, file_size_bytes=max(0, int(size)))
+
+        return total, tuple(await asyncio.gather(*(with_size(clip) for clip in clips)))
 
     async def _upload_progress(self, job_ids: Tuple[int, ...]) -> Dict[int, float]:
         if not job_ids:
@@ -660,19 +835,42 @@ class HighlightService:
 
         now = int(self._clock())
 
-        def begin_delete(connection: sqlite3.Connection) -> Optional[int]:
+        def begin_delete(
+            connection: sqlite3.Connection,
+        ) -> Tuple[Optional[int], Optional[int]]:
             current = connection.execute(
                 'SELECT upload_session_id FROM highlight_clips WHERE id=?', (clip_id,)
             ).fetchone()
             if current is None:
                 raise ValueError('highlight clip state changed')
             upload_session_id = current['upload_session_id']
+            upload_job_id: Optional[int] = None
             if upload_session_id is not None:
-                has_job = connection.execute(
-                    'SELECT 1 FROM upload_jobs WHERE session_id=?', (upload_session_id,)
+                job = connection.execute(
+                    'SELECT id FROM upload_jobs WHERE session_id=?',
+                    (upload_session_id,),
                 ).fetchone()
-                if has_job is not None:
-                    raise ValueError('highlight clip already has an upload task')
+                if job is not None:
+                    upload_job_id = int(job['id'])
+                    connection.execute(
+                        'DELETE FROM danmaku_items WHERE part_id IN('
+                        'SELECT id FROM upload_parts WHERE job_id=?)',
+                        (upload_job_id,),
+                    )
+                    connection.execute(
+                        'DELETE FROM upload_chunks WHERE part_id IN('
+                        'SELECT id FROM upload_parts WHERE job_id=?)',
+                        (upload_job_id,),
+                    )
+                    connection.execute(
+                        'DELETE FROM comment_items WHERE job_id=?', (upload_job_id,)
+                    )
+                    connection.execute(
+                        'DELETE FROM upload_parts WHERE job_id=?', (upload_job_id,)
+                    )
+                    connection.execute(
+                        'DELETE FROM upload_jobs WHERE id=?', (upload_job_id,)
+                    )
             updated = connection.execute(
                 "UPDATE highlight_clips SET state='cancelled',lease_owner=NULL,"
                 'lease_until=NULL,next_attempt_at=0,updated_at=? WHERE id=?',
@@ -680,9 +878,20 @@ class HighlightService:
             )
             if updated.rowcount != 1:
                 raise ValueError('highlight clip state changed')
-            return None if upload_session_id is None else int(upload_session_id)
+            return (
+                None if upload_session_id is None else int(upload_session_id),
+                upload_job_id,
+            )
 
-        upload_session_id = await self._database.write(begin_delete)
+        upload_session_id, upload_job_id = await self._database.write(begin_delete)
+        if upload_job_id is not None:
+            audit(
+                'highlight_clip_upload_task_cancelled',
+                clip_id=clip_id,
+                room_id=clip.room_id,
+                upload_job_id=upload_job_id,
+                result='deleted_local_only',
+            )
         try:
             await self._remove_clip_outputs(clip, partial_only=False)
         except OSError as error:
@@ -752,10 +961,10 @@ class HighlightService:
 
     async def ensure_upload_session(self, clip_id: int) -> int:
         clip = await self.get_clip(clip_id)
-        if clip.upload_session_id is not None:
-            return clip.upload_session_id
         if clip.state != 'ready' or clip.output_video_path is None:
             raise ValueError('highlight clip is not ready for upload')
+        if clip.upload_session_id is not None:
+            return clip.upload_session_id
         video_path = self._owned_highlight_path(clip.output_video_path)
         if not video_path.is_file() or video_path.stat().st_size <= 0:
             raise ValueError('highlight clip video is missing')
@@ -1049,9 +1258,9 @@ class HighlightService:
         return tuple(paths)
 
     def _owned_highlight_path(self, value: str) -> Path:
-        if self._recording_root is None:
-            raise ValueError('highlight recording root is not configured')
-        root = (self._recording_root / 'highlights').resolve()
+        if self._clip_root is None:
+            raise ValueError('highlight clip root is not configured')
+        root = self._clip_root.resolve()
         path = Path(value).resolve(strict=False)
         try:
             path.relative_to(root)
@@ -1244,5 +1453,23 @@ class HighlightService:
                 None
                 if 'upload_bvid' not in row.keys() or row['upload_bvid'] is None
                 else str(row['upload_bvid'])
+            ),
+            source_anchor_name=(
+                ''
+                if 'source_anchor_name' not in row.keys()
+                or row['source_anchor_name'] is None
+                else str(row['source_anchor_name'])
+            ),
+            source_title=(
+                ''
+                if 'source_title' not in row.keys() or row['source_title'] is None
+                else str(row['source_title'])
+            ),
+            duration_ms=max(
+                0,
+                int(
+                    (row['actual_end_ms'] or row['requested_end_ms'])
+                    - (row['actual_start_ms'] or row['requested_start_ms'])
+                ),
             ),
         )

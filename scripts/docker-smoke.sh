@@ -11,7 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$root/cfg" "$root/log" "$root/rec"
+mkdir -p "$root/cfg" "$root/log" "$root/rec" "$root/clips"
 openssl rand -base64 32 > "$root/cfg/credential.key"
 chmod 600 "$root/cfg/credential.key"
 
@@ -23,6 +23,7 @@ docker run -d --name "$container" \
   -v "$root/cfg:/cfg" \
   -v "$root/log:/log" \
   -v "$root/rec:/rec" \
+  -v "$root/clips:/clips" \
   "$image" >/dev/null
 
 port="$(docker port "$container" 2233/tcp | head -1 | awk -F: '{print $NF}')"

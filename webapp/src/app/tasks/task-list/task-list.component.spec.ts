@@ -147,9 +147,8 @@ describe('TaskListComponent', () => {
     expect(headers).toEqual([
       '',
       '直播间',
-      '直播状态',
       '监控与录制',
-      '自动投稿',
+      '投稿安排',
       '操作',
     ]);
 

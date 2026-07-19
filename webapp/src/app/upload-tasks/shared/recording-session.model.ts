@@ -338,6 +338,7 @@ export interface RecordingPart {
   readonly sourceExists: boolean;
   readonly finalExists: boolean;
   readonly errorMessage: string | null;
+  readonly uploadExcludedReason?: string | null;
   readonly mediaIndexState?:
     | 'pending'
     | 'indexing'

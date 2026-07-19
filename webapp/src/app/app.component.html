@@ -65,6 +65,16 @@
               nzMatchRouter="true"
               nz-tooltip
               nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '片段管理' : ''"
+            >
+              <i nz-icon nzType="scissor" nzTheme="outline"></i>
+              <span><a routerLink="/clips">片段管理</a></span>
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
               [nzTooltipTitle]="collapsed ? '投稿账号' : ''"
             >
               <i nz-icon nzType="user" nzTheme="outline"></i>

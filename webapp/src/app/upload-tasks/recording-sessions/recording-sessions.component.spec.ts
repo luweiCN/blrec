@@ -332,9 +332,10 @@ describe('RecordingSessionsComponent', () => {
     });
     expect(text).toContain('上传任务');
     expect(text).not.toContain('上传任务列表');
-    expect(text).toContain('直播与房间');
-    expect(text).toContain('录制概要');
-    expect(text).toContain('投稿状态');
+    expect(text).toContain('任务');
+    expect(text).toContain('录像');
+    expect(text).toContain('处理进度');
+    expect(text).toContain('投稿配置');
     expect(text).toContain('房间 100');
     expect(
       fixture.nativeElement.querySelector('thead').textContent,
@@ -345,6 +346,14 @@ describe('RecordingSessionsComponent', () => {
     expect(text).toContain('1 MB');
     expect(text).toContain('等待审核');
     expect(text).toContain('投稿账号');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="danmaku-summary"]')
+        .textContent,
+    ).toContain('采集 321 条');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="danmaku-summary"]')
+        .textContent,
+    ).toContain('已回灌 0 / 1');
     expect(text).not.toContain('UID 42');
     expect(text).not.toContain('/rec/p1.mp4');
     expect(
@@ -717,18 +726,18 @@ describe('RecordingSessionsComponent', () => {
     ).not.toBeNull();
   });
 
-  it('keeps the operation header and cells fixed together', () => {
+  it('fits its core columns without a horizontal-scroll table', () => {
     fixture.detectChanges();
 
-    const fixedHeader = fixture.nativeElement.querySelector(
-      'thead th.ant-table-cell-fix-right',
+    expect(
+      fixture.nativeElement.querySelector('.ant-table-scroll-horizontal'),
+    ).toBeNull();
+    expect(fixture.nativeElement.querySelector('thead').textContent).toContain(
+      '操作',
     );
-    const fixedCell = fixture.nativeElement.querySelector(
-      'tbody td.ant-table-cell-fix-right',
+    expect(fixture.nativeElement.querySelector('tbody').textContent).toContain(
+      '详情',
     );
-
-    expect(fixedHeader?.textContent).toContain('操作');
-    expect(fixedCell?.textContent).toContain('详情');
   });
 
   it('submits row actions through the session batch endpoint', () => {
@@ -839,7 +848,7 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.selectedSession).toBeNull();
   });
 
-  it('opens and clears video and danmaku in separate dialogs', () => {
+  it('opens video and danmaku in one combined dialog', () => {
     fixture.detectChanges();
     const session = fixture.componentInstance.sessions[0];
     const part = session.parts[0];
@@ -849,7 +858,6 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.videoVisible).toBeTrue();
     expect(fixture.componentInstance.videoSession).toBe(session);
     expect(fixture.componentInstance.videoPart).toBe(part);
-    expect(fixture.componentInstance.danmakuVisible).toBeFalse();
 
     fixture.componentInstance.videoVisibilityChanged(false);
 
@@ -859,16 +867,9 @@ describe('RecordingSessionsComponent', () => {
 
     fixture.componentInstance.openPartDanmaku(session, part);
 
-    expect(fixture.componentInstance.danmakuVisible).toBeTrue();
-    expect(fixture.componentInstance.danmakuSession).toBe(session);
-    expect(fixture.componentInstance.danmakuPart).toBe(part);
-    expect(fixture.componentInstance.videoVisible).toBeFalse();
-
-    fixture.componentInstance.danmakuVisibilityChanged(false);
-
-    expect(fixture.componentInstance.danmakuVisible).toBeFalse();
-    expect(fixture.componentInstance.danmakuSession).toBeNull();
-    expect(fixture.componentInstance.danmakuPart).toBeNull();
+    expect(fixture.componentInstance.videoVisible).toBeTrue();
+    expect(fixture.componentInstance.videoSession).toBe(session);
+    expect(fixture.componentInstance.videoPart).toBe(part);
   });
 
   it('does not reopen a closed detail drawer when the list refreshes', () => {

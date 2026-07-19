@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
 from unittest.mock import AsyncMock, Mock
@@ -35,6 +36,11 @@ class FakeClock:
 
     def advance(self, seconds: int) -> None:
         self.value += seconds
+
+
+async def recording_credential_fingerprint(manager: AccountManager) -> str:
+    cookie_header = await manager.recording_cookie_header('https://api.bilibili.com/')
+    return hashlib.sha256(cookie_header.encode('utf-8')).hexdigest()
 
 
 def confirmed_response(
@@ -531,7 +537,8 @@ async def test_failed_standby_notifies_recording_cookie_to_use_next_account(
         protocol.oauth_results.append(BiliApiError(-101, operation='oauth_info'))
         changed.reset_mock()
 
-        await manager.report_primary_auth_failure()
+        fingerprint = await recording_credential_fingerprint(manager)
+        await manager.report_primary_auth_failure(fingerprint)
 
         assert (
             await database.scalar(
@@ -881,8 +888,10 @@ async def test_confirmed_auth_failure_pauses_primary_account_and_notifies_once(
         changed.reset_mock()
         protocol.oauth_results.append(BiliApiError(-101, operation='oauth_info'))
 
+        fingerprint = await recording_credential_fingerprint(manager)
         await asyncio.gather(
-            manager.report_primary_auth_failure(), manager.report_primary_auth_failure()
+            manager.report_primary_auth_failure(fingerprint),
+            manager.report_primary_auth_failure(fingerprint),
         )
 
         row = await database.fetchone(
@@ -896,6 +905,303 @@ async def test_confirmed_auth_failure_pauses_primary_account_and_notifies_once(
         assert protocol.oauth_calls == 2  # login validation, then failure confirmation
         changed.assert_awaited_once_with()
         assert await manager.primary_cookie_header('https://api.bilibili.com/') == ''
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_transport_auth_rejection_pauses_http_valid_account(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    changed = AsyncMock()
+    database, _store, _cipher, manager = await components(
+        tmp_path, protocol, clock, on_primary_credential_changed=changed
+    )
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+        changed.reset_mock()
+
+        fingerprint = await recording_credential_fingerprint(manager)
+        await manager.report_primary_auth_failure(fingerprint)
+        await manager.report_primary_auth_failure(fingerprint)
+
+        row = await database.fetchone(
+            'SELECT state,pause_reason FROM bili_accounts WHERE id=?', (account.id,)
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'paused',
+            'pause_reason': 'credential repeatedly rejected by authenticated transport',
+        }
+        changed.assert_awaited_once_with()
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_auth_rejection_window_resets_after_relogin(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    changed = AsyncMock()
+    database, _store, _cipher, manager = await components(
+        tmp_path, protocol, clock, on_primary_credential_changed=changed
+    )
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+
+        fingerprint = await recording_credential_fingerprint(manager)
+        await manager.report_primary_auth_failure(fingerprint)
+        relogged = await manager.finish_confirmed_login(
+            confirmed_response(
+                access_token='access-relogged',
+                refresh_token='refresh-relogged',
+                sessdata='sess-relogged',
+            ),
+            account_id=account.id,
+        )
+        assert relogged.credential_version == account.credential_version + 1
+        changed.reset_mock()
+
+        relogged_fingerprint = await recording_credential_fingerprint(manager)
+        await manager.report_primary_auth_failure(relogged_fingerprint)
+
+        row = await database.fetchone(
+            'SELECT state,pause_reason FROM bili_accounts WHERE id=?', (account.id,)
+        )
+        assert row is not None
+        assert dict(row) == {'state': 'active', 'pause_reason': None}
+        changed.assert_not_awaited()
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_relogin_serializes_with_inflight_failure_refresh(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    validation_started = asyncio.Event()
+    release_validation = asyncio.Event()
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+        old_fingerprint = await recording_credential_fingerprint(manager)
+
+        async def delayed_oauth(bundle: CredentialBundle) -> Mapping[str, Any]:
+            if bundle.access_token == 'access-new':
+                validation_started.set()
+                await release_validation.wait()
+                return {'code': 0, 'data': {'mid': 42, 'refresh': True}}
+            return {'code': 0, 'data': {'mid': 42, 'refresh': False}}
+
+        protocol.oauth_info = delayed_oauth  # type: ignore[method-assign]
+        protocol.refresh_results.append(
+            confirmed_response(
+                access_token='access-refreshed',
+                refresh_token='refresh-refreshed',
+                sessdata='sess-refreshed',
+            )
+        )
+        report_task = asyncio.create_task(
+            manager.report_primary_auth_failure(old_fingerprint)
+        )
+        await validation_started.wait()
+        relogin_task = asyncio.create_task(
+            manager.finish_confirmed_login(
+                confirmed_response(
+                    access_token='access-relogged',
+                    refresh_token='refresh-relogged',
+                    sessdata='sess-relogged',
+                ),
+                account_id=account.id,
+            )
+        )
+        await asyncio.sleep(0)
+        release_validation.set()
+        await asyncio.gather(report_task, relogin_task)
+
+        current_fingerprint = await recording_credential_fingerprint(manager)
+        await manager.report_primary_auth_failure(current_fingerprint)
+
+        assert (
+            await database.scalar(
+                'SELECT state FROM bili_accounts WHERE id=?', (account.id,)
+            )
+            == 'active'
+        )
+    finally:
+        release_validation.set()
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_relogin_wins_over_inflight_background_refresh(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, cipher, manager = await components(tmp_path, protocol, clock)
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+
+        async def delayed_refresh(_bundle: CredentialBundle) -> Mapping[str, Any]:
+            refresh_started.set()
+            await release_refresh.wait()
+            return confirmed_response(
+                access_token='access-background-refresh',
+                refresh_token='refresh-background-refresh',
+                sessdata='sess-background-refresh',
+            )
+
+        protocol.refresh_token = delayed_refresh  # type: ignore[method-assign]
+        refresh_task = asyncio.create_task(manager.refresh_account(account.id))
+        await refresh_started.wait()
+        relogin_task = asyncio.create_task(
+            manager.finish_confirmed_login(
+                confirmed_response(
+                    access_token='access-manual-relogin',
+                    refresh_token='refresh-manual-relogin',
+                    sessdata='sess-manual-relogin',
+                ),
+                account_id=account.id,
+            )
+        )
+        await asyncio.sleep(0)
+        release_refresh.set()
+        await asyncio.gather(refresh_task, relogin_task)
+
+        bundle = await store.get(account_id=account.id, cipher=cipher)
+        assert bundle.access_token == 'access-manual-relogin'
+    finally:
+        release_refresh.set()
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failure_validation_does_not_confirm_next_rejection(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    validation_started = asyncio.Event()
+    original_oauth_info = protocol.oauth_info
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+        fingerprint = await recording_credential_fingerprint(manager)
+
+        async def blocked_oauth(_bundle: CredentialBundle) -> Mapping[str, Any]:
+            validation_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError('unreachable')
+
+        protocol.oauth_info = blocked_oauth  # type: ignore[method-assign]
+        report_task = asyncio.create_task(
+            manager.report_primary_auth_failure(fingerprint)
+        )
+        await validation_started.wait()
+        report_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await report_task
+
+        protocol.oauth_info = original_oauth_info  # type: ignore[method-assign]
+        await manager.report_primary_auth_failure(fingerprint)
+
+        assert (
+            await database.scalar(
+                'SELECT state FROM bili_accounts WHERE id=?', (account.id,)
+            )
+            == 'active'
+        )
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_failure_does_not_pause_the_next_recording_account(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        first = await manager.finish_confirmed_login(confirmed_response())
+        first_fingerprint = await recording_credential_fingerprint(manager)
+        protocol.token_mid = 43
+        protocol.web_uid = 43
+        second = await manager.finish_confirmed_login(
+            confirmed_response(mid=43, cookie_uid=43, sessdata='standby-secret')
+        )
+        protocol.token_mid = 42
+        protocol.web_uid = 42
+        protocol.oauth_results.append(BiliApiError(-101, operation='oauth_info'))
+
+        await manager.report_primary_auth_failure(first_fingerprint)
+        await manager.report_primary_auth_failure(first_fingerprint)
+
+        rows = await database.fetchall(
+            'SELECT id,state FROM bili_accounts WHERE id IN (?,?) ORDER BY id',
+            (first.id, second.id),
+        )
+        assert [dict(row) for row in rows] == [
+            {'id': first.id, 'state': 'paused'},
+            {'id': second.id, 'state': 'active'},
+        ]
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejection_after_automatic_refresh_pauses_account(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    changed = AsyncMock()
+    database, _store, _cipher, manager = await components(
+        tmp_path, protocol, clock, on_primary_credential_changed=changed
+    )
+    try:
+        account = await manager.finish_confirmed_login(confirmed_response())
+        old_fingerprint = await recording_credential_fingerprint(manager)
+        changed.reset_mock()
+        protocol.oauth_results.append({'code': 0, 'data': {'mid': 42, 'refresh': True}})
+        protocol.refresh_results.append(
+            confirmed_response(
+                access_token='access-refreshed',
+                refresh_token='refresh-refreshed',
+                sessdata='sess-refreshed',
+            )
+        )
+
+        await manager.report_primary_auth_failure(old_fingerprint)
+        refreshed_fingerprint = await recording_credential_fingerprint(manager)
+        assert refreshed_fingerprint != old_fingerprint
+        await manager.report_primary_auth_failure(refreshed_fingerprint)
+
+        row = await database.fetchone(
+            'SELECT state,pause_reason FROM bili_accounts WHERE id=?', (account.id,)
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'paused',
+            'pause_reason': 'credential repeatedly rejected by authenticated transport',
+        }
+        assert changed.await_count == 2  # refreshed, then paused
     finally:
         await manager.close()
         await database.close()

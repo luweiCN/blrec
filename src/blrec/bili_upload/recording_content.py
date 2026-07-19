@@ -4,6 +4,8 @@ import asyncio
 import math
 import os
 import stat
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -76,6 +78,13 @@ class DanmakuLine:
 class DanmakuPage:
     items: Tuple[DanmakuLine, ...]
     next_cursor: Optional[int]
+
+
+@dataclass
+class _DanmakuStream:
+    iterator: Iterator[DanmakuLine]
+    next_cursor: int
+    pending: Optional[DanmakuLine] = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +247,10 @@ class RecordingContentReader:
 
     def __init__(self, database: BiliUploadDatabase) -> None:
         self._database = database
+        self._danmaku_lock = threading.Lock()
+        self._danmaku_streams: OrderedDict[Tuple[str, int, int], _DanmakuStream] = (
+            OrderedDict()
+        )
 
     async def media(self, part_id: int) -> MediaResource:
         row = await self._database.fetchone(
@@ -259,8 +272,8 @@ class RecordingContentReader:
     async def danmaku(self, part_id: int, *, cursor: int, limit: int) -> DanmakuPage:
         if cursor < 0:
             raise ValueError('cursor must not be negative')
-        if limit < 1 or limit > 100:
-            raise ValueError('limit must be between 1 and 100')
+        if limit < 1 or limit > 500:
+            raise ValueError('limit must be between 1 and 500')
         row = await self._database.fetchone(
             'SELECT xml_path FROM recording_parts WHERE id=?', (int(part_id),)
         )
@@ -341,44 +354,100 @@ class RecordingContentReader:
             return None
         return int(result.st_size)
 
-    @classmethod
-    def _parse_danmaku(cls, path: str, cursor: int, limit: int) -> DanmakuPage:
-        if cls._regular_file_size(path) is None:
+    def _parse_danmaku(self, path: str, cursor: int, limit: int) -> DanmakuPage:
+        try:
+            file_stat = os.stat(path)
+        except OSError:
             raise RecordingContentUnavailable('该分 P 的弹幕文件不可用')
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise RecordingContentUnavailable('该分 P 的弹幕文件不可用')
+        key = (path, int(file_stat.st_size), int(file_stat.st_mtime_ns))
+        with self._danmaku_lock:
+            self._drop_stale_danmaku_streams(path, key)
+            stream = self._danmaku_streams.get(key)
+            if stream is None or stream.next_cursor != cursor:
+                if stream is not None:
+                    self._close_danmaku_stream(stream)
+                stream = self._new_danmaku_stream(path, cursor)
+                self._danmaku_streams[key] = stream
+            self._danmaku_streams.move_to_end(key)
+            while len(self._danmaku_streams) > 2:
+                _old_key, old = self._danmaku_streams.popitem(last=False)
+                self._close_danmaku_stream(old)
+            return self._read_danmaku_page(key, stream, cursor, limit)
+
+    def _new_danmaku_stream(self, path: str, cursor: int) -> _DanmakuStream:
+        iterator = self._iter_danmaku(path)
+        try:
+            for _index in range(cursor):
+                next(iterator)
+        except StopIteration:
+            return _DanmakuStream(iter(()), cursor)
+        return _DanmakuStream(iterator, cursor)
+
+    def _read_danmaku_page(
+        self, key: Tuple[str, int, int], stream: _DanmakuStream, cursor: int, limit: int
+    ) -> DanmakuPage:
+        items = []
+        try:
+            if stream.pending is not None:
+                items.append(stream.pending)
+                stream.pending = None
+            while len(items) < limit:
+                items.append(next(stream.iterator))
+            stream.pending = next(stream.iterator)
+        except StopIteration:
+            self._danmaku_streams.pop(key, None)
+            self._close_danmaku_stream(stream)
+            return DanmakuPage(items=tuple(items), next_cursor=None)
+        except (OSError, ValueError, etree.LxmlError, RecordingContentInvalid):
+            self._danmaku_streams.pop(key, None)
+            self._close_danmaku_stream(stream)
+            raise RecordingContentInvalid('弹幕文件格式无效') from None
+        stream.next_cursor = cursor + len(items)
+        return DanmakuPage(items=tuple(items), next_cursor=stream.next_cursor)
+
+    @classmethod
+    def _iter_danmaku(cls, path: str) -> Iterator[DanmakuLine]:
         try:
             with open(path, 'rb') as file:
                 prefix = file.read(4_096).upper()
             if b'<!DOCTYPE' in prefix or b'<!ENTITY' in prefix:
                 raise RecordingContentInvalid('弹幕文件格式无效')
-            items = []
-            ordinal = 0
-            context = etree.iterparse(
-                path,
-                events=('end',),
-                tag='d',
-                resolve_entities=False,
-                no_network=True,
-                huge_tree=False,
-            )
-            for _event, element in context:
-                if ordinal >= cursor:
-                    items.append(cls._danmaku_line(ordinal, element))
-                    if len(items) > limit:
-                        break
-                ordinal += 1
-                element.clear()
-                parent = element.getparent()
-                while parent is not None and element.getprevious() is not None:
-                    del parent[0]
-            has_more = len(items) > limit
-            return DanmakuPage(
-                items=tuple(items[:limit]),
-                next_cursor=cursor + limit if has_more else None,
-            )
+            with open(path, 'rb') as file:
+                context = etree.iterparse(
+                    file,
+                    events=('end',),
+                    tag='d',
+                    resolve_entities=False,
+                    no_network=True,
+                    huge_tree=False,
+                )
+                for ordinal, (_event, element) in enumerate(context):
+                    yield cls._danmaku_line(ordinal, element)
+                    element.clear()
+                    parent = element.getparent()
+                    while parent is not None and element.getprevious() is not None:
+                        del parent[0]
         except RecordingContentInvalid:
             raise
         except (OSError, ValueError, etree.LxmlError):
             raise RecordingContentInvalid('弹幕文件格式无效') from None
+
+    def _drop_stale_danmaku_streams(
+        self, path: str, current_key: Tuple[str, int, int]
+    ) -> None:
+        for key in tuple(self._danmaku_streams):
+            if key[0] != path or key == current_key:
+                continue
+            stream = self._danmaku_streams.pop(key)
+            self._close_danmaku_stream(stream)
+
+    @staticmethod
+    def _close_danmaku_stream(stream: _DanmakuStream) -> None:
+        close = getattr(stream.iterator, 'close', None)
+        if callable(close):
+            close()
 
     @staticmethod
     def _danmaku_line(index: int, element: etree._Element) -> DanmakuLine:

@@ -274,6 +274,144 @@ async def test_ready_clip_exposes_only_an_owned_existing_video(
 
 
 @pytest.mark.asyncio
+async def test_clip_library_accepts_a_dedicated_root(database, tmp_path: Path) -> None:
+    clip_root = tmp_path / 'clips'
+    video = clip_root / '100' / 'highlight-1.mp4'
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b'clip')
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,actual_start_ms,'
+        'actual_end_ms,output_video_path,state,created_at,updated_at) '
+        "VALUES(1,100,'高光',0,1000,0,1000,?,'ready',1,1)",
+        (str(video),),
+    )
+
+    service = HighlightService(database, clip_root=clip_root)
+
+    assert await service.clip_video_path(1) == video.resolve()
+
+
+@pytest.mark.asyncio
+async def test_legacy_clip_outputs_move_to_the_dedicated_library(
+    database, tmp_path: Path
+) -> None:
+    recording_root = tmp_path / 'rec'
+    clip_root = tmp_path / 'clips'
+    old_video = recording_root / 'highlights' / '100' / 'highlight-1.mp4'
+    old_xml = recording_root / 'highlights' / '100' / 'highlight-1.xml'
+    old_video.parent.mkdir(parents=True)
+    old_video.write_bytes(b'video')
+    old_xml.write_text('<i/>', encoding='utf8')
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,actual_start_ms,'
+        'actual_end_ms,output_video_path,output_xml_path,state,created_at,updated_at) '
+        "VALUES(1,100,'高光',0,1000,0,1000,?,?,'ready',1,1)",
+        (str(old_video), str(old_xml)),
+    )
+    service = HighlightService(database, clip_root=clip_root)
+
+    migrated = await service.migrate_legacy_outputs(recording_root)
+
+    assert migrated == 1
+    assert old_video.exists()
+    assert old_xml.exists()
+    assert (clip_root / '100' / old_video.name).read_bytes() == b'video'
+    assert (clip_root / '100' / old_xml.name).read_text(encoding='utf8') == '<i/>'
+    assert (
+        await service.clip_video_path(1)
+        == (clip_root / '100' / old_video.name).resolve()
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_clip_migration_updates_its_local_upload_paths(
+    database, tmp_path: Path
+) -> None:
+    recording_root = tmp_path / 'rec'
+    clip_root = tmp_path / 'clips'
+    old_video = recording_root / 'highlights' / '100' / 'highlight-1.mp4'
+    old_xml = recording_root / 'highlights' / '100' / 'highlight-1.xml'
+    old_video.parent.mkdir(parents=True)
+    old_video.write_bytes(b'video')
+    old_xml.write_text('<i/>', encoding='utf8')
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+        "VALUES(2,100,'highlight:1','closed',2,'highlight')"
+    )
+    await database.execute(
+        "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+        "VALUES('clip',2,'finished',2,2)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,final_path,xml_path,'
+        'record_start_time,artifact_state,created_at,updated_at) '
+        "VALUES(2,2,'clip',1,?,?,?,2,'ready',2,2)",
+        (str(old_video), str(old_video), str(old_xml)),
+    )
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(1,1000,'投稿账号',X'00',1,'test','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(7,2,1,'{}','paused','prepared',2,2)"
+    )
+    await database.execute(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,final_path,xml_path,file_identity,'
+        'artifact_state,upload_state) '
+        "VALUES(8,7,1,?,?,?,'legacy-identity','ready','confirmed')",
+        (str(old_video), str(old_video), str(old_xml)),
+    )
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,upload_session_id,name,requested_start_ms,requested_end_ms,'
+        'actual_start_ms,actual_end_ms,output_video_path,output_xml_path,state,'
+        'created_at,updated_at) '
+        "VALUES(1,100,2,'高光',0,1000,0,1000,?,?,'ready',1,1)",
+        (str(old_video), str(old_xml)),
+    )
+
+    migrated = await HighlightService(
+        database, clip_root=clip_root
+    ).migrate_legacy_outputs(recording_root)
+
+    new_video = str((clip_root / '100' / old_video.name).resolve())
+    new_xml = str((clip_root / '100' / old_xml.name).resolve())
+    assert migrated == 1
+    recording_part = await database.fetchone(
+        'SELECT source_path,final_path,xml_path FROM recording_parts WHERE id=2'
+    )
+    assert recording_part is not None
+    assert dict(recording_part) == {
+        'source_path': new_video,
+        'final_path': new_video,
+        'xml_path': new_xml,
+    }
+    upload_part = await database.fetchone(
+        'SELECT source_path,final_path,xml_path,file_identity '
+        'FROM upload_parts WHERE id=8'
+    )
+    assert upload_part is not None
+    assert dict(upload_part) == {
+        'source_path': new_video,
+        'final_path': new_video,
+        'xml_path': new_xml,
+        'file_identity': None,
+    }
+    assert old_video.exists()
+    assert old_xml.exists()
+
+
+@pytest.mark.asyncio
 async def test_failed_clip_can_be_queued_for_retry(database, tmp_path: Path) -> None:
     await database.execute(
         'INSERT INTO highlight_clips('
@@ -340,3 +478,102 @@ async def test_list_clips_restores_upload_progress_for_a_recording(
     assert clips[1].upload_job_id == 7
     assert clips[1].upload_state == 'uploading'
     assert clips[1].upload_percent == 25.0
+
+
+@pytest.mark.asyncio
+async def test_global_clip_library_is_newest_first_and_includes_source_metadata(
+    database, tmp_path: Path
+) -> None:
+    first = tmp_path / 'first.mp4'
+    second = tmp_path / 'second.mp4'
+    first.write_bytes(b'a' * 10)
+    second.write_bytes(b'b' * 20)
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,title,anchor_name,'
+        'source_kind) '
+        "VALUES(1,100,'100:1','closed',1,'第一场','主播甲','live'),"
+        "(2,200,'200:2','closed',2,'第二场','主播乙','live')"
+    )
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,name,requested_start_ms,requested_end_ms,'
+        'actual_start_ms,actual_end_ms,output_video_path,state,created_at,updated_at) '
+        "VALUES(1,100,1,'第一段',0,10000,0,10000,?,'ready',1,1),"
+        "(2,200,2,'第二段',5000,20000,5000,20000,?,'ready',2,2)",
+        (str(first), str(second)),
+    )
+
+    total, clips = await HighlightService(database).list_all_clips(limit=20, offset=0)
+
+    assert total == 2
+    assert [clip.name for clip in clips] == ['第二段', '第一段']
+    assert clips[0].source_anchor_name == '主播乙'
+    assert clips[0].source_title == '第二场'
+    assert clips[0].duration_ms == 15_000
+    assert clips[0].file_size_bytes == 20
+
+
+@pytest.mark.asyncio
+async def test_delete_clip_removes_its_local_upload_task(
+    database, tmp_path: Path
+) -> None:
+    clip_root = tmp_path / 'clips'
+    video = clip_root / '100' / 'highlight-1.mp4'
+    xml = clip_root / '100' / 'highlight-1.xml'
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b'clip')
+    xml.write_text('<i/>', encoding='utf8')
+    await database.execute(
+        "INSERT INTO recording_sessions("
+        "id,room_id,broadcast_session_key,state,started_at,source_kind) "
+        "VALUES(1,100,'100:live','closed',1,'live'),"
+        "(2,100,'highlight:1','closed',2,'highlight')"
+    )
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(1,1000,'投稿账号',X'00',1,'test','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(7,2,1,'{}','uploading','prepared',2,2)"
+    )
+    await database.execute(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,final_path,xml_path,artifact_state) '
+        "VALUES(8,7,1,?,?,?,'ready')",
+        (str(video), str(video), str(xml)),
+    )
+    await database.execute(
+        'INSERT INTO upload_chunks('
+        'part_id,chunk_no,offset,size,state,attempt) '
+        "VALUES(8,0,0,4,'confirmed',1)"
+    )
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,upload_session_id,name,'
+        'requested_start_ms,requested_end_ms,actual_start_ms,actual_end_ms,'
+        'output_video_path,output_xml_path,state,created_at,updated_at) '
+        "VALUES(1,100,1,2,'待删除片段',0,1000,0,1000,?,?,'ready',2,2)",
+        (str(video), str(xml)),
+    )
+
+    result = await HighlightService(database, clip_root=clip_root).delete_clip(1)
+
+    assert result == 'deleted'
+    assert not video.exists()
+    assert not xml.exists()
+    assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 0
+    assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+    assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 0
+    assert await database.scalar('SELECT COUNT(*) FROM upload_chunks') == 0
+    assert (
+        await database.scalar(
+            "SELECT COUNT(*) FROM recording_sessions WHERE source_kind='highlight'"
+        )
+        == 0
+    )

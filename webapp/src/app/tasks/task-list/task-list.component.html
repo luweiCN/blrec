@@ -95,9 +95,8 @@
         ></label>
       </div>
       <div role="columnheader">直播间</div>
-      <div role="columnheader">直播状态</div>
       <div role="columnheader">监控与录制</div>
-      <div role="columnheader">自动投稿</div>
+      <div role="columnheader">投稿安排</div>
       <div role="columnheader">操作</div>
     </div>
     <app-task-item
@@ -105,6 +104,7 @@
       role="row"
       [data]="data"
       [uploadPolicy]="policyFor(data.room_info.room_id)"
+      [collectionLabel]="collectionLabelFor(policyFor(data.room_info.room_id))"
       [selected]="isSelected(data.room_info.room_id)"
       (selectedChange)="setTaskSelected(data.room_info.room_id, $event)"
       (uploadPolicyChanged)="refreshPolicies()"

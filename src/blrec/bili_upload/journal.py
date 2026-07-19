@@ -66,6 +66,7 @@ class RecordingPart:
     source_exists: bool
     final_exists: bool
     error_message: Optional[str]
+    upload_excluded_reason: Optional[str] = None
     record_end_time: Optional[int] = None
     record_duration_seconds: Optional[int] = None
     file_size_bytes: Optional[int] = None
@@ -1639,7 +1640,7 @@ class RecordingJournalBridge:
             'SELECT id,session_id,run_id,part_index,source_path,final_path,'
             'xml_path,record_start_time,record_end_time,record_duration_seconds,'
             'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
-            'error_message,media_index_state,media_index_error,'
+            'error_message,upload_excluded_reason,media_index_state,media_index_error,'
             'media_index_progress '
             'FROM recording_parts WHERE run_id=? ORDER BY part_index',
             (run_id,),
@@ -1651,7 +1652,7 @@ class RecordingJournalBridge:
             'SELECT id,session_id,run_id,part_index,source_path,final_path,'
             'xml_path,record_start_time,record_end_time,record_duration_seconds,'
             'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
-            'error_message,media_index_state,media_index_error,'
+            'error_message,upload_excluded_reason,media_index_state,media_index_error,'
             'media_index_progress '
             'FROM recording_parts WHERE session_id=? ORDER BY part_index',
             (session_id,),
@@ -1752,6 +1753,11 @@ class RecordingJournalBridge:
             final_exists=final_path is not None and os.path.exists(final_path),
             error_message=(
                 None if row['error_message'] is None else str(row['error_message'])
+            ),
+            upload_excluded_reason=(
+                None
+                if row['upload_excluded_reason'] is None
+                else str(row['upload_excluded_reason'])
             ),
             record_end_time=(
                 None if row['record_end_time'] is None else int(row['record_end_time'])

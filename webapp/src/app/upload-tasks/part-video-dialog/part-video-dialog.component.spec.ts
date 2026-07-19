@@ -98,6 +98,33 @@ describe('PartVideoDialogComponent', () => {
         requestId: 'request-1',
       })
     );
+    service.listDanmaku.and.returnValue(
+      of({
+        items: [
+          {
+            index: 0,
+            progressMs: 1_250,
+            mode: 1,
+            fontSize: 25,
+            color: 16_777_215,
+            user: '观众甲',
+            uid: 42,
+            content: '第一条弹幕',
+          },
+          {
+            index: 1,
+            progressMs: 2_500,
+            mode: 1,
+            fontSize: 25,
+            color: 16_777_215,
+            user: null,
+            uid: null,
+            content: '第二条弹幕',
+          },
+        ],
+        nextCursor: null,
+      })
+    );
     service.mediaUrl.and.returnValue('/api/media?signed');
     player = jasmine.createSpyObj<PartPlayer>('PartPlayer', [
       'pause',
@@ -132,7 +159,7 @@ describe('PartVideoDialogComponent', () => {
     fixture.componentRef.setInput('visible', true);
   });
 
-  it('plays a growing FLV as a finite seekable snapshot', () => {
+  it('plays video and loads its danmaku in the same dialog', () => {
     fixture.detectChanges();
 
     expect(playerFactory.attachFlv).toHaveBeenCalledWith(
@@ -145,9 +172,104 @@ describe('PartVideoDialogComponent', () => {
       },
       jasmine.any(Function)
     );
-    expect(service.listDanmaku).not.toHaveBeenCalled();
+    expect(service.listDanmaku).toHaveBeenCalledOnceWith(2, 0, 500);
     expect(fixture.nativeElement.querySelector('[role="tablist"]')).toBeNull();
-    expect(fixture.nativeElement.textContent).not.toContain('查看弹幕');
+    const overlay = overlayContainer.getContainerElement();
+    expect(overlay.textContent).toContain('第一条弹幕');
+    expect(overlay.querySelector('[data-testid="danmaku-list"]')).not.toBeNull();
+  });
+
+  it('bounds the rendered danmaku window for long recordings', () => {
+    service.listDanmaku.and.returnValue(
+      of({
+        items: Array.from({ length: 1_001 }, (_value, index) => ({
+          index,
+          progressMs: index * 1_000,
+          mode: 1,
+          fontSize: 25,
+          color: 16_777_215,
+          user: null,
+          uid: null,
+          content: `弹幕 ${index}`,
+        })),
+        nextCursor: 1_001,
+      })
+    );
+
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.danmakuItems.length).toBe(1_000);
+    expect(fixture.componentInstance.danmakuItems[0].index).toBe(1);
+    expect(
+      overlayContainer
+        .getContainerElement()
+        .querySelectorAll('[data-testid="danmaku-line"]').length
+    ).toBe(1_000);
+  });
+
+  it('keeps manually paged danmaku at the requested window', () => {
+    service.listDanmaku.and.callFake((_partId, cursor) => {
+      const start = cursor ?? 0;
+      return of({
+        items: Array.from({ length: 500 }, (_value, offset) => ({
+          index: start + offset,
+          progressMs: (start + offset) * 1_000,
+          mode: 1,
+          fontSize: 25,
+          color: 16_777_215,
+          user: null,
+          uid: null,
+          content: `弹幕 ${start + offset}`,
+        })),
+        nextCursor: start + 500,
+      });
+    });
+    fixture.detectChanges();
+
+    fixture.componentInstance.loadMoreDanmaku();
+    fixture.componentInstance.loadMoreDanmaku();
+    const video = overlayContainer.getContainerElement().querySelector(
+      '[data-testid="part-video"]'
+    ) as HTMLVideoElement;
+    video.currentTime = 0;
+    video.dispatchEvent(new Event('timeupdate'));
+
+    expect(service.listDanmaku.calls.count()).toBe(3);
+    expect(fixture.componentInstance.danmakuItems.length).toBe(1_000);
+    expect(fixture.componentInstance.danmakuItems[0].index).toBe(500);
+    expect(fixture.componentInstance.danmakuItems[999].index).toBe(1_499);
+  });
+
+  it('highlights the danmaku nearest to the current video time', () => {
+    fixture.detectChanges();
+    const video = overlayContainer.getContainerElement().querySelector(
+      '[data-testid="part-video"]'
+    ) as HTMLVideoElement;
+
+    video.currentTime = 2.6;
+    video.dispatchEvent(new Event('timeupdate'));
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.activeDanmakuIndex).toBe(1);
+    const active = overlayContainer.getContainerElement().querySelector(
+      '[data-testid="danmaku-line"].active'
+    );
+    expect(active?.textContent).toContain('第二条弹幕');
+  });
+
+  it('seeks the video when a danmaku line is selected', () => {
+    fixture.detectChanges();
+    const video = overlayContainer.getContainerElement().querySelector(
+      '[data-testid="part-video"]'
+    ) as HTMLVideoElement;
+    const lines = overlayContainer.getContainerElement().querySelectorAll(
+      '[data-testid="danmaku-line"]'
+    );
+
+    (lines[0] as HTMLElement).click();
+
+    expect(video.currentTime).toBeCloseTo(1.25, 2);
+    expect(fixture.componentInstance.followDanmaku).toBeTrue();
   });
 
   it('uses finite player options when a growing FLV has no duration index', () => {

@@ -74,7 +74,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 22
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 23
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -88,6 +88,13 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
                 'PRAGMA table_info(room_upload_policies)'
             )
         }
+        recording_part_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(recording_parts)')
+        }
+        assert {'upload_excluded_reason', 'upload_probe_attempt'} <= (
+            recording_part_columns
+        )
         assert {
             'account_mode',
             'part_title_template',
@@ -390,7 +397,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 22
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 23
     finally:
         await database.close()
 

@@ -36,7 +36,7 @@ class BaseApi(ABC):
         headers: Optional[Dict[str, str]] = None,
         *,
         room_id: Optional[int] = None,
-        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         self._logger = logger.bind(room_id=room_id or '')
 
@@ -57,19 +57,30 @@ class BaseApi(ABC):
     def headers(self, value: Dict[str, str]) -> None:
         self._headers = {**BASE_HEADERS, **value}
 
-    async def _check_response(self, json_res: JsonResponse) -> None:
+    async def _check_response(
+        self, json_res: JsonResponse, credential_fingerprint: str = ''
+    ) -> None:
         if json_res['code'] != 0:
             error = ApiRequestError(
                 json_res['code'], json_res.get('message') or json_res.get('msg') or ''
             )
             if error.code == -101 and self._auth_failure_reporter is not None:
-                await self._auth_failure_reporter()
+                await self._auth_failure_reporter(credential_fingerprint)
             raise error
 
     @retry(reraise=True, stop=stop_after_delay(5), wait=wait_exponential(0.1))
     async def _get_json_res(self, url: str, *args: Any, **kwds: Any) -> JsonResponse:
         should_check_response = kwds.pop('check_response', True)
         kwds = {'timeout': self.timeout, 'headers': self.headers, **kwds}
+        request_headers = kwds['headers']
+        cookie_header = (
+            str(request_headers.get('Cookie', ''))
+            if isinstance(request_headers, Mapping)
+            else ''
+        )
+        credential_fingerprint = hashlib.sha256(
+            cookie_header.encode('utf-8')
+        ).hexdigest()
         async with self._session.get(url, *args, **kwds) as res:
             self._logger.trace(
                 'HTTP GET host={} path={} status={}',
@@ -88,7 +99,7 @@ class BaseApi(ABC):
                 )
                 raise
             if should_check_response:
-                await self._check_response(json_res)
+                await self._check_response(json_res, credential_fingerprint)
             return json_res
 
     async def _get_json(

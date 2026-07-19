@@ -33,6 +33,7 @@ from .room_upload_policies import RoomUploadPolicyRequest
 service: Optional[HighlightService] = None
 worker: Optional[HighlightWorker] = None
 upload_task_creator: Optional[Callable[..., Awaitable[int]]] = None
+clip_deleter: Optional[Callable[[int], Awaitable[str]]] = None
 active_durations_provider: Optional[Callable[[int], Awaitable[Mapping[int, int]]]] = (
     None
 )
@@ -184,6 +185,15 @@ class ClipResponse(ApiModel):
     upload_state: Optional[str]
     upload_percent: Optional[float]
     upload_bvid: Optional[str]
+    source_anchor_name: str = ''
+    source_title: str = ''
+    duration_ms: int = 0
+    file_size_bytes: int = 0
+
+
+class ClipListResponse(ApiModel):
+    total: int
+    items: List[ClipResponse]
 
 
 class UploadTaskResponse(ApiModel):
@@ -216,6 +226,15 @@ def get_upload_task_creator() -> Callable[..., Awaitable[int]]:
             detail=unavailable_reason or 'Highlight upload is unavailable',
         )
     return upload_task_creator
+
+
+def get_clip_deleter() -> Callable[[int], Awaitable[str]]:
+    if clip_deleter is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or '高光片段管理当前不可用',
+        )
+    return clip_deleter
 
 
 async def _active_durations(session_id: int) -> Mapping[int, int]:
@@ -338,6 +357,10 @@ def _clip_response(value: HighlightClip) -> ClipResponse:
         upload_state=value.upload_state,
         upload_percent=value.upload_percent,
         upload_bvid=value.upload_bvid,
+        source_anchor_name=value.source_anchor_name,
+        source_title=value.source_title,
+        duration_ms=value.duration_ms,
+        file_size_bytes=value.file_size_bytes,
     )
 
 
@@ -483,6 +506,19 @@ async def list_clips(
     return [_clip_response(value) for value in values]
 
 
+@router.get('/clips', response_model=ClipListResponse)
+async def list_all_clips(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> ClipListResponse:
+    total, values = await highlight_service.list_all_clips(limit=limit, offset=offset)
+    return ClipListResponse(
+        total=total, items=[_clip_response(value) for value in values]
+    )
+
+
 @router.get('/clips/{clip_id}', response_model=ClipResponse)
 async def get_clip(
     clip_id: int,
@@ -588,10 +624,10 @@ async def stream_clip_media(
 async def delete_clip(
     clip_id: int,
     _subject: str = Depends(authenticated_manager_subject),
-    highlight_service: HighlightService = Depends(get_service),
+    delete: Callable[[int], Awaitable[str]] = Depends(get_clip_deleter),
 ) -> Response:
     try:
-        await highlight_service.delete_clip(clip_id)
+        await delete(clip_id)
     except ValueError as error:
         if 'upload task' in str(error):
             raise _clip_conflict(error) from None

@@ -3,7 +3,7 @@
 FROM python:3.11-slim-buster
 
 WORKDIR /app
-VOLUME ["/cfg", "/log", "/rec"]
+VOLUME ["/cfg", "/log", "/rec", "/clips"]
 
 COPY src src/
 COPY setup.py setup.cfg ./

@@ -537,7 +537,7 @@ async def test_delete_clip_cancels_pending_and_removes_only_ready_outputs(
 
 
 @pytest.mark.asyncio
-async def test_delete_clip_keeps_files_when_upload_job_exists(
+async def test_delete_clip_cancels_local_upload_job_and_removes_files(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
     root = tmp_path / 'records'
@@ -576,17 +576,18 @@ async def test_delete_clip_keeps_files_when_upload_job_exists(
         (upload_session_id,),
     )
 
-    with pytest.raises(ValueError, match='already has an upload task'):
-        await service.delete_clip(clip.id)
+    result = await service.delete_clip(clip.id)
 
-    assert Path(clip.output_video_path).exists()
-    assert Path(clip.output_xml_path).exists()
+    assert result == 'deleted'
+    assert not Path(clip.output_video_path).exists()
+    assert not Path(clip.output_xml_path).exists()
     assert (
         await database.scalar(
             'SELECT COUNT(*) FROM highlight_clips WHERE id=?', (clip.id,)
         )
-        == 1
+        == 0
     )
+    assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
 
 
 @pytest.mark.asyncio

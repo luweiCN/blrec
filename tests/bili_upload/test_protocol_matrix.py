@@ -591,6 +591,38 @@ async def test_api_business_error_is_code_only_when_message_contains_secrets() -
 
 
 @pytest.mark.asyncio
+async def test_bvc_business_error_retains_only_safe_part_diagnostics() -> None:
+    response = ProtocolResponse(
+        status=200,
+        headers={},
+        body=json.dumps(
+            {
+                'code': 21588,
+                'message': '视频检测未通过',
+                'data': {
+                    'bvc_check': [
+                        {'cid': 12345, 'msg': '该视频时长不足 1 秒'},
+                        {'cid': 99999, 'msg': 'access_key=must-not-leak'},
+                    ],
+                    'unrelated': 'cookie-secret',
+                },
+            }
+        ).encode('utf8'),
+    )
+    client = protocol_client(StaticResponseTransport(response))
+
+    with pytest.raises(BiliApiError) as error:
+        await client.submit_archive(credential_fixture(), {'videos': []})
+
+    assert error.value.details == {
+        'bvc_check': [{'cid': 12345, 'message': '该视频时长不足 1 秒'}]
+    }
+    rendered = str(error.value) + repr(error.value)
+    assert 'must-not-leak' not in rendered
+    assert 'cookie-secret' not in rendered
+
+
+@pytest.mark.asyncio
 async def test_preupload_rejects_non_https_dynamic_endpoint_before_sending() -> None:
     fixtures = json.loads(FIXTURE_PATH.read_text())
     fixtures['preupload'] = {

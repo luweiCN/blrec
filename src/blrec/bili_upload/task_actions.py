@@ -467,6 +467,7 @@ class UploadTaskActionManager:
             'JOIN recording_sessions session ON session.id=job.session_id '
             'JOIN bili_accounts account ON account.id=job.account_id '
             "WHERE job.state='paused' AND account.state='active' "
+            'AND job.operator_paused=0 '
             "AND job.submit_state NOT IN ('in_flight','unknown_outcome') "
             "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
             'AND NOT EXISTS('
@@ -495,7 +496,8 @@ class UploadTaskActionManager:
         def retry(connection: sqlite3.Connection) -> str:
             job = connection.execute(
                 'SELECT job.state,job.submit_state,job.aid,job.bvid,'
-                'job.repair_state,job.lease_until,account.state AS account_state '
+                'job.repair_state,job.operator_paused,job.lease_until,'
+                'account.state AS account_state '
                 'FROM upload_jobs job JOIN bili_accounts account '
                 'ON account.id=job.account_id WHERE job.id=?',
                 (job_id,),
@@ -504,6 +506,8 @@ class UploadTaskActionManager:
                 raise UploadTaskActionRejected('上传任务不存在')
             if str(job['state']) != 'paused':
                 raise UploadTaskActionRejected('只有已暂停的任务可以重新排队')
+            if bool(job['operator_paused']):
+                raise UploadTaskActionRejected('任务由管理员暂停，请使用继续上传')
             if str(job['account_state']) != 'active':
                 raise UploadTaskActionRejected('投稿账号当前不可用')
             if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:

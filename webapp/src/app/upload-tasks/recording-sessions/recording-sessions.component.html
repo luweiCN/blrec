@@ -210,7 +210,6 @@
     [nzLoading]="view.state === 'loading'"
     [nzFrontPagination]="false"
     [nzShowPagination]="false"
-    [nzScroll]="{ x: isRecordingScope ? '1120px' : '960px' }"
     [nzNoResult]="'还没有' + pageTitle"
   >
     <thead>
@@ -225,12 +224,11 @@
             (ngModelChange)="setAllPageSessionsSelected($event)"
           ></label>
         </th>
-        <th nzWidth="260px">直播与房间</th>
-        <th nzWidth="135px">开始时间</th>
-        <th nzWidth="170px">录制概要</th>
-        <th nzWidth="160px">状态</th>
-        <th nzWidth="115px">投稿账号</th>
-        <th nzRight nzWidth="175px">
+        <th class="identity-column">任务</th>
+        <th class="recording-column">录像</th>
+        <th class="progress-column">处理进度</th>
+        <th class="submission-column">投稿配置</th>
+        <th class="actions-column">
           操作
           <i
             nz-icon
@@ -243,7 +241,7 @@
     </thead>
     <tbody>
       <tr *ngFor="let session of taskTable.data; trackBy: trackSession">
-        <td>
+        <td class="identity-column">
           <label
             nz-checkbox
             data-testid="session-select"
@@ -287,20 +285,21 @@
                 {{ session.anchorName || "未知主播" }} · 房间
                 {{ session.roomId }}
               </span>
+              <span>
+                {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
+              </span>
             </div>
           </div>
         </td>
-        <td class="nowrap">
-          {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
-        </td>
-        <td>
+        <td class="recording-column">
           <div>{{ recordingPartCountLabel(session) }}</div>
           <div class="secondary-text">
             {{ formatDuration(session.recordDurationSeconds) }} ·
             {{ formatBytes(session.totalFileSizeBytes) }}
           </div>
+          <div class="secondary-text">采集 {{ session.danmakuCount }} 条弹幕</div>
         </td>
-        <td>
+        <td class="progress-column">
           <ng-container *ngIf="session.uploadJob as statusJob; else sessionStatus">
             <nz-tag [nzColor]="uploadDisplayStateColor(statusJob)">
               {{ uploadDisplayStateLabel(statusJob) }}
@@ -339,14 +338,36 @@
               </span>
             </ng-container>
           </div>
+          <div
+            *ngIf="session.uploadJob as job"
+            class="danmaku-table-summary"
+            data-testid="danmaku-summary"
+          >
+            <span>采集 {{ session.danmakuCount }} 条</span>
+            <span *ngIf="job.danmakuTotal > 0">
+              已回灌 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}
+            </span>
+            <span *ngIf="job.danmakuPending > 0">
+              待处理 {{ job.danmakuPending }}
+            </span>
+            <span *ngIf="job.danmakuFailed > 0" class="status-error">
+              失败 {{ job.danmakuFailed }}
+            </span>
+          </div>
         </td>
-        <td>
+        <td class="submission-column">
           <ng-container *ngIf="session.uploadJob as job; else noAccount">
-            {{ job.accountDisplayName }}
+            <div>{{ job.accountDisplayName }}</div>
+            <div class="secondary-text" *ngIf="job.scheduledPublishAt">
+              定时 {{ job.scheduledPublishAt * 1000 | date: "MM-dd HH:mm" }}
+            </div>
+            <div class="secondary-text" *ngIf="job.collectionBranchState !== 'disabled'">
+              合集：{{ collectionBranchLabel(job.collectionBranchState) }}
+            </div>
           </ng-container>
           <ng-template #noAccount>—</ng-template>
         </td>
-        <td nzRight>
+        <td class="actions-column">
           <button
             nz-button
             nzType="link"
@@ -650,6 +671,9 @@
                 <div class="part-error" *ngIf="part.errorMessage">
                   {{ part.errorMessage }}
                 </div>
+                <div class="part-excluded" *ngIf="part.uploadExcludedReason">
+                  {{ part.uploadExcludedReason }}
+                </div>
               </td>
               <td>
                 <ng-container
@@ -825,7 +849,7 @@
                   [disabled]="!part.xmlPath"
                   (click)="openPartDanmaku(session, part)"
                 >
-                  查看
+                  随视频查看
                 </button>
               </td>
             </tr>
@@ -860,14 +884,6 @@
   [part]="videoPart"
   (visibleChange)="videoVisibilityChanged($event)"
 ></app-part-video-dialog>
-
-<app-part-danmaku-dialog
-  *ngIf="danmakuSession && danmakuPart"
-  [visible]="danmakuVisible"
-  [session]="danmakuSession"
-  [part]="danmakuPart"
-  (visibleChange)="danmakuVisibilityChanged($event)"
-></app-part-danmaku-dialog>
 
 <nz-modal
   nzTitle="重试失败任务"

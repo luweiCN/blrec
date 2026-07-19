@@ -2,7 +2,7 @@
   [nzTitle]="title"
   [nzVisible]="visible"
   [nzFooter]="null"
-  nzWidth="900px"
+  nzWidth="1040px"
   (nzOnCancel)="handleClose()"
 >
   <ng-container *nzModalContent>
@@ -22,11 +22,80 @@
       [attr.src]="isFlv ? null : mediaUrl"
       (loadeddata)="handleFirstFrame()"
       (playing)="handleFirstFrame()"
+      (timeupdate)="handleTimeUpdate()"
       (error)="handleNativeMediaError()"
       (stalled)="handleNativeMediaStalled()"
     ></video>
     <p *ngIf="mediaAccess?.snapshotId" class="hint">
       当前可播放至打开播放器时的录制进度；重新打开可读取新增内容。
     </p>
+    <section class="danmaku-panel" aria-label="弹幕列表">
+      <header class="danmaku-header">
+        <div>
+          <strong>弹幕</strong>
+          <span class="danmaku-count" *ngIf="danmakuItems.length > 0">
+            当前显示 {{ danmakuItems.length }} 条
+          </span>
+        </div>
+        <button
+          *ngIf="!followDanmaku"
+          nz-button
+          nzType="link"
+          nzSize="small"
+          type="button"
+          (click)="resumeDanmakuFollow()"
+        >
+          恢复跟随播放
+        </button>
+        <span *ngIf="followDanmaku" class="follow-state">跟随播放</span>
+      </header>
+      <nz-alert
+        *ngIf="danmakuError"
+        nzType="warning"
+        nzShowIcon
+        [nzMessage]="danmakuError"
+      ></nz-alert>
+      <div *ngIf="danmakuLoading && danmakuItems.length === 0" class="danmaku-empty">
+        正在加载弹幕…
+      </div>
+      <div
+        *ngIf="!danmakuLoading && !danmakuError && danmakuItems.length === 0"
+        class="danmaku-empty"
+      >
+        该分 P 没有可显示的弹幕
+      </div>
+      <div
+        *ngIf="danmakuItems.length > 0"
+        #danmakuList
+        data-testid="danmaku-list"
+        class="danmaku-list"
+        (wheel)="pauseDanmakuFollow()"
+        (touchstart)="pauseDanmakuFollow()"
+      >
+        <button
+          *ngFor="let item of danmakuItems; let index = index"
+          type="button"
+          data-testid="danmaku-line"
+          class="danmaku-line"
+          [class.active]="activeDanmakuIndex === index"
+          [attr.data-danmaku-index]="index"
+          (click)="seekDanmaku(item, index)"
+        >
+          <time>{{ formatDanmakuTime(item.progressMs) }}</time>
+          <span class="danmaku-user">{{ item.user || "匿名观众" }}</span>
+          <span class="danmaku-content">{{ item.content }}</span>
+        </button>
+      </div>
+      <button
+        *ngIf="danmakuNextCursor !== null"
+        nz-button
+        nzType="link"
+        type="button"
+        [disabled]="danmakuLoading"
+        (click)="loadMoreDanmaku()"
+      >
+        {{ danmakuLoading ? "正在加载…" : "加载更多弹幕" }}
+      </button>
+    </section>
   </ng-container>
 </nz-modal>

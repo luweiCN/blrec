@@ -47,6 +47,7 @@ export class TaskListComponent implements OnChanges, OnInit {
   batchTaskOptions?: TaskOptions;
   batchGlobalSettings?: GlobalTaskSettings;
   policiesByRoomId = new Map<number, RoomUploadPolicy>();
+  collectionLabelsByKey = new Map<string, string>();
 
   constructor(
     private changeDetector: ChangeDetectorRef,
@@ -142,12 +143,31 @@ export class TaskListComponent implements OnChanges, OnInit {
     return this.policiesByRoomId.get(roomId) ?? null;
   }
 
+  collectionLabelFor(policy: RoomUploadPolicy | null): string | null {
+    if (
+      policy?.collectionSeasonId === null ||
+      policy?.collectionSeasonId === undefined
+    ) {
+      return null;
+    }
+    const accountId = policy.resolvedAccountId;
+    if (accountId === null) {
+      return `合集 #${policy.collectionSeasonId}`;
+    }
+    return (
+      this.collectionLabelsByKey.get(
+        `${accountId}:${policy.collectionSeasonId}`,
+      ) ?? `合集 #${policy.collectionSeasonId}`
+    );
+  }
+
   refreshPolicies(): void {
     this.policyService.list().subscribe({
       next: (policies) => {
         this.policiesByRoomId = new Map(
           policies.map((policy) => [policy.roomId, policy]),
         );
+        this.refreshCollectionLabels(policies);
         this.changeDetector.markForCheck();
       },
       error: () => {
@@ -334,5 +354,41 @@ export class TaskListComponent implements OnChanges, OnInit {
         },
         error: (error: unknown) => reject?.(error),
       });
+  }
+
+  private refreshCollectionLabels(
+    policies: readonly RoomUploadPolicy[],
+  ): void {
+    const selections = new Map<
+      string,
+      Pick<RoomUploadPolicy, 'accountMode' | 'accountId'>
+    >();
+    for (const policy of policies) {
+      if (
+        policy.collectionSeasonId === null ||
+        policy.resolvedAccountId === null ||
+        policy.blockedReason !== null
+      ) {
+        continue;
+      }
+      const key = `${policy.accountMode}:${policy.accountId ?? ''}`;
+      selections.set(key, policy);
+    }
+    for (const selection of selections.values()) {
+      this.policyService
+        .collections(selection.accountMode, selection.accountId)
+        .subscribe({
+          next: (catalog) => {
+            for (const collection of catalog.collections) {
+              this.collectionLabelsByKey.set(
+                `${catalog.accountId}:${collection.id}`,
+                collection.title,
+              );
+            }
+            this.changeDetector.markForCheck();
+          },
+          error: () => undefined,
+        });
+    }
   }
 }

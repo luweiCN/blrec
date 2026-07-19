@@ -19,6 +19,7 @@ from .accounts import (
     AccountWriteGate,
     CredentialVersionChanged,
 )
+from .artifact_recovery import RecoveredArtifact, probe_recording_artifact
 from .covers import (
     CoverAssetNotFound,
     CoverResolutionError,
@@ -45,7 +46,13 @@ from .policies import (
     room_upload_policy_command,
 )
 from .session_submission import InvalidSessionSubmission, decode_submission_settings
-from .upos import FileIdentity, UposUploader, UposUploadPaused, UposUploadStopped
+from .upos import (
+    FileIdentity,
+    UposUploadDeferred,
+    UposUploader,
+    UposUploadPaused,
+    UposUploadStopped,
+)
 
 __all__ = ('InvalidUploadPolicy', 'UploadCoordinator')
 
@@ -96,6 +103,11 @@ class _ResolvedLiveSettings:
 
 
 class UploadCoordinator:
+    _MIN_UPLOAD_PART_DURATION_SECONDS = 60
+    _MEDIA_PROBE_MAX_FAILURES = 5
+    _MEDIA_PROBE_PENDING_REASON = '录像媒体信息暂时无法读取，等待重新校验'
+    _MEDIA_PROBE_FAILED_REASON = '录像媒体信息连续校验失败，已排除自动投稿'
+
     def __init__(
         self,
         database: BiliUploadDatabase,
@@ -109,6 +121,9 @@ class UploadCoordinator:
         stability_seconds: int = 30,
         clock: Callable[[], float] = time.time,
         stop_requested: Callable[[], bool] = lambda: False,
+        artifact_probe: Callable[[str], Optional[RecoveredArtifact]] = (
+            probe_recording_artifact
+        ),
     ) -> None:
         if stability_seconds < 0:
             raise ValueError('file stability window must not be negative')
@@ -122,6 +137,8 @@ class UploadCoordinator:
         self._stability_seconds = stability_seconds
         self._clock = clock
         self._stop_requested = stop_requested
+        self._artifact_probe = artifact_probe
+        self._artifact_probe_next_at: Dict[int, int] = {}
         self._run_lock = asyncio.Lock()
         self._liquid = Environment()
         self._policy_manager = RoomUploadPolicyManager(database, clock=clock)
@@ -248,6 +265,10 @@ class UploadCoordinator:
             )
         ):
             return None
+        await self._refresh_ready_part_durations(session_id)
+        if finalized and await self._has_pending_media_probe(session_id):
+            return None
+        await self._mark_short_parts_excluded(session_id)
         if not finalized and not await self._has_stable_ready_part(session_id):
             return None
         settings, resolution_state, resolution_error = (
@@ -268,12 +289,38 @@ class UploadCoordinator:
         account_credential_version = int(account['credential_version'])
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path FROM recording_parts '
-            'WHERE session_id=? ORDER BY part_index',
-            (session_id,),
+            'WHERE session_id=? AND (artifact_state!=\'ready\' OR '
+            '(upload_excluded_reason IS NULL AND '
+            '(record_duration_seconds IS NULL OR record_duration_seconds>=?))) '
+            'ORDER BY part_index',
+            (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
         )
         if not part_rows:
+            pending_probe = await self._database.scalar(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                'AND upload_excluded_reason=? LIMIT 1',
+                (session_id, self._MEDIA_PROBE_PENDING_REASON),
+            )
+            if pending_probe == 1:
+                return None
+            recording_part_count = int(
+                await self._database.scalar(
+                    'SELECT COUNT(*) FROM recording_parts WHERE session_id=?',
+                    (session_id,),
+                )
+            )
             await self._set_upload_resolution(
-                session_id, 'configuration_required', '本场没有可用于投稿的录像分段'
+                session_id,
+                (
+                    'not_requested'
+                    if recording_part_count > 0
+                    else 'configuration_required'
+                ),
+                (
+                    '录像分段均不足 60 秒，已保留本地文件'
+                    if recording_part_count > 0
+                    else '本场没有可用于投稿的录像分段'
+                ),
             )
             return None
         parts = [
@@ -377,8 +424,11 @@ class UploadCoordinator:
             if not finalized:
                 ready = connection.execute(
                     'SELECT 1 FROM recording_parts '
-                    "WHERE session_id=? AND artifact_state='ready' LIMIT 1",
-                    (session_id,),
+                    "WHERE session_id=? AND artifact_state='ready' "
+                    'AND upload_excluded_reason IS NULL '
+                    'AND (record_duration_seconds IS NULL OR '
+                    'record_duration_seconds>=?) LIMIT 1',
+                    (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
                 ).fetchone()
                 if ready is None:
                     return None
@@ -435,6 +485,151 @@ class UploadCoordinator:
                 preupload=not finalized,
             )
         return job_id
+
+    async def _mark_short_parts_excluded(self, session_id: int) -> None:
+        reason = '录像不足 {} 秒，已保留本地文件但不投稿'.format(
+            self._MIN_UPLOAD_PART_DURATION_SECONDS
+        )
+        await self._database.execute(
+            'UPDATE recording_parts SET upload_excluded_reason=NULL '
+            'WHERE session_id=? AND upload_excluded_reason=? '
+            'AND (artifact_state!=\'ready\' OR record_duration_seconds IS NULL '
+            'OR record_duration_seconds>=?)',
+            (session_id, reason, self._MIN_UPLOAD_PART_DURATION_SECONDS),
+        )
+        rows = await self._database.fetchall(
+            'SELECT id,part_index,record_duration_seconds FROM recording_parts '
+            "WHERE session_id=? AND artifact_state='ready' "
+            'AND record_duration_seconds<? AND upload_excluded_reason IS NULL '
+            'ORDER BY part_index',
+            (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
+        )
+        for row in rows:
+            updated = await self._database.execute(
+                'UPDATE recording_parts SET upload_excluded_reason=? '
+                'WHERE id=? AND upload_excluded_reason IS NULL',
+                (reason, int(row['id'])),
+            )
+            if updated == 1:
+                audit(
+                    'upload_part_excluded',
+                    level='INFO',
+                    session_id=session_id,
+                    part_id=int(row['id']),
+                    part_index=int(row['part_index']),
+                    duration_seconds=int(row['record_duration_seconds']),
+                    minimum_duration_seconds=self._MIN_UPLOAD_PART_DURATION_SECONDS,
+                    reason='short_recording',
+                )
+
+    async def _refresh_ready_part_durations(self, session_id: int) -> None:
+        rows = await self._database.fetchall(
+            'SELECT part.id,part.part_index,part.final_path,'
+            'part.record_duration_seconds,part.upload_probe_attempt '
+            'FROM recording_parts part '
+            "WHERE part.session_id=? AND part.artifact_state='ready' "
+            'AND part.final_path IS NOT NULL '
+            'AND (part.upload_excluded_reason IS NULL '
+            'OR part.upload_excluded_reason=?) '
+            'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
+            'JOIN upload_parts upload ON upload.job_id=job.id '
+            'WHERE job.session_id=part.session_id '
+            'AND upload.part_index=part.part_index) ORDER BY part.part_index',
+            (session_id, self._MEDIA_PROBE_PENDING_REASON),
+        )
+        loop = asyncio.get_running_loop()
+        for row in rows:
+            part_id = int(row['id'])
+            now = int(self._clock())
+            if now < self._artifact_probe_next_at.get(part_id, 0):
+                continue
+            path = str(row['final_path'])
+            recovered = await loop.run_in_executor(None, self._artifact_probe, path)
+            if recovered is None or recovered.duration_seconds is None:
+                failures = int(row['upload_probe_attempt']) + 1
+                if failures >= self._MEDIA_PROBE_MAX_FAILURES:
+                    self._artifact_probe_next_at.pop(part_id, None)
+                    await self._database.execute(
+                        'UPDATE recording_parts SET upload_excluded_reason=?, '
+                        'upload_probe_attempt=? '
+                        "WHERE id=? AND session_id=? AND artifact_state='ready' "
+                        'AND final_path=?',
+                        (
+                            self._MEDIA_PROBE_FAILED_REASON,
+                            failures,
+                            part_id,
+                            session_id,
+                            path,
+                        ),
+                    )
+                    audit(
+                        'upload_part_duration_probe_failed',
+                        level='ERROR',
+                        session_id=session_id,
+                        part_id=part_id,
+                        part_index=int(row['part_index']),
+                        attempts=failures,
+                        result='excluded_from_upload',
+                    )
+                    continue
+                delay = min(15 * 60, 60 * (2 ** min(failures - 1, 4)))
+                self._artifact_probe_next_at[part_id] = now + delay
+                await self._database.execute(
+                    'UPDATE recording_parts SET upload_excluded_reason=?, '
+                    'upload_probe_attempt=? '
+                    "WHERE id=? AND session_id=? AND artifact_state='ready' "
+                    'AND final_path=?',
+                    (
+                        self._MEDIA_PROBE_PENDING_REASON,
+                        failures,
+                        part_id,
+                        session_id,
+                        path,
+                    ),
+                )
+                audit(
+                    'upload_part_duration_probe_unavailable',
+                    level='WARNING',
+                    session_id=session_id,
+                    part_id=part_id,
+                    part_index=int(row['part_index']),
+                    retry_after_seconds=delay,
+                )
+                continue
+            duration_seconds = int(recovered.duration_seconds)
+            self._artifact_probe_next_at.pop(part_id, None)
+            updated = await self._database.execute(
+                'UPDATE recording_parts SET record_duration_seconds=?,'
+                'upload_excluded_reason=NULL,upload_probe_attempt=0 '
+                "WHERE id=? AND session_id=? AND artifact_state='ready' "
+                'AND final_path=? AND (upload_excluded_reason IS NULL '
+                'OR upload_excluded_reason=?)',
+                (
+                    duration_seconds,
+                    part_id,
+                    session_id,
+                    path,
+                    self._MEDIA_PROBE_PENDING_REASON,
+                ),
+            )
+            if updated == 1:
+                audit(
+                    'upload_part_duration_probed',
+                    session_id=session_id,
+                    part_id=part_id,
+                    part_index=int(row['part_index']),
+                    previous_duration_seconds=row['record_duration_seconds'],
+                    media_duration_seconds=duration_seconds,
+                )
+
+    async def _has_pending_media_probe(self, session_id: int) -> bool:
+        return bool(
+            await self._database.scalar(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                'AND upload_excluded_reason=? LIMIT 1',
+                (session_id, self._MEDIA_PROBE_PENDING_REASON),
+            )
+        )
 
     async def _resolve_live_settings(
         self, session: sqlite3.Row
@@ -530,10 +725,17 @@ class UploadCoordinator:
         resolved_settings = settings
         live_session = session
 
+        await self._refresh_ready_part_durations(session_id)
+        if await self._has_pending_media_probe(session_id):
+            return False
+        await self._mark_short_parts_excluded(session_id)
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path FROM recording_parts '
-            'WHERE session_id=? ORDER BY part_index',
-            (session_id,),
+            'WHERE session_id=? AND (artifact_state!=\'ready\' OR '
+            '(upload_excluded_reason IS NULL AND '
+            '(record_duration_seconds IS NULL OR record_duration_seconds>=?))) '
+            'ORDER BY part_index',
+            (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
         )
         if not part_rows:
             return False
@@ -598,8 +800,12 @@ class UploadCoordinator:
                 return False, False, 'waiting_artifacts'
             current_parts = connection.execute(
                 'SELECT id,part_index,source_path FROM recording_parts '
-                'WHERE session_id=? ORDER BY part_index',
-                (session_id,),
+                'WHERE session_id=? AND (artifact_state!=\'ready\' OR '
+                '(upload_excluded_reason IS NULL AND '
+                '(record_duration_seconds IS NULL OR '
+                'record_duration_seconds>=?))) '
+                'ORDER BY part_index',
+                (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
             ).fetchall()
             if [
                 (int(part['id']), int(part['part_index']), str(part['source_path']))
@@ -671,8 +877,11 @@ class UploadCoordinator:
                 'LEFT JOIN upload_parts upload ON upload.job_id=? '
                 'AND upload.part_index=part.part_index '
                 "WHERE part.session_id=? AND part.artifact_state='ready' "
+                'AND part.upload_excluded_reason IS NULL '
+                'AND (part.record_duration_seconds IS NULL OR '
+                'part.record_duration_seconds>=?) '
                 'AND upload.id IS NULL LIMIT 1',
-                (job_id, session_id),
+                (job_id, session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
             ).fetchone()
             part_count = int(
                 connection.execute(
@@ -834,12 +1043,25 @@ class UploadCoordinator:
             return False
         if not isinstance(snapshot, dict):
             return False
+        await self._refresh_ready_part_durations(job_session_id)
+        if finalized and await self._has_pending_media_probe(job_session_id):
+            return False
+        await self._mark_short_parts_excluded(job_session_id)
         rows = await self._database.fetchall(
             'SELECT id,part_index,source_path,final_path,xml_path,'
             'artifact_state,updated_at FROM recording_parts '
-            "WHERE session_id=? AND artifact_state='ready' ORDER BY part_index",
-            (job_session_id,),
+            "WHERE session_id=? AND artifact_state='ready' "
+            'AND upload_excluded_reason IS NULL '
+            'AND (record_duration_seconds IS NULL OR record_duration_seconds>=?) '
+            'ORDER BY part_index',
+            (job_session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
         )
+        if (
+            finalized
+            and not rows
+            and await self._cancel_empty_finalized_job(job_session_id, job_id)
+        ):
+            return True
         if not rows and not finalized:
             return False
         existing_rows = await self._database.fetchall(
@@ -952,8 +1174,11 @@ class UploadCoordinator:
                     'LEFT JOIN upload_parts upload ON upload.job_id=? '
                     'AND upload.part_index=part.part_index '
                     "WHERE part.session_id=? AND part.artifact_state='ready' "
+                    'AND part.upload_excluded_reason IS NULL '
+                    'AND (part.record_duration_seconds IS NULL OR '
+                    'part.record_duration_seconds>=?) '
                     'AND upload.id IS NULL LIMIT 1',
-                    (job_id, job_session_id),
+                    (job_id, job_session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
                 ).fetchone()
                 if pending_artifact is not None or missing_ready is not None:
                     next_state = 'waiting_artifacts'
@@ -983,11 +1208,72 @@ class UploadCoordinator:
             )
         return prepared
 
+    async def _cancel_empty_finalized_job(self, session_id: int, job_id: int) -> bool:
+        now = int(self._clock())
+        reason = '录像分段均不足 60 秒，已保留本地文件'
+
+        def cancel(connection: sqlite3.Connection) -> bool:
+            job = connection.execute(
+                'SELECT state,lease_until FROM upload_jobs '
+                'WHERE id=? AND session_id=? AND preupload_finalized=1',
+                (job_id, session_id),
+            ).fetchone()
+            if (
+                job is None
+                or str(job['state']) != 'waiting_artifacts'
+                or (job['lease_until'] is not None and int(job['lease_until']) > now)
+            ):
+                return False
+            if connection.execute(
+                'SELECT 1 FROM upload_parts WHERE job_id=? LIMIT 1', (job_id,)
+            ).fetchone():
+                return False
+            if connection.execute(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                "AND artifact_state NOT IN ('ready','failed','missing') LIMIT 1",
+                (session_id,),
+            ).fetchone():
+                return False
+            if connection.execute(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                'AND upload_excluded_reason=? LIMIT 1',
+                (session_id, self._MEDIA_PROBE_PENDING_REASON),
+            ).fetchone():
+                return False
+            if connection.execute(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                "AND artifact_state='ready' AND (record_duration_seconds IS NULL "
+                'OR record_duration_seconds>=?) '
+                'AND upload_excluded_reason IS NULL LIMIT 1',
+                (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
+            ).fetchone():
+                return False
+            connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
+            connection.execute(
+                "UPDATE recording_sessions SET upload_resolution_state='not_requested',"
+                'upload_resolution_error=?,upload_resolved_at=? WHERE id=?',
+                (reason, now, session_id),
+            )
+            return True
+
+        cancelled = await self._database.write(cancel)
+        if cancelled:
+            audit(
+                'upload_empty_finalized_job_cancelled',
+                job_id=job_id,
+                session_id=session_id,
+                reason='all_parts_below_minimum_duration',
+            )
+        return cancelled
+
     async def _has_stable_ready_part(self, session_id: int) -> bool:
         rows = await self._database.fetchall(
             'SELECT final_path FROM recording_parts '
-            "WHERE session_id=? AND artifact_state='ready' ORDER BY part_index",
-            (session_id,),
+            "WHERE session_id=? AND artifact_state='ready' "
+            'AND upload_excluded_reason IS NULL '
+            'AND (record_duration_seconds IS NULL OR record_duration_seconds>=?) '
+            'ORDER BY part_index',
+            (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
         )
         stable_before_ns = int(
             (self._clock() - self._stability_seconds) * 1_000_000_000
@@ -1602,17 +1888,11 @@ class UploadCoordinator:
             submit_state=job.submit_state,
             preupload=not job.preupload_finalized,
         )
-        if job.state == 'submitting' and job.submit_state == 'in_flight':
-            await self._update_job(
-                claim,
-                {
-                    'state': 'paused',
-                    'submit_state': 'unknown_outcome',
-                    'review_reason': '投稿提交在重启前已发出，远端结果未知',
-                    'updated_at': int(self._clock()),
-                },
-                release=True,
-            )
+        if job.state == 'submitting' and job.submit_state in (
+            'in_flight',
+            'unknown_outcome',
+        ):
+            await self._reconcile_unknown_submission(claim, job)
             return
         account = await self._database.fetchone(
             'SELECT state,credential_version FROM bili_accounts WHERE id=?',
@@ -1674,6 +1954,8 @@ class UploadCoordinator:
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
                 payload = await self._submit_payload(job)
+                if self._stop_requested():
+                    raise UposUploadStopped('upload stopped before archive submission')
                 scheduled_publish_at = payload.get('dtime')
                 now = int(self._clock())
                 await self._update_job(
@@ -1686,6 +1968,24 @@ class UploadCoordinator:
                         'updated_at': now,
                     },
                 )
+                if self._stop_requested():
+                    await self._update_job(
+                        claim,
+                        {
+                            'state': 'submitting',
+                            'submit_state': 'prepared',
+                            'review_reason': None,
+                            'updated_at': int(self._clock()),
+                        },
+                        release=True,
+                    )
+                    audit(
+                        'upload_archive_submission_stopped',
+                        job_id=job.id,
+                        account_id=job.account_id,
+                        result='not_sent',
+                    )
+                    return
                 submit_started = True
                 audit(
                     'upload_archive_submitting',
@@ -1703,9 +2003,26 @@ class UploadCoordinator:
             return
         except RemoteOutcomeUnknown:
             if submit_started:
-                await self._pause_unknown_submission(claim)
+                await self._mark_unknown_submission(
+                    claim, reason='投稿结果暂未确认，系统将先查询远端稿件'
+                )
             else:
                 await self._retry_not_sent(claim, submit_started=False)
+            return
+        except UposUploadDeferred as error:
+            await self._update_job(
+                claim,
+                {
+                    'state': 'uploading',
+                    'submit_state': 'prepared',
+                    'review_reason': '预上传暂时受限，系统将在 {} 秒后自动重试'.format(
+                        error.retry_after_seconds
+                    ),
+                    'next_attempt_at': (int(self._clock()) + error.retry_after_seconds),
+                    'updated_at': int(self._clock()),
+                },
+                release=True,
+            )
             return
         except UposUploadPaused:
             state = await self._database.scalar(
@@ -1734,6 +2051,31 @@ class UploadCoordinator:
             await self._pause_job(claim, '投稿封面无法读取或上传')
             return
         except BiliApiError as error:
+            if error.code in (406, 408, 425, 429):
+                delay = min(15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4)))
+                await self._update_job(
+                    claim,
+                    {
+                        'state': 'submitting' if submit_started else 'uploading',
+                        'submit_state': 'prepared',
+                        'review_reason': 'B 站暂时限制请求，系统将在 {} 秒后自动重试'.format(
+                            delay
+                        ),
+                        'next_attempt_at': int(self._clock()) + delay,
+                        'updated_at': int(self._clock()),
+                    },
+                    release=True,
+                )
+                audit(
+                    'upload_preupload_rate_limited',
+                    level='WARNING',
+                    job_id=claim.id,
+                    stage='submission' if submit_started else 'upload',
+                    error_code=error.code,
+                    delay_seconds=delay,
+                )
+                return
+            rejection_reason = await self._bili_rejection_reason(claim.id, error)
             await self._update_job(
                 claim,
                 {
@@ -1741,7 +2083,7 @@ class UploadCoordinator:
                     'submit_state': (
                         'failed_permanent' if submit_started else 'prepared'
                     ),
-                    'review_reason': 'B 站接口拒绝请求（{}）'.format(error.code),
+                    'review_reason': rejection_reason,
                     'updated_at': int(self._clock()),
                 },
                 release=True,
@@ -1749,13 +2091,17 @@ class UploadCoordinator:
             return
         except ProtocolContractError:
             if submit_started:
-                await self._pause_unknown_submission(claim)
+                await self._mark_unknown_submission(
+                    claim, reason='投稿响应无法确认，系统将先查询远端稿件'
+                )
             else:
                 await self._pause_job(claim, '上传协议响应不符合预期')
             return
         aid, bvid = self._submission_identity(response)
         if aid is None or bvid is None:
-            await self._pause_unknown_submission(claim)
+            await self._mark_unknown_submission(
+                claim, reason='投稿响应缺少稿件编号，系统将先查询远端稿件'
+            )
             return
         await self._update_job(
             claim,
@@ -1983,18 +2329,213 @@ class UploadCoordinator:
             delay_seconds=delay,
         )
 
-    async def _pause_unknown_submission(self, claim: LeaseClaim) -> None:
+    async def _bili_rejection_reason(self, job_id: int, error: BiliApiError) -> str:
+        checks = error.details.get('bvc_check')
+        if error.code == 21588 and isinstance(checks, list):
+            part_rows = await self._database.fetchall(
+                'SELECT part_index,cid FROM upload_parts '
+                'WHERE job_id=? AND cid IS NOT NULL',
+                (job_id,),
+            )
+            parts_by_cid = {
+                int(row['cid']): int(row['part_index']) for row in part_rows
+            }
+            messages = []
+            for check in checks:
+                if not isinstance(check, Mapping):
+                    continue
+                cid = check.get('cid')
+                message = check.get('message')
+                if type(cid) is not int or not isinstance(message, str):
+                    continue
+                part_index = parts_by_cid.get(cid)
+                label = (
+                    'P{}'.format(part_index)
+                    if part_index is not None
+                    else 'CID {}'.format(cid)
+                )
+                messages.append('{} {}'.format(label, message))
+            if messages:
+                return ('B 站视频检测未通过：' + '；'.join(messages))[:500]
+            return 'B 站视频检测未通过（21588），未返回可匹配的分 P 原因'
+        if error.public_message:
+            return 'B 站接口拒绝请求（{}）：{}'.format(
+                error.code, error.public_message
+            )[:500]
+        return 'B 站接口拒绝请求（{}）'.format(error.code)
+
+    async def _mark_unknown_submission(self, claim: LeaseClaim, *, reason: str) -> None:
+        delay = min(15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4)))
         await self._update_job(
             claim,
             {
-                'state': 'paused',
+                'state': 'submitting',
                 'submit_state': 'unknown_outcome',
-                'review_reason': '投稿提交结果未知，需要远端对账',
+                'review_reason': '{}（{} 秒后核对）'.format(reason, delay),
+                'next_attempt_at': int(self._clock()) + delay,
                 'updated_at': int(self._clock()),
             },
             release=True,
         )
-        audit('upload_submission_unknown', level='ERROR', job_id=claim.id)
+        audit(
+            'upload_submission_reconciliation_scheduled',
+            level='WARNING',
+            job_id=claim.id,
+            delay_seconds=delay,
+            reason=reason,
+        )
+
+    async def _reconcile_unknown_submission(self, claim: LeaseClaim, job: _Job) -> None:
+        account = await self._database.fetchone(
+            'SELECT state,credential_version FROM bili_accounts WHERE id=?',
+            (job.account_id,),
+        )
+        if account is None or str(account['state']) != 'active':
+            await self._pause_job(claim, '投稿账号不可用，无法核对投稿结果')
+            return
+        try:
+            gate = self._account_gates.for_account(job.account_id)
+            async with gate.hold(int(account['credential_version'])):
+                bundle = await self._bundle_loader(job.account_id)
+                matches = await self._find_remote_submission(job, bundle)
+        except (AccountNotFound, AccountPaused, CredentialVersionChanged):
+            await self._pause_job(claim, '投稿账号在核对期间发生变化')
+            return
+        except (CredentialNotFound, InvalidCredentialBundle, InvalidCredentialKey):
+            await self._pause_job(claim, '投稿账号凭据无法读取')
+            return
+        except (
+            BiliApiError,
+            DefinitelyNotSent,
+            ProtocolContractError,
+            RemoteOutcomeUnknown,
+        ) as error:
+            await self._mark_unknown_submission(
+                claim, reason='远端稿件暂时无法查询：{}'.format(type(error).__name__)
+            )
+            return
+        if matches:
+            aid, bvid = matches[0]
+            await self._update_job(
+                claim,
+                {
+                    'state': 'waiting_review',
+                    'submit_state': 'confirmed',
+                    'aid': aid,
+                    'bvid': bvid,
+                    'submitted_at': int(self._clock()),
+                    'review_reason': None,
+                    'updated_at': int(self._clock()),
+                },
+                release=True,
+            )
+            audit(
+                'upload_submission_reconciled',
+                level='WARNING' if len(matches) > 1 else 'INFO',
+                job_id=claim.id,
+                aid=aid,
+                bvid=bvid,
+                matching_archives=len(matches),
+            )
+            return
+
+        await self._mark_unknown_submission(
+            claim, reason='近期稿件中暂未找到匹配项，继续核对且不会盲目重复投稿'
+        )
+
+    async def _find_remote_submission(
+        self, job: _Job, bundle: Any
+    ) -> List[Tuple[int, str]]:
+        try:
+            snapshot = json.loads(job.policy_snapshot_json)
+        except json.JSONDecodeError:
+            raise ProtocolContractError('invalid upload policy snapshot') from None
+        if not isinstance(snapshot, Mapping) or not isinstance(
+            snapshot.get('title'), str
+        ):
+            raise ProtocolContractError('invalid upload policy snapshot')
+        expected_title = str(snapshot['title'])
+        rows = await self._database.fetchall(
+            'SELECT remote_filename FROM upload_parts '
+            'WHERE job_id=? ORDER BY part_index',
+            (job.id,),
+        )
+        expected_filenames = tuple(str(row['remote_filename'] or '') for row in rows)
+        if not expected_filenames or any(not name for name in expected_filenames):
+            raise ProtocolContractError('upload part is incomplete')
+
+        candidates: List[Tuple[int, str]] = []
+        for page_number in range(1, 21):
+            response = await self._protocol.list_archives(
+                bundle,
+                {'status': 'is_pubing,pubed,not_pubed', 'pn': page_number, 'ps': 50},
+            )
+            entries = self._archive_entries(response)
+            for entry in entries:
+                archive = self._archive(entry)
+                if archive.get('title') != expected_title:
+                    continue
+                identity = self._archive_identity(archive)
+                if identity is not None:
+                    candidates.append(identity)
+            if len(entries) < 50:
+                break
+
+        matches: List[Tuple[int, str]] = []
+        seen = set()
+        for aid, bvid in candidates:
+            if bvid in seen:
+                continue
+            seen.add(bvid)
+            detail = await self._protocol.archive_view(
+                bundle, {'topic_grey': 1, 'bvid': bvid, 't': int(self._clock() * 1000)}
+            )
+            data = detail.get('data')
+            if not isinstance(data, Mapping):
+                continue
+            detail_identity = self._archive_identity(self._archive(data))
+            videos = data.get('videos')
+            if detail_identity != (aid, bvid) or not isinstance(videos, list):
+                continue
+            filenames = tuple(
+                str(video.get('filename') or '')
+                for video in videos
+                if isinstance(video, Mapping)
+            )
+            if filenames == expected_filenames:
+                matches.append((aid, bvid))
+        return matches
+
+    @staticmethod
+    def _archive_entries(response: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+        data = response.get('data')
+        entries = data.get('arc_audits') if isinstance(data, Mapping) else None
+        if not isinstance(entries, list) or not all(
+            isinstance(entry, Mapping) for entry in entries
+        ):
+            raise ProtocolContractError('archive list response is invalid')
+        return list(entries)
+
+    @staticmethod
+    def _archive(value: Mapping[str, Any]) -> Mapping[str, Any]:
+        archive = value.get('Archive')
+        if not isinstance(archive, Mapping):
+            archive = value.get('archive')
+        return archive if isinstance(archive, Mapping) else value
+
+    @staticmethod
+    def _archive_identity(value: Mapping[str, Any]) -> Optional[Tuple[int, str]]:
+        raw_aid = value.get('aid')
+        if type(raw_aid) is int:
+            aid = raw_aid
+        elif isinstance(raw_aid, str) and raw_aid.isdigit():
+            aid = int(raw_aid)
+        else:
+            return None
+        bvid = value.get('bvid')
+        if aid <= 0 or not isinstance(bvid, str) or not bvid:
+            return None
+        return aid, bvid
 
     async def _pause_job(self, claim: LeaseClaim, reason: str) -> None:
         await self._update_job(

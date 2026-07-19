@@ -9,9 +9,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim, LeaseLost
-from blrec.bili_upload.errors import RemoteOutcomeUnknown
+from blrec.bili_upload.errors import BiliApiError, RemoteOutcomeUnknown
 from blrec.bili_upload.upos import (
     FileIdentity,
+    UposUploadDeferred,
     UposUploader,
     UposUploadPaused,
     UposUploadStopped,
@@ -19,9 +20,15 @@ from blrec.bili_upload.upos import (
 
 
 class FakeSession:
-    def __init__(self, file_name: str, remote_file_name: str = 'remote-video') -> None:
+    def __init__(
+        self,
+        file_name: str,
+        remote_file_name: str = 'remote-video',
+        biz_id: str = '12345',
+    ) -> None:
         self.file_name = file_name
         self.remote_file_name = remote_file_name
+        self.biz_id = biz_id
 
 
 class FakeProtocol:
@@ -35,9 +42,14 @@ class FakeProtocol:
         self.active_chunks = 0
         self.max_active_chunks = 0
         self.chunk_delay = 0.0
+        self.preupload_error: Optional[BaseException] = None
+        self.chunk_errors: List[BaseException] = []
 
     async def preupload(self, _bundle: Any, params: Mapping[str, Any]) -> Any:
         self.preupload_calls.append(params)
+        if self.preupload_error is not None:
+            error, self.preupload_error = self.preupload_error, None
+            raise error
         return SimpleNamespace(
             payload={'chunk_size': 4}, session=FakeSession(str(params['name']))
         )
@@ -71,6 +83,8 @@ class FakeProtocol:
                 await asyncio.sleep(self.chunk_delay)
             if chunk_no == self.crash_on_chunk:
                 raise RuntimeError('simulated process crash')
+            if self.chunk_errors:
+                raise self.chunk_errors.pop(0)
             return {'etag': 'etag-{}'.format(chunk_no)}
         finally:
             self.active_chunks -= 1
@@ -291,7 +305,83 @@ async def test_progress_milestones_use_whole_job_bytes_for_multiple_parts(
 
 
 @pytest.mark.asyncio
-async def test_unknown_complete_result_is_paused_and_never_repeated(
+async def test_preupload_admission_window_starts_at_one_and_grows_to_five(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = []
+        for index in range(1, 7):
+            path = tmp_path / 'part-{}.flv'.format(index)
+            path.write_bytes(('part-{}'.format(index)).encode('ascii'))
+            paths.append(path)
+        await prepared_part(database, paths[0])
+        for index, path in enumerate(paths[1:], start=2):
+            await database.execute(
+                'INSERT INTO upload_parts('
+                'id,job_id,part_index,source_path,final_path,artifact_state,'
+                "upload_state) VALUES(?,1,?,?,?,'ready','prepared')",
+                (index, index, str(path), str(path)),
+            )
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        uploader = UposUploader(
+            database, protocol, chunk_size=32, concurrency=1, clock=lambda: 1000
+        )
+
+        for part_id in range(1, 6):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+        with pytest.raises(RuntimeError, match='preupload.*deferred') as caught:
+            await uploader.upload_part(6, bundle=object(), claim=claim)
+
+        assert getattr(caught.value, 'retry_after_seconds', 0) == 60
+        assert len(protocol.preupload_calls) == 5
+        assert (
+            await database.scalar('SELECT upload_state FROM upload_parts WHERE id=6')
+            == 'prepared'
+        )
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'ready'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_406_defers_without_pausing_job(tmp_path: Path) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcdefgh')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.preupload_error = BiliApiError(406, operation='preupload')
+        uploader = UposUploader(
+            database, protocol, chunk_size=4, concurrency=1, clock=lambda: 1000
+        )
+
+        with pytest.raises(RuntimeError, match='preupload.*deferred') as caught:
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert getattr(caught.value, 'retry_after_seconds', 0) >= 60
+        assert (
+            await database.scalar(
+                'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+            )
+            == 'prepared'
+        )
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'ready'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_complete_result_is_deferred_and_completed_on_retry(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / 'part.flv'
@@ -305,20 +395,114 @@ async def test_unknown_complete_result_is_paused_and_never_repeated(
         protocol.complete_error = RemoteOutcomeUnknown('complete_upload')
         uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
 
-        with pytest.raises(UposUploadPaused, match='unknown'):
+        with pytest.raises(UposUploadDeferred, match='deferred'):
             await uploader.upload_part(part_id, bundle=object(), claim=claim)
-        with pytest.raises(UposUploadPaused, match='unknown'):
-            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+        protocol.complete_error = None
+        await uploader.upload_part(part_id, bundle=object(), claim=claim)
 
-        assert protocol.complete_calls == 1
+        assert protocol.complete_calls == 2
         assert (
             await database.scalar(
                 'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
             )
-            == 'unknown_outcome'
+            == 'confirmed'
         )
         assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
-            'paused'
+            'ready'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code', (406, 408, 425, 429))
+async def test_transient_complete_rejection_is_deferred_without_pausing(
+    tmp_path: Path, code: int
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.complete_error = BiliApiError(code, operation='complete_upload')
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+
+        with pytest.raises(UposUploadDeferred):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert (
+            await database.scalar(
+                'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+            )
+            == 'uploading'
+        )
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'ready'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_chunk_failures_defer_and_resume_without_pausing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.chunk_errors = [
+            RemoteOutcomeUnknown('upload_chunk'),
+            RemoteOutcomeUnknown('upload_chunk'),
+            RemoteOutcomeUnknown('upload_chunk'),
+        ]
+        uploader = UposUploader(
+            database, protocol, chunk_size=4, concurrency=1, max_chunk_attempts=3
+        )
+
+        with pytest.raises(UposUploadDeferred):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+        await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'ready'
+        )
+        assert (
+            await database.scalar(
+                'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+            )
+            == 'confirmed'
+        )
+        assert protocol.chunk_calls == [0, 0, 0, 0]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_persists_bilibili_cid_for_submission_diagnostics(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        uploader = UposUploader(database, FakeProtocol(), chunk_size=4, concurrency=1)
+
+        await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert (
+            await database.scalar('SELECT cid FROM upload_parts WHERE id=?', (part_id,))
+            == 12345
         )
     finally:
         await database.close()

@@ -12,10 +12,12 @@ async def test_not_logged_in_response_triggers_account_validation() -> None:
     api = BaseApi(Mock(), auth_failure_reporter=reporter)
 
     with pytest.raises(ApiRequestError) as exc_info:
-        await api._check_response({'code': -101, 'message': 'not logged in'})
+        await api._check_response(
+            {'code': -101, 'message': 'not logged in'}, 'credential-fingerprint'
+        )
 
     assert exc_info.value.code == -101
-    reporter.assert_awaited_once_with()
+    reporter.assert_awaited_once_with('credential-fingerprint')
 
 
 @pytest.mark.asyncio

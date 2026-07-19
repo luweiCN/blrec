@@ -245,6 +245,41 @@ async def test_danmaku_pages_completed_xml(
 
 
 @pytest.mark.asyncio
+async def test_danmaku_first_page_does_not_parse_the_whole_file(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'many.xml'
+    xml.write_text(
+        '<i>'
+        + ''.join(
+            '<d p="{},1,25,1">{}</d>'.format(index, index) for index in range(100)
+        )
+        + '</i>',
+        encoding='utf8',
+    )
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=1 WHERE id=?',
+        (str(xml), part_id),
+    )
+    original = RecordingContentReader._danmaku_line
+    parsed = []
+
+    def counting(index, element):
+        parsed.append(index)
+        return original(index, element)
+
+    monkeypatch.setattr(RecordingContentReader, '_danmaku_line', staticmethod(counting))
+
+    page = await RecordingContentReader(database).danmaku(part_id, cursor=0, limit=2)
+
+    assert [item.content for item in page.items] == ['0', '1']
+    assert page.next_cursor == 2
+    assert parsed == [0, 1, 2]
+
+
+@pytest.mark.asyncio
 async def test_danmaku_rejects_malformed_xml(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
@@ -292,4 +327,4 @@ async def test_danmaku_validates_cursor_and_limit(database: BiliUploadDatabase) 
     with pytest.raises(ValueError, match='cursor'):
         await reader.danmaku(1, cursor=-1, limit=100)
     with pytest.raises(ValueError, match='limit'):
-        await reader.danmaku(1, cursor=0, limit=101)
+        await reader.danmaku(1, cursor=0, limit=501)

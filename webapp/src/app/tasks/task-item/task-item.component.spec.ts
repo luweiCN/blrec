@@ -73,6 +73,7 @@ class DataurlStubPipe implements PipeTransform {
 }
 
 const taskData: TaskData = {
+  title_keywords: ['比赛', 'HIGHLIGHT', '复盘'],
   user_info: {
     name: '测试主播',
     gender: '',
@@ -283,5 +284,38 @@ describe('TaskItemComponent', () => {
       1,
       jasmine.objectContaining({ enabled: false }),
     );
+  });
+
+  it('shows recording title conditions and the effective submission summary', () => {
+    fixture.componentRef.setInput('uploadPolicy', {
+      ...uploadPolicy,
+      isOnlySelf: true,
+      publishDelaySeconds: 7_200,
+      collectionSeasonId: 88,
+      collectionSectionId: 99,
+      retentionMode: 'approved',
+      retentionDays: 5,
+      danmakuBackfill: false,
+    });
+    fixture.componentRef.setInput('collectionLabel', '合集 #88');
+    fixture.detectChanges();
+
+    const recording = fixture.nativeElement.querySelector(
+      '[data-testid="recording-summary"]',
+    ) as HTMLElement;
+    const submission = fixture.nativeElement.querySelector(
+      '[data-testid="submission-summary"]',
+    ) as HTMLElement;
+
+    expect(recording.textContent).toContain('标题匹配');
+    expect(recording.textContent).toContain('比赛');
+    expect(recording.textContent).toContain('等 3 项');
+    expect(submission.textContent).toContain('投稿账号');
+    expect(submission.textContent).toContain('仅自己可见');
+    expect(submission.textContent).toContain('原创');
+    expect(submission.textContent).toContain('定时发布');
+    expect(submission.textContent).toContain('合集 #88');
+    expect(submission.textContent).toContain('审核通过 5 天后删除');
+    expect(submission.textContent).toContain('不回灌弹幕');
   });
 });

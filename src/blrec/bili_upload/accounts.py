@@ -16,6 +16,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Tuple,
 )
 
 from loguru import logger
@@ -169,6 +170,8 @@ class AccountManager:
     _TERMINAL_QR_STATES = ('confirmed', 'expired', 'cancelled', 'failed')
     _REFRESH_WINDOW_SECONDS = 72 * 3600
     _HEALTH_CHECK_INTERVAL_SECONDS = 12 * 3600
+    _AUTH_FAILURE_CONFIRM_WINDOW_SECONDS = 5 * 60
+    _RECORDING_COOKIE_URL = 'https://api.bilibili.com/'
 
     def __init__(
         self,
@@ -204,6 +207,7 @@ class AccountManager:
         self._health_lock = asyncio.Lock()
         self._last_health_check_at: Optional[int] = None
         self._auth_failure_lock = asyncio.Lock()
+        self._auth_failure_observed_at: Dict[int, Tuple[int, int]] = {}
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -311,6 +315,22 @@ class AccountManager:
         previous_bundle: Optional[CredentialBundle] = None,
         account_id: Optional[int] = None,
     ) -> AccountView:
+        async with self._auth_failure_lock:
+            return await self._finish_confirmed_login(
+                response,
+                app_device_id=app_device_id,
+                previous_bundle=previous_bundle,
+                account_id=account_id,
+            )
+
+    async def _finish_confirmed_login(
+        self,
+        response: Mapping[str, Any],
+        *,
+        app_device_id: Optional[str],
+        previous_bundle: Optional[CredentialBundle],
+        account_id: Optional[int],
+    ) -> AccountView:
         bundle = self._build_bundle(
             response, app_device_id=app_device_id, previous_bundle=previous_bundle
         )
@@ -339,6 +359,8 @@ class AccountManager:
                 cipher=self._cipher,
                 now=int(self._clock()),
             )
+            if previous_bundle is None:
+                self._auth_failure_observed_at.pop(account_id, None)
             await self._database.execute(
                 'INSERT OR IGNORE INTO bili_account_selection('
                 'id,primary_account_id) VALUES(1,?)',
@@ -419,6 +441,10 @@ class AccountManager:
         return self._web_session_builder.cookie_header(bundle, url)
 
     async def refresh_account(self, account_id: int) -> int:
+        async with self._auth_failure_lock:
+            return await self._refresh_account(account_id)
+
+    async def _refresh_account(self, account_id: int) -> int:
         row = await self._account_row(account_id)
         version = int(row['credential_version'])
         gate = self._write_gates.for_account(account_id)
@@ -427,6 +453,10 @@ class AccountManager:
             return await self._refresh_locked(account_id, row, previous)
 
     async def check_account_renewal(self, account_id: int) -> RenewalCheckResult:
+        async with self._auth_failure_lock:
+            return await self._check_account_renewal(account_id)
+
+    async def _check_account_renewal(self, account_id: int) -> RenewalCheckResult:
         row = await self._account_row(account_id)
         version = int(row['credential_version'])
         gate = self._write_gates.for_account(account_id)
@@ -493,13 +523,39 @@ class AccountManager:
                 )
         return refreshed
 
-    async def report_primary_auth_failure(self) -> None:
+    async def report_primary_auth_failure(self, credential_fingerprint: str) -> None:
         async with self._auth_failure_lock:
-            account_id = await self._recording_account_id()
-            if account_id is None:
+            account_reference = await self._account_for_credential_fingerprint(
+                credential_fingerprint
+            )
+            if account_reference is None:
                 return
+            account_id, credential_version = account_reference
+            now = int(self._clock())
+            previous = self._auth_failure_observed_at.get(account_id)
+            if (
+                previous is not None
+                and previous[0] == credential_version
+                and 0 <= now - previous[1] <= self._AUTH_FAILURE_CONFIRM_WINDOW_SECONDS
+            ):
+                self._auth_failure_observed_at.pop(account_id, None)
+                await self._mark_credential_invalid(
+                    account_id,
+                    reason=(
+                        'credential repeatedly rejected by authenticated transport'
+                    ),
+                )
+                return
+            self._auth_failure_observed_at[account_id] = (credential_version, now)
             try:
-                await self.check_account_renewal(account_id)
+                result = await self._check_account_renewal(account_id)
+                self._auth_failure_observed_at[account_id] = (
+                    result.credential_version,
+                    now,
+                )
+            except asyncio.CancelledError:
+                self._auth_failure_observed_at.pop(account_id, None)
+                raise
             except (
                 AccountIdentityMismatch,
                 AccountNotFound,
@@ -514,6 +570,26 @@ class AccountManager:
                     'failure ended with {}',
                     type(error).__name__,
                 )
+
+    async def _account_for_credential_fingerprint(
+        self, credential_fingerprint: str
+    ) -> Optional[Tuple[int, int]]:
+        if not credential_fingerprint:
+            return None
+        rows = await self._database.fetchall(
+            "SELECT id,credential_version FROM bili_accounts WHERE state='active' "
+            'ORDER BY id'
+        )
+        for row in rows:
+            account_id = int(row['id'])
+            bundle = await self._store.get(account_id=account_id, cipher=self._cipher)
+            cookie_header = self._web_session_builder.cookie_header(
+                bundle, self._RECORDING_COOKIE_URL
+            )
+            fingerprint = hashlib.sha256(cookie_header.encode('utf-8')).hexdigest()
+            if secrets.compare_digest(fingerprint, credential_fingerprint):
+                return account_id, int(row['credential_version'])
+        return None
 
     async def _recording_account_id(self) -> Optional[int]:
         row = await self._database.fetchone(
@@ -537,8 +613,11 @@ class AccountManager:
             await self._mark_refresh_unknown(account_id)
             raise
         try:
-            account = await self.finish_confirmed_login(
-                response, previous_bundle=previous, account_id=account_id
+            account = await self._finish_confirmed_login(
+                response,
+                app_device_id=None,
+                previous_bundle=previous,
+                account_id=account_id,
             )
         except (DefinitelyNotSent, RemoteOutcomeUnknown):
             await self._mark_refresh_unknown(account_id)
@@ -791,11 +870,13 @@ class AccountManager:
         )
         await self._notify_primary_credential_changed()
 
-    async def _mark_credential_invalid(self, account_id: int) -> None:
+    async def _mark_credential_invalid(
+        self, account_id: int, *, reason: str = 'credential is no longer authenticated'
+    ) -> None:
         await self._database.execute(
             "UPDATE bili_accounts SET state='paused',pause_reason=?,updated_at=? "
             "WHERE id=? AND state='active'",
-            ('credential is no longer authenticated', int(self._clock()), account_id),
+            (reason, int(self._clock()), account_id),
         )
         await self._notify_primary_credential_changed()
 

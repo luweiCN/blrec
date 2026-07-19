@@ -1,3 +1,4 @@
+import hashlib
 import os
 from contextlib import suppress
 from pathlib import PurePath
@@ -69,7 +70,7 @@ class RecordTask:
         delete_source: DeleteStrategy = DeleteStrategy.AUTO,
         live_status_coordinator: Optional['LiveStatusCoordinator'] = None,
         anonymous_room_client: Optional['AnonymousRoomClient'] = None,
-        auth_failure_reporter: Optional[Callable[[], Awaitable[None]]] = None,
+        auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
         recording_journal: Optional[RecordingJournalBridge] = None,
         network_session_pool: Optional['AiohttpSessionPool'] = None,
         network_route_manager: Optional['NetworkRouteManager'] = None,
@@ -609,6 +610,7 @@ class RecordTask:
             self._danmaku_client,
             configure_anonymous=lambda: self._configure_danmaku_transport(False),
             configure_authenticated=lambda: self._configure_danmaku_transport(True),
+            authenticated_failure_reporter=self._auth_failure_reporter,
         )
 
     def _make_danmaku_transport(
@@ -641,12 +643,14 @@ class RecordTask:
             api.base_play_info_api_urls = list(self._live.base_play_info_api_urls)
         return session, appapi, webapi, headers
 
-    def _configure_danmaku_transport(self, authenticated: bool) -> bool:
+    def _configure_danmaku_transport(self, authenticated: bool) -> Optional[str]:
         if authenticated and not self._live.cookie:
-            return False
+            return None
         session, appapi, webapi, headers = self._make_danmaku_transport(authenticated)
         self._danmaku_client.configure(session, appapi, webapi, headers)
-        return True
+        if not authenticated:
+            return None
+        return hashlib.sha256(self._live.cookie.encode('utf-8')).hexdigest()
 
     def _setup_live_monitor(self) -> None:
         if not self._batch_monitoring:

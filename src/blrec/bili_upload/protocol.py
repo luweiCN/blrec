@@ -745,7 +745,10 @@ class BiliProtocolClient:
         code = payload.get('code')
         if check_code and type(code) is int and code != 0:
             raise BiliApiError(
-                code, self._safe_message(payload), operation=request.operation
+                code,
+                self._safe_message(payload),
+                operation=request.operation,
+                details=self._safe_error_details(payload),
             )
         if 'OK' in payload and payload['OK'] != 1:
             raise ProtocolContractError('UPOS operation failed')
@@ -869,3 +872,63 @@ class BiliProtocolClient:
         if isinstance(message, str) and message.isascii() and message.isalpha():
             return message
         return None
+
+    @classmethod
+    def _safe_error_details(cls, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        data = payload.get('data')
+        if not isinstance(data, Mapping):
+            return {}
+        raw_checks = data.get('bvc_check')
+        if isinstance(raw_checks, Mapping):
+            if 'cid' in raw_checks:
+                candidates = [raw_checks]
+            else:
+                candidates = [
+                    {'cid': cid, 'message': message}
+                    for cid, message in raw_checks.items()
+                ]
+        elif isinstance(raw_checks, list):
+            candidates = raw_checks
+        else:
+            return {}
+        checks = []
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            raw_cid = candidate.get('cid')
+            if raw_cid is None:
+                continue
+            try:
+                cid = int(raw_cid)
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0:
+                continue
+            message = next(
+                (
+                    candidate.get(field)
+                    for field in ('message', 'msg', 'desc', 'reject_reason')
+                    if isinstance(candidate.get(field), str)
+                ),
+                None,
+            )
+            safe_message = cls._safe_public_text(message)
+            if safe_message is None:
+                continue
+            checks.append({'cid': cid, 'message': safe_message})
+        return {'bvc_check': checks} if checks else {}
+
+    @staticmethod
+    def _safe_public_text(value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        normalized = ' '.join(value.split()).strip()
+        if not normalized or len(normalized) > 300:
+            return None
+        lowered = normalized.lower()
+        if any(
+            marker in lowered
+            for marker in ('access_key', 'cookie', 'sessdata', 'csrf', 'token=')
+        ):
+            return None
+        return normalized

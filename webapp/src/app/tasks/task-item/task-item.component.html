@@ -30,16 +30,7 @@
     </div>
   </div>
 
-  <div class="live-cell">
-    <nz-tag [nzColor]="liveStatusColor(data.room_info.live_status)">
-      {{ liveStatusLabel(data.room_info.live_status) }}
-    </nz-tag>
-    <span *ngIf="data.room_info.live_start_time > 0">
-      {{ data.room_info.live_start_time * 1000 | date : 'MM-dd HH:mm' }}
-    </span>
-  </div>
-
-  <div class="task-control-cell">
+  <div class="task-control-cell" data-testid="recording-summary">
     <div class="task-control-summary">
       <nz-switch
         data-testid="task-enabled-switch"
@@ -53,30 +44,62 @@
       <nz-tag [nzColor]="runningStatusColor(data.task_status.running_status)">
         {{ runningStatusLabel(data.task_status.running_status) }}
       </nz-tag>
+      <nz-tag [nzColor]="liveStatusColor(data.room_info.live_status)">
+        {{ liveStatusLabel(data.room_info.live_status) }}
+      </nz-tag>
     </div>
     <span *ngIf="data.task_status.running_status === RunningStatus.RECORDING">
       {{ data.task_status.rec_elapsed | duration }} ·
       {{ data.task_status.rec_total | filesize : { spacer: '' } }}
     </span>
+    <span
+      *ngIf="titleKeywords.length > 0"
+      class="keyword-summary"
+      nz-tooltip
+      [nzTooltipTitle]="titleKeywords.join('、')"
+    >
+      标题匹配：{{ titleKeywordSummary }}
+    </span>
   </div>
 
-  <div class="upload-policy-cell">
-    <nz-switch
-      data-testid="automatic-submission-switch"
-      nz-tooltip
-      [nzTooltipTitle]="
-        uploadPolicy?.blockedReason ||
-        (uploadPolicy ? '录制结束后自动创建上传任务' : '首次开启需要先完成投稿设置')
-      "
-      [ngModel]="automaticSubmissionEnabled"
-      [nzControl]="true"
-      [nzLoading]="automaticSubmissionPending"
-      (click)="toggleAutomaticSubmission()"
-    ></nz-switch>
+  <div
+    class="upload-policy-cell"
+    data-testid="submission-summary"
+    [class.policy-disabled]="uploadPolicy !== null && !uploadPolicy.enabled"
+  >
+    <div class="policy-control-row">
+      <nz-switch
+        data-testid="automatic-submission-switch"
+        nz-tooltip
+        [nzTooltipTitle]="
+          uploadPolicy?.blockedReason ||
+          (uploadPolicy ? '录制结束后自动创建上传任务' : '首次开启需要先完成投稿设置')
+        "
+        [ngModel]="automaticSubmissionEnabled"
+        [nzControl]="true"
+        [nzLoading]="automaticSubmissionPending"
+        (click)="toggleAutomaticSubmission()"
+      ></nz-switch>
+      <strong>{{ automaticSubmissionEnabled ? "自动投稿" : "不自动投稿" }}</strong>
+    </div>
     <span *ngIf="uploadPolicy?.blockedReason" class="policy-warning">
-      配置不可用
+      {{ uploadPolicy?.blockedReason }}
     </span>
-    <span *ngIf="!uploadPolicy">未设置</span>
+    <span *ngIf="!uploadPolicy">尚未设置投稿参数</span>
+    <ng-container *ngIf="uploadPolicy as policy">
+      <span>投稿账号：{{ policy.resolvedAccountName || "不可用" }}</span>
+      <div class="policy-tags">
+        <nz-tag *ngIf="policy.isOnlySelf" nzColor="orange">仅自己可见</nz-tag>
+        <span *ngIf="!policy.isOnlySelf">公开</span>
+        <span>{{ creationTypeLabel }}</span>
+        <span>{{ publishTimingLabel }}</span>
+      </div>
+      <span *ngIf="collectionLabel">{{ collectionLabel }}</span>
+      <span>{{ retentionLabel }}</span>
+      <span *ngIf="!policy.danmakuBackfill" class="policy-exception">
+        不回灌弹幕
+      </span>
+    </ng-container>
   </div>
 
   <div class="actions-cell">

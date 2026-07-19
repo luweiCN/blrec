@@ -98,6 +98,7 @@ class RecordingPartResponse(ApiModel):
     source_exists: bool
     final_exists: bool
     error_message: Optional[str]
+    upload_excluded_reason: Optional[str]
     media_index_state: str
     media_index_error: Optional[str]
     media_index_progress: float
@@ -610,6 +611,7 @@ def _part_response(part: RecordingPart) -> RecordingPartResponse:
         source_exists=part.source_exists,
         final_exists=part.final_exists,
         error_message=part.error_message,
+        upload_excluded_reason=part.upload_excluded_reason,
         media_index_state=part.media_index_state,
         media_index_error=part.media_index_error,
         media_index_progress=part.media_index_progress,
@@ -1257,7 +1259,7 @@ async def stream_recording_media(
 async def list_recording_danmaku(
     part_id: int,
     cursor: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=500),
     _subject: str = Depends(authenticated_manager_subject),
     reader: RecordingContentReader = Depends(get_content_reader),
 ) -> DanmakuPageResponse:

@@ -8,6 +8,7 @@ import { RoomUploadPolicyRequest } from 'src/app/tasks/upload-policy-dialog/room
 import {
   CreateHighlightClipRequest,
   HighlightClip,
+  HighlightClipList,
   HighlightClipInspection,
   HighlightMarker,
   HighlightMediaAccess,
@@ -53,6 +54,11 @@ export class HighlightService {
     return this.http.get<readonly HighlightClip[]>(
       this.url.makeApiUrl(`/api/v1/highlights/sessions/${sessionId}/clips`),
     );
+  }
+
+  listAllClips(limit: number, offset: number): Observable<HighlightClipList> {
+    const path = `/api/v1/highlights/clips?limit=${limit}&offset=${offset}`;
+    return this.http.get<HighlightClipList>(this.url.makeApiUrl(path));
   }
 
   getClip(clipId: number): Observable<HighlightClip> {

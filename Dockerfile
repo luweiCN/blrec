@@ -38,7 +38,7 @@ ENV BLREC_DEFAULT_SETTINGS_FILE=/cfg/settings.toml \
     BLREC_DEFAULT_LOG_DIR=/log \
     BLREC_DEFAULT_OUT_DIR=/rec \
     TZ=Asia/Shanghai
-VOLUME ["/cfg", "/log", "/rec"]
+VOLUME ["/cfg", "/log", "/rec", "/clips"]
 EXPOSE 2233
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2233/api/v1/auth/status', timeout=3).read()"]

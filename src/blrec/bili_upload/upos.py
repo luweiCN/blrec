@@ -7,9 +7,10 @@ import math
 import os
 import sqlite3
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from functools import partial
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple
 
 from blrec.logging.audit import audit
 
@@ -22,7 +23,20 @@ from .errors import (
     RemoteOutcomeUnknown,
 )
 
-__all__ = ('FileIdentity', 'UposUploader', 'UposUploadPaused', 'UposUploadStopped')
+__all__ = (
+    'FileIdentity',
+    'UposUploader',
+    'UposUploadDeferred',
+    'UposUploadPaused',
+    'UposUploadStopped',
+)
+
+
+class UposUploadDeferred(RuntimeError):
+    def __init__(self, retry_after_seconds: int, reason: str) -> None:
+        self.retry_after_seconds = max(1, int(retry_after_seconds))
+        self.reason = reason
+        super().__init__('preupload deferred: {}'.format(reason))
 
 
 class UposUploadPaused(RuntimeError):
@@ -35,6 +49,45 @@ class UposUploadStopped(RuntimeError):
 
 class _SessionExpired(RuntimeError):
     pass
+
+
+class _PreuploadAdmissionWindow:
+    _WINDOW_SECONDS = 60
+    _MAX_CAPACITY = 5
+    _MAX_COOLDOWN_SECONDS = 15 * 60
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._capacity = 1
+        self._starts: Deque[float] = deque()
+        self._cooldown_until = 0.0
+        self._consecutive_rate_limits = 0
+
+    def reserve(self) -> int:
+        now = float(self._clock())
+        if now < self._cooldown_until:
+            return max(1, int(math.ceil(self._cooldown_until - now)))
+        cutoff = now - self._WINDOW_SECONDS
+        while self._starts and self._starts[0] <= cutoff:
+            self._starts.popleft()
+        if len(self._starts) >= self._capacity:
+            return max(1, int(math.ceil(self._starts[0] + self._WINDOW_SECONDS - now)))
+        self._starts.append(now)
+        return 0
+
+    def succeeded(self) -> None:
+        self._capacity = min(self._MAX_CAPACITY, self._capacity + 1)
+        self._consecutive_rate_limits = 0
+
+    def rate_limited(self) -> int:
+        self._capacity = max(1, self._capacity // 2)
+        self._consecutive_rate_limits += 1
+        delay = min(
+            self._MAX_COOLDOWN_SECONDS,
+            60 * (2 ** min(self._consecutive_rate_limits - 1, 4)),
+        )
+        self._cooldown_until = max(self._cooldown_until, float(self._clock()) + delay)
+        return delay
 
 
 @dataclass(frozen=True)
@@ -141,6 +194,7 @@ class UposUploader:
         self._clock = clock
         self._stop_requested = stop_requested
         self._progress_milestones: Dict[int, int] = {}
+        self._preupload_admission = _PreuploadAdmissionWindow(clock)
 
     async def upload_part(
         self, part_id: int, *, bundle: CredentialBundle, claim: LeaseClaim
@@ -152,14 +206,7 @@ class UposUploader:
                 raise UposUploadPaused('confirmed UPOS part has no remote filename')
             return part.remote_filename
         if part.upload_state in ('unknown_outcome', 'completing'):
-            if part.upload_state == 'completing':
-                await self._pause(
-                    part_id,
-                    claim,
-                    reason='UPOS completion outcome is unknown after restart',
-                    upload_state='unknown_outcome',
-                )
-            raise UposUploadPaused('UPOS completion outcome is unknown')
+            await self._update_part(part_id, claim, {'upload_state': 'uploading'})
         if part.upload_state == 'failed':
             raise UposUploadPaused('UPOS part requires manual retry')
         if part.artifact_state != 'ready':
@@ -237,26 +284,54 @@ class UposUploader:
         renewal_count: int,
     ) -> Any:
         await self._verify_identity(part_id, identity, claim)
+        retry_after = self._preupload_admission.reserve()
+        if retry_after:
+            audit(
+                'upload_preupload_deferred',
+                level='DEBUG',
+                job_id=claim.id,
+                part_id=part_id,
+                retry_after_seconds=retry_after,
+                reason='admission_window',
+            )
+            raise UposUploadDeferred(retry_after, 'admission window')
         await self._update_part(part_id, claim, {'upload_state': 'preupload'})
-        prepared = await self._protocol.preupload(
-            bundle,
-            {
-                'r': 'upos',
-                'profile': 'ugcupos/bup',
-                'ssl': 0,
-                'version': '2.8.12',
-                'build': 2081200,
-                'name': os.path.basename(identity.canonical_path),
-                'size': identity.size,
-            },
-        )
+        try:
+            prepared = await self._protocol.preupload(
+                bundle,
+                {
+                    'r': 'upos',
+                    'profile': 'ugcupos/bup',
+                    'ssl': 0,
+                    'version': '2.8.12',
+                    'build': 2081200,
+                    'name': os.path.basename(identity.canonical_path),
+                    'size': identity.size,
+                },
+            )
+        except BiliApiError as error:
+            if error.code not in (406, 429):
+                raise
+            retry_after = self._preupload_admission.rate_limited()
+            await self._update_part(part_id, claim, {'upload_state': 'prepared'})
+            audit(
+                'upload_preupload_rate_limited',
+                level='WARNING',
+                job_id=claim.id,
+                part_id=part_id,
+                error_code=error.code,
+                retry_after_seconds=retry_after,
+            )
+            raise UposUploadDeferred(retry_after, 'rate limited') from None
+        self._preupload_admission.succeeded()
         exported = self._protocol.export_upos_session(prepared.session)
         session_json = self._encode_session(exported, renewal_count)
         remote_filename = getattr(prepared.session, 'remote_file_name', None)
         if not isinstance(remote_filename, str) or not remote_filename:
             raise ProtocolContractError('UPOS session has no remote filename')
+        cid = self._positive_int(getattr(prepared.session, 'biz_id', None))
         await self._initialize_session(
-            part_id, identity.size, session_json, remote_filename, claim
+            part_id, identity.size, session_json, remote_filename, cid, claim
         )
         audit(
             'upload_session_started',
@@ -355,6 +430,20 @@ class UposUploader:
             except BiliApiError as error:
                 if error.code in (401, 403):
                     raise _SessionExpired() from None
+                if error.code in (406, 408, 425, 429):
+                    retry_after = (
+                        self._preupload_admission.rate_limited()
+                        if error.code in (406, 429)
+                        else 30
+                    )
+                    await self._defer_chunk(
+                        part_id,
+                        chunk.chunk_no,
+                        claim,
+                        session_json,
+                        reason='UPOS chunk request was temporarily rejected',
+                        retry_after_seconds=retry_after,
+                    )
                 await self._fail_chunk(part_id, chunk.chunk_no, claim, session_json)
                 raise UposUploadPaused('UPOS chunk was rejected') from None
             except (DefinitelyNotSent, RemoteOutcomeUnknown):
@@ -368,8 +457,13 @@ class UposUploader:
                         attempt=attempt,
                     )
                     continue
-                await self._fail_chunk(part_id, chunk.chunk_no, claim, session_json)
-                raise UposUploadPaused('UPOS chunk retry limit reached') from None
+                await self._defer_chunk(
+                    part_id,
+                    chunk.chunk_no,
+                    claim,
+                    session_json,
+                    reason='UPOS chunk retry window was exhausted',
+                )
             except ProtocolContractError:
                 await self._fail_chunk(part_id, chunk.chunk_no, claim, session_json)
                 raise UposUploadPaused('UPOS chunk response is invalid') from None
@@ -398,8 +492,13 @@ class UposUploader:
             await self._audit_progress(part_id, identity.size, claim.id)
             return
 
-        await self._fail_chunk(part_id, chunk.chunk_no, claim, session_json)
-        raise UposUploadPaused('UPOS chunk retry limit reached')
+        await self._defer_chunk(
+            part_id,
+            chunk.chunk_no,
+            claim,
+            session_json,
+            reason='UPOS chunk retry window was exhausted',
+        )
 
     async def _complete(
         self,
@@ -442,16 +541,46 @@ class UposUploader:
             )
             raise
         except RemoteOutcomeUnknown:
-            await self._pause(
+            await self._update_part(
                 part_id,
                 claim,
-                reason='UPOS completion outcome is unknown',
-                upload_state='unknown_outcome',
+                {'upload_state': 'uploading'},
+                expected_session_json=session_json,
             )
-            raise UposUploadPaused('UPOS completion outcome is unknown') from None
+            audit(
+                'upload_completion_deferred',
+                level='WARNING',
+                job_id=claim.id,
+                part_id=part_id,
+                retry_after_seconds=60,
+            )
+            raise UposUploadDeferred(60, 'completion outcome unknown') from None
         except BiliApiError as error:
             if error.code in (401, 403):
                 raise _SessionExpired() from None
+            if error.code in (406, 408, 425, 429):
+                delay = (
+                    self._preupload_admission.rate_limited()
+                    if error.code in (406, 429)
+                    else 60
+                )
+                await self._update_part(
+                    part_id,
+                    claim,
+                    {'upload_state': 'uploading'},
+                    expected_session_json=session_json,
+                )
+                audit(
+                    'upload_completion_deferred',
+                    level='WARNING',
+                    job_id=claim.id,
+                    part_id=part_id,
+                    error_code=error.code,
+                    retry_after_seconds=delay,
+                )
+                raise UposUploadDeferred(
+                    delay, 'UPOS completion temporarily rejected'
+                ) from None
             await self._pause(
                 part_id,
                 claim,
@@ -495,6 +624,30 @@ class UposUploader:
         await self._pause(
             part_id, claim, reason='UPOS chunk upload failed', upload_state='failed'
         )
+
+    async def _defer_chunk(
+        self,
+        part_id: int,
+        chunk_no: int,
+        claim: LeaseClaim,
+        session_json: str,
+        *,
+        reason: str,
+        retry_after_seconds: int = 30,
+    ) -> None:
+        await self._update_chunk(
+            part_id, chunk_no, claim, session_json, state='prepared', attempt=0
+        )
+        audit(
+            'upload_chunk_deferred',
+            level='WARNING',
+            job_id=claim.id,
+            part_id=part_id,
+            chunk_no=chunk_no,
+            retry_after_seconds=retry_after_seconds,
+            reason=reason,
+        )
+        raise UposUploadDeferred(retry_after_seconds, reason)
 
     async def _verify_identity(
         self, part_id: int, expected: FileIdentity, claim: LeaseClaim
@@ -582,6 +735,7 @@ class UposUploader:
         total_size: int,
         session_json: str,
         remote_filename: str,
+        cid: Optional[int],
         claim: LeaseClaim,
     ) -> None:
         chunk_size = self._chunk_size
@@ -589,13 +743,14 @@ class UposUploader:
         def initialize(connection: sqlite3.Connection) -> None:
             cursor = connection.execute(
                 'UPDATE upload_parts SET upload_state=?,upload_session_json=?,'
-                'remote_filename=? WHERE id=? AND EXISTS('
+                'remote_filename=?,cid=COALESCE(?,cid) WHERE id=? AND EXISTS('
                 'SELECT 1 FROM upload_jobs job WHERE job.id=upload_parts.job_id '
                 'AND job.id=? AND job.lease_owner=? AND job.lease_generation=?)',
                 (
                     'uploading',
                     session_json,
                     remote_filename,
+                    cid,
                     part_id,
                     claim.id,
                     claim.lease_owner,
@@ -617,6 +772,14 @@ class UposUploader:
                 )
 
         await self._database.write(initialize)
+
+    @staticmethod
+    def _positive_int(value: Any) -> Optional[int]:
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            return None
+        return normalized if normalized > 0 else None
 
     async def _discard_session(
         self, part_id: int, claim: LeaseClaim, renewal_count: int

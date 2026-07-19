@@ -183,6 +183,74 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stopping_upload_worker_keeps_stop_event_visible_until_exit(
+    tmp_path: Path,
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+    )
+    stop_event = asyncio.Event()
+    observed = asyncio.Event()
+
+    async def worker() -> None:
+        await stop_event.wait()
+        assert runtime._upload_stop_event is stop_event
+        observed.set()
+
+    runtime._upload_stop_event = stop_event
+    runtime._upload_task = asyncio.create_task(worker())
+
+    await runtime._stop_upload_worker()
+
+    assert observed.is_set()
+    assert runtime._upload_stop_event is None
+    assert runtime._upload_task is None
+
+
+@pytest.mark.asyncio
+async def test_deleting_highlight_stops_workers_before_removing_upload_state(
+    tmp_path: Path,
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+    )
+    events = []
+    service = SimpleNamespace(
+        delete_clip=AsyncMock(
+            side_effect=lambda _clip_id: events.append('delete') or 'deleted'
+        )
+    )
+    runtime._highlight_service = service  # type: ignore[assignment]
+    runtime._stop_upload_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda: events.append('stop_upload')
+    )
+    runtime._stop_highlight_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda: events.append('stop_clip')
+    )
+    runtime._start_highlight_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda: events.append('start_clip')
+    )
+    runtime._start_upload_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda: events.append('start_upload')
+    )
+
+    result = await runtime.delete_highlight_clip(7)
+
+    assert result == 'deleted'
+    assert events == [
+        'stop_upload',
+        'stop_clip',
+        'delete',
+        'start_clip',
+        'start_upload',
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_reconciles_crash_interrupted_recording_before_use(
     tmp_path: Path,
 ) -> None:
@@ -279,8 +347,10 @@ async def test_runtime_exposes_primary_cookie_and_forwards_auth_failures(
         changed.assert_awaited_once_with()
 
         runtime.manager.report_primary_auth_failure = AsyncMock()
-        await runtime.report_primary_auth_failure()
-        runtime.manager.report_primary_auth_failure.assert_awaited_once_with()
+        await runtime.report_primary_auth_failure('credential-fingerprint')
+        runtime.manager.report_primary_auth_failure.assert_awaited_once_with(
+            'credential-fingerprint'
+        )
     finally:
         await runtime.close()
 

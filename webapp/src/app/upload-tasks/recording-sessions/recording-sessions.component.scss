@@ -6,6 +6,32 @@
   padding: 0 24px 24px;
 }
 
+:host ::ng-deep .ant-table-thead > tr > th,
+:host ::ng-deep .ant-table-tbody > tr > td {
+  vertical-align: top;
+}
+
+.identity-column {
+  width: 31%;
+}
+
+.recording-column {
+  width: 17%;
+}
+
+.progress-column {
+  width: 25%;
+}
+
+.submission-column {
+  width: 14%;
+}
+
+.actions-column {
+  width: 170px;
+  white-space: nowrap;
+}
+
 .header-actions,
 .filter-bar {
   display: flex;
@@ -124,6 +150,19 @@
   margin-top: 4px;
   color: #8c8c8c;
   white-space: nowrap;
+}
+
+.danmaku-table-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 6px;
+  color: #595959;
+  font-size: 12px;
+}
+
+.status-error {
+  color: #cf1322;
 }
 
 .pagination-bar {
@@ -302,6 +341,11 @@
   color: #cf1322;
 }
 
+.part-excluded {
+  margin-top: 4px;
+  color: #8c8c8c;
+}
+
 .part-metric {
   margin-top: 4px;
   color: #8c8c8c;
@@ -340,6 +384,35 @@
 
   .filter-bar > * {
     width: 100%;
+  }
+}
+
+@media (max-width: 900px) {
+  :host ::ng-deep .ant-table-thead {
+    display: none;
+  }
+
+  :host ::ng-deep .ant-table-tbody > tr {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  :host ::ng-deep .ant-table-tbody > tr > td {
+    width: auto !important;
+    border-bottom: 0;
+  }
+
+  :host ::ng-deep .ant-table-tbody > tr > td:first-child {
+    grid-row: 1 / span 5;
+  }
+
+  :host ::ng-deep .ant-table-tbody > tr > td:not(:first-child) {
+    grid-column: 2;
+  }
+
+  .actions-column {
+    white-space: normal;
   }
 }
 

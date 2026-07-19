@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 __all__ = (
     'BiliApiError',
@@ -37,10 +37,12 @@ class BiliApiError(RuntimeError):
         public_message: Optional[str] = None,
         *,
         operation: Optional[str] = None,
+        details: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.code = code
         self.public_message = public_message
         self.operation = operation
+        self.details = {} if details is None else dict(details)
         super().__init__('Bilibili API error {}'.format(code))
 
     def __repr__(self) -> str:

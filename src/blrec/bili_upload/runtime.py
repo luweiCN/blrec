@@ -251,12 +251,18 @@ class BiliAccountRuntime:
             highlight_danmaku_clipper = HighlightDanmakuClipper()
             highlight_service = HighlightService(
                 database,
-                recording_root=(
-                    None if self._recording_root is None else Path(self._recording_root)
+                clip_root=(
+                    None
+                    if self._recording_root is None
+                    else Path(self._recording_root).resolve().parent / 'clips'
                 ),
                 clipper=lossless_clipper,
                 clock=self._clock,
             )
+            if self._recording_root is not None:
+                await highlight_service.migrate_legacy_outputs(
+                    Path(self._recording_root)
+                )
             highlight_worker = HighlightWorker(
                 database, lossless_clipper, highlight_danmaku_clipper, clock=self._clock
             )
@@ -451,9 +457,9 @@ class BiliAccountRuntime:
             return None
         return await self._manager.recording_cookie_header(url)
 
-    async def report_primary_auth_failure(self) -> None:
+    async def report_primary_auth_failure(self, credential_fingerprint: str) -> None:
         if self._manager is not None:
-            await self._manager.report_primary_auth_failure()
+            await self._manager.report_primary_auth_failure(credential_fingerprint)
 
     async def create_highlight_upload_task(
         self, clip_id: int, *, settings: RoomUploadPolicyCommand, manager_subject: str
@@ -501,6 +507,19 @@ class BiliAccountRuntime:
                 )
                 return await coordinator.create_highlight_job(session_id)
             finally:
+                await self._start_upload_worker()
+
+    async def delete_highlight_clip(self, clip_id: int) -> str:
+        service = self._highlight_service
+        if service is None:
+            raise UploadTaskActionRejected('高光片段管理当前不可用')
+        async with self._session_action_lock:
+            await self._stop_upload_worker()
+            await self._stop_highlight_worker()
+            try:
+                return await service.delete_clip(clip_id)
+            finally:
+                await self._start_highlight_worker()
                 await self._start_upload_worker()
 
     async def run_recording_session_action(
@@ -759,12 +778,18 @@ class BiliAccountRuntime:
                 pass
 
     async def _stop_upload_worker(self) -> None:
-        stop_event, self._upload_stop_event = self._upload_stop_event, None
+        stop_event = self._upload_stop_event
         if stop_event is not None:
             stop_event.set()
-        upload_task, self._upload_task = self._upload_task, None
-        if upload_task is not None:
-            await upload_task
+        upload_task = self._upload_task
+        try:
+            if upload_task is not None:
+                await upload_task
+        finally:
+            if self._upload_task is upload_task:
+                self._upload_task = None
+            if self._upload_stop_event is stop_event:
+                self._upload_stop_event = None
 
     async def _start_upload_worker(self) -> None:
         if self._upload_task is not None and not self._upload_task.done():

@@ -132,6 +132,7 @@ class RetentionManager:
             'JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             "WHERE part.video_deleted_at IS NULL AND session.state='closed' "
+            "AND session.source_kind='live' "
             'AND NOT EXISTS(SELECT 1 FROM highlight_clip_sources source '
             'JOIN highlight_clips clip ON clip.id=source.clip_id '
             'WHERE source.part_id=part.id '
@@ -171,6 +172,7 @@ class RetentionManager:
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             "WHERE part.video_deleted_at IS NULL AND session.state='closed' "
+            "AND session.source_kind='live' "
             "AND session.deletion_state='none' "
             "AND part.artifact_state NOT IN ('recording','postprocessing') "
             'AND ((job.id IS NULL '
@@ -263,8 +265,9 @@ class RetentionManager:
 
     async def _managed_video_bytes(self) -> int:
         rows = await self._database.fetchall(
-            'SELECT source_path,final_path FROM recording_parts '
-            'WHERE video_deleted_at IS NULL'
+            'SELECT part.source_path,part.final_path FROM recording_parts part '
+            'JOIN recording_sessions session ON session.id=part.session_id '
+            "WHERE part.video_deleted_at IS NULL AND session.source_kind='live'"
         )
         paths: Dict[str, Path] = {}
         for row in rows:

@@ -153,6 +153,54 @@ async def test_event_retention_deletes_only_video_and_preserves_danmaku(
 
 
 @pytest.mark.asyncio
+async def test_clip_library_files_do_not_count_toward_recording_capacity(
+    tmp_path: Path,
+) -> None:
+    recording_root = tmp_path / 'rec'
+    clip_root = tmp_path / 'clips'
+    recording_root.mkdir()
+    clip_root.mkdir()
+    recording_video = recording_root / 'recording.flv'
+    clip_video = clip_root / 'highlight.mp4'
+    recording_video.write_bytes(b'r' * 10)
+    clip_video.write_bytes(b'c' * 40)
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+            "VALUES(1,100,'100:1','closed',1,'live'),"
+            "(2,100,'highlight:1','closed',2,'highlight')"
+        )
+        await database.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            "VALUES('live',1,'finished',1,1),('clip',2,'finished',2,2)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,created_at,updated_at) '
+            "VALUES(1,'live',1,?,?,1,'ready',1,1),"
+            "(2,'clip',1,?,?,2,'ready',2,2)",
+            (
+                str(recording_video),
+                str(recording_video),
+                str(clip_video),
+                str(clip_video),
+            ),
+        )
+        manager = RetentionManager(database, recording_root, capacity_bytes=lambda: 100)
+
+        status = await manager.status()
+
+        assert status.managed_video_bytes == 10
+        assert status.remaining_bytes == 90
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_session_retention_override_wins_over_room_policy(tmp_path: Path) -> None:
     root = tmp_path / 'records'
     root.mkdir()

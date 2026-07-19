@@ -71,9 +71,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   videoVisible = false;
   videoSession: RecordingSession | null = null;
   videoPart: RecordingPart | null = null;
-  danmakuVisible = false;
-  danmakuSession: RecordingSession | null = null;
-  danmakuPart: RecordingPart | null = null;
   readonly selectedSessionIds = new Set<number>();
   uploadAction: RecordingSessionAction | null = null;
   uploadActionSessionIds: readonly number[] = [];
@@ -586,19 +583,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   openPartDanmaku(session: RecordingSession, part: RecordingPart): void {
-    this.danmakuSession = session;
-    this.danmakuPart = part;
-    this.danmakuVisible = true;
-    this.changeDetector.markForCheck();
-  }
-
-  danmakuVisibilityChanged(visible: boolean): void {
-    this.danmakuVisible = visible;
-    if (!visible) {
-      this.danmakuSession = null;
-      this.danmakuPart = null;
-    }
-    this.changeDetector.markForCheck();
+    this.openPartVideo(session, part);
   }
 
   sessionStateLabel(state: RecordingSessionState): string {

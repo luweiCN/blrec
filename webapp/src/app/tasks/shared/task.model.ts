@@ -10,6 +10,7 @@ export interface TaskData {
   user_info: Readonly<UserInfo>;
   room_info: Readonly<RoomInfo>;
   task_status: Readonly<TaskStatus>;
+  readonly title_keywords?: readonly string[];
 }
 
 export type TaskBatchAction =

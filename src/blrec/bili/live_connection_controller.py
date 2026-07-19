@@ -22,9 +22,9 @@ __all__ = ('LiveConnectionController',)
 
 
 class LiveConnectionController:
-    # DanmakuConnection can make one bounded anonymous attempt and one
-    # authenticated fallback attempt before it reports a terminal failure.
-    _ACTIVATION_TIMEOUT_SECONDS = 90
+    # DanmakuConnection makes bounded authenticated recovery attempts followed
+    # by one anonymous fallback before it reports a terminal failure.
+    _ACTIVATION_TIMEOUT_SECONDS = 240
 
     def __init__(
         self,

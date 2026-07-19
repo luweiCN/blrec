@@ -441,6 +441,7 @@ def test_list_recording_sessions_returns_redacted_part_state(
                         'sourceExists': False,
                         'finalExists': True,
                         'errorMessage': None,
+                        'uploadExcludedReason': None,
                         'mediaIndexState': 'pending',
                         'mediaIndexError': None,
                         'mediaIndexProgress': 0.0,
@@ -993,9 +994,9 @@ def test_danmaku_returns_a_camel_case_page(client: TestClient) -> None:
     }
 
 
-def test_danmaku_rejects_pages_over_one_hundred(client: TestClient) -> None:
+def test_danmaku_rejects_pages_over_five_hundred(client: TestClient) -> None:
     response = client.get(
-        '/api/v1/recording-sessions/parts/2/danmaku?cursor=0&limit=101',
+        '/api/v1/recording-sessions/parts/2/danmaku?cursor=0&limit=501',
         headers={'x-api-key': 'test-api-key'},
     )
 

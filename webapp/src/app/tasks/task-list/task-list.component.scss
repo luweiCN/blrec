@@ -4,11 +4,9 @@
   @extend %inner-content;
   display: block;
   padding: 12px;
-  overflow: auto;
 }
 
 .task-table {
-  min-width: 1050px;
   overflow: hidden;
   background: #fff;
   border: 1px solid #f0f0f0;
@@ -17,7 +15,9 @@
 
 .task-list-header {
   display: grid;
-  grid-template-columns: 44px minmax(320px, 1fr) 120px 190px 130px 230px;
+  grid-template-columns:
+    44px minmax(260px, 1.35fr) minmax(230px, 1fr)
+    minmax(260px, 1.1fr) 180px;
   align-items: center;
   min-height: 46px;
   padding: 0 16px;
@@ -25,6 +25,12 @@
   font-weight: 500;
   background: #fafafa;
   border-bottom: 1px solid #f0f0f0;
+}
+
+@media (max-width: 1240px) {
+  .task-list-header {
+    display: none;
+  }
 }
 
 .batch-action-bar {

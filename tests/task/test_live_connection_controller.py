@@ -88,8 +88,8 @@ def room_info(
     )
 
 
-def test_websocket_activation_budget_allows_both_transport_attempts() -> None:
-    assert LiveConnectionController._ACTIVATION_TIMEOUT_SECONDS >= 60
+def test_websocket_activation_budget_covers_bounded_recovery() -> None:
+    assert LiveConnectionController._ACTIVATION_TIMEOUT_SECONDS >= 210
 
 
 @pytest.mark.asyncio
@@ -989,7 +989,7 @@ def test_batch_task_uses_anonymous_sticky_websocket_route_without_cookie(
 
 
 @pytest.mark.asyncio
-async def test_batch_task_cookie_fallback_configures_one_coherent_identity(
+async def test_batch_task_authenticated_danmaku_falls_back_to_anonymous_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task_module = load_task_module(monkeypatch)
@@ -1019,13 +1019,13 @@ async def test_batch_task_cookie_fallback_configures_one_coherent_identity(
     monkeypatch.setattr(task_module, 'DanmakuClient', Mock(return_value=danmaku))
     appapis = [
         Mock(name='initial_anonymous_appapi'),
-        Mock(name='anonymous_appapi'),
         Mock(name='authenticated_appapi'),
+        Mock(name='anonymous_appapi'),
     ]
     webapis = [
         Mock(name='initial_anonymous_webapi'),
-        Mock(name='anonymous_webapi'),
         Mock(name='authenticated_webapi'),
+        Mock(name='anonymous_webapi'),
     ]
     monkeypatch.setattr(task_module, 'AppApi', Mock(side_effect=appapis), raising=False)
     monkeypatch.setattr(task_module, 'WebApi', Mock(side_effect=webapis), raising=False)
@@ -1035,18 +1035,18 @@ async def test_batch_task_cookie_fallback_configures_one_coherent_identity(
     await task._danmaku_connection.start()
 
     assert danmaku.configure.call_args_list[0].args == (
-        anonymous_session,
+        authenticated_session,
         appapis[1],
         webapis[1],
-        live.stream_headers,
-    )
-    assert danmaku.configure.call_args_list[1].args == (
-        authenticated_session,
-        appapis[2],
-        webapis[2],
         live.headers,
     )
-    assert task._danmaku_connection.mode == 'authenticated'
+    assert danmaku.configure.call_args_list[1].args == (
+        anonymous_session,
+        appapis[2],
+        webapis[2],
+        live.stream_headers,
+    )
+    assert task._danmaku_connection.mode == 'anonymous'
 
 
 def test_batch_task_cookie_refresh_does_not_change_an_active_transport(

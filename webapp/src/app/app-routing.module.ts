@@ -58,6 +58,15 @@ const routes: Routes = [
       ),
   },
   {
+    path: 'clips',
+    canActivate: [AuthGuard],
+    data: { clipLibrary: true },
+    loadChildren: () =>
+      import('./upload-tasks/upload-tasks.module').then(
+        (m) => m.UploadTasksModule,
+      ),
+  },
+  {
     path: 'upload-policies',
     pathMatch: 'full',
     redirectTo: 'tasks',

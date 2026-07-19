@@ -131,6 +131,15 @@ describe('HighlightService', () => {
     upload.flush({ jobId: 17 });
   });
 
+  it('loads the global clip library with pagination', () => {
+    service.listAllClips(20, 40).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/highlights/clips?limit=20&offset=40',
+    );
+    expect(request.request.method).toBe('GET');
+  });
+
   it('updates and deletes independent marker metadata', () => {
     service.updateMarker(1, '新名称', '备注').subscribe();
     const update = http.expectOne('/api/v1/highlights/1');

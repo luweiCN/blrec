@@ -515,6 +515,32 @@ async def test_retryable_failed_job_ids_excludes_unknown_remote_outcomes(
 
 
 @pytest.mark.asyncio
+async def test_retryable_failed_jobs_exclude_operator_paused_tasks(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='prepared',
+            second_upload_state='failed',
+        )
+        await database.execute('UPDATE upload_jobs SET operator_paused=1 WHERE id=9')
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        assert await manager.retryable_failed_job_ids() == ()
+        with pytest.raises(UploadTaskActionRejected, match='管理员暂停'):
+            await manager.retry_failed(9, manager_subject='manager')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ('submit_state', 'part_state'),
     (('unknown_outcome', 'unknown_outcome'), ('prepared', 'completing')),
