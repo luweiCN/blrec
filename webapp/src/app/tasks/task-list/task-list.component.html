@@ -1,4 +1,7 @@
-<div class="empty-container" *ngIf="visibleDataList.length === 0; else taskList">
+<div
+  class="empty-container"
+  *ngIf="visibleDataList.length === 0; else taskList"
+>
   <nz-empty></nz-empty>
 </div>
 
@@ -16,7 +19,7 @@
       [nzLoading]="batchSettingsLoading"
       (click)="openBatchSettingsDialog()"
     >
-      批量录制设置
+      录制设置
     </button>
     <button
       nz-button
@@ -24,44 +27,25 @@
       type="button"
       (click)="openBatchUploadPolicyDialog()"
     >
-      批量投稿设置
+      投稿设置
     </button>
     <button
+      *ngIf="eligibleCount('start') > 0"
       nz-button
       nzSize="small"
       type="button"
-      [disabled]="eligibleCount('start') === 0"
       (click)="runBatchAction('start')"
     >
-      开启
+      开启监控与录制（{{ eligibleCount("start") }}）
     </button>
     <button
+      *ngIf="eligibleCount('stop') > 0"
       nz-button
       nzSize="small"
       type="button"
-      [disabled]="eligibleCount('stop') === 0"
       (click)="runBatchAction('stop')"
     >
-      关闭
-    </button>
-    <button
-      nz-button
-      nzSize="small"
-      type="button"
-      [disabled]="eligibleCount('cut') === 0"
-      (click)="runBatchAction('cut')"
-    >
-      切割文件
-    </button>
-    <button
-      nz-button
-      nzSize="small"
-      nzDanger
-      type="button"
-      [disabled]="eligibleCount('force_stop') === 0"
-      (click)="runBatchAction('force_stop')"
-    >
-      强制停止
+      停止监控与录制（{{ eligibleCount("stop") }}）
     </button>
     <button
       nz-button
@@ -69,14 +53,13 @@
       type="button"
       (click)="runBatchAction('refresh')"
     >
-      刷新数据
+      刷新所选房间
     </button>
     <button
       nz-button
       nzDanger
       nzSize="small"
       type="button"
-      [disabled]="eligibleCount('delete') === 0"
       (click)="runBatchAction('delete')"
     >
       删除
@@ -107,7 +90,7 @@
       [collectionLabel]="collectionLabelFor(policyFor(data.room_info.room_id))"
       [selected]="isSelected(data.room_info.room_id)"
       (selectedChange)="setTaskSelected(data.room_info.room_id, $event)"
-      (uploadPolicyChanged)="refreshPolicies()"
+      (uploadPolicyChanged)="requestPolicyRefresh()"
     ></app-task-item>
   </div>
 </ng-template>
@@ -130,5 +113,5 @@
   [roomName]="reference.user_info.name"
   [liveAreaName]="reference.room_info.area_name"
   [liveParentAreaName]="reference.room_info.parent_area_name"
-  (closed)="batchUploadPolicyDialogVisible = false"
+  (closed)="closeBatchUploadPolicyDialog()"
 ></app-upload-policy-dialog>

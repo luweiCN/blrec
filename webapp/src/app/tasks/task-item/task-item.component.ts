@@ -62,7 +62,7 @@ export class TaskItemComponent implements OnChanges {
     private modal: NzModalService,
     private settingService: SettingService,
     private taskManager: TaskManagerService,
-    private policyService: RoomUploadPolicyService
+    private policyService: RoomUploadPolicyService,
   ) {}
 
   get roomId() {
@@ -74,6 +74,10 @@ export class TaskItemComponent implements OnChanges {
       this.data.task_status.monitor_enabled ||
       this.data.task_status.recorder_enabled
     );
+  }
+
+  get canForceInterrupt(): boolean {
+    return this.data.task_status.running_status === RunningStatus.RECORDING;
   }
 
   get automaticSubmissionEnabled(): boolean {
@@ -179,7 +183,7 @@ export class TaskItemComponent implements OnChanges {
         finalize(() => {
           this.switchPending = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe();
   }
@@ -207,8 +211,9 @@ export class TaskItemComponent implements OnChanges {
       this.data.task_status.running_status == RunningStatus.RECORDING
     ) {
       this.modal.confirm({
-        nzTitle: '确定要强制停止任务？',
-        nzContent: '正在录制的文件会被强行中断！确定要放弃正在录制的文件？',
+        nzTitle: '确定强制中断当前录制？',
+        nzContent:
+          '仅在普通停止无效时使用。当前录像文件可能中断，系统之后仍会尝试恢复可用内容。',
         nzOnOk: () =>
           new Promise((resolve, reject) => {
             this.taskManager
@@ -230,7 +235,7 @@ export class TaskItemComponent implements OnChanges {
         'danmaku',
         'recorder',
         'postprocessing',
-      ])
+      ]),
     ).subscribe(
       ([taskOptions, globalSettings]) => {
         this.taskOptions = taskOptions;
@@ -240,7 +245,7 @@ export class TaskItemComponent implements OnChanges {
       },
       (error: HttpErrorResponse) => {
         this.message.error(`获取任务设置出错: ${error.message}`);
-      }
+      },
     );
   }
 
@@ -274,7 +279,9 @@ export class TaskItemComponent implements OnChanges {
         next: (policy) => {
           this.uploadPolicy = policy;
           this.uploadPolicyChanged.emit();
-          this.message.success(policy.enabled ? '已开启自动投稿' : '已关闭自动投稿');
+          this.message.success(
+            policy.enabled ? '已开启自动投稿' : '已关闭自动投稿',
+          );
         },
         error: (error: HttpErrorResponse) => {
           this.message.error(`修改自动投稿失败：${error.message}`);
@@ -303,20 +310,8 @@ export class TaskItemComponent implements OnChanges {
         },
         (error: HttpErrorResponse) => {
           this.message.error(`修改任务设置出错: ${error.message}`);
-        }
+        },
       );
-  }
-
-  cutStream(): void {
-    if (this.data.task_status.running_status === RunningStatus.RECORDING) {
-      this.taskManager
-        .canCutStream(this.roomId)
-        .subscribe((ableToCutStream) => {
-          if (ableToCutStream) {
-            this.taskManager.cutStream(this.roomId).subscribe();
-          }
-        });
-    }
   }
 
   private policyRequest(policy: RoomUploadPolicy): RoomUploadPolicyRequest {

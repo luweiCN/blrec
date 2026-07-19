@@ -18,7 +18,7 @@ describe('ToolbarComponent', () => {
   beforeEach(async () => {
     const breakpointObserver = jasmine.createSpyObj<BreakpointObserver>(
       'BreakpointObserver',
-      ['observe']
+      ['observe'],
     );
     breakpointObserver.observe.and.returnValue(NEVER);
 
@@ -29,10 +29,9 @@ describe('ToolbarComponent', () => {
         { provide: BreakpointObserver, useValue: breakpointObserver },
         {
           provide: NzMessageService,
-          useValue: jasmine.createSpyObj<NzMessageService>(
-            'NzMessageService',
-            ['success']
-          ),
+          useValue: jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+            'success',
+          ]),
         },
         {
           provide: NzModalService,
@@ -48,13 +47,12 @@ describe('ToolbarComponent', () => {
           provide: TaskManagerService,
           useValue: jasmine.createSpyObj<TaskManagerService>(
             'TaskManagerService',
-            ['getAllTaskRoomIds']
+            ['getAllTaskRoomIds'],
           ),
         },
       ],
       schemas: [NO_ERRORS_SCHEMA],
-    })
-      .compileComponents();
+    }).compileComponents();
   });
 
   beforeEach(() => {
@@ -73,19 +71,51 @@ describe('ToolbarComponent', () => {
     expect(component.selections.map((item) => item.label)).toEqual([
       '全部',
       '录制中',
-      '已开启',
-      '已关闭',
+      '监控已开启',
+      '监控已关闭',
       '直播',
       '轮播',
       '闲置',
     ]);
     expect(fixture.nativeElement.textContent).not.toContain('关闭录制');
-    expect(component.automaticSubmissionOptions.map((item) => item.label)).toEqual([
+    expect(
+      component.automaticSubmissionOptions.map((item) => item.label),
+    ).toEqual([
       '全部投稿状态',
       '自动投稿已开启',
       '自动投稿已关闭',
       '未设置投稿',
     ]);
     expect(fixture.nativeElement.textContent).not.toContain('开播开始日期');
+  });
+
+  it('offers submission visibility and account filters', () => {
+    const filterState = component as ToolbarComponent & {
+      submissionVisibilityOptions?: readonly { label: string }[];
+    };
+
+    expect(
+      filterState.submissionVisibilityOptions?.map((item) => item.label),
+    ).toEqual(['全部可见性', '公开', '仅自己可见']);
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="visibility-filter"]'),
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="account-filter"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps global actions read-only with respect to room configuration', () => {
+    const legacyActions = component as ToolbarComponent & {
+      startAllTasks?: unknown;
+      stopAllTasks?: unknown;
+      removeAllTasks?: unknown;
+    };
+
+    expect(legacyActions.startAllTasks).toBeUndefined();
+    expect(legacyActions.stopAllTasks).toBeUndefined();
+    expect(legacyActions.removeAllTasks).toBeUndefined();
+    expect(component.updateAllTaskInfos).toEqual(jasmine.any(Function));
+    expect(component.copyAllTaskRoomIds).toEqual(jasmine.any(Function));
   });
 });

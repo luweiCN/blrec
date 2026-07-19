@@ -7,8 +7,8 @@ import {
   OnInit,
 } from '@angular/core';
 
-import { Subscription } from 'rxjs';
-import { finalize } from 'rxjs/operators';
+import { EMPTY, Subscription } from 'rxjs';
+import { finalize, switchMap } from 'rxjs/operators';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import {
@@ -34,7 +34,9 @@ import {
   UploadPartState,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
+import { HighlightService } from '../shared/highlight.service';
 import { RealtimeService } from '../../core/services/realtime.service';
+import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 
 interface RealtimeUploadJobProgress {
   readonly jobId: number;
@@ -72,6 +74,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   videoSession: RecordingSession | null = null;
   videoPart: RecordingPart | null = null;
   readonly selectedSessionIds = new Set<number>();
+  readonly cuttingRoomIds = new Set<number>();
   uploadAction: RecordingSessionAction | null = null;
   uploadActionSessionIds: readonly number[] = [];
   uploadActionSubmitting = false;
@@ -88,7 +91,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   taskEditVisible = false;
   taskEditJobIds: readonly number[] = [];
   submissionSession: RecordingSession | null = null;
+  partHighlightCounts = new Map<number, number>();
+  partHighlightCountState: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
   private realtimeSubscription?: Subscription;
+  private highlightTimelineSubscription?: Subscription;
   private realtimeUploadJobIds: Set<number> | null = null;
 
   readonly recordingStateOptions = [
@@ -118,6 +124,8 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     private clipboard: Clipboard,
     private message: NzMessageService,
     private realtime: RealtimeService,
+    private taskManager: TaskManagerService,
+    private highlights: HighlightService,
   ) {}
 
   ngOnInit(): void {
@@ -137,6 +145,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.realtimeSubscription?.unsubscribe();
+    this.highlightTimelineSubscription?.unsubscribe();
   }
 
   get sessions(): readonly RecordingSession[] {
@@ -495,7 +504,41 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   hasMoreActions(session: RecordingSession): boolean {
-    return session.availableActions.some((action) => action !== 'delete_local');
+    return (
+      this.canCutCurrentFile(session) ||
+      session.availableActions.some((action) => action !== 'delete_local')
+    );
+  }
+
+  canCutCurrentFile(session: RecordingSession): boolean {
+    return (
+      this.isRecordingScope &&
+      session.sourceKind === 'live' &&
+      session.state === 'open'
+    );
+  }
+
+  cutCurrentFile(session: RecordingSession): void {
+    if (
+      !this.canCutCurrentFile(session) ||
+      this.cuttingRoomIds.has(session.roomId)
+    ) {
+      return;
+    }
+    this.cuttingRoomIds.add(session.roomId);
+    this.changeDetector.markForCheck();
+    this.taskManager
+      .canCutStream(session.roomId)
+      .pipe(
+        switchMap((canCut) =>
+          canCut ? this.taskManager.cutStream(session.roomId) : EMPTY,
+        ),
+        finalize(() => {
+          this.cuttingRoomIds.delete(session.roomId);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({ error: () => undefined });
   }
 
   openSubmissionSettings(session: RecordingSession): void {
@@ -557,13 +600,31 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   openDetails(session: RecordingSession): void {
     this.selectedSession = session;
     this.detailVisible = true;
+    this.loadPartHighlightCounts(session);
     this.changeDetector.markForCheck();
   }
 
   closeDetails(): void {
+    this.highlightTimelineSubscription?.unsubscribe();
     this.detailVisible = false;
     this.selectedSession = null;
+    this.partHighlightCounts = new Map<number, number>();
+    this.partHighlightCountState = 'idle';
     this.changeDetector.markForCheck();
+  }
+
+  partHighlightCountLabel(partId: number): string {
+    if (this.partHighlightCountState === 'loading') {
+      return '高光 …';
+    }
+    if (this.partHighlightCountState !== 'ready') {
+      return '高光 —';
+    }
+    return `高光 ${this.partHighlightCounts.get(partId) ?? 0}`;
+  }
+
+  partHasHighlights(partId: number): boolean {
+    return (this.partHighlightCounts.get(partId) ?? 0) > 0;
   }
 
   openPartVideo(session: RecordingSession, part: RecordingPart): void {
@@ -1034,6 +1095,42 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   trackPart(_index: number, part: RecordingPart): number {
     return part.id;
+  }
+
+  private loadPartHighlightCounts(session: RecordingSession): void {
+    this.highlightTimelineSubscription?.unsubscribe();
+    this.partHighlightCounts = new Map<number, number>();
+    if (!this.isRecordingScope || session.sourceKind !== 'live') {
+      this.partHighlightCountState = 'idle';
+      return;
+    }
+
+    this.partHighlightCountState = 'loading';
+    this.highlightTimelineSubscription = this.highlights
+      .getTimeline(session.id)
+      .subscribe({
+        next: (timeline) => {
+          if (!this.detailVisible || this.selectedSession?.id !== session.id) {
+            return;
+          }
+          const counts = new Map<number, number>(
+            session.parts.map((part) => [part.id, 0]),
+          );
+          for (const marker of timeline.markers) {
+            counts.set(marker.partId, (counts.get(marker.partId) ?? 0) + 1);
+          }
+          this.partHighlightCounts = counts;
+          this.partHighlightCountState = 'ready';
+          this.changeDetector.markForCheck();
+        },
+        error: () => {
+          if (!this.detailVisible || this.selectedSession?.id !== session.id) {
+            return;
+          }
+          this.partHighlightCountState = 'error';
+          this.changeDetector.markForCheck();
+        },
+      });
   }
 
   private describeError(error: unknown): string {

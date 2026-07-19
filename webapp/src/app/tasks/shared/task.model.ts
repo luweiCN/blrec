@@ -27,6 +27,8 @@ export type TaskBatchAction =
 export type AutomaticSubmissionFilter =
   'enabled' | 'disabled' | 'unconfigured' | null;
 
+export type SubmissionVisibilityFilter = 'public' | 'private' | null;
+
 export interface TaskBatchActionResult {
   readonly roomId: number;
   readonly accepted: boolean;

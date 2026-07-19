@@ -297,10 +297,14 @@
             {{ formatDuration(session.recordDurationSeconds) }} ·
             {{ formatBytes(session.totalFileSizeBytes) }}
           </div>
-          <div class="secondary-text">采集 {{ session.danmakuCount }} 条弹幕</div>
+          <div class="secondary-text">
+            采集 {{ session.danmakuCount }} 条弹幕
+          </div>
         </td>
         <td class="progress-column">
-          <ng-container *ngIf="session.uploadJob as statusJob; else sessionStatus">
+          <ng-container
+            *ngIf="session.uploadJob as statusJob; else sessionStatus"
+          >
             <nz-tag [nzColor]="uploadDisplayStateColor(statusJob)">
               {{ uploadDisplayStateLabel(statusJob) }}
             </nz-tag>
@@ -318,7 +322,10 @@
           </div>
           <div
             class="secondary-text"
-            *ngIf="session.uploadJob && preuploadPartDetail(session.uploadJob) as detail"
+            *ngIf="
+              session.uploadJob &&
+              preuploadPartDetail(session.uploadJob) as detail
+            "
           >
             {{ detail }}
           </div>
@@ -361,7 +368,10 @@
             <div class="secondary-text" *ngIf="job.scheduledPublishAt">
               定时 {{ job.scheduledPublishAt * 1000 | date: "MM-dd HH:mm" }}
             </div>
-            <div class="secondary-text" *ngIf="job.collectionBranchState !== 'disabled'">
+            <div
+              class="secondary-text"
+              *ngIf="job.collectionBranchState !== 'disabled'"
+            >
               合集：{{ collectionBranchLabel(job.collectionBranchState) }}
             </div>
           </ng-container>
@@ -402,6 +412,19 @@
           </button>
           <nz-dropdown-menu #sessionActions="nzDropdownMenu">
             <ul nz-menu>
+              <li
+                *ngIf="canCutCurrentFile(session)"
+                nz-menu-item
+                data-testid="cut-current-recording"
+                [nzDisabled]="cuttingRoomIds.has(session.roomId)"
+                (click)="cutCurrentFile(session)"
+              >
+                {{
+                  cuttingRoomIds.has(session.roomId)
+                    ? "正在切割…"
+                    : "切割当前文件"
+                }}
+              </li>
               <li
                 *ngIf="hasAction(session.id, 'set_upload')"
                 nz-menu-item
@@ -663,6 +686,14 @@
                   P{{ part.partIndex }}
                 </a>
                 <ng-template #plainPart>P{{ part.partIndex }}</ng-template>
+                <div
+                  *ngIf="isRecordingScope && session.sourceKind === 'live'"
+                  class="part-highlight-count"
+                  [class.has-highlights]="partHasHighlights(part.id)"
+                  data-testid="part-highlight-count"
+                >
+                  {{ partHighlightCountLabel(part.id) }}
+                </div>
               </th>
               <td>
                 <nz-tag [nzColor]="artifactStateColor(part.artifactState)">

@@ -35,13 +35,31 @@
     (ngModelChange)="automaticSubmissionFilterChange.emit($event)"
   ></nz-select>
 
+  <nz-select
+    class="selector visibility-selector"
+    data-testid="visibility-filter"
+    aria-label="筛选稿件可见性"
+    [nzOptions]="submissionVisibilityOptions"
+    [(ngModel)]="submissionVisibilityFilter"
+    (ngModelChange)="submissionVisibilityFilterChange.emit($event)"
+  ></nz-select>
+
+  <nz-select
+    class="selector account-selector"
+    data-testid="account-filter"
+    aria-label="筛选投稿账号"
+    [nzOptions]="accountFilterOptions"
+    [(ngModel)]="submissionAccountFilter"
+    (ngModelChange)="submissionAccountFilterChange.emit($event)"
+  ></nz-select>
+
   <button
     class="reverse-button"
     nz-button
     type="button"
     (click)="toggleReverse()"
   >
-    <span>{{ reverse ? '最早优先' : '最新优先' }}</span>
+    <span>{{ reverse ? "最早优先" : "最新优先" }}</span>
     <i nz-icon nzType="swap" [nzRotate]="90"></i>
   </button>
 
@@ -54,7 +72,7 @@
     nzPlacement="bottomRight"
     nzOverlayClassName="action-dropdown-overlay"
     [nzDropdownMenu]="dropdownMenu"
-    aria-label="全部任务操作"
+    aria-label="其他房间操作"
   >
     <i nz-icon nzType="more"></i>
   </button>
@@ -62,12 +80,7 @@
 
 <nz-dropdown-menu #dropdownMenu="nzDropdownMenu">
   <ul nz-menu>
-    <li nz-menu-item (click)="startAllTasks()">全部开启</li>
-    <li nz-menu-item (click)="stopAllTasks()">全部关闭</li>
-    <li nz-menu-item (click)="stopAllTasks(true)">全部强制停止</li>
-    <li nz-menu-divider></li>
-    <li nz-menu-item (click)="updateAllTaskInfos()">全部刷新数据</li>
+    <li nz-menu-item (click)="updateAllTaskInfos()">刷新全部房间信息</li>
     <li nz-menu-item (click)="copyAllTaskRoomIds()">复制全部房间号</li>
-    <li nz-menu-item nzDanger (click)="removeAllTasks()">全部删除</li>
   </ul>
 </nz-dropdown-menu>

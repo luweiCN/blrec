@@ -11,6 +11,11 @@
     (filterChange)="filterTerm = $event"
     [automaticSubmissionFilter]="automaticSubmissionFilter"
     (automaticSubmissionFilterChange)="automaticSubmissionFilter = $event"
+    [submissionVisibilityFilter]="submissionVisibilityFilter"
+    (submissionVisibilityFilterChange)="submissionVisibilityFilter = $event"
+    [submissionAccountFilter]="submissionAccountFilter"
+    (submissionAccountFilterChange)="submissionAccountFilter = $event"
+    [submissionAccountOptions]="submissionAccountOptions"
   ></app-toolbar>
 
   <nz-spin
@@ -23,6 +28,10 @@
     <app-task-list
       [dataList]="dataList | filterTasks: filterTerm"
       [automaticSubmissionFilter]="automaticSubmissionFilter"
+      [submissionVisibilityFilter]="submissionVisibilityFilter"
+      [submissionAccountFilter]="submissionAccountFilter"
+      [roomUploadPolicies]="roomUploadPolicies"
+      (roomUploadPoliciesRefresh)="refreshRoomUploadPolicies()"
     ></app-task-list>
   </ng-template>
 </div>

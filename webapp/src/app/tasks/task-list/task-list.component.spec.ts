@@ -71,7 +71,7 @@ describe('TaskListComponent', () => {
   beforeEach(async () => {
     taskManager = jasmine.createSpyObj<TaskManagerService>(
       'TaskManagerService',
-      ['runBatchAction']
+      ['runBatchAction'],
     );
     taskManager.runBatchAction.and.returnValue(of({ results: [] }));
     policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
@@ -94,10 +94,10 @@ describe('TaskListComponent', () => {
         },
         {
           provide: NzMessageService,
-          useValue: jasmine.createSpyObj<NzMessageService>(
-            'NzMessageService',
-            ['success', 'error']
-          ),
+          useValue: jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+            'success',
+            'error',
+          ]),
         },
         {
           provide: NzModalService,
@@ -107,8 +107,7 @@ describe('TaskListComponent', () => {
         },
       ],
       schemas: [NO_ERRORS_SCHEMA],
-    })
-      .compileComponents();
+    }).compileComponents();
   });
 
   beforeEach(() => {
@@ -130,7 +129,9 @@ describe('TaskListComponent', () => {
 
     expect(component.selectedCount).toBe(1);
     expect(taskManager.runBatchAction).toHaveBeenCalledOnceWith('start', [1]);
-    expect(fixture.nativeElement.querySelector('.task-list-header')).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('.task-list-header'),
+    ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('nz-card')).toBeNull();
   });
 
@@ -144,13 +145,7 @@ describe('TaskListComponent', () => {
     const headers = Array.from(headerElements).map(
       (header) => header.textContent?.trim() ?? '',
     );
-    expect(headers).toEqual([
-      '',
-      '直播间',
-      '监控与录制',
-      '投稿安排',
-      '操作',
-    ]);
+    expect(headers).toEqual(['', '直播间', '监控与录制', '投稿安排', '操作']);
 
     component.setTaskSelected(1, true);
     fixture.detectChanges();
@@ -174,5 +169,139 @@ describe('TaskListComponent', () => {
 
     fixture.componentRef.setInput('automaticSubmissionFilter', 'disabled');
     expect(component.visibleDataList).toEqual([]);
+  });
+
+  it('combines submission visibility and account filters', () => {
+    const secondTask: TaskData = {
+      ...taskData,
+      user_info: { ...taskData.user_info, name: '第二位主播' },
+      room_info: { ...taskData.room_info, room_id: 2 },
+    };
+    fixture.componentRef.setInput('dataList', [taskData, secondTask]);
+    component.policiesByRoomId = new Map([
+      [
+        1,
+        {
+          roomId: 1,
+          enabled: true,
+          resolvedAccountId: 11,
+          isOnlySelf: false,
+        } as RoomUploadPolicy,
+      ],
+      [
+        2,
+        {
+          roomId: 2,
+          enabled: true,
+          resolvedAccountId: 22,
+          isOnlySelf: true,
+        } as RoomUploadPolicy,
+      ],
+    ]);
+    const filterState = component as TaskListComponent & {
+      submissionVisibilityFilter: 'public' | 'private' | null;
+      submissionAccountFilter: number | null;
+    };
+
+    filterState.submissionVisibilityFilter = 'private';
+    filterState.submissionAccountFilter = null;
+    expect(
+      component.visibleDataList.map((item) => item.room_info.room_id),
+    ).toEqual([2]);
+
+    filterState.submissionVisibilityFilter = null;
+    filterState.submissionAccountFilter = 11;
+    expect(
+      component.visibleDataList.map((item) => item.room_info.room_id),
+    ).toEqual([1]);
+  });
+
+  it('shows explicit actions only for eligible selected rooms', () => {
+    const recordingTask: TaskData = {
+      ...taskData,
+      room_info: { ...taskData.room_info, room_id: 2 },
+      task_status: {
+        ...taskData.task_status,
+        monitor_enabled: true,
+        recorder_enabled: true,
+        running_status: RunningStatus.RECORDING,
+      },
+    };
+    fixture.componentRef.setInput('dataList', [taskData, recordingTask]);
+    component.setTaskSelected(1, true);
+    component.setTaskSelected(2, true);
+    fixture.detectChanges();
+
+    const actions = fixture.nativeElement.querySelector(
+      '[data-testid="recording-task-batch-actions"]',
+    ) as HTMLElement;
+    expect(actions.textContent).toContain('开启监控与录制（1）');
+    expect(actions.textContent).toContain('停止监控与录制（1）');
+    expect(actions.textContent).toContain('刷新所选房间');
+    expect(actions.textContent).not.toContain('切割文件');
+    expect(actions.textContent).not.toContain('强制停止');
+  });
+
+  it('allows selected running rooms to be deleted', () => {
+    const recordingTask: TaskData = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        running_status: RunningStatus.RECORDING,
+      },
+    };
+    fixture.componentRef.setInput('dataList', [recordingTask]);
+    component.setTaskSelected(1, true);
+    fixture.detectChanges();
+
+    const deleteButton = Array.from(
+      fixture.nativeElement.querySelectorAll(
+        '[data-testid="recording-task-batch-actions"] button',
+      ) as NodeListOf<HTMLButtonElement>,
+    ).find((button) => button.textContent?.trim() === '删除');
+    component.runBatchAction('delete');
+
+    expect(deleteButton).toBeDefined();
+    expect(deleteButton?.disabled).toBeFalse();
+    expect(component.eligibleCount('delete')).toBe(1);
+    const modal = TestBed.inject(
+      NzModalService,
+    ) as jasmine.SpyObj<NzModalService>;
+    expect(modal.confirm).toHaveBeenCalled();
+    const confirmation = modal.confirm.calls.mostRecent()?.args[0];
+    expect(confirmation?.nzContent).toContain('历史录像');
+  });
+
+  it('drops selections that become hidden by submission filters', () => {
+    const secondTask: TaskData = {
+      ...taskData,
+      room_info: { ...taskData.room_info, room_id: 2 },
+    };
+    fixture.componentRef.setInput('dataList', [taskData, secondTask]);
+    fixture.componentRef.setInput('roomUploadPolicies', [
+      { roomId: 1, isOnlySelf: false } as RoomUploadPolicy,
+      { roomId: 2, isOnlySelf: true } as RoomUploadPolicy,
+    ]);
+    fixture.detectChanges();
+    component.setAllSelected(true);
+
+    fixture.componentRef.setInput('submissionVisibilityFilter', 'private');
+    fixture.detectChanges();
+
+    expect(component.selectedRoomIdsArray).toEqual([2]);
+    expect(component.selectedCount).toBe(1);
+  });
+
+  it('requests a fresh policy snapshot after batch submission settings close', () => {
+    const refresh = spyOn(component.roomUploadPoliciesRefresh, 'emit');
+    component.batchUploadPolicyDialogVisible = true;
+    const batchDialog = component as TaskListComponent & {
+      closeBatchUploadPolicyDialog?: () => void;
+    };
+
+    batchDialog.closeBatchUploadPolicyDialog?.();
+
+    expect(component.batchUploadPolicyDialogVisible).toBeFalse();
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

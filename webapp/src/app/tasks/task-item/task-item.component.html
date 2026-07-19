@@ -21,7 +21,7 @@
         {{ data.user_info.name }}
       </a>
       <span class="room-title" [title]="data.room_info.title">
-        {{ data.room_info.title || '暂无直播标题' }}
+        {{ data.room_info.title || "暂无直播标题" }}
       </span>
       <span class="room-meta">
         房间 {{ roomId }} · {{ data.room_info.parent_area_name }} /
@@ -50,7 +50,7 @@
     </div>
     <span *ngIf="data.task_status.running_status === RunningStatus.RECORDING">
       {{ data.task_status.rec_elapsed | duration }} ·
-      {{ data.task_status.rec_total | filesize : { spacer: '' } }}
+      {{ data.task_status.rec_total | filesize: { spacer: "" } }}
     </span>
     <span
       *ngIf="titleKeywords.length > 0"
@@ -73,14 +73,18 @@
         nz-tooltip
         [nzTooltipTitle]="
           uploadPolicy?.blockedReason ||
-          (uploadPolicy ? '录制结束后自动创建上传任务' : '首次开启需要先完成投稿设置')
+          (uploadPolicy
+            ? '录制结束后自动创建上传任务'
+            : '首次开启需要先完成投稿设置')
         "
         [ngModel]="automaticSubmissionEnabled"
         [nzControl]="true"
         [nzLoading]="automaticSubmissionPending"
         (click)="toggleAutomaticSubmission()"
       ></nz-switch>
-      <strong>{{ automaticSubmissionEnabled ? "自动投稿" : "不自动投稿" }}</strong>
+      <strong>{{
+        automaticSubmissionEnabled ? "自动投稿" : "不自动投稿"
+      }}</strong>
     </div>
     <span *ngIf="uploadPolicy?.blockedReason" class="policy-warning">
       {{ uploadPolicy?.blockedReason }}
@@ -103,7 +107,12 @@
   </div>
 
   <div class="actions-cell">
-    <button nz-button nzType="link" type="button" [routerLink]="[roomId, 'detail']">
+    <button
+      nz-button
+      nzType="link"
+      type="button"
+      [routerLink]="[roomId, 'detail']"
+    >
       详情
     </button>
     <button
@@ -131,17 +140,6 @@
       nz-button
       nzType="text"
       type="button"
-      nz-tooltip
-      nzTooltipTitle="切割当前录制文件"
-      [disabled]="data.task_status.running_status !== RunningStatus.RECORDING"
-      (click)="cutStream()"
-    >
-      <i nz-icon nzType="scissor"></i>
-    </button>
-    <button
-      nz-button
-      nzType="text"
-      type="button"
       nz-dropdown
       nzPlacement="bottomRight"
       nzOverlayClassName="action-dropdown-overlay"
@@ -157,8 +155,10 @@
   <ul nz-menu>
     <li nz-menu-item (click)="updateTaskInfo()">刷新数据</li>
     <li nz-menu-divider></li>
-    <li nz-menu-item (click)="stopTask(true)">强制停止</li>
-    <li nz-menu-divider></li>
+    <li *ngIf="canForceInterrupt" nz-menu-item (click)="stopTask(true)">
+      强制中断
+    </li>
+    <li *ngIf="canForceInterrupt" nz-menu-divider></li>
     <li nz-menu-item nzDanger (click)="removeTask()">删除</li>
   </ul>
 </nz-dropdown-menu>

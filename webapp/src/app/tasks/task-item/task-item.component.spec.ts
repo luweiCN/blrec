@@ -5,16 +5,12 @@ import { By } from '@angular/platform-browser';
 import {
   CloudUploadOutline,
   MoreOutline,
-  ScissorOutline,
   SettingOutline,
 } from '@ant-design/icons-angular/icons';
 import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
-import {
-  NzDropDownDirective,
-  NzDropDownModule,
-} from 'ng-zorro-antd/dropdown';
+import { NzDropDownDirective, NzDropDownModule } from 'ng-zorro-antd/dropdown';
 import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 import { of } from 'rxjs';
 
@@ -144,19 +140,15 @@ describe('TaskItemComponent', () => {
       providers: [
         {
           provide: NZ_ICONS,
-          useValue: [
-            CloudUploadOutline,
-            MoreOutline,
-            ScissorOutline,
-            SettingOutline,
-          ],
+          useValue: [CloudUploadOutline, MoreOutline, SettingOutline],
         },
         {
           provide: NzMessageService,
-          useValue: jasmine.createSpyObj<NzMessageService>(
-            'NzMessageService',
-            ['warning', 'success', 'error']
-          ),
+          useValue: jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+            'warning',
+            'success',
+            'error',
+          ]),
         },
         {
           provide: NzModalService,
@@ -177,8 +169,7 @@ describe('TaskItemComponent', () => {
         { provide: RoomUploadPolicyService, useValue: policyService },
       ],
       schemas: [NO_ERRORS_SCHEMA],
-    })
-      .compileComponents();
+    }).compileComponents();
   });
 
   beforeEach(() => {
@@ -205,20 +196,20 @@ describe('TaskItemComponent', () => {
 
   it('creates the upload settings dialog only after its card action is used', () => {
     expect(
-      fixture.nativeElement.querySelector('app-upload-policy-dialog')
+      fixture.nativeElement.querySelector('app-upload-policy-dialog'),
     ).toBeNull();
 
     component.openUploadPolicyDialog();
     fixture.detectChanges();
 
     expect(
-      fixture.nativeElement.querySelector('app-upload-policy-dialog')
+      fixture.nativeElement.querySelector('app-upload-policy-dialog'),
     ).not.toBeNull();
   });
 
   it('renders more actions with the shared ellipsis dropdown', () => {
     const trigger = fixture.nativeElement.querySelector(
-      '[aria-label="更多任务操作"]'
+      '[aria-label="更多任务操作"]',
     ) as HTMLButtonElement | null;
     const dropdown = fixture.debugElement
       .query(By.directive(NzDropDownDirective))
@@ -231,6 +222,51 @@ describe('TaskItemComponent', () => {
     expect(dropdown.nzOverlayClassName).toBe('action-dropdown-overlay');
   });
 
+  it('does not expose current-file cutting from room management', () => {
+    expect(
+      fixture.nativeElement.querySelector(
+        '[nztooltiptitle="切割当前录制文件"]',
+      ),
+    ).toBeNull();
+  });
+
+  it('only offers force interruption for a running room', () => {
+    const forceState = component as TaskItemComponent & {
+      canForceInterrupt?: boolean;
+    };
+    expect(forceState.canForceInterrupt).toBeFalse();
+
+    component.data = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        running_status: RunningStatus.RECORDING,
+      },
+    };
+
+    expect(forceState.canForceInterrupt).toBeTrue();
+  });
+
+  it('explains that force interruption is only for abnormal stopping', () => {
+    component.data = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        running_status: RunningStatus.RECORDING,
+      },
+    };
+
+    component.stopTask(true);
+
+    const modal = TestBed.inject(
+      NzModalService,
+    ) as jasmine.SpyObj<NzModalService>;
+    expect(modal.confirm).toHaveBeenCalled();
+    const confirmation = modal.confirm.calls.mostRecent().args[0]!;
+    expect(confirmation.nzTitle).toBe('确定强制中断当前录制？');
+    expect(confirmation.nzContent).toContain('普通停止无效');
+  });
+
   it('uses one control to start monitoring and recording together', () => {
     expect(component.taskEnabled).toBeFalse();
 
@@ -241,7 +277,9 @@ describe('TaskItemComponent', () => {
     expect(fixture.nativeElement.textContent).not.toContain('监控已关闭');
     expect(fixture.nativeElement.textContent).not.toContain('监控已开启');
     expect(
-      fixture.nativeElement.querySelector('[data-testid="task-enabled-switch"]')
+      fixture.nativeElement.querySelector(
+        '[data-testid="task-enabled-switch"]',
+      ),
     ).not.toBeNull();
   });
 

@@ -3,7 +3,10 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NzNotificationService } from 'ng-zorro-antd/notification';
 import { of, Subject } from 'rxjs';
 
-import { RealtimeEvent, RealtimeService } from '../core/services/realtime.service';
+import {
+  RealtimeEvent,
+  RealtimeService,
+} from '../core/services/realtime.service';
 import { StorageService } from '../core/services/storage.service';
 import { FilterTasksPipe } from './shared/pipes/filter-tasks.pipe';
 import { TaskService } from './shared/services/task.service';
@@ -14,15 +17,25 @@ import {
   TaskData,
 } from './shared/task.model';
 import { TasksComponent } from './tasks.component';
+import { RoomUploadPolicy } from './upload-policy-dialog/room-upload-policy.model';
+import { RoomUploadPolicyService } from './upload-policy-dialog/room-upload-policy.service';
 
 describe('TasksComponent', () => {
   let component: TasksComponent;
   let fixture: ComponentFixture<TasksComponent>;
   let taskService: jasmine.SpyObj<TaskService>;
+  let policyService: jasmine.SpyObj<RoomUploadPolicyService>;
   let realtimeEvents: Subject<RealtimeEvent>;
 
   const taskData: TaskData = {
-    user_info: { name: '主播', gender: '', face: '', uid: 1, level: 0, sign: '' },
+    user_info: {
+      name: '主播',
+      gender: '',
+      face: '',
+      uid: 1,
+      level: 0,
+      sign: '',
+    },
     room_info: {
       uid: 1,
       room_id: 100,
@@ -66,6 +79,29 @@ describe('TasksComponent', () => {
       'getAllTaskData',
     ]);
     taskService.getAllTaskData.and.returnValue(of([]));
+    policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
+      'RoomUploadPolicyService',
+      ['list'],
+    );
+    policyService.list.and.returnValue(
+      of([
+        {
+          roomId: 100,
+          resolvedAccountId: 7,
+          resolvedAccountName: '主账号',
+        } as RoomUploadPolicy,
+        {
+          roomId: 101,
+          resolvedAccountId: 7,
+          resolvedAccountName: '主账号',
+        } as RoomUploadPolicy,
+        {
+          roomId: 102,
+          resolvedAccountId: 9,
+          resolvedAccountName: '剪辑账号',
+        } as RoomUploadPolicy,
+      ]),
+    );
     realtimeEvents = new Subject<RealtimeEvent>();
     const storage = jasmine.createSpyObj<StorageService>('StorageService', [
       'getData',
@@ -80,7 +116,7 @@ describe('TasksComponent', () => {
           provide: NzNotificationService,
           useValue: jasmine.createSpyObj<NzNotificationService>(
             'NzNotificationService',
-            ['error']
+            ['error'],
           ),
         },
         {
@@ -92,10 +128,10 @@ describe('TasksComponent', () => {
           useValue: { events$: realtimeEvents.asObservable() },
         },
         { provide: TaskService, useValue: taskService },
+        { provide: RoomUploadPolicyService, useValue: policyService },
       ],
       schemas: [NO_ERRORS_SCHEMA],
-    })
-      .compileComponents();
+    }).compileComponents();
   });
 
   beforeEach(() => {
@@ -111,7 +147,7 @@ describe('TasksComponent', () => {
 
   it('uses one shared primary-page container', () => {
     expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
-      1
+      1,
     );
   });
 
@@ -130,5 +166,17 @@ describe('TasksComponent', () => {
     expect(component.dataList).toEqual([taskData]);
     expect(component.loading).toBeFalse();
     expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads one room policy snapshot and derives unique account filters', () => {
+    const policyState = component as TasksComponent & {
+      submissionAccountOptions?: readonly { label: string; value: number }[];
+    };
+
+    expect(policyService.list).toHaveBeenCalledTimes(1);
+    expect(policyState.submissionAccountOptions).toEqual([
+      { label: '主账号', value: 7 },
+      { label: '剪辑账号', value: 9 },
+    ]);
   });
 });

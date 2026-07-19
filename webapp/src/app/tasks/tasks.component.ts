@@ -17,8 +17,11 @@ import {
   AutomaticSubmissionFilter,
   DataSelection,
   RunningStatus,
+  SubmissionVisibilityFilter,
   TaskData,
 } from './shared/task.model';
+import { RoomUploadPolicy } from './upload-policy-dialog/room-upload-policy.model';
+import { RoomUploadPolicyService } from './upload-policy-dialog/room-upload-policy.service';
 
 const SELECTION_STORAGE_KEY = 'app-tasks-selection';
 const REVERSE_STORAGE_KEY = 'app-tasks-reverse';
@@ -36,8 +39,16 @@ export class TasksComponent implements OnInit, OnDestroy {
   reverse: boolean;
   filterTerm = '';
   automaticSubmissionFilter: AutomaticSubmissionFilter = null;
+  submissionVisibilityFilter: SubmissionVisibilityFilter = null;
+  submissionAccountFilter: number | null = null;
+  roomUploadPolicies: readonly RoomUploadPolicy[] = [];
+  submissionAccountOptions: readonly {
+    label: string;
+    value: number;
+  }[] = [];
 
   private dataSubscription?: Subscription;
+  private policySubscription?: Subscription;
   private realtimeSubscription?: Subscription;
   private allDataList: TaskData[] = [];
 
@@ -46,7 +57,8 @@ export class TasksComponent implements OnInit, OnDestroy {
     private notification: NzNotificationService,
     private storage: StorageService,
     private taskService: TaskService,
-    private realtime: RealtimeService
+    private realtime: RealtimeService,
+    private roomUploadPolicyService: RoomUploadPolicyService,
   ) {
     this.selection = this.retrieveSelection();
     this.reverse = this.retrieveReverse();
@@ -54,6 +66,7 @@ export class TasksComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.syncTaskData();
+    this.syncRoomUploadPolicies();
     this.realtimeSubscription = this.realtime.events$.subscribe((event) => {
       if (event.type === 'resync') {
         this.syncTaskData();
@@ -71,6 +84,11 @@ export class TasksComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.desyncTaskData();
+    this.policySubscription?.unsubscribe();
+  }
+
+  refreshRoomUploadPolicies(): void {
+    this.syncRoomUploadPolicies();
   }
 
   onSelectionChanged(selection: DataSelection): void {
@@ -87,7 +105,7 @@ export class TasksComponent implements OnInit, OnDestroy {
 
   private retrieveSelection(): DataSelection {
     const selection = this.storage.getData(
-      SELECTION_STORAGE_KEY
+      SELECTION_STORAGE_KEY,
     ) as DataSelection | null;
     return selection !== null ? selection : DataSelection.ALL;
   }
@@ -108,9 +126,7 @@ export class TasksComponent implements OnInit, OnDestroy {
     this.dataSubscription?.unsubscribe();
     this.dataSubscription = this.taskService
       .getAllTaskData(DataSelection.ALL)
-      .pipe(
-        retry(10, 3000)
-      )
+      .pipe(retry(10, 3000))
       .subscribe({
         next: (dataList) => {
           this.loading = false;
@@ -120,10 +136,45 @@ export class TasksComponent implements OnInit, OnDestroy {
           this.notification.error(
             '获取任务数据出错',
             '网络连接异常, 请待网络正常后刷新。',
-            { nzDuration: 0 }
+            { nzDuration: 0 },
           );
         },
       });
+  }
+
+  private syncRoomUploadPolicies(): void {
+    this.policySubscription?.unsubscribe();
+    this.policySubscription = this.roomUploadPolicyService.list().subscribe({
+      next: (policies) => {
+        this.roomUploadPolicies = policies;
+        const accounts = new Map<number, string>();
+        for (const policy of policies) {
+          if (policy.resolvedAccountId === null) {
+            continue;
+          }
+          accounts.set(
+            policy.resolvedAccountId,
+            policy.resolvedAccountName || `账号 #${policy.resolvedAccountId}`,
+          );
+        }
+        this.submissionAccountOptions = [...accounts.entries()].map(
+          ([value, label]) => ({ label, value }),
+        );
+        if (
+          this.submissionAccountFilter !== null &&
+          !accounts.has(this.submissionAccountFilter)
+        ) {
+          this.submissionAccountFilter = null;
+        }
+        this.changeDetector.markForCheck();
+      },
+      error: () => {
+        this.notification.error(
+          '获取投稿设置出错',
+          '暂时无法加载投稿筛选，请稍后刷新。',
+        );
+      },
+    });
   }
 
   private desyncTaskData(): void {
@@ -134,7 +185,7 @@ export class TasksComponent implements OnInit, OnDestroy {
   private applyTaskData(dataList: TaskData[]): void {
     this.allDataList = [...dataList];
     const filtered = this.allDataList.filter((data) =>
-      this.matchesSelection(data)
+      this.matchesSelection(data),
     );
     this.dataList = this.reverse ? [...filtered].reverse() : filtered;
     this.loading = false;

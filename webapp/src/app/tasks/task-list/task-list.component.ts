@@ -3,9 +3,11 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  EventEmitter,
   Input,
   OnChanges,
-  OnInit,
+  Output,
+  SimpleChanges,
 } from '@angular/core';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
@@ -24,6 +26,7 @@ import { TaskManagerService } from '../shared/services/task-manager.service';
 import {
   AutomaticSubmissionFilter,
   RunningStatus,
+  SubmissionVisibilityFilter,
   TaskBatchAction,
   TaskData,
 } from '../shared/task.model';
@@ -36,9 +39,13 @@ import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-pol
   styleUrls: ['./task-list.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TaskListComponent implements OnChanges, OnInit {
+export class TaskListComponent implements OnChanges {
   @Input() dataList: TaskData[] = [];
   @Input() automaticSubmissionFilter: AutomaticSubmissionFilter = null;
+  @Input() submissionVisibilityFilter: SubmissionVisibilityFilter = null;
+  @Input() submissionAccountFilter: number | null = null;
+  @Input() roomUploadPolicies: readonly RoomUploadPolicy[] = [];
+  @Output() roomUploadPoliciesRefresh = new EventEmitter<void>();
   readonly selectedRoomIds = new Set<number>();
   batchLoading = false;
   batchSettingsLoading = false;
@@ -55,16 +62,19 @@ export class TaskListComponent implements OnChanges, OnInit {
     private modal: NzModalService,
     private settingService: SettingService,
     private taskManager: TaskManagerService,
-    private policyService: RoomUploadPolicyService
+    private policyService: RoomUploadPolicyService,
   ) {}
 
-  ngOnInit(): void {
-    this.refreshPolicies();
-  }
-
-  ngOnChanges(): void {
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes.roomUploadPolicies) {
+      this.policiesByRoomId = new Map(
+        this.roomUploadPolicies.map((policy) => [policy.roomId, policy]),
+      );
+      this.collectionLabelsByKey.clear();
+      this.refreshCollectionLabels(this.roomUploadPolicies);
+    }
     const visibleRooms = new Set(
-      this.dataList.map((data) => data.room_info.room_id)
+      this.visibleDataList.map((data) => data.room_info.room_id),
     );
     for (const roomId of this.selectedRoomIds) {
       if (!visibleRooms.has(roomId)) {
@@ -78,18 +88,45 @@ export class TaskListComponent implements OnChanges, OnInit {
   }
 
   get visibleDataList(): TaskData[] {
-    if (this.automaticSubmissionFilter === null) {
-      return this.dataList;
-    }
     return this.dataList.filter((data) => {
       const policy = this.policyFor(data.room_info.room_id);
-      if (this.automaticSubmissionFilter === 'unconfigured') {
-        return policy === null;
+      if (
+        this.automaticSubmissionFilter === 'unconfigured' &&
+        policy !== null
+      ) {
+        return false;
       }
-      if (this.automaticSubmissionFilter === 'enabled') {
-        return policy?.enabled === true;
+      if (
+        this.automaticSubmissionFilter === 'enabled' &&
+        policy?.enabled !== true
+      ) {
+        return false;
       }
-      return policy !== null && !policy.enabled;
+      if (
+        this.automaticSubmissionFilter === 'disabled' &&
+        (policy === null || policy.enabled)
+      ) {
+        return false;
+      }
+      if (
+        this.submissionVisibilityFilter === 'private' &&
+        policy?.isOnlySelf !== true
+      ) {
+        return false;
+      }
+      if (
+        this.submissionVisibilityFilter === 'public' &&
+        (policy === null || policy.isOnlySelf)
+      ) {
+        return false;
+      }
+      if (
+        this.submissionAccountFilter !== null &&
+        policy?.resolvedAccountId !== this.submissionAccountFilter
+      ) {
+        return false;
+      }
+      return true;
     });
   }
 
@@ -102,7 +139,7 @@ export class TaskListComponent implements OnChanges, OnInit {
   get selectedReferenceTask(): TaskData | null {
     return (
       this.visibleDataList.find((data) =>
-        this.selectedRoomIds.has(data.room_info.room_id)
+        this.selectedRoomIds.has(data.room_info.room_id),
       ) ?? null
     );
   }
@@ -111,7 +148,7 @@ export class TaskListComponent implements OnChanges, OnInit {
     return (
       this.visibleDataList.length > 0 &&
       this.visibleDataList.every((data) =>
-        this.selectedRoomIds.has(data.room_info.room_id)
+        this.selectedRoomIds.has(data.room_info.room_id),
       )
     );
   }
@@ -161,19 +198,8 @@ export class TaskListComponent implements OnChanges, OnInit {
     );
   }
 
-  refreshPolicies(): void {
-    this.policyService.list().subscribe({
-      next: (policies) => {
-        this.policiesByRoomId = new Map(
-          policies.map((policy) => [policy.roomId, policy]),
-        );
-        this.refreshCollectionLabels(policies);
-        this.changeDetector.markForCheck();
-      },
-      error: () => {
-        this.message.error('获取房间投稿状态失败');
-      },
-    });
+  requestPolicyRefresh(): void {
+    this.roomUploadPoliciesRefresh.emit();
   }
 
   eligibleCount(action: TaskBatchAction): number {
@@ -190,8 +216,9 @@ export class TaskListComponent implements OnChanges, OnInit {
     }
     if (action === 'delete') {
       this.modal.confirm({
-        nzTitle: `确定删除选中的 ${roomIds.length} 个录制任务？`,
-        nzContent: '正在录制的任务不会被强制删除；请先停止录制。',
+        nzTitle: `确定删除选中的 ${roomIds.length} 个房间？`,
+        nzContent:
+          '系统会先停止这些房间的监控与录制，再删除房间配置。历史录像、弹幕、片段和 B 站稿件都会保留。',
         nzOkDanger: true,
         nzOnOk: () =>
           new Promise<void>((resolve, reject) => {
@@ -200,12 +227,9 @@ export class TaskListComponent implements OnChanges, OnInit {
       });
       return;
     }
-    if (action === 'force_stop' || action === 'recorder_force_disable') {
+    if (action === 'recorder_force_disable') {
       this.modal.confirm({
-        nzTitle:
-          action === 'force_stop'
-            ? `强制停止选中的 ${roomIds.length} 个任务？`
-            : `强制关闭选中的 ${roomIds.length} 个录制？`,
+        nzTitle: `强制关闭选中的 ${roomIds.length} 个录制？`,
         nzContent: '正在写入的录像文件会被中断，仅在普通停止无效时使用。',
         nzOkDanger: true,
         nzOnOk: () =>
@@ -232,13 +256,13 @@ export class TaskListComponent implements OnChanges, OnInit {
         'danmaku',
         'recorder',
         'postprocessing',
-      ])
+      ]),
     )
       .pipe(
         finalize(() => {
           this.batchSettingsLoading = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: ([taskOptions, globalSettings]) => {
@@ -261,6 +285,11 @@ export class TaskListComponent implements OnChanges, OnInit {
     this.changeDetector.markForCheck();
   }
 
+  closeBatchUploadPolicyDialog(): void {
+    this.batchUploadPolicyDialogVisible = false;
+    this.requestPolicyRefresh();
+  }
+
   changeBatchTaskOptions(options: TaskOptionsIn): void {
     const roomIds = this.selectedRoomIdsArray;
     if (roomIds.length === 0 || this.batchSettingsLoading) {
@@ -271,14 +300,14 @@ export class TaskListComponent implements OnChanges, OnInit {
       roomIds.map((roomId) =>
         this.settingService
           .changeTaskOptions(roomId, options)
-          .pipe(retry(3, 300))
-      )
+          .pipe(retry(3, 300)),
+      ),
     )
       .pipe(
         finalize(() => {
           this.batchSettingsLoading = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: () => {
@@ -309,17 +338,14 @@ export class TaskListComponent implements OnChanges, OnInit {
           case 'start':
             return status.running_status === RunningStatus.STOPPED;
           case 'stop':
-          case 'force_stop':
             return status.running_status !== RunningStatus.STOPPED;
           case 'recorder_enable':
             return status.monitor_enabled && !status.recorder_enabled;
           case 'recorder_disable':
           case 'recorder_force_disable':
             return status.recorder_enabled;
-          case 'cut':
-            return status.running_status === RunningStatus.RECORDING;
           case 'delete':
-            return status.running_status === RunningStatus.STOPPED;
+            return true;
           default:
             return true;
         }
@@ -331,7 +357,7 @@ export class TaskListComponent implements OnChanges, OnInit {
     action: TaskBatchAction,
     roomIds: readonly number[],
     resolve?: () => void,
-    reject?: (reason?: unknown) => void
+    reject?: (reason?: unknown) => void,
   ): void {
     this.batchLoading = true;
     this.taskManager
@@ -340,7 +366,7 @@ export class TaskListComponent implements OnChanges, OnInit {
         finalize(() => {
           this.batchLoading = false;
           this.changeDetector.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: (response) => {
@@ -356,9 +382,7 @@ export class TaskListComponent implements OnChanges, OnInit {
       });
   }
 
-  private refreshCollectionLabels(
-    policies: readonly RoomUploadPolicy[],
-  ): void {
+  private refreshCollectionLabels(policies: readonly RoomUploadPolicy[]): void {
     const selections = new Map<
       string,
       Pick<RoomUploadPolicy, 'accountMode' | 'accountId'>

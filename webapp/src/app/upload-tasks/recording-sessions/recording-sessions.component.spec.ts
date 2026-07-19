@@ -41,7 +41,9 @@ import {
 } from '../../core/services/realtime.service';
 import { RecordingSession } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
+import { HighlightService } from '../shared/highlight.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
+import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 
 @Component({ selector: 'app-task-edit-dialog', template: '' })
 class TaskEditDialogStubComponent {
@@ -90,6 +92,8 @@ describe('RecordingSessionsComponent', () => {
   let service: jasmine.SpyObj<RecordingSessionService>;
   let clipboard: jasmine.SpyObj<Clipboard>;
   let message: jasmine.SpyObj<NzMessageService>;
+  let taskManager: jasmine.SpyObj<TaskManagerService>;
+  let highlights: jasmine.SpyObj<HighlightService>;
   let realtimeEvents: Subject<RealtimeEvent>;
 
   beforeEach(async () => {
@@ -110,6 +114,35 @@ describe('RecordingSessionsComponent', () => {
       'warning',
       'info',
     ]);
+    taskManager = jasmine.createSpyObj<TaskManagerService>(
+      'TaskManagerService',
+      ['canCutStream', 'cutStream'],
+    );
+    taskManager.canCutStream.and.returnValue(of(true));
+    taskManager.cutStream.and.returnValue(of(null));
+    highlights = jasmine.createSpyObj<HighlightService>('HighlightService', [
+      'getTimeline',
+    ]);
+    highlights.getTimeline.and.returnValue(
+      of({
+        sessionId: 1,
+        roomId: 100,
+        durationMs: 59_000,
+        stableEndMs: 59_000,
+        parts: [
+          {
+            partId: 2,
+            partIndex: 1,
+            timelineStartMs: 0,
+            durationMs: 59_000,
+            stableEndMs: 59_000,
+            recording: false,
+            mediaKind: 'native',
+          },
+        ],
+        markers: [],
+      }),
+    );
     realtimeEvents = new Subject<RealtimeEvent>();
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
@@ -296,6 +329,8 @@ describe('RecordingSessionsComponent', () => {
         { provide: RecordingSessionService, useValue: service },
         { provide: Clipboard, useValue: clipboard },
         { provide: NzMessageService, useValue: message },
+        { provide: TaskManagerService, useValue: taskManager },
+        { provide: HighlightService, useValue: highlights },
         {
           provide: RealtimeService,
           useValue: { events$: realtimeEvents.asObservable() },
@@ -433,6 +468,81 @@ describe('RecordingSessionsComponent', () => {
     );
   });
 
+  it('shows the highlight count for each part in recording details', () => {
+    highlights.getTimeline.and.returnValue(
+      of({
+        sessionId: 1,
+        roomId: 100,
+        durationMs: 59_000,
+        stableEndMs: 59_000,
+        parts: [
+          {
+            partId: 2,
+            partIndex: 1,
+            timelineStartMs: 0,
+            durationMs: 59_000,
+            stableEndMs: 59_000,
+            recording: false,
+            mediaKind: 'native',
+          },
+        ],
+        markers: [
+          {
+            marker: {
+              id: 11,
+              roomId: 100,
+              observedAtMs: 10_000,
+              playerDelayMs: 0,
+              contentAtMs: 10_000,
+              title: '直播标题',
+              anchorName: '主播名',
+              name: '高光一',
+              note: '',
+              source: 'web',
+              createdAt: 10,
+              updatedAt: 10,
+            },
+            partId: 2,
+            localOffsetMs: 10_000,
+            timelineOffsetMs: 10_000,
+          },
+          {
+            marker: {
+              id: 12,
+              roomId: 100,
+              observedAtMs: 20_000,
+              playerDelayMs: 0,
+              contentAtMs: 20_000,
+              title: '直播标题',
+              anchorName: '主播名',
+              name: '高光二',
+              note: '',
+              source: 'browser_extension',
+              createdAt: 20,
+              updatedAt: 20,
+            },
+            partId: 2,
+            localOffsetMs: 20_000,
+            timelineOffsetMs: 20_000,
+          },
+        ],
+      }),
+    );
+    fixture.componentInstance.scope = 'recordings';
+    fixture.detectChanges();
+
+    fixture.componentInstance.openDetails(
+      fixture.componentInstance.sessions[0],
+    );
+    fixture.detectChanges();
+
+    expect(highlights.getTimeline).toHaveBeenCalledOnceWith(1);
+    expect(
+      document.body.querySelector('[data-testid="part-highlight-count"]')
+        ?.textContent,
+    ).toContain('高光 2');
+  });
+
   it('does not offer highlight editing when a part has no local video', () => {
     fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
@@ -535,6 +645,58 @@ describe('RecordingSessionsComponent', () => {
         '[data-testid="session-actions-trigger"]',
       ),
     ).toBeNull();
+  });
+
+  it('offers current-file cutting only for an active live recording', () => {
+    fixture.componentInstance.scope = 'recordings';
+    fixture.detectChanges();
+    const closedSession = fixture.componentInstance.sessions[0];
+    const openSession = {
+      ...closedSession,
+      state: 'open',
+      displayState: 'recording',
+      uploadJob: null,
+    } as RecordingSession;
+    const cutActions =
+      fixture.componentInstance as RecordingSessionsComponent & {
+        canCutCurrentFile?: (session: RecordingSession) => boolean;
+      };
+
+    expect(cutActions.canCutCurrentFile?.(openSession)).toBeTrue();
+    expect(cutActions.canCutCurrentFile?.(closedSession)).toBeFalse();
+    expect(
+      cutActions.canCutCurrentFile?.({
+        ...openSession,
+        sourceKind: 'highlight',
+      }),
+    ).toBeFalse();
+    fixture.componentInstance.scope = 'uploads';
+    expect(cutActions.canCutCurrentFile?.(openSession)).toBeFalse();
+  });
+
+  it('checks capability once before cutting the active recording file', () => {
+    fixture.componentInstance.scope = 'recordings';
+    fixture.detectChanges();
+    const openSession = {
+      ...fixture.componentInstance.sessions[0],
+      state: 'open',
+      displayState: 'recording',
+      uploadJob: null,
+    } as RecordingSession;
+    const capability = new Subject<boolean>();
+    taskManager.canCutStream.and.returnValue(capability);
+    const cutActions =
+      fixture.componentInstance as RecordingSessionsComponent & {
+        cutCurrentFile?: (session: RecordingSession) => void;
+      };
+
+    cutActions.cutCurrentFile?.(openSession);
+    cutActions.cutCurrentFile?.(openSession);
+    expect(taskManager.canCutStream).toHaveBeenCalledOnceWith(100);
+
+    capability.next(true);
+    capability.complete();
+    expect(taskManager.cutStream).toHaveBeenCalledOnceWith(100);
   });
 
   it('opens the shared complete submission form for one recording', () => {
@@ -1033,7 +1195,10 @@ describe('RecordingSessionsComponent', () => {
   it('reloads when the current provisional task disappears from SSE', () => {
     fixture.detectChanges();
     const session = fixture.componentInstance.sessions[0];
-    if (fixture.componentInstance.view.state !== 'ready' || !session.uploadJob) {
+    if (
+      fixture.componentInstance.view.state !== 'ready' ||
+      !session.uploadJob
+    ) {
       throw new Error('expected a ready upload-task view');
     }
     fixture.componentInstance.view = {
@@ -1074,7 +1239,10 @@ describe('RecordingSessionsComponent', () => {
   it('shows completed and discovered part counts during preupload', () => {
     fixture.detectChanges();
     const session = fixture.componentInstance.sessions[0];
-    if (fixture.componentInstance.view.state !== 'ready' || !session.uploadJob) {
+    if (
+      fixture.componentInstance.view.state !== 'ready' ||
+      !session.uploadJob
+    ) {
       throw new Error('expected a ready upload-task view');
     }
     fixture.componentInstance.view = {
@@ -1103,7 +1271,10 @@ describe('RecordingSessionsComponent', () => {
   it('updates preupload part counts from SSE without a state change', () => {
     fixture.detectChanges();
     const session = fixture.componentInstance.sessions[0];
-    if (fixture.componentInstance.view.state !== 'ready' || !session.uploadJob) {
+    if (
+      fixture.componentInstance.view.state !== 'ready' ||
+      !session.uploadJob
+    ) {
       throw new Error('expected a ready upload-task view');
     }
     fixture.componentInstance.view = {
@@ -1157,10 +1328,7 @@ describe('RecordingSessionsComponent', () => {
     realtimeEvents.next({
       type: 'upload_progress',
       data: {
-        jobs: [
-          currentJob,
-          realtimeUploadJob({ jobId: 10, sessionId: 2 }),
-        ],
+        jobs: [currentJob, realtimeUploadJob({ jobId: 10, sessionId: 2 })],
       },
     });
     service.listSessions.calls.reset();
@@ -1205,5 +1373,4 @@ describe('RecordingSessionsComponent', () => {
       fixture.nativeElement.querySelector('[data-testid="retry-sessions"]'),
     ).not.toBeNull();
   });
-
 });
