@@ -706,7 +706,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     if (uploadPart?.cid === null || uploadPart?.cid === undefined) {
       return null;
     }
-    return this.archiveUrl(session, partIndex);
+    const submittedPage =
+      session.uploadJob?.parts.filter((part) => part.partIndex <= partIndex)
+        .length ?? 0;
+    return submittedPage > 0 ? this.archiveUrl(session, submittedPage) : null;
   }
 
   uploadJobStateColor(state: UploadJobState): string {

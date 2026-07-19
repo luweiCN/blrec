@@ -1405,6 +1405,50 @@ async def test_broken_parts_are_excluded_from_upload_job(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_legacy_snapshot_maps_sparse_parts_by_submission_order(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        assert await worker.create_ready_jobs() == [1]
+        row = await database.fetchone(
+            'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        snapshot = json.loads(str(row['policy_snapshot_json']))
+        snapshot.pop('recording_part_indexes')
+        snapshot['part_titles'] = ['P2', 'P12']
+        await database.execute(
+            'UPDATE upload_jobs SET aid=303,policy_snapshot_json=? WHERE id=1',
+            (json.dumps(snapshot),),
+        )
+        await database.execute(
+            "UPDATE upload_parts SET part_index=12,remote_filename='remote-p12' "
+            'WHERE job_id=1 AND part_index=2'
+        )
+        await database.execute(
+            "UPDATE upload_parts SET part_index=2,remote_filename='remote-p2' "
+            'WHERE job_id=1 AND part_index=1'
+        )
+
+        payload = await worker.build_edit_payload(
+            1, {}, 'https://archive.biliimg.com/fixture.jpg'
+        )
+
+        assert payload['videos'] == [
+            {'filename': 'remote-p2', 'title': 'P2', 'desc': ''},
+            {'filename': 'remote-p12', 'title': 'P12', 'desc': ''},
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_run_once_uploads_parts_in_order_and_submits_one_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

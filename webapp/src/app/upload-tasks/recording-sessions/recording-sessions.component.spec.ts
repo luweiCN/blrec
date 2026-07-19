@@ -634,6 +634,29 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.remotePartUrl(session, 1)).toBeNull();
   });
 
+  it('links sparse original parts by their submitted page order', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    const sparse = {
+      ...session,
+      uploadJob: {
+        ...session.uploadJob!,
+        state: 'approved' as const,
+        parts: [
+          { ...session.uploadJob!.parts[0], partIndex: 2, cid: 202 },
+          { ...session.uploadJob!.parts[0], id: 12, partIndex: 12, cid: 1212 },
+        ],
+      },
+    };
+
+    expect(fixture.componentInstance.remotePartUrl(sparse, 2)).toBe(
+      'https://www.bilibili.com/video/BV1test?p=1',
+    );
+    expect(fixture.componentInstance.remotePartUrl(sparse, 12)).toBe(
+      'https://www.bilibili.com/video/BV1test?p=2',
+    );
+  });
+
   it('requests the selected server page and page size', () => {
     fixture.detectChanges();
 

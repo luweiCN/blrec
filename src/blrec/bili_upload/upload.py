@@ -2149,9 +2149,14 @@ class UploadCoordinator:
         if not isinstance(titles, list):
             raise ProtocolContractError('invalid upload policy snapshot')
         if source_indexes is None:
-            title_by_part_index = {
-                index + 1: title for index, title in enumerate(titles)
-            }
+            if len(titles) == len(parts):
+                title_by_part_index = {
+                    int(part['part_index']): title for part, title in zip(parts, titles)
+                }
+            else:
+                title_by_part_index = {
+                    index + 1: title for index, title in enumerate(titles)
+                }
         elif (
             isinstance(source_indexes, list)
             and len(source_indexes) == len(titles)
