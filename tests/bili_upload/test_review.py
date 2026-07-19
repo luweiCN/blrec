@@ -225,6 +225,73 @@ async def async_value(value: object) -> object:
 
 
 @pytest.mark.asyncio
+async def test_recover_legacy_page_order_pause_is_exact_and_never_reuploads(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    reason = '远端分 P 页码与本地顺序不一致'
+    try:
+        for job_id in range(1, 6):
+            await seed_waiting_job(
+                database,
+                job_id=job_id,
+                aid=300 + job_id,
+                bvid='BV{}'.format(job_id),
+                filenames=('p1',),
+            )
+            await database.execute(
+                "UPDATE upload_jobs SET state='paused',review_reason=? WHERE id=?",
+                (reason, job_id),
+            )
+        await database.execute(
+            "UPDATE upload_jobs SET lease_owner='old',lease_until=9999,"
+            'next_attempt_at=9999 WHERE id=1'
+        )
+        await database.execute('UPDATE upload_jobs SET operator_paused=1 WHERE id=2')
+        await database.execute('UPDATE upload_jobs SET bvid=NULL WHERE id=3')
+        await database.execute(
+            "UPDATE upload_jobs SET review_reason='另一种暂停原因' WHERE id=4"
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET submit_state='prepared' WHERE id=5"
+        )
+        review = watcher(database, archive_response())
+
+        assert await review.recover_legacy_page_order_pauses() == 1
+
+        recovered = await database.fetchone(
+            'SELECT state,submit_state,review_reason,lease_owner,lease_until,'
+            'next_attempt_at FROM upload_jobs WHERE id=1'
+        )
+        assert recovered is not None
+        assert dict(recovered) == {
+            'state': 'waiting_review',
+            'submit_state': 'confirmed',
+            'review_reason': None,
+            'lease_owner': None,
+            'lease_until': None,
+            'next_attempt_at': 0,
+        }
+        untouched = await database.fetchall(
+            'SELECT id,state FROM upload_jobs WHERE id BETWEEN 2 AND 5 ORDER BY id'
+        )
+        assert [(int(row['id']), str(row['state'])) for row in untouched] == [
+            (2, 'paused'),
+            (3, 'paused'),
+            (4, 'paused'),
+            (5, 'paused'),
+        ]
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM upload_chunks WHERE part_id=101'
+            )
+            == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_review_binds_cids_by_remote_filename_not_array_position(
     tmp_path: Path,
 ) -> None:

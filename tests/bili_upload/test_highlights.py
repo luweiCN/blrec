@@ -3,6 +3,7 @@ from typing import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from loguru import logger
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.highlights import HighlightService
@@ -577,3 +578,51 @@ async def test_delete_clip_removes_its_local_upload_task(
         )
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_delete_clip_removes_a_missing_legacy_output_record(
+    database, tmp_path: Path
+) -> None:
+    clip_root = tmp_path / 'clips'
+    missing = tmp_path / 'rec' / 'highlights' / '100' / 'highlight-1.mp4'
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,actual_start_ms,'
+        'actual_end_ms,output_video_path,state,error_message,created_at,updated_at) '
+        "VALUES(1,100,'旧失败片段',0,1000,0,1000,?,'failed','ffprobe failed',1,1)",
+        (str(missing),),
+    )
+
+    result = await HighlightService(database, clip_root=clip_root).delete_clip(1)
+
+    assert result == 'deleted'
+    assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_clip_rejects_and_audits_an_existing_outside_root_file(
+    database, tmp_path: Path
+) -> None:
+    clip_root = tmp_path / 'clips'
+    outside = tmp_path / 'rec' / 'highlights' / '100' / 'highlight-1.mp4'
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b'must remain')
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,actual_start_ms,'
+        'actual_end_ms,output_video_path,state,created_at,updated_at) '
+        "VALUES(1,100,'越界片段',0,1000,0,1000,?,'failed',1,1)",
+        (str(outside),),
+    )
+    messages = []
+    sink = logger.add(messages.append, format='{message}')
+    try:
+        with pytest.raises(ValueError, match='outside recording root'):
+            await HighlightService(database, clip_root=clip_root).delete_clip(1)
+    finally:
+        logger.remove(sink)
+
+    assert outside.read_bytes() == b'must remain'
+    assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 1
+    assert any('highlight_clip_delete_rejected' in str(item) for item in messages)

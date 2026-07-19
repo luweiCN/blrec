@@ -141,6 +141,42 @@ async def test_worker_never_claims_an_active_recording(
 
 
 @pytest.mark.asyncio
+async def test_worker_indexes_a_part_while_upload_job_waits_for_artifacts(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    path = tmp_path / 'recording.flv'
+    part_id = await seed_part(database, path)
+    await database.execute(
+        "INSERT INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(1,42,'投稿账号',X'00',1,'k','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'created_at,updated_at) '
+        "VALUES(1,1,1,'{}','waiting_artifacts','prepared',1,1)"
+    )
+    result = MediaIndexResult(12_000, path.stat().st_size, 3)
+    worker = MediaIndexWorker(
+        database,
+        inspect=lambda _path: result,
+        rebuild=lambda _path, _progress: result,
+        clock=lambda: 100,
+        worker_id='test-indexer',
+    )
+
+    assert await worker.run_once() == part_id
+    assert (
+        await database.scalar(
+            'SELECT media_index_state FROM recording_parts WHERE id=?', (part_id,)
+        )
+        == 'ready'
+    )
+
+
+@pytest.mark.asyncio
 async def test_worker_recovers_an_interrupted_claim_after_restart(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:

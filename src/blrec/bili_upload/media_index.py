@@ -136,7 +136,8 @@ class MediaIndexWorker:
                 'AND part.video_deleted_at IS NULL '
                 'AND NOT EXISTS('
                 'SELECT 1 FROM upload_jobs job WHERE job.session_id=part.session_id '
-                "AND job.state NOT IN ('approved','completed','rejected')) "
+                "AND job.state NOT IN ("
+                "'waiting_artifacts','approved','completed','rejected')) "
                 'ORDER BY part.id LIMIT 1'
             ).fetchone()
             if row is None:

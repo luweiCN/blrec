@@ -1251,11 +1251,44 @@ class HighlightService:
         for value in (clip.output_video_path, clip.output_xml_path):
             if value is None:
                 continue
-            path = self._owned_highlight_path(value)
+            try:
+                path = self._owned_highlight_path(value)
+            except ValueError as error:
+                if self._is_missing_legacy_output(value):
+                    audit(
+                        'highlight_clip_missing_legacy_output_skipped',
+                        clip_id=clip.id,
+                        room_id=clip.room_id,
+                        path=value,
+                        result='missing',
+                    )
+                    continue
+                audit(
+                    'highlight_clip_delete_rejected',
+                    level='WARNING',
+                    clip_id=clip.id,
+                    room_id=clip.room_id,
+                    stage='validate_output_path',
+                    reason=str(error)[:500],
+                    result='rejected',
+                )
+                raise
             paths.append(Path(str(path) + '.partial'))
             if not partial_only:
                 paths.append(path)
         return tuple(paths)
+
+    def _is_missing_legacy_output(self, value: str) -> bool:
+        if self._clip_root is None:
+            return False
+        path = Path(value).resolve(strict=False)
+        if path.suffix.lower() not in ('.mp4', '.xml'):
+            return False
+        try:
+            path.relative_to(self._clip_root.resolve())
+        except ValueError:
+            return not path.exists() and not Path(str(path) + '.partial').exists()
+        return False
 
     def _owned_highlight_path(self, value: str) -> Path:
         if self._clip_root is None:

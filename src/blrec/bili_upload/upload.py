@@ -1047,6 +1047,8 @@ class UploadCoordinator:
         if finalized and await self._has_pending_media_probe(job_session_id):
             return False
         await self._mark_short_parts_excluded(job_session_id)
+        if finalized and await self._has_pending_media_index(job_session_id):
+            return False
         rows = await self._database.fetchall(
             'SELECT id,part_index,source_path,final_path,xml_path,'
             'artifact_state,updated_at FROM recording_parts '
@@ -1117,7 +1119,7 @@ class UploadCoordinator:
             for part in parts:
                 current_part = connection.execute(
                     'SELECT part_index,source_path,final_path,artifact_state,'
-                    'updated_at '
+                    'updated_at,media_index_state '
                     'FROM recording_parts WHERE id=? AND session_id=?',
                     (part.id, job_session_id),
                 ).fetchone()
@@ -1133,6 +1135,11 @@ class UploadCoordinator:
                     part.final_path,
                     part.artifact_state,
                     part.updated_at,
+                ):
+                    return False
+                if finalized and str(current_part['media_index_state']) in (
+                    'pending',
+                    'indexing',
                 ):
                     return False
                 if (
@@ -1265,6 +1272,18 @@ class UploadCoordinator:
                 reason='all_parts_below_minimum_duration',
             )
         return cancelled
+
+    async def _has_pending_media_index(self, session_id: int) -> bool:
+        return bool(
+            await self._database.scalar(
+                'SELECT 1 FROM recording_parts WHERE session_id=? '
+                "AND artifact_state='ready' AND media_index_state IN "
+                "('pending','indexing') AND upload_excluded_reason IS NULL "
+                'AND (record_duration_seconds IS NULL OR '
+                'record_duration_seconds>=?) LIMIT 1',
+                (session_id, self._MIN_UPLOAD_PART_DURATION_SECONDS),
+            )
+        )
 
     async def _has_stable_ready_part(self, session_id: int) -> bool:
         rows = await self._database.fetchall(

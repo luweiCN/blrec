@@ -383,6 +383,7 @@ class BiliAccountRuntime:
                 collection_branch=collection_publisher,
                 clock=self._clock,
             )
+            await review_watcher.recover_legacy_page_order_pauses()
             retention_manager = (
                 None
                 if self._recording_root is None

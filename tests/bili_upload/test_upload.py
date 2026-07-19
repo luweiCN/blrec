@@ -235,8 +235,9 @@ async def seed_ready_session(
             'INSERT INTO recording_parts('
             'id,session_id,run_id,part_index,source_path,final_path,'
             'record_start_time,record_end_time,record_duration_seconds,'
-            'file_size_bytes,danmaku_count,artifact_state,created_at,updated_at) '
-            "VALUES(?,1,'run',?,?,?,?,?,?,?,?,'ready',800,900)",
+            'file_size_bytes,danmaku_count,artifact_state,created_at,updated_at,'
+            'media_index_state) '
+            "VALUES(?,1,'run',?,?,?,?,?,?,?,?,'ready',800,900,'ready')",
             (
                 index,
                 index,
@@ -1256,6 +1257,83 @@ async def test_finished_session_creates_waiting_job_before_artifacts_are_ready(
             await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == 'ready'
         )
         assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('media_index_state', ('pending', 'indexing'))
+async def test_finished_session_waits_for_media_index_before_snapshotting_parts(
+    tmp_path: Path, media_index_state: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        await database.execute(
+            'UPDATE recording_parts SET media_index_state=?', (media_index_state,)
+        )
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+
+        assert await worker.resolve_finished_sessions() == [1]
+        assert await worker.prepare_waiting_jobs() == []
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_artifacts'
+        )
+        assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 0
+
+        paths[0].write_bytes(b'rebuilt-final-file')
+        os.utime(str(paths[0]), (900, 900))
+        await database.execute(
+            "UPDATE recording_parts SET media_index_state='ready',updated_at=901"
+        )
+
+        assert await worker.prepare_waiting_jobs() == [1]
+        stored = await database.scalar(
+            'SELECT file_identity FROM upload_parts ' 'WHERE job_id=1 AND part_index=1'
+        )
+        assert json.loads(str(stored))['size'] == len(b'rebuilt-final-file')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_media_index_claim_during_snapshot_aborts_upload_part_insert(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        assert await worker.resolve_finished_sessions() == [1]
+        original_file_identity = worker._file_identity
+        claimed = False
+
+        async def claim_during_identity(path: str):
+            nonlocal claimed
+            identity = await original_file_identity(path)
+            if not claimed:
+                claimed = True
+                await database.execute(
+                    "UPDATE recording_parts SET media_index_state='indexing' "
+                    'WHERE id=1'
+                )
+            return identity
+
+        worker._file_identity = claim_during_identity  # type: ignore[method-assign]
+
+        assert await worker.prepare_waiting_jobs() == []
+        assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 0
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_artifacts'
+        )
     finally:
         await database.close()
 

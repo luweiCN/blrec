@@ -89,6 +89,20 @@ class ReviewWatcher:
         self._clock = clock
         self._next_poll_at: Dict[int, int] = {}
 
+    async def recover_legacy_page_order_pauses(self) -> int:
+        reason = '远端分 P 页码与本地顺序不一致'
+        recovered = await self._database.execute(
+            "UPDATE upload_jobs SET state='waiting_review',review_reason=NULL,"
+            'next_attempt_at=0,lease_owner=NULL,lease_until=NULL,updated_at=? '
+            "WHERE state='paused' AND submit_state='confirmed' "
+            'AND operator_paused=0 AND aid IS NOT NULL '
+            "AND bvid IS NOT NULL AND bvid!='' AND review_reason=?",
+            (int(self._clock()), reason),
+        )
+        if recovered:
+            audit('upload_review_legacy_pause_recovered', count=recovered)
+        return recovered
+
     async def run_once(self) -> int:
         rows = await self._database.fetchall(
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
