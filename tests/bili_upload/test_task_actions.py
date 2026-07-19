@@ -693,6 +693,37 @@ async def test_repair_reuploads_only_failed_part_and_edits_existing_archive(
 
 
 @pytest.mark.asyncio
+async def test_repair_uses_submission_order_after_short_parts_are_filtered(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        await database.execute('UPDATE upload_parts SET part_index=12 WHERE id=12')
+        await database.execute('UPDATE upload_parts SET part_index=2 WHERE id=11')
+        protocol = FakeProtocol(archive_response(second_state='failed'))
+        manager, uploader, payload_builder = make_manager(database, protocol, tmp_path)
+
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        assert await manager.run_once() == 9
+
+        assert uploader.calls == [12]
+        assert payload_builder.calls == [{11: 101}]
+        job = await database.fetchone(
+            'SELECT state,repair_state,repair_error FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'waiting_review',
+            'repair_state': 'waiting_review',
+            'repair_error': None,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_second_terminal_failure_remuxes_only_failed_part_and_restores_path(
     tmp_path: Path,
 ) -> None:

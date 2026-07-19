@@ -84,6 +84,7 @@ class _RepairJob:
 class _LocalPart:
     id: int
     part_index: int
+    submitted_page: int
     path: str
     file_identity: Optional[str]
     remote_filename: str
@@ -1530,7 +1531,7 @@ class UploadTaskActionManager:
             (job.id,),
         )
         local_by_filename: Dict[str, _LocalPart] = {}
-        for row in local_rows:
+        for submitted_page, row in enumerate(local_rows, 1):
             filename = self._text(row['remote_filename'])
             if filename is None or filename in local_by_filename:
                 raise ProtocolContractError('本地分 P 的远端 filename 不完整或重复')
@@ -1538,6 +1539,7 @@ class UploadTaskActionManager:
             local_by_filename[filename] = _LocalPart(
                 id=int(row['id']),
                 part_index=int(row['part_index']),
+                submitted_page=submitted_page,
                 path=final_path or str(row['source_path']),
                 file_identity=self._text(row['file_identity']),
                 remote_filename=filename,
@@ -1558,7 +1560,7 @@ class UploadTaskActionManager:
                 raise ProtocolContractError('远端分 P 与本地记录不能一一对应')
             page = self._positive_int(video.get('page'))
             cid = self._positive_int(video.get('cid'))
-            if page != local.part_index or cid is None:
+            if page != local.submitted_page or cid is None:
                 raise ProtocolContractError('远端分 P 页码或 CID 不符合预期')
             video_aid = self._positive_int(video.get('aid'))
             video_bvid = self._text(video.get('bvid'))

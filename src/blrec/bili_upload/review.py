@@ -233,6 +233,7 @@ class ReviewWatcher:
             snapshot = json.loads(job.policy_snapshot_json)
             if not isinstance(snapshot, Mapping):
                 raise ValueError('policy snapshot is not an object')
+            snapshot = await self._submitted_snapshot(job.id, snapshot)
             verification = verify_submission(
                 snapshot, detail, scheduled_publish_at=job.scheduled_publish_at
             )
@@ -282,6 +283,35 @@ class ReviewWatcher:
             error=verification.error,
         )
 
+    async def _submitted_snapshot(
+        self, job_id: int, snapshot: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        source_indexes = snapshot.get('recording_part_indexes')
+        if source_indexes is None:
+            return snapshot
+        titles = snapshot.get('part_titles')
+        if (
+            not isinstance(source_indexes, list)
+            or not isinstance(titles, list)
+            or len(source_indexes) != len(titles)
+            or any(type(value) is not int or value <= 0 for value in source_indexes)
+        ):
+            raise ValueError('policy snapshot part titles are invalid')
+        title_by_index = dict(zip(source_indexes, titles))
+        rows = await self._database.fetchall(
+            'SELECT part_index FROM upload_parts WHERE job_id=? ORDER BY part_index',
+            (job_id,),
+        )
+        submitted_indexes = [int(row['part_index']) for row in rows]
+        if any(index not in title_by_index for index in submitted_indexes):
+            raise ValueError('submitted part title is missing')
+        submitted = dict(snapshot)
+        submitted['recording_part_indexes'] = submitted_indexes
+        submitted['part_titles'] = [
+            title_by_index[index] for index in submitted_indexes
+        ]
+        return submitted
+
     async def _verified_parts(
         self, job: _WaitingJob, response: Mapping[str, Any]
     ) -> Dict[int, _VerifiedPart]:
@@ -291,11 +321,11 @@ class ReviewWatcher:
             (job.id,),
         )
         local_by_filename: Dict[str, Tuple[int, int]] = {}
-        for part in parts:
+        for submitted_page, part in enumerate(parts, 1):
             filename = self._text(part['remote_filename'])
             if filename is None or filename in local_by_filename:
                 raise _ReviewMismatch('本地上传分 P 的远端 filename 不完整或重复')
-            local_by_filename[filename] = (int(part['id']), int(part['part_index']))
+            local_by_filename[filename] = (int(part['id']), submitted_page)
         if not local_by_filename:
             raise _ReviewMismatch('上传任务没有可核对的分 P')
 
@@ -360,9 +390,9 @@ class ReviewWatcher:
         if set(remote_by_filename) != set(local_by_filename):
             raise _ReviewMismatch('远端分 P 与本地上传 filename 不能一一对应')
         verified_parts: Dict[int, _VerifiedPart] = {}
-        for filename, (part_id, part_index) in local_by_filename.items():
+        for filename, (part_id, submitted_page) in local_by_filename.items():
             page, verified = remote_by_filename[filename]
-            if page != part_index:
+            if page != submitted_page:
                 raise _ReviewMismatch('远端分 P 页码与本地顺序不一致')
             verified_parts[part_id] = verified
         return verified_parts

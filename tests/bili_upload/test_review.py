@@ -264,6 +264,63 @@ async def test_review_binds_cids_by_remote_filename_not_array_position(
 
 
 @pytest.mark.asyncio
+async def test_review_uses_submission_order_after_short_parts_are_filtered(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(database, filenames=('p2', 'p12'))
+        await database.execute(
+            'UPDATE upload_parts SET part_index=12 WHERE job_id=1 AND id=102'
+        )
+        await database.execute(
+            'UPDATE upload_parts SET part_index=2 WHERE job_id=1 AND id=101'
+        )
+        await database.execute(
+            'UPDATE upload_jobs SET policy_snapshot_json=? WHERE id=1',
+            (
+                json.dumps(
+                    {
+                        'format_version': 4,
+                        'part_titles': ['P{}'.format(index) for index in range(1, 13)],
+                        'recording_part_indexes': list(range(1, 13)),
+                    }
+                ),
+            ),
+        )
+        review = watcher(
+            database,
+            archive_response(),
+            detail=archive_detail(
+                [
+                    dict(video('p2', 202, 1), title='P2'),
+                    dict(video('p12', 1212, 2), title='P12'),
+                ]
+            ),
+        )
+
+        assert await review.run_once() == 1
+
+        job = await database.fetchone(
+            'SELECT state,submission_verification_state FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'approved',
+            'submission_verification_state': 'passed',
+        }
+        rows = await database.fetchall(
+            'SELECT part_index,cid FROM upload_parts WHERE job_id=1 ORDER BY part_index'
+        )
+        assert [dict(row) for row in rows] == [
+            {'part_index': 2, 'cid': 202},
+            {'part_index': 12, 'cid': 1212},
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_review_persists_submission_setting_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
