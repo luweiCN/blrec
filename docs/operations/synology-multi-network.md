@@ -14,11 +14,11 @@
 
 ## 首次安装
 
-先创建 `/cfg`、`/log` 和 `/rec` 对应的宿主目录。以下命令遇到任何失败都会停止；已有且非空的 `credential.key` 只会收紧权限，不会被重新生成或覆盖：
+先创建 `/cfg`、`/log`、`/rec` 和 `/clips` 对应的宿主目录。以下命令遇到任何失败都会停止；已有且非空的 `credential.key` 只会收紧权限，不会被重新生成或覆盖：
 
 ```bash
 set -eu
-mkdir -p /volume1/docker/blrec-next/config /volume1/docker/blrec-next/log /volume1/docker/blrec-next/rec
+mkdir -p /volume1/docker/blrec-next/config /volume1/docker/blrec-next/log /volume1/docker/blrec-next/rec /volume1/docker/blrec-next/clips
 credential_key=/volume1/docker/blrec-next/config/credential.key
 if [ -e "$credential_key" ]; then
   test -s "$credential_key"
@@ -35,7 +35,7 @@ chmod 600 .env
 test -s .env
 ```
 
-把 `openssl rand -hex 32` 的输出填入 `.env` 的 `BLREC_API_KEY`，并按需修改管理员用户名和三个宿主目录。若 `.env` 已存在，`test ! -e .env` 会停止安装以避免覆盖，请先确认并妥善迁移原文件。API Key 只用于首次创建管理员和密码恢复，不要提交 `.env`；原始凭据密钥只保存在 `/cfg/credential.key`，不要写入环境变量。
+把 `openssl rand -hex 32` 的输出填入 `.env` 的 `BLREC_API_KEY`，并按需修改管理员用户名和四个宿主目录。若 `.env` 已存在，`test ! -e .env` 会停止安装以避免覆盖，请先确认并妥善迁移原文件。API Key 只用于首次创建管理员和密码恢复，不要提交 `.env`；原始凭据密钥只保存在 `/cfg/credential.key`，不要写入环境变量。
 
 通过 SSH 启动：
 
@@ -60,7 +60,7 @@ docker run --rm --entrypoint python \
   -v /volume1/docker/blrec-next/config:/cfg \
   -v /volume1/docker/blrec-next/log:/log \
   -v /volume1/docker/blrec-next/rec:/rec \
-  ghcr.io/luweicn/blrec:3.0.0-beta.15 \
+  ghcr.io/luweicn/blrec:3.0.0-beta.16 \
   /app/scripts/migrate_legacy_settings.py \
   /legacy/settings.toml /cfg/settings.toml \
   --rooms 30038570 25654586 21045351 10802797 2604398
@@ -70,7 +70,7 @@ docker run --rm --entrypoint python \
 
 ## 升级
 
-先停止服务并备份 `/cfg` 对应的宿主目录及当前 `.env`，确认备份成功后再修改 `BLREC_IMAGE_TAG`。下面的命令以示例中的目录为准；如果修改过 `BLREC_CONFIG_DIR`，请同步替换 `config_dir`：
+先停止服务并备份 `/cfg` 对应的宿主目录及当前 `.env`，确认备份成功后再修改 `BLREC_IMAGE_TAG`。升级时必须使用目标版本仓库中的 `compose.synology.yml` 替换旧文件，不能只改镜像标签；这样新增的持久化目录才不会落入匿名卷。下面的命令以示例中的目录为准；如果修改过 `BLREC_CONFIG_DIR`，请同步替换 `config_dir`：
 
 ```bash
 set -eu
@@ -95,7 +95,18 @@ cmp -s .env "$backup_env"
 echo "$backup_id"
 ```
 
-只有上述校验全部成功后，才记录终端输出的 `backup_id`，编辑 `.env`，把 `BLREC_IMAGE_TAG` 改成要升级的固定版本，再部署：
+只有上述校验全部成功后，才记录终端输出的 `backup_id`。编辑 `.env`，把 `BLREC_IMAGE_TAG` 改成要升级的固定版本，并确保包含 `BLREC_CLIP_DIR=/volume1/docker/blrec-next/clips`。beta.16 首次引入独立片段目录，部署前创建并校验宿主目录：
+
+beta.16 会把旧 `/rec/highlights` 片段复制到 `/clips` 并更新新数据库中的路径，同时保留旧文件供 beta.15 回滚。确认不再需要回滚旧版之前，不要手动删除 `/rec/highlights`。
+
+```bash
+set -eu
+clip_dir=/volume1/docker/blrec-next/clips
+mkdir -p "$clip_dir"
+test -d "$clip_dir"
+```
+
+再用目标版本的 Compose 部署：
 
 ```bash
 set -eu

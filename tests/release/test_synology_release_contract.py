@@ -6,22 +6,22 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_synology_compose_pulls_one_pinned_public_image() -> None:
     compose = (ROOT / 'compose.synology.yml').read_text(encoding='utf8')
     assert 'build:' not in compose
-    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.15}' in compose
+    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.16}' in compose
     assert 'container_name: blrec-next' in compose
     assert 'network_mode: host' in compose
     assert 'ports:' not in compose
     assert 'stop_grace_period: 2m' in compose
-    for path in ('/cfg', '/log', '/rec'):
+    for path in ('/cfg', '/log', '/rec', '/clips'):
         assert path in compose
 
 
 def test_environment_example_contains_no_credential() -> None:
     example = (ROOT / 'synology.env.example').read_text(encoding='utf8')
-    assert 'BLREC_IMAGE_TAG=3.0.0-beta.15' in example
+    assert 'BLREC_IMAGE_TAG=3.0.0-beta.16' in example
     assert 'BLREC_ADMIN_USERNAME=admin' in example
     assert 'BLREC_API_KEY=\n' in example
     assert 'BLREC_CREDENTIAL_KEY=' not in example
-    for directory in ('config', 'log', 'rec'):
+    for directory in ('config', 'log', 'rec', 'clips'):
         assert f'/volume1/docker/blrec-next/{directory}' in example
 
 
@@ -76,6 +76,11 @@ def test_upgrade_stops_on_error_and_verifies_secure_backups() -> None:
     assert upgrade.index('cp .env "$backup_env"') < upgrade.index(
         'test -s "$backup_env"'
     )
+    assert '必须使用目标版本仓库中的 `compose.synology.yml` 替换旧文件' in upgrade
+    assert 'clip_dir=/volume1/docker/blrec-next/clips' in upgrade
+    assert 'mkdir -p "$clip_dir"' in upgrade
+    assert 'test -d "$clip_dir"' in upgrade
+    assert 'BLREC_CLIP_DIR' in upgrade
 
 
 def test_rollback_validates_and_stages_restore_before_replacing_config() -> None:

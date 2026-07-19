@@ -35,4 +35,4 @@ Python 使用四空格缩进、类型注解和 88 字符行宽，并遵循 Black
 - Container Manager 实际项目目录为 `/volume1/docker/blrec-next/workspace`，Compose 文件为 `compose.yml`，容器名为 `blrec-next`。不要误改项目根目录下的旧 `compose.yaml`。
 - 当前容器使用 `host` 网络，管理页面和 API 地址为 `http://192.168.50.24:2234`；NAS 上没有映射 `2233` 端口。
 - 群晖非交互 SSH 的 PATH 不含 Docker；使用管理员权限调用 `/usr/local/bin/docker`，sudo 密码同样通过 Expect 从 `SYNO_ADMIN_PASSWORD` 提供。
-- 更新前先用容器标签核对 `com.docker.compose.project.config_files` 和 `working_dir`，并确认 `/volume1/docker/blrec-next/config`、`log`、`rec` 三个挂载不变。更新后检查容器健康状态、版本接口和关键日志。
+- 更新前先用容器标签核对 `com.docker.compose.project.config_files` 和 `working_dir`，并确认 `/volume1/docker/blrec-next/config`、`log`、`rec`、`clips` 四个挂载不变。更新后检查容器健康状态、版本接口和关键日志。
