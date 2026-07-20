@@ -26,6 +26,9 @@ type RealtimeTopic = (typeof REALTIME_TOPICS)[number];
 const ROUTE_TOPICS: ReadonlyArray<
   readonly [route: string, topics: readonly RealtimeTopic[]]
 > = [
+  ['/recordings/highlights', ['upload_progress', 'highlight_progress']],
+  ['/upload-tasks/highlights', ['upload_progress', 'highlight_progress']],
+  ['/clips/highlights', ['upload_progress', 'highlight_progress']],
   ['/tasks', ['tasks']],
   ['/network', ['network']],
   ['/recordings', ['upload_progress']],
@@ -81,10 +84,16 @@ export class RealtimeService {
     @Inject(EVENT_SOURCE_FACTORY) private eventSourceFactory: EventSourceFactory
   ) {
     this.events$ = new Observable<RealtimeEvent>((subscriber) => {
-      const topics = realtimeTopicsForUrl(this.router.url);
-      const params = encodeURIComponent(topics.join(','));
+      const routeTopics = realtimeTopicsForUrl(this.router.url);
+      const topics = routeTopics.length === 0 ? REALTIME_TOPICS : routeTopics;
+      const realtimePath =
+        routeTopics.length === 0
+          ? '/api/v1/realtime'
+          : `/api/v1/realtime?topics=${encodeURIComponent(
+              routeTopics.join(',')
+            )}`;
       const source = this.eventSourceFactory(
-        this.url.makeApiUrl(`/api/v1/realtime?topics=${params}`)
+        this.url.makeApiUrl(realtimePath)
       );
       const listeners = new Map<string, EventListener>();
       let bootstrapResyncPending = true;

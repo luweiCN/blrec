@@ -63,6 +63,20 @@ describe('realtimeTopicsForUrl', () => {
     ]);
   });
 
+  it('maps every mounted highlight editor route to both progress topics', () => {
+    const expected = ['upload_progress', 'highlight_progress'] as const;
+
+    expect(
+      realtimeTopicsForUrl('/recordings/highlights/41?tab=clips#editor')
+    ).toEqual(expected);
+    expect(
+      realtimeTopicsForUrl('/upload-tasks/highlights/42?tab=clips#editor')
+    ).toEqual(expected);
+    expect(
+      realtimeTopicsForUrl('/clips/highlights/43?tab=clips#editor')
+    ).toEqual(expected);
+  });
+
   it('returns unique topics from the backend whitelist', () => {
     const backendTopics = new Set([
       'tasks',
@@ -164,6 +178,53 @@ describe('RealtimeService', () => {
     expect(sources[0].close).toHaveBeenCalledOnceWith();
 
     secondSubscription.unsubscribe();
+  });
+
+  it('listens for both progress events on every highlight editor route', () => {
+    const service = TestBed.inject(RealtimeService);
+    const routes = [
+      '/recordings/highlights/41?tab=clips#editor',
+      '/upload-tasks/highlights/42?tab=clips#editor',
+      '/clips/highlights/43?tab=clips#editor',
+    ];
+
+    for (const route of routes) {
+      router.url = route;
+      const subscription = service.events$.subscribe();
+      const source = sources[sources.length - 1];
+
+      expect(Array.from(source.listeners.keys())).toEqual([
+        'upload_progress',
+        'highlight_progress',
+        'resync',
+        'heartbeat',
+      ]);
+      subscription.unsubscribe();
+    }
+
+    expect(factory.calls.allArgs()).toEqual(
+      routes.map(() => [
+        '/api/v1/realtime?topics=upload_progress%2Chighlight_progress',
+      ])
+    );
+  });
+
+  it('uses the all-topic compatibility connection for an unmapped route', () => {
+    router.url = '/settings/profile?tab=network#advanced';
+    const subscription = TestBed.inject(RealtimeService).events$.subscribe();
+    const source = sources[0];
+
+    expect(factory).toHaveBeenCalledOnceWith('/api/v1/realtime');
+    expect(Array.from(source.listeners.keys())).toEqual([
+      'tasks',
+      'network',
+      'upload_progress',
+      'highlight_progress',
+      'resync',
+      'heartbeat',
+    ]);
+
+    subscription.unsubscribe();
   });
 
   it('suppresses only the first well-formed resync for each EventSource', () => {
