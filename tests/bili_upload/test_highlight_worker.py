@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import uuid
 from pathlib import Path
-from typing import AsyncIterator, Sequence
+from typing import AsyncIterator, Optional, Sequence, Tuple
 
 import pytest
 import pytest_asyncio
@@ -139,6 +139,38 @@ class LegacyMultiClipper(LosslessClipper):
         Path(output_path).write_bytes(b'legacy-multi-clip')
         return CutArtifact(
             output_path, len(b'legacy-multi-clip'), inspection.output_duration_ms
+        )
+
+
+class DurationAwareClipper(LosslessClipper):
+    def __init__(self, duration_ms: int = 120_000) -> None:
+        super().__init__()
+        self.duration_ms = duration_ms
+        self.probe_calls = []
+        self.cut_calls = []
+
+    def _probe_media(
+        self,
+        path: str,
+        *,
+        keyframe_at_ms: Optional[int] = None,
+        known_duration_ms: Optional[int] = None,
+        deadline_monotonic: Optional[float] = None,
+    ) -> Tuple[MediaProfile, Tuple[int, ...]]:
+        self.probe_calls.append((path, keyframe_at_ms, known_duration_ms))
+        duration_ms = (
+            self.duration_ms if known_duration_ms is None else int(known_duration_ms)
+        )
+        return (
+            MediaProfile('h264', 1920, 1080, '60/1', 42, duration_ms, True),
+            (0, 15_000),
+        )
+
+    def cut(self, inspection: ClipInspection, output_path: str) -> CutArtifact:
+        self.cut_calls.append((inspection, output_path))
+        Path(output_path).write_bytes(b'duration-aware-clip')
+        return CutArtifact(
+            output_path, len(b'duration-aware-clip'), inspection.output_duration_ms
         )
 
 
@@ -634,6 +666,69 @@ async def test_probe_singleflight_forgets_terminal_success_and_failure(
 
 
 @pytest.mark.asyncio
+async def test_successful_probe_remains_singleflight_until_result_is_durable(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    original_execute = database.execute
+    first_success_update_started = asyncio.Event()
+    release_first_success_update = asyncio.Event()
+    success_update_count = 0
+
+    async def delay_first_success_update(sql, parameters=()):
+        nonlocal success_update_count
+        if "UPDATE highlight_inspections SET state='succeeded'" in sql:
+            success_update_count += 1
+            if success_update_count == 1:
+                first_success_update_started.set()
+                await release_first_success_update.wait()
+        return await original_execute(sql, parameters)
+
+    monkeypatch.setattr(database, 'execute', delay_first_success_update)
+    try:
+        first = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=str(uuid.uuid4()),
+        )
+        await asyncio.wait_for(first_success_update_started.wait(), timeout=1)
+
+        second = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=str(uuid.uuid4()),
+        )
+        second_result = await wait_for_inspection(
+            service, second.operation_id, claim_key=str(uuid.uuid4())
+        )
+
+        assert second_result.state == 'succeeded'
+        assert len(clipper.inspect_calls) == 1
+    finally:
+        release_first_success_update.set()
+        await service.shutdown()
+
+    first_result = await service.get_clip_inspection(
+        first.operation_id, claim_key=str(uuid.uuid4())
+    )
+    assert first_result.state == 'succeeded'
+    assert service._probe_futures == {}
+
+
+@pytest.mark.asyncio
 async def test_inspection_admission_is_bounded_to_two_active_and_eight_waiting(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
@@ -762,7 +857,7 @@ async def test_worker_completes_video_and_danmaku_atomically(
     assert len(clipper.cut_calls) == 1
     assert len(danmaku.calls) == 1
     worker_sources = clipper.inspect_calls[-1][0]
-    assert worker_sources[0].duration_ms == 70_000
+    assert worker_sources[0].duration_ms is None
     assert worker_sources[0].keyframes_ms == ()
 
 
@@ -829,6 +924,78 @@ async def test_worker_reprobes_profile_and_keyframes_after_source_replacement(
         assert int(row['actual_start_ms']) == 15_000
         assert json.loads(str(row['inspection_json']))['actualStartMs'] == 15_000
         assert str(row['source_fingerprint_json']) != str(stored_before)
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.parametrize(
+    ('replacement_duration_ms', 'expected_state', 'expected_cut_count'),
+    ((60_000, 'queued', 0), (180_000, 'ready', 1)),
+)
+@pytest.mark.asyncio
+async def test_worker_reprobes_replacement_with_its_real_duration(
+    database: BiliUploadDatabase,
+    tmp_path: Path,
+    replacement_duration_ms: int,
+    expected_state: str,
+    expected_cut_count: int,
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    source = await seed_active_recording(database, root)
+    clipper = DurationAwareClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        ready = await wait_for_inspection(
+            service, accepted.operation_id, claim_key=str(uuid.uuid4())
+        )
+        assert ready.inspection_token is not None
+        clip = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='替换源文件时长',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 120_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+        assert not isinstance(clip, HighlightInspectionOperation)
+
+        replacement = root / 'replacement-duration.flv'
+        replacement.write_bytes(b'replacement-source-with-different-duration')
+        os.replace(str(replacement), str(source))
+        clipper.duration_ms = replacement_duration_ms
+        worker = HighlightWorker(
+            database, clipper, FakeDanmakuClipper(), worker_id='worker'
+        )
+
+        assert await worker.run_once() == clip.id
+
+        row = await database.fetchone(
+            'SELECT state,inspection_json FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+        assert row is not None
+        assert str(row['state']) == expected_state
+        assert clipper.probe_calls[-1][2] is None
+        assert len(clipper.cut_calls) == expected_cut_count
+        if expected_state == 'ready':
+            inspection = json.loads(str(row['inspection_json']))
+            assert inspection['sources'][0]['profile']['durationMs'] == 180_000
     finally:
         await service.shutdown()
 

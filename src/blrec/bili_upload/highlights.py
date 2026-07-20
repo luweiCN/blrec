@@ -707,6 +707,7 @@ class HighlightService:
             if reusable is not None:
                 result_json = str(reusable['result_json'])
                 _inspection_from_json(result_json, str(reusable['fingerprint_json']))
+                probe_future = None
             else:
                 future = self._probe_futures.get(cache_key)
                 if future is None:
@@ -726,11 +727,12 @@ class HighlightService:
                     )
                     self._probe_futures[cache_key] = future
                     future.add_done_callback(
-                        partial(self._forget_probe_future, cache_key)
+                        partial(self._forget_unsuccessful_probe_future, cache_key)
                     )
+                probe_future = future
                 result_json, fingerprint = await asyncio.shield(future)
             completed_at = int(self._clock())
-            await self._database.execute(
+            updated = await self._database.execute(
                 "UPDATE highlight_inspections SET state='succeeded',result_json=?,"
                 'fingerprint_json=?,error_code=NULL,terminal_expires_at=?,updated_at=? '
                 "WHERE operation_id=? AND state='running'",
@@ -742,6 +744,8 @@ class HighlightService:
                     operation_id,
                 ),
             )
+            if updated == 1 and probe_future is not None:
+                self._forget_probe_future(cache_key, probe_future)
             audit(
                 'highlight_inspection_completed',
                 operation_id=operation_id,
@@ -873,6 +877,15 @@ class HighlightService:
     ) -> None:
         if self._probe_futures.get(cache_key) is future:
             self._probe_futures.pop(cache_key, None)
+
+    def _forget_unsuccessful_probe_future(
+        self, cache_key: str, future: asyncio.Future[Tuple[str, str]]
+    ) -> None:
+        if future.cancelled():
+            self._forget_probe_future(cache_key, future)
+            return
+        if future.exception() is not None:
+            self._forget_probe_future(cache_key, future)
 
     def _make_inspection_token(
         self, operation_id: str, idempotency_key: str, claim_key: str, expiry: int

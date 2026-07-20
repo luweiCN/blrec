@@ -627,7 +627,8 @@ class HighlightWorker:
                 inspection = replace(persisted, sources=(persisted_source,))
             else:
                 reprobe_sources = tuple(
-                    replace(source, keyframes_ms=()) for source in hinted_sources
+                    replace(source, duration_ms=None, keyframes_ms=())
+                    for source in hinted_sources
                 )
                 inspection = self._clipper.inspect(
                     reprobe_sources,
