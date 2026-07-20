@@ -6,9 +6,9 @@
 
 **Architecture:** Preserve the existing FastAPI, asyncio, SQLite, Angular, network-route manager, and account-gate boundaries. First make remote `unknown_outcome` terminal for automatic UPOS completion and danmaku posting. Then pass or briefly coalesce immutable read results at the narrowest owning boundary, keep account-scoped writes serialized, and replace detached notification/webhook work with lifecycle-owned bounded dispatchers. Update metadata may use a stale cache; cookie validation must only reuse a cookie-less transport and must never cache credentials.
 
-**Tech Stack:** Python 3.9, asyncio, aiohttp, requests, FastAPI, SQLite, pytest, Angular 15, RxJS, Jasmine/Karma.
+**Tech Stack:** Python 3.8+, asyncio, aiohttp, requests, FastAPI, SQLite, pytest, Angular 15, RxJS, Jasmine/Karma.
 
-**Source Evidence:** `docs/superpowers/specs/2026-07-20-end-to-end-request-performance-design.md` defines the target architecture and non-goals; `docs/performance/request-audit.md` is the 103-trigger/18-group ledger; `.superpowers/sdd/outbound-request-audit.md` supplies the code-verified O-01–O-15 findings and corrects the stale QR/Review descriptions. When implementation discovers drift, update the failing test and this plan before changing the stated request budget.
+**Source Evidence:** `docs/superpowers/specs/2026-07-20-end-to-end-request-performance-design.md` defines the target architecture and non-goals; `docs/performance/request-audit.md` is the current 105-route/18-group ledger (`I-104` is recording detail and `I-105` is marker counts); `docs/performance/outbound-request-audit.md` supplies the code-verified O-01–O-15 findings and corrects the stale QR/Review descriptions. New inbound work must start at `I-106`; this plan does not reuse an existing ID. When implementation discovers drift, update the failing test and this plan before changing the stated request budget.
 
 ## Global Constraints
 
@@ -25,7 +25,7 @@
 - Keep Categories' 24-hour credential-version cache, per-account lock, and stale fallback. Keep Network probe explicitly user-triggered, one request per interface, cached, and bounded by eight seconds.
 - Keep cover trust policy: HTTPS-only trusted origins, no redirect, 2 MiB maximum. Keep the persistent `(asset_id, account_id)` custom-cover URL cache.
 - Preserve account credential-version rechecks while a write gate is held. UI admission may time out; background workers retain the ability to wait. Do not weaken or bypass the gate.
-- Use `asyncio.wait_for` for Python 3.9 absolute deadlines. Do not add `asyncio.timeout`, `TaskGroup`, or another Python 3.11-only API.
+- Use `asyncio.wait_for` for Python 3.8+ absolute deadlines. Every deadline owner accepts an internal timeout parameter with its production default; tests inject `0.01` seconds instead of sleeping through production budgets. Do not add `asyncio.timeout`, `TaskGroup`, or another Python 3.11-only API.
 - Never place cookies, tokens, account identifiers, concrete webhook URLs, local media paths, or response bodies in logs, metrics, cache keys exposed to logs, or test failure messages.
 - Write the failing test first. A request-budget test must assert call count, maximum in-flight work, deadline, and remote-outcome state where applicable—not merely response content.
 - Each task is one independently reviewable commit. Stage only the files listed by that task; do not absorb unrelated worktree changes.
@@ -58,7 +58,7 @@ Full `npx ng lint` is compared with starting SHA `57361f7`: it may exit 1 only f
 
 ## Audit Coverage and Task Routing
 
-O-03 and O-04 are one task because the initialization revision is produced by the composite refresh and consumed immediately by add→start/batch orchestration; landing either half alone leaves a duplicate request or an unused interface. O-14 and O-15 share one lifecycle task because both need an application-owned HTTP client, while their cache policies remain explicitly opposite. Notification and Webhook stay separate because their overload policies differ and must be independently reversible.
+O-03 and O-04 are one task because the initialization revision is produced by the composite refresh and consumed by the durable task-control operation. O-14 and O-15 are separate commits because update metadata is cached while cookie validation must remain uncached and preserve its existing HTTP error mapping. Notification and Webhook stay separate because their overload policies differ and must be independently reversible.
 
 | Audit item | Task | Result |
 | --- | --- | --- |
@@ -74,21 +74,22 @@ O-03 and O-04 are one task because the initialization revision is produced by th
 | O-11 | Task 10 | One nonterminal QR session and poller per manager subject. |
 | O-12 | Task 11 | Notification work is bounded, pooled, and drained. |
 | O-13 | Task 12 | Webhook work is bounded, ordered, pooled, and drained. |
-| O-14/O-15 | Task 13 | Update cache plus uncached pooled cookie validation. |
+| O-14 | Task 13 | Update metadata client, single-flight, and stale cache. |
+| O-15 | Task 14 | Uncached pooled cookie validation with unchanged HTTP semantics. |
 
 All 18 audited outbound groups have an explicit disposition:
 
 | # | Outbound group | Disposition |
 | --- | --- | --- |
-| 1 | Room status | **Keep unchanged**; Task 14 reruns the 58-room/batch request guards. |
+| 1 | Room status | **Keep unchanged**; Task 15 reruns the 58-room/batch request guards. |
 | 2 | Room detail | Task 3. |
 | 3 | Play info | Task 4. |
 | 4 | Recording transfer | Task 4; only the pre-validation GET is removed. |
-| 5 | Danmaku WebSocket | **Keep handshake/auth/fallback/heartbeat/reconnect cadence unchanged**; Task 14 checks it. |
+| 5 | Danmaku WebSocket | **Keep handshake/auth/fallback/heartbeat/reconnect cadence unchanged**; Task 15 checks it. |
 | 6 | UPOS | Tasks 1 and 5. |
 | 7 | Submission | Tasks 5 and 6; unknown reconciliation remains mandatory. |
 | 8 | Review | Task 6; existing per-account grouping and 900-second cadence stay. |
-| 9 | Comments | **Keep unchanged**; Task 14 reruns unknown/pin/cadence guards. |
+| 9 | Comments | **Keep unchanged**; Task 15 reruns unknown/pin/cadence guards. |
 | 10 | Danmaku posting | Task 2. |
 | 11 | Collections | Tasks 7 and 8. |
 | 12 | Categories | Task 7 coalesces one forced generation; **keep the 24-hour credential-scoped cache/stale behavior unchanged**. |
@@ -96,7 +97,7 @@ All 18 audited outbound groups have an explicit disposition:
 | 14 | QR/account | Tasks 8 and 10; status remains local and renewal unknown remains fenced. |
 | 15 | Notifications | Task 11. |
 | 16 | Webhook | Task 12. |
-| 17 | Network probe | **Keep explicit-only one-request-per-interface behavior**; Task 14 reruns the eight-second guard. |
+| 17 | Network probe | **Keep explicit-only one-request-per-interface behavior**; Task 15 reruns the eight-second guard. |
 | 18 | Update check | Task 13. |
 
 The 20 inbound triggers with an `Outbound` disposition are all covered without inventing a second background-operation model:
@@ -108,8 +109,8 @@ The 20 inbound triggers with an `Outbound` disposition are all covered without i
 | I-022/I-023 | 2 | Tasks 3–4; existing Write/media accepted-operation boundary and Danmaku WS cadence remain. |
 | I-026/I-027 | 2 | Task 4: reuse the monitor/debounce resolution; no extra stream GET. |
 | I-030 | 1 | Task 3 initialization revision; Task 4 play reuse; WS behavior unchanged. |
-| I-036 | 1 | **Keep** existing Danmaku WS connection budgets; Task 14 verifies no faster reconnect. |
-| I-042 | 1 | Task 13 uncached, pooled cookie validation. |
+| I-036 | 1 | **Keep** existing Danmaku WS connection budgets; Task 15 verifies no faster reconnect. |
+| I-042 | 1 | Task 14 uncached, pooled cookie validation. |
 | I-045 | 1 | Task 13 update cache/single-flight/stale result. |
 | I-056/I-057 | 2 | Task 10 create single-flight; status remains local. |
 | I-059 | 1 | Task 8 bounded UI admission and 60-second renewal deadline. |
@@ -319,8 +320,8 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_danmaku_publish
 .venv/bin/python -m isort --check-only src/blrec/bili_upload/danmaku_publish.py tests/bili_upload/test_danmaku_publish.py
 .venv/bin/python -m flake8 src/blrec/bili_upload/danmaku_publish.py tests/bili_upload/test_danmaku_publish.py
 .venv/bin/python -m mypy src/blrec/bili_upload/danmaku_publish.py
-cd webapp && npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/upload-tasks/recording-sessions/recording-sessions.component.spec.ts'
-cd webapp && npx eslint src/app/upload-tasks/recording-sessions/recording-sessions.component.spec.ts
+(cd webapp && npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/upload-tasks/recording-sessions/recording-sessions.component.spec.ts')
+(cd webapp && npx eslint src/app/upload-tasks/recording-sessions/recording-sessions.component.spec.ts)
 ```
 
 **Budget and invariants:** posts after unknown/in-flight are zero. `DefinitelyNotSent` retains at most the existing five safe attempts, each separated by at least 25 seconds. There remains one sending line per account; no breaker, daily limit, fairness order, account gate, or UI manual fence is weakened. Production/test file budget: 1/2; no migration.
@@ -341,20 +342,25 @@ git commit -m "fix: preserve unknown danmaku outcomes"
 - Modify: `src/blrec/task/task.py`
 - Modify: `src/blrec/task/task_manager.py`
 - Modify: `src/blrec/application.py`
+- Modify: `src/blrec/control/operations.py`
+- Modify: `src/blrec/setting/setting_manager.py`
 - Modify: `src/blrec/web/routers/tasks.py`
 - Modify: `src/blrec/web/routers/browser_extension.py`
 - Create: `tests/bili/test_live_info_refresh.py`
 - Create: `tests/task/test_task_manager_outbound.py`
+- Modify: `tests/control/test_operations.py`
 - Modify: `tests/web/test_tasks_routes.py`
 - Modify: `tests/web/test_browser_extension_routes.py`
 - Modify: `tests/task/test_live_connection_controller.py`
 
 **Interfaces:**
 - `Live.info_revision: int` advances once per successful composite room+anchor application.
-- `Live.update_info()` is same-instance single-flight and has one ten-second absolute deadline over the complete web→app→HTML fallback sequence.
+- `Live.update_info()` is same-instance single-flight and has one injected `_info_timeout_seconds=10` absolute deadline over the complete web→app→HTML fallback sequence; tests pass `0.01`.
 - `RecordTask.info_revision` exposes the current `Live` revision.
-- `start_task(room_id, *, reuse_info_revision: Optional[int] = None)` skips only the refresh whose exact revision was produced earlier in the same add→start operation.
-- Room-disjoint remote actions use fixed concurrency 2 and retain input-order results.
+- **Hard prerequisite:** Write/media Task 6 (`TaskControlReconciler`) and Task 7 (durable membership/control-operation journal) are merged first. This task extends those owners; it does not add a second route-local operation model.
+- The durable operation step carries `reuse_info_revision` from add/collect to start and consumes it exactly once. HTTP `start`, `recorder_enable`, and browser collect only persist intent and return `accepted`; their final per-room result is read from the existing control-operation endpoint.
+- `refresh` remains synchronous and read-only. Refresh work and durable remote-bearing control steps share fixed concurrency 2 and retain stable input-order results.
+- `SettingsManager.change_task_desired_states(...)` is the only batch desired-state writer and performs at most one `dump_settings()` for the whole batch.
 
 - [ ] **Step 1: Write failing composite refresh and cancellation tests**
 
@@ -369,34 +375,36 @@ assert live.info_revision == 1
 assert max_in_flight == 1
 ```
 
-Also cover: web failure calls app exactly once; web+app failure calls HTML exactly once; all failures complete within the injected ten-second `wait_for`; canceling one waiter does not cancel the shared fetch; a finished task is not retained as a long-lived cache; `update_room_info` and `update_user_info` consume the same composite response when concurrent.
+Also cover: web failure calls app exactly once; web+app failure calls HTML exactly once; all failures complete within an injected `0.01`-second budget; canceling one waiter does not cancel the shared fetch; a finished task is not retained as a long-lived cache; `update_room_info` and `update_user_info` consume the same composite response when concurrent. Do not monkeypatch global `asyncio.wait_for`.
 
-- [ ] **Step 2: Write failing task-operation request-budget tests**
+- [ ] **Step 2: Write failing durable-operation request-budget tests**
 
-In `test_task_manager_outbound.py`, assert:
+In `test_task_manager_outbound.py`, exercise the existing reconciler/control journal rather than calling lifecycle work from a route:
 
 ```python
-room_id = await app.add_task(123)
-revision = app.get_task_info_revision(room_id)
-await app.start_task(room_id, reuse_info_revision=revision)
+operation = await control_operations.submit_collect(123, auto_record=True)
+await control_worker.run_until_idle()
 assert fake_live.composite_calls == 1
+assert operation_store.get(operation.id).status == 'succeeded'
 
-await manager.update_all_task_infos()
+await control_operations.submit_batch_desired_state(seed_room_ids, enabled=True)
+await control_worker.run_until_idle()
 assert max_room_detail_in_flight == 2
 assert completed_room_ids == seed_room_ids
+assert settings_manager.dump_settings_calls == 1
 ```
 
-Add route tests proving: `POST /tasks/actions` returns results in request order when remote-bearing actions finish out of order; one room failure does not replay successful rooms; non-remote `stop/force_stop/cut/remove` actions stay serial; browser collect passes the exact revision only when it added the task. Assert `RecordTaskManager.add_task` no longer retries all of `setup()` after a failure.
+Add route tests proving `start`, `recorder_enable`, and browser collect return C100 `accepted` without waiting for blocked lifecycle calls. Add worker tests proving max in-flight remote steps is 2, final results remain in input order, one room failure does not replay successful rooms, and restart resumes pending steps. Browser collect must produce and consume the exact revision inside one durable operation. For 58 rooms, assert `change_task_desired_states` is called once and `dump_settings_calls == 1`; never fan out calls to `app.start_task()` or `enable_task_recorder()` from HTTP. `refresh` alone may use route-local bounded gather because it is read-only. Assert `RecordTaskManager.add_task` no longer retries all of `setup()` after a failure.
 
 - [ ] **Step 3: Run the red tests**
 
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py -q
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/control/test_operations.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py -q
 ```
 
-Expected: new interfaces are missing, a successful refresh makes two overlapping `getInfoByRoom` calls, add→start refreshes twice, and all-room actions currently have maximum in-flight 1.
+Expected: new interfaces are missing, a successful refresh makes two overlapping `getInfoByRoom` calls, add→start refreshes twice, batch desired state dumps per room or waits in HTTP, and durable worker concurrency/restart assertions fail.
 
 - [ ] **Step 4: Implement one composite, single-flight refresh**
 
@@ -426,7 +434,9 @@ async def _load_info_snapshot(self) -> LiveInfoSnapshot:
     raise ApiRequestError('room information is unavailable')
 
 async def _refresh_info_once(self) -> None:
-    snapshot = await asyncio.wait_for(self._load_info_snapshot(), timeout=10)
+    snapshot = await asyncio.wait_for(
+        self._load_info_snapshot(), timeout=self._info_timeout_seconds
+    )
     self._room_info = snapshot.room_info
     self._user_info = snapshot.user_info
     self._room_id = snapshot.room_info.room_id
@@ -435,9 +445,9 @@ async def _refresh_info_once(self) -> None:
 
 Create `_info_refresh_task` while holding an `asyncio.Lock`, await it through `asyncio.shield`, and clear it by identity in a done callback. `init`, `update_info`, `update_room_info`, and `update_user_info` all enter that boundary. Preserve each public method's `raise_exception=False` logging/boolean behavior. `deinit` cancels and awaits an outstanding refresh before closing its owned session.
 
-- [ ] **Step 5: Pass the exact initialization revision and bound room-disjoint work**
+- [ ] **Step 5: Pass the revision through the durable owner and batch settings once**
 
-Remove the 60-second retry decorator from `RecordTaskManager.add_task`. Expose the `Live` revision through `RecordTask`, then skip only an exact handoff:
+Remove the 60-second retry decorator from `RecordTaskManager.add_task`. Expose the `Live` revision through `RecordTask`, then let the existing membership/control-operation worker skip only an exact handoff:
 
 ```python
 async def start_task(
@@ -450,7 +460,7 @@ async def start_task(
     await task.enable_recorder()
 ```
 
-Add a local helper in `TaskManager` for all-room refresh/start and a route-local helper for the remote-bearing subset `start`, `refresh`, and `recorder_enable`:
+The reconciler/control worker owns a shared semaphore for room-disjoint remote steps; only the synchronous read-only `refresh` route may use the same bounded helper directly:
 
 ```python
 semaphore = asyncio.Semaphore(2)
@@ -465,26 +475,26 @@ indexed = await asyncio.gather(
 results = [result for _index, result in sorted(indexed)]
 ```
 
-Do not put `stop`, `force_stop`, recorder disable, `cut`, or `remove` through this concurrency path. `start_all_tasks` continues to call `mark_all_tasks_enabled()` once. In browser collect, capture `revision = app.get_task_info_revision(resolved_room_id)` only after a successful add and pass it to `start_task`; existing tasks pass `None`.
+For a batch start/stop/recorder toggle, call `SettingsManager.change_task_desired_states(changes)` once before waking the reconciler; it computes one diff and performs zero or one dump. Do not call per-room settings mutators concurrently. `stop`, `force_stop`, recorder disable, `cut`, and `remove` keep their Write/media ownership and are not moved into a route-local gather. In browser collect, the durable membership step captures the revision after successful add, writes it into the next operation step, and the worker passes it to `start_task`; a resumed operation reads the persisted step data rather than refreshing from the route.
 
 - [ ] **Step 6: Verify request counts, cleanup, and static checks**
 
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py tests/bili/test_live_status_coordinator.py tests/integration/test_batch_live_monitor.py -q
-.venv/bin/python -m black --check src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py
-.venv/bin/python -m isort --check-only src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py
-.venv/bin/python -m flake8 src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py
-.venv/bin/python -m mypy src/blrec/bili src/blrec/task src/blrec/application.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/control/test_operations.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py tests/bili/test_live_status_coordinator.py tests/integration/test_batch_live_monitor.py -q
+.venv/bin/python -m black --check src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/control/operations.py src/blrec/setting/setting_manager.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/control/test_operations.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py
+.venv/bin/python -m isort --check-only src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/control/operations.py src/blrec/setting/setting_manager.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py
+.venv/bin/python -m flake8 src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/control/operations.py src/blrec/setting/setting_manager.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py
+.venv/bin/python -m mypy src/blrec/bili src/blrec/task src/blrec/control src/blrec/setting/setting_manager.py src/blrec/application.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py
 ```
 
-**Budget and invariants:** successful logical refresh = 1 upstream room-detail call; concurrent same-instance refresh = 1; fallback attempts ≤3 and total wall time ≤10 seconds; add→start/collect = 1 composite refresh; room-disjoint remote action concurrency = 2. No general TTL is added, status polling is not touched, and a failed setup is not replayed wholesale. Production/test file budget: 6/5. If routing needs another file, pause and revise this plan's task boundary before writing code.
+**Budget and invariants:** successful logical refresh = 1 upstream room-detail call; concurrent same-instance refresh = 1; fallback attempts ≤3 and total wall time ≤10 seconds; add→start/collect = 1 composite refresh; room-disjoint remote action concurrency = 2; 58-room desired-state batch dumps settings exactly once. HTTP control latency stays within C100 because it returns accepted, restart resumes the same durable operation, and there is one control owner. No general TTL is added, status polling is not touched, and a failed setup is not replayed wholesale. Production/test file budget: 6/5 plus the already-owned Write/media control files needed to carry the revision; if this exceeds one focused operation-owner diff, revise the task before coding.
 
 - [ ] **Step 7: Commit the atomic producer/consumer handoff**
 
 ```bash
-git add src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py
+git add src/blrec/bili/live.py src/blrec/task/task.py src/blrec/task/task_manager.py src/blrec/application.py src/blrec/control/operations.py src/blrec/setting/setting_manager.py src/blrec/web/routers/tasks.py src/blrec/web/routers/browser_extension.py tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/control/test_operations.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py
 git commit -m "perf: coalesce room detail refreshes"
 ```
 
@@ -500,11 +510,12 @@ git commit -m "perf: coalesce room detail refreshes"
 - Modify: `src/blrec/core/operators/stream_url_resolver.py`
 - Modify: `tests/bili/test_live_stream_url.py`
 - Create: `tests/core/test_stream_request_reuse.py`
+- Create: `tests/core/test_hls_integrity_guards.py`
 
 **Interfaces:**
-- `LiveStreamSnapshot` records requested quality/platform, parsed streams, and monotonic observation time.
+- `LiveStreamSnapshot` records requested quality/platform/format/codec/alternative selection, parsed streams, and monotonic observation time.
 - `StreamResolution` records the full selection identity, URL, and server-selected quality.
-- `Live.resolve_live_stream(qn, *, api_platform, stream_format, stream_codec, select_alternative, snapshot=None)` selects without a new play-info call when a matching snapshot no older than two seconds exists.
+- `Live.resolve_live_stream(qn, *, api_platform, stream_format, stream_codec, select_alternative, snapshot=None)` reuses only a caller-supplied snapshot for which `_snapshot_matches(...)` verifies the complete identity and monotonic age≤2 seconds. `snapshot=None` always performs the original fresh read; there is no ambient recent-snapshot lookup.
 - `StreamURLResolver.seed(resolution)` accepts the fMP4 confirmation result; URL reuse becomes a pure identity check.
 
 - [ ] **Step 1: Write failing monitor→debounce→resolver request-budget tests**
@@ -520,23 +531,28 @@ assert requests_session.get_calls == 1  # real StreamFetcher GET only
 assert requests_session.validation_get_calls == 0
 ```
 
-For fMP4, make the monitor snapshot contain the target format, advance the injected monotonic clock by one second for confirmation, and assert exactly two total play-info calls: monitor/first success plus one debounce confirmation. Resolver adds zero. Also assert a mismatched quality/platform/format/codec/alternative flag or snapshot older than two seconds is not reused, and a real 403 transfer error resets/rotates before resolving again.
+For fMP4, make the monitor snapshot contain the target format, advance the injected monotonic clock by one second for confirmation, and assert exactly two total play-info calls: monitor/first success plus one debounce confirmation. Resolver adds zero. Also assert a mismatched quality/platform/format/codec/alternative flag or snapshot older than two seconds is not reused, `snapshot=None` always reads fresh, and a real 403 transfer error resets/rotates before resolving again.
+
+Add an executable HLS guard in `test_hls_integrity_guards.py` using fake playlist/segment transports: init-section data is accepted only after two identical reads, size/CRC mismatches are rejected, and a real transfer failure retains the existing retry and route-rotation sequence. This is a preservation test, not new HLS behavior.
 
 - [ ] **Step 2: Run the focused red tests**
 
-Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py -q`
+Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/core/test_hls_integrity_guards.py -q`
 
 Expected: snapshot/resolution APIs are missing; current monitor, fMP4 wait, and resolver each fetch play info, and `_can_resue_url` performs its own GET.
 
 - [ ] **Step 3: Add immutable selection snapshots at the `Live` boundary**
 
-Keep `get_live_streams()` compatible, but let it install a short-lived snapshot. Move URL selection into a pure helper used by both public methods:
+Keep `get_live_streams()` compatible, but add an internal/public snapshot-producing call whose immutable return value is handed to its immediate consumer. Do not install it on `Live`. Move URL selection into a pure helper used by both public methods:
 
 ```python
 @dataclass(frozen=True)
 class LiveStreamSnapshot:
     quality_number: QualityNumber
     api_platform: ApiPlatform
+    stream_format: StreamFormat
+    stream_codec: StreamCodec
+    select_alternative: bool
     streams: Tuple[Any, ...]
     observed_at: float
 
@@ -560,12 +576,24 @@ async def resolve_live_stream(
     select_alternative: bool = False,
     snapshot: Optional[LiveStreamSnapshot] = None,
 ) -> StreamResolution:
-    usable = snapshot or self.recent_stream_snapshot(qn, api_platform, max_age=2)
-    streams = list(usable.streams) if usable is not None else await self.get_live_streams(qn, api_platform)
+    usable = snapshot if self._snapshot_matches(
+        snapshot,
+        qn=qn,
+        api_platform=api_platform,
+        stream_format=stream_format,
+        stream_codec=stream_codec,
+        select_alternative=select_alternative,
+        max_age_seconds=2,
+    ) else None
+    streams = (
+        list(usable.streams)
+        if usable is not None
+        else await self.get_live_streams(qn, api_platform)
+    )
     return self._select_stream(streams, qn, api_platform, stream_format, stream_codec, select_alternative)
 ```
 
-The two-second value is only a handoff window, not a polling cache. It must be injected/clock-testable and cleared on room change/deinit.
+The two-second value is only an explicit producer→consumer handoff window, not a polling cache. `_snapshot_matches` compares all five request dimensions and uses an injected monotonic clock. The monitor passes the immutable object directly to fMP4 confirmation/recorder/resolver; no caller retrieves it from a `Live` ambient recent slot.
 
 - [ ] **Step 4: Seed the recorder and make URL reuse side-effect free**
 
@@ -593,19 +621,19 @@ Delete the `requests.Session.get(stream=True, timeout=3)` validation. Keep `Requ
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/core/test_recorder_event_order.py -q
-.venv/bin/python -m black --check src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core/stream_recorder.py src/blrec/core/stream_recorder_impl.py src/blrec/core/operators/stream_url_resolver.py tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/core/test_hls_integrity_guards.py tests/core/test_recorder_event_order.py -q
+.venv/bin/python -m black --check src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core/stream_recorder.py src/blrec/core/stream_recorder_impl.py src/blrec/core/operators/stream_url_resolver.py tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/core/test_hls_integrity_guards.py
 .venv/bin/python -m isort --check-only src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core/stream_recorder.py src/blrec/core/stream_recorder_impl.py src/blrec/core/operators/stream_url_resolver.py
 .venv/bin/python -m flake8 src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core/stream_recorder.py src/blrec/core/stream_recorder_impl.py src/blrec/core/operators/stream_url_resolver.py
 .venv/bin/python -m mypy src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core
 ```
 
-**Budget and invariants:** each one-second availability tick still makes at most one play-info request. A monitor result counts as fMP4 success one, and only one fresh confirmation is allowed. Resolver play-info calls after a matching confirmation are zero; pre-transfer validation GETs are zero. The first real FLV/HLS GET remains authoritative. Fixed network source/route selection and every HLS/segment correctness check remain unchanged. Production/test file budget: 5/2.
+**Budget and invariants:** each one-second availability tick still makes at most one play-info request. A monitor result counts as fMP4 success one, and only one fresh confirmation is allowed. Resolver play-info calls after a matching explicit confirmation are zero; an absent/mismatched/stale snapshot gets one fresh read; pre-transfer validation GETs are zero. The first real FLV/HLS GET remains authoritative. Executable guards prove unchanged HLS init-section agreement, segment size/CRC rejection, and transfer retry/route rotation. Production/test file budget: 5/3.
 
 - [ ] **Step 6: Commit the resolution handoff**
 
 ```bash
-git add src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core/stream_recorder.py src/blrec/core/stream_recorder_impl.py src/blrec/core/operators/stream_url_resolver.py tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py
+git add src/blrec/bili/live.py src/blrec/bili/live_monitor.py src/blrec/core/stream_recorder.py src/blrec/core/stream_recorder_impl.py src/blrec/core/operators/stream_url_resolver.py tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/core/test_hls_integrity_guards.py
 git commit -m "perf: reuse live stream resolutions"
 ```
 
@@ -631,7 +659,7 @@ git commit -m "perf: reuse live stream resolutions"
 
 - [ ] **Step 1: Add failing timeout/taxonomy/backoff tests**
 
-In the protocol matrix tests, inspect the constructed `ClientTimeout`, cover delta-seconds and HTTP-date `Retry-After`, reject negative/invalid/over-900 values, and prove it never appears in `repr(error)`. Assert HTTP 5xx on an idempotent read becomes a retryable `BiliApiError`, while HTTP 5xx on non-idempotent completion/submission remains `RemoteOutcomeUnknown`. Under `protocol_request_deadline(2)`, assert the transport uses at most two seconds, an already-expired deadline is `DefinitelyNotSent`, and expiry after headers are sent is `RemoteOutcomeUnknown` for a non-idempotent request.
+In the protocol matrix tests, inspect the constructed `ClientTimeout`, cover delta-seconds and HTTP-date `Retry-After`, return `None` for negative/invalid values, clamp values over 900 to 900, and prove it never appears in `repr(error)`. Distinguish HTTP status from Bilibili JSON business code. Assert HTTP 5xx on a protocol-matrix idempotent request becomes retryable, while HTTP 5xx on non-idempotent completion/submission remains `RemoteOutcomeUnknown`. Under `protocol_request_deadline(0.01)`, assert the transport uses at most that injected budget, an already-expired deadline is `DefinitelyNotSent`, and expiry after headers are sent is `RemoteOutcomeUnknown` for a non-idempotent request.
 
 In UPOS tests, inject `sleeper` and `jitter`:
 
@@ -650,7 +678,7 @@ assert protocol.chunk_calls == 3
 assert delays == [1.0, 2.0]
 ```
 
-Add coordinator tests asserting a server value such as 240 seconds is persisted, the lease/gate is released, and the P0 completion/submission unknown tests still make zero blind repeat calls.
+Add coordinator tests asserting a server value such as 240 seconds is persisted, the lease/gate is released, and the P0 completion/submission unknown tests still make zero blind repeat calls. Add the complete safe-retry matrix: preupload-init and chunk HTTP 500→success use at most three attempts; continuous HTTP 503 becomes one bounded persisted defer; completion and submission HTTP 500 become unknown with exactly one call.
 
 - [ ] **Step 2: Run the focused red tests**
 
@@ -676,7 +704,7 @@ class BiliApiError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
 ```
 
-Use `email.utils.parsedate_to_datetime` for the HTTP-date form and an injected wall clock. Return `None` for malformed/non-positive values and `min(parsed, 900)` otherwise. Pass it only when raising `BiliApiError`; never store raw headers. For status ≥500, use `BiliApiError` only when `idempotent=True`; retain `RemoteOutcomeUnknown` for non-idempotent requests.
+Use `email.utils.parsedate_to_datetime` for the HTTP-date form and an injected wall clock. Return `None` for malformed/non-positive values and `min(parsed, 900)` otherwise. Pass it only when raising `BiliApiError`; never store raw headers. For HTTP status ≥500, use `BiliApiError` only when the protocol matrix marks that operation idempotent; retain `RemoteOutcomeUnknown` for non-idempotent requests. A JSON business code returned in an HTTP 2xx response keeps its existing operation-specific mapping and is not treated as an HTTP 5xx.
 
 Add a `ContextVar[Optional[float]]` containing a monotonic deadline and a synchronous context manager that always resets its token. `AiohttpProtocolTransport.send` computes the remaining seconds immediately before `session.request`; if none remain, raise `TransportFailure(headers_sent=False)`. Otherwise construct a per-call `ClientTimeout` whose fields are the minimum of the default field and remaining duration. Do not implement an outer task cancellation: aiohttp timeout must continue through the existing `headers_sent` classification.
 
@@ -691,7 +719,7 @@ self._timeout = aiohttp.ClientTimeout(
 )
 ```
 
-Before chunk attempts 2 and 3, call the injected sleeper with jittered upper bounds one and two seconds. Do not jitter completion. For explicit 406/408/425/429 responses, prefer `error.retry_after_seconds` and clamp to 1–900; otherwise retain the existing computed delay. `_defer_chunk` and `_update_job` with `release=True` must persist the delay before returning to the broad loop. Re-run Task 1's completion tests while editing this code.
+Before chunk attempts 2 and 3, call the injected sleeper with jittered upper bounds one and two seconds. Do not jitter completion. For protocol-matrix idempotent preupload-init/chunk requests, include HTTP 500–599 in the existing at-most-three safe retry/defer path; after bounded attempts, persist a defer and release the gate rather than pausing permanently. For explicit 406/408/425/429 responses, prefer `error.retry_after_seconds` and clamp to 1–900; otherwise retain the existing computed delay. `_defer_chunk` and `_update_job` with `release=True` must persist the delay before returning to the broad loop. Non-idempotent completion/submission 5xx never enters this path. Re-run Task 1's completion tests while editing this code.
 
 - [ ] **Step 5: Verify protocol safety and static checks**
 
@@ -705,7 +733,7 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_protocol_matrix
 .venv/bin/python -m mypy src/blrec/bili_upload
 ```
 
-**Budget and invariants:** request total ≤30 seconds or the smaller task-local remaining deadline, connect/sock-connect≤5, sock-read≤20; chunk attempts≤3 with delays `[0..1, 0..2]`; accepted `Retry-After` 1–900 seconds. Long delay sleeps under an account gate are zero. Completion/submission/danmaku unknown blind retries remain zero, chunk concurrency remains default 2/max 3, and the selected upload source is never changed by retry metadata. Production/test file budget: 4/3.
+**Budget and invariants:** request total ≤30 seconds or the smaller task-local remaining deadline, connect/sock-connect≤5, sock-read≤20; idempotent preupload/chunk HTTP 5xx attempts≤3 with delays `[0..1, 0..2]`; accepted `Retry-After` is clamped to 1–900 seconds. Long delay sleeps under an account gate are zero. Exhausted idempotent 5xx is deferred, not permanently paused. Completion/submission/danmaku unknown blind retries remain zero, chunk concurrency remains default 2/max 3, and the selected upload source is never changed by retry metadata. Production/test file budget: 4/3.
 
 - [ ] **Step 6: Commit the protocol budget change**
 
@@ -731,7 +759,7 @@ git commit -m "perf: bound Bilibili protocol retries"
 - `ArchiveReadService.list_page(bundle, *, account_id, credential_version, status, page_number, page_size)` returns an immutable tuple and single-flights/cache-scopes by every named field.
 - `ArchiveReadService.detail(bundle, *, account_id, credential_version, bvid)` single-flights the read-only detail lookup.
 - Completed reads are fresh for 30 seconds; failed/cancelled tasks are never cached.
-- Review account cycles and submission reconciliation cycles each have an absolute 60-second limit; detail calls remain sequential.
+- Review archive list/detail reads and submission read reconciliation each have an injected `_read_timeout_seconds=60` absolute limit; tests use `0.01`. Approval, branch creation, and every other local/non-idempotent state transition run outside that cancellation boundary. Detail calls remain sequential.
 
 - [ ] **Step 1: Write failing cache/request-budget tests**
 
@@ -748,9 +776,11 @@ assert all(page == pages[0] for page in pages)
 
 Also assert cancellation of one waiter does not cancel the shared read, exceptions evict the in-flight entry, completed entries expire after 30 seconds, and `close()` cancels/awaits no user-owned task (the service owns only tasks it creates).
 
-- [ ] **Step 2: Add failing Review/reconciliation deadline and candidate tests**
+- [ ] **Step 2: Add failing read-deadline, recovery, and candidate tests**
 
-Preserve `test_waiting_jobs_are_grouped_into_one_read_per_account`. Add tests that a stuck page/detail ends one account cycle by 60 seconds without affecting the next account; repeated page identities terminate early; at most 20 pages are read; at most 10 same-title candidate details are inspected sequentially. When candidate 11 appears, the submission remains `unknown_outcome` and `submit_archive` is never called.
+Preserve `test_waiting_jobs_are_grouped_into_one_read_per_account`. Inject `read_timeout_seconds=0.01` and add tests that a stuck page/detail ends only the read phase without affecting the next account; no approval/branch write has started when that timeout fires. Repeated page identities terminate early; at most 20 pages are read; at most 10 same-title candidate details are inspected sequentially. When candidate 11 appears, the submission remains `unknown_outcome` and `submit_archive` is never called.
+
+Add a crash-boundary regression: interrupt after the approved transaction commits but before `_create_branches`, rebuild the watcher/runtime, and assert startup/cycle recovery creates every still-pending branch exactly once without calling `submit_archive` again. This recovery scans only `approved` jobs with a `pending` branch and relies on each branch's existing durable state/unknown fence.
 
 - [ ] **Step 3: Run the red tests**
 
@@ -801,24 +831,28 @@ class ArchiveReadService:
 
 Use `asyncio.shield` for waiters, clear failed/cancelled tasks by identity, and retain only successful `(expires_at, value)` entries. Do not add a stale-on-error result here: an uncertain submission must remain uncertain rather than be “confirmed” from expired data.
 
-- [ ] **Step 5: Inject one service and enforce per-cycle limits**
+- [ ] **Step 5: Bound only remote reads and recover approved pending branches**
 
-Construct one `ArchiveReadService` in `BiliUploadRuntime` and pass it to both `UploadCoordinator` and `ReviewWatcher`. Add `credential_version` to Review's account query. Replace direct list/detail calls with the service, preserving page size 50, page cap 20, repeated-page detection, and sequential iteration. Put list plus every sequential detail/process call for one account inside `_run_account_cycle`, and close the shared reader during runtime shutdown.
+Construct one `ArchiveReadService` in `BiliUploadRuntime` and pass it to both `UploadCoordinator` and `ReviewWatcher`. Add `credential_version` to Review's account query. Replace direct list/detail calls with the service, preserving page size 50, page cap 20, repeated-page detection, and sequential iteration. A read function returns immutable review decisions; no database write or branch call occurs inside its `wait_for`. Close the shared reader during runtime shutdown.
 
 ```python
 try:
-    changed += await asyncio.wait_for(
-        self._run_account_cycle(
+    decisions = await asyncio.wait_for(
+        self._read_account_decisions(
             bundle, account_id, credential_version, jobs
         ),
-        timeout=60,
+        timeout=self._read_timeout_seconds,
     )
 except asyncio.TimeoutError:
     audit('upload_review_cycle_timed_out', account_scope='redacted')
     continue
+for decision in decisions:
+    changed += await self._apply_review_decision(decision)
 ```
 
-Wrap only the read-only reconciliation function in its own 60-second `wait_for`. Stop collecting after candidate 11, raise a private `ArchiveCandidateLimit`, catch it beside the existing read failures, and call `_mark_unknown_submission`; never route that condition to `submit_archive`. Do not parallelize archive details.
+Wrap only `_find_remote_submission`'s read-only list/detail reconciliation in its own injected timeout. Stop collecting after candidate 11, raise a private `ArchiveCandidateLimit`, then outside the timeout catch it beside existing read failures and call `_mark_unknown_submission`; never route that condition to `submit_archive`. Do not parallelize archive details.
+
+Before the next remote review read (and once during runtime recovery), scan `approved` jobs with pending branch state and call the existing idempotent branch-creation boundary. This closes the approve→branch crash window without wrapping non-idempotent collection/comment/danmaku work in `wait_for`; branch durable states remain the owner of interrupted/unknown outcomes.
 
 - [ ] **Step 6: Verify reuse, fences, and static checks**
 
@@ -832,7 +866,7 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_archive_reads.p
 .venv/bin/python -m mypy src/blrec/bili_upload
 ```
 
-**Budget and invariants:** identical account/version/query/page/detail reads ≤1 per 30 seconds; pages ≤20; same-title details ≤10 at concurrency 1; account/reconciliation cycle ≤60 seconds. Review remains grouped per account and runs no sooner than every 900 seconds. Submission unknown still performs read reconciliation only and never blind resubmission. Comments are not moved to another worker or sped up. Production/test file budget: 4/3.
+**Budget and invariants:** identical account/version/query/page/detail reads ≤1 per 30 seconds; pages ≤20; same-title details ≤10 at concurrency 1; remote read/reconciliation phase ≤60 seconds. Timeout cancellation covers no approval, branch creation, SQLite write, or non-idempotent remote write. Approved+pending recovery makes zero submission calls. Review remains grouped per account and runs no sooner than every 900 seconds. Submission unknown still performs read reconciliation only and never blind resubmission. Comments are not moved to another worker or sped up. Production/test file budget: 4/3.
 
 - [ ] **Step 7: Commit the shared archive reader**
 
@@ -947,9 +981,9 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_collections.py 
 .venv/bin/python -m isort --check-only src/blrec/bili_upload/collections.py src/blrec/bili_upload/categories.py src/blrec/web/routers/bili_collections.py
 .venv/bin/python -m flake8 src/blrec/bili_upload/collections.py src/blrec/bili_upload/categories.py src/blrec/web/routers/bili_collections.py
 .venv/bin/python -m mypy src/blrec/bili_upload/collections.py src/blrec/bili_upload/categories.py src/blrec/web/routers/bili_collections.py
-cd webapp && npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/tasks/upload-policy-dialog/room-upload-policy.service.spec.ts' --include='src/app/tasks/upload-policy-dialog/upload-policy-dialog.component.spec.ts'
-cd webapp && npx eslint src/app/tasks/upload-policy-dialog/room-upload-policy.service.ts src/app/tasks/upload-policy-dialog/upload-policy-dialog.component.ts src/app/tasks/upload-policy-dialog/room-upload-policy.service.spec.ts src/app/tasks/upload-policy-dialog/upload-policy-dialog.component.spec.ts
-cd webapp && npx tsc --noEmit -p tsconfig.app.json
+(cd webapp && npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/tasks/upload-policy-dialog/room-upload-policy.service.spec.ts' --include='src/app/tasks/upload-policy-dialog/upload-policy-dialog.component.spec.ts')
+(cd webapp && npx eslint src/app/tasks/upload-policy-dialog/room-upload-policy.service.ts src/app/tasks/upload-policy-dialog/upload-policy-dialog.component.ts src/app/tasks/upload-policy-dialog/room-upload-policy.service.spec.ts src/app/tasks/upload-policy-dialog/upload-policy-dialog.component.spec.ts)
+(cd webapp && npx tsc --noEmit -p tsconfig.app.json)
 ```
 
 **Budget and invariants:** collection fresh TTL 60 seconds and stale-if-error≤15 minutes; identical collection account/version in-flight lists=1. Category TTL remains 24 hours, stale behavior is unchanged, and each concurrent normal/forced generation makes one `archive_pre` call. A create flow has cover upload≤1, create≤1, and post-create list≤1 across backend+frontend. Creation unknown is not retried/reconciled automatically. This task does not yet change write serialization; that is Task 8's separate rollback boundary. Production/test file budget: 5/5.
@@ -983,7 +1017,7 @@ git commit -m "perf: coalesce upload catalogs"
 - `_PerAccountGate.hold(expected_credential_version, *, wait_timeout_seconds=None)` retains the post-acquire database recheck and raises `AccountWriteBusy` only when admission expires.
 - `AccountManager.check_account_renewal(account_id, *, admission_timeout_seconds=None, operation_timeout_seconds=None)` applies one admission budget across `_auth_failure_lock` and the account gate, then uses Task 5's protocol deadline rather than unsafe outer cancellation.
 - UI callers use 250 ms admission and 60-second operation budgets; background auth recovery passes no admission timeout.
-- Both collection creation and collection episode publication hold the runtime's existing `AccountWriteGate` for the exact account/version.
+- Both collection creation and collection episode publication hold the runtime's existing `AccountWriteGate` for the exact account/version and accept an internal `operation_timeout_seconds=60`; deadline tests pass `0.01`.
 
 - [ ] **Step 1: Write failing gate primitive and renewal tests**
 
@@ -1004,7 +1038,7 @@ Repeat with `_auth_failure_lock` held to prove the same 250 ms budget covers bot
 
 - [ ] **Step 2: Write failing collection serialization and route tests**
 
-Run a manager create, publisher add-episode, and upload write for one account; assert maximum remote-write concurrency is 1. A different account may proceed independently. Assert the UI routes return 409 with a retryable busy message by 250 ms, while publisher workers wait. Seed `RemoteOutcomeUnknown` for create/add-episode and assert calls remain 1 with existing manual/failure state.
+Run a manager create, publisher add-episode, and upload write for one account; assert maximum remote-write concurrency is 1. A different account may proceed independently. Assert the UI routes return 409 with a retryable busy message by 250 ms, while publisher workers wait. Seed `RemoteOutcomeUnknown` for create/add-episode and assert calls remain 1 with existing manual/failure state. Inject `operation_timeout_seconds=0.01` for a blocked protocol fake so the test never waits 60 real seconds.
 
 - [ ] **Step 3: Run the red tests**
 
@@ -1044,7 +1078,7 @@ In `check_account_renewal`, compute one `time.monotonic()` admission deadline be
 
 - [ ] **Step 5: Put both collection writers behind the shared gate**
 
-Inject `AccountWriteGate` from `BiliUploadRuntime`. `CollectionManager.create` uses the `credential_version` already resolved in Task 7 and holds the gate across cover resolution/upload, create, and the single post-create catalog refresh. Both it and `CollectionPublisher` run their remote sequence under `protocol_request_deadline(60)`; the publisher loads account state/version with its job and holds the gate across exactly one `add_collection_episode` attempt. Reuse existing unknown catches and release/persist state before returning; do not add a retry loop or outer cancellation.
+Inject `AccountWriteGate` from `BiliUploadRuntime`. `CollectionManager.create` uses the `credential_version` already resolved in Task 7 and holds the gate across cover resolution/upload, create, and the single post-create catalog refresh. Both it and `CollectionPublisher` run their remote sequence under `protocol_request_deadline(self._operation_timeout_seconds)`; the publisher loads account state/version with its job and holds the gate across exactly one `add_collection_episode` attempt. Reuse existing unknown catches and release/persist state before returning; do not add a retry loop or outer cancellation.
 
 Routes pass UI budgets and map only `AccountWriteBusy` to 409 “账号正在执行其他写操作，请稍后重试.” Account/credential/outcome errors keep their existing status and manual-recovery messages.
 
@@ -1083,17 +1117,18 @@ git commit -m "perf: serialize account collection writes"
 
 **Interfaces:**
 - `CoverDownloader` keys downloaded bytes by `(room_id, live_start_time, cover_url)` and performs at most one composite metadata fallback per broadcast.
+- A private `_FAILED` sentinel records an optional cover GET failure for that exact broadcast key; it is never confused with empty bytes and is cleared only by `ROOM_CHANGE`/new `live_start_time`.
 - File-save policy remains per part; only remote bytes are reused. A `ROOM_CHANGE` URL or new `live_start_time` creates a new key.
-- `CoverResolver` owns one lifecycle session and single-flights transient `live_url` work by account plus source fingerprint.
+- `CoverResolver` owns one lifecycle session and single-flights transient `live_url` work by account plus source fingerprint. Path validation, resolve, stat, read, hashing, and writes execute off the event loop through one semaphore-bounded executor submission boundary.
 - `CoverResolver.close()` is awaited by `BiliUploadRuntime.close()`.
 
 - [ ] **Step 1: Write failing legacy cover request-count tests**
 
-Complete three video parts in one broadcast with the same URL and assert one cover GET and zero room-detail refreshes. Change only the output part path and prove each required cover file is still written from cached bytes. Repeat with a failed GET and assert later parts make no second request. Emit `ROOM_CHANGE` with a new URL and then a new `live_start_time`; each key may fetch once. With missing metadata, assert one Task 3 composite fallback for the broadcast, never one per part.
+Complete three video parts in one broadcast with the same URL and assert one cover GET and zero room-detail refreshes. Change only the output part path and prove each required cover file is still written from cached bytes. Repeat with a failed GET and assert `_FAILED` is cached, later parts make no second request, and callers receive the same optional-cover absence. Emit `ROOM_CHANGE` with a new URL and then a new `live_start_time`; each key may fetch once. With missing metadata, assert one Task 3 composite fallback for the broadcast, never one per part.
 
 - [ ] **Step 2: Write failing resolver coalescing/lifecycle tests**
 
-Start 20 identical `live_url` calls and assert one trusted download and one cover-upload request. Change local file `mtime_ns/size` or source URL and assert no reuse. Preserve/strengthen HTTPS-only, no-redirect, 2 MiB cutoff, and unknown upload no-blind-retry tests. Assert runtime close waits for/cleans the shared session and in-flight tasks.
+Start 20 identical `live_url` calls and assert one trusted download and one cover-upload request. Change local file `mtime_ns/size` or source URL and assert no reuse. Inject blocking path resolve/stat/read/write functions and prove an event-loop heartbeat advances while they run and no file operation executes on the loop thread. Preserve/strengthen HTTPS-only, no-redirect, 2 MiB cutoff, and unknown upload no-blind-retry tests. Assert runtime close waits for/cleans the shared session and in-flight tasks.
 
 - [ ] **Step 3: Run the red tests**
 
@@ -1120,11 +1155,11 @@ async def _cover_bytes_for_part(self) -> bytes:
 
 Read metadata maintained by LIVE/ROOM_CHANGE first. If no usable URL exists, remember that the current `(room_id, live_start_time)` consumed its one composite fallback, then retry metadata once. Compute SHA1 from cached bytes before deciding whether to write. Reset only on broadcast identity change or destroy; do not turn this into a cross-broadcast disk cache.
 
-Remove `_fetch_cover`'s three-attempt tenacity decorator: the one broadcast/source request is an optional artifact read, and repeating it for every completed part defeats the broadcast budget. Cache a failed logical fetch for that broadcast key as well, so another part does not reopen the same URL; only ROOM_CHANGE or a new `live_start_time` may try again.
+Remove `_fetch_cover`'s three-attempt tenacity decorator: the one broadcast/source request is an optional artifact read, and repeating it for every completed part defeats the broadcast budget. Define `_FAILED = object()` and store it after a failed logical fetch; cache lookup returns the same optional-cover absence without reopening the URL. Never use `None` or empty bytes as an ambiguous failure marker. Only ROOM_CHANGE or a new `live_start_time` clears that key.
 
 - [ ] **Step 5: Pool and single-flight `CoverResolver.live_url`**
 
-Create one `aiohttp.ClientSession` lazily with `ClientTimeout(total=30, connect=5, sock_connect=5, sock_read=20)` and `DummyCookieJar`; preserve trusted-host validation, redirect denial, and streaming size enforcement. Build the source fingerprint as URL text or `(resolved_path, st_mtime_ns, st_size)`. Shield shared work, remove the task by identity on completion, and never persist transient live-source results into the custom-asset cache. `close()` cancels/awaits in-flight tasks before closing the session.
+Create one `aiohttp.ClientSession` lazily with `ClientTimeout(total=30, connect=5, sock_connect=5, sock_read=20)` and `DummyCookieJar`; preserve trusted-host validation, redirect denial, and streaming size enforcement. For local sources, one synchronous helper performs validate→resolve→stat→limited read and returns `(resolved_path, st_mtime_ns, st_size, bytes)`; submit that whole helper with `loop.run_in_executor` while holding a resolver-local semaphore of 2 (Python 3.8 compatible—do not use `asyncio.to_thread`). Hash/write helpers use the same off-loop boundary. Build the fingerprint from the returned metadata, never by calling `Path.resolve/stat/read_bytes` on the event loop. Shield shared work, remove the task by identity on completion, and never persist transient live-source results into the custom-asset cache. `close()` cancels/awaits in-flight tasks before closing the session.
 
 - [ ] **Step 6: Verify cover safety and static checks**
 
@@ -1138,7 +1173,7 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/core/test_cover_downloader.py te
 .venv/bin/python -m mypy src/blrec/core/cover_downloader.py src/blrec/bili_upload/covers.py src/blrec/bili_upload/runtime.py
 ```
 
-**Budget and invariants:** cover GET≤1 per `(broadcast, URL)`; fallback room detail≤1 per broadcast; identical live source/account in-flight upload=1; download total≤30 seconds and bytes≤2 MiB. Persistent custom cover cache, HTTPS/trust/redirect policy, and non-idempotent unknown behavior remain unchanged. Production/test file budget: 3/3.
+**Budget and invariants:** cover GET≤1 per `(broadcast, URL)`, including failed GETs; fallback room detail≤1 per broadcast; identical live source/account in-flight upload=1; resolver-local file work in-flight≤2 and event-loop file operations=0; download total≤30 seconds and bytes≤2 MiB. Persistent custom cover cache, HTTPS/trust/redirect policy, and non-idempotent unknown behavior remain unchanged. Production/test file budget: 3/3.
 
 - [ ] **Step 7: Commit the cover reuse boundary**
 
@@ -1238,15 +1273,18 @@ git commit -m "perf: bound QR session pollers"
 - Modify: `src/blrec/web/main.py`
 - Create: `tests/notification/test_dispatcher.py`
 - Create: `tests/notification/test_providers.py`
+- Create: `tests/notification/test_notifiers.py`
 - Modify: `tests/notification/test_operational.py`
 - Create: `tests/test_application_outbound_lifecycle.py`
+- Modify: `tests/web/test_main_lifecycle.py`
 
 **Interfaces:**
 - `NotificationDispatcher.enqueue(channel, title, content, message_type, *, coalesce_key=None) -> bool` is non-blocking with a global pending capacity of 100.
 - At most four channels deliver concurrently and each channel has exactly one ordered delivery line.
 - Operational items use latest-wins key `(event_code, object_key, channel)`; unkeyed legacy events reject newest when full. Neither path creates an untracked per-message task.
-- One delivery has at most three attempts, a 60-second absolute deadline, and one-attempt timeout ≤10 seconds. HTTP 429/5xx and transport errors are transient; other 4xx and configuration errors are final.
-- `start()` owns one cookie-less shared HTTP session; `close(drain_timeout_seconds=5)` disables intake, drains briefly, cancels/awaits owned workers, and closes the session.
+- Constructor-injected budgets default to delivery 60 seconds, HTTP/SMTP attempt 10 seconds, and close 15 seconds; tests pass short values. One delivery has at most three attempts. HTTP 429/5xx and transport errors are transient; other 4xx and configuration errors are final.
+- `web/main.py` is the single lifecycle owner: `start()` runs before `_bili_account_runtime.start()`, and final shutdown closes the dispatcher after both producer families are disabled. Pre-start `enqueue` may append only; it never creates a worker or touches a session.
+- `start()` owns one cookie-less shared HTTP session. `close(drain_timeout_seconds=15)` disables intake, drains/cancels/awaits asyncio workers, waits for every tracked SMTP executor future, and closes the session. The 15-second bound covers one real ten-second SMTP attempt plus teardown; it does not pretend a running thread can be cancelled in five seconds.
 
 - [ ] **Step 1: Write failing queue, ordering, overload, and retry tests**
 
@@ -1263,17 +1301,19 @@ assert dispatcher.dropped_count == 900
 assert dispatcher.owned_task_count <= 6
 ```
 
-Cover attempts `[1]` for 400/401/403/configuration errors and `[1, 2, 3]` for 429, 5xx, `aiohttp.ClientError`, timeout, and transient SMTP errors. Advance the fake deadline to prove total delivery≤60 seconds. Assert close drains accepted items when possible and otherwise cancels/awaits every owned worker.
+Cover attempts `[1]` for 400/401/403/configuration errors and `[1, 2, 3]` for 429, 5xx, `aiohttp.ClientError`, timeout, and transient SMTP errors. Advance the fake deadline to prove total delivery≤60 seconds. Enqueue before start and assert pending grows while owned task count stays zero; start then drains it. Assert close drains accepted items when possible, cancels/awaits every owned asyncio worker, and waits for every tracked SMTP future.
 
 - [ ] **Step 2: Write failing provider and operational-loop tests**
 
-Use a loopback aiohttp server to prove every HTTP provider reuses the injected session, applies ten-second timeout, and never enables a cookie jar. Assert Pushplus target is `https://www.pushplus.plus/send`. Patch `smtplib.SMTP_SSL/SMTP` and assert `timeout=10` in both branches.
+Use a loopback aiohttp server to prove every HTTP provider reuses the injected session, applies ten-second timeout, and never enables a cookie jar. Assert Pushplus target is `https://www.pushplus.plus/send`. Patch `smtplib.SMTP_SSL/SMTP` and inject a monotonic clock: every connect/STARTTLS/login/send phase receives only the remaining part of one ten-second attempt; after the budget expires, fallback or the next phase is not started. Block an executor future and assert close waits for it instead of reporting a false five-second cancellation.
 
 In `OperationalNotificationCenter`, block the sender and prove `report()` returns after state persistence/enqueue rather than delaying the upload broad loop. Repeating the same unhealthy state still enqueues zero; a changed state uses the latest-wins key.
 
+In `tests/notification/test_notifiers.py`, prove `MessageNotifier` only calls `enqueue`: patch `asyncio.create_task` to fail and assert no detached task is created. In `tests/web/test_main_lifecycle.py`, record real startup order and assert `dispatcher.start < bili_runtime.start < app.launch`; also verify partial-start failure closes the already-started dispatcher exactly once.
+
 - [ ] **Step 3: Run the red tests**
 
-Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_operational.py tests/test_application_outbound_lifecycle.py -q`
+Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_notifiers.py tests/notification/test_operational.py tests/test_application_outbound_lifecycle.py tests/web/test_main_lifecycle.py -q`
 
 Expected: dispatcher/lifecycle APIs are missing, notifiers and operational scans await or detach direct sends, providers allocate sessions per message, and SMTP/Pushplus violate the budget.
 
@@ -1299,7 +1339,7 @@ def enqueue(
         content=content,
         message_type=message_type,
         coalesce_key=coalesce_key,
-        deadline_at=self._monotonic() + 60,
+        deadline_at=self._monotonic() + self._delivery_timeout_seconds,
     )
     if coalesce_key is not None and self._replace_pending(coalesce_key, delivery):
         return True
@@ -1308,40 +1348,41 @@ def enqueue(
         return False
     self._queues[channel].append(delivery)
     self._pending_count += 1
-    self._ensure_channel_worker(channel)
+    if self._started:
+        self._ensure_channel_worker(channel)
     return True
 ```
 
-Workers decrement pending in `finally`, call `_deliver` under the global semaphore, and remove themselves by identity. `_deliver` checks remaining deadline before each attempt and injects jittered delays no greater than one and two seconds. Log channel name/error class/counters only—never title, content, provider key, token, email, or endpoint.
+`start()` creates the shared session, marks `_started`, and starts workers for channels that were queued before startup. Workers decrement pending in `finally`, call `_deliver` under the global semaphore, and remove themselves by identity. `_deliver` checks remaining deadline before each attempt and injects jittered delays no greater than one and two seconds. Log channel name/error class/counters only—never title, content, provider key, token, email, or endpoint.
 
 - [ ] **Step 5: Pool transports and route both producers through the dispatcher**
 
-Give HTTP providers an injected/shared session and make `send_message` one attempt only. Configure the dispatcher session with `DummyCookieJar`, `raise_for_status=True`, and explicit timeout fields. Add `timeout=10` to SMTP constructors and bound its executor await with `await asyncio.wait_for(send_future, timeout=60)`; the socket timeout is what terminates the underlying thread.
+Give HTTP providers an injected/shared session and make `send_message` one attempt only. Configure the dispatcher session with `DummyCookieJar`, `raise_for_status=True`, and explicit timeout fields. SMTP uses one synchronous `send_with_deadline(deadline_at)` function in the executor: calculate `remaining=max(0, deadline_at-monotonic())` before constructor, fallback, STARTTLS, login, and send; pass `min(remaining, 10)` to constructors and update the live socket timeout before later phases. If no budget remains, abort before starting the phase. Track the executor future in a dispatcher-owned set; an asyncio timeout may stop awaiting the result but must not discard or falsely cancel the thread.
 
 Inject the dispatcher into `MessageNotifier`; `_send_message` calls `enqueue` and has no `asyncio.create_task`. Change `OperationalNotificationCenter._dispatch` to enqueue with `(event, object_key, channel)` after the SQLite state transition. In `web/main.py`, construct the dispatcher once, pass its channel adapters to `BiliAccountRuntime`, and pass the dispatcher into `Application`, so legacy and operational paths share capacity rather than each owning a queue.
 
-- [ ] **Step 6: Start and stop delivery explicitly in `Application`**
+- [ ] **Step 6: Start and stop delivery once in the real web lifecycle**
 
-`Application.launch()` starts the dispatcher before enabling notifiers. During `_exit`, first disable notifier subscriptions so no new items arrive, then await dispatcher drain/close before deleting notifiers and before raising aggregated teardown errors. Preserve restart support by creating a fresh session/workers on the next `start()`.
+Construct the dispatcher once in `web/main.py`, inject its channel adapters into `BiliAccountRuntime`, and pass it to `Application` only as a producer dependency. `on_startup` must `await dispatcher.start()` before `await _bili_account_runtime.start()`; `Application.launch()` only enables legacy notifier producers and does not start a second owner. On shutdown, `app.exit()` disables legacy subscriptions, runtime close disables operational producers, then `dispatcher.close(15)` runs last. Mirror that order in every partial-start failure branch. Preserve restart support by opening a fresh session/workers on the next `start()`.
 
 - [ ] **Step 7: Verify bounded delivery, lifecycle, and static checks**
 
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_operational.py tests/setting/test_operational_notifications.py tests/test_application_outbound_lifecycle.py -q
-.venv/bin/python -m black --check src/blrec/notification/dispatcher.py src/blrec/notification/providers.py src/blrec/notification/notifiers.py src/blrec/notification/operational.py src/blrec/application.py src/blrec/web/main.py tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_operational.py tests/test_application_outbound_lifecycle.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_notifiers.py tests/notification/test_operational.py tests/setting/test_operational_notifications.py tests/test_application_outbound_lifecycle.py tests/web/test_main_lifecycle.py -q
+.venv/bin/python -m black --check src/blrec/notification/dispatcher.py src/blrec/notification/providers.py src/blrec/notification/notifiers.py src/blrec/notification/operational.py src/blrec/application.py src/blrec/web/main.py tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_notifiers.py tests/notification/test_operational.py tests/test_application_outbound_lifecycle.py tests/web/test_main_lifecycle.py
 .venv/bin/python -m isort --check-only src/blrec/notification/dispatcher.py src/blrec/notification/providers.py src/blrec/notification/notifiers.py src/blrec/notification/operational.py src/blrec/application.py src/blrec/web/main.py
 .venv/bin/python -m flake8 src/blrec/notification/dispatcher.py src/blrec/notification/providers.py src/blrec/notification/notifiers.py src/blrec/notification/operational.py src/blrec/application.py src/blrec/web/main.py
 .venv/bin/python -m mypy src/blrec/notification src/blrec/application.py src/blrec/web/main.py
 ```
 
-**Budget and invariants:** pending≤100; global active channels≤4; per-channel concurrency=1; request≤10 seconds; delivery attempts≤3 and deadline≤60 seconds; shutdown drain≤5 seconds before cancellation. Operational state-transition suppression remains authoritative. No notification failure blocks or accelerates the upload broad loop, and no overload path spawns a side-channel task. Production/test file budget: 6/4.
+**Budget and invariants:** pending≤100; global active channels≤4; per-channel concurrency=1; request/SMTP attempt≤10 seconds; delivery attempts≤3 and deadline≤60 seconds; shutdown drain≤15 seconds and every SMTP future is observed. Pre-start workers=0; startup owner count=1. Operational state-transition suppression remains authoritative. No notification failure blocks or accelerates the upload broad loop, and no overload path spawns a side-channel task. Production/test file budget: 6/6.
 
 - [ ] **Step 8: Commit the notification dispatcher**
 
 ```bash
-git add src/blrec/notification/dispatcher.py src/blrec/notification/providers.py src/blrec/notification/notifiers.py src/blrec/notification/operational.py src/blrec/application.py src/blrec/web/main.py tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_operational.py tests/test_application_outbound_lifecycle.py
+git add src/blrec/notification/dispatcher.py src/blrec/notification/providers.py src/blrec/notification/notifiers.py src/blrec/notification/operational.py src/blrec/application.py src/blrec/web/main.py tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_notifiers.py tests/notification/test_operational.py tests/test_application_outbound_lifecycle.py tests/web/test_main_lifecycle.py
 git commit -m "perf: bound notification delivery"
 ```
 
@@ -1359,12 +1400,12 @@ git commit -m "perf: bound notification delivery"
 - `WebHookEmitter.start()` owns one cookie-less shared session.
 - `_send_request` becomes a non-blocking enqueue into a global capacity-100 queue.
 - Global delivery concurrency≤4 and the same URL has concurrency 1 with stable order.
-- Each delivery has request timeout≤10 seconds, attempts≤3, total deadline≤60 seconds; only 429/5xx/transport failures retry.
-- `close(drain_timeout_seconds=5)` disables intake, drains/cancels/awaits, and closes its session. Metrics/logs redact the URL and payload.
+- Each delivery has injected request timeout≤10 seconds and total deadline≤60 seconds; tests pass `0.01`. Attempts≤3 and only 429/5xx/transport failures retry.
+- `close(drain_timeout_seconds=5)` uses an injected short test budget, disables intake, drains/cancels/awaits, and closes its session. Metrics/logs redact the URL and payload.
 
 - [ ] **Step 1: Write failing storm, ordering, retry, and close tests**
 
-Configure 50 webhooks and emit enough matching events/exceptions to exceed capacity. Assert no more than 100 pending, no more than four active destinations, same-URL order, rejected-newest count, and a bounded owned-task count. Use loopback responses to prove 4xx attempts=1 and 429/5xx/connection timeout attempts≤3. Assert an event payload is delivered unchanged but never appears in logs.
+Configure 50 webhooks and emit enough matching events/exceptions to exceed capacity. Assert no more than 100 pending, no more than four active destinations, same-URL order, rejected-newest count, and a bounded owned-task count. Inject `request_timeout_seconds=0.01`, `delivery_timeout_seconds=0.03`, and `drain_timeout_seconds=0.01`; use loopback responses to prove 4xx attempts=1 and 429/5xx/connection timeout attempts≤3 without sleeping through production budgets. Assert an event payload is delivered unchanged but never appears in logs.
 
 Close while requests are blocked and assert all tasks are awaited/cancelled, the session is closed once, and a post-close event is rejected without warning that contains the concrete URL.
 
@@ -1385,7 +1426,7 @@ def _is_transient(error: BaseException) -> bool:
     return isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError, OSError))
 ```
 
-Remove tenacity's 180-second window. Use injected sleeper/jitter for delays no greater than one/two seconds, stop at attempt 3 or the 60-second deadline, and never log URL/payload/headers.
+Remove tenacity's 180-second window. Use injected sleeper/jitter for delays no greater than one/two seconds, stop at attempt 3 or the injected delivery deadline (default 60 seconds), and never log URL/payload/headers.
 
 - [ ] **Step 4: Integrate Application start/disable/drain order**
 
@@ -1414,30 +1455,25 @@ git commit -m "perf: bound webhook delivery"
 
 ---
 
-### Task 13: Reuse low-frequency clients with opposite cache policies (O-14/O-15, P2)
+### Task 13: Cache Update metadata with one lifecycle client (O-14, P2)
 
 **Files:**
 - Modify: `src/blrec/update/helpers.py`
 - Modify: `src/blrec/update/api.py`
-- Modify: `src/blrec/bili/helpers.py`
 - Modify: `src/blrec/application.py`
 - Modify: `src/blrec/web/routers/update.py`
-- Modify: `src/blrec/web/routers/validation.py`
 - Create: `tests/update/test_helpers.py`
 - Create: `tests/web/test_update_routes.py`
-- Create: `tests/bili/test_helpers.py`
-- Create: `tests/web/test_validation_routes.py`
 - Modify: `tests/test_application_outbound_lifecycle.py`
 
 **Interfaces:**
-- `UpdateMetadataClient` owns one session, a cache keyed by `('project', project_name)` or `('release', project_name, version)`, 30-minute freshness, 24-hour stale fallback, and per-key single-flight.
-- A refresh makes one PyPI request with a ten-second absolute deadline; 404 is a cacheable `None`, while an error may return only a non-expired stale value.
-- `get_nav(cookie, session)` requires an application-owned anonymous Bilibili session and sends the cookie only in that request's explicit header.
-- `Application.validate_bili_cookie(cookie)` has a ten-second logical deadline and cache TTL zero. It never uses a shared cookie jar, metric label, or log field.
+- `UpdateMetadataClient` owns one cookie-less session, a cache keyed by `('project', project_name)` or `('release', project_name, version)`, 30-minute freshness, 24-hour stale fallback, and per-key single-flight.
+- A refresh makes one PyPI request with an injected `request_timeout_seconds=10` absolute deadline; tests pass `0.01`. A 404 is a cacheable `None`, while an error may return only a non-expired stale value.
+- This task owns no Bilibili transport or cookie validation behavior.
 
-- [ ] **Step 1: Write failing update cache/lifecycle tests**
+- [ ] **Step 1: Write failing update cache and lifecycle tests**
 
-Use an injected clock and blocked fake response. Assert 20 concurrent latest-version calls make one request, calls within 1,800 seconds are local, expiry makes one refresh, error returns stale only until 86,400 seconds, 404 is cached, project/release keys cannot collide, cancellation of one waiter does not cancel the shared read, and close awaits/cancels work and closes once.
+Use injected monotonic clock, `request_timeout_seconds=0.01`, and a blocked fake response. Assert 20 concurrent calls for one key make one request, calls within 1,800 seconds are local, expiry makes one refresh, error returns stale only until 86,400 seconds, 404 is cached, project/release keys cannot collide, one waiter cancellation does not cancel shared work, and close cancels/awaits owned tasks and closes once.
 
 ```python
 versions = await asyncio.gather(
@@ -1447,19 +1483,19 @@ assert versions == ['2.0.0'] * 20
 assert pypi_requests == 1
 ```
 
-Route tests assert timeout/error returns stale or `''` promptly and never exposes an exception body.
+Route tests assert timeout/error returns stale or `''` promptly and never exposes an exception body. Do not monkeypatch global `asyncio.wait_for`.
 
-- [ ] **Step 2: Write failing cookie transport/privacy tests**
+- [ ] **Step 2: Run the focused red tests**
 
-Make two sequential validations with distinct cookie sentinel strings. Assert the same session/connector is reused, the jar remains empty, upstream calls=2, and each request receives only its own explicit `Cookie` value. Delay the fake WebApi and assert total≤10 seconds/cancellation propagates. Capture logs/exceptions/request metrics and assert neither sentinel occurs. Route response semantics remain the existing `ResponseMessage`.
+Run:
 
-- [ ] **Step 3: Run the red tests**
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/update/test_helpers.py tests/web/test_update_routes.py tests/test_application_outbound_lifecycle.py -q
+```
 
-Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/update/test_helpers.py tests/web/test_update_routes.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py -q`
+Expected: every call allocates a session, and update has no cache/single-flight/stale result or lifecycle close.
 
-Expected: every update/cookie call allocates a session, update has no cache/single-flight/stale result, and cookie validation has nested retry but no whole-operation deadline.
-
-- [ ] **Step 4: Implement the lifecycle update client**
+- [ ] **Step 3: Implement the update-only lifecycle client**
 
 Remove the tenacity decorator from `PypiApi._get`; the cache boundary performs one request per refresh generation and returns stale on failure instead of adding burst retries.
 
@@ -1476,11 +1512,69 @@ class UpdateMetadataClient:
         return None if metadata is None else metadata['info']['version']
 ```
 
-The session uses `DummyCookieJar`, `ClientTimeout(total=10, connect=5, sock_connect=5, sock_read=10)`, and application lifecycle close. Single-flight uses shield and identity cleanup; cache only validated metadata/`None`, not exception objects. Preserve `project_name` and `version` in internal keys but never log arbitrary input.
+The session uses `DummyCookieJar` and explicit `ClientTimeout` fields capped by the injected logical budget. Single-flight uses shield and identity cleanup; cache only validated metadata/`None`, not exception objects. Preserve `project_name` and `version` in internal keys but never log arbitrary input.
 
-- [ ] **Step 5: Route validation through an anonymous pooled session without caching**
+- [ ] **Step 4: Wire and close only the update resource**
 
-Change `get_nav` to accept a session and remove its local `ClientSession` block:
+The update router uses the application-owned client. Application startup creates/starts it before serving the route; exit stops intake, cancels/awaits in-flight refresh tasks, then closes the owned session once. Restart constructs a fresh session and empty in-flight map while retaining no process-global cache.
+
+- [ ] **Step 5: Verify cache and static checks**
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/update/test_helpers.py tests/web/test_update_routes.py tests/test_application_outbound_lifecycle.py -q
+.venv/bin/python -m black --check src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/application.py src/blrec/web/routers/update.py tests/update/test_helpers.py tests/web/test_update_routes.py tests/test_application_outbound_lifecycle.py
+.venv/bin/python -m isort --check-only src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/application.py src/blrec/web/routers/update.py
+.venv/bin/python -m flake8 src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/application.py src/blrec/web/routers/update.py
+.venv/bin/python -m mypy src/blrec/update src/blrec/application.py src/blrec/web/routers/update.py
+```
+
+**Budget and invariants:** update request≤1 per project/30 minutes, in-flight per key=1, stale≤24 hours, refresh deadline≤10 seconds. No Bilibili request or credential path changes in this commit. Production/test file budget: 4/3.
+
+- [ ] **Step 6: Commit the update client**
+
+```bash
+git add src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/application.py src/blrec/web/routers/update.py tests/update/test_helpers.py tests/web/test_update_routes.py tests/test_application_outbound_lifecycle.py
+git commit -m "perf: cache update metadata"
+```
+
+---
+
+### Task 14: Pool cookie validation without caching credentials (O-15, P2)
+
+**Files:**
+- Modify: `src/blrec/bili/helpers.py`
+- Modify: `src/blrec/application.py`
+- Modify: `src/blrec/web/routers/validation.py`
+- Create: `tests/bili/test_helpers.py`
+- Create: `tests/web/test_validation_routes.py`
+- Modify: `tests/test_application_outbound_lifecycle.py`
+
+**Interfaces:**
+- `get_nav(cookie, session)` requires an application-owned anonymous Bilibili session and sends the cookie only in that request's explicit header.
+- `Application.validate_bili_cookie(cookie)` has injected `validation_timeout_seconds=10` (tests pass `0.01`) and cache TTL zero.
+- The request explicitly enables HTTP status raising even when the shared anonymous pool defaults to `raise_for_status=False`; 401/429/500 preserve the old helper/route error mapping.
+
+- [ ] **Step 1: Write failing transport, HTTP-semantics, and privacy tests**
+
+Make two sequential validations with distinct cookie sentinel strings. Assert the same connector/session is reused, the jar remains empty, upstream calls=2, and each request receives only its own explicit `Cookie` value. Use loopback 401, 429, and 500 responses and assert the same exception/route status mapping as the old dedicated `ClientSession(raise_for_status=True)`; no JSON success path may swallow these statuses.
+
+Inject `validation_timeout_seconds=0.01`, block the response, and assert the logical request is cancelled promptly. Capture logs, exceptions, and request metrics and assert neither sentinel occurs. Do not monkeypatch global `asyncio.wait_for`.
+
+- [ ] **Step 2: Run the focused red tests**
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py -q
+```
+
+Expected: each validation allocates a session, no whole-operation deadline exists, and directly swapping to the anonymous pool would change 401/429/500 handling.
+
+- [ ] **Step 3: Use the anonymous pool with a request-level status override**
+
+Change `get_nav` to accept a session and remove its local session block. Extend only the nav request boundary as needed so its underlying aiohttp request passes `raise_for_status=True`; do not change the anonymous pool default used by other callers.
 
 ```python
 async def get_nav(cookie: str, session: Any) -> ResponseData:
@@ -1489,37 +1583,39 @@ async def get_nav(cookie: str, session: Any) -> ResponseData:
         'Referer': 'https://passport.bilibili.com/account/security',
         'Cookie': cookie,
     }
-    return await WebApi(session, headers).get_nav()
+    return await WebApi(session, headers).get_nav(raise_for_status=True)
 ```
 
-`Application` returns `network_session_pool.client('bili_api', anonymous=True)` when routing is configured; otherwise it lazily owns a `DummyCookieJar` fallback session with the same ten-second timeout. `validate_bili_cookie` calls `await asyncio.wait_for(get_nav(cookie, session), 10)`. Do not write a cookie hash/cache/single-flight: two concurrent validations are two logical user requests, bounded only by the existing connector.
+Application obtains `network_session_pool.client('bili_api', anonymous=True)` when routing is configured; otherwise it lazily owns a `DummyCookieJar` fallback session. Wrap only this idempotent validation read with `asyncio.wait_for(..., timeout=self._validation_timeout_seconds)`. Do not add a cookie hash, cache, or single-flight: two concurrent user validations remain two logical requests under the existing connector bound.
 
-Update and validation routers call the application methods already injected through `web/main.py`. `_exit` closes the update client and only the owned fallback session; the network pool remains closed by its existing owner.
+- [ ] **Step 4: Preserve lifecycle ownership**
 
-- [ ] **Step 6: Verify cache separation, privacy, and static checks**
+The validation router calls the application method already injected through `web/main.py`. Exit closes only the owned fallback session; the network pool remains closed by its existing owner. Restart must not reuse the old fallback session or any credential state.
+
+- [ ] **Step 5: Verify HTTP semantics, privacy, and static checks**
 
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/update/test_helpers.py tests/web/test_update_routes.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py -q
-.venv/bin/python -m black --check src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/update.py src/blrec/web/routers/validation.py tests/update/test_helpers.py tests/web/test_update_routes.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py
-.venv/bin/python -m isort --check-only src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/update.py src/blrec/web/routers/validation.py
-.venv/bin/python -m flake8 src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/update.py src/blrec/web/routers/validation.py
-.venv/bin/python -m mypy src/blrec/update src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/update.py src/blrec/web/routers/validation.py
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py -q
+.venv/bin/python -m black --check src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/validation.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py
+.venv/bin/python -m isort --check-only src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/validation.py
+.venv/bin/python -m flake8 src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/validation.py
+.venv/bin/python -m mypy src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/validation.py
 ```
 
-**Budget and invariants:** update request≤1 per project/30 minutes, in-flight per key=1, stale≤24 hours, refresh deadline≤10 seconds. Cookie validation success=1 request per user action, deadline≤10 seconds, cache TTL=0, jar persistence=0, and secret-bearing log/metric fields=0. The anonymous Bilibili session keeps existing network-purpose selection; no upload route or cookie-bearing account session is reused. Production/test file budget: 6/5.
+**Budget and invariants:** validation success=1 nav request per user action, logical deadline≤10 seconds, cache TTL=0, jar persistence=0, and secret-bearing log/metric fields=0. HTTP 401/429/500 mapping is byte-for-byte compatible at the route response boundary. The anonymous Bilibili session keeps existing network-purpose selection; no upload route or cookie-bearing account session is reused. Production/test file budget: 3/3.
 
-- [ ] **Step 7: Commit the low-frequency clients**
+- [ ] **Step 6: Commit the validation transport separately**
 
 ```bash
-git add src/blrec/update/helpers.py src/blrec/update/api.py src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/update.py src/blrec/web/routers/validation.py tests/update/test_helpers.py tests/web/test_update_routes.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py
-git commit -m "perf: reuse low-frequency outbound clients"
+git add src/blrec/bili/helpers.py src/blrec/application.py src/blrec/web/routers/validation.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py
+git commit -m "perf: pool cookie validation transport"
 ```
 
 ---
 
-### Task 14: Run the cross-group request audit and update the ledger
+### Task 15: Run the cross-group request audit and update the ledger
 
 **Files:**
 - Modify: `docs/performance/request-audit.md`
@@ -1542,7 +1638,7 @@ Required evidence: completion calls after unknown/interrupted=0; danmaku posts a
 Run:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/bili_upload/test_protocol_matrix.py tests/bili_upload/test_archive_reads.py tests/bili_upload/test_review.py tests/bili_upload/test_collections.py tests/bili_upload/test_collection_publish.py tests/bili_upload/test_covers.py tests/core/test_cover_downloader.py tests/bili_upload/test_accounts.py tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_operational.py tests/webhook/test_webhook_emitter.py tests/update/test_helpers.py tests/web/test_update_routes.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py -q
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/control/test_operations.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/bili/test_live_stream_url.py tests/core/test_stream_request_reuse.py tests/core/test_hls_integrity_guards.py tests/bili_upload/test_protocol_matrix.py tests/bili_upload/test_archive_reads.py tests/bili_upload/test_review.py tests/bili_upload/test_collections.py tests/bili_upload/test_collection_publish.py tests/bili_upload/test_covers.py tests/core/test_cover_downloader.py tests/bili_upload/test_accounts.py tests/notification/test_dispatcher.py tests/notification/test_providers.py tests/notification/test_notifiers.py tests/notification/test_operational.py tests/web/test_main_lifecycle.py tests/webhook/test_webhook_emitter.py tests/update/test_helpers.py tests/web/test_update_routes.py tests/bili/test_helpers.py tests/web/test_validation_routes.py tests/test_application_outbound_lifecycle.py -q
 ```
 
 - [ ] **Step 3: Rerun preserved-group guards**
@@ -1565,10 +1661,10 @@ PYTHONPATH=src .venv/bin/python -m pytest -q
 .venv/bin/python -m isort --check-only src tests
 .venv/bin/python -m flake8 src
 .venv/bin/python -m mypy src/blrec
-cd webapp && npm test -- --watch=false --browsers=ChromeHeadless
-cd webapp && npx tsc --noEmit -p tsconfig.app.json
-cd webapp && npx ng lint
-cd webapp && npm run build
+(cd webapp && npm test -- --watch=false --browsers=ChromeHeadless)
+(cd webapp && npx tsc --noEmit -p tsconfig.app.json)
+(cd webapp && npx ng lint)
+(cd webapp && npm run build)
 ```
 
 The lint command may exit 1 only with the five baseline file/rule pairs listed above; compare exact output and reject any new warning/error. Every other command exits 0.
@@ -1579,7 +1675,7 @@ In `docs/performance/request-audit.md`:
 
 - Replace the I-057 finding with “status is local; one background poller is created per active subject/session.”
 - Replace the Review finding with “already grouped per account; shared archive page/detail snapshots remove cross-consumer duplication.”
-- Record Tasks 1–13's exact call-count/deadline/concurrency results beside the affected 18 group rows and 20 inbound trigger rows.
+- Record Tasks 1–14's exact call-count/deadline/concurrency results beside the affected 18 group rows and 20 inbound trigger rows.
 - Mark Room status, Danmaku WS, Comments, Categories core semantics, Network probe, HLS integrity, UPOS route/admission, and all remote-unknown fences as retained—not removed or sped up.
 - Cite test file/test name and fake/loopback fixture; do not claim NAS or live-Bilibili latency measurements.
 
@@ -1588,17 +1684,23 @@ In `docs/performance/request-audit.md`:
 Run:
 
 ```bash
-test "$(rg -c '^### Task [0-9]+:' docs/superpowers/plans/2026-07-20-outbound-request-performance.md)" -eq 14
-test "$(rg -c '^\| O-[0-9]{2}' docs/superpowers/plans/2026-07-20-outbound-request-performance.md)" -eq 13
+git ls-files --error-unmatch docs/performance/outbound-request-audit.md
+test "$(rg -c '^### Task [0-9]+:' docs/superpowers/plans/2026-07-20-outbound-request-performance.md)" -eq 15
+test "$(rg -c '^\| O-[0-9]{2}' docs/superpowers/plans/2026-07-20-outbound-request-performance.md)" -eq 14
 for id in $(seq -w 1 15); do rg -q "O-$id" docs/superpowers/plans/2026-07-20-outbound-request-performance.md; done
 for id in 011 018 019 022 023 026 027 030 036 042 045 056 057 059 076 078 083 084 099 102; do rg -q "I-$id" docs/superpowers/plans/2026-07-20-outbound-request-performance.md; done
 test "$(rg -c '^\| [0-9]+ \| [A-Z]' docs/superpowers/plans/2026-07-20-outbound-request-performance.md)" -eq 18
+rg -q '^\| I-104 \| GET \| `/api/v1/recording-sessions/\{session_id\}`' docs/performance/request-audit.md
+rg -q '^\| I-105 \| GET \| `/api/v1/highlights/sessions/\{session_id\}/marker-counts`' docs/performance/request-audit.md
+test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" -ge 105
 ! rg -n 'T[B]D|TO-[D]O|implement[ ]later|same[ ]as[ ]above|similar[ ]to' docs/superpowers/plans/2026-07-20-outbound-request-performance.md
+rg -q "target-version = \['py38'\]" pyproject.toml
+! rg -n 'asyncio\.(timeout|TaskGroup)|except\s*\*' src/blrec tests
 git diff --check
 git status --short
 ```
 
-The O-table has 13 rows because O-03/O-04 and O-14/O-15 are deliberately paired; the loop proves all 15 IDs are present. Before committing, inspect status and stage only the ledger.
+The O-table has 14 rows because only O-03/O-04 are deliberately paired; the loop proves all 15 IDs are present. The route ledger may exceed 105 after the prerequisite Write/media plan, but I-104 and I-105 must retain their current meanings and this plan must not allocate another inbound ID. Black runs with the repository's `py38` target, the mechanical guard rejects 3.11-only asyncio/exception syntax, and the normal CI/runtime matrix must still run on Python 3.8. Before committing, inspect status and stage only the ledger.
 
 **Budget and invariants:** this task makes zero outbound calls except loopback fakes and zero production-code changes. Completion requires 18/18 groups and 20/20 triggers accounted for, no higher cadence/concurrency, no upload-line change, no new lint errors, no leaked sessions/tasks, and no weakened unknown-outcome fence.
 
@@ -1626,4 +1728,4 @@ Before calling the implementation complete, answer every item with a test name a
 
 ## Implementation Completion Criteria
 
-The plan is complete only when all fourteen task commits exist in order, all verification commands pass under the documented lint baseline, `docs/performance/request-audit.md` contains evidence for all 18 groups and 20 triggers, and `git status --short` contains no unreviewed files from this work.
+The plan is complete only when all fifteen task commits exist in order, all verification commands pass under the documented lint baseline, `docs/performance/request-audit.md` contains evidence for all 18 groups and 20 triggers, `docs/performance/outbound-request-audit.md` is tracked, and `git status --short` contains no unreviewed files from this work.
