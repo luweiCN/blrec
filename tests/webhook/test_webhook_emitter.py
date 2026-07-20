@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections import defaultdict, deque
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
@@ -77,6 +78,32 @@ class _Session:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+class _BlockingCloseSession(_Session):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_started = asyncio.Event()
+        self.close_release = asyncio.Event()
+        self.closed = False
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        await self.close_release.wait()
+        self.closed = True
+
+
+class _FlakyCloseSession(_Session):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_calls == 1:
+            raise OSError('first close failed')
+        self.closed = True
 
 
 async def _wait_until(predicate: Any) -> None:
@@ -160,6 +187,7 @@ async def test_only_transient_failures_retry_and_attempts_stop_at_three() -> Non
                 _http_error(503),
             ],
             'https://transport.invalid': [OSError('secret payload'), None],
+            'invalid-url': [aiohttp.InvalidURL('invalid-url')],
         }
     )
     emitter = WebHookEmitter(
@@ -180,6 +208,7 @@ async def test_only_transient_failures_retry_and_attempts_stop_at_three() -> Non
         'https://rate.invalid': 2,
         'https://server.invalid': 3,
         'https://transport.invalid': 2,
+        'invalid-url': 1,
     }
 
 
@@ -203,6 +232,79 @@ async def test_close_cancels_blocked_delivery_and_rejects_new_work() -> None:
     assert not emitter._send_request(
         'https://private.invalid/path', {'token': 'secret'}
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_waiter_still_waits_for_session_close() -> None:
+    session = _BlockingCloseSession()
+    emitter = WebHookEmitter(session_factory=lambda **_kwargs: session)
+    await emitter.start()
+
+    close = asyncio.create_task(emitter.close(drain_timeout_seconds=1))
+    await session.close_started.wait()
+    close.cancel()
+    await asyncio.sleep(0)
+
+    assert not close.done()
+    assert emitter._session is session
+
+    session.close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close
+
+    assert session.closed
+    assert emitter._session is None
+    await emitter.close(drain_timeout_seconds=1)
+    assert session.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_session_close_keeps_reference_for_retry() -> None:
+    session = _FlakyCloseSession()
+    emitter = WebHookEmitter(session_factory=lambda **_kwargs: session)
+    await emitter.start()
+
+    with pytest.raises(OSError, match='first close failed'):
+        await emitter.close(drain_timeout_seconds=1)
+
+    assert emitter._session is session
+    assert not session.closed
+
+    await emitter.close(drain_timeout_seconds=1)
+
+    assert session.closed
+    assert session.close_calls == 2
+    assert emitter._session is None
+
+
+@pytest.mark.asyncio
+async def test_cross_thread_admission_reserves_capacity_before_close() -> None:
+    session = _Session()
+    emitter = WebHookEmitter(
+        session_factory=lambda **_kwargs: session,
+        capacity=100,
+        sleeper=lambda _delay: asyncio.sleep(0),
+    )
+    await emitter.start()
+    accepted: List[bool] = []
+
+    def submit() -> None:
+        for index in range(101):
+            accepted.append(
+                emitter._send_request('https://thread.invalid/hook', {'index': index})
+            )
+
+    thread = threading.Thread(target=submit)
+    thread.start()
+    thread.join()
+
+    await emitter.close(drain_timeout_seconds=1)
+
+    assert accepted == [True] * 100 + [False]
+    assert [payload['index'] for _url, payload in session.calls] == list(range(100))
+    assert emitter.pending_count == 0
+    assert emitter.rejected_count == 1
+    assert session.close_calls == 1
 
 
 @pytest.mark.asyncio

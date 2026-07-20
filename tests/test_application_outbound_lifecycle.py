@@ -24,6 +24,18 @@ class _Emitter:
         self._calls.append('webhook.close')
 
 
+class _FailingCloseEmitter(_Emitter):
+    def __init__(self, calls: List[str]) -> None:
+        super().__init__(calls)
+        self._close_calls = 0
+
+    async def close(self, *, drain_timeout_seconds: float = 5) -> None:
+        await super().close(drain_timeout_seconds=drain_timeout_seconds)
+        self._close_calls += 1
+        if self._close_calls == 1:
+            raise OSError('session close failed')
+
+
 class _TaskManager:
     def __init__(self, calls: List[str]) -> None:
         self._calls = calls
@@ -82,6 +94,29 @@ async def test_exit_disables_webhooks_before_drain_and_deletes_emitter() -> None
         'application.destroy',
     ]
     assert not hasattr(app, '_webhook_emitter')
+
+
+@pytest.mark.asyncio
+async def test_failed_webhook_close_keeps_emitter_for_retry() -> None:
+    calls: List[str] = []
+    app = object.__new__(Application)
+    emitter = _FailingCloseEmitter(calls)
+    app._webhook_emitter = emitter
+
+    with pytest.raises(OSError, match='session close failed'):
+        await app._teardown_webhooks()
+
+    assert app._webhook_emitter is emitter
+
+    await app._teardown_webhooks()
+
+    assert not hasattr(app, '_webhook_emitter')
+    assert calls == [
+        'webhook.disable',
+        'webhook.close',
+        'webhook.disable',
+        'webhook.close',
+    ]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set
@@ -60,6 +61,9 @@ class WebHookEmitter(SwitchableMixin):
         self._session: Optional[Any] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._slots: Optional[asyncio.Semaphore] = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._admission_lock = threading.Lock()
+        self._close_task: Optional[asyncio.Task[None]] = None
         self._queues: Dict[str, Deque[_Delivery]] = {}
         self._active_urls: Set[str] = set()
         self._workers: Set[asyncio.Task[Any]] = set()
@@ -70,58 +74,115 @@ class WebHookEmitter(SwitchableMixin):
 
     @property
     def pending_count(self) -> int:
-        return self._pending_count
+        with self._admission_lock:
+            return self._pending_count
 
     @property
     def rejected_count(self) -> int:
-        return self._rejected_count
+        with self._admission_lock:
+            return self._rejected_count
 
     @property
     def failed_count(self) -> int:
-        return self._failed_count
+        with self._admission_lock:
+            return self._failed_count
 
     @property
     def worker_count(self) -> int:
         return len(self._workers)
 
     async def start(self) -> None:
-        if self._session is not None:
-            return
-        self._loop = asyncio.get_running_loop()
-        self._slots = asyncio.Semaphore(self._concurrency)
-        self._session = self._session_factory(
-            headers=self.headers, cookie_jar=aiohttp.DummyCookieJar()
-        )
-        self._accepting = True
+        while True:
+            async with self._lifecycle_lock:
+                close_task = self._close_task
+                if close_task is None:
+                    if self._session is not None:
+                        return
+                    loop = asyncio.get_running_loop()
+                    slots = asyncio.Semaphore(self._concurrency)
+                    session = self._session_factory(
+                        headers=self.headers, cookie_jar=aiohttp.DummyCookieJar()
+                    )
+                    self._loop = loop
+                    self._slots = slots
+                    self._session = session
+                    with self._admission_lock:
+                        self._accepting = True
+                    return
+            try:
+                await asyncio.shield(close_task)
+            finally:
+                await self._forget_close_task(close_task)
 
     async def close(self, *, drain_timeout_seconds: float = 5) -> None:
         if drain_timeout_seconds < 0:
             raise ValueError('webhook drain timeout must not be negative')
-        self._accepting = False
-        workers = tuple(self._workers)
+        with self._admission_lock:
+            self._accepting = False
+        async with self._lifecycle_lock:
+            close_task = self._close_task
+            if close_task is None:
+                session = self._session
+                if session is None:
+                    self._loop = None
+                    self._slots = None
+                    return
+                close_task = asyncio.create_task(
+                    self._close_owned(session, drain_timeout_seconds)
+                )
+                self._close_task = close_task
+        cancelled = False
         try:
-            if workers:
-                group = asyncio.gather(*workers, return_exceptions=True)
+            while True:
                 try:
-                    await asyncio.wait_for(group, timeout=drain_timeout_seconds)
-                except asyncio.TimeoutError:
-                    for worker in workers:
-                        worker.cancel()
-                    await asyncio.gather(*workers, return_exceptions=True)
+                    await asyncio.shield(close_task)
+                    break
+                except asyncio.CancelledError:
+                    if close_task.done():
+                        close_task.result()
+                        raise
+                    cancelled = True
         finally:
-            for queue in self._queues.values():
-                self._pending_count -= len(queue)
-                queue.clear()
-            self._queues.clear()
-            self._active_urls.clear()
-            self._workers.clear()
-            self._pending_count = 0
-            session = self._session
+            await self._forget_close_task(close_task)
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _close_owned(self, session: Any, drain_timeout_seconds: float) -> None:
+        loop = self._loop
+        if loop is not None:
+            flushed = loop.create_future()
+            loop.call_soon(flushed.set_result, None)
+            await flushed
+        workers = tuple(self._workers)
+        if workers:
+            group = asyncio.gather(*workers, return_exceptions=True)
+            try:
+                await asyncio.wait_for(group, timeout=drain_timeout_seconds)
+            except asyncio.TimeoutError:
+                for worker in workers:
+                    worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+        remaining = 0
+        for queue in self._queues.values():
+            remaining += len(queue)
+            queue.clear()
+        self._queues.clear()
+        self._active_urls.clear()
+        self._workers.clear()
+        if remaining:
+            self._release_pending(remaining)
+        await session.close()
+        if self._session is session:
             self._session = None
             self._slots = None
             self._loop = None
-            if session is not None:
-                await session.close()
+
+    async def _forget_close_task(self, task: asyncio.Task[None]) -> None:
+        if not task.done():
+            return
+        async with self._lifecycle_lock:
+            if self._close_task is task:
+                self._close_task = None
 
     def _do_enable(self) -> None:
         events = EventCenter.get_instance().events
@@ -151,36 +212,54 @@ class WebHookEmitter(SwitchableMixin):
         self._send_request(url, payload)
 
     def _send_request(self, url: str, payload: Dict[str, Any]) -> bool:
-        loop = self._loop
-        if not self._accepting or loop is None or not loop.is_running():
-            self._rejected_count += 1
-            return False
         current_loop: Optional[asyncio.AbstractEventLoop]
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             current_loop = None
+        with self._admission_lock:
+            loop = self._loop
+            if (
+                not self._accepting
+                or loop is None
+                or not loop.is_running()
+                or loop.is_closed()
+            ):
+                self._rejected_count += 1
+                return False
+            if self._pending_count >= self._capacity:
+                self._rejected_count += 1
+                return False
+            self._pending_count += 1
+            if current_loop is not loop:
+                try:
+                    loop.call_soon_threadsafe(self._enqueue_reserved, url, payload)
+                except RuntimeError:
+                    self._pending_count -= 1
+                    self._rejected_count += 1
+                    return False
+                return True
         if current_loop is loop:
-            return self._enqueue(url, payload)
-        loop.call_soon_threadsafe(self._enqueue, url, payload)
+            self._enqueue_reserved(url, payload)
         return True
 
-    def _enqueue(self, url: str, payload: Dict[str, Any]) -> bool:
-        if not self._accepting or self._session is None:
-            self._rejected_count += 1
-            return False
-        if self._pending_count >= self._capacity:
-            self._rejected_count += 1
-            return False
+    def _enqueue_reserved(self, url: str, payload: Dict[str, Any]) -> None:
+        if self._session is None:
+            self._release_pending(1, rejected=True)
+            return
         queue = self._queues.setdefault(url, deque())
         queue.append(_Delivery(payload))
-        self._pending_count += 1
         if url not in self._active_urls:
             self._active_urls.add(url)
             worker = asyncio.create_task(self._run_url(url))
             self._workers.add(worker)
             worker.add_done_callback(self._workers.discard)
-        return True
+
+    def _release_pending(self, count: int, *, rejected: bool = False) -> None:
+        with self._admission_lock:
+            self._pending_count -= count
+            if rejected:
+                self._rejected_count += count
 
     async def _run_url(self, url: str) -> None:
         queue = self._queues[url]
@@ -196,12 +275,12 @@ class WebHookEmitter(SwitchableMixin):
                 finally:
                     if queue and queue[0] is delivery:
                         queue.popleft()
-                        self._pending_count -= 1
+                        self._release_pending(1)
         finally:
             remaining = len(queue)
             if remaining:
                 queue.clear()
-                self._pending_count -= remaining
+                self._release_pending(remaining)
             self._queues.pop(url, None)
             self._active_urls.discard(url)
 
@@ -239,7 +318,8 @@ class WebHookEmitter(SwitchableMixin):
                 raise
             except asyncio.TimeoutError:
                 break
-        self._failed_count += 1
+        with self._admission_lock:
+            self._failed_count += 1
         error_name = 'deadline' if last_error is None else type(last_error).__name__
         logger.warning(
             'Webhook delivery failed after {} attempt(s): {}', attempt, error_name
@@ -257,4 +337,6 @@ class WebHookEmitter(SwitchableMixin):
     def _is_transient(error: BaseException) -> bool:
         if isinstance(error, aiohttp.ClientResponseError):
             return error.status == 429 or error.status >= 500
-        return isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError, OSError))
+        return isinstance(
+            error, (aiohttp.ClientConnectionError, asyncio.TimeoutError, OSError)
+        )

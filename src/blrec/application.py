@@ -679,9 +679,13 @@ class Application:
             emitter.disable()
         except BaseException as error:
             errors.append(error)
-        await _collect_teardown_error(emitter.close(drain_timeout_seconds=5), errors)
-        if getattr(self, '_webhook_emitter', None) is emitter:
-            del self._webhook_emitter
+        try:
+            await emitter.close(drain_timeout_seconds=5)
+        except BaseException as error:
+            errors.append(error)
+        else:
+            if getattr(self, '_webhook_emitter', None) is emitter:
+                del self._webhook_emitter
         _raise_teardown_errors(errors)
 
     def _destroy(self) -> None:
