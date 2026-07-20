@@ -50,6 +50,72 @@ def command(*, account_mode: str = 'primary', account_id=None, **overrides):
     return RoomUploadPolicyCommand(**values)
 
 
+def track_database_reads(database: BiliUploadDatabase, monkeypatch):
+    calls = {'fetchall': 0, 'fetchone': 0}
+    fetchall = database.fetchall
+    fetchone = database.fetchone
+
+    async def tracked_fetchall(*args, **kwargs):
+        calls['fetchall'] += 1
+        return await fetchall(*args, **kwargs)
+
+    async def tracked_fetchone(*args, **kwargs):
+        calls['fetchone'] += 1
+        return await fetchone(*args, **kwargs)
+
+    monkeypatch.setattr(database, 'fetchall', tracked_fetchall)
+    monkeypatch.setattr(database, 'fetchone', tracked_fetchone)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('policy_count', (1, 20, 100))
+async def test_policy_list_resolves_accounts_with_constant_query_budget(
+    tmp_path: Path, monkeypatch, policy_count: int
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+        await manager.upsert(1, command())
+        for room_id in range(2, policy_count + 1):
+            await manager.upsert(room_id, command(account_mode='fixed', account_id=2))
+        calls = track_database_reads(database, monkeypatch)
+
+        policies = await manager.list()
+
+        assert len(policies) == policy_count
+        assert policies[0].resolved_account_name == '账号1'
+        assert policies[-1].resolved_account_name == (
+            '账号1' if policy_count == 1 else '账号2'
+        )
+        assert calls == {'fetchall': 1, 'fetchone': 0}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_policy_get_resolves_account_with_one_query(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+        await manager.upsert(100, command(account_mode='fixed', account_id=2))
+        calls = track_database_reads(database, monkeypatch)
+
+        policy = await manager.get(100)
+
+        assert policy.resolved_account_id == 2
+        assert policy.resolved_account_name == '账号2'
+        assert calls == {'fetchall': 0, 'fetchone': 1}
+    finally:
+        await database.close()
+
+
 @pytest.mark.asyncio
 async def test_primary_policy_follows_primary_account_until_job_creation(
     tmp_path: Path,
@@ -93,6 +159,84 @@ async def test_fixed_policy_stays_bound_to_selected_account(tmp_path: Path) -> N
         assert policy.account_id == 2
         assert policy.resolved_account_id == 2
         assert policy.resolved_account_name == '账号2'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_primary_policy_remains_visible_without_a_primary_selection(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+        await manager.upsert(100, command())
+        await database.execute('DELETE FROM bili_account_selection WHERE id=1')
+
+        listed = (await manager.list())[0]
+        fetched = await manager.get(100)
+
+        for policy in (listed, fetched):
+            assert policy.resolved_account_id is None
+            assert policy.resolved_account_name is None
+            assert policy.blocked_reason == '未找到可用的投稿账号'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('account_mode', 'account_id', 'resolved_account_id', 'state'),
+    (('primary', None, 1, 'paused'), ('fixed', 2, 2, 'archived')),
+)
+async def test_policy_keeps_resolved_account_identity_when_account_becomes_unavailable(
+    tmp_path: Path, account_mode: str, account_id, resolved_account_id: int, state: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+        await manager.upsert(
+            100, command(account_mode=account_mode, account_id=account_id)
+        )
+        await database.execute(
+            'UPDATE bili_accounts SET state=? WHERE id=?', (state, resolved_account_id)
+        )
+
+        policy = await manager.get(100)
+
+        assert policy.resolved_account_id == resolved_account_id
+        assert policy.resolved_account_name == '账号{}'.format(resolved_account_id)
+        assert policy.blocked_reason == '投稿账号当前不可用'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('filter_json', ('{', '[]'))
+async def test_corrupt_policy_filters_take_precedence_over_account_state(
+    tmp_path: Path, filter_json: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        manager = RoomUploadPolicyManager(database, clock=lambda: 1000)
+        await manager.upsert(100, command(account_mode='fixed', account_id=2))
+        await database.execute("UPDATE bili_accounts SET state='paused' WHERE id=2")
+        await database.execute(
+            'UPDATE room_upload_policies SET filter_json=? WHERE room_id=100',
+            (filter_json,),
+        )
+
+        policy = await manager.get(100)
+
+        assert policy.resolved_account_id == 2
+        assert policy.filters == {}
+        assert policy.blocked_reason == '过滤设置损坏'
     finally:
         await database.close()
 

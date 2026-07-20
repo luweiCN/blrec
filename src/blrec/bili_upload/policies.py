@@ -28,6 +28,31 @@ class RoomUploadPolicyNotFound(RuntimeError):
     pass
 
 
+_ROOM_UPLOAD_POLICY_SELECT = (
+    'SELECT policy.room_id,policy.account_mode,policy.account_id,policy.enabled,'
+    'policy.title_template,policy.description_template,policy.part_title_template,'
+    'policy.dynamic_template,policy.tid,policy.tags,'
+    'policy.creation_statement_id,policy.original_authorization,policy.copyright,'
+    'policy.source,policy.is_only_self,policy.publish_dynamic,policy.no_reprint,'
+    'policy.up_selection_reply,policy.up_close_reply,policy.up_close_danmu,'
+    'policy.auto_comment,policy.danmaku_backfill,policy.filter_json,'
+    'policy.created_at,policy.updated_at,policy.collection_season_id,'
+    'policy.collection_section_id,policy.cover_mode,policy.cover_asset_id,'
+    'policy.publish_delay_seconds,policy.retention_mode,policy.retention_days,'
+    "CASE WHEN policy.account_mode='primary' THEN primary_account.id "
+    'ELSE fixed_account.id END AS resolved_account_id,'
+    "CASE WHEN policy.account_mode='primary' THEN primary_account.display_name "
+    'ELSE fixed_account.display_name END AS resolved_account_name,'
+    "CASE WHEN policy.account_mode='primary' THEN primary_account.state "
+    'ELSE fixed_account.state END AS resolved_account_state '
+    'FROM room_upload_policies policy '
+    'LEFT JOIN bili_account_selection selection ON selection.id=1 '
+    'LEFT JOIN bili_accounts primary_account '
+    'ON primary_account.id=selection.primary_account_id '
+    'LEFT JOIN bili_accounts fixed_account ON fixed_account.id=policy.account_id'
+)
+
+
 @dataclass(frozen=True)
 class RoomUploadPolicyCommand:
     account_mode: str
@@ -179,34 +204,17 @@ class RoomUploadPolicyManager:
 
     async def list(self) -> List[RoomUploadPolicyView]:
         rows = await self._database.fetchall(
-            'SELECT room_id,account_mode,account_id,enabled,title_template,'
-            'description_template,part_title_template,dynamic_template,tid,tags,'
-            'creation_statement_id,original_authorization,copyright,source,'
-            'is_only_self,publish_dynamic,no_reprint,'
-            'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
-            'danmaku_backfill,filter_json,created_at,updated_at,'
-            'collection_season_id,collection_section_id,cover_mode,'
-            'cover_asset_id,publish_delay_seconds,retention_mode,retention_days '
-            'FROM room_upload_policies ORDER BY room_id'
+            _ROOM_UPLOAD_POLICY_SELECT + ' ORDER BY policy.room_id'
         )
-        return [await self._view(row) for row in rows]
+        return [self._view(row) for row in rows]
 
     async def get(self, room_id: int) -> RoomUploadPolicyView:
         row = await self._database.fetchone(
-            'SELECT room_id,account_mode,account_id,enabled,title_template,'
-            'description_template,part_title_template,dynamic_template,tid,tags,'
-            'creation_statement_id,original_authorization,copyright,source,'
-            'is_only_self,publish_dynamic,no_reprint,'
-            'up_selection_reply,up_close_reply,up_close_danmu,auto_comment,'
-            'danmaku_backfill,filter_json,created_at,updated_at,'
-            'collection_season_id,collection_section_id,cover_mode,'
-            'cover_asset_id,publish_delay_seconds,retention_mode,retention_days '
-            'FROM room_upload_policies WHERE room_id=?',
-            (room_id,),
+            _ROOM_UPLOAD_POLICY_SELECT + ' WHERE policy.room_id=?', (room_id,)
         )
         if row is None:
             raise RoomUploadPolicyNotFound('room upload policy not found')
-        return await self._view(row)
+        return self._view(row)
 
     async def upsert(
         self, room_id: int, command: RoomUploadPolicyCommand
@@ -432,31 +440,27 @@ class RoomUploadPolicyManager:
         if exists != 1:
             raise InvalidRoomUploadPolicy('custom cover asset was not found')
 
-    async def _view(self, row: Any) -> RoomUploadPolicyView:
+    def _view(self, row: Any) -> RoomUploadPolicyView:
         account_mode = str(row['account_mode'])
         account_id = None if row['account_id'] is None else int(row['account_id'])
-        if account_mode == 'primary':
-            account = await self._database.fetchone(
-                'SELECT account.id,account.display_name,account.state '
-                'FROM bili_account_selection selection '
-                'JOIN bili_accounts account '
-                'ON account.id=selection.primary_account_id WHERE selection.id=1'
-            )
-        else:
-            account = await self._database.fetchone(
-                'SELECT id,display_name,state FROM bili_accounts WHERE id=?',
-                (account_id,),
-            )
+        resolved_account_id = (
+            None
+            if row['resolved_account_id'] is None
+            else int(row['resolved_account_id'])
+        )
+        resolved_account_name = (
+            None
+            if row['resolved_account_name'] is None
+            else str(row['resolved_account_name'])
+        )
         blocked_reason: Optional[str]
-        if account is None:
-            resolved_account_id = None
-            resolved_account_name = None
+        if resolved_account_id is None:
             blocked_reason = '未找到可用的投稿账号'
         else:
-            resolved_account_id = int(account['id'])
-            resolved_account_name = str(account['display_name'])
             blocked_reason = (
-                None if str(account['state']) == 'active' else '投稿账号当前不可用'
+                None
+                if str(row['resolved_account_state']) == 'active'
+                else '投稿账号当前不可用'
             )
         try:
             filters = json.loads(str(row['filter_json']))
