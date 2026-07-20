@@ -1236,12 +1236,13 @@ class UploadTaskActionManager:
                 await self._finish_repair(claim, failed, healthy_cids, repair_modes)
         except DefinitelyNotSent:
             if edit_started:
-                active = await self._settle_edit_failure(
-                    claim, outcome_state='confirmed_failure'
+                await self._finish_edit_failure(
+                    claim,
+                    reason='稿件编辑请求未发出，可以重新尝试',
+                    outcome_state='confirmed_failure',
                 )
-                if not active:
-                    return
-            await self._fail_repair(claim, '稿件编辑请求未发出，可以重新尝试')
+            else:
+                await self._fail_repair(claim, '稿件编辑请求未发出，可以重新尝试')
         except RemoteOutcomeUnknown:
             if edit_started:
                 await self._unknown_repair(claim)
@@ -1257,14 +1258,15 @@ class UploadTaskActionManager:
             await self._fail_repair(claim, str(error))
         except BiliApiError as error:
             if edit_started:
-                active = await self._settle_edit_failure(
-                    claim, outcome_state='confirmed_failure'
+                await self._finish_edit_failure(
+                    claim,
+                    reason='B 站接口拒绝转码修复请求（{}）'.format(error.code),
+                    outcome_state='confirmed_failure',
                 )
-                if not active:
-                    return
-            await self._fail_repair(
-                claim, 'B 站接口拒绝转码修复请求（{}）'.format(error.code)
-            )
+            else:
+                await self._fail_repair(
+                    claim, 'B 站接口拒绝转码修复请求（{}）'.format(error.code)
+                )
         except LeaseLost:
             await self._cancel_deleted_claim(claim)
         except _RepairDeletionRequested:
@@ -1513,9 +1515,9 @@ class UploadTaskActionManager:
         except asyncio.CancelledError:
             return await request
 
-    async def _settle_edit_failure(
-        self, claim: LeaseClaim, *, outcome_state: str
-    ) -> bool:
+    async def _finish_edit_failure(
+        self, claim: LeaseClaim, *, reason: str, outcome_state: str
+    ) -> None:
         now = int(self._clock())
 
         def settle(connection: sqlite3.Connection) -> bool:
@@ -1525,6 +1527,31 @@ class UploadTaskActionManager:
                     "AND owner_id=? AND side_effect_key='archive_edit' "
                     'AND source_generation=?',
                     (claim.id, self._repair_source_generation(claim)),
+                )
+                cursor = connection.execute(
+                    "UPDATE upload_jobs SET repair_state='failed',"
+                    'repair_message=NULL,repair_error=?,repair_completed_at=?,'
+                    'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? '
+                    'AND lease_owner=? AND lease_generation=?',
+                    (
+                        reason[:500],
+                        now,
+                        now,
+                        claim.id,
+                        claim.lease_owner,
+                        claim.lease_generation,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLost('转码修复任务租约已失效')
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+                    'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+                    (
+                        claim.id,
+                        self._repair_lease_key(claim),
+                        self._repair_source_generation(claim),
+                    ),
                 )
                 return True
             self._ack_repair_intent(
@@ -1537,7 +1564,14 @@ class UploadTaskActionManager:
             self._release_deleted_claim(connection, claim, now=now)
             return False
 
-        return await self._database.write(settle)
+        active = await self._database.write(settle)
+        audit(
+            'transcode_repair_failed',
+            level='ERROR',
+            job_id=claim.id,
+            reason=reason[:500],
+            result='failed' if active else outcome_state,
+        )
 
     async def _inspect_remote(
         self, job: _RepairJob, response: Mapping[str, Any]
