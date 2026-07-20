@@ -18,6 +18,28 @@
 - Write a failing regression test before each behavior change.
 - Each task must be independently reviewable and committed before the next dependent task begins.
 
+### Accepted frontend lint baseline
+
+The checked frontend verification steps below are evaluated against an explicitly
+accepted starting-SHA `57361f7` baseline from `npx ng lint`: exit 1 with exactly
+five errors and zero warnings.
+
+- `webapp/src/app/page-not-found/page-not-found.component.ts`:
+  `@angular-eslint/no-empty-lifecycle-method`.
+- `webapp/src/app/tasks/task-detail/task-postprocessing-detail/task-postprocessing-detail.component.ts`:
+  `@angular-eslint/no-empty-lifecycle-method`.
+- `webapp/src/app/tasks/task-detail/task-room-info-detail/task-room-info-detail.component.ts`:
+  `@angular-eslint/no-empty-lifecycle-method`.
+- `webapp/src/app/tasks/task-detail/task-user-info-detail/task-user-info-detail.component.ts`:
+  `@angular-eslint/no-empty-lifecycle-method`.
+- `webapp/src/app/tasks/info-panel/info-panel.component.ts`:
+  `@angular-eslint/no-output-native`.
+
+For this already-completed foundation, a full-lint gate passes only when its output
+matches those five file/rule pairs exactly and adds no errors or warnings. It does
+not mean that `npx ng lint` exits 0. Focused tests, TypeScript compilation, and the
+production build must still exit 0.
+
 ---
 
 ### Task 1: Request performance context and ASGI middleware
@@ -501,7 +523,9 @@ npx ng lint
 npx tsc --noEmit -p tsconfig.app.json
 ```
 
-Expected: all commands pass.
+Expected: the focused tests and TypeScript compilation exit 0. Full `ng lint`
+exits 1 with exactly the five accepted file/rule pairs above, zero warnings, and no
+error in a file changed by this task.
 
 - [x] **Step 6: Commit**
 
@@ -538,7 +562,7 @@ mypy src/blrec
 
 Expected: all tests and checks pass.
 
-- [x] **Step 3: Run frontend verification and production build**
+- [x] **Step 3: Run frontend verification against the locked lint baseline**
 
 Run:
 
@@ -549,7 +573,10 @@ npx ng lint
 npm run build
 ```
 
-Expected: tests, lint, and build pass; only previously accepted bundle/style warnings may remain.
+Expected: tests and build exit 0. Full `ng lint` exits 1 and reproduces exactly the
+five accepted starting-SHA file/rule pairs above with zero warnings; this gate does
+not claim a clean lint exit. Only previously accepted bundle/style build warnings
+may remain.
 
 - [x] **Step 4: Re-run the baseline harness**
 

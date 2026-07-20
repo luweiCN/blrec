@@ -16,12 +16,19 @@
 - Do not change upload, review, comment, danmaku, room-status, or stream polling frequency.
 - Do not expose local media paths, credentials, query values, or concrete account identifiers in logs or performance fixtures.
 - Preserve existing list filters, sort order, display states, available actions, realtime progress merge behavior, detail drawers, and route URLs.
-- Preserve full recording/upload diagnostics in the detail response; the list deliberately omits paths, per-part upload rows, unknown danmaku items, policy JSON, and submission-verification JSON.
+- Preserve full recording/upload and clip diagnostics in detail responses; list
+  summaries deliberately omit paths, source ranges, per-part upload rows, unknown
+  danmaku items, policy JSON, and submission-verification JSON.
 - Write the failing test before each behavior change. Do not add FTS while the `%LIKE%` search remains within budget.
 - A 20-row recording/upload list uses at most two business-database calls (count plus summary query), performs zero `exists`, `stat`, `getsize`, or directory calls, and has warm NAS p95 below 150 ms.
 - Policy list query count is constant and at most one business-database call.
-- Retention status uses one aggregate database call and zero per-recording filesystem calls; warm p95 is below 100 ms.
+- Retention status uses one status-only aggregate database call and zero
+  per-recording filesystem calls; warm p95 is below 100 ms. Capacity cleanup keeps
+  its existing real-filesystem accounting.
 - Highlight marker counts use at most two database calls and no full timeline/path projection; warm p95 is below 100 ms.
+- A 20- or 100-row clip-library page uses exactly two business-database calls and
+  zero list-time file calls. New/recovered sizes are persisted; an unmeasured legacy
+  size remains nullable/unknown until the bounded worker-start backfill records it.
 - Ordinary detail GETs remain below 100 ms excluding media/probe work.
 - Filtering, pagination, and explicit refresh have one active HTTP request; an older response cannot overwrite newer criteria.
 - A realtime update for one upload job changes one row input identity and does not rebuild the other 19 row view models.
@@ -33,24 +40,45 @@
 - `src/blrec/bili_upload/journal.py`: typed recording/upload summary projections and the existing full detail projection.
 - `src/blrec/web/routers/recording_sessions.py`: summary response, new detail endpoint, and response mapping.
 - `src/blrec/bili_upload/policies.py`: one-query policy/account resolution.
-- `src/blrec/bili_upload/retention.py`: persisted-size aggregate for status.
-- `src/blrec/bili_upload/highlights.py`: lightweight per-part marker counts.
-- `src/blrec/web/routers/highlights.py`: marker-count response endpoint.
-- `src/blrec/bili_upload/migrations/0024_initial.sql`: read-path indexes proven by `EXPLAIN QUERY PLAN`.
-- `src/blrec/bili_upload/database.py`: migration version 24.
+- `src/blrec/bili_upload/retention.py`: status-only persisted-size aggregate while
+  cleanup retains real-filesystem accounting.
+- `src/blrec/bili_upload/highlights.py`: lightweight per-part marker counts, clip
+  summaries, and unchanged full clip details.
+- `src/blrec/bili_upload/highlight_worker.py`: new/recovered clip-size persistence
+  and the bounded legacy-size backfill.
+- `src/blrec/bili_upload/runtime.py`: one bounded legacy-size backfill call at the
+  highlight-worker startup boundary.
+- `src/blrec/web/routers/highlights.py`: marker-count and clip-summary response
+  endpoints plus unchanged full detail response.
+- `src/blrec/bili_upload/migrations/0024_initial.sql`: nullable persisted clip-size
+  column, owned only by Task 5.
+- `src/blrec/bili_upload/migrations/0025_initial.sql`: read-path indexes proven by
+  `EXPLAIN QUERY PLAN`, owned only by Task 6.
+- `src/blrec/bili_upload/database.py`: migration 24 bump in Task 5 and final
+  migration version 25 in Task 6.
 - `tests/bili_upload/test_journal.py`, `tests/web/test_recording_sessions_routes.py`: list budgets and summary/detail contracts.
 - `tests/bili_upload/test_policies.py`: policy list query budget.
 - `tests/bili_upload/test_retention.py`, `tests/web/test_recording_retention_routes.py`: status aggregate and route contract.
-- `tests/bili_upload/test_highlights.py`, `tests/web/test_highlights_routes.py`: marker-count correctness and budget.
-- `tests/bili_upload/test_database.py`: migration/index and query-plan evidence.
+- `tests/bili_upload/test_highlights.py`, `tests/web/test_highlights_routes.py`:
+  marker-count correctness plus clip summary/detail and file/query budgets.
+- `tests/bili_upload/test_highlight_worker.py`,
+  `tests/bili_upload/test_account_runtime.py`: clip-size persistence, recovery, and
+  bounded startup backfill.
+- `tests/bili_upload/test_database.py`: migrations 24/25, persisted-size column,
+  indexes, and query-plan evidence.
 - `webapp/src/app/upload-tasks/shared/recording-session.model.ts`: summary/detail TypeScript contracts.
 - `webapp/src/app/upload-tasks/shared/recording-session.service.ts`: list/detail requests.
-- `webapp/src/app/upload-tasks/shared/highlight.model.ts`, `highlight.service.ts`: marker-count contract and request.
+- `webapp/src/app/upload-tasks/shared/highlight.model.ts`, `highlight.service.ts`:
+  marker-count, clip-summary, and full clip-detail contracts and requests.
 - `webapp/src/app/upload-tasks/recording-sessions/recording-sessions.component.*`: cancellable list/detail orchestration and OnPush parent.
 - `webapp/src/app/upload-tasks/recording-sessions/recording-session-row.component.*`: isolated OnPush row rendering.
+- `webapp/src/app/upload-tasks/clip-library/clip-library.component.*`: clip summary
+  consumption and explicit unknown-size rendering.
 - `webapp/src/app/upload-tasks/clip-library/clip-library.module.ts`, `clip-library-routing.module.ts`: clip-library lazy boundary.
 - `webapp/src/app/upload-tasks/highlight-editor/highlight-editor.module.ts`, `highlight-editor-routing.module.ts`: editor lazy boundary.
-- `webapp/src/app/upload-tasks/part-video-dialog/part-player.loader.ts`: open-action dynamic boundary for the FLV runtime.
+- `webapp/src/app/upload-tasks/part-video-dialog/part-player.loader.ts`: shared
+  open-action dynamic boundary used by both `PartVideoDialogComponent` and
+  `HighlightEditorComponent` for the FLV runtime.
 - `webapp/src/app/upload-tasks/upload-tasks.module.ts`, `upload-tasks-routing.module.ts`, `webapp/src/app/app-routing.module.ts`: lightweight list module and route loading policy.
 
 ### Task 1: Recording and upload list summaries
@@ -61,9 +89,18 @@
 - Modify: `tests/bili_upload/test_journal.py`
 - Modify: `tests/web/test_recording_sessions_routes.py`
 
-- [ ] **Step 1: Write a NAS-shaped failing summary budget test**
+- [ ] **Step 1: Write a NAS-shaped failing summary budget and scan test**
 
-Seed 20 sessions with multiple recording parts, upload parts, chunks, and danmaku rows. Wrap `database.scalar` and `database.fetchall`, and monkeypatch `os.path.exists`, `os.path.getsize`, and `Path.stat` to fail if the list calls them.
+Seed the requested 20-session page plus at least 500 older off-page sessions, each
+with multiple recording parts, upload parts, chunks, and danmaku rows. Wrap
+`database.scalar` and `database.fetchall`, and monkeypatch `os.path.exists`,
+`os.path.getsize`, and `Path.stat` to fail if the list calls them. Run
+`EXPLAIN QUERY PLAN` for the exact summary statement and fail if
+`recording_parts`, `upload_parts`, `upload_chunks`, or `danmaku_items` is reached
+by an unbounded table scan instead of an indexed lookup from the selected page
+IDs. The fixture must place all 20 returned rows after the off-page history in
+insertion order so a test that accidentally aggregates history cannot pass by
+only seeding the page.
 
 ```python
 summaries = await journal.list_session_summaries(
@@ -78,6 +115,7 @@ assert filesystem_calls == []
 assert summaries[0].upload_job is not None
 assert not hasattr(summaries[0].upload_job, 'parts')
 assert not hasattr(summaries[0].upload_job, 'unknown_danmaku_items')
+assert_child_tables_are_page_bounded(explained_plan)
 ```
 
 Run:
@@ -110,21 +148,45 @@ SUMMARY_FORBIDDEN_FIELDS = frozenset(
 )
 ```
 
-- [ ] **Step 3: Implement one bulk summary query**
+- [ ] **Step 3: Select the page IDs before running any child aggregate**
 
-Use CTEs grouped independently by `session_id` or `job_id` so joining them cannot multiply chunks by danmaku rows. The final query returns one row per session and calculates only aggregate counts/bytes. Keep `count_sessions()` separate, so the route has exactly two database calls.
+The first materialized CTE must apply `_session_filters()`, the stable
+`started_at,id` order, and `LIMIT/OFFSET`, and return only the selected
+`session_id` and `job_id` values. Every recording-part, upload-part, chunk, and
+danmaku aggregate must join those selected IDs before grouping. Group the child
+sets independently so joining their results cannot multiply chunks by danmaku
+rows. The final query returns one row per selected session and calculates only
+aggregate counts/bytes. Keep `count_sessions()` separate, so the route has exactly
+two database calls.
 
 Required query shape:
 
 ```sql
-WITH part_summary AS (
-    SELECT session_id,
+WITH selected_sessions AS MATERIALIZED (
+    SELECT session.id AS session_id,job.id AS job_id
+    FROM recording_sessions session
+    LEFT JOIN upload_jobs job ON job.session_id=session.id
+    LEFT JOIN bili_accounts account ON account.id=job.account_id
+    LEFT JOIN upload_suppressions suppression
+           ON suppression.session_id=session.id
+    /* exact _session_filters() WHERE clauses */
+    ORDER BY session.started_at {direction},session.id {direction}
+    LIMIT ? OFFSET ?
+),
+part_summary AS (
+    SELECT part.session_id,
            COUNT(*) AS part_count,
            COALESCE(SUM(danmaku_count), 0) AS danmaku_count,
            COALESCE(SUM(file_size_bytes), 0) AS total_file_size_bytes,
            COALESCE(SUM(record_duration_seconds), 0) AS record_duration_seconds
-    FROM recording_parts
-    GROUP BY session_id
+    FROM recording_parts part
+    JOIN selected_sessions selected ON selected.session_id=part.session_id
+    GROUP BY part.session_id
+),
+selected_upload_parts AS MATERIALIZED (
+    SELECT part.id,part.job_id,part.upload_state
+    FROM upload_parts part
+    JOIN selected_sessions selected ON selected.job_id=part.job_id
 ),
 chunk_summary AS (
     SELECT part.job_id,
@@ -134,7 +196,7 @@ chunk_summary AS (
            COUNT(DISTINCT part.id) AS discovered_part_count,
            COUNT(DISTINCT CASE WHEN part.upload_state='confirmed' THEN part.id END)
                AS confirmed_part_count
-    FROM upload_parts part
+    FROM selected_upload_parts part
     LEFT JOIN upload_chunks chunk ON chunk.part_id=part.id
     GROUP BY part.job_id
 ),
@@ -146,18 +208,20 @@ danmaku_summary AS (
                AS pending,
            SUM(CASE WHEN item.state='unknown_outcome' THEN 1 ELSE 0 END) AS unknown_count,
            SUM(CASE WHEN item.state='failed_permanent' THEN 1 ELSE 0 END) AS failed
-    FROM danmaku_items item
-    JOIN upload_parts part ON part.id=item.part_id
+    FROM selected_upload_parts part
+    JOIN danmaku_items item ON item.part_id=part.id
     GROUP BY part.job_id
 )
 ```
 
 After the CTEs, the final `SELECT` must name every scalar field in
 `RecordingSessionSummary` and `UploadJobSummary` explicitly. Join
-`recording_sessions` to `upload_jobs`, `bili_accounts`, `upload_suppressions`,
-`room_upload_policies`, `highlight_clips`, and the three CTEs. Reuse
-`_session_filters()` verbatim, then apply the existing stable `started_at,id`
-order and bounded `LIMIT/OFFSET`. Do not use `SELECT *`.
+`selected_sessions` back to `recording_sessions`, `upload_jobs`, `bili_accounts`,
+`upload_suppressions`, `room_upload_policies`, `highlight_clips`, and the three
+summary CTEs. Reuse `_session_filters()` verbatim only inside
+`selected_sessions`; repeat the same `started_at,id` ordering in the final select
+but do not reapply `LIMIT/OFFSET` after the child aggregates, and do not use
+`SELECT *`.
 
 Keep the existing `list_sessions()` and `upload_jobs_for_sessions()` as the full detail path; do not weaken their diagnostics.
 
@@ -206,6 +270,12 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_journal.py test
 ```
 
 Expected: PASS; 20-row route uses two business-database calls and zero list-time filesystem calls.
+
+Also run the 500-plus-session off-page fixture through the exact production SQL.
+Its `EXPLAIN QUERY PLAN` scan guard must show indexed child-table searches rooted
+in `selected_sessions`/`selected_upload_parts`, with no unbounded scan of the four
+historical child tables. Assert the page payload and database-call count are
+unchanged when the off-page history is doubled.
 
 - [ ] **Step 6: Commit**
 
@@ -267,14 +337,14 @@ git add src/blrec/bili_upload/policies.py tests/bili_upload/test_policies.py
 git commit -m "perf: batch room policy account resolution"
 ```
 
-### Task 3: Make retention status an aggregate read
+### Task 3: Make retention status an aggregate read without weakening cleanup
 
 **Files:**
 - Modify: `src/blrec/bili_upload/retention.py`
 - Modify: `tests/bili_upload/test_retention.py`
 - Modify: `tests/web/test_recording_retention_routes.py`
 
-- [ ] **Step 1: Write a failing no-filesystem status test**
+- [ ] **Step 1: Write a failing status test and a capacity-safety regression**
 
 Seed many live recording parts with persisted `file_size_bytes`, including deleted and highlight-source rows. Make path-size functions raise.
 
@@ -285,13 +355,21 @@ assert database_calls == 1
 assert filesystem_calls == []
 ```
 
-Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_retention.py -k status -q`
+Add a separate regression with an active `recording` part whose
+`file_size_bytes` is `NULL` but whose real file makes total managed usage exceed
+capacity, plus one closed capacity-eligible part. Assert `run_once()` measures the
+real files, does not return early from the persisted total, and deletes the
+eligible candidate. This regression protects the destructive path and is expected
+to pass before and after the status optimization.
+
+Run: `PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_retention.py -k 'status or null_size_capacity' -q`
 
 Expected: FAIL because `_managed_video_bytes()` currently loads paths and calls `lstat` for each one.
 
-- [ ] **Step 2: Replace request-time path scans with persisted aggregation**
+- [ ] **Step 2: Add a status-only persisted aggregate**
 
-Use this status query:
+Add a separately named method such as `_persisted_managed_video_bytes()` and use
+it only from `status()`. Its query is:
 
 ```sql
 SELECT COALESCE(SUM(COALESCE(part.file_size_bytes, 0)), 0)
@@ -301,7 +379,11 @@ WHERE part.video_deleted_at IS NULL
   AND session.source_kind='live'
 ```
 
-Keep `_candidate_size()` and `_paths_size()` for destructive retention execution, where actual file size is required. Status is observational and uses journaled size; missing size is zero until the existing journal/index workers persist it.
+Keep `_managed_video_bytes()` unchanged as the actual filesystem measurement used
+by `run_once()`. Keep `_candidate_size()` and `_paths_size()` unchanged for
+destructive retention execution. Never route a capacity/deletion decision through
+the persisted aggregate: status is observational and may report a temporarily
+lower total while a recording part still has a null journaled size.
 
 - [ ] **Step 3: Verify route and deletion correctness**
 
@@ -311,7 +393,10 @@ Run:
 PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_retention.py tests/web/test_recording_retention_routes.py -q
 ```
 
-Expected: PASS; status performs one aggregate query and no path IO, while deletion/reclaim tests still use real file sizes in the worker path.
+Expected: PASS; status performs one aggregate query and no path IO, while
+`run_once()` still counts the real active file with null persisted size, detects
+the over-capacity state, and reclaims the eligible closed candidate using real
+file sizes.
 
 - [ ] **Step 4: Commit**
 
@@ -330,7 +415,11 @@ git commit -m "perf: aggregate recording retention status"
 
 - [ ] **Step 1: Write failing count-projection tests**
 
-Cover markers with a persisted `recording_part_id`, legacy markers that require time-range mapping, parts with zero markers, and a marker from another room/session.
+Cover markers with a persisted `recording_part_id`, legacy markers that require
+time-range mapping, parts with zero markers, and a marker from another
+room/session. Include two contiguous parts: a legacy marker exactly at the shared
+boundary must map to the first part, and a marker exactly at the final part's end
+must map to the final part, matching the editor's existing inclusive mapper.
 
 ```python
 counts = await service.marker_counts(session_id)
@@ -350,9 +439,13 @@ First query the session's part IDs, `part_index`, minimal time bounds
 `artifact_state`, and `video_deleted_at`. Apply the same eligible-state and
 not-deleted rules as `timeline()` without resolving a filesystem path. Second query
 markers for the room with only `recording_part_id` and `content_at_ms`. Count
-persisted mappings directly; map legacy null references with the same half-open
-interval rule used by `timeline()`. Do not select paths, marker notes, clip rows, or
-upload progress.
+persisted mappings directly. For legacy null references, construct the minimal
+ordered `TimelinePart` values and call the existing `_part_containing()` helper;
+do not copy its predicate into a second implementation. Its current inclusive
+rule is `0 <= content_at_ms - absolute_start_at_ms <= duration_ms`, so an exact
+boundary shared by adjacent parts belongs to the first part in `part_index` order,
+and the final part's exact end is included. Do not select paths, marker notes, clip
+rows, or upload progress.
 
 Expose:
 
@@ -402,7 +495,9 @@ Run:
 PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_highlights.py tests/web/test_highlights_routes.py -q
 ```
 
-Expected: PASS; count endpoint uses at most two queries and timeline/clip behavior remains unchanged.
+Expected: PASS; count endpoint uses at most two queries, the adjacent-boundary and
+final-end assertions agree with `timeline()`, and timeline/clip behavior remains
+unchanged.
 
 - [ ] **Step 5: Commit**
 
@@ -411,18 +506,185 @@ git add src/blrec/bili_upload/highlights.py src/blrec/web/routers/highlights.py 
 git commit -m "perf: add lightweight highlight marker counts"
 ```
 
-### Task 5: Add only proven list indexes
+### Task 5: Add a clip-library summary with persisted file sizes
 
 **Files:**
 - Create: `src/blrec/bili_upload/migrations/0024_initial.sql`
+- Modify: `src/blrec/bili_upload/database.py`
+- Modify: `src/blrec/bili_upload/highlights.py`
+- Modify: `src/blrec/bili_upload/highlight_worker.py`
+- Modify: `src/blrec/bili_upload/runtime.py`
+- Modify: `src/blrec/web/routers/highlights.py`
+- Modify: `tests/bili_upload/test_database.py`
+- Modify: `tests/bili_upload/test_highlights.py`
+- Modify: `tests/bili_upload/test_highlight_worker.py`
+- Modify: `tests/bili_upload/test_account_runtime.py`
+- Modify: `tests/web/test_highlights_routes.py`
+- Modify: `webapp/src/app/upload-tasks/shared/highlight.model.ts`
+- Modify: `webapp/src/app/upload-tasks/shared/highlight.service.ts`
+- Modify: `webapp/src/app/upload-tasks/shared/highlight.service.spec.ts`
+- Modify: `webapp/src/app/upload-tasks/clip-library/clip-library.component.ts`
+- Modify: `webapp/src/app/upload-tasks/clip-library/clip-library.component.spec.ts`
+
+- [ ] **Step 1: Write failing summary, file-budget, and compatibility tests**
+
+Seed a 20-clip page, at least 500 off-page historical clips, multiple upload
+parts/chunks for the page and history, and full source rows for one selected clip.
+Count `scalar`/`fetchall` calls and make `os.path.getsize`, `Path.stat`, and
+`Path.lstat` fail during `GET /api/v1/highlights/clips`.
+
+```python
+total, summaries = await service.list_clip_summaries(limit=20, offset=0)
+assert total == 520
+assert len(summaries) == 20
+assert database_calls == 2  # count plus one page-summary statement
+assert filesystem_calls == []
+assert not hasattr(summaries[0], 'output_video_path')
+assert not hasattr(summaries[0], 'sources')
+
+detail = await service.get_clip(summaries[0].id)
+assert detail.output_video_path is not None
+assert detail.sources
+```
+
+Add route/model tests proving the paged endpoint returns only the clip-library
+fields used by the table, while `GET /api/v1/highlights/clips/{clip_id}` and the
+session clip/detail path retain their full existing projection. Add worker tests
+that initially fail because completed and recovered clips do not persist size.
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_highlights.py tests/bili_upload/test_highlight_worker.py tests/web/test_highlights_routes.py -k 'clip_summary or file_size or clip_library' -q
+```
+
+Expected: FAIL because there is no persisted clip size or summary projection and
+the current list calls `getsize` once per row.
+
+- [ ] **Step 2: Add migration 24 for the persisted clip size**
+
+Task 5 exclusively owns `0024_initial.sql`:
+
+```sql
+ALTER TABLE highlight_clips
+ADD COLUMN file_size_bytes INTEGER
+CHECK (file_size_bytes IS NULL OR file_size_bytes >= 0);
+```
+
+Change the migration ceiling from 23 to 24 and test both an empty database and a
+version-23 database. Keep the column nullable: `NULL` means a legacy output has not
+been measured yet and must never be presented as a known zero-byte file. Do not put
+the list indexes in migration 24; Task 6 owns migration 25 so committed migrations
+are never edited later.
+
+- [ ] **Step 3: Implement the two-call clip summary projection**
+
+Add immutable `HighlightClipSummary` and `ClipSummaryResponse` contracts containing
+only the scalar fields used by the clip-library table/actions: IDs, room/source
+identity, name/state/error/timestamps, source anchor/title, duration, nullable
+persisted size, and upload job/state/percent/BVID. Paths, source ranges, keyframe
+diagnostics, and other full clip fields remain on `HighlightClip`/`ClipResponse`.
+Map the new nullable size on the full model/response too; do not remove or replace
+any existing detail field.
+
+Keep the count as the first database call. The second statement must select the
+page before aggregating upload chunks:
+
+```sql
+WITH selected_clips AS MATERIALIZED (
+    SELECT id
+    FROM highlight_clips
+    WHERE state!='cancelled'
+    ORDER BY created_at DESC,id DESC
+    LIMIT ? OFFSET ?
+),
+selected_jobs AS MATERIALIZED (
+    SELECT job.id
+    FROM selected_clips selected
+    JOIN highlight_clips clip ON clip.id=selected.id
+    JOIN upload_jobs job ON job.session_id=clip.upload_session_id
+),
+upload_summary AS (
+    SELECT part.job_id,
+           COALESCE(SUM(chunk.size),0) AS total_bytes,
+           COALESCE(SUM(CASE WHEN chunk.state='confirmed' THEN chunk.size ELSE 0 END),0)
+               AS confirmed_bytes
+    FROM upload_parts part
+    JOIN selected_jobs selected ON selected.id=part.job_id
+    LEFT JOIN upload_chunks chunk ON chunk.part_id=part.id
+    GROUP BY part.job_id
+)
+/* explicit summary SELECT rooted in selected_clips */
+```
+
+Expose `list_clip_summaries(limit, offset)` and make only the global paged route use
+it. The query reads `clip.file_size_bytes`; it must not call `_upload_progress()`,
+`getsize`, `stat`, or hydrate `HighlightClipSource`. Keep `get_clip()` and
+`list_clips(session_id)` as complete detail/editor paths.
+
+- [ ] **Step 4: Persist new sizes and perform one bounded legacy backfill**
+
+In the same fenced update that marks a newly generated clip `ready`, persist
+`result.artifact.size_bytes`. The interrupted-work recovery path must persist
+`RecoveredArtifact.size_bytes` when it promotes a clip to `ready`; any path that
+removes or invalidates a generated output must clear the persisted size.
+
+Add `HighlightWorker.backfill_file_sizes(limit: int = 100) -> int`. At the existing
+worker startup boundary, after interrupted recovery and before starting the normal
+highlight loop, call it once with 100. It selects at most 100 legacy `ready` clips
+whose size is null, performs those file checks in the worker executor, and writes
+successful measurements with a conditional `WHERE file_size_bytes IS NULL` update.
+Missing or unreadable legacy files remain `NULL`; log only clip IDs/error types, not
+paths. There is deliberately no request-time fallback and no unbounded startup
+walk. A not-yet-backfilled legacy size serializes as `null`/unknown, while the
+existing detail route remains structurally complete and media access remains the
+authoritative check of the current file.
+
+- [ ] **Step 5: Consume the summary contract in the clip library**
+
+Split `HighlightClipSummary` from the existing full `HighlightClip` TypeScript
+interface. `listAllClips()` returns summaries; editor/detail calls retain
+`HighlightClip`; both contracts represent the persisted size as `number | null`.
+Make the library render a nullable size as `大小待索引`, not `0 B`, and keep retry,
+preview, download, upload, and delete actions driven by summary IDs and states. Add
+exact HTTP/model tests and a component test for the unknown-size legacy row.
+
+- [ ] **Step 6: Verify constant SQL, zero list stat, persistence, and detail parity**
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_database.py tests/bili_upload/test_highlights.py tests/bili_upload/test_highlight_worker.py tests/bili_upload/test_account_runtime.py tests/web/test_highlights_routes.py -q
+cd webapp
+npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/upload-tasks/shared/highlight.service.spec.ts' --include='src/app/upload-tasks/clip-library/clip-library.component.spec.ts'
+```
+
+Expected: PASS. Both 20- and 100-row library pages use exactly two database calls
+and zero list-time filesystem calls; adding off-page clips/chunks does not change
+the call count. New and recovered clips persist exact sizes, startup examines no
+more than 100 legacy paths, unknown legacy sizes stay explicit, and full detail
+responses retain paths and sources.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/blrec/bili_upload/migrations/0024_initial.sql src/blrec/bili_upload/database.py src/blrec/bili_upload/highlights.py src/blrec/bili_upload/highlight_worker.py src/blrec/bili_upload/runtime.py src/blrec/web/routers/highlights.py tests/bili_upload/test_database.py tests/bili_upload/test_highlights.py tests/bili_upload/test_highlight_worker.py tests/bili_upload/test_account_runtime.py tests/web/test_highlights_routes.py webapp/src/app/upload-tasks/shared/highlight.model.ts webapp/src/app/upload-tasks/shared/highlight.service.ts webapp/src/app/upload-tasks/shared/highlight.service.spec.ts webapp/src/app/upload-tasks/clip-library/clip-library.component.ts webapp/src/app/upload-tasks/clip-library/clip-library.component.spec.ts
+git commit -m "perf: add lightweight clip library summaries"
+```
+
+### Task 6: Add only proven list indexes
+
+**Files:**
+- Create: `src/blrec/bili_upload/migrations/0025_initial.sql`
 - Modify: `src/blrec/bili_upload/database.py`
 - Modify: `tests/bili_upload/test_database.py`
 - Modify: `tests/bili_upload/test_journal.py`
 - Modify: `tests/bili_upload/test_highlights.py`
 
-- [ ] **Step 1: Write failing migration and query-plan tests**
+- [ ] **Step 1: Write failing migration-25 and query-plan tests**
 
-Assert schema version 24 and inspect `EXPLAIN QUERY PLAN` for the exact unsearched list predicates. The target indexes are:
+Assert schema version 25 and inspect `EXPLAIN QUERY PLAN` for the exact
+unsearched production list predicates. The target indexes are:
 
 ```sql
 CREATE INDEX recording_sessions_source_started_idx
@@ -444,13 +706,16 @@ Run:
 PYTHONPATH=src .venv/bin/python -m pytest tests/bili_upload/test_database.py tests/bili_upload/test_journal.py tests/bili_upload/test_highlights.py -k 'migration or query_plan or index' -q
 ```
 
-Expected: FAIL because migration 24 and the indexes do not exist.
+Expected: FAIL because migration 25 and the indexes do not exist.
 
-- [ ] **Step 2: Add migration 24 and bump the migration ceiling**
+- [ ] **Step 2: Add migration 25 and bump the migration ceiling**
 
-Create the three indexes above and change `latest_version = 23` to `latest_version = 24`. Update all explicit schema-version assertions in `tests/bili_upload/test_database.py` to 24.
+Task 6 exclusively owns `0025_initial.sql`. Create the three indexes above and
+change `latest_version = 24` to `latest_version = 25`. Update the final explicit
+schema-version assertions in `tests/bili_upload/test_database.py` to 25. Do not
+edit Task 5's already-committed migration 24.
 
-- [ ] **Step 3: Verify migrations from empty and version-23 databases**
+- [ ] **Step 3: Verify migrations from empty and version-24 databases**
 
 Run:
 
@@ -463,11 +728,11 @@ Expected: PASS. If an `EXPLAIN` test shows an index is unused by its production 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/blrec/bili_upload/migrations/0024_initial.sql src/blrec/bili_upload/database.py tests/bili_upload/test_database.py tests/bili_upload/test_journal.py tests/bili_upload/test_highlights.py
+git add src/blrec/bili_upload/migrations/0025_initial.sql src/blrec/bili_upload/database.py tests/bili_upload/test_database.py tests/bili_upload/test_journal.py tests/bili_upload/test_highlights.py
 git commit -m "perf: index hot recording lists"
 ```
 
-### Task 6: Consume summaries and cancel stale Angular reads
+### Task 7: Consume summaries and cancel stale Angular reads
 
 **Files:**
 - Modify: `webapp/src/app/upload-tasks/shared/recording-session.model.ts`
@@ -562,7 +827,7 @@ git add webapp/src/app/upload-tasks/shared/recording-session.model.ts webapp/src
 git commit -m "perf: load recording details on demand"
 ```
 
-### Task 7: Isolate recording rows with OnPush
+### Task 8: Isolate recording rows with OnPush
 
 **Files:**
 - Create: `webapp/src/app/upload-tasks/recording-sessions/recording-session-row.component.ts`
@@ -643,7 +908,7 @@ git add webapp/src/app/upload-tasks/recording-sessions webapp/src/app/upload-tas
 git commit -m "perf: render recording rows with OnPush"
 ```
 
-### Task 8: Split heavyweight Angular routes and disable eager preloading
+### Task 9: Split heavyweight Angular routes and disable eager preloading
 
 **Files:**
 - Create: `webapp/src/app/upload-tasks/clip-library/clip-library.module.ts`
@@ -658,9 +923,11 @@ git commit -m "perf: render recording rows with OnPush"
 - Create: `webapp/src/app/app-routing.module.spec.ts`
 - Modify: `webapp/src/app/core/services/realtime.service.spec.ts`
 - Modify: `webapp/src/app/upload-tasks/clip-library/clip-library.component.spec.ts`
+- Modify: `webapp/src/app/upload-tasks/highlight-editor/highlight-editor.component.ts`
 - Modify: `webapp/src/app/upload-tasks/highlight-editor/highlight-editor.component.spec.ts`
 - Create: `webapp/src/app/upload-tasks/part-video-dialog/part-player.loader.ts`
 - Modify: `webapp/src/app/upload-tasks/part-video-dialog/part-player.factory.ts`
+- Modify: `webapp/src/app/upload-tasks/part-video-dialog/part-player.factory.spec.ts`
 - Modify: `webapp/src/app/upload-tasks/part-video-dialog/part-video-dialog.component.ts`
 - Modify: `webapp/src/app/upload-tasks/part-video-dialog/part-video-dialog.component.spec.ts`
 
@@ -669,21 +936,24 @@ git commit -m "perf: render recording rows with OnPush"
 Assert the list module no longer declares/imports `ClipLibraryComponent` or `HighlightEditorComponent`. Assert `/clips` lazy-loads `ClipLibraryModule`, and each supported `*/highlights/:sessionId` route lazy-loads `HighlightEditorModule`. Keep the existing realtime topic mapping assertions for nested routes.
 
 Also assert that constructing and rendering a closed recording list does not call
-the FLV player loader. Opening native media must not call it; opening FLV media calls
-it once after media access succeeds.
+the FLV player loader. For both `PartVideoDialogComponent` and
+`HighlightEditorComponent`, opening native media must not call it; opening FLV
+media calls it once only after media access succeeds. Resolve a pending loader
+after the dialog closes or the editor selects another part and assert the stale
+factory is never attached.
 
 Run:
 
 ```bash
 cd webapp
-npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/app-routing.module.spec.ts' --include='src/app/core/services/realtime.service.spec.ts' --include='src/app/upload-tasks/clip-library/clip-library.component.spec.ts' --include='src/app/upload-tasks/highlight-editor/highlight-editor.component.spec.ts' --include='src/app/upload-tasks/part-video-dialog/part-video-dialog.component.spec.ts'
+npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/app-routing.module.spec.ts' --include='src/app/core/services/realtime.service.spec.ts' --include='src/app/upload-tasks/clip-library/clip-library.component.spec.ts' --include='src/app/upload-tasks/highlight-editor/highlight-editor.component.spec.ts' --include='src/app/upload-tasks/part-video-dialog/part-player.factory.spec.ts' --include='src/app/upload-tasks/part-video-dialog/part-video-dialog.component.spec.ts'
 ```
 
 Expected: FAIL because all three pages are declared in `UploadTasksModule`, share
 one 103 KiB estimated-transfer chunk, and the list statically imports the FLV
 runtime.
 
-- [ ] **Step 2: Defer the FLV runtime until a player opens**
+- [ ] **Step 2: Move both FLV consumers onto the dynamic loader**
 
 Move `PartPlayer`, `PartPlayerEvent`, `PartPlayerEventHandler`, and
 `FlvPlaybackSource` into `part-player.loader.ts`. Export this injectable loader
@@ -699,20 +969,32 @@ export interface PartPlayerFactoryLike {
   ): PartPlayer | null;
 }
 
-export const PART_PLAYER_LOADER = new InjectionToken<
-  () => Promise<PartPlayerFactoryLike>
->('PART_PLAYER_LOADER');
+export type PartPlayerLoader = () => Promise<PartPlayerFactoryLike>;
 
 export const loadPartPlayerFactory = async (): Promise<PartPlayerFactoryLike> => {
   const module = await import('./part-player.factory');
   return new module.PartPlayerFactory();
 };
+
+export const PART_PLAYER_LOADER = new InjectionToken<PartPlayerLoader>(
+  'PART_PLAYER_LOADER',
+  { providedIn: 'root', factory: () => loadPartPlayerFactory },
+);
 ```
 
-Provide `loadPartPlayerFactory` from the lightweight list module. Inject the loader
-into `PartVideoDialogComponent`, call it only in the FLV branch after media access,
-and ignore a resolved loader if the dialog/part changed while the chunk loaded.
-Keep native browser playback free of the FLV runtime.
+`part-player.factory.ts` must use type-only imports from the loader contract, so its
+static dependency is not pulled back into either component. Inject
+`PART_PLAYER_LOADER` into both `PartVideoDialogComponent` and
+`HighlightEditorComponent`; remove their static `PartPlayerFactory` imports and
+constructor injections. Call the loader only in an FLV branch after that part's
+media-access response succeeds. Guard each promise with the current dialog/part
+identity and component lifetime, and ignore a resolved loader after close,
+destroy, or part change. Keep native browser playback free of the FLV runtime.
+
+Update both component specs and `part-player.factory.spec.ts` to import player
+types from `part-player.loader.ts`, provide a controllable loader promise, and
+cover success, rejection, and stale-resolution cleanup. This type split must pass
+TypeScript before the route/build gate.
 
 - [ ] **Step 3: Create dedicated feature modules**
 
@@ -751,13 +1033,15 @@ Replace `PreloadAllModules` with `NoPreloading` in `AppRoutingModule`. This ensu
 
 ```bash
 cd webapp
-npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/app-routing.module.spec.ts' --include='src/app/core/services/realtime.service.spec.ts' --include='src/app/upload-tasks/clip-library/clip-library.component.spec.ts' --include='src/app/upload-tasks/highlight-editor/highlight-editor.component.spec.ts' --include='src/app/upload-tasks/part-video-dialog/part-video-dialog.component.spec.ts'
+npm test -- --watch=false --browsers=ChromeHeadless --include='src/app/app-routing.module.spec.ts' --include='src/app/core/services/realtime.service.spec.ts' --include='src/app/upload-tasks/clip-library/clip-library.component.spec.ts' --include='src/app/upload-tasks/highlight-editor/highlight-editor.component.spec.ts' --include='src/app/upload-tasks/part-video-dialog/part-player.factory.spec.ts' --include='src/app/upload-tasks/part-video-dialog/part-video-dialog.component.spec.ts'
 npm run build -- --stats-json --output-path=/tmp/blrec-hot-read-build
 ```
 
 Expected: PASS. Build output has separate list, editor, clip-library, and FLV
 runtime lazy chunks; the list chunk is at most 70 KiB estimated transfer and
-contains neither editor, clip-library, nor `mpegts.js` code.
+contains neither editor, clip-library, nor `mpegts.js` code. The editor chunk also
+contains no `mpegts.js`; only invoking either component's loader downloads the FLV
+runtime chunk.
 
 - [ ] **Step 6: Commit**
 
@@ -766,7 +1050,7 @@ git add webapp/src/app/app-routing.module.ts webapp/src/app/app-routing.module.s
 git commit -m "perf: split heavyweight upload routes"
 ```
 
-### Task 9: Integration verification and budget record
+### Task 10: Integration verification and budget record
 
 **Files:**
 - Modify: `docs/performance/request-audit.md`
@@ -805,6 +1089,7 @@ recording/upload list: 2 database calls, 0 filesystem calls
 room-policy list: 1 database call
 retention status: 1 database call, 0 per-recording filesystem calls
 highlight marker counts: <=2 database calls, 0 filesystem calls
+clip-library list: 2 database calls, 0 filesystem calls for 20 and 100 rows
 ```
 
 On a warm NAS deployment, sample normalized request metrics without request values and record p50/p95 for list and status routes. Do not benchmark destructive endpoints or increase upstream request rates.
@@ -812,7 +1097,17 @@ On a warm NAS deployment, sample normalized request metrics without request valu
 - [ ] **Step 4: Update the audit dispositions**
 
 Mark inbound rows I-060, I-070, I-074, I-075, I-088, and I-092 with the
-actual test/metric evidence. Append I-104 for
+actual test/metric evidence. I-092 is complete only if its evidence records exactly
+two SQL calls for both 20- and 100-row pages, zero list-time `getsize`/`stat`/`lstat`
+calls, exact size persistence for new and recovered clips, the 100-path maximum at
+the startup legacy-backfill boundary, explicit `null` for an unmeasured legacy
+size, unchanged full detail paths/sources, and warm NAS p95 below 150 ms. An
+index-only result or a constant query count that still performs per-row file IO is
+not completion evidence.
+Only after those checks pass may I-092's handler IO be changed from `R,F` to `R`
+and its disposition be marked complete.
+
+Append I-104 for
 `GET /api/v1/recording-sessions/{session_id}` and I-105 for
 `GET /api/v1/highlights/sessions/{session_id}/marker-counts`, then change the
 machine-count assertion and summary to 105 endpoints. Re-run the registered-route
@@ -829,4 +1124,11 @@ git commit -m "docs: record hot read performance budgets"
 
 ## Completion gate
 
-The plan is complete only when all regression commands have fresh passing evidence, the five lint baseline errors are unchanged, the summary/list file and query budgets are deterministic, and the production build proves separate lazy chunks within the size budget. A passing unit suite alone is not evidence for the NAS p95 targets; record those deployment measurements separately without request values or local paths.
+The ten-task plan is complete only when all 52 steps have fresh passing evidence,
+the five lint baseline errors are unchanged, the recording and clip summary/list
+file and query budgets are deterministic, migration 24 owns only the clip-size
+column, migration 25 owns only the proven indexes, and the production build proves
+separate list, editor, clip-library, and FLV-runtime lazy chunks within the size
+budget. I-092 must satisfy its explicit Step 4 evidence gate. A passing unit suite
+alone is not evidence for the NAS p95 targets; record those deployment measurements
+separately without request values or local paths.
