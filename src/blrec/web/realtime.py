@@ -3,7 +3,22 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Set
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Collection,
+    Dict,
+    FrozenSet,
+    Mapping,
+    Optional,
+    Set,
+)
+
+REALTIME_TOPICS: FrozenSet[str] = frozenset(
+    {'tasks', 'network', 'upload_progress', 'highlight_progress'}
+)
+_CONTROL_EVENT_TYPES: FrozenSet[str] = frozenset({'resync', 'heartbeat'})
 
 
 @dataclass(frozen=True)
@@ -13,8 +28,9 @@ class RealtimeEvent:
 
 
 class RealtimeSubscription:
-    def __init__(self, queue_size: int) -> None:
+    def __init__(self, queue_size: int, topics: FrozenSet[str]) -> None:
         self._queue: asyncio.Queue[RealtimeEvent] = asyncio.Queue(queue_size)
+        self._topics = topics
 
     async def get(self) -> RealtimeEvent:
         return await self._queue.get()
@@ -24,6 +40,9 @@ class RealtimeSubscription:
 
     def put(self, event: RealtimeEvent) -> None:
         self._queue.put_nowait(event)
+
+    def accepts(self, event_type: str) -> bool:
+        return event_type in self._topics or event_type in _CONTROL_EVENT_TYPES
 
     def replace_with_resync(self) -> None:
         while not self._queue.empty():
@@ -42,17 +61,34 @@ class RealtimeBroker:
         self._queue_size = queue_size
         self._subscriptions: Set[RealtimeSubscription] = set()
 
-    def subscribe(self) -> RealtimeSubscription:
-        subscription = RealtimeSubscription(self._queue_size)
+    def subscribe(
+        self, topics: Optional[Collection[str]] = None
+    ) -> RealtimeSubscription:
+        requested_topics = REALTIME_TOPICS if topics is None else frozenset(topics)
+        if not requested_topics:
+            raise ValueError('realtime topics must not be empty')
+        unknown_topics = requested_topics - REALTIME_TOPICS
+        if unknown_topics:
+            raise ValueError(
+                'unknown realtime topics: {}'.format(','.join(sorted(unknown_topics)))
+            )
+        subscription = RealtimeSubscription(self._queue_size, requested_topics)
         self._subscriptions.add(subscription)
         return subscription
 
     def unsubscribe(self, subscription: RealtimeSubscription) -> None:
         self._subscriptions.discard(subscription)
 
+    def has_subscribers(self, event_type: str) -> bool:
+        return any(
+            subscription.accepts(event_type) for subscription in self._subscriptions
+        )
+
     async def publish(self, event_type: str, data: Mapping[str, Any]) -> None:
         event = RealtimeEvent(event_type, dict(data))
         for subscription in tuple(self._subscriptions):
+            if not subscription.accepts(event_type):
+                continue
             if subscription.full:
                 subscription.replace_with_resync()
             else:
@@ -80,13 +116,18 @@ class RealtimeSampler:
         self._task: Optional[asyncio.Task[None]] = None
 
     async def sample_once(self) -> None:
-        tasks = self._task_provider()
-        network = self._network_provider()
-        uploads = await self._upload_provider()
-        await self._publish_changed('tasks', {'tasks': tasks})
-        await self._publish_changed('network', network)
-        await self._publish_changed('upload_progress', {'jobs': uploads})
-        if self._highlight_provider is not None:
+        if self._broker.has_subscribers('tasks'):
+            tasks = self._task_provider()
+            await self._publish_changed('tasks', {'tasks': tasks})
+        if self._broker.has_subscribers('network'):
+            network = self._network_provider()
+            await self._publish_changed('network', network)
+        if self._broker.has_subscribers('upload_progress'):
+            uploads = await self._upload_provider()
+            await self._publish_changed('upload_progress', {'jobs': uploads})
+        if self._highlight_provider is not None and self._broker.has_subscribers(
+            'highlight_progress'
+        ):
             highlights = await self._highlight_provider()
             await self._publish_changed('highlight_progress', {'clips': highlights})
 
