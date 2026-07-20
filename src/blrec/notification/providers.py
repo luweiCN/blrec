@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Final, Optional, TypedDic
 from urllib.parse import urljoin
 
 import aiohttp
+from loguru import logger
 
 from ..utils.patterns import Singleton
 
@@ -136,7 +137,7 @@ class EmailService(MessagingProvider):
                 self._set_phase_timeout(smtp, deadline_at)
                 smtp.send_message(msg, self.src_addr, self.dst_addr)
             finally:
-                smtp.close()
+                self._close_smtp(smtp)
         else:
             try:
                 smtp = smtp_ssl
@@ -145,7 +146,14 @@ class EmailService(MessagingProvider):
                 self._set_phase_timeout(smtp, deadline_at)
                 smtp.send_message(msg, self.src_addr, self.dst_addr)
             finally:
-                smtp_ssl.close()
+                self._close_smtp(smtp_ssl)
+
+    @staticmethod
+    def _close_smtp(smtp: Any) -> None:
+        try:
+            smtp.close()
+        except OSError as error:
+            logger.warning('SMTP transport close failed error={}', type(error).__name__)
 
     def _remaining_timeout(self, deadline_at: float) -> float:
         remaining = deadline_at - self._monotonic()

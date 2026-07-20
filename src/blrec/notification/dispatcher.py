@@ -101,6 +101,7 @@ class NotificationDispatcher:
         self._started = False
         self._closing = False
         self._session: Optional[Any] = None
+        self._session_close_task: Optional[asyncio.Task[None]] = None
 
     @property
     def pending_count(self) -> int:
@@ -164,6 +165,12 @@ class NotificationDispatcher:
             return
         if self._closing:
             raise RuntimeError('notification dispatcher is closing')
+        loop_deadline = asyncio.get_running_loop().time() + self._close_timeout_seconds
+        await self._wait_for_session_close(loop_deadline)
+        if self._started:
+            return
+        if self._closing:
+            raise RuntimeError('notification dispatcher is closing')
         self._semaphore = asyncio.Semaphore(self._max_concurrency)
         self._close_deadline_at = None
         self._session = self._create_session()
@@ -176,7 +183,12 @@ class NotificationDispatcher:
     async def close(self, *, drain_timeout_seconds: Optional[float] = None) -> None:
         if self._closing:
             return
-        if not self._started and self._session is None and not self._workers:
+        if (
+            not self._started
+            and self._session is None
+            and not self._workers
+            and self._session_close_task is None
+        ):
             return
         self._closing = True
         timeout_seconds = (
@@ -206,9 +218,12 @@ class NotificationDispatcher:
             session = self._session
             self._session = None
             self._bind_session(None)
+            close_task = self._session_close_task
             if session is not None:
                 close_task = asyncio.create_task(session.close())
+                self._session_close_task = close_task
                 close_task.add_done_callback(self._session_close_done)
+            if close_task is not None:
                 await asyncio.wait(
                     (close_task,), timeout=self._remaining_close_budget(loop_deadline)
                 )
@@ -221,8 +236,20 @@ class NotificationDispatcher:
     def _remaining_close_budget(deadline_at: float) -> float:
         return max(0, deadline_at - asyncio.get_running_loop().time())
 
-    @staticmethod
-    def _session_close_done(task: asyncio.Task[Any]) -> None:
+    async def _wait_for_session_close(self, deadline_at: float) -> None:
+        task = self._session_close_task
+        if task is None or task.done():
+            return
+        loop = asyncio.get_running_loop()
+        if task.get_loop() is not loop:
+            raise RuntimeError('previous notification session is still closing')
+        _, pending = await asyncio.wait(
+            (task,), timeout=self._remaining_close_budget(deadline_at)
+        )
+        if pending:
+            raise asyncio.TimeoutError()
+
+    def _session_close_done(self, task: asyncio.Task[Any]) -> None:
         try:
             task.result()
         except asyncio.CancelledError:
@@ -231,6 +258,9 @@ class NotificationDispatcher:
             logger.warning(
                 'Notification session close failed error={}', type(error).__name__
             )
+        finally:
+            if self._session_close_task is task:
+                self._session_close_task = None
 
     def _create_session(self) -> Any:
         if self._session_factory is not None:
@@ -401,6 +431,21 @@ class NotificationDispatcher:
             ),
         ):
             return False
+        if isinstance(error, smtplib.SMTPRecipientsRefused):
+            recipients = error.recipients
+            if not isinstance(recipients, Mapping) or not recipients:
+                return False
+            for response in recipients.values():
+                if not isinstance(response, tuple) or not response:
+                    return False
+                code = response[0]
+                if (
+                    isinstance(code, bool)
+                    or not isinstance(code, int)
+                    or not 400 <= code <= 499
+                ):
+                    return False
+            return True
         if isinstance(error, smtplib.SMTPResponseException):
             return 400 <= error.smtp_code <= 499
         return isinstance(error, (smtplib.SMTPException, OSError))

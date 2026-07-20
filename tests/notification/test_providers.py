@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import smtplib
 import ssl
 from typing import Any, Dict, List, Mapping, Tuple, Type
 
@@ -145,6 +146,16 @@ class DeadlineExitSmtp(FakeSmtp):
         self.closed = True
 
 
+class CloseFailureSmtp(FakeSmtp):
+    def __init__(self, clock: List[float], timeout: float) -> None:
+        super().__init__(clock, timeout)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        raise OSError('simulated SMTP close failure')
+
+
 def test_smtp_fallback_uses_remaining_single_attempt_budget(monkeypatch) -> None:
     clock = [100.0]
     fallback: List[FakeSmtp] = []
@@ -222,6 +233,87 @@ def test_smtp_certificate_verification_failure_does_not_fallback(monkeypatch) ->
 
     monkeypatch.setattr('smtplib.SMTP_SSL', fail_ssl)
     monkeypatch.setattr('smtplib.SMTP', fail_fallback)
+    provider = make_provider(
+        EmailService,
+        src_addr='from@example.com',
+        dst_addr='to@example.com',
+        auth_code='secret',
+    )
+    provider.bind_session(None, attempt_timeout_seconds=10, monotonic=lambda: 100.0)
+
+    with pytest.raises(ssl.SSLCertVerificationError):
+        provider.send_with_deadline('title', 'content', 'text', 110.0)
+
+
+@pytest.mark.parametrize('transport', ('ssl', 'starttls'))
+def test_smtp_close_failure_does_not_fail_acknowledged_delivery(
+    monkeypatch, transport: str
+) -> None:
+    sessions: List[CloseFailureSmtp] = []
+
+    def make_smtp(_host: str, _port: int, *, timeout: float) -> CloseFailureSmtp:
+        smtp = CloseFailureSmtp([100.0], timeout)
+        sessions.append(smtp)
+        return smtp
+
+    if transport == 'ssl':
+        monkeypatch.setattr('smtplib.SMTP_SSL', make_smtp)
+    else:
+        monkeypatch.setattr(
+            'smtplib.SMTP_SSL',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(ssl.SSLError()),
+        )
+        monkeypatch.setattr('smtplib.SMTP', make_smtp)
+    provider = make_provider(
+        EmailService,
+        src_addr='from@example.com',
+        dst_addr='to@example.com',
+        auth_code='secret',
+    )
+    provider.bind_session(None, attempt_timeout_seconds=10, monotonic=lambda: 100.0)
+
+    provider.send_with_deadline('title', 'content', 'text', 110.0)
+
+    assert sessions[0].send_calls == 1
+    assert sessions[0].close_calls == 1
+
+
+def test_smtp_close_failure_does_not_hide_authentication_failure(monkeypatch) -> None:
+    class AuthenticationFailureSmtp(CloseFailureSmtp):
+        def login(self, *_args: Any) -> None:
+            self.login_calls += 1
+            raise smtplib.SMTPAuthenticationError(535, b'authentication failed')
+
+    monkeypatch.setattr(
+        'smtplib.SMTP_SSL',
+        lambda _host, _port, *, timeout: AuthenticationFailureSmtp([100.0], timeout),
+    )
+    provider = make_provider(
+        EmailService,
+        src_addr='from@example.com',
+        dst_addr='to@example.com',
+        auth_code='secret',
+    )
+    provider.bind_session(None, attempt_timeout_seconds=10, monotonic=lambda: 100.0)
+
+    with pytest.raises(smtplib.SMTPAuthenticationError):
+        provider.send_with_deadline('title', 'content', 'text', 110.0)
+
+
+def test_smtp_close_failure_does_not_hide_certificate_failure(monkeypatch) -> None:
+    class CertificateFailureSmtp(CloseFailureSmtp):
+        def starttls(self, **_kwargs: Any) -> None:
+            self.starttls_calls += 1
+            raise ssl.SSLCertVerificationError(1, 'certificate verify failed')
+
+    monkeypatch.setattr(
+        'smtplib.SMTP_SSL',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ssl.SSLError()),
+    )
+    monkeypatch.setattr(
+        'smtplib.SMTP',
+        lambda _host, _port, *, timeout: CertificateFailureSmtp([100.0], timeout),
+    )
     provider = make_provider(
         EmailService,
         src_addr='from@example.com',

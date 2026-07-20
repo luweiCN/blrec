@@ -23,6 +23,25 @@ class FakeSession:
         self.closed = True
 
 
+class BlockingCloseSession(FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_started = asyncio.Event()
+        self.close_release = asyncio.Event()
+        self.close_calls = 0
+        self.active_closes = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.active_closes += 1
+        self.close_started.set()
+        try:
+            await self.close_release.wait()
+            self.closed = True
+        finally:
+            self.active_closes -= 1
+
+
 class RecordingSender:
     def __init__(
         self,
@@ -208,6 +227,28 @@ async def test_keyed_pending_delivery_is_replaced_without_growing_queue() -> Non
         (socket.gaierror(-2, 'name lookup failed'), 3),
         (smtplib.SMTPNotSupportedError('AUTH unsupported'), 1),
         (ssl.SSLCertVerificationError(1, 'certificate verify failed'), 1),
+        (
+            smtplib.SMTPRecipientsRefused(
+                {'permanent@example.com': (550, b'mailbox unavailable')}
+            ),
+            1,
+        ),
+        (
+            smtplib.SMTPRecipientsRefused(
+                {'transient@example.com': (450, b'mailbox busy')}
+            ),
+            3,
+        ),
+        (
+            smtplib.SMTPRecipientsRefused(
+                {
+                    'transient@example.com': (450, b'mailbox busy'),
+                    'permanent@example.com': (550, b'mailbox unavailable'),
+                }
+            ),
+            1,
+        ),
+        (smtplib.SMTPRecipientsRefused({}), 1),
     ],
 )
 async def test_retry_classification_is_bounded(
@@ -341,3 +382,66 @@ async def test_restart_serializes_smtp_left_running_by_close_timeout() -> None:
 
     assert sender.calls == ['old', 'new']
     assert sender.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_timed_out_session_close_remains_owned_until_it_finishes() -> None:
+    session = BlockingCloseSession()
+    dispatcher = NotificationDispatcher(
+        {}, close_timeout_seconds=0.01, session_factory=lambda: session
+    )
+    await dispatcher.start()
+
+    started_at = time.monotonic()
+    await dispatcher.close()
+    assert time.monotonic() - started_at < 0.15
+    close_task = getattr(dispatcher, '_session_close_task', None)
+    try:
+        assert close_task is not None
+        assert not close_task.done()
+        assert session.active_closes == 1
+    finally:
+        session.close_release.set()
+        await asyncio.wait_for(session.close_started.wait(), timeout=0.2)
+        if close_task is not None:
+            await asyncio.wait_for(asyncio.shield(close_task), timeout=0.2)
+
+    await asyncio.sleep(0)
+    assert dispatcher._session_close_task is None
+    assert session.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_overlap_timed_out_session_close() -> None:
+    first = BlockingCloseSession()
+    sessions: List[FakeSession] = []
+
+    def session_factory() -> FakeSession:
+        session: FakeSession = first if not sessions else FakeSession()
+        sessions.append(session)
+        return session
+
+    dispatcher = NotificationDispatcher(
+        {}, close_timeout_seconds=0.01, session_factory=session_factory
+    )
+    await dispatcher.start()
+    await dispatcher.close()
+
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await dispatcher.start()
+        assert time.monotonic() - started_at < 0.15
+        assert sessions == [first]
+        assert first.active_closes == 1
+    finally:
+        first.close_release.set()
+        close_task = getattr(dispatcher, '_session_close_task', None)
+        if close_task is not None:
+            await asyncio.wait_for(asyncio.shield(close_task), timeout=0.2)
+        if dispatcher._started:
+            await dispatcher.close(drain_timeout_seconds=0.2)
+
+    await dispatcher.start()
+    assert len(sessions) == 2
+    await dispatcher.close(drain_timeout_seconds=0.2)
