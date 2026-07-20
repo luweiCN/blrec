@@ -180,9 +180,9 @@ async def test_clip_library_files_do_not_count_toward_recording_capacity(
         await database.execute(
             'INSERT INTO recording_parts('
             'session_id,run_id,part_index,source_path,final_path,'
-            'record_start_time,artifact_state,created_at,updated_at) '
-            "VALUES(1,'live',1,?,?,1,'ready',1,1),"
-            "(2,'clip',1,?,?,2,'ready',2,2)",
+            'record_start_time,file_size_bytes,artifact_state,created_at,updated_at) '
+            "VALUES(1,'live',1,?,?,1,10,'ready',1,1),"
+            "(2,'clip',1,?,?,2,40,'ready',2,2)",
             (
                 str(recording_video),
                 str(recording_video),
@@ -196,6 +196,166 @@ async def test_clip_library_files_do_not_count_toward_recording_capacity(
 
         assert status.managed_video_bytes == 10
         assert status.remaining_bytes == 90
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_status_aggregates_persisted_live_sizes_without_file_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+
+        def seed(connection) -> None:
+            connection.executemany(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at,ended_at,'
+                'source_kind) VALUES(?,?,?,\'closed\',1,2,?)',
+                (
+                    (1, 100, '100:many', 'live'),
+                    (2, 101, '101:deleted', 'live'),
+                    (3, 102, 'highlight:1', 'highlight'),
+                    (4, 103, '103:protected', 'live'),
+                ),
+            )
+            connection.executemany(
+                'INSERT INTO recording_runs('
+                'id,session_id,state,started_at,ended_at) '
+                "VALUES(?,?,'finished',1,2)",
+                (('many', 1), ('deleted', 2), ('highlight', 3), ('protected', 4)),
+            )
+            connection.executemany(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,final_path,'
+                'record_start_time,artifact_state,file_size_bytes,created_at,'
+                'updated_at) VALUES(?,1,\'many\',?,?,?,1,\'ready\',1,1,1)',
+                tuple(
+                    (
+                        identifier,
+                        identifier,
+                        str(root / '{}.flv'.format(identifier)),
+                        str(root / '{}.flv'.format(identifier)),
+                    )
+                    for identifier in range(1, 101)
+                ),
+            )
+            connection.execute(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,final_path,'
+                'record_start_time,artifact_state,file_size_bytes,video_deleted_at,'
+                'created_at,updated_at) '
+                "VALUES(101,2,'deleted',1,?,?,1,'ready',50,2,1,1)",
+                (str(root / 'deleted.flv'), str(root / 'deleted.flv')),
+            )
+            connection.execute(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,final_path,'
+                'record_start_time,artifact_state,file_size_bytes,created_at,'
+                'updated_at) '
+                "VALUES(102,3,'highlight',1,?,?,1,'ready',70,1,1)",
+                (str(root / 'highlight.mp4'), str(root / 'highlight.mp4')),
+            )
+            connection.execute(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,final_path,'
+                'record_start_time,artifact_state,file_size_bytes,created_at,'
+                'updated_at) '
+                "VALUES(103,4,'protected',1,?,?,1,'ready',11,1,1)",
+                (str(root / 'protected.flv'), str(root / 'protected.flv')),
+            )
+            connection.execute(
+                'INSERT INTO highlight_clips('
+                'id,room_id,source_session_id,name,requested_start_ms,'
+                'requested_end_ms,state,created_at,updated_at) '
+                "VALUES(1,103,4,'高光',0,1000,'queued',1,1)"
+            )
+            connection.execute(
+                'INSERT INTO highlight_clip_sources('
+                'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms) '
+                'VALUES(1,103,1,0,1000)'
+            )
+
+        await database.write(seed)
+        manager = RetentionManager(database, root, capacity_bytes=lambda: 1_000)
+        database_calls = []
+        filesystem_calls = []
+        original_run = database._run
+
+        async def counting_run(operation, *args):
+            database_calls.append(operation.__name__)
+            return await original_run(operation, *args)
+
+        def forbidden_paths_size(paths) -> int:
+            filesystem_calls.append(tuple(paths))
+            raise AssertionError('retention status must not inspect recording paths')
+
+        monkeypatch.setattr(database, '_run', counting_run)
+        monkeypatch.setattr(manager, '_paths_size', forbidden_paths_size)
+
+        status = await manager.status()
+
+        assert status.managed_video_bytes == 111
+        assert len(database_calls) == 1
+        assert filesystem_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_null_size_capacity_uses_real_active_file_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        reclaimable, _xml = await seed_recording(
+            database,
+            root,
+            identifier=1,
+            room_id=101,
+            retention_mode='capacity',
+            retention_days=5,
+            submitted_at=1_000,
+            content=b'old!',
+        )
+        active = root / 'active.flv'
+        active.write_bytes(b'recording')
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,102,'102:active','open',2)"
+        )
+        await database.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at) '
+            "VALUES('active',2,'recording',2)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,file_size_bytes,created_at,updated_at) '
+            "VALUES(2,2,'active',1,?,2,'recording',NULL,2,2)",
+            (str(active),),
+        )
+        manager = RetentionManager(
+            database, root, capacity_bytes=lambda: 8, clock=lambda: 10_000
+        )
+
+        assert await manager.run_once() == 1
+        assert not reclaimable.exists()
+        assert active.exists()
+        assert (
+            await database.scalar(
+                'SELECT video_deleted_at FROM recording_parts WHERE id=1'
+            )
+            == 10_000
+        )
     finally:
         await database.close()
 

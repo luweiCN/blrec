@@ -12,7 +12,10 @@ from blrec.web.routers import recording_retention
 
 @dataclass
 class FakeRetentionManager:
+    status_calls: int = 0
+
     async def status(self) -> RetentionStatus:
+        self.status_calls += 1
         return RetentionStatus(
             managed_video_bytes=480,
             capacity_bytes=500,
@@ -34,7 +37,8 @@ def restore_state() -> Iterator[None]:
 
 
 def test_retention_status_reports_capacity_warning() -> None:
-    recording_retention.manager = FakeRetentionManager()  # type: ignore[assignment]
+    manager = FakeRetentionManager()
+    recording_retention.manager = manager  # type: ignore[assignment]
     recording_retention.unavailable_reason = None
     security.api_key = 'test-key'
     api = FastAPI()
@@ -53,3 +57,4 @@ def test_retention_status_reports_capacity_warning() -> None:
         'warningThresholdBytes': 20,
         'warning': True,
     }
+    assert manager.status_calls == 1

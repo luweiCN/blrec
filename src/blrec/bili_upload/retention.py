@@ -104,7 +104,7 @@ class RetentionManager:
             return False
 
     async def status(self) -> RetentionStatus:
-        usage = await self._managed_video_bytes()
+        usage = await self._persisted_managed_video_bytes()
         capacity = max(0, int(self._capacity_bytes()))
         warning_threshold = max(0, int(self._warning_threshold_bytes()))
         remaining = max(0, capacity - usage) if capacity > 0 else 0
@@ -277,6 +277,17 @@ class RetentionManager:
             ):
                 paths[str(path)] = path
         return await self._run_io(self._paths_size, tuple(paths.values()))
+
+    async def _persisted_managed_video_bytes(self) -> int:
+        return int(
+            await self._database.scalar(
+                'SELECT COALESCE(SUM(COALESCE(part.file_size_bytes,0)),0) '
+                'FROM recording_parts part '
+                'JOIN recording_sessions session ON session.id=part.session_id '
+                'WHERE part.video_deleted_at IS NULL '
+                "AND session.source_kind='live'"
+            )
+        )
 
     def _unique_paths(
         self, source_path: str, final_path: Optional[str]
