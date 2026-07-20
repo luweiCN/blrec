@@ -1517,36 +1517,113 @@ class RecordingJournalBridge:
 
     async def realtime_upload_progress(self) -> List[Dict[str, object]]:
         cutoff = int(self._clock()) - 300
-        rows = await self._database.fetchall(
-            "SELECT session_id FROM upload_jobs WHERE state!='completed' "
-            'OR updated_at>=? ORDER BY id',
+        jobs = await self._database.fetchall(
+            'SELECT job.id,job.session_id,job.state,job.submit_state,'
+            'job.preupload_finalized,job.aid,job.bvid '
+            'FROM upload_jobs job WHERE '
+            "job.state IN ('waiting_artifacts','ready','uploading','submitting',"
+            "'waiting_review') "
+            "OR job.repair_state IN ('queued','checking','reuploading','editing',"
+            "'waiting_review') "
+            "OR job.comment_branch_state IN ('pending','running') "
+            "OR job.danmaku_branch_state IN ('pending','importing','publishing') "
+            "OR job.collection_branch_state IN ('pending','running') "
+            'OR job.updated_at>=? ORDER BY job.id',
             (cutoff,),
         )
-        session_ids = tuple(int(row['session_id']) for row in rows)
-        jobs = await self.upload_jobs_for_sessions(session_ids)
-        return [
-            {
-                'jobId': job.id,
-                'sessionId': job.session_id,
-                'state': job.state,
-                'submitState': job.submit_state,
-                'preuploadFinalized': job.preupload_finalized,
-                'displayState': job.display_state,
-                'aid': job.aid,
-                'bvid': job.bvid,
-                'confirmedBytes': job.confirmed_bytes,
-                'totalBytes': job.total_bytes,
-                'percent': job.percent,
-                'bytesPerSecond': job.bytes_per_second,
-                'etaSeconds': job.eta_seconds,
-                'currentPartIndex': job.current_part_index,
-                'confirmedPartCount': sum(
-                    part.upload_state == 'confirmed' for part in job.parts
-                ),
-                'discoveredPartCount': len(job.parts),
-            }
-            for job in sorted(jobs.values(), key=lambda item: item.id)
-        ]
+        if not jobs:
+            return []
+        job_ids = tuple(int(row['id']) for row in jobs)
+        placeholders = ','.join('?' for _ in job_ids)
+        part_rows = await self._database.fetchall(
+            'SELECT progress.job_id,'
+            'COALESCE(SUM(progress.confirmed_bytes),0) AS confirmed_bytes,'
+            'COALESCE(SUM(progress.total_bytes),0) AS total_bytes,'
+            'COALESCE(MIN(CASE WHEN progress.total_bytes<=0 '
+            'OR progress.confirmed_bytes<progress.total_bytes '
+            "OR progress.upload_state!='confirmed' THEN progress.part_index END),"
+            'MAX(progress.part_index)) AS current_part_index,'
+            "SUM(CASE WHEN progress.upload_state='confirmed' THEN 1 ELSE 0 END) "
+            'AS confirmed_part_count,COUNT(*) AS discovered_part_count '
+            'FROM (SELECT part.id,part.job_id,part.part_index,part.upload_state,'
+            "COALESCE(SUM(CASE WHEN chunk.state='confirmed' THEN chunk.size "
+            'ELSE 0 END),0) AS confirmed_bytes,'
+            'COALESCE(SUM(chunk.size),0) AS total_bytes '
+            'FROM upload_parts part LEFT JOIN upload_chunks chunk '
+            'ON chunk.part_id=part.id WHERE part.job_id IN ({}) '
+            'GROUP BY part.id) progress GROUP BY progress.job_id '
+            'ORDER BY progress.job_id'.format(placeholders),
+            job_ids,
+        )
+        parts_by_job = {int(row['job_id']): row for row in part_rows}
+        sampled_at = self._clock()
+        result: List[Dict[str, object]] = []
+        for job in jobs:
+            job_id = int(job['id'])
+            part = parts_by_job.get(job_id)
+            confirmed_bytes = 0 if part is None else int(part['confirmed_bytes'])
+            total_bytes = 0 if part is None else int(part['total_bytes'])
+            confirmed_part_count = (
+                0 if part is None else int(part['confirmed_part_count'])
+            )
+            discovered_part_count = (
+                0 if part is None else int(part['discovered_part_count'])
+            )
+            current_part_index = (
+                None if part is None else int(part['current_part_index'])
+            )
+            percent = (
+                0.0
+                if total_bytes <= 0
+                else round(min(100.0, confirmed_bytes * 100.0 / total_bytes), 2)
+            )
+            bytes_per_second: Optional[float] = None
+            previous_sample = self._upload_speed_samples.get(job_id)
+            if previous_sample is not None:
+                elapsed = sampled_at - previous_sample[0]
+                byte_delta = confirmed_bytes - previous_sample[1]
+                if elapsed > 0 and byte_delta > 0:
+                    bytes_per_second = byte_delta / elapsed
+            self._upload_speed_samples[job_id] = (sampled_at, confirmed_bytes)
+            eta_seconds: Optional[int] = None
+            if bytes_per_second is not None and bytes_per_second > 0:
+                remaining = max(0, total_bytes - confirmed_bytes)
+                eta_seconds = int((remaining / bytes_per_second) + 0.999)
+            preupload_finalized = bool(job['preupload_finalized'])
+            display_state: UploadJobDisplayState
+            if preupload_finalized:
+                display_state = 'standard'
+            elif str(job['state']) == 'paused':
+                display_state = 'preupload_paused'
+            elif (
+                str(job['state']) in ('ready', 'uploading')
+                or discovered_part_count == 0
+                or confirmed_part_count != discovered_part_count
+            ):
+                display_state = 'preuploading'
+            else:
+                display_state = 'preuploaded_waiting'
+            result.append(
+                {
+                    'jobId': job_id,
+                    'sessionId': int(job['session_id']),
+                    'state': str(job['state']),
+                    'submitState': str(job['submit_state']),
+                    'preuploadFinalized': preupload_finalized,
+                    'displayState': display_state,
+                    'aid': None if job['aid'] is None else int(job['aid']),
+                    'bvid': None if job['bvid'] is None else str(job['bvid']),
+                    'confirmedBytes': confirmed_bytes,
+                    'totalBytes': total_bytes,
+                    'percent': percent,
+                    'bytesPerSecond': bytes_per_second,
+                    'etaSeconds': eta_seconds,
+                    'currentPartIndex': current_part_index,
+                    'confirmedPartCount': confirmed_part_count,
+                    'discoveredPartCount': discovered_part_count,
+                }
+            )
+        return result
 
     @staticmethod
     def _can_retry_upload_job(row: sqlite3.Row) -> bool:

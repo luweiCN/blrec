@@ -173,9 +173,12 @@ class HighlightWorker:
         return recovered
 
     async def progress(self) -> Tuple[Mapping[str, object], ...]:
+        cutoff = int(self._clock()) - 300
         rows = await self._database.fetchall(
             'SELECT id,room_id,name,state,attempt,error_message,updated_at '
-            'FROM highlight_clips ORDER BY updated_at DESC,id DESC'
+            "FROM highlight_clips WHERE state IN ('queued','processing') "
+            'OR updated_at>=? ORDER BY updated_at DESC,id DESC',
+            (cutoff,),
         )
         return tuple(
             {

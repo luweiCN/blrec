@@ -1,6 +1,7 @@
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncIterator, List
+from typing import AsyncIterator, List, Sequence, Tuple
 
 import pytest
 import pytest_asyncio
@@ -886,6 +887,177 @@ async def test_realtime_upload_progress_returns_active_job_bytes(database) -> No
             'discoveredPartCount': 1,
         }
     ]
+
+    now[0] = 1_002.0
+    await database.execute(
+        "UPDATE upload_chunks SET state='confirmed' " 'WHERE part_id=4 AND chunk_no=1'
+    )
+
+    progressed = (await journal.realtime_upload_progress())[0]
+
+    assert progressed['confirmedBytes'] == 8
+    assert progressed['totalBytes'] == 8
+    assert progressed['percent'] == 100.0
+    assert progressed['bytesPerSecond'] == 2.0
+    assert progressed['etaSeconds'] == 0
+    assert progressed['currentPartIndex'] == 1
+    assert progressed['confirmedPartCount'] == 0
+    assert progressed['discoveredPartCount'] == 1
+
+
+@pytest.mark.asyncio
+async def test_realtime_upload_progress_bounds_nas_shaped_history(
+    database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_000
+    historical_job_count = 43
+    confirmed_chunks_per_job = 24
+    active_job_id = historical_job_count + 1
+
+    def seed(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) VALUES(1,42,'账号',X'00',1,'k','active',1,1)"
+        )
+        connection.executemany(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(?,?,?,'closed',1)",
+            (
+                (session_id, 10_000 + session_id, 'history-{}'.format(session_id))
+                for session_id in range(1, active_job_id + 1)
+            ),
+        )
+        terminal_jobs = [
+            (
+                job_id,
+                job_id,
+                1,
+                '{}',
+                'approved',
+                'confirmed',
+                'completed',
+                'completed',
+                'completed',
+                'completed',
+                1,
+                1,
+                1,
+            )
+            for job_id in range(1, active_job_id)
+        ]
+        active_job = (
+            active_job_id,
+            active_job_id,
+            1,
+            '{}',
+            'uploading',
+            'prepared',
+            'disabled',
+            'disabled',
+            'disabled',
+            'idle',
+            0,
+            1,
+            now,
+        )
+        connection.executemany(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'comment_branch_state,danmaku_branch_state,collection_branch_state,'
+            'repair_state,preupload_finalized,created_at,updated_at) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            terminal_jobs + [active_job],
+        )
+        connection.executemany(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,artifact_state,upload_state) '
+            'VALUES(?,?,1,?,?,?)',
+            [
+                (
+                    job_id,
+                    job_id,
+                    '/rec/history-{}.flv'.format(job_id),
+                    'ready',
+                    'confirmed',
+                )
+                for job_id in range(1, active_job_id)
+            ]
+            + [(active_job_id, active_job_id, '/rec/active.flv', 'ready', 'uploading')],
+        )
+        connection.executemany(
+            'INSERT INTO upload_chunks('
+            'part_id,chunk_no,offset,size,state,attempt) VALUES(?,?,?,?,?,?)',
+            [
+                (job_id, chunk_no, chunk_no, 1, 'confirmed', 1)
+                for job_id in range(1, active_job_id)
+                for chunk_no in range(confirmed_chunks_per_job)
+            ]
+            + [
+                (active_job_id, 0, 0, 4, 'confirmed', 1),
+                (active_job_id, 1, 4, 4, 'prepared', 0),
+            ],
+        )
+
+    await database.write(seed)
+    fetchall = database.fetchall
+    fetchall_calls: List[Tuple[str, Tuple[object, ...]]] = []
+
+    async def counting_fetchall(
+        sql: str, parameters: Sequence[object] = ()
+    ) -> List[sqlite3.Row]:
+        fetchall_calls.append((sql, tuple(parameters)))
+        return await fetchall(sql, parameters)
+
+    monkeypatch.setattr(database, 'fetchall', counting_fetchall)
+    journal = RecordingJournalBridge(database, clock=lambda: now)
+
+    progress = await journal.realtime_upload_progress()
+
+    assert [item['jobId'] for item in progress] == [active_job_id]
+    assert len(fetchall_calls) <= 2
+    assert len(fetchall_calls) == 2
+    job_sql = ' '.join(fetchall_calls[0][0].split())
+    assert (
+        "job.state IN ('waiting_artifacts','ready','uploading','submitting',"
+        "'waiting_review')" in job_sql
+    )
+    assert (
+        "job.repair_state IN ('queued','checking','reuploading','editing',"
+        "'waiting_review')" in job_sql
+    )
+    assert "job.comment_branch_state IN ('pending','running')" in job_sql
+    assert "job.danmaku_branch_state IN ('pending','importing','publishing')" in job_sql
+    assert "job.collection_branch_state IN ('pending','running')" in job_sql
+    assert 'job.updated_at>=?' in job_sql
+    assert fetchall_calls[0][1] == (now - 300,)
+    aggregate_sql = ' '.join(fetchall_calls[1][0].split())
+    assert 'part.job_id IN (?)' in aggregate_sql
+    assert 'part.job_id IN ({})'.format(active_job_id) not in aggregate_sql
+    assert fetchall_calls[1][1] == (active_job_id,)
+    realtime_sql = ' '.join(sql for sql, _parameters in fetchall_calls).lower()
+    for forbidden in (
+        'bili_accounts',
+        'policy_snapshot_json',
+        'danmaku_items',
+        'unknown_outcome',
+        'submission_verification',
+    ):
+        assert forbidden not in realtime_sql
+
+    await database.execute(
+        "UPDATE upload_jobs SET state='approved',submit_state='confirmed',"
+        "comment_branch_state='completed',danmaku_branch_state='completed',"
+        "collection_branch_state='completed',repair_state='completed',"
+        'preupload_finalized=1,updated_at=1 WHERE id=?',
+        (active_job_id,),
+    )
+    fetchall_calls.clear()
+
+    assert await journal.realtime_upload_progress() == []
+    assert len(fetchall_calls) == 1
+    assert 'upload_chunks' not in fetchall_calls[0][0]
 
 
 class FakeEmitter:

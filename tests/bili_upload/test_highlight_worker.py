@@ -126,6 +126,48 @@ async def seed_active_recording(database: BiliUploadDatabase, root: Path) -> Pat
 
 
 @pytest.mark.asyncio
+async def test_progress_returns_only_active_or_recent_clips(
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_000
+    cutoff = now - 300
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,state,attempt,'
+        'error_message,created_at,updated_at) VALUES'
+        "(1,100,'过期成品',0,1000,'ready',0,NULL,1,699),"
+        "(2,100,'排队中',0,1000,'queued',1,NULL,1,1),"
+        "(3,100,'处理中',0,1000,'processing',2,NULL,1,2),"
+        "(4,100,'边界成品',0,1000,'ready',0,NULL,1,700),"
+        "(5,100,'最近取消',0,1000,'cancelled',3,'已取消',1,1000),"
+        "(6,100,'过期失败',0,1000,'failed',4,'失败',1,699)"
+    )
+    fetchall = database.fetchall
+    calls = []
+
+    async def capturing_fetchall(sql, parameters=()):
+        calls.append((sql, tuple(parameters)))
+        return await fetchall(sql, parameters)
+
+    monkeypatch.setattr(database, 'fetchall', capturing_fetchall)
+    worker = HighlightWorker(
+        database,
+        FakeClipper(),
+        FakeDanmakuClipper(),
+        worker_id='worker',
+        clock=lambda: now,
+    )
+
+    progress = await worker.progress()
+
+    assert [item['id'] for item in progress] == [5, 4, 3, 2]
+    assert len(calls) == 1
+    sql = ' '.join(calls[0][0].split())
+    assert "WHERE state IN ('queued','processing') OR updated_at>=?" in sql
+    assert calls[0][1] == (cutoff,)
+
+
+@pytest.mark.asyncio
 async def test_create_clip_persists_ordered_sources_and_rejects_unsafe_tail(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
