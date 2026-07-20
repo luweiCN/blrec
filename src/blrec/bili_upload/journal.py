@@ -1314,7 +1314,7 @@ class RecordingJournalBridge:
             'AS total_file_size_bytes,'
             'COALESCE(SUM(recording_part.record_duration_seconds),0) '
             'AS record_duration_seconds,'
-            'COUNT(CASE WHEN recording_part.xml_path IS NOT NULL '
+            "COUNT(CASE WHEN NULLIF(recording_part.xml_path,'') IS NOT NULL "
             'AND recording_part.xml_completed=1 THEN 1 END) '
             'AS danmaku_part_count '
             'FROM selected_sessions selected '
@@ -1364,7 +1364,7 @@ class RecordingJournalBridge:
             'COUNT(CASE WHEN part.cid IS NOT NULL THEN 1 END) '
             'AS uploaded_part_count,'
             'COUNT(CASE WHEN part.cid IS NOT NULL '
-            'AND recording_part_match.xml_path IS NOT NULL '
+            "AND NULLIF(recording_part_match.xml_path,'') IS NOT NULL "
             'AND recording_part_match.xml_completed=1 THEN 1 END) '
             'AS backfill_match_count '
             'FROM chunk_by_part part '

@@ -1027,7 +1027,12 @@ async def get_recording_session(
     _subject: str = Depends(authenticated_manager_subject),
     recording_journal: RecordingJournalBridge = Depends(get_recording_journal),
 ) -> RecordingSessionResponse:
-    session = await recording_journal.get_session(session_id)
+    try:
+        session = await recording_journal.get_session(session_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
     upload_jobs = await recording_journal.upload_jobs_for_sessions((session_id,))
     return _session_response(session, upload_jobs.get(session_id))
 

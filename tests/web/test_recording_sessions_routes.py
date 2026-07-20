@@ -121,7 +121,8 @@ class FakeJournal:
         return (RecordingSessionSummary(**session_values),)
 
     async def get_session(self, session_id: int) -> RecordingSession:
-        assert session_id == 1
+        if session_id != 1:
+            raise ValueError("unknown recording session '{}'".format(session_id))
         self.detail_calls += 1
         return (await self.list_sessions(limit=20, offset=40))[0]
 
@@ -489,6 +490,16 @@ def test_recording_session_list_is_summary_and_detail_stays_complete(
     assert detail.json()['uploadJob']['submissionVerification']['state'] == 'partial'
     assert fake.detail_calls == 1
     assert fake.upload_job_calls == 1
+
+
+def test_missing_recording_session_detail_returns_not_found(client: TestClient) -> None:
+    with TestClient(client.app, raise_server_exceptions=False) as non_raising_client:
+        response = non_raising_client.get(
+            '/api/v1/recording-sessions/404', headers={'x-api-key': 'test-api-key'}
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {'detail': "unknown recording session '404'"}
 
 
 def test_highlight_upload_uses_the_final_submission_title() -> None:

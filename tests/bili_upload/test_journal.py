@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
+from typing import AsyncIterator, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pytest
 import pytest_asyncio
@@ -213,7 +213,7 @@ def _seed_summary_sessions(
 
 
 def _summary_child_accesses(
-    plan: Sequence[sqlite3.Row],
+    plan: Sequence[Mapping[str, object]]
 ) -> Dict[str, Tuple[Tuple[str, Optional[str]], ...]]:
     aliases = (
         'recording_part',
@@ -226,13 +226,16 @@ def _summary_child_accesses(
         alias: [] for alias in aliases
     }
     for row in plan:
-        tokens = str(row['detail']).replace('`', '').split()
+        tokens = [token.strip('`"[]') for token in str(row['detail']).split()]
         if len(tokens) < 2 or tokens[0] not in ('SCAN', 'SEARCH'):
             continue
         relation_index = 1 if tokens[1] != 'TABLE' else 2
         if len(tokens) <= relation_index:
             continue
         relation = tokens[relation_index]
+        alias_marker = relation_index + 1
+        if len(tokens) > alias_marker + 1 and tokens[alias_marker] == 'AS':
+            relation = tokens[alias_marker + 1]
         if relation in result:
             index_name = None
             if 'INDEX' in tokens:
@@ -241,6 +244,32 @@ def _summary_child_accesses(
                     index_name = tokens[index_position]
             result[relation].append((tokens[0], index_name))
     return {alias: tuple(accesses) for alias, accesses in result.items()}
+
+
+@pytest.mark.parametrize(
+    ('detail', 'alias', 'index_name'),
+    (
+        (
+            'SEARCH TABLE recording_parts AS recording_part USING INDEX '
+            'recording_parts_session_idx (session_id=?)',
+            'recording_part',
+            'recording_parts_session_idx',
+        ),
+        (
+            'SEARCH upload_chunk USING COVERING INDEX upload_chunks_part_idx '
+            '(part_id=?)',
+            'upload_chunk',
+            'upload_chunks_part_idx',
+        ),
+    ),
+    ids=('sqlite-3.22', 'modern-sqlite'),
+)
+def test_summary_child_accesses_parse_old_and_new_sqlite_plans(
+    detail: str, alias: str, index_name: str
+) -> None:
+    accesses = _summary_child_accesses(({'detail': detail},))
+
+    assert accesses[alias] == (('SEARCH', index_name),)
 
 
 @pytest.mark.asyncio
@@ -499,6 +528,38 @@ async def test_session_summary_dto_matches_full_projection_scalars_and_actions(
     assert summary_by_id[5].upload_job.discovered_part_count == 0
     assert summary_by_id[5].upload_job.display_state == 'preuploading'
     assert summary_by_id[6].title == 'final highlight title'
+
+
+@pytest.mark.parametrize('xml_path', ('', None), ids=('empty', 'missing'))
+@pytest.mark.asyncio
+async def test_session_summary_unusable_xml_path_matches_full_backfill_action(
+    database: BiliUploadDatabase, xml_path: Optional[str]
+) -> None:
+    await database.write(
+        lambda connection: _seed_summary_sessions(connection, ((1, 1_000),))
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET state='approved',submit_state='confirmed',"
+        "aid=1,bvid='BVxml',danmaku_branch_state='disabled' WHERE id=1"
+    )
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=1 WHERE session_id=1',
+        (xml_path,),
+    )
+    journal = RecordingJournalBridge(database, clock=lambda: 20_000)
+
+    full_session = (await journal.list_sessions())[0]
+    full_job = (await journal.upload_jobs_for_sessions((1,)))[1]
+    summary = (await journal.list_session_summaries())[0]
+    full_actions = recording_sessions._session_response(
+        full_session, full_job
+    ).available_actions
+    summary_actions = recording_sessions._session_summary_response(
+        summary
+    ).available_actions
+
+    assert summary_actions == full_actions
+    assert 'backfill_danmaku' not in summary_actions
 
 
 @pytest.mark.asyncio
