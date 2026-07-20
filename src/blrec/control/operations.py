@@ -151,6 +151,7 @@ class ControlOperationJournal:
         kind: str,
         target_key: str,
         steps: Sequence[ControlStepInput],
+        result: Optional[Mapping[str, Any]] = None,
     ) -> ControlOperationSnapshot:
         if not self._admitting or self._closed:
             raise ControlJournalClosed('control journal admission is closed')
@@ -161,10 +162,26 @@ class ControlOperationJournal:
         keys = [step.key for step in steps]
         if any(not key for key in keys) or len(set(keys)) != len(keys):
             raise ValueError('control step keys must be non-empty and unique')
-        return await self._run(self._admit_sync, lane, kind, target_key, tuple(steps))
+        return await self._run(
+            self._admit_sync,
+            lane,
+            kind,
+            target_key,
+            tuple(steps),
+            dict(result) if result is not None else None,
+        )
 
     async def get(self, operation_id: str) -> Optional[ControlOperationSnapshot]:
         return await self._run(self._get_sync, operation_id)
+
+    async def list_nonterminal(self, lane: str) -> Sequence[ControlOperationSnapshot]:
+        operation_ids = await self._run(self._list_nonterminal_ids_sync, lane)
+        snapshots = []
+        for operation_id in operation_ids:
+            snapshot = await self.get(operation_id)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return tuple(snapshots)
 
     async def claim_next(self, lane: str) -> Optional[ClaimedControlStep]:
         return await self._run(self._claim_next_sync, lane)
@@ -176,6 +193,7 @@ class ControlOperationJournal:
         status: TerminalStepStatus,
         result: Optional[Mapping[str, Any]] = None,
         error_code: Optional[str] = None,
+        operation_result: Optional[Mapping[str, Any]] = None,
     ) -> bool:
         if status == 'failed' and not error_code:
             raise ValueError('failed control step requires an error code')
@@ -185,6 +203,14 @@ class ControlOperationJournal:
             status,
             dict(result) if result is not None else None,
             error_code,
+            dict(operation_result) if operation_result is not None else None,
+        )
+
+    async def fail_queued_steps(self, operation_id: str, *, error_code: str) -> int:
+        if not error_code:
+            raise ValueError('failed control steps require an error code')
+        return int(
+            await self._run(self._fail_queued_steps_sync, operation_id, error_code)
         )
 
     async def fail_unclaimed_operation(
@@ -309,7 +335,12 @@ class ControlOperationJournal:
         return None if row is None else row[0]
 
     def _admit_sync(
-        self, lane: str, kind: str, target_key: str, steps: Sequence[ControlStepInput]
+        self,
+        lane: str,
+        kind: str,
+        target_key: str,
+        steps: Sequence[ControlStepInput],
+        result: Optional[Mapping[str, Any]],
     ) -> ControlOperationSnapshot:
         connection = self._require_connection()
         now = float(self._clock())
@@ -350,9 +381,19 @@ class ControlOperationJournal:
             connection.execute(
                 'INSERT INTO control_operations('
                 'id,lane,kind,target_key,attempt,generation,status,'
-                'created_at,updated_at'
-                ') VALUES(?,?,?,?,?,?,\'accepted\',?,?)',
-                (operation_id, lane, kind, target_key, attempt, generation, now, now),
+                'result_json,created_at,updated_at'
+                ') VALUES(?,?,?,?,?,?,\'accepted\',?,?,?)',
+                (
+                    operation_id,
+                    lane,
+                    kind,
+                    target_key,
+                    attempt,
+                    generation,
+                    self._encode(result),
+                    now,
+                    now,
+                ),
             )
             connection.executemany(
                 'INSERT INTO control_operation_steps('
@@ -469,6 +510,7 @@ class ControlOperationJournal:
         status: TerminalStepStatus,
         result: Optional[Mapping[str, Any]],
         error_code: Optional[str],
+        operation_result: Optional[Mapping[str, Any]],
     ) -> bool:
         connection = self._require_connection()
         now = float(self._clock())
@@ -492,6 +534,19 @@ class ControlOperationJournal:
                 connection.execute('ROLLBACK')
                 return False
             self._refresh_operation_sync(connection, claim.operation_id, now)
+            if operation_result:
+                row = connection.execute(
+                    'SELECT result_json FROM control_operations WHERE id=?',
+                    (claim.operation_id,),
+                ).fetchone()
+                current = self._decode(row['result_json']) if row is not None else None
+                merged = dict(current or {})
+                merged.update(operation_result)
+                connection.execute(
+                    'UPDATE control_operations SET result_json=?,updated_at=? '
+                    'WHERE id=?',
+                    (self._encode(merged), now, claim.operation_id),
+                )
             connection.execute('COMMIT')
             return True
         except BaseException:
@@ -543,6 +598,36 @@ class ControlOperationJournal:
             .fetchone()
         )
         return int(row[0])
+
+    def _list_nonterminal_ids_sync(self, lane: str) -> Sequence[str]:
+        rows = (
+            self._require_connection()
+            .execute(
+                'SELECT id FROM control_operations WHERE lane=? '
+                "AND status IN ('accepted','running') ORDER BY generation,id",
+                (lane,),
+            )
+            .fetchall()
+        )
+        return tuple(str(row['id']) for row in rows)
+
+    def _fail_queued_steps_sync(self, operation_id: str, error_code: str) -> int:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            cursor = connection.execute(
+                "UPDATE control_operation_steps SET status='failed',"
+                'result_json=NULL,error_code=?,updated_at=? '
+                "WHERE operation_id=? AND status='queued'",
+                (error_code, now, operation_id),
+            )
+            self._refresh_operation_sync(connection, operation_id, now)
+            connection.execute('COMMIT')
+            return int(cursor.rowcount)
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
 
     def _supersede_queued_steps_sync(
         self, lane: str, keys: Sequence[str], keep_operation_id: str, generation: int
@@ -611,13 +696,23 @@ class ControlOperationJournal:
         else:
             operation_status = 'succeeded'
             error_code = None
+        current_row = connection.execute(
+            'SELECT result_json FROM control_operations WHERE id=?', (operation_id,)
+        ).fetchone()
+        current_result = (
+            self._decode(current_row['result_json'])
+            if current_row is not None
+            else None
+        )
+        merged_result = dict(current_result or {})
+        merged_result['counts'] = counts
         connection.execute(
             'UPDATE control_operations SET '
             'status=?,result_json=?,error_code=?,updated_at=? '
             'WHERE id=?',
             (
                 operation_status,
-                self._encode({'counts': counts}),
+                self._encode(merged_result),
                 error_code,
                 now,
                 operation_id,

@@ -30,6 +30,14 @@ class FakeOperation:
         ]
 
 
+class FakeMembershipOperation:
+    id = 'membership-operation-1'
+    status = 'accepted'
+
+    def __init__(self, requested_room_id: int = None) -> None:
+        self.result = {'requestedRoomId': requested_room_id}
+
+
 class FakeApplication:
     def __init__(self) -> None:
         self.calls: List[Tuple[str, int]] = []
@@ -60,6 +68,16 @@ class FakeApplication:
 
     async def remove_task(self, room_id: int) -> None:
         self.calls.append(('delete', room_id))
+
+    async def submit_room_add(self, room_id: int) -> FakeMembershipOperation:
+        self.calls.append(('add', room_id))
+        return FakeMembershipOperation(room_id)
+
+    async def submit_room_remove(
+        self, room_ids: List[int], *, remove_all: bool = False
+    ) -> FakeMembershipOperation:
+        self.calls.append(('remove_all' if remove_all else 'remove', len(room_ids)))
+        return FakeMembershipOperation(None if remove_all else room_ids[0])
 
     async def submit_task_control(
         self, action: str, room_ids: List[int], force: bool = False
@@ -236,3 +254,39 @@ def test_single_lifecycle_routes_return_operation_admission(
     app = tasks.app
     assert isinstance(app, FakeApplication)
     assert app.calls == [(expected_action, 1)]
+
+
+def test_add_and_remove_routes_return_membership_admissions(client: TestClient) -> None:
+    added = client.post('/api/v1/tasks/6')
+    removed = client.delete('/api/v1/tasks/100')
+    removed_all = client.delete('/api/v1/tasks')
+
+    assert added.status_code == 202
+    assert added.json() == {
+        'operationId': 'membership-operation-1',
+        'status': 'accepted',
+        'requestedRoomId': 6,
+    }
+    assert removed.status_code == 202
+    assert removed.json()['requestedRoomId'] == 100
+    assert removed_all.status_code == 202
+    assert removed_all.json()['requestedRoomId'] is None
+    app = tasks.app
+    assert isinstance(app, FakeApplication)
+    assert app.calls == [('add', 6), ('remove', 1), ('remove_all', 2)]
+
+
+def test_batch_delete_returns_one_durable_operation(client: TestClient) -> None:
+    response = client.post(
+        '/api/v1/tasks/actions', json={'action': 'delete', 'roomIds': [100, 200]}
+    )
+
+    assert response.status_code == 202
+    assert response.json()['operationId'] == 'membership-operation-1'
+    assert [item['status'] for item in response.json()['results']] == [
+        'queued',
+        'queued',
+    ]
+    app = tasks.app
+    assert isinstance(app, FakeApplication)
+    assert app.calls == [('remove', 2)]

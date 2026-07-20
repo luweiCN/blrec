@@ -187,6 +187,30 @@ async def test_recovery_scans_persisted_desired_state_without_a_wake(
 
 
 @pytest.mark.asyncio
+async def test_pending_membership_removal_suppresses_task_state_recovery(
+    tmp_path: Path,
+) -> None:
+    settings_manager = make_settings_manager(
+        Settings(
+            tasks=[TaskSettings(room_id=100, enable_monitor=True, enable_recorder=True)]
+        )
+    )
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    task_manager = FakeTaskManager()
+    reconciler = TaskControlReconciler(journal, settings_manager, task_manager)
+    reconciler.set_desired_absent_provider(lambda room_id: room_id == 100)
+    try:
+        operation = await reconciler.recover()
+
+        assert operation is None
+        assert await journal.queued_count('task-state') == 0
+    finally:
+        await reconciler.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_consumes_operation_persisted_before_wake(tmp_path: Path) -> None:
     settings_manager = make_settings_manager(
         Settings(

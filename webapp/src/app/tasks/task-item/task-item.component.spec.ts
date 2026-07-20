@@ -125,7 +125,7 @@ describe('TaskItemComponent', () => {
   beforeEach(async () => {
     taskManager = jasmine.createSpyObj<TaskManagerService>(
       'TaskManagerService',
-      ['updateTaskInfo', 'startTask', 'stopTask'],
+      ['updateTaskInfo', 'startTask', 'stopTask', 'removeTask'],
     );
     taskManager.startTask.and.returnValue(
       of({ status: 'succeeded', results: [] })
@@ -133,6 +133,7 @@ describe('TaskItemComponent', () => {
     taskManager.stopTask.and.returnValue(
       of({ status: 'succeeded', results: [] })
     );
+    taskManager.removeTask.and.returnValue(of());
     policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
       'RoomUploadPolicyService',
       ['save'],
@@ -350,6 +351,23 @@ describe('TaskItemComponent', () => {
     };
 
     component.stopTask(true);
+    const modal = TestBed.inject(
+      NzModalService,
+    ) as jasmine.SpyObj<NzModalService>;
+    const confirmation = modal.confirm.calls.mostRecent().args[0]!;
+    (confirmation.nzOnOk as () => Promise<unknown>)();
+    expect(pending.observers.length).toBe(1);
+
+    fixture.destroy();
+
+    expect(pending.observers.length).toBe(0);
+  });
+
+  it('cancels membership polling after a confirmed removal when destroyed', () => {
+    const pending = new Subject<never>();
+    taskManager.removeTask.and.returnValue(pending);
+
+    component.removeTask();
     const modal = TestBed.inject(
       NzModalService,
     ) as jasmine.SpyObj<NzModalService>;

@@ -116,6 +116,16 @@ async def _cancel_active_recording(room_id: int) -> None:
     await app.suppress_current_live(room_id)
 
 
+async def _enable_collect_upload_policy(room_id: int) -> None:
+    policy_manager = _bili_account_runtime.policy_manager
+    category_catalog = _bili_account_runtime.category_catalog
+    if policy_manager is None or category_catalog is None:
+        raise RuntimeError('upload policy service is not ready')
+    await browser_extension._enable_upload_policy(
+        room_id, policy_manager, category_catalog
+    )
+
+
 _bili_account_runtime = BiliAccountRuntime(
     _settings.bili_upload,
     api_key=_env_settings.api_key,
@@ -149,6 +159,7 @@ app = Application(
     recording_retention_provider=(lambda: _bili_account_runtime.retention_manager),
     network_route_manager=_network_route_manager,
     control_operation_journal=_control_operation_journal,
+    room_upload_policy_enabler=_enable_collect_upload_policy,
 )
 
 

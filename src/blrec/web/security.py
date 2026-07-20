@@ -123,6 +123,15 @@ async def authenticate(
         or request.url.path.startswith('/api/v1/browser-extension/')
     ):
         return
+    if request.method == 'GET' and request.url.path.startswith(
+        '/api/v1/control-operations/'
+    ):
+        extension_token = request.headers.get('x-blrec-extension-token', '')
+        if extension_token:
+            identity = auth_store.authenticate_extension(extension_token)
+            if identity is not None:
+                request.state.extension_identity = identity
+                return
     if _valid_signed_media_request(request):
         return
 

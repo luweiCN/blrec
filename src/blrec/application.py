@@ -108,6 +108,7 @@ class Application:
         ] = None,
         network_route_manager: Optional[NetworkRouteManager] = None,
         control_operation_journal: Optional[ControlOperationJournal] = None,
+        room_upload_policy_enabler: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> None:
         self._settings = settings
         self._out_dir = settings.output.out_dir
@@ -121,7 +122,9 @@ class Application:
         self._recording_journal_provider = recording_journal_provider
         self._recording_retention_provider = recording_retention_provider
         self._control_operation_journal = control_operation_journal
+        self._room_upload_policy_enabler = room_upload_policy_enabler
         self._task_control_reconciler: Optional[Any] = None
+        self._room_membership_reconciler: Optional[Any] = None
 
     @property
     def info(self) -> AppInfo:
@@ -174,12 +177,24 @@ class Application:
         logger.info(f'Launched Application v{__version__}')
         if self._control_operation_journal is not None:
             from .task.control_reconciler import TaskControlReconciler
+            from .task.membership_reconciler import RoomMembershipReconciler
 
             await self._control_operation_journal.open()
             self._task_control_reconciler = TaskControlReconciler(
                 self._control_operation_journal,
                 self._settings_manager,
                 self._task_manager,
+            )
+            self._room_membership_reconciler = RoomMembershipReconciler(
+                self._control_operation_journal,
+                self._settings_manager,
+                self._task_manager,
+                self._task_control_reconciler,
+                room_id_resolver=self._resolve_room_id,
+                upload_policy_enabler=self._room_upload_policy_enabler,
+            )
+            self._task_control_reconciler.set_desired_absent_provider(
+                self._room_membership_reconciler.desires_absent
             )
         self._loading_task = asyncio.create_task(self._load_tasks_and_controls())
 
@@ -208,6 +223,10 @@ class Application:
                     await self._loading_task
             except BaseException as error:
                 errors.append(error)
+        membership = getattr(self, '_room_membership_reconciler', None)
+        self._room_membership_reconciler = None
+        if membership is not None:
+            await _collect_teardown_error(membership.shutdown(), errors)
         reconciler = getattr(self, '_task_control_reconciler', None)
         self._task_control_reconciler = None
         if reconciler is not None:
@@ -251,6 +270,28 @@ class Application:
                 rejected[room_id] = 'TASK_NOT_FOUND'
         return await reconciler.submit(action, valid, rejected=rejected, force=force)
 
+    async def submit_room_add(self, room_id: int) -> ControlOperationSnapshot:
+        reconciler = self._room_membership_reconciler
+        if reconciler is None:
+            raise RuntimeError('room membership service is not ready')
+        return await reconciler.submit_add(room_id)
+
+    async def submit_room_remove(
+        self, room_ids: List[int], *, remove_all: bool = False
+    ) -> ControlOperationSnapshot:
+        reconciler = self._room_membership_reconciler
+        if reconciler is None:
+            raise RuntimeError('room membership service is not ready')
+        return await reconciler.submit_remove(room_ids, remove_all=remove_all)
+
+    async def submit_room_collect(
+        self, room_id: int, *, upload: bool
+    ) -> ControlOperationSnapshot:
+        reconciler = self._room_membership_reconciler
+        if reconciler is None:
+            raise RuntimeError('room membership service is not ready')
+        return await reconciler.submit_collect(room_id, upload=upload)
+
     def has_recording_task(self) -> bool:
         from .task import RunningStatus
 
@@ -289,12 +330,7 @@ class Application:
             self._live_status_coordinator.resume()
 
     async def add_task(self, room_id: int) -> int:
-        from .bili.helpers import ensure_room_id
-
-        network_pool = self._ensure_network_session_pool()
-        room_id = await ensure_room_id(
-            room_id, None if network_pool is None else network_pool.client('bili_api')
-        )
+        room_id = await self._resolve_room_id(room_id)
 
         if self._task_manager.has_task(room_id):
             raise ExistsError(f'a task for the room {room_id} is already existed')
@@ -455,11 +491,25 @@ class Application:
         await self._task_manager.refresh_managed_cookie()
 
     async def _load_tasks_and_controls(self) -> None:
-        await self._task_manager.load_all_tasks()
+        membership = self._room_membership_reconciler
+        desired_absent = (
+            set() if membership is None else await membership.pending_removal_room_ids()
+        )
+        await self._task_manager.load_all_tasks(desired_absent)
         reconciler = self._task_control_reconciler
         if reconciler is not None:
             await reconciler.recover()
             reconciler.start()
+        if membership is not None:
+            membership.start()
+
+    async def _resolve_room_id(self, room_id: int) -> int:
+        from .bili.helpers import ensure_room_id
+
+        network_pool = self._ensure_network_session_pool()
+        return await ensure_room_id(
+            room_id, None if network_pool is None else network_pool.client('bili_api')
+        )
 
     async def _setup_live_status_monitor(self) -> None:
         from .bili.anonymous_room_client import AnonymousRoomClient

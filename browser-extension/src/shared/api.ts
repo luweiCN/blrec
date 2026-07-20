@@ -9,9 +9,27 @@ export interface RoomStatus {
 }
 
 export interface CollectResult {
-  readonly roomId: number;
-  readonly collected: true;
-  readonly upload: boolean;
+  readonly operationId: string;
+  readonly status: ControlOperationStatus;
+  readonly requestedRoomId: number;
+}
+
+export type ControlOperationStatus =
+  | 'accepted'
+  | 'running'
+  | 'succeeded'
+  | 'failed';
+
+export interface ControlOperationResult {
+  readonly id: string;
+  readonly status: ControlOperationStatus;
+  readonly result: {
+    readonly requestedRoomId?: number;
+    readonly resolvedRoomId?: number;
+    readonly collected?: boolean;
+    readonly upload?: boolean;
+  } | null;
+  readonly errorCode: string | null;
 }
 
 export interface HighlightResult {
@@ -45,6 +63,13 @@ export class ExtensionApi {
     });
   }
 
+  controlOperation(operationId: string): Promise<ControlOperationResult> {
+    return this.request<ControlOperationResult>(
+      `/control-operations/${encodeURIComponent(operationId)}`,
+      { apiRoot: true }
+    );
+  }
+
   addHighlight(
     roomId: number,
     payload: {
@@ -72,6 +97,7 @@ export class ExtensionApi {
       readonly method?: 'GET' | 'POST';
       readonly body?: unknown;
       readonly authenticated?: boolean;
+      readonly apiRoot?: boolean;
     } = {}
   ): Promise<T> {
     const controller = new AbortController();
@@ -87,7 +113,9 @@ export class ExtensionApi {
       }
       headers['X-BLREC-Extension-Token'] = this.token;
     }
-    const url = `${this.backendUrl}/api/v1/browser-extension${path}`;
+    const url = `${this.backendUrl}/api/v1${
+      options.apiRoot ? '' : '/browser-extension'
+    }${path}`;
     try {
       const response = await this.fetchFn.call(globalThis, url, {
         method: options.method ?? 'GET',

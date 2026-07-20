@@ -3,7 +3,10 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { TaskService } from './task.service';
-import { TaskManagerService } from './task-manager.service';
+import {
+  AddTaskResultMessage,
+  TaskManagerService,
+} from './task-manager.service';
 import { ControlOperationService } from 'src/app/core/services/control-operation.service';
 import { of, throwError } from 'rxjs';
 import { TaskData } from '../task.model';
@@ -15,6 +18,7 @@ describe('TaskManagerService', () => {
   beforeEach(() => {
     message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
       'error',
+      'info',
       'success',
       'warning',
     ]);
@@ -29,6 +33,9 @@ describe('TaskManagerService', () => {
           useValue: jasmine.createSpyObj<TaskService>('TaskService', [
             'getAllTaskData',
             'runBatchAction',
+            'addTask',
+            'removeTask',
+            'removeAllTasks',
           ]),
         },
         {
@@ -45,6 +52,56 @@ describe('TaskManagerService', () => {
 
   it('should be created', () => {
     expect(service).toBeTruthy();
+  });
+
+  it('emits submitted then terminal add result and refreshes with real room ID', () => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    taskService.addTask.and.returnValue(
+      of({
+        operationId: 'membership-operation-1',
+        status: 'accepted',
+        requestedRoomId: 6,
+      })
+    );
+    taskService.getAllTaskData.and.returnValue(of([]));
+    operations.poll.and.returnValue(
+      of({
+        id: 'membership-operation-1',
+        lane: 'room-membership',
+        kind: 'add',
+        targetKey: '6',
+        attempt: 1,
+        generation: 1,
+        status: 'succeeded',
+        result: {
+          requestedRoomId: 6,
+          resolvedRoomId: 3582149,
+          collected: true,
+          upload: false,
+        },
+        errorCode: null,
+        createdAt: 1,
+        updatedAt: 2,
+        steps: [],
+      })
+    );
+    const results: AddTaskResultMessage[] = [];
+
+    service.addTask(6).subscribe((result) => results.push(result));
+
+    expect(results).toEqual([
+      { type: 'info', message: '6: 添加任务已提交' },
+      { type: 'success', message: '3582149: 成功添加任务' },
+    ]);
+    expect(operations.poll).toHaveBeenCalledOnceWith(
+      'membership-operation-1'
+    );
+    expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
   });
 
   it('emits admission then terminal per-item results and refreshes once', () => {

@@ -15,6 +15,11 @@ export interface CollectMessage {
   readonly upload: boolean;
 }
 
+export interface ControlOperationMessage {
+  readonly type: 'CONTROL_OPERATION';
+  readonly operationId: string;
+}
+
 export interface AddHighlightMessage {
   readonly type: 'ADD_HIGHLIGHT';
   readonly roomId: number;
@@ -34,6 +39,7 @@ export type BackgroundMessage =
   | PairMessage
   | RoomStatusMessage
   | CollectMessage
+  | ControlOperationMessage
   | AddHighlightMessage;
 
 export type BackgroundResponse<T = unknown> =

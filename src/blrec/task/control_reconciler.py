@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -49,6 +49,10 @@ class TaskControlReconciler:
         self._worker: Optional[asyncio.Task[None]] = None
         self._accepting = True
         self._submission_lock = asyncio.Lock()
+        self._desired_absent_provider: Callable[[int], bool] = lambda _room_id: False
+
+    def set_desired_absent_provider(self, provider: Callable[[int], bool]) -> None:
+        self._desired_absent_provider = provider
 
     def start(self) -> None:
         if self._worker is not None and not self._worker.done():
@@ -120,6 +124,8 @@ class TaskControlReconciler:
         settings = self._settings_manager.get_settings({'tasks'}).tasks or []
         for task_settings in settings:
             room_id = task_settings.room_id
+            if self._desired_absent_provider(room_id):
+                continue
             if not self._task_manager.has_task(room_id):
                 continue
             try:
@@ -193,7 +199,11 @@ class TaskControlReconciler:
     async def _reconcile_claim(self, claim: ClaimedControlStep) -> None:
         room_id = int(claim.key)
         try:
-            desired = self._settings_manager.get_task_desired_state(room_id)
+            desired = (
+                (False, False)
+                if self._desired_absent_provider(room_id)
+                else self._settings_manager.get_task_desired_state(room_id)
+            )
             actual = self._task_manager.get_task_control_state(room_id)
             await self._apply(
                 room_id,

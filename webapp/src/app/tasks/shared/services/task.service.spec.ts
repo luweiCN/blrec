@@ -59,4 +59,24 @@ describe('TaskService', () => {
 
     expect(operationId).toBe('operation-1');
   });
+
+  it('keeps the requested room identity returned by a membership admission', () => {
+    let requestedRoomId: number | null | undefined;
+    service.addTask(6).subscribe((response) => {
+      requestedRoomId = response.requestedRoomId;
+    });
+
+    const request = http.expectOne('/api/v1/tasks/6');
+    expect(request.request.method).toBe('POST');
+    request.flush(
+      {
+        operationId: 'membership-operation-1',
+        status: 'accepted',
+        requestedRoomId: 6,
+      },
+      { status: 202, statusText: 'Accepted' }
+    );
+
+    expect(requestedRoomId).toBe(6);
+  });
 });

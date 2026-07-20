@@ -1,4 +1,3 @@
-import { ResponseMessage } from '../../shared/api.models';
 import type {
   DeleteStrategy,
   StreamFormat,
@@ -355,8 +354,10 @@ export interface DanmakuFileDetail {
   readonly status: DanmakuFileStatus;
 }
 
-export interface AddTaskResult extends ResponseMessage {
-  data: {
-    room_id: number;
-  };
+export interface RoomMembershipAdmission {
+  readonly operationId: string;
+  readonly status: ControlOperationStatus;
+  readonly requestedRoomId: number | null;
 }
+
+export type AddTaskResult = RoomMembershipAdmission;

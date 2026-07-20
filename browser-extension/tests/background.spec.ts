@@ -114,4 +114,37 @@ describe('background message handling', () => {
       'X-BLREC-Extension-Token': 'blrec_ext_token',
     });
   });
+
+  it('reads durable control operations with the extension token', async () => {
+    const storage = memoryStorage();
+    storage.values['blrecExtensionSettings'] = {
+      backendUrl: 'http://nas:2233',
+      username: 'owner',
+      token: 'blrec_ext_token',
+    };
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'operation-1',
+          status: 'succeeded',
+          result: { resolvedRoomId: 3582149, collected: true, upload: false },
+          errorCode: null,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+
+    const response = await handleBackgroundMessage(
+      { type: 'CONTROL_OPERATION', operationId: 'operation-1' },
+      { storage, fetchFn }
+    );
+
+    expect(response.ok).toBe(true);
+    expect(fetchFn.mock.calls[0][0]).toBe(
+      'http://nas:2233/api/v1/control-operations/operation-1'
+    );
+    expect(fetchFn.mock.calls[0][1].headers).toMatchObject({
+      'X-BLREC-Extension-Token': 'blrec_ext_token',
+    });
+  });
 });

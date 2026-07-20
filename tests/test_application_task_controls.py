@@ -61,6 +61,27 @@ async def test_application_admits_valid_and_rejected_rooms_together() -> None:
 
 
 @pytest.mark.asyncio
+async def test_application_delegates_membership_without_running_side_effects() -> None:
+    app = Application(Settings())
+    reconciler = AsyncMock()
+    reconciler.submit_add.return_value = object()
+    reconciler.submit_remove.return_value = object()
+    reconciler.submit_collect.return_value = object()
+    app._room_membership_reconciler = reconciler
+
+    added = await app.submit_room_add(6)
+    removed = await app.submit_room_remove([100, 200], remove_all=True)
+    collected = await app.submit_room_collect(6, upload=True)
+
+    assert added is reconciler.submit_add.return_value
+    assert removed is reconciler.submit_remove.return_value
+    assert collected is reconciler.submit_collect.return_value
+    reconciler.submit_add.assert_awaited_once_with(6)
+    reconciler.submit_remove.assert_awaited_once_with([100, 200], remove_all=True)
+    reconciler.submit_collect.assert_awaited_once_with(6, upload=True)
+
+
+@pytest.mark.asyncio
 async def test_failed_desired_state_dump_restores_in_memory_values() -> None:
     settings = Settings(
         tasks=[TaskSettings(room_id=100, enable_monitor=True, enable_recorder=True)]

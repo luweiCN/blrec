@@ -21,6 +21,7 @@ interface ContentDependencies {
   readonly scheduleRefresh?: (
     callback: () => Promise<void>
   ) => () => void;
+  readonly waitForOperationPoll?: () => Promise<void>;
 }
 
 interface RoomStatus {
@@ -37,6 +38,7 @@ export class HighlightContentController {
   private readonly scheduleRefresh: (
     callback: () => Promise<void>
   ) => () => void;
+  private readonly waitForOperationPoll: () => Promise<void>;
   private roomId: number | null = null;
   private status: RoomStatus | null = null;
   private observer: ObserverLike | null = null;
@@ -44,6 +46,7 @@ export class HighlightContentController {
   private cancelNamePrompt: (() => void) | null = null;
   private readonly playerDelay = new PlayerDelayCalibrator();
   private started = false;
+  private membershipGeneration = 0;
 
   constructor(dependencies: ContentDependencies) {
     this.document = dependencies.document;
@@ -59,6 +62,9 @@ export class HighlightContentController {
         const timer = setInterval(() => void callback(), 30_000);
         return () => clearInterval(timer);
       });
+    this.waitForOperationPoll =
+      dependencies.waitForOperationPoll ??
+      (() => new Promise((resolve) => setTimeout(resolve, 500)));
   }
 
   async start(): Promise<void> {
@@ -82,6 +88,8 @@ export class HighlightContentController {
   }
 
   destroy(): void {
+    this.started = false;
+    this.membershipGeneration += 1;
     this.observer?.disconnect();
     this.observer = null;
     this.cancelStatusRefresh?.();
@@ -179,11 +187,19 @@ export class HighlightContentController {
       this.setDisabled(container, false);
       return;
     }
-    if (this.isCollectResult(response.data)) {
-      this.roomId = response.data.roomId;
+    if (!this.isCollectAdmission(response.data)) {
+      this.toast('BLREC 返回了无法识别的收录任务', 'error');
+      this.setDisabled(container, false);
+      return;
     }
-    this.toast(upload ? '已收录并开启投稿' : '已收录', 'success');
-    await this.refreshStatus();
+    const generation = ++this.membershipGeneration;
+    this.toast('收录任务已提交', 'success');
+    await this.pollMembership(
+      container,
+      response.data.operationId,
+      upload,
+      generation
+    );
   }
 
   private async addHighlight(container: HTMLElement): Promise<void> {
@@ -326,15 +342,119 @@ export class HighlightContentController {
     );
   }
 
-  private isCollectResult(value: unknown): value is { roomId: number } {
+  private isCollectAdmission(
+    value: unknown
+  ): value is { operationId: string; requestedRoomId: number } {
     return (
       typeof value === 'object' &&
       value !== null &&
-      'roomId' in value &&
-      typeof value.roomId === 'number' &&
-      Number.isSafeInteger(value.roomId) &&
-      value.roomId > 0
+      'operationId' in value &&
+      typeof value.operationId === 'string' &&
+      value.operationId.length > 0 &&
+      'requestedRoomId' in value &&
+      typeof value.requestedRoomId === 'number'
     );
+  }
+
+  private async pollMembership(
+    container: HTMLElement,
+    operationId: string,
+    upload: boolean,
+    generation: number
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await this.waitForOperationPoll();
+      if (!this.started || generation !== this.membershipGeneration) {
+        return;
+      }
+      const response = await this.sendMessage({
+        type: 'CONTROL_OPERATION',
+        operationId,
+      });
+      if (!this.started || generation !== this.membershipGeneration) {
+        return;
+      }
+      if (!response.ok) {
+        this.toast(this.friendlyError(response.message), 'error');
+        this.setDisabled(container, false);
+        return;
+      }
+      const operation = this.controlOperation(response.data);
+      if (!operation) {
+        this.toast('BLREC 返回了无法识别的任务状态', 'error');
+        this.setDisabled(container, false);
+        return;
+      }
+      if (operation.status === 'accepted' || operation.status === 'running') {
+        continue;
+      }
+      if (operation.status === 'failed') {
+        this.toast(this.membershipError(operation.errorCode), 'error');
+        this.setDisabled(container, false);
+        return;
+      }
+      const resolvedRoomId = operation.result?.resolvedRoomId;
+      if (
+        typeof resolvedRoomId === 'number' &&
+        Number.isSafeInteger(resolvedRoomId) &&
+        resolvedRoomId > 0
+      ) {
+        this.roomId = resolvedRoomId;
+      }
+      this.toast(upload ? '已收录并开启投稿' : '已收录', 'success');
+      await this.refreshStatus();
+      return;
+    }
+    this.toast('收录任务查询超时，请稍后刷新页面确认', 'error');
+    this.setDisabled(container, false);
+  }
+
+  private controlOperation(value: unknown): {
+    status: 'accepted' | 'running' | 'succeeded' | 'failed';
+    result: { resolvedRoomId?: number } | null;
+    errorCode: string | null;
+  } | null {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      !('status' in value) ||
+      !['accepted', 'running', 'succeeded', 'failed'].includes(
+        String(value.status)
+      )
+    ) {
+      return null;
+    }
+    const status = value.status as
+      | 'accepted'
+      | 'running'
+      | 'succeeded'
+      | 'failed';
+    const result =
+      'result' in value && typeof value.result === 'object'
+        ? (value.result as { resolvedRoomId?: number } | null)
+        : null;
+    const errorCode =
+      'errorCode' in value && typeof value.errorCode === 'string'
+        ? value.errorCode
+        : null;
+    return { status, result, errorCode };
+  }
+
+  private membershipError(errorCode: string | null): string {
+    const messages: Readonly<Record<string, string>> = {
+      ROOM_RESOLVE_FAILED: '直播间编号解析失败',
+      TASK_ADD_FAILED: '添加录制任务失败',
+      TASK_STATE_FAILED: '启动录制任务失败',
+      UPLOAD_POLICY_FAILED: '启用投稿设置失败',
+      SETTINGS_PERSIST_FAILED: '保存任务设置失败',
+      TASK_TEARDOWN_FAILED: '删除录制任务失败',
+      DEPENDENCY_FAILED: '前置步骤失败',
+    };
+    return errorCode && messages[errorCode]
+      ? messages[errorCode]
+      : errorCode
+      ? `收录失败（${errorCode}）`
+      : '收录失败';
   }
 }
 

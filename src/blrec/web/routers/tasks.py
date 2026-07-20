@@ -69,6 +69,12 @@ class TaskBatchActionResponse(ApiModel):
     results: List[TaskBatchActionResult]
 
 
+class RoomMembershipAdmissionResponse(ApiModel):
+    operation_id: str
+    status: Literal['accepted', 'running', 'succeeded', 'failed']
+    requested_room_id: Optional[int]
+
+
 _LIFECYCLE_ACTIONS = frozenset(
     (
         'start',
@@ -113,6 +119,31 @@ async def _submit_control(
     )
 
 
+async def _submit_membership_remove(
+    room_ids: List[int], *, remove_all: bool = False
+) -> Any:
+    try:
+        return await app.submit_room_remove(room_ids, remove_all=remove_all)
+    except (ControlJournalClosed, ControlLaneSaturated) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='房间操作队列繁忙，请稍后重试',
+            headers={'Retry-After': '1'},
+        ) from error
+
+
+def _membership_admission(operation: Any) -> RoomMembershipAdmissionResponse:
+    result = operation.result or {}
+    requested_room_id = result.get('requestedRoomId')
+    return RoomMembershipAdmissionResponse(
+        operation_id=operation.id,
+        status=operation.status,
+        requested_room_id=(
+            requested_room_id if isinstance(requested_room_id, int) else None
+        ),
+    )
+
+
 @router.get('/data')
 async def get_task_data(
     page: PositiveInt = 1,
@@ -151,6 +182,23 @@ async def run_task_batch_action(
             operation_id=result.operation_id,
         )
         return result
+    if command.action == 'delete':
+        operation = await _submit_membership_remove(command.room_ids)
+        response.status_code = status.HTTP_202_ACCEPTED
+        return TaskBatchActionResponse(
+            operation_id=operation.id,
+            status=operation.status,
+            results=[
+                TaskBatchActionResult(
+                    room_id=room_id,
+                    accepted=True,
+                    status='queued',
+                    operation_id=operation.id,
+                    message='删除已提交',
+                )
+                for room_id in command.room_ids
+            ],
+        )
     results = []
     for room_id in command.room_ids:
         if not app.has_task(room_id):
@@ -180,8 +228,7 @@ async def run_task_batch_action(
                     continue
                 message = '已触发文件切割'
             else:
-                await app.remove_task(room_id)
-                message = '任务已删除'
+                raise AssertionError('unsupported task action')
         except Exception as error:
             results.append(
                 TaskBatchActionResult(
@@ -375,11 +422,11 @@ async def disable_task_recorder(
 
 @router.post(
     '/{room_id}',
-    response_model=ResponseMessage,
-    status_code=status.HTTP_201_CREATED,
+    response_model=RoomMembershipAdmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     responses={**created_responses, **confict_responses, **forbidden_responses},
 )
-async def add_task(room_id: int) -> ResponseMessage:
+async def add_task(room_id: int) -> RoomMembershipAdmissionResponse:
     """Add a task for a room.
 
     the room_id argument can be both the real room id or the short room id.
@@ -388,21 +435,35 @@ async def add_task(room_id: int) -> ResponseMessage:
     the short room id should be considered as a shorthand
     only for adding tasks conveniently.
     """
-    real_room_id = await app.add_task(room_id)
-    return ResponseMessage(
-        message='Successfully Added Task', data={'room_id': real_room_id}
-    )
-
-
-@router.delete('', response_model=ResponseMessage)
-async def remove_all_tasks() -> ResponseMessage:
-    await app.remove_all_tasks()
-    return ResponseMessage(message='All tasks have been removed')
+    try:
+        operation = await app.submit_room_add(room_id)
+    except (ControlJournalClosed, ControlLaneSaturated) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='房间操作队列繁忙，请稍后重试',
+            headers={'Retry-After': '1'},
+        ) from error
+    return _membership_admission(operation)
 
 
 @router.delete(
-    '/{room_id}', response_model=ResponseMessage, responses={**not_found_responses}
+    '',
+    response_model=RoomMembershipAdmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
-async def remove_task(room_id: int) -> ResponseMessage:
-    await app.remove_task(room_id)
-    return ResponseMessage(message='The task has been removed')
+async def remove_all_tasks() -> RoomMembershipAdmissionResponse:
+    operation = await _submit_membership_remove(
+        list(app.get_all_task_room_ids()), remove_all=True
+    )
+    return _membership_admission(operation)
+
+
+@router.delete(
+    '/{room_id}',
+    response_model=RoomMembershipAdmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={**not_found_responses},
+)
+async def remove_task(room_id: int) -> RoomMembershipAdmissionResponse:
+    operation = await _submit_membership_remove([room_id])
+    return _membership_admission(operation)

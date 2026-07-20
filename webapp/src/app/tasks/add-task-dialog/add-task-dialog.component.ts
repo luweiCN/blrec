@@ -5,6 +5,7 @@ import {
   Input,
   Output,
   ChangeDetectorRef,
+  OnDestroy,
 } from '@angular/core';
 import {
   FormBuilder,
@@ -13,8 +14,8 @@ import {
   Validators,
 } from '@angular/forms';
 
-import { from } from 'rxjs';
-import { concatMap, tap } from 'rxjs/operators';
+import { from, Subject } from 'rxjs';
+import { concatMap, takeUntil, tap } from 'rxjs/operators';
 
 import {
   TaskManagerService,
@@ -31,7 +32,7 @@ const INPUT_PATTERN =
   styleUrls: ['./add-task-dialog.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class AddTaskDialogComponent {
+export class AddTaskDialogComponent implements OnDestroy {
   @Input() visible = false;
   @Output() visibleChange = new EventEmitter<boolean>();
 
@@ -40,6 +41,7 @@ export class AddTaskDialogComponent {
 
   readonly formGroup: FormGroup;
   readonly pattern = INPUT_PATTERN;
+  private readonly destroy$ = new Subject<void>();
 
   constructor(
     formBuilder: FormBuilder,
@@ -81,6 +83,11 @@ export class AddTaskDialogComponent {
     this.close();
   }
 
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
   handleConfirm(): void {
     this.pending = true;
     const inputValue = this.inputControl.value.trim() as string;
@@ -97,12 +104,22 @@ export class AddTaskDialogComponent {
         concatMap((roomId) => this.taskManager.addTask(roomId)),
         tap((resultMessage) => {
           this.resultMessages.push(resultMessage);
+          if (resultMessage.type === 'info') {
+            this.pending = false;
+          }
           this.changeDetector.markForCheck();
-        })
+        }),
+        takeUntil(this.destroy$)
       )
       .subscribe({
         complete: () => {
-          if (this.resultMessages.every((m) => m.type === 'success')) {
+          if (
+            this.resultMessages.length > 0 &&
+            this.resultMessages.every(
+              (message) =>
+                message.type === 'success' || message.type === 'info'
+            )
+          ) {
             this.close();
           } else {
             this.reset();

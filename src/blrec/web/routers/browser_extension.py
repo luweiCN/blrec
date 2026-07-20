@@ -21,6 +21,7 @@ from blrec.bili_upload.policies import (
     RoomUploadPolicyNotFound,
     default_room_upload_policy,
 )
+from blrec.control.operations import ControlJournalClosed, ControlLaneSaturated
 from blrec.logging.audit import audit
 from blrec.task.models import RunningStatus
 from blrec.utils.string import camel_case
@@ -63,9 +64,9 @@ class CollectRequest(ApiModel):
 
 
 class CollectResponse(ApiModel):
-    room_id: int
-    collected: Literal[True] = True
-    upload: bool
+    operation_id: str
+    status: Literal['accepted', 'running', 'succeeded', 'failed']
+    requested_room_id: int
 
 
 class HighlightRequest(ApiModel):
@@ -176,7 +177,11 @@ async def room_status(
     return RoomStatusResponse(collected=True, recording=recording)
 
 
-@router.post('/rooms/{room_id}/collect', response_model=CollectResponse)
+@router.post(
+    '/rooms/{room_id}/collect',
+    response_model=CollectResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def collect_room(
     room_id: int,
     command: CollectRequest,
@@ -187,32 +192,25 @@ async def collect_room(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='直播间编号无效'
         )
-    resolved_room_id = room_id
     try:
-        if not app.has_task(room_id):
-            resolved_room_id = await app.add_task(room_id)
-        data = app.get_task_data(resolved_room_id)
-        if not data.task_status.monitor_enabled:
-            await app.start_task(resolved_room_id)
-        elif not data.task_status.recorder_enabled:
-            await app.enable_task_recorder(resolved_room_id)
-        if command.upload:
-            await _enable_upload_policy(resolved_room_id, _policies(), _categories())
-    except HTTPException:
-        raise
-    except Exception as error:
+        operation = await app.submit_room_collect(room_id, upload=command.upload)
+    except (ControlJournalClosed, ControlLaneSaturated) as error:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(error) or '无法收录该直播间',
-        ) from None
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='房间操作队列繁忙，请稍后重试',
+            headers={'Retry-After': '1'},
+        ) from error
     audit(
-        'browser_extension_room_collected',
+        'browser_extension_room_collect_submitted',
         token_id=identity.token_id,
-        room_id=resolved_room_id,
+        requested_room_id=room_id,
         upload=command.upload,
+        operation_id=operation.id,
         result='accepted',
     )
-    return CollectResponse(room_id=resolved_room_id, upload=command.upload)
+    return CollectResponse(
+        operation_id=operation.id, status=operation.status, requested_room_id=room_id
+    )
 
 
 @router.post(
@@ -262,6 +260,8 @@ async def _enable_upload_policy(
     except RoomUploadPolicyNotFound:
         command = default_room_upload_policy()
     else:
+        if current.enabled and not current.blocked_reason:
+            return
         command = RoomUploadPolicyCommand(
             **{
                 field.name: (

@@ -15,6 +15,7 @@ import {
   Metadata,
   StreamProfile,
   AddTaskResult,
+  RoomMembershipAdmission,
   VideoFileDetail,
   DanmakuFileDetail,
 } from '../task.model';
@@ -85,14 +86,14 @@ export class TaskService {
     return this.http.post<AddTaskResult>(url, null);
   }
 
-  removeTask(roomId: number): Observable<ResponseMessage> {
+  removeTask(roomId: number): Observable<RoomMembershipAdmission> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/${roomId}`);
-    return this.http.delete<ResponseMessage>(url);
+    return this.http.delete<RoomMembershipAdmission>(url);
   }
 
-  removeAllTasks(): Observable<ResponseMessage> {
+  removeAllTasks(): Observable<RoomMembershipAdmission> {
     const url = this.url.makeApiUrl('/api/v1/tasks');
-    return this.http.delete<ResponseMessage>(url);
+    return this.http.delete<RoomMembershipAdmission>(url);
   }
 
   startTask(roomId: number): Observable<TaskBatchActionResponse> {

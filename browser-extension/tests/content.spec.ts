@@ -141,15 +141,36 @@ describe('Bilibili live controls', () => {
           },
         };
       }
+      if (message.type === 'CONTROL_OPERATION') {
+        return {
+          ok: true as const,
+          data: {
+            id: 'operation-1',
+            status: 'succeeded',
+            result: {
+              requestedRoomId: 6,
+              resolvedRoomId: 3582149,
+              collected: true,
+              upload: false,
+            },
+            errorCode: null,
+          },
+        };
+      }
       return {
         ok: true as const,
-        data: { roomId: 3582149, collected: true, upload: false },
+        data: {
+          operationId: 'operation-1',
+          status: 'accepted',
+          requestedRoomId: 6,
+        },
       };
     });
     const controller = new HighlightContentController({
       document,
       location: locationAt('/6'),
       sendMessage,
+      waitForOperationPoll: () => Promise.resolve(),
       createObserver: (callback) => new FakeObserver(callback),
       scheduleRefresh: () => () => undefined,
     });
@@ -159,6 +180,59 @@ describe('Bilibili live controls', () => {
       .querySelector<HTMLButtonElement>('.blrec-highlight-actions button')!
       .click();
     await vi.waitFor(() => expect(statusRoomIds).toEqual([6, 3582149]));
+  });
+
+  it('stops client polling on destroy without cancelling the durable operation', async () => {
+    let releasePoll: (() => void) | undefined;
+    const waitForOperationPoll = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePoll = resolve;
+        })
+    );
+    const setup = makeController({ collected: false, recording: false });
+    const controller = new HighlightContentController({
+      document,
+      location: locationAt('/100'),
+      sendMessage: setup.sendMessage,
+      createObserver: (callback) => new FakeObserver(callback),
+      scheduleRefresh: () => () => undefined,
+      waitForOperationPoll,
+    });
+    setup.sendMessage.mockImplementation(async (message) => {
+      if (message.type === 'ROOM_STATUS') {
+        return { ok: true, data: { collected: false, recording: false } };
+      }
+      if (message.type === 'COLLECT') {
+        return {
+          ok: true,
+          data: {
+            operationId: 'operation-1',
+            status: 'accepted',
+            requestedRoomId: 100,
+          },
+        };
+      }
+      return {
+        ok: true,
+        data: { id: 'operation-1', status: 'running', result: null },
+      };
+    });
+    await controller.start();
+    document
+      .querySelector<HTMLButtonElement>('.blrec-highlight-actions button')!
+      .click();
+    await vi.waitFor(() => expect(waitForOperationPoll).toHaveBeenCalledOnce());
+
+    controller.destroy();
+    releasePoll?.();
+    await Promise.resolve();
+
+    expect(
+      setup.sendMessage.mock.calls.filter(
+        ([message]) => message.type === 'CONTROL_OPERATION'
+      )
+    ).toHaveLength(0);
   });
 
   it('locks the click time, accepts a name and allows repeated highlights', async () => {

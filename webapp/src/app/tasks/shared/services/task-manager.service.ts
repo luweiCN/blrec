@@ -18,6 +18,7 @@ import {
   TaskBatchAction,
   TaskBatchActionResponse,
   TaskData,
+  RoomMembershipAdmission,
 } from '../task.model';
 import { ControlOperationService } from 'src/app/core/services/control-operation.service';
 import type { ControlOperation } from 'src/app/core/services/control-operation.service';
@@ -118,12 +119,35 @@ export class TaskManagerService {
 
   addTask(roomId: number): Observable<AddTaskResultMessage> {
     return this.taskService.addTask(roomId).pipe(
-      map((result) => {
-        return {
-          type: 'success',
-          message: '成功添加任务',
-        } as AddTaskResultMessage;
-      }),
+      switchMap((admission) =>
+        concat(
+          of({
+            type: 'info',
+            message: `${roomId}: 添加任务已提交`,
+          } as AddTaskResultMessage),
+          this.observeMembership(admission).pipe(
+            map((operation) => {
+              const resolvedRoomId = operation.result?.['resolvedRoomId'];
+              if (operation.status === 'failed') {
+                return {
+                  type: 'error',
+                  message: `${roomId}: ${this.membershipErrorMessage(
+                    operation.errorCode
+                  )}`,
+                } as AddTaskResultMessage;
+              }
+              return {
+                type: 'success',
+                message: `${
+                  typeof resolvedRoomId === 'number'
+                    ? resolvedRoomId
+                    : roomId
+                }: 成功添加任务`,
+              } as AddTaskResultMessage;
+            })
+          )
+        )
+      ),
       catchError((error: HttpErrorResponse) => {
         let result: AddTaskResultMessage;
         if (error.status == 409) {
@@ -149,38 +173,71 @@ export class TaskManagerService {
         }
         return of(result);
       }),
-      map((resultMessage) => {
-        resultMessage.message = `${roomId}: ${resultMessage.message}`;
-        return resultMessage;
-      }),
       tap((resultMessage) => {
         this.message[resultMessage.type](resultMessage.message);
       })
     );
   }
 
-  removeTask(roomId: number): Observable<ResponseMessage> {
+  removeTask(roomId: number): Observable<AddTaskResultMessage> {
     return this.taskService.removeTask(roomId).pipe(
-      tap(
-        () => {
-          this.message.success(`[${roomId}] 任务已删除`);
-        },
-        (error: HttpErrorResponse) => {
-          this.message.error(`[${roomId}] 删除任务出错: ${error.message}`);
-        }
-      )
+      switchMap((admission) =>
+        concat(
+          of({
+            type: 'info',
+            message: `[${roomId}] 删除已提交`,
+          } as AddTaskResultMessage),
+          this.observeMembership(admission).pipe(
+            map(
+              (operation) =>
+                ({
+                  type:
+                    operation.status === 'failed' ? 'error' : 'success',
+                  message:
+                    operation.status === 'failed'
+                      ? `[${roomId}] ${this.membershipErrorMessage(
+                          operation.errorCode
+                        )}`
+                      : `[${roomId}] 任务已删除`,
+                } as AddTaskResultMessage)
+            )
+          )
+        )
+      ),
+      tap((result) => this.message[result.type](result.message))
     );
   }
 
-  removeAllTasks(): Observable<ResponseMessage> {
+  removeAllTasks(): Observable<AddTaskResultMessage> {
     const messageId = this.message.loading('正在删除全部任务...', {
       nzDuration: 0,
     }).messageId;
     return this.taskService.removeAllTasks().pipe(
+      switchMap((admission) =>
+        concat(
+          of({
+            type: 'info',
+            message: '删除全部任务已提交',
+          } as AddTaskResultMessage),
+          this.observeMembership(admission).pipe(
+            map(
+              (operation) =>
+                ({
+                  type:
+                    operation.status === 'failed' ? 'error' : 'success',
+                  message:
+                    operation.status === 'failed'
+                      ? this.membershipErrorMessage(operation.errorCode)
+                      : '成功删除全部任务',
+                } as AddTaskResultMessage)
+            )
+          )
+        )
+      ),
       tap(
-        () => {
+        (result) => {
           this.message.remove(messageId);
-          this.message.success('成功删除全部任务');
+          this.message[result.type](result.message);
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -434,6 +491,48 @@ export class TaskManagerService {
         concatMap((result) => this.refreshTaskDataAfterControl(result))
       )
     );
+  }
+
+  private observeMembership(
+    admission: RoomMembershipAdmission
+  ): Observable<ControlOperation> {
+    return this.controlOperations.poll(admission.operationId).pipe(
+      filter(
+        (operation) =>
+          operation.status === 'succeeded' || operation.status === 'failed'
+      ),
+      concatMap((operation) =>
+        this.taskService.getAllTaskData().pipe(
+          tap((tasks) => this.taskDataRefreshSubject.next(tasks)),
+          map(() => operation),
+          catchError((error: HttpErrorResponse) => {
+            this.message.warning(
+              `房间操作已完成，但刷新任务列表失败：${error.message}`
+            );
+            return of(operation);
+          })
+        )
+      )
+    );
+  }
+
+  private membershipErrorMessage(
+    errorCode: string | null | undefined
+  ): string {
+    const messages: Readonly<Record<string, string>> = {
+      ROOM_RESOLVE_FAILED: '直播间编号解析失败',
+      TASK_ADD_FAILED: '添加录制任务失败',
+      TASK_STATE_FAILED: '启动录制任务失败',
+      UPLOAD_POLICY_FAILED: '启用投稿设置失败',
+      TASK_TEARDOWN_FAILED: '停止并删除录制任务失败',
+      SETTINGS_PERSIST_FAILED: '保存任务设置失败',
+      DEPENDENCY_FAILED: '前置步骤失败',
+    };
+    return errorCode && messages[errorCode]
+      ? messages[errorCode]
+      : errorCode
+      ? `房间操作失败（${errorCode}）`
+      : '房间操作失败';
   }
 
   private refreshTaskDataAfterControl(

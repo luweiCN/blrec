@@ -51,6 +51,12 @@ export async function handleBackgroundMessage(
         data: await api.collect(message.roomId, message.upload),
       };
     }
+    if (message.type === 'CONTROL_OPERATION') {
+      return {
+        ok: true,
+        data: await api.controlOperation(message.operationId),
+      };
+    }
     return {
       ok: true,
       data: await api.addHighlight(message.roomId, {

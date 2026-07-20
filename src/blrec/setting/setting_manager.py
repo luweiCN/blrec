@@ -163,6 +163,24 @@ class SettingsManager:
         await self.dump_settings()
         return settings.copy(deep=True)
 
+    async def ensure_task_settings(self, room_id: int) -> TaskSettings:
+        """Create one task setting durably, or return the existing setting."""
+
+        async with self._task_desired_state_lock:
+            existing = self.find_task_settings(room_id)
+            if existing is not None:
+                return existing.copy(deep=True)
+            settings = TaskSettings(room_id=room_id)
+            self._settings.tasks = [*self._settings.tasks, settings]
+            try:
+                await self.dump_settings()
+            except BaseException:
+                self._settings.tasks = [
+                    item for item in self._settings.tasks if item is not settings
+                ]
+                raise
+            return settings.copy(deep=True)
+
     async def remove_task_settings(self, room_id: int) -> None:
         settings = self.find_task_settings(room_id)
         if settings is None:
@@ -173,6 +191,29 @@ class SettingsManager:
     async def remove_all_task_settings(self) -> None:
         self._settings.tasks.clear()
         await self.dump_settings()
+
+    async def remove_task_settings_batch(self, room_ids: Iterable[int]) -> Set[int]:
+        """Remove a membership batch with at most one settings-file write."""
+
+        normalized = set(room_ids)
+        async with self._task_desired_state_lock:
+            previous = self._settings.tasks
+            removed = {
+                settings.room_id
+                for settings in previous
+                if settings.room_id in normalized
+            }
+            if not removed:
+                return set()
+            self._settings.tasks = [
+                settings for settings in previous if settings.room_id not in removed
+            ]
+            try:
+                await self.dump_settings()
+            except BaseException:
+                self._settings.tasks = previous
+                raise
+            return removed
 
     def get_task_desired_state(self, room_id: int) -> Tuple[bool, bool]:
         settings = self.find_task_settings(room_id)

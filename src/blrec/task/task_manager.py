@@ -9,6 +9,7 @@ from typing import (
     Dict,
     Iterator,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -78,15 +79,25 @@ class RecordTaskManager:
         self._network_route_manager = network_route_manager
         self._tasks: Dict[int, RecordTask] = {}
 
-    async def load_all_tasks(self) -> None:
+    async def load_all_tasks(
+        self, desired_absent_room_ids: Optional[Set[int]] = None
+    ) -> None:
         logger.info('Loading all tasks...')
 
         settings_list = self._settings_manager.get_settings({'tasks'}).tasks
         assert settings_list is not None
 
-        for settings in settings_list:
+        desired_absent_room_ids = desired_absent_room_ids or set()
+        for persisted_settings in settings_list:
+            settings = persisted_settings
+            apply_desired_state = True
+            if persisted_settings.room_id in desired_absent_room_ids:
+                settings = persisted_settings.copy(deep=True)
+                settings.enable_monitor = False
+                settings.enable_recorder = False
+                apply_desired_state = False
             try:
-                await self.add_task(settings)
+                await self.add_task(settings, apply_desired_state=apply_desired_state)
             except Exception as e:
                 submit_exception(e)
 
@@ -120,7 +131,9 @@ class RecordTaskManager:
         wait=wait_exponential(max=10),
         stop=stop_after_delay(60),
     )
-    async def add_task(self, settings: TaskSettings) -> None:
+    async def add_task(
+        self, settings: TaskSettings, *, apply_desired_state: bool = True
+    ) -> None:
         logger.info(f'Adding task {settings.room_id}...')
 
         task_options: Dict[str, Any] = {
@@ -160,9 +173,9 @@ class RecordTaskManager:
                 settings.room_id, settings.postprocessing
             )
 
-            if settings.enable_monitor:
+            if apply_desired_state and settings.enable_monitor:
                 await task.enable_monitor()
-            if settings.enable_recorder:
+            if apply_desired_state and settings.enable_recorder:
                 await task.enable_recorder()
         except BaseException as e:
             logger.error(f'Failed to add task {settings.room_id} due to: {repr(e)}')

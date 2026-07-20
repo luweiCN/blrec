@@ -13,7 +13,7 @@ from blrec.bili_upload.policies import RoomUploadPolicyCommand, RoomUploadPolicy
 from blrec.task.models import RunningStatus
 from blrec.web import security
 from blrec.web.auth_store import AdminAuthStore
-from blrec.web.routers import browser_extension
+from blrec.web.routers import browser_extension, control_operations
 
 
 class Clock:
@@ -33,6 +33,7 @@ class FakeApplication:
         self.add_task = AsyncMock(side_effect=self._add_task)
         self.start_task = AsyncMock(side_effect=self._start_task)
         self.enable_task_recorder = AsyncMock(side_effect=self._enable_recorder)
+        self.submit_room_collect = AsyncMock(side_effect=self._submit_room_collect)
 
     def has_task(self, _room_id: int) -> bool:
         return self.collected
@@ -57,6 +58,13 @@ class FakeApplication:
 
     async def _enable_recorder(self, _room_id: int) -> None:
         self.recorder_enabled = True
+
+    async def _submit_room_collect(self, room_id: int, *, upload: bool):
+        return SimpleNamespace(
+            id='membership-operation-1',
+            status='accepted',
+            result={'requestedRoomId': room_id, 'upload': upload},
+        )
 
 
 class FakePolicyManager:
@@ -110,9 +118,32 @@ def extension_client(
     browser_extension.highlight_service = highlights
     browser_extension.policy_manager = policies  # type: ignore[assignment]
     browser_extension.category_catalog = FakeCatalog()  # type: ignore[assignment]
+    old_control_journal = control_operations.journal
+    control_journal = AsyncMock()
+    control_journal.get.return_value = SimpleNamespace(
+        id='membership-operation-1',
+        lane='room-membership',
+        kind='collect',
+        target_key='100:0',
+        attempt=1,
+        generation=1,
+        status='succeeded',
+        result={
+            'requestedRoomId': 100,
+            'resolvedRoomId': 100,
+            'collected': True,
+            'upload': False,
+        },
+        error_code=None,
+        created_at=1.0,
+        updated_at=2.0,
+        steps=(),
+    )
+    control_operations.journal = control_journal
 
     api = FastAPI(dependencies=[Depends(security.authenticate)])
     api.include_router(browser_extension.router, prefix='/api/v1')
+    api.include_router(control_operations.router, prefix='/api/v1')
 
     @api.get('/api/v1/settings')
     async def settings() -> dict:
@@ -122,6 +153,7 @@ def extension_client(
         yield client, application, policies, highlights, store, clock
 
     browser_extension.reset()
+    control_operations.journal = old_control_journal
     security.reset()
     store.close()
 
@@ -160,7 +192,7 @@ def test_pair_and_room_status_map_to_the_three_button_states(extension_client) -
     assert recording.json() == {'collected': True, 'recording': True}
 
 
-def test_collect_is_idempotent_and_only_creates_policy_when_requested(
+def test_collect_returns_durable_admission_without_waiting_for_side_effects(
     extension_client,
 ) -> None:
     client, application, policies, _highlights, _store, _clock = extension_client
@@ -171,10 +203,15 @@ def test_collect_is_idempotent_and_only_creates_policy_when_requested(
         headers=extension_headers(token),
         json={'upload': False},
     )
-    assert collected.status_code == 200
-    assert collected.json() == {'roomId': 100, 'collected': True, 'upload': False}
-    application.add_task.assert_awaited_once_with(100)
-    application.start_task.assert_awaited_once_with(100)
+    assert collected.status_code == 202
+    assert collected.json() == {
+        'operationId': 'membership-operation-1',
+        'status': 'accepted',
+        'requestedRoomId': 100,
+    }
+    application.submit_room_collect.assert_awaited_once_with(100, upload=False)
+    application.add_task.assert_not_awaited()
+    application.start_task.assert_not_awaited()
     policies.upsert.assert_not_awaited()
 
     uploaded = client.post(
@@ -182,15 +219,12 @@ def test_collect_is_idempotent_and_only_creates_policy_when_requested(
         headers=extension_headers(token),
         json={'upload': True},
     )
-    assert uploaded.status_code == 200
-    application.add_task.assert_awaited_once()
-    command = policies.upsert.await_args.args[1]
-    assert command.enabled is True
-    assert command.tid == 21
-    assert command.creation_statement_id == -2
+    assert uploaded.status_code == 202
+    application.submit_room_collect.assert_awaited_with(100, upload=True)
+    policies.upsert.assert_not_awaited()
 
 
-def test_collect_preserves_existing_policy_fields_when_enabling_upload(
+def test_collect_admission_does_not_apply_policy_inside_the_request(
     extension_client,
 ) -> None:
     client, application, policies, _highlights, _store, _clock = extension_client
@@ -212,10 +246,46 @@ def test_collect_preserves_existing_policy_fields_when_enabling_upload(
         json={'upload': True},
     )
 
+    assert response.status_code == 202
+    application.submit_room_collect.assert_awaited_once_with(100, upload=True)
+    policies.upsert.assert_not_awaited()
+
+
+def test_extension_token_can_poll_the_shared_control_operation_route(
+    extension_client,
+) -> None:
+    client, _application, _policies, _highlights, _store, _clock = extension_client
+    token = pair(client)
+
+    response = client.get(
+        '/api/v1/control-operations/membership-operation-1',
+        headers=extension_headers(token),
+    )
+
     assert response.status_code == 200
-    command = policies.upsert.await_args.args[1]
-    assert command.enabled is True
-    assert command.title_template == '保留这个标题'
+    assert response.json()['result']['resolvedRoomId'] == 100
+
+
+@pytest.mark.asyncio
+async def test_upload_policy_step_observes_enabled_postcondition_before_remote_list() -> (
+    None
+):
+    policies = FakePolicyManager()
+    from blrec.bili_upload.policies import default_room_upload_policy
+
+    command = default_room_upload_policy()
+    policies.current = SimpleNamespace(
+        room_id=100,
+        resolved_account_id=1,
+        blocked_reason=None,
+        **{**command.__dict__, 'enabled': True},
+    )
+    catalog = AsyncMock()
+
+    await browser_extension._enable_upload_policy(100, policies, catalog)
+
+    catalog.list.assert_not_awaited()
+    policies.upsert.assert_not_awaited()
 
 
 def test_highlight_is_saved_independently_of_current_recording_state(
