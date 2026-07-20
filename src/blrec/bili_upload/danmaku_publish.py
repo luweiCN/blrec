@@ -142,7 +142,7 @@ class DanmakuPublisher:
 
     async def recover_interrupted(self) -> int:
         now = int(self._clock())
-        message = '弹幕发送被中断，已自动重新排队'
+        message = '弹幕发送被中断，结果无法安全确认'
 
         def recover(connection: sqlite3.Connection) -> List[sqlite3.Row]:
             rows = connection.execute(
@@ -153,28 +153,31 @@ class DanmakuPublisher:
             ).fetchall()
             for row in rows:
                 connection.execute(
-                    "UPDATE danmaku_items SET state='prepared',"
-                    'error_code=NULL,error_message=?,next_attempt_at=?,'
+                    "UPDATE danmaku_items SET state='unknown_outcome',"
+                    "error_code=CASE WHEN state='in_flight' THEN NULL "
+                    'ELSE error_code END,'
+                    "error_message=CASE WHEN state='in_flight' THEN ? "
+                    'ELSE error_message END,'
+                    "next_attempt_at=CASE WHEN state='in_flight' THEN ? "
+                    'ELSE next_attempt_at END,'
                     'lease_owner=NULL,lease_until=NULL WHERE id=? '
                     "AND state IN ('in_flight','unknown_outcome')",
-                    (message, now, int(row['id'])),
+                    (message, _DORMANT_UNTIL, int(row['id'])),
                 )
             job_ids = {int(row['job_id']) for row in rows}
             for job_id in job_ids:
                 connection.execute(
-                    "UPDATE upload_jobs SET danmaku_branch_state='publishing',"
-                    'review_reason=NULL,updated_at=? WHERE id=? AND state='
-                    "'approved' AND danmaku_branch_state='paused' AND EXISTS("
-                    'SELECT 1 FROM bili_accounts account WHERE account.id='
-                    "upload_jobs.account_id AND account.state='active')",
-                    (now, job_id),
+                    "UPDATE upload_jobs SET danmaku_branch_state='paused',"
+                    'review_reason=?,updated_at=? WHERE id=? AND state='
+                    "'approved' AND danmaku_branch_state IN ('publishing','paused')",
+                    (message, now, job_id),
                 )
             return rows
 
         recovered = await self._database.write(recover)
         for row in recovered:
             audit(
-                'danmaku_requeued',
+                'danmaku_outcome_unknown',
                 level='WARNING',
                 job_id=int(row['job_id']),
                 part_id=int(row['part_id']),
@@ -184,7 +187,7 @@ class DanmakuPublisher:
                 attempt=int(row['attempt']),
                 reason=message,
                 recovery=True,
-                result='prepared',
+                result='manual_confirmation_required',
             )
         return len(recovered)
 
@@ -304,7 +307,7 @@ class DanmakuPublisher:
     async def _process(self, claim: LeaseClaim) -> None:
         work = await self._load(claim)
         if work.state == 'in_flight':
-            await self._retry_uncertain(claim, work, '弹幕在发起请求阶段被中断')
+            await self._mark_unknown(claim, work, '弹幕在发起请求阶段被中断')
             return
         if work.branch_state != 'publishing':
             await self._release(claim, _DORMANT_UNTIL)
@@ -329,7 +332,7 @@ class DanmakuPublisher:
             await self._safe_retry(claim, work, '弹幕请求确认未发出，将自动重试')
             return
         except RemoteOutcomeUnknown:
-            await self._retry_uncertain(claim, work, '弹幕请求结果未返回')
+            await self._mark_unknown(claim, work, '弹幕请求结果未返回')
             return
         except BiliApiError as error:
             await self._handle_api_error(claim, work, error)
@@ -341,7 +344,7 @@ class DanmakuPublisher:
             await self._pause_branch(claim, work, '投稿账号凭据无法读取')
             return
         except ProtocolContractError:
-            await self._retry_uncertain(claim, work, '弹幕接口响应异常')
+            await self._mark_unknown(claim, work, '弹幕接口响应异常')
             return
         dmid = self._response_dmid(response)
         await self._confirm(claim, work, dmid)
@@ -525,23 +528,36 @@ class DanmakuPublisher:
             release=True,
         )
 
-    async def _retry_uncertain(
+    async def _mark_unknown(
         self, claim: LeaseClaim, work: _DanmakuWork, message: str
     ) -> None:
-        delay = max(self._interval_seconds, min(300, 2 ** min(claim.attempt, 8)))
-        retry_message = '{}，已自动重新排队'.format(message)
-        await self._update_item(
-            claim,
-            {
-                'state': 'prepared',
-                'error_code': None,
-                'error_message': retry_message,
-                'next_attempt_at': self._deadline(delay),
-            },
-            release=True,
-        )
+        now = int(self._clock())
+        unknown_message = '{}，结果无法安全确认'.format(message)
+
+        def update(connection: sqlite3.Connection) -> None:
+            changed = connection.execute(
+                "UPDATE danmaku_items SET state='unknown_outcome',error_code=NULL,"
+                'error_message=?,next_attempt_at=?,lease_owner=NULL,lease_until=NULL '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    unknown_message,
+                    _DORMANT_UNTIL,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise LeaseLost('danmaku item lease was lost')
+            connection.execute(
+                "UPDATE upload_jobs SET danmaku_branch_state='paused',"
+                'review_reason=?,updated_at=? WHERE id=?',
+                (unknown_message, now, work.job_id),
+            )
+
+        await self._database.write(update)
         audit(
-            'danmaku_requeued',
+            'danmaku_outcome_unknown',
             level='WARNING',
             job_id=work.job_id,
             part_id=work.part_id,
@@ -549,9 +565,7 @@ class DanmakuPublisher:
             cid=work.cid,
             progress_ms=work.progress_ms,
             attempt=claim.attempt,
-            reason=retry_message,
-            recovery=False,
-            result='prepared',
+            result='manual_confirmation_required',
         )
 
     async def _pause_branch(

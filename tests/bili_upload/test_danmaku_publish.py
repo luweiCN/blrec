@@ -344,7 +344,7 @@ async def test_repeated_local_send_failures_pause_branch(
 
 
 @pytest.mark.asyncio
-async def test_unknown_outcome_is_requeued_automatically(
+async def test_unknown_outcome_is_fenced_without_second_post(
     database: BiliUploadDatabase,
 ) -> None:
     await seed_job(database, 1, [0])
@@ -354,17 +354,24 @@ async def test_unknown_outcome_is_requeued_automatically(
     worker = publisher(database, protocol, clock)
 
     await worker.run_once()
-    assert await database.scalar('SELECT state FROM danmaku_items') == 'prepared'
+    assert await database.scalar('SELECT state FROM danmaku_items') == (
+        'unknown_outcome'
+    )
 
-    clock.advance(25)
+    clock.advance(300)
     await worker.run_once()
 
-    assert len(protocol.calls) == 2
-    assert await database.scalar('SELECT state FROM danmaku_items') == 'confirmed'
+    assert len(protocol.calls) == 1
+    assert await database.scalar('SELECT state FROM danmaku_items') == (
+        'unknown_outcome'
+    )
+    assert await database.scalar(
+        'SELECT danmaku_branch_state FROM upload_jobs WHERE id=1'
+    ) == ('paused')
 
 
 @pytest.mark.asyncio
-async def test_crash_interrupted_in_flight_item_is_requeued(
+async def test_crash_interrupted_in_flight_item_is_fenced_before_network(
     database: BiliUploadDatabase,
 ) -> None:
     await seed_job(database, 1, [0], states=['in_flight'])
@@ -375,17 +382,21 @@ async def test_crash_interrupted_in_flight_item_is_requeued(
     await worker.run_once()
 
     assert protocol.calls == []
-    assert await database.scalar('SELECT state FROM danmaku_items') == 'prepared'
+    assert await database.scalar('SELECT state FROM danmaku_items') == (
+        'unknown_outcome'
+    )
 
-    clock.advance(25)
+    clock.advance(300)
     await worker.run_once()
 
-    assert len(protocol.calls) == 1
-    assert await database.scalar('SELECT state FROM danmaku_items') == 'confirmed'
+    assert protocol.calls == []
+    assert await database.scalar(
+        'SELECT danmaku_branch_state FROM upload_jobs WHERE id=1'
+    ) == ('paused')
 
 
 @pytest.mark.asyncio
-async def test_startup_recovery_requeues_every_interrupted_item(
+async def test_startup_recovery_fences_every_interrupted_item(
     database: BiliUploadDatabase,
 ) -> None:
     await seed_job(
@@ -399,14 +410,16 @@ async def test_startup_recovery_requeues_every_interrupted_item(
         ('previous-process', 999_999),
     )
     await database.execute(
-        "UPDATE danmaku_items SET state='unknown_outcome' WHERE id=3"
+        "UPDATE danmaku_items SET state='unknown_outcome',error_message=? WHERE id=3",
+        ('existing unknown detail',),
     )
     await database.execute(
         "UPDATE upload_jobs SET danmaku_branch_state='paused',review_reason=? "
         'WHERE id=1',
         ('弹幕在进程中断前已发出，结果无法安全确认',),
     )
-    worker = publisher(database, FakeProtocol(), FakeClock())
+    protocol = FakeProtocol()
+    worker = publisher(database, protocol, FakeClock())
 
     recovered = await worker.recover_interrupted()
 
@@ -414,21 +427,20 @@ async def test_startup_recovery_requeues_every_interrupted_item(
     rows = await database.fetchall(
         'SELECT state,error_message,lease_owner FROM danmaku_items ORDER BY id'
     )
-    assert [row['state'] for row in rows] == ['prepared'] * 3
-    assert all('自动重新排队' in row['error_message'] for row in rows)
+    assert [row['state'] for row in rows] == ['unknown_outcome'] * 3
+    assert all('结果无法安全确认' in row['error_message'] for row in rows[:2])
+    assert rows[2]['error_message'] == 'existing unknown detail'
     assert all(row['lease_owner'] is None for row in rows)
     assert (
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
-        == 'publishing'
+        == 'paused'
     )
-    assert (
-        await database.scalar('SELECT review_reason FROM upload_jobs WHERE id=1')
-        is None
-    )
+    await worker.run_once()
+    assert protocol.calls == []
 
 
 @pytest.mark.asyncio
-async def test_startup_recovery_requeues_legacy_unknown_item(
+async def test_startup_recovery_keeps_legacy_unknown_item_fenced(
     database: BiliUploadDatabase,
 ) -> None:
     legacy_message = '弹幕在进程中断前已发出，结果无法安全确认'
@@ -447,17 +459,15 @@ async def test_startup_recovery_requeues_legacy_unknown_item(
     ).recover_interrupted()
 
     assert recovered == 1
-    assert await database.scalar('SELECT state FROM danmaku_items') == 'prepared'
-    assert '自动重新排队' in str(
+    assert await database.scalar('SELECT state FROM danmaku_items') == (
+        'unknown_outcome'
+    )
+    assert '结果无法安全确认' in str(
         await database.scalar('SELECT error_message FROM danmaku_items')
     )
     assert (
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
-        == 'publishing'
-    )
-    assert (
-        await database.scalar('SELECT review_reason FROM upload_jobs WHERE id=1')
-        is None
+        == 'paused'
     )
 
 
