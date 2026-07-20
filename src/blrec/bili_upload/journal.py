@@ -552,17 +552,22 @@ class RecordingJournalBridge:
         now = int(self._clock())
 
         sessions = await self._database.fetchall(
-            'SELECT id FROM recording_sessions '
+            'SELECT id,deletion_state FROM recording_sessions '
             "WHERE source_kind='live' "
             "AND state IN ('open','cancelled','manual_review') "
-            "AND deletion_state='none'"
+            "AND (deletion_state='none' OR EXISTS("
+            'SELECT 1 FROM recording_parts part '
+            'WHERE part.session_id=recording_sessions.id '
+            "AND part.artifact_state='postprocessing'))"
         )
         recoveries: Dict[int, _ArtifactRecoveryDecision] = {}
         loop = asyncio.get_running_loop()
         for session in sessions:
+            deleting = str(session['deletion_state']) != 'none'
             parts = await self._database.fetchall(
                 'SELECT id,source_path,final_path,artifact_state '
-                'FROM recording_parts WHERE session_id=?',
+                'FROM recording_parts WHERE session_id=? '
+                + ("AND artifact_state='postprocessing'" if deleting else ''),
                 (int(session['id']),),
             )
             for part in parts:
@@ -582,14 +587,18 @@ class RecordingJournalBridge:
 
         def write(connection: sqlite3.Connection) -> None:
             sessions = connection.execute(
-                'SELECT id,state FROM recording_sessions '
+                'SELECT id,state,deletion_state FROM recording_sessions '
                 "WHERE source_kind='live' "
                 "AND state IN ('open','cancelled','manual_review') "
-                "AND deletion_state='none'"
+                "AND (deletion_state='none' OR EXISTS("
+                'SELECT 1 FROM recording_parts part '
+                'WHERE part.session_id=recording_sessions.id '
+                "AND part.artifact_state='postprocessing'))"
             ).fetchall()
             for session in sessions:
                 session_id = int(session['id'])
                 original_state = str(session['state'])
+                deleting = str(session['deletion_state']) != 'none'
                 stale_run_count = int(
                     connection.execute(
                         "SELECT COUNT(*) FROM recording_runs WHERE session_id=? "
@@ -604,7 +613,7 @@ class RecordingJournalBridge:
                 )
 
                 parts = connection.execute(
-                    'SELECT id,source_path,final_path,record_start_time,'
+                    'SELECT id,run_id,source_path,final_path,record_start_time,'
                     'artifact_state '
                     'FROM recording_parts WHERE session_id=?',
                     (session_id,),
@@ -632,14 +641,18 @@ class RecordingJournalBridge:
                             'COALESCE(postprocessed_at,?),error_message=?,updated_at=? '
                             'WHERE id=?',
                             (
-                                'ready',
+                                'failed' if deleting else 'ready',
                                 artifact.path,
                                 artifact.size_bytes,
                                 record_end_time,
                                 duration,
                                 now,
                                 now,
-                                message,
+                                (
+                                    '本地删除已请求，启动时已收敛后处理文件'
+                                    if deleting
+                                    else message
+                                ),
                                 now,
                                 int(part['id']),
                             ),
@@ -658,6 +671,21 @@ class RecordingJournalBridge:
                             (state, message, now, int(part['id'])),
                         )
 
+                    if deleting:
+                        owner = self._recording_owner_state(
+                            connection, str(part['run_id'])
+                        )
+                        self._record_local_handoff(
+                            connection,
+                            owner=owner,
+                            run_id=str(part['run_id']),
+                            event_type='postprocessor_startup_recovery',
+                            event_id='part-{}'.format(int(part['id'])),
+                            now=now,
+                        )
+
+                if deleting:
+                    continue
                 if original_state == 'cancelled':
                     continue
                 part_states = {
@@ -2645,11 +2673,10 @@ class RecordingJournalBridge:
         if started is not None:
             try:
                 payload = json.loads(str(started['payload_json']))
-                source_generation = int(
-                    payload.get('cancellation_generation', current_generation)
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                source_generation = current_generation
+                source_generation = int(payload['cancellation_generation'])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                # Migration 26 added generation journaling; older runs started at 0.
+                source_generation = 0
         elif str(row['deletion_state']) != 'none':
             # Runs created before generation journaling all started at generation 0.
             source_generation = 0

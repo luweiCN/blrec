@@ -432,6 +432,13 @@ class LocalDeletionWorker:
         ).fetchone()[0]
         if int(media):
             blockers.append('media_index')
+        postprocessor = connection.execute(
+            'SELECT COUNT(*) FROM recording_parts WHERE session_id=? '
+            "AND artifact_state='postprocessing'",
+            (session_id,),
+        ).fetchone()[0]
+        if int(postprocessor):
+            blockers.append('postprocessor')
         highlight = connection.execute(
             'SELECT COUNT(*) FROM highlight_clips clip '
             'JOIN highlight_clip_sources source ON source.clip_id=clip.id '
