@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Set, Tuple, Type
+from typing import TYPE_CHECKING, Set, Tuple, Type
 
 import attr
 
@@ -23,7 +23,9 @@ from ..event import (
     VideoPostprocessingCompletedEvent,
 )
 from ..event.typing import Event
-from ..setting import WebHookSettings
+
+if TYPE_CHECKING:
+    from ..setting import WebHookSettings
 
 __all__ = ('WebHook',)
 

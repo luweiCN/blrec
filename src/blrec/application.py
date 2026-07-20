@@ -170,39 +170,48 @@ class Application:
         await self._setup_live_status_monitor()
         try:
             self._setup()
+            await self._start_webhooks()
+            if self._control_operation_journal is not None:
+                from .task.control_reconciler import TaskControlReconciler
+                from .task.membership_reconciler import RoomMembershipReconciler
+
+                await self._control_operation_journal.open()
+                self._task_control_reconciler = TaskControlReconciler(
+                    self._control_operation_journal,
+                    self._settings_manager,
+                    self._task_manager,
+                )
+                self._room_membership_reconciler = RoomMembershipReconciler(
+                    self._control_operation_journal,
+                    self._settings_manager,
+                    self._task_manager,
+                    self._task_control_reconciler,
+                    room_id_resolver=self._resolve_room_id,
+                    upload_policy_enabler=self._room_upload_policy_enabler,
+                )
+                self._task_control_reconciler.set_desired_absent_provider(
+                    self._room_membership_reconciler.desires_absent
+                )
+            self._loading_task = asyncio.create_task(self._load_tasks_and_controls())
+
+            def callback(future: asyncio.Future) -> None:  # type: ignore
+                del self._loading_task
+
+            self._loading_task.add_done_callback(exception_callback)
+            self._loading_task.add_done_callback(callback)
         except BaseException as error:
+            try:
+                await self._teardown_webhooks()
+            except asyncio.CancelledError as cleanup_error:
+                raise cleanup_error from error
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Webhook teardown after launch failure: {!r}', cleanup_error
+                )
             await self._teardown_live_status_monitor_after_failure(error)
             raise
         logger.debug(f'Default umask {os.umask(0o000)}')
         logger.info(f'Launched Application v{__version__}')
-        if self._control_operation_journal is not None:
-            from .task.control_reconciler import TaskControlReconciler
-            from .task.membership_reconciler import RoomMembershipReconciler
-
-            await self._control_operation_journal.open()
-            self._task_control_reconciler = TaskControlReconciler(
-                self._control_operation_journal,
-                self._settings_manager,
-                self._task_manager,
-            )
-            self._room_membership_reconciler = RoomMembershipReconciler(
-                self._control_operation_journal,
-                self._settings_manager,
-                self._task_manager,
-                self._task_control_reconciler,
-                room_id_resolver=self._resolve_room_id,
-                upload_policy_enabler=self._room_upload_policy_enabler,
-            )
-            self._task_control_reconciler.set_desired_absent_provider(
-                self._room_membership_reconciler.desires_absent
-            )
-        self._loading_task = asyncio.create_task(self._load_tasks_and_controls())
-
-        def callback(future: asyncio.Future) -> None:  # type: ignore
-            del self._loading_task
-
-        self._loading_task.add_done_callback(exception_callback)
-        self._loading_task.add_done_callback(callback)
 
     async def exit(self) -> None:
         logger.info('Exiting Application...')
@@ -223,6 +232,7 @@ class Application:
                     await self._loading_task
             except BaseException as error:
                 errors.append(error)
+        await _collect_teardown_error(self._teardown_webhooks(), errors)
         membership = getattr(self, '_room_membership_reconciler', None)
         self._room_membership_reconciler = None
         if membership is not None:
@@ -652,11 +662,32 @@ class Application:
 
         self._webhook_emitter = WebHookEmitter()
         self._settings_manager.apply_webhooks_settings()
-        self._webhook_emitter.enable()
+
+    async def _start_webhooks(self) -> None:
+        emitter = getattr(self, '_webhook_emitter', None)
+        if emitter is None:
+            return
+        await emitter.start()
+        emitter.enable()
+
+    async def _teardown_webhooks(self) -> None:
+        emitter = getattr(self, '_webhook_emitter', None)
+        if emitter is None:
+            return
+        errors: List[BaseException] = []
+        try:
+            emitter.disable()
+        except BaseException as error:
+            errors.append(error)
+        await _collect_teardown_error(emitter.close(drain_timeout_seconds=5), errors)
+        if getattr(self, '_webhook_emitter', None) is emitter:
+            del self._webhook_emitter
+        _raise_teardown_errors(errors)
 
     def _destroy(self) -> None:
         self._destroy_notifiers()
-        self._destroy_webhooks()
+        if hasattr(self, '_webhook_emitter'):
+            self._destroy_webhooks()
         self._destroy_exception_handler()
 
     def _destroy_notifiers(self) -> None:
