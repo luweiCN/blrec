@@ -153,7 +153,7 @@ SUMMARY_FORBIDDEN_FIELDS = frozenset(
 
 - [ ] **Step 3: Select the page IDs before running any child aggregate**
 
-The first materialized CTE must apply `_session_filters()`, the stable
+The first page-selection CTE must apply `_session_filters()`, the stable
 `started_at,id` order, and `LIMIT/OFFSET`, and return only the selected
 `session_id` and `job_id` values. Every recording-part, upload-part, chunk, and
 danmaku aggregate must join those selected IDs before grouping. Group the child
