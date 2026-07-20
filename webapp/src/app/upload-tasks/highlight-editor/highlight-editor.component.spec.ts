@@ -340,6 +340,46 @@ describe('HighlightEditorComponent', () => {
     expect(playerFactory.attachFlv).toHaveBeenCalledTimes(1);
   }));
 
+  it('keeps current media access alive while the previous video view is removed', fakeAsync(() => {
+    const access = new Subject<RecordingMediaAccess>();
+    recordings.createMediaAccess.and.returnValue(access);
+    playerLoader.calls.reset();
+    playerFactory.attachFlv.calls.reset();
+
+    component.selectPart(timeline.parts[1]);
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="editor-video"]'),
+    ).toBeNull();
+    expect(component.mediaLoading).toBeTrue();
+
+    access.next({
+      token: 'signed-next-part',
+      expiresAt: 124,
+      snapshotId: 'snapshot-next-part',
+      durationMs: 80_000,
+      fileSizeBytes: 4_096,
+      recording: true,
+      playbackMode: 'active_snapshot',
+      indexState: 'pending',
+      retryAfterMs: null,
+      requestId: 'request-next-part',
+    });
+
+    expect(component.mediaUrl).toBe('/media/12');
+    expect(component.mediaLoading).toBeFalse();
+
+    fixture.detectChanges();
+    flushMicrotasks();
+
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="editor-video"]'),
+    ).not.toBeNull();
+    expect(playerLoader).toHaveBeenCalledTimes(1);
+    expect(playerFactory.attachFlv).toHaveBeenCalledTimes(1);
+  }));
+
   it('does not load the FLV runtime for a native selected part', () => {
     const nativePart = {
       ...timeline.parts[1],

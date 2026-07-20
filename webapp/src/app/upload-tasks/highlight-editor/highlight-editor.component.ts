@@ -149,6 +149,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private previewingDraftId: number | null = null;
   private draggingPointerId: number | null = null;
   private readonly subscriptions = new Subscription();
+  private mediaRequestGeneration = 0;
   private playerGeneration = 0;
   private pendingPlayerGeneration: number | null = null;
   private destroyed = false;
@@ -297,6 +298,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    this.mediaRequestGeneration += 1;
     this.mediaRequest?.unsubscribe();
     this.clipsRequest?.unsubscribe();
     this.subscriptions.unsubscribe();
@@ -1409,6 +1411,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             ? timeline.parts.find((part) => part.partId === this.initialPartId)
             : undefined;
           if (initial && this.initialPartId !== null && !requestedPart) {
+            this.mediaRequestGeneration += 1;
             this.mediaRequest?.unsubscribe();
             this.invalidatePlayer();
             this.selectedPart = null;
@@ -1487,8 +1490,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     const part = this.selectedPart;
     this.mediaRequest?.unsubscribe();
+    const generation = ++this.mediaRequestGeneration;
     this.invalidatePlayer();
-    const generation = this.playerGeneration;
     this.mediaUrl = null;
     this.mediaAccess = null;
     this.mediaError = null;
@@ -1499,7 +1502,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         next: (access) => {
           if (
             this.destroyed ||
-            this.playerGeneration !== generation ||
+            this.mediaRequestGeneration !== generation ||
             this.selectedPart?.partId !== part.partId
           ) {
             return;
@@ -1514,7 +1517,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
         error: (error: unknown) => {
           if (
             this.destroyed ||
-            this.playerGeneration !== generation ||
+            this.mediaRequestGeneration !== generation ||
             this.selectedPart?.partId !== part.partId
           ) {
             return;
