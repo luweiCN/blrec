@@ -8,6 +8,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from blrec.logging.audit import audit
 from blrec.web.request_metrics import request_metrics_scope
 
+_OCTET_STREAM_MEDIA_ROUTES = frozenset(
+    {'/api/v1/recording-sessions/parts/{part_id}/media'}
+)
+
 
 class RequestPerformanceMiddleware:
     def __init__(self, app: ASGIApp, slow_request_seconds: float = 0.25) -> None:
@@ -27,8 +31,45 @@ class RequestPerformanceMiddleware:
         with request_metrics_scope() as metrics:
             started = time.perf_counter()
 
+            def emit(event_status: int, *, exception: bool = False) -> None:
+                nonlocal logged
+                if logged:
+                    return
+                logged = True
+                normalized_content_type = content_type.partition(';')[0].lower()
+                route = scope.get('route')
+                normalized_route = getattr(route, 'path', None) or '<unmatched>'
+                if 200 <= event_status < 400 and (
+                    normalized_content_type == 'text/event-stream'
+                    or normalized_content_type.startswith('audio/')
+                    or normalized_content_type.startswith('video/')
+                    or (
+                        normalized_content_type == 'application/octet-stream'
+                        and normalized_route in _OCTET_STREAM_MEDIA_ROUTES
+                    )
+                ):
+                    return
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                if exception or event_status >= 500 or elapsed_ms >= self._slow_ms:
+                    level = 'WARNING'
+                elif event_status >= 400:
+                    level = 'INFO'
+                else:
+                    level = 'DEBUG'
+                audit(
+                    'http_request_performance',
+                    level=level,
+                    method=scope.get('method', ''),
+                    route=normalized_route,
+                    status=event_status,
+                    elapsed_ms=round(elapsed_ms, 3),
+                    response_bytes=response_bytes,
+                    database_calls=metrics.database_calls,
+                    database_ms=round(metrics.database_ms, 3),
+                )
+
             async def measured_send(message: Message) -> None:
-                nonlocal content_type, logged, response_bytes, status_code
+                nonlocal content_type, response_bytes, status_code
                 message_type = message['type']
                 final_body = False
                 if message_type == 'http.response.start':
@@ -43,28 +84,10 @@ class RequestPerformanceMiddleware:
                 await send(message)
 
                 if final_body and not logged:
-                    logged = True
-                    normalized_content_type = content_type.partition(';')[0].lower()
-                    if normalized_content_type == 'text/event-stream' or (
-                        normalized_content_type.startswith('audio/')
-                        or normalized_content_type.startswith('video/')
-                    ):
-                        return
-                    elapsed_ms = (time.perf_counter() - started) * 1000.0
-                    route = scope.get('route')
-                    normalized_route = getattr(route, 'path', None) or scope.get(
-                        'path', ''
-                    )
-                    audit(
-                        'http_request_performance',
-                        level=('WARNING' if elapsed_ms >= self._slow_ms else 'DEBUG'),
-                        method=scope.get('method', ''),
-                        route=normalized_route,
-                        status=status_code,
-                        elapsed_ms=round(elapsed_ms, 3),
-                        response_bytes=response_bytes,
-                        database_calls=metrics.database_calls,
-                        database_ms=round(metrics.database_ms, 3),
-                    )
+                    emit(status_code)
 
-            await self._app(scope, receive, measured_send)
+            try:
+                await self._app(scope, receive, measured_send)
+            except Exception:
+                emit(500, exception=True)
+                raise
