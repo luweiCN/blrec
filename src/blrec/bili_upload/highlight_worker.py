@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from blrec.logging.audit import audit
 
@@ -107,6 +107,7 @@ class HighlightWorker:
         self._clock = clock
         self._monotonic = monotonic
         self._artifact_probe = artifact_probe
+        self._active_owners: Dict[int, asyncio.Task[int]] = {}
 
     async def run_once(self) -> Optional[int]:
         claim = await self._claim()
@@ -118,9 +119,50 @@ class HighlightWorker:
             if await self._generation_changed(claim, work):
                 await self._complete_cancelled(claim, 'ffmpeg_cut')
                 return claim.id
-            result = await asyncio.get_running_loop().run_in_executor(
-                None, self._process_sync, work
-            )
+        except _LocalDeletionRequested:
+            await self._complete_cancelled(claim, 'ffmpeg_cut')
+            return claim.id
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._handle_failure(claim, work, error)
+            return claim.id
+
+        owner_task = asyncio.create_task(self._settle_claim(claim, work))
+        self._active_owners[claim.id] = owner_task
+        cancellation_requested = False
+        try:
+            while True:
+                try:
+                    result = await asyncio.shield(owner_task)
+                    break
+                except asyncio.CancelledError:
+                    cancellation_requested = True
+                    if owner_task.done():
+                        result = owner_task.result()
+                        break
+        finally:
+            if self._active_owners.get(claim.id) is owner_task:
+                self._active_owners.pop(claim.id, None)
+        if cancellation_requested:
+            raise asyncio.CancelledError
+        return result
+
+    async def _settle_claim(self, claim: _ClaimedClip, work: _ClipWork) -> int:
+        process = asyncio.ensure_future(
+            asyncio.get_running_loop().run_in_executor(None, self._process_sync, work)
+        )
+        cancellation_requested = False
+        try:
+            while True:
+                try:
+                    result = await asyncio.shield(process)
+                    break
+                except asyncio.CancelledError:
+                    cancellation_requested = True
+                    if process.done():
+                        result = process.result()
+                        break
             completed = await self._complete(claim, work, result)
             if not completed:
                 audit(
@@ -129,12 +171,12 @@ class HighlightWorker:
                     reason='local_deletion_requested',
                     result='cancelled_local',
                 )
-        except _LocalDeletionRequested:
-            await self._complete_cancelled(claim, 'ffmpeg_cut')
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await self._handle_failure(claim, work, error)
+        if cancellation_requested:
+            raise asyncio.CancelledError
         return claim.id
 
     async def _claim(self) -> Optional[_ClaimedClip]:
@@ -194,6 +236,16 @@ class HighlightWorker:
                 (clip_id,),
             ).fetchone()
             assert current is not None
+            connection.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('highlight',?,'ffmpeg_cut',?,'in_flight','{}',NULL) "
+                'ON CONFLICT(owner_kind,owner_id,side_effect_key,source_generation) '
+                "DO UPDATE SET outcome_state='in_flight',outcome_json='{}',"
+                'acknowledged_at=NULL',
+                (clip_id, int(row['cancellation_generation'])),
+            )
             return _ClaimedClip(
                 id=clip_id,
                 lease_owner=self._worker_id,
@@ -209,7 +261,12 @@ class HighlightWorker:
         rows = await self._database.fetchall(
             'SELECT id,state,output_video_path,output_xml_path,'
             'cancellation_generation,deletion_state,lease_owner,'
-            'lease_generation,lease_until,attempt '
+            'lease_generation,lease_until,attempt,'
+            '(SELECT source_generation FROM owner_handoff_outcomes outcome '
+            "WHERE outcome.owner_kind='highlight' "
+            'AND outcome.owner_id=highlight_clips.id '
+            "AND outcome.side_effect_key='ffmpeg_cut' "
+            'ORDER BY outcome.id DESC LIMIT 1) AS owner_source_generation '
             "FROM highlight_clips WHERE state IN ('queued','processing') "
             'ORDER BY id'
         )
@@ -217,6 +274,21 @@ class HighlightWorker:
         loop = asyncio.get_running_loop()
         for row in rows:
             clip_id = int(row['id'])
+            owner_source_generation = (
+                0
+                if row['owner_source_generation'] is None
+                else int(row['owner_source_generation'])
+            )
+            active_owner = self._active_owners.get(clip_id)
+            if active_owner is not None:
+                try:
+                    await asyncio.shield(active_owner)
+                except asyncio.CancelledError:
+                    if not active_owner.done():
+                        raise
+                except Exception:
+                    pass
+                continue
             state = str(row['state'])
             video_path = (
                 None
@@ -248,11 +320,7 @@ class HighlightWorker:
                         lease_generation=int(row['lease_generation']),
                         lease_until=int(row['lease_until'] or 0),
                         attempt=int(row['attempt']),
-                        cancellation_generation=max(
-                            0,
-                            int(row['cancellation_generation'])
-                            - int(str(row['deletion_state']) != 'none'),
-                        ),
+                        cancellation_generation=owner_source_generation,
                     )
                     await self._complete_cancelled(claim, 'ffmpeg_cut')
                 recovered += 1
@@ -267,30 +335,38 @@ class HighlightWorker:
                     None, self._artifact_probe, video_path
                 )
                 if artifact is not None and artifact.size_bytes > 0:
-                    await self._database.execute(
-                        "UPDATE highlight_clips SET state='ready',error_message=NULL,"
-                        'output_xml_path=?,file_size_bytes=?,lease_owner=NULL,'
-                        'lease_until=NULL,'
-                        'next_attempt_at=0,updated_at=? WHERE id=? '
-                        "AND state='processing' AND deletion_state='none' "
-                        'AND cancellation_generation=? AND NOT EXISTS('
-                        'SELECT 1 FROM highlight_clip_sources source '
-                        'JOIN recording_parts part ON part.id=source.part_id '
-                        'JOIN recording_sessions session ON session.id=part.session_id '
-                        'WHERE source.clip_id=highlight_clips.id '
-                        "AND session.deletion_state!='none')",
+                    recovered_xml_path = (
+                        xml_path
+                        if xml_path is not None and os.path.isfile(xml_path)
+                        else None
+                    )
+                    changed = await self._recover_processing_state(
+                        clip_id,
+                        owner_source_generation,
                         (
-                            (
-                                xml_path
-                                if xml_path is not None and os.path.isfile(xml_path)
-                                else None
-                            ),
+                            "UPDATE highlight_clips SET state='ready',"
+                            'error_message=NULL,output_xml_path=?,file_size_bytes=?,'
+                            'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,'
+                            'updated_at=? WHERE id=? '
+                            "AND state='processing' AND deletion_state='none' "
+                            'AND cancellation_generation=? AND NOT EXISTS('
+                            'SELECT 1 FROM highlight_clip_sources source '
+                            'JOIN recording_parts part ON part.id=source.part_id '
+                            'JOIN recording_sessions session '
+                            'ON session.id=part.session_id '
+                            'WHERE source.clip_id=highlight_clips.id '
+                            "AND session.deletion_state!='none')"
+                        ),
+                        (
+                            recovered_xml_path,
                             artifact.size_bytes,
                             int(self._clock()),
                             clip_id,
                             int(row['cancellation_generation']),
                         ),
                     )
+                    if changed != 1:
+                        continue
                     recovered += 1
                     audit(
                         'highlight_clip_recovered',
@@ -304,24 +380,44 @@ class HighlightWorker:
                 video_path, xml_path, include_final=state == 'processing'
             )
             if state == 'processing':
-                await self._database.execute(
-                    "UPDATE highlight_clips SET state='queued',"
-                    "error_message='程序重启后自动重新处理',lease_owner=NULL,"
-                    'lease_until=NULL,next_attempt_at=0,file_size_bytes=NULL,'
-                    'updated_at=? WHERE id=? '
-                    "AND state='processing' AND deletion_state='none' "
-                    'AND cancellation_generation=? AND NOT EXISTS('
-                    'SELECT 1 FROM highlight_clip_sources source '
-                    'JOIN recording_parts part ON part.id=source.part_id '
-                    'JOIN recording_sessions session ON session.id=part.session_id '
-                    'WHERE source.clip_id=highlight_clips.id '
-                    "AND session.deletion_state!='none')",
+                changed = await self._recover_processing_state(
+                    clip_id,
+                    owner_source_generation,
+                    (
+                        "UPDATE highlight_clips SET state='queued',"
+                        "error_message='程序重启后自动重新处理',lease_owner=NULL,"
+                        'lease_until=NULL,next_attempt_at=0,file_size_bytes=NULL,'
+                        'updated_at=? WHERE id=? '
+                        "AND state='processing' AND deletion_state='none' "
+                        'AND cancellation_generation=? AND NOT EXISTS('
+                        'SELECT 1 FROM highlight_clip_sources source '
+                        'JOIN recording_parts part ON part.id=source.part_id '
+                        'JOIN recording_sessions session '
+                        'ON session.id=part.session_id '
+                        'WHERE source.clip_id=highlight_clips.id '
+                        "AND session.deletion_state!='none')"
+                    ),
                     (int(self._clock()), clip_id, int(row['cancellation_generation'])),
                 )
-                recovered += 1
+                recovered += int(changed == 1)
             elif partial_existed:
                 recovered += 1
         return recovered
+
+    async def _recover_processing_state(
+        self,
+        clip_id: int,
+        source_generation: int,
+        sql: str,
+        parameters: Tuple[object, ...],
+    ) -> int:
+        def update(connection: sqlite3.Connection) -> int:
+            cursor = connection.execute(sql, parameters)
+            if cursor.rowcount == 1:
+                self._clear_owner_intent(connection, clip_id, source_generation)
+            return cursor.rowcount
+
+        return await self._database.write(update)
 
     async def backfill_file_sizes(self, limit: int = 100) -> int:
         bounded_limit = min(100, max(0, int(limit)))
@@ -608,6 +704,9 @@ class HighlightWorker:
                     'actual_end_ms=? WHERE clip_id=? AND ordinal=?',
                     (source.actual_start_ms, source.actual_end_ms, claim.id, ordinal),
                 )
+            self._clear_owner_intent(
+                connection, claim.id, claim.cancellation_generation
+            )
             return 1, False
 
         count, cancelled = await self._database.write(complete)
@@ -812,6 +911,10 @@ class HighlightWorker:
                     claim.cancellation_generation,
                 ),
             )
+            if cursor.rowcount == 1:
+                self._clear_owner_intent(
+                    connection, claim.id, claim.cancellation_generation
+                )
             return cursor.rowcount, False
 
         count, cancelled = await self._database.write(finish)
@@ -833,6 +936,16 @@ class HighlightWorker:
             reason=str(error)[:500],
             next_attempt_at=next_attempt_at,
             result=state,
+        )
+
+    @staticmethod
+    def _clear_owner_intent(
+        connection: sqlite3.Connection, clip_id: int, source_generation: int
+    ) -> None:
+        connection.execute(
+            'DELETE FROM owner_handoff_outcomes WHERE owner_kind=? '
+            'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+            ('highlight', clip_id, 'ffmpeg_cut', source_generation),
         )
 
     @staticmethod

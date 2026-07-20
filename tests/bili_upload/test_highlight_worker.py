@@ -639,7 +639,7 @@ async def test_worker_hands_off_when_source_session_is_deleted_during_ffmpeg(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_coroutine_keeps_highlight_lease_until_startup_handoff(
+async def test_worker_persists_claim_generation_until_ffmpeg_settles(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
     root = tmp_path / 'records'
@@ -650,23 +650,70 @@ async def test_cancelled_coroutine_keeps_highlight_lease_until_startup_handoff(
     clip = await service.create_clip(
         session_id=1,
         marker_id=None,
-        name='崩溃恢复高光',
+        name='持久化剪辑 owner',
         requested_start_ms=20_000,
         requested_end_ms=70_000,
         confirm_keyframe=False,
         active_durations_ms={1: 120_000},
     )
     worker = HighlightWorker(
-        database,
-        clipper,
-        FakeDanmakuClipper(),
-        worker_id='worker',
-        clock=lambda: 1_000,
-        artifact_probe=lambda path: (
-            RecoveredArtifact(path, Path(path).stat().st_size, 52)
-            if Path(path).is_file()
-            else None
-        ),
+        database, clipper, FakeDanmakuClipper(), worker_id='worker', clock=lambda: 1_000
+    )
+    run_task = asyncio.create_task(worker.run_once())
+    started = await asyncio.get_running_loop().run_in_executor(
+        None, clipper.started.wait, 0.5
+    )
+    assert started
+    try:
+        outcome = await database.fetchone(
+            'SELECT source_generation,outcome_state,acknowledged_at '
+            'FROM owner_handoff_outcomes '
+            "WHERE owner_kind='highlight' AND owner_id=? "
+            "AND side_effect_key='ffmpeg_cut'",
+            (clip.id,),
+        )
+        assert outcome is not None
+        assert dict(outcome) == {
+            'source_generation': 0,
+            'outcome_state': 'in_flight',
+            'acknowledged_at': None,
+        }
+
+        clipper.release.set()
+        assert await run_task == clip.id
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='highlight' AND owner_id=?",
+                (clip.id,),
+            )
+            == 0
+        )
+    finally:
+        clipper.release.set()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_coroutine_drains_ffmpeg_before_recovery_releases_lease(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = BlockingClipper()
+    service = HighlightService(database, recording_root=root, clipper=clipper)
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='取消后排空高光',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
+    )
+    worker = HighlightWorker(
+        database, clipper, FakeDanmakuClipper(), worker_id='worker', clock=lambda: 1_000
     )
     deletion = LocalDeletionWorker(
         database,
@@ -675,54 +722,110 @@ async def test_cancelled_coroutine_keeps_highlight_lease_until_startup_handoff(
         clock=lambda: 1_001,
     )
     run_task = asyncio.create_task(worker.run_once())
+    recovery_task = None
     started = await asyncio.get_running_loop().run_in_executor(
         None, clipper.started.wait, 0.5
     )
     assert started
 
-    run_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await run_task
-    await deletion.request_clip(clip.id)
-    assert (
-        await database.scalar(
-            'SELECT lease_owner FROM highlight_clips WHERE id=?', (clip.id,)
+    try:
+        run_task.cancel()
+        await asyncio.sleep(0)
+        assert not run_task.done()
+        await deletion.request_clip(clip.id)
+        recovery_task = asyncio.create_task(worker.recover_interrupted())
+        await asyncio.sleep(0)
+        assert not recovery_task.done()
+        assert await deletion.run_once() == ('clip', clip.id)
+        assert (
+            await database.scalar(
+                'SELECT lease_owner FROM highlight_clips WHERE id=?', (clip.id,)
+            )
+            == 'worker'
         )
-        == 'worker'
-    )
-    assert await database.scalar('SELECT COUNT(*) FROM owner_handoff_outcomes') == 0
+        clipper.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        assert recovery_task is not None
+        assert await recovery_task == 0
 
-    clipper.release.set()
-    completed = await asyncio.get_running_loop().run_in_executor(
-        None, clipper.finished.wait, 0.5
-    )
-    assert completed
-    assert clip.output_video_path is not None
-    for _attempt in range(50):
-        if Path(clip.output_video_path).is_file():
-            break
-        await asyncio.sleep(0.01)
-    assert Path(clip.output_video_path).is_file()
-
-    assert await worker.recover_interrupted() == 1
-    row = await database.fetchone(
-        'SELECT state,deletion_state,lease_owner FROM highlight_clips WHERE id=?',
-        (clip.id,),
-    )
-    assert row is not None
-    assert dict(row) == {
-        'state': 'processing',
-        'deletion_state': 'requested',
-        'lease_owner': None,
-    }
-    assert (
-        await database.scalar(
-            "SELECT outcome_state FROM owner_handoff_outcomes "
-            "WHERE owner_kind='highlight' AND owner_id=?",
+        row = await database.fetchone(
+            'SELECT state,deletion_state,lease_owner FROM highlight_clips WHERE id=?',
             (clip.id,),
         )
-        == 'cancelled_local'
+        assert row is not None
+        assert dict(row) == {
+            'state': 'processing',
+            'deletion_state': 'requested',
+            'lease_owner': None,
+        }
+        assert await deletion.run_once() == ('clip', clip.id)
+        assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 0
+        assert clip.output_video_path is not None
+        assert not Path(clip.output_video_path).exists()
+    finally:
+        clipper.release.set()
+        await asyncio.gather(run_task, return_exceptions=True)
+        if recovery_task is not None:
+            await asyncio.gather(recovery_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_recovery_uses_persisted_claim_generation_after_repeated_delete(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(database, recording_root=root, clipper=clipper)
+    clip = await service.create_clip(
+        session_id=1,
+        marker_id=None,
+        name='重复删除高光',
+        requested_start_ms=20_000,
+        requested_end_ms=70_000,
+        confirm_keyframe=False,
+        active_durations_ms={1: 120_000},
     )
+    await database.execute(
+        "UPDATE highlight_clips SET state='processing',lease_owner='dead-worker',"
+        'lease_generation=1,lease_until=9999,attempt=1 WHERE id=?',
+        (clip.id,),
+    )
+    await database.execute(
+        'INSERT INTO owner_handoff_outcomes('
+        'owner_kind,owner_id,side_effect_key,source_generation,outcome_state,'
+        "outcome_json,acknowledged_at) VALUES('highlight',?,'ffmpeg_cut',0,"
+        "'in_flight','{}',NULL)",
+        (clip.id,),
+    )
+    deletion = LocalDeletionWorker(
+        database,
+        recording_root=root,
+        clip_root=root / 'highlights',
+        clock=lambda: 1_001,
+    )
+    assert await deletion.request_clip(clip.id) == 1
+    assert await deletion.request_clip(clip.id) == 2
+    restarted = HighlightWorker(
+        database,
+        clipper,
+        FakeDanmakuClipper(),
+        worker_id='new-worker',
+        clock=lambda: 1_002,
+    )
+
+    assert await restarted.recover_interrupted() == 1
+
+    outcomes = await database.fetchall(
+        'SELECT source_generation,outcome_state FROM owner_handoff_outcomes '
+        "WHERE owner_kind='highlight' AND owner_id=? ORDER BY source_generation",
+        (clip.id,),
+    )
+    assert [dict(row) for row in outcomes] == [
+        {'source_generation': 0, 'outcome_state': 'cancelled_local'}
+    ]
 
 
 @pytest.mark.asyncio
@@ -909,6 +1012,13 @@ async def test_worker_recovers_stale_partial_and_valid_final_output(
         'lease_until=1,file_size_bytes=999 WHERE id=?',
         (clip.id,),
     )
+    await database.execute(
+        'INSERT INTO owner_handoff_outcomes('
+        'owner_kind,owner_id,side_effect_key,source_generation,outcome_state,'
+        "outcome_json,acknowledged_at) VALUES('highlight',?,'ffmpeg_cut',0,"
+        "'in_flight','{}',NULL)",
+        (clip.id,),
+    )
     worker = HighlightWorker(
         database,
         clipper,
@@ -929,6 +1039,7 @@ async def test_worker_recovers_stale_partial_and_valid_final_output(
     )
     assert reset is not None
     assert dict(reset) == {'state': 'queued', 'file_size_bytes': None}
+    assert await database.scalar('SELECT COUNT(*) FROM owner_handoff_outcomes') == 0
 
     final = Path(clip.output_video_path)
     final.write_bytes(b'complete')
@@ -937,12 +1048,20 @@ async def test_worker_recovers_stale_partial_and_valid_final_output(
         'lease_until=1 WHERE id=?',
         (clip.id,),
     )
+    await database.execute(
+        'INSERT INTO owner_handoff_outcomes('
+        'owner_kind,owner_id,side_effect_key,source_generation,outcome_state,'
+        "outcome_json,acknowledged_at) VALUES('highlight',?,'ffmpeg_cut',0,"
+        "'in_flight','{}',NULL)",
+        (clip.id,),
+    )
     assert await worker.recover_interrupted() == 1
     recovered = await database.fetchone(
         'SELECT state,file_size_bytes FROM highlight_clips WHERE id=?', (clip.id,)
     )
     assert recovered is not None
     assert dict(recovered) == {'state': 'ready', 'file_size_bytes': len(b'complete')}
+    assert await database.scalar('SELECT COUNT(*) FROM owner_handoff_outcomes') == 0
     assert clipper.cut_calls == []
 
 
