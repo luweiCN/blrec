@@ -95,6 +95,7 @@ def snapshot() -> Dict[str, List[Dict[str, Any]]]:
 
 @router.get('/interfaces')
 async def get_interfaces() -> Dict[str, List[Dict[str, Any]]]:
+    await _manager().refresh_interfaces()
     return snapshot()
 
 
@@ -102,8 +103,9 @@ async def get_interfaces() -> Dict[str, List[Dict[str, Any]]]:
 async def update_interface(
     interface_name: str, request: InterfaceUpdateRequest
 ) -> Dict[str, List[Dict[str, Any]]]:
+    network_manager = _manager()
     try:
-        await _manager().update_interface(
+        await network_manager.update_interface(
             interface_name,
             enabled=request.enabled,
             upload_limit_bps=request.upload_limit_bps,
@@ -112,13 +114,16 @@ async def update_interface(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Network interface not found'
         ) from None
+    await network_manager.refresh_interfaces(force=True)
     return snapshot()
 
 
 @router.post('/probe')
 async def probe_networks(request: ProbeRequest) -> Dict[str, List[Dict[str, Any]]]:
+    network_manager = _manager()
+    await network_manager.refresh_interfaces()
     try:
-        await _manager().probe(request.interface_name)
+        await network_manager.probe(request.interface_name)
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Network interface not found'

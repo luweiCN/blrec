@@ -1,4 +1,7 @@
+import asyncio
+import threading
 from typing import Any, Dict, List, Tuple
+from unittest.mock import Mock
 
 import pytest
 
@@ -10,7 +13,19 @@ from blrec.networking.requests_session import (
     SourceAddressAdapter,
 )
 from blrec.networking.resolver import SourceBoundResolver
-from blrec.setting.models import NetworkRouteSettings, NetworkSettings
+from blrec.setting.models import (
+    NetworkInterfaceSettings,
+    NetworkRouteSettings,
+    NetworkSettings,
+)
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
 
 
 def _interfaces() -> Dict[str, NetworkInterface]:
@@ -102,6 +117,124 @@ def test_interface_settings_override_discovery_defaults() -> None:
 
     assert interface.enabled is False
     assert interface.upload_limit_bps == 1024
+
+
+@pytest.mark.asyncio
+async def test_interfaces_uses_cache_until_async_refresh() -> None:
+    clock = Clock()
+    provider = Mock(return_value=_interfaces())
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(),
+        interface_provider=provider,
+        interface_cache_ttl_seconds=10,
+        clock=clock,
+    )
+
+    assert provider.call_count == 1
+    manager.interfaces()
+    manager.interfaces()
+    await manager.refresh_interfaces()
+
+    assert provider.call_count == 1
+
+    clock.value += 11
+    manager.interfaces()
+    manager.interfaces()
+
+    assert provider.call_count == 1
+
+    await manager.refresh_interfaces()
+
+    assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_interfaces_can_force_a_fresh_discovery() -> None:
+    provider = Mock(return_value=_interfaces())
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(), interface_provider=provider
+    )
+
+    await manager.refresh_interfaces(force=True)
+
+    assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_interfaces_runs_provider_in_executor() -> None:
+    provider_threads: List[int] = []
+
+    def provider() -> Dict[str, NetworkInterface]:
+        provider_threads.append(threading.get_ident())
+        return _interfaces()
+
+    clock = Clock()
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(),
+        interface_provider=provider,
+        interface_cache_ttl_seconds=10,
+        clock=clock,
+    )
+    clock.value += 11
+
+    await manager.refresh_interfaces()
+
+    assert provider_threads[0] == threading.get_ident()
+    assert provider_threads[1] != threading.get_ident()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('force', [False, True], ids=['expired', 'forced'])
+async def test_concurrent_refreshes_share_interface_discovery(force: bool) -> None:
+    provider_calls: List[None] = []
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+
+    def provider() -> Dict[str, NetworkInterface]:
+        provider_calls.append(None)
+        if len(provider_calls) > 1:
+            refresh_started.set()
+            release_refresh.wait(timeout=1)
+        return _interfaces()
+
+    clock = Clock()
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(),
+        interface_provider=provider,
+        interface_cache_ttl_seconds=10,
+        clock=clock,
+    )
+    clock.value += 11
+
+    first = asyncio.create_task(manager.refresh_interfaces(force=force))
+    for _ in range(100):
+        if refresh_started.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert refresh_started.is_set()
+    second = asyncio.create_task(manager.refresh_interfaces(force=force))
+    await asyncio.sleep(0)
+    release_refresh.set()
+
+    await asyncio.gather(first, second)
+
+    assert len(provider_calls) == 2
+
+
+def test_interfaces_apply_current_settings_without_rediscovery() -> None:
+    settings = NetworkSettings()
+    provider = Mock(return_value=_interfaces())
+    manager = NetworkRouteManager(lambda: settings, interface_provider=provider)
+
+    assert manager.interfaces()['lan1'].enabled is True
+    settings.interfaces['lan1'] = NetworkInterfaceSettings(
+        enabled=False, upload_limit_bps=2048
+    )
+    interface = manager.interfaces()['lan1']
+
+    assert interface.enabled is False
+    assert interface.upload_limit_bps == 2048
+    assert provider.call_count == 1
 
 
 def test_source_address_adapter_passes_binding_to_urllib3() -> None:

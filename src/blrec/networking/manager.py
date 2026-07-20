@@ -79,6 +79,7 @@ class NetworkRouteManager:
         interface_provider: Callable[
             [], Mapping[str, NetworkInterface]
         ] = discover_interfaces,
+        interface_cache_ttl_seconds: float = 10,
         clock: Callable[[], float] = time.monotonic,
         failure_threshold: int = 2,
         fallback_cooldown_seconds: int = 60,
@@ -88,7 +89,13 @@ class NetworkRouteManager:
     ) -> None:
         self._settings_provider = settings_provider
         self._interface_provider = interface_provider
+        self._interface_cache_ttl_seconds = interface_cache_ttl_seconds
         self._clock = clock
+        self._lock = RLock()
+        self._interface_cache = dict(self._interface_provider())
+        self._interfaces_refreshed_at = self._clock()
+        self._interface_cache_generation = 0
+        self._interface_refresh_lock = asyncio.Lock()
         self._failure_threshold = failure_threshold
         self._fallback_cooldown_seconds = fallback_cooldown_seconds
         self._probes: Dict[str, NetworkProbe] = {}
@@ -100,7 +107,6 @@ class NetworkRouteManager:
         self._selection_audit_at: Dict[
             Tuple[NetworkPurpose, Optional[str], str], float
         ] = {}
-        self._lock = RLock()
         self._traffic_meter = TrafficMeter(clock=clock)
         self._upload_limiter = SharedUploadLimiter(
             self._upload_limit, meter=self._traffic_meter, clock=clock
@@ -108,8 +114,10 @@ class NetworkRouteManager:
 
     def interfaces(self) -> Dict[str, NetworkInterface]:
         configured = self._settings_provider().interfaces
+        with self._lock:
+            discovered = dict(self._interface_cache)
         result: Dict[str, NetworkInterface] = {}
-        for name, interface in self._interface_provider().items():
+        for name, interface in discovered.items():
             settings = configured.get(name)
             if settings is None:
                 result[name] = interface
@@ -120,6 +128,32 @@ class NetworkRouteManager:
                     upload_limit_bps=settings.upload_limit_bps,
                 )
         return result
+
+    async def refresh_interfaces(self, force: bool = False) -> None:
+        with self._lock:
+            generation = self._interface_cache_generation
+            if (
+                not force
+                and self._clock() - self._interfaces_refreshed_at
+                < self._interface_cache_ttl_seconds
+            ):
+                return
+        async with self._interface_refresh_lock:
+            with self._lock:
+                if generation != self._interface_cache_generation:
+                    return
+                if (
+                    not force
+                    and self._clock() - self._interfaces_refreshed_at
+                    < self._interface_cache_ttl_seconds
+                ):
+                    return
+            loop = asyncio.get_running_loop()
+            interfaces = await loop.run_in_executor(None, self._interface_provider)
+            with self._lock:
+                self._interface_cache = dict(interfaces)
+                self._interfaces_refreshed_at = self._clock()
+                self._interface_cache_generation += 1
 
     def set_settings_persister(
         self, persister: Callable[['NetworkSettings'], Awaitable[None]]
