@@ -350,6 +350,37 @@ def test_login_commit_cannot_create_a_session_after_concurrent_password_reset(
     reset_store.close()
 
 
+def test_plain_login_does_not_invalidate_a_prepared_password_change(
+    tmp_path: Path,
+) -> None:
+    clock = Clock(100)
+    auth = store(tmp_path, clock)
+    auth.open()
+    auth.initialize('owner', 'correct horse battery staple')
+    ticket = auth.prepare_password_change()
+    verification = auth.check_password_change(
+        ticket, 'correct horse battery staple', 'new correct horse battery staple'
+    )
+
+    clock.value = 101
+    auth.login('owner', 'correct horse battery staple', client_key='192.0.2.33')
+    connection = auth._connection
+    assert connection is not None
+    assert (
+        connection.execute('SELECT updated_at FROM admin WHERE id=1').fetchone()[0]
+        == 100
+    )
+    auth.commit_password_change(ticket, verification)
+
+    assert (
+        auth.login(
+            'owner', 'new correct horse battery staple', client_key='192.0.2.34'
+        ).session_token
+        != ''
+    )
+    auth.close()
+
+
 def test_bootstrap_rate_limit_is_persistent_and_separate_from_login(
     tmp_path: Path,
 ) -> None:

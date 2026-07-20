@@ -13,6 +13,7 @@ import pytest
 from argon2 import PasswordHasher
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from blrec.web import security
 from blrec.web.auth_store import AdminAuthStore
@@ -537,6 +538,137 @@ def test_password_routes_run_argon2_only_in_the_password_worker(
     assert [kind for kind, _ in calls].count('hash') == 3
     assert [kind for kind, _ in calls].count('verify') == 2
     assert all(name.startswith('blrec-password') for _, name in calls)
+
+
+@pytest.mark.asyncio
+async def test_all_password_routes_keep_the_event_loop_responsive_during_argon2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AdminAuthStore(str(tmp_path / 'auth.sqlite3'), admin_username='owner')
+    store.open()
+    password_work = PasswordWorkCoordinator()
+    security.configure(store, bootstrap_api_key='bootstrap-key')
+    auth_router.configure(
+        store, password_work=password_work, bootstrap_api_key='bootstrap-key'
+    )
+    api = FastAPI(dependencies=[Depends(security.authenticate)])
+    api.include_router(auth_router.router, prefix='/api/v1')
+    original_hash = PasswordHasher.hash
+    original_verify = PasswordHasher.verify
+    gate_lock = threading.Lock()
+    gate = None
+
+    def wait_at_gate(kind: str) -> None:
+        with gate_lock:
+            state = gate
+            if state is None or state['kind'] != kind or state['used']:
+                return
+            state['used'] = True
+        state['started'].set()
+        assert state['release'].wait(5)
+
+    def blocking_hash(hasher: PasswordHasher, password: str) -> str:
+        wait_at_gate('hash')
+        return str(original_hash(hasher, password))
+
+    def blocking_verify(
+        hasher: PasswordHasher, encoded_hash: str, password: str
+    ) -> bool:
+        wait_at_gate('verify')
+        return bool(original_verify(hasher, encoded_hash, password))
+
+    monkeypatch.setattr(PasswordHasher, 'hash', blocking_hash)
+    monkeypatch.setattr(PasswordHasher, 'verify', blocking_verify)
+
+    async def request_with_heartbeat(kind: str, request) -> object:
+        nonlocal gate
+        started = threading.Event()
+        release = threading.Event()
+        heartbeat = threading.Event()
+        observed = []
+        gate = {'kind': kind, 'used': False, 'started': started, 'release': release}
+        loop = asyncio.get_running_loop()
+
+        def release_after_heartbeat() -> None:
+            assert started.wait(5)
+            loop.call_soon_threadsafe(heartbeat.set)
+            observed.append(heartbeat.wait(5))
+            release.set()
+
+        helper = threading.Thread(target=release_after_heartbeat, daemon=True)
+        helper.start()
+        response = await request()
+        helper.join(timeout=5)
+        assert not helper.is_alive()
+        assert observed == [True], '{} Argon2 blocked the event loop'.format(kind)
+        assert gate['used'] is True
+        gate = None
+        return response
+
+    transport = ASGITransport(app=api)
+    try:
+        async with AsyncClient(
+            transport=transport, base_url='https://testserver'
+        ) as client:
+            setup = await request_with_heartbeat(
+                'hash',
+                lambda: client.post(
+                    '/api/v1/auth/setup',
+                    headers={'origin': 'https://testserver'},
+                    json={
+                        'username': 'owner',
+                        'apiKey': 'bootstrap-key',
+                        'password': 'correct horse battery staple',
+                    },
+                ),
+            )
+            assert setup.status_code == 200
+            login = await request_with_heartbeat(
+                'verify',
+                lambda: client.post(
+                    '/api/v1/auth/login',
+                    headers={'origin': 'https://testserver'},
+                    json={
+                        'username': 'owner',
+                        'password': 'correct horse battery staple',
+                    },
+                ),
+            )
+            assert login.status_code == 200
+            csrf_token = str(login.json()['csrfToken'])
+            changed = await request_with_heartbeat(
+                'hash',
+                lambda: client.post(
+                    '/api/v1/auth/change-password',
+                    headers={
+                        'origin': 'https://testserver',
+                        'x-csrf-token': csrf_token,
+                    },
+                    json={
+                        'currentPassword': 'correct horse battery staple',
+                        'newPassword': 'new correct horse battery staple',
+                    },
+                ),
+            )
+            assert changed.status_code == 204
+            recovered = await request_with_heartbeat(
+                'hash',
+                lambda: client.post(
+                    '/api/v1/auth/recover',
+                    headers={'origin': 'https://testserver'},
+                    json={
+                        'username': 'owner',
+                        'apiKey': 'bootstrap-key',
+                        'newPassword': 'recovered correct password',
+                    },
+                ),
+            )
+            assert recovered.status_code == 204
+    finally:
+        security.reset()
+        auth_router.reset()
+        await password_work.shutdown()
+        store.close()
 
 
 def test_saturated_password_worker_returns_retryable_503_without_login_failure(
