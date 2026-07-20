@@ -1720,3 +1720,116 @@ async def test_renewal_check_installs_one_operation_deadline(
     finally:
         await manager.close()
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_due_account_worker_uses_default_operation_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, cipher, manager = await components(tmp_path, protocol, clock)
+    deadlines = []
+
+    @contextmanager
+    def capture_deadline(seconds: float):
+        deadlines.append(seconds)
+        yield
+
+    monkeypatch.setattr(accounts_module, 'protocol_request_deadline', capture_deadline)
+    try:
+        await seed_account(store, cipher, expires_at=clock.value + 73 * 3600)
+
+        await manager.refresh_due_accounts()
+
+        assert deadlines == [60]
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_worker_uses_default_operation_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, cipher, manager = await components(tmp_path, protocol, clock)
+    deadlines = []
+
+    @contextmanager
+    def capture_deadline(seconds: float):
+        deadlines.append(seconds)
+        yield
+
+    monkeypatch.setattr(accounts_module, 'protocol_request_deadline', capture_deadline)
+    try:
+        await seed_account(store, cipher, expires_at=clock.value + 73 * 3600)
+        fingerprint = await recording_credential_fingerprint(manager)
+
+        await manager.report_primary_auth_failure(fingerprint)
+
+        assert deadlines == [60]
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_ui_admission_budget_includes_account_lookup_before_the_gate(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    monotonic = FakeMonotonic()
+    protocol = ScriptedProtocol()
+    database, store, cipher, manager = await components(
+        tmp_path, protocol, clock, monotonic_clock=monotonic
+    )
+    original_account_row = manager._account_row
+
+    async def delayed_account_row(account_id: int):
+        monotonic.advance(0.30)
+        return await original_account_row(account_id)
+
+    manager._account_row = delayed_account_row
+    try:
+        await seed_account(store, cipher, expires_at=clock.value + 73 * 3600)
+
+        with pytest.raises(AccountWriteBusy):
+            await manager.check_account_renewal(
+                1, admission_timeout_seconds=0.25, operation_timeout_seconds=60
+            )
+
+        assert protocol.oauth_calls == 0
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_ui_admission_bounds_a_blocked_account_lookup(tmp_path: Path) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, cipher, manager = await components(tmp_path, protocol, clock)
+    lookup_started = asyncio.Event()
+
+    async def blocked_account_row(_account_id: int):
+        lookup_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError('unreachable')
+
+    manager._account_row = blocked_account_row
+    try:
+        await seed_account(store, cipher, expires_at=clock.value + 73 * 3600)
+        check = asyncio.create_task(
+            manager.check_account_renewal(1, admission_timeout_seconds=0.01)
+        )
+        await asyncio.wait_for(lookup_started.wait(), timeout=1)
+
+        with pytest.raises(AccountWriteBusy):
+            await asyncio.wait_for(check, timeout=0.2)
+
+        assert protocol.oauth_calls == 0
+    finally:
+        await manager.close()
+        await database.close()

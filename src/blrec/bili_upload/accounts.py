@@ -545,7 +545,7 @@ class AccountManager:
         account_id: int,
         *,
         admission_timeout_seconds: Optional[float] = None,
-        operation_timeout_seconds: Optional[float] = None,
+        operation_timeout_seconds: Optional[float] = 60.0,
     ) -> RenewalCheckResult:
         admission_deadline = (
             None
@@ -576,9 +576,18 @@ class AccountManager:
         account_id: int,
         *,
         gate_admission_deadline: Optional[float] = None,
-        operation_timeout_seconds: Optional[float] = None,
+        operation_timeout_seconds: Optional[float] = 60.0,
     ) -> RenewalCheckResult:
-        row = await self._account_row(account_id)
+        if gate_admission_deadline is None:
+            row = await self._account_row(account_id)
+        else:
+            try:
+                row = await asyncio.wait_for(
+                    self._account_row(account_id),
+                    timeout=max(0.0, gate_admission_deadline - self._monotonic_clock()),
+                )
+            except asyncio.TimeoutError:
+                raise AccountWriteBusy('account write is busy') from None
         version = int(row['credential_version'])
         gate = self._write_gates.for_account(account_id)
         gate_timeout = (

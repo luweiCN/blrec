@@ -260,17 +260,14 @@ class CollectionManager:
             previous = self._refresh_tasks.get(key)
             if previous is not None:
                 try:
-                    await asyncio.shield(previous.task)
-                except asyncio.CancelledError:
-                    if not previous.task.cancelled():
-                        raise
+                    await self._await_refresh_after_create_commit(previous.task)
                 except Exception:
                     pass
             stale = self._supersede_catalog_generation(key)
             task = self._start_refresh(key, account, stale=stale)
         try:
-            catalog = await asyncio.shield(task)
-            collections = catalog.collections
+            catalog = await self._await_refresh_after_create_commit(task)
+            collections = () if catalog is None else catalog.collections
         except CollectionUnavailable:
             collections = ()
         created = next(
@@ -293,6 +290,17 @@ class CollectionManager:
                 sections=(),
             )
         return CollectionCreationView(account_id=account.id, collection=created)
+
+    @staticmethod
+    async def _await_refresh_after_create_commit(
+        task: asyncio.Task[CollectionCatalogView],
+    ) -> Optional[CollectionCatalogView]:
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    return None
 
     def _supersede_catalog_generation(
         self, key: Tuple[int, int]

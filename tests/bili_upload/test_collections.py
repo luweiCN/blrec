@@ -250,6 +250,19 @@ class PostCreateRaceProtocol(FakeProtocol):
         return result
 
 
+class BlockingPostCreateListProtocol(FakeProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_started = asyncio.Event()
+        self.list_release = asyncio.Event()
+
+    async def list_collections(self, bundle: Any) -> Mapping[str, Any]:
+        self.list_calls.append(bundle)
+        self.list_started.set()
+        await self.list_release.wait()
+        return response(include_created=self.include_created)
+
+
 @pytest.mark.asyncio
 async def test_collection_list_is_scoped_to_the_resolved_account(
     tmp_path: Path,
@@ -656,6 +669,77 @@ async def test_post_create_generation_cannot_be_overwritten_by_an_older_force(
     finally:
         protocol.first_release.set()
         protocol.release_stale.set()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_create_success_waits_for_older_catalog_convergence(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    protocol = PreCreateListProtocol()
+    old_list = None
+    creation = None
+    try:
+        await seed_accounts(database)
+        catalog = manager(database, protocol, FakeCoverResolver())
+        old_list = asyncio.create_task(catalog.list('fixed', 1, force_refresh=True))
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+        creation = asyncio.create_task(
+            catalog.create('fixed', 1, title='新合集', description='', cover_asset_id=7)
+        )
+        await asyncio.wait_for(protocol.create_finished.wait(), timeout=1)
+
+        creation.cancel()
+        await asyncio.sleep(0)
+        assert not creation.done()
+        protocol.first_release.set()
+        created = await asyncio.wait_for(creation, timeout=1)
+        await asyncio.wait_for(old_list, timeout=1)
+
+        assert created.collection.id == 20
+        assert len(protocol.create_calls) == 1
+        assert len(protocol.list_calls) == 2
+    finally:
+        protocol.first_release.set()
+        await asyncio.gather(
+            *(task for task in (old_list, creation) if task is not None),
+            return_exceptions=True,
+        )
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_create_success_waits_for_post_create_refresh(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    protocol = BlockingPostCreateListProtocol()
+    creation = None
+    try:
+        await seed_accounts(database)
+        catalog = manager(database, protocol, FakeCoverResolver())
+        creation = asyncio.create_task(
+            catalog.create('fixed', 1, title='新合集', description='', cover_asset_id=7)
+        )
+        await asyncio.wait_for(protocol.list_started.wait(), timeout=1)
+
+        creation.cancel()
+        await asyncio.sleep(0)
+        assert not creation.done()
+        protocol.list_release.set()
+        created = await asyncio.wait_for(creation, timeout=1)
+
+        assert created.collection.id == 20
+        assert len(protocol.create_calls) == 1
+        assert len(protocol.list_calls) == 1
+    finally:
+        protocol.list_release.set()
+        await asyncio.gather(
+            *(task for task in (creation,) if task is not None), return_exceptions=True
+        )
         await database.close()
 
 
