@@ -261,7 +261,7 @@ export interface SubmissionVerification {
   readonly error?: string | null;
 }
 
-export interface UploadJobProgress {
+export interface UploadJobSummary {
   readonly id: number;
   readonly accountId: number;
   readonly accountUid: number;
@@ -303,7 +303,6 @@ export interface UploadJobProgress {
   readonly collectionError: string | null;
   readonly submissionVerificationState: SubmissionVerificationState;
   readonly submissionVerifiedAt: number | null;
-  readonly submissionVerification: SubmissionVerification | null;
   readonly commentError: string | null;
   readonly danmakuError: string | null;
   readonly canPause: boolean;
@@ -317,6 +316,10 @@ export interface UploadJobProgress {
   readonly currentPartIndex: number | null;
   readonly confirmedPartCount: number;
   readonly discoveredPartCount: number;
+}
+
+export interface UploadJobProgress extends UploadJobSummary {
+  readonly submissionVerification: SubmissionVerification | null;
   readonly unknownDanmakuItems: readonly DanmakuItemProgress[];
   readonly parts: readonly UploadPartProgress[];
 }
@@ -349,17 +352,15 @@ export interface RecordingPart {
   readonly mediaIndexProgress?: number;
 }
 
-export interface RecordingSession {
+export interface RecordingSessionSummary {
   readonly id: number;
   readonly roomId: number;
-  readonly broadcastSessionKey: string;
   readonly liveStartTime: number | null;
   readonly state: RecordingSessionState;
   readonly startedAt: number;
   readonly endedAt: number | null;
   readonly title: string;
   readonly coverUrl: string;
-  readonly coverPath: string | null;
   readonly anchorUid: number | null;
   readonly anchorName: string;
   readonly areaId: number | null;
@@ -387,14 +388,22 @@ export interface RecordingSession {
   readonly highlightClipId: number | null;
   readonly displayState: RecordingSessionDisplayState;
   readonly availableActions: readonly RecordingSessionAction[];
+  readonly uploadJob: UploadJobSummary | null;
+}
+
+export interface RecordingSessionDetail extends RecordingSessionSummary {
+  readonly broadcastSessionKey: string;
+  readonly coverPath: string | null;
   readonly uploadJob: UploadJobProgress | null;
   readonly parts: readonly RecordingPart[];
 }
 
+export type RecordingSession = RecordingSessionDetail;
+
 export interface RecordingSessionsResponse {
   readonly degradedReason: string | null;
   readonly total: number;
-  readonly sessions: readonly RecordingSession[];
+  readonly sessions: readonly RecordingSessionSummary[];
 }
 
 export type RecordingSessionsView =

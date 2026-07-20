@@ -11,6 +11,7 @@ import {
   HighlightClipList,
   HighlightClipInspection,
   HighlightMarker,
+  HighlightMarkerCount,
   HighlightMediaAccess,
   HighlightTimeline,
   HighlightUploadSessionResponse,
@@ -27,6 +28,15 @@ export class HighlightService {
   getTimeline(sessionId: number): Observable<HighlightTimeline> {
     return this.http.get<HighlightTimeline>(
       this.url.makeApiUrl(`/api/v1/highlights/sessions/${sessionId}/timeline`),
+    );
+  }
+
+  getMarkerCounts(
+    sessionId: number,
+  ): Observable<readonly HighlightMarkerCount[]> {
+    const path = `/api/v1/highlights/sessions/${sessionId}/marker-counts`;
+    return this.http.get<readonly HighlightMarkerCount[]>(
+      this.url.makeApiUrl(path),
     );
   }
 

@@ -9,6 +9,7 @@ import {
   RecordingSessionActionResponse,
   RecordingDanmakuPage,
   RecordingMediaAccess,
+  RecordingSessionDetail,
   UploadJobRetryPreviewResponse,
   RecordingSessionFilters,
   RecordingSessionsResponse,
@@ -56,6 +57,11 @@ export class RecordingSessionService {
     return this.http.get<RecordingSessionsResponse>(this.url.makeApiUrl(path), {
       params,
     });
+  }
+
+  getSession(sessionId: number): Observable<RecordingSessionDetail> {
+    const path = `/api/v1/recording-sessions/${sessionId}`;
+    return this.http.get<RecordingSessionDetail>(this.url.makeApiUrl(path));
   }
 
   runJobAction(

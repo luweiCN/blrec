@@ -7,8 +7,14 @@ import {
   OnInit,
 } from '@angular/core';
 
-import { EMPTY, Subscription } from 'rxjs';
-import { finalize, switchMap } from 'rxjs/operators';
+import { EMPTY, forkJoin, of, Subject, Subscription } from 'rxjs';
+import {
+  catchError,
+  finalize,
+  map,
+  switchMap,
+  tap,
+} from 'rxjs/operators';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import {
@@ -17,15 +23,17 @@ import {
   DanmakuImportState,
   RecordingArtifactState,
   RecordingPart,
-  RecordingSession,
   RecordingSessionAction,
+  RecordingSessionDetail,
   RecordingSessionDisplayState,
   RecordingSessionFilters,
+  RecordingSessionSummary,
   RecordingSessionState,
   RecordingSessionScope,
+  RecordingSessionsResponse,
   RecordingSessionsView,
   TranscodeState,
-  UploadJobProgress,
+  UploadJobSummary,
   UploadJobDisplayState,
   UploadJobRetryPreviewItem,
   UploadJobState,
@@ -57,6 +65,16 @@ interface RealtimeUploadJobProgress {
   readonly discoveredPartCount: number;
 }
 
+interface RecordingListRequest {
+  readonly limit: number;
+  readonly offset: number;
+  readonly filters: RecordingSessionFilters;
+}
+
+type RecordingListResult =
+  | { readonly kind: 'ready'; readonly response: RecordingSessionsResponse }
+  | { readonly kind: 'error'; readonly message: string };
+
 @Component({
   selector: 'app-recording-sessions',
   templateUrl: './recording-sessions.component.html',
@@ -68,10 +86,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   pageIndex = 1;
   pageSize = 20;
   readonly pageSizeOptions = [20, 50, 100];
-  selectedSession: RecordingSession | null = null;
+  selectedSession: RecordingSessionDetail | null = null;
   detailVisible = false;
   videoVisible = false;
-  videoSession: RecordingSession | null = null;
+  videoSession: RecordingSessionDetail | null = null;
   videoPart: RecordingPart | null = null;
   readonly selectedSessionIds = new Set<number>();
   readonly cuttingRoomIds = new Set<number>();
@@ -90,11 +108,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   retryPreviewItems: readonly UploadJobRetryPreviewItem[] = [];
   taskEditVisible = false;
   taskEditJobIds: readonly number[] = [];
-  submissionSession: RecordingSession | null = null;
+  submissionSession: RecordingSessionSummary | null = null;
   partHighlightCounts = new Map<number, number>();
   partHighlightCountState: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
   private realtimeSubscription?: Subscription;
-  private highlightTimelineSubscription?: Subscription;
+  private listSubscription?: Subscription;
+  private detailSubscription?: Subscription;
+  private readonly listRequests = new Subject<RecordingListRequest>();
+  private selectedSessionId: number | null = null;
   private realtimeUploadJobIds: Set<number> | null = null;
 
   readonly recordingStateOptions = [
@@ -129,6 +150,39 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   ) {}
 
   ngOnInit(): void {
+    this.listSubscription = this.listRequests
+      .pipe(
+        tap(() => {
+          this.view = { state: 'loading' };
+          this.changeDetector.markForCheck();
+        }),
+        switchMap((request) =>
+          this.recordingSessions
+            .listSessions(request.limit, request.offset, request.filters)
+            .pipe(
+              map(
+                (response): RecordingListResult => ({
+                  kind: 'ready',
+                  response,
+                }),
+              ),
+              catchError((error: unknown) =>
+                of<RecordingListResult>({
+                  kind: 'error',
+                  message: this.describeError(error),
+                }),
+              ),
+            ),
+        ),
+      )
+      .subscribe((result) => {
+        if (result.kind === 'ready') {
+          this.applyListResponse(result.response);
+        } else {
+          this.view = { state: 'error', message: result.message };
+        }
+        this.changeDetector.markForCheck();
+      });
     this.load();
     this.realtimeSubscription = this.realtime.events$.subscribe((event) => {
       if (event.type === 'resync') {
@@ -145,10 +199,11 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.realtimeSubscription?.unsubscribe();
-    this.highlightTimelineSubscription?.unsubscribe();
+    this.listSubscription?.unsubscribe();
+    this.detailSubscription?.unsubscribe();
   }
 
-  get sessions(): readonly RecordingSession[] {
+  get sessions(): readonly RecordingSessionSummary[] {
     return this.view.state === 'ready' ? this.view.response.sessions : [];
   }
 
@@ -217,35 +272,12 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   load(): void {
-    this.view = { state: 'loading' };
     const offset = (this.pageIndex - 1) * this.pageSize;
-    this.recordingSessions
-      .listSessions(this.pageSize, offset, this.filters())
-      .subscribe({
-        next: (response) => {
-          this.view = { state: 'ready', response };
-          const currentSessionIds = new Set(
-            response.sessions.map((session) => session.id),
-          );
-          for (const sessionId of this.selectedSessionIds) {
-            if (!currentSessionIds.has(sessionId)) {
-              this.selectedSessionIds.delete(sessionId);
-            }
-          }
-          if (this.detailVisible && this.selectedSession) {
-            this.selectedSession =
-              response.sessions.find(
-                (session) => session.id === this.selectedSession?.id,
-              ) ?? null;
-            this.detailVisible = this.selectedSession !== null;
-          }
-          this.changeDetector.markForCheck();
-        },
-        error: (error: unknown) => {
-          this.view = { state: 'error', message: this.describeError(error) };
-          this.changeDetector.markForCheck();
-        },
-      });
+    this.listRequests.next({
+      limit: this.pageSize,
+      offset,
+      filters: this.filters(),
+    });
   }
 
   applyFilters(): void {
@@ -503,14 +535,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return session?.availableActions.includes(action) ?? false;
   }
 
-  hasMoreActions(session: RecordingSession): boolean {
+  hasMoreActions(session: RecordingSessionSummary): boolean {
     return (
       this.canCutCurrentFile(session) ||
       session.availableActions.some((action) => action !== 'delete_local')
     );
   }
 
-  canCutCurrentFile(session: RecordingSession): boolean {
+  canCutCurrentFile(session: RecordingSessionSummary): boolean {
     return (
       this.isRecordingScope &&
       session.sourceKind === 'live' &&
@@ -518,7 +550,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     );
   }
 
-  cutCurrentFile(session: RecordingSession): void {
+  cutCurrentFile(session: RecordingSessionSummary): void {
     if (
       !this.canCutCurrentFile(session) ||
       this.cuttingRoomIds.has(session.roomId)
@@ -541,7 +573,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       .subscribe({ error: () => undefined });
   }
 
-  openSubmissionSettings(session: RecordingSession): void {
+  openSubmissionSettings(session: RecordingSessionSummary): void {
     this.submissionSession = session;
     this.changeDetector.markForCheck();
   }
@@ -551,7 +583,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     this.load();
   }
 
-  highlightEditorLink(session: RecordingSession): string[] {
+  highlightEditorLink(session: RecordingSessionSummary): string[] {
     return ['/', 'recordings', 'highlights', String(session.id)];
   }
 
@@ -597,15 +629,58 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     );
   }
 
-  openDetails(session: RecordingSession): void {
-    this.selectedSession = session;
+  openDetails(session: RecordingSessionSummary): void {
+    const sessionId = session.id;
+    this.detailSubscription?.unsubscribe();
+    this.selectedSessionId = sessionId;
+    this.selectedSession = null;
     this.detailVisible = true;
-    this.loadPartHighlightCounts(session);
+    this.partHighlightCounts = new Map<number, number>();
+    this.partHighlightCountState =
+      session.sourceKind === 'live' ? 'loading' : 'idle';
     this.changeDetector.markForCheck();
+
+    const detailRequest =
+      session.sourceKind === 'live'
+        ? forkJoin({
+            detail: this.recordingSessions.getSession(sessionId),
+            counts: this.highlights.getMarkerCounts(sessionId),
+          })
+        : this.recordingSessions
+            .getSession(sessionId)
+            .pipe(map((detail) => ({ detail, counts: [] })));
+    this.detailSubscription = detailRequest.subscribe({
+      next: ({ detail, counts }) => {
+        if (!this.detailVisible || this.selectedSessionId !== sessionId) {
+          return;
+        }
+        const byPartId = new Map<number, number>(
+          detail.parts.map((part) => [part.id, 0]),
+        );
+        for (const value of counts) {
+          byPartId.set(value.partId, value.count);
+        }
+        this.selectedSession = detail;
+        this.partHighlightCounts = byPartId;
+        this.partHighlightCountState =
+          session.sourceKind === 'live' ? 'ready' : 'idle';
+        this.changeDetector.markForCheck();
+      },
+      error: () => {
+        if (!this.detailVisible || this.selectedSessionId !== sessionId) {
+          return;
+        }
+        this.selectedSession = null;
+        this.partHighlightCountState =
+          session.sourceKind === 'live' ? 'error' : 'idle';
+        this.changeDetector.markForCheck();
+      },
+    });
   }
 
   closeDetails(): void {
-    this.highlightTimelineSubscription?.unsubscribe();
+    this.detailSubscription?.unsubscribe();
+    this.selectedSessionId = null;
     this.detailVisible = false;
     this.selectedSession = null;
     this.partHighlightCounts = new Map<number, number>();
@@ -627,7 +702,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return (this.partHighlightCounts.get(partId) ?? 0) > 0;
   }
 
-  openPartVideo(session: RecordingSession, part: RecordingPart): void {
+  openPartVideo(session: RecordingSessionDetail, part: RecordingPart): void {
     this.videoSession = session;
     this.videoPart = part;
     this.videoVisible = true;
@@ -643,7 +718,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     this.changeDetector.markForCheck();
   }
 
-  openPartDanmaku(session: RecordingSession, part: RecordingPart): void {
+  openPartDanmaku(session: RecordingSessionDetail, part: RecordingPart): void {
     this.openPartVideo(session, part);
   }
 
@@ -697,7 +772,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }[state];
   }
 
-  displayStateDetail(session: RecordingSession): string {
+  displayStateDetail(session: RecordingSessionSummary): string {
     if (session.displayState === 'recording') {
       return ['auto', 'upload'].includes(session.uploadIntent)
         ? '本场结束后上传'
@@ -751,7 +826,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }[state];
   }
 
-  archiveUrl(session: RecordingSession, partIndex?: number): string | null {
+  archiveUrl(
+    session: RecordingSessionSummary,
+    partIndex?: number,
+  ): string | null {
     const job = session.uploadJob;
     if (!job?.bvid || (job.state !== 'approved' && job.state !== 'completed')) {
       return null;
@@ -762,7 +840,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     )}${part}`;
   }
 
-  remotePartUrl(session: RecordingSession, partIndex: number): string | null {
+  remotePartUrl(
+    session: RecordingSessionDetail,
+    partIndex: number,
+  ): string | null {
     const uploadPart = this.uploadPartFor(session, partIndex);
     if (uploadPart?.cid === null || uploadPart?.cid === undefined) {
       return null;
@@ -787,7 +868,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }[state];
   }
 
-  uploadDisplayStateLabel(job: UploadJobProgress): string {
+  uploadDisplayStateLabel(job: UploadJobSummary): string {
     if (job.displayState !== 'standard') {
       return {
         preuploading: '录制中 · 正在预上传',
@@ -815,7 +896,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }
   }
 
-  uploadDisplayStateColor(job: UploadJobProgress): string {
+  uploadDisplayStateColor(job: UploadJobSummary): string {
     if (job.displayState === 'preupload_paused') {
       return 'warning';
     }
@@ -892,7 +973,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   collectionBranchLabel(
-    state: UploadJobProgress['collectionBranchState'],
+    state: UploadJobSummary['collectionBranchState'],
   ): string {
     return {
       disabled: '未加入',
@@ -973,7 +1054,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   uploadPartFor(
-    session: RecordingSession,
+    session: RecordingSessionDetail,
     partIndex: number,
   ): UploadPartProgress | null {
     return (
@@ -982,7 +1063,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     );
   }
 
-  noUploadJobReason(session: RecordingSession): string {
+  noUploadJobReason(session: RecordingSessionSummary): string {
     if (session.uploadSuppressed) {
       return '本场已设为不上传，本地录像仍会按保留策略管理。';
     }
@@ -992,18 +1073,18 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return '尚未创建投稿任务；请检查房间投稿设置、账号状态和分 P 制品是否就绪。';
   }
 
-  sessionHeader(session: RecordingSession): string {
+  sessionHeader(session: RecordingSessionSummary): string {
     const title = session.title || `房间 ${session.roomId}`;
     return `${title} · 房间 ${session.roomId} · ${this.sessionStateLabel(
       session.state,
     )}`;
   }
 
-  coverAlt(session: RecordingSession): string {
+  coverAlt(session: RecordingSessionSummary): string {
     return `${session.title || `房间 ${session.roomId}`}的直播封面`;
   }
 
-  areaLabel(session: RecordingSession): string {
+  areaLabel(session: RecordingSessionSummary): string {
     return [session.parentAreaName, session.areaName]
       .filter(Boolean)
       .join(' / ');
@@ -1063,14 +1144,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       : `${this.formatBytes(bytesPerSecond)}/s`;
   }
 
-  preuploadPartDetail(job: UploadJobProgress): string | null {
+  preuploadPartDetail(job: UploadJobSummary): string | null {
     if (job.preuploadFinalized) {
       return null;
     }
     return `已预上传 ${job.confirmedPartCount} / ${job.discoveredPartCount} 个已封口分 P`;
   }
 
-  recordingPartCountLabel(session: RecordingSession): string {
+  recordingPartCountLabel(session: RecordingSessionSummary): string {
     return session.state === 'open'
       ? `${session.partCount} 个已发现分 P`
       : `${session.partCount} 个分 P`;
@@ -1089,7 +1170,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     this.message.error('复制失败，请重试');
   }
 
-  trackSession(_index: number, session: RecordingSession): number {
+  trackSession(_index: number, session: RecordingSessionSummary): number {
     return session.id;
   }
 
@@ -1097,40 +1178,23 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return part.id;
   }
 
-  private loadPartHighlightCounts(session: RecordingSession): void {
-    this.highlightTimelineSubscription?.unsubscribe();
-    this.partHighlightCounts = new Map<number, number>();
-    if (!this.isRecordingScope || session.sourceKind !== 'live') {
-      this.partHighlightCountState = 'idle';
-      return;
+  private applyListResponse(response: RecordingSessionsResponse): void {
+    this.view = { state: 'ready', response };
+    const currentSessionIds = new Set(
+      response.sessions.map((session) => session.id),
+    );
+    for (const sessionId of this.selectedSessionIds) {
+      if (!currentSessionIds.has(sessionId)) {
+        this.selectedSessionIds.delete(sessionId);
+      }
     }
-
-    this.partHighlightCountState = 'loading';
-    this.highlightTimelineSubscription = this.highlights
-      .getTimeline(session.id)
-      .subscribe({
-        next: (timeline) => {
-          if (!this.detailVisible || this.selectedSession?.id !== session.id) {
-            return;
-          }
-          const counts = new Map<number, number>(
-            session.parts.map((part) => [part.id, 0]),
-          );
-          for (const marker of timeline.markers) {
-            counts.set(marker.partId, (counts.get(marker.partId) ?? 0) + 1);
-          }
-          this.partHighlightCounts = counts;
-          this.partHighlightCountState = 'ready';
-          this.changeDetector.markForCheck();
-        },
-        error: () => {
-          if (!this.detailVisible || this.selectedSession?.id !== session.id) {
-            return;
-          }
-          this.partHighlightCountState = 'error';
-          this.changeDetector.markForCheck();
-        },
-      });
+    if (
+      this.detailVisible &&
+      this.selectedSessionId !== null &&
+      !currentSessionIds.has(this.selectedSessionId)
+    ) {
+      this.closeDetails();
+    }
   }
 
   private describeError(error: unknown): string {
@@ -1216,11 +1280,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       state: 'ready',
       response: { ...this.view.response, sessions },
     };
-    if (this.selectedSession !== null) {
-      this.selectedSession =
-        sessions.find((session) => session.id === this.selectedSession?.id) ??
-        null;
-    }
     this.changeDetector.markForCheck();
     if (stateChanged) {
       this.load();

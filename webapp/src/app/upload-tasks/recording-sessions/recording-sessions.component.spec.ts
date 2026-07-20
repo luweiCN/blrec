@@ -43,7 +43,12 @@ import {
   RealtimeService,
 } from '../../core/services/realtime.service';
 import { UrlService } from '../../core/services/url.service';
-import { RecordingSession } from '../shared/recording-session.model';
+import {
+  RecordingSession,
+  RecordingSessionDetail,
+  RecordingSessionSummary,
+  RecordingSessionsResponse,
+} from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightService } from '../shared/highlight.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
@@ -127,12 +132,15 @@ describe('RecordingSessionsComponent', () => {
   let taskManager: jasmine.SpyObj<TaskManagerService>;
   let highlights: jasmine.SpyObj<HighlightService>;
   let realtimeEvents: FakeRealtimeSource;
+  let detailSession: RecordingSessionDetail;
+  let summarySession: RecordingSessionSummary;
 
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
       [
         'listSessions',
+        'getSession',
         'runJobAction',
         'runSessionAction',
         'retryFailedJobs',
@@ -154,6 +162,7 @@ describe('RecordingSessionsComponent', () => {
     taskManager.cutStream.and.returnValue(of(null));
     highlights = jasmine.createSpyObj<HighlightService>('HighlightService', [
       'getTimeline',
+      'getMarkerCounts',
     ]);
     highlights.getTimeline.and.returnValue(
       of({
@@ -175,17 +184,13 @@ describe('RecordingSessionsComponent', () => {
         markers: [],
       }),
     );
+    highlights.getMarkerCounts.and.returnValue(of([{ partId: 2, count: 0 }]));
     realtimeEvents = new FakeRealtimeSource();
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
     service.retryFailedJobs.and.returnValue(of({ results: [] }));
     service.previewRetryFailedJobs.and.returnValue(of({ items: [] }));
-    service.listSessions.and.returnValue(
-      of({
-        degradedReason: null,
-        total: 41,
-        sessions: [
-          {
+    detailSession = {
             id: 1,
             roomId: 100,
             broadcastSessionKey: '100:900',
@@ -323,9 +328,24 @@ describe('RecordingSessionsComponent', () => {
                 errorMessage: null,
               },
             ],
-          },
-        ],
-      }),
+    };
+    const {
+      broadcastSessionKey: _broadcastSessionKey,
+      coverPath: _coverPath,
+      parts: _parts,
+      uploadJob: detailUploadJob,
+      ...summaryFields
+    } = detailSession;
+    const {
+      submissionVerification: _submissionVerification,
+      unknownDanmakuItems: _unknownDanmakuItems,
+      parts: _uploadParts,
+      ...uploadSummary
+    } = detailUploadJob!;
+    summarySession = { ...summaryFields, uploadJob: uploadSummary };
+    service.getSession.and.returnValue(of(detailSession));
+    service.listSessions.and.returnValue(
+      of({ degradedReason: null, total: 41, sessions: [summarySession] }),
     );
 
     await TestBed.configureTestingModule({
@@ -428,6 +448,14 @@ describe('RecordingSessionsComponent', () => {
     ).toContain('已回灌 0 / 1');
     expect(text).not.toContain('UID 42');
     expect(text).not.toContain('/rec/p1.mp4');
+    expect('parts' in fixture.componentInstance.sessions[0]).toBeFalse();
+    expect(
+      'submissionVerification' in
+        (fixture.componentInstance.sessions[0].uploadJob as object),
+    ).toBeFalse();
+    expect(
+      'parts' in (fixture.componentInstance.sessions[0].uploadJob as object),
+    ).toBeFalse();
     expect(
       fixture.nativeElement.querySelector('.pagination-bar'),
     ).not.toBeNull();
@@ -501,70 +529,12 @@ describe('RecordingSessionsComponent', () => {
     expect(link).not.toBeNull();
     expect(link?.getAttribute('href')).toContain('/recordings/highlights/1');
     expect(link?.getAttribute('href')).toContain(
-      `partId=${fixture.componentInstance.sessions[0].parts[0].id}`,
+      `partId=${detailSession.parts[0].id}`,
     );
   });
 
   it('shows the highlight count for each part in recording details', () => {
-    highlights.getTimeline.and.returnValue(
-      of({
-        sessionId: 1,
-        roomId: 100,
-        durationMs: 59_000,
-        stableEndMs: 59_000,
-        parts: [
-          {
-            partId: 2,
-            partIndex: 1,
-            timelineStartMs: 0,
-            durationMs: 59_000,
-            stableEndMs: 59_000,
-            recording: false,
-            mediaKind: 'native',
-          },
-        ],
-        markers: [
-          {
-            marker: {
-              id: 11,
-              roomId: 100,
-              observedAtMs: 10_000,
-              playerDelayMs: 0,
-              contentAtMs: 10_000,
-              title: '直播标题',
-              anchorName: '主播名',
-              name: '高光一',
-              note: '',
-              source: 'web',
-              createdAt: 10,
-              updatedAt: 10,
-            },
-            partId: 2,
-            localOffsetMs: 10_000,
-            timelineOffsetMs: 10_000,
-          },
-          {
-            marker: {
-              id: 12,
-              roomId: 100,
-              observedAtMs: 20_000,
-              playerDelayMs: 0,
-              contentAtMs: 20_000,
-              title: '直播标题',
-              anchorName: '主播名',
-              name: '高光二',
-              note: '',
-              source: 'browser_extension',
-              createdAt: 20,
-              updatedAt: 20,
-            },
-            partId: 2,
-            localOffsetMs: 20_000,
-            timelineOffsetMs: 20_000,
-          },
-        ],
-      }),
-    );
+    highlights.getMarkerCounts.and.returnValue(of([{ partId: 2, count: 2 }]));
     fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
 
@@ -573,7 +543,9 @@ describe('RecordingSessionsComponent', () => {
     );
     fixture.detectChanges();
 
-    expect(highlights.getTimeline).toHaveBeenCalledOnceWith(1);
+    expect(service.getSession).toHaveBeenCalledOnceWith(1);
+    expect(highlights.getMarkerCounts).toHaveBeenCalledOnceWith(1);
+    expect(highlights.getTimeline).not.toHaveBeenCalled();
     expect(
       document.body.querySelector('[data-testid="part-highlight-count"]')
         ?.textContent,
@@ -583,26 +555,16 @@ describe('RecordingSessionsComponent', () => {
   it('does not offer highlight editing when a part has no local video', () => {
     fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
-    const session = fixture.componentInstance.sessions[0];
-    if (fixture.componentInstance.view.state !== 'ready') {
-      throw new Error('expected a ready recording-session view');
-    }
-    fixture.componentInstance.view = {
-      state: 'ready',
-      response: {
-        ...fixture.componentInstance.view.response,
-        sessions: [
-          {
-            ...session,
-            parts: session.parts.map((part) => ({
-              ...part,
-              sourceExists: false,
-              finalExists: false,
-            })),
-          },
-        ],
-      },
-    };
+    service.getSession.and.returnValue(
+      of({
+        ...detailSession,
+        parts: detailSession.parts.map((part) => ({
+          ...part,
+          sourceExists: false,
+          finalExists: false,
+        })),
+      }),
+    );
     fixture.componentInstance.openDetails(
       fixture.componentInstance.sessions[0],
     );
@@ -812,7 +774,7 @@ describe('RecordingSessionsComponent', () => {
 
   it('links an approved part only after its cid is available', () => {
     fixture.detectChanges();
-    const session = fixture.componentInstance.sessions[0];
+    const session = detailSession;
     const approved = {
       ...session,
       uploadJob: {
@@ -835,7 +797,7 @@ describe('RecordingSessionsComponent', () => {
 
   it('links sparse original parts by their submitted page order', () => {
     fixture.detectChanges();
-    const session = fixture.componentInstance.sessions[0];
+    const session = detailSession;
     const sparse = {
       ...session,
       uploadJob: {
@@ -873,6 +835,37 @@ describe('RecordingSessionsComponent', () => {
       0,
       jasmine.any(Object),
     );
+  });
+
+  it('ignores an older list response after a newer page request', () => {
+    const older = new Subject<RecordingSessionsResponse>();
+    const newer = new Subject<RecordingSessionsResponse>();
+    const newerSummary = { ...summarySession, id: 2, roomId: 200 };
+    service.listSessions.and.returnValues(older, newer);
+
+    fixture.detectChanges();
+    fixture.componentInstance.pageIndexChanged(2);
+    newer.next({ degradedReason: null, total: 1, sessions: [newerSummary] });
+    newer.complete();
+    older.next({ degradedReason: null, total: 1, sessions: [summarySession] });
+    older.complete();
+
+    expect(fixture.componentInstance.sessions).toEqual([newerSummary]);
+  });
+
+  it('keeps the list request pipeline alive after an error', () => {
+    service.listSessions.and.returnValues(
+      throwError(() => new Error('first request failed')),
+      of({ degradedReason: null, total: 1, sessions: [summarySession] }),
+    );
+
+    fixture.detectChanges();
+    expect(fixture.componentInstance.errorMessage).toBe('first request failed');
+
+    fixture.componentInstance.load();
+
+    expect(fixture.componentInstance.sessions).toEqual([summarySession]);
+    expect(service.listSessions).toHaveBeenCalledTimes(2);
   });
 
   it('reloads from page one with server-side filters', () => {
@@ -1054,7 +1047,10 @@ describe('RecordingSessionsComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.componentInstance.detailVisible).toBeTrue();
-    expect(fixture.componentInstance.selectedSession).toBe(session);
+    expect(service.getSession).toHaveBeenCalledOnceWith(1);
+    expect(highlights.getMarkerCounts).toHaveBeenCalledOnceWith(1);
+    expect(highlights.getTimeline).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.selectedSession).toBe(detailSession);
     expect(drawer.nzWidth).toBe('1180px');
     expect(document.body.textContent).not.toContain('投稿配置核验');
     expect(document.body.textContent).not.toContain('可核验设置未返回');
@@ -1070,9 +1066,64 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.selectedSession).toBeNull();
   });
 
+  it('loads non-live detail without requesting marker counts', () => {
+    const clipSummary: RecordingSessionSummary = {
+      ...summarySession,
+      sourceKind: 'highlight',
+      highlightClipId: 3,
+    };
+    const clipDetail: RecordingSessionDetail = {
+      ...detailSession,
+      sourceKind: 'highlight',
+      highlightClipId: 3,
+    };
+    service.getSession.and.returnValue(of(clipDetail));
+    fixture.detectChanges();
+    service.getSession.calls.reset();
+    highlights.getMarkerCounts.calls.reset();
+
+    fixture.componentInstance.openDetails(clipSummary);
+
+    expect(service.getSession).toHaveBeenCalledOnceWith(1);
+    expect(highlights.getMarkerCounts).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.selectedSession).toBe(clipDetail);
+  });
+
+  it('keeps loaded detail fields when the summary list refreshes', () => {
+    fixture.detectChanges();
+    fixture.componentInstance.openDetails(summarySession);
+    expect(fixture.componentInstance.selectedSession?.parts).toEqual(
+      detailSession.parts,
+    );
+
+    fixture.componentInstance.load();
+
+    expect(fixture.componentInstance.selectedSession?.parts).toEqual(
+      detailSession.parts,
+    );
+  });
+
+  it('does not apply a detail request after the drawer closes', () => {
+    const detail = new Subject<RecordingSessionDetail>();
+    const counts = new Subject<readonly { partId: number; count: number }[]>();
+    service.getSession.and.returnValue(detail);
+    highlights.getMarkerCounts.and.returnValue(counts);
+    fixture.detectChanges();
+
+    fixture.componentInstance.openDetails(summarySession);
+    fixture.componentInstance.closeDetails();
+    detail.next(detailSession);
+    detail.complete();
+    counts.next([{ partId: 2, count: 1 }]);
+    counts.complete();
+
+    expect(fixture.componentInstance.detailVisible).toBeFalse();
+    expect(fixture.componentInstance.selectedSession).toBeNull();
+  });
+
   it('opens video and danmaku in one combined dialog', () => {
     fixture.detectChanges();
-    const session = fixture.componentInstance.sessions[0];
+    const session = detailSession;
     const part = session.parts[0];
 
     fixture.componentInstance.openPartVideo(session, part);

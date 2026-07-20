@@ -38,6 +38,14 @@ describe('RecordingSessionService', () => {
     request.flush({ degradedReason: null, total: 0, sessions: [] });
   });
 
+  it('loads one complete recording-session detail on demand', () => {
+    service.getSession(7).subscribe();
+
+    const request = http.expectOne('/api/v1/recording-sessions/7');
+    expect(request.request.method).toBe('GET');
+    request.flush({ id: 7, parts: [] });
+  });
+
   it('sends upload-task filters as query parameters', () => {
     service
       .listSessions(20, 0, {

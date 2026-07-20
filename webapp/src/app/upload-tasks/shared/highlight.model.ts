@@ -46,6 +46,11 @@ export interface HighlightTimeline {
   readonly markers: readonly MappedHighlight[];
 }
 
+export interface HighlightMarkerCount {
+  readonly partId: number;
+  readonly count: number;
+}
+
 export interface HighlightClipInspectionSource {
   readonly partId: number;
   readonly actualStartMs: number;

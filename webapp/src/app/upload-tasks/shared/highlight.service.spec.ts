@@ -48,6 +48,16 @@ describe('HighlightService', () => {
     inspection.flush({});
   });
 
+  it('loads lightweight marker counts without the full timeline', () => {
+    service.getMarkerCounts(7).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/highlights/sessions/7/marker-counts',
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush([{ partId: 2, count: 3 }]);
+  });
+
   it('creates, loads, deletes and submits one independent clip', () => {
     service.listClips(9).subscribe();
     expect(
