@@ -1,10 +1,14 @@
 import { ResponseMessage } from '../../shared/api.models';
-import {
+import type {
   DeleteStrategy,
   StreamFormat,
   QualityNumber,
   RecordingMode,
 } from '../../settings/shared/setting.model';
+import {
+  ControlOperationStatus,
+  ControlStepStatus,
+} from '../../core/services/control-operation.service';
 
 export interface TaskData {
   user_info: Readonly<UserInfo>;
@@ -32,10 +36,15 @@ export type SubmissionVisibilityFilter = 'public' | 'private' | null;
 export interface TaskBatchActionResult {
   readonly roomId: number;
   readonly accepted: boolean;
+  readonly status: ControlStepStatus;
+  readonly operationId: string | null;
+  readonly errorCode: string | null;
   readonly message: string;
 }
 
 export interface TaskBatchActionResponse {
+  readonly operationId?: string | null;
+  readonly status?: ControlOperationStatus | null;
   readonly results: readonly TaskBatchActionResult[];
 }
 

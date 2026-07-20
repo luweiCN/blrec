@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .bili.live_status_coordinator import LiveStatusCoordinator
     from .bili_upload.journal import RecordingJournalBridge
     from .bili_upload.retention import RetentionManager
+    from .control.operations import ControlOperationJournal, ControlOperationSnapshot
     from .core.typing import MetaData
     from .flv.operators import StreamProfile
     from .networking.aiohttp_session import AiohttpSessionPool
@@ -106,6 +107,7 @@ class Application:
             Callable[[], Optional[RetentionManager]]
         ] = None,
         network_route_manager: Optional[NetworkRouteManager] = None,
+        control_operation_journal: Optional[ControlOperationJournal] = None,
     ) -> None:
         self._settings = settings
         self._out_dir = settings.output.out_dir
@@ -118,6 +120,8 @@ class Application:
         self._auth_failure_reporter = auth_failure_reporter
         self._recording_journal_provider = recording_journal_provider
         self._recording_retention_provider = recording_retention_provider
+        self._control_operation_journal = control_operation_journal
+        self._task_control_reconciler: Optional[Any] = None
 
     @property
     def info(self) -> AppInfo:
@@ -168,7 +172,16 @@ class Application:
             raise
         logger.debug(f'Default umask {os.umask(0o000)}')
         logger.info(f'Launched Application v{__version__}')
-        self._loading_task = asyncio.create_task(self._task_manager.load_all_tasks())
+        if self._control_operation_journal is not None:
+            from .task.control_reconciler import TaskControlReconciler
+
+            await self._control_operation_journal.open()
+            self._task_control_reconciler = TaskControlReconciler(
+                self._control_operation_journal,
+                self._settings_manager,
+                self._task_manager,
+            )
+        self._loading_task = asyncio.create_task(self._load_tasks_and_controls())
 
         def callback(future: asyncio.Future) -> None:  # type: ignore
             del self._loading_task
@@ -195,6 +208,10 @@ class Application:
                     await self._loading_task
             except BaseException as error:
                 errors.append(error)
+        reconciler = getattr(self, '_task_control_reconciler', None)
+        self._task_control_reconciler = None
+        if reconciler is not None:
+            await _collect_teardown_error(reconciler.shutdown(), errors)
         await _collect_teardown_error(
             self._task_manager.stop_all_tasks(force=force), errors
         )
@@ -215,6 +232,24 @@ class Application:
 
     def has_task(self, room_id: int) -> bool:
         return self._task_manager.has_task(room_id)
+
+    def get_all_task_room_ids(self) -> Iterator[int]:
+        yield from self._task_manager.get_all_task_room_ids()
+
+    async def submit_task_control(
+        self, action: str, room_ids: List[int], force: bool = False
+    ) -> ControlOperationSnapshot:
+        reconciler = self._task_control_reconciler
+        if reconciler is None:
+            raise RuntimeError('task control service is not ready')
+        valid = []
+        rejected = {}
+        for room_id in room_ids:
+            if self.has_task(room_id):
+                valid.append(room_id)
+            else:
+                rejected[room_id] = 'TASK_NOT_FOUND'
+        return await reconciler.submit(action, valid, rejected=rejected, force=force)
 
     def has_recording_task(self) -> bool:
         from .task import RunningStatus
@@ -418,6 +453,13 @@ class Application:
 
     async def refresh_managed_cookie(self) -> None:
         await self._task_manager.refresh_managed_cookie()
+
+    async def _load_tasks_and_controls(self) -> None:
+        await self._task_manager.load_all_tasks()
+        reconciler = self._task_control_reconciler
+        if reconciler is not None:
+            await reconciler.recover()
+            reconciler.start()
 
     async def _setup_live_status_monitor(self) -> None:
         from .bili.anonymous_room_client import AnonymousRoomClient

@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterator, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    Optional,
+    Tuple,
+)
 
 import aiohttp
 from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
@@ -95,6 +104,13 @@ class RecordTaskManager:
 
     def has_task(self, room_id: int) -> bool:
         return room_id in self._tasks
+
+    def get_all_task_room_ids(self) -> Iterator[int]:
+        yield from self._tasks
+
+    def get_task_control_state(self, room_id: int) -> Tuple[bool, bool]:
+        task = self._get_task(room_id, check_ready=True)
+        return task.monitor_enabled, task.recorder_enabled
 
     @retry(
         reraise=True,

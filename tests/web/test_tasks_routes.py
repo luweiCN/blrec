@@ -7,6 +7,29 @@ from fastapi.testclient import TestClient
 from blrec.web.routers import tasks
 
 
+class FakeStep:
+    def __init__(
+        self, key: str, status: str = 'queued', error_code: str = None
+    ) -> None:
+        self.key = key
+        self.status = status
+        self.error_code = error_code
+
+
+class FakeOperation:
+    def __init__(self, room_ids: List[int]) -> None:
+        self.id = 'operation-1'
+        self.status = 'accepted'
+        self.steps = [
+            FakeStep(
+                str(room_id),
+                status='rejected' if room_id == 404 else 'queued',
+                error_code='TASK_NOT_FOUND' if room_id == 404 else None,
+            )
+            for room_id in room_ids
+        ]
+
+
 class FakeApplication:
     def __init__(self) -> None:
         self.calls: List[Tuple[str, int]] = []
@@ -38,6 +61,16 @@ class FakeApplication:
     async def remove_task(self, room_id: int) -> None:
         self.calls.append(('delete', room_id))
 
+    async def submit_task_control(
+        self, action: str, room_ids: List[int], force: bool = False
+    ) -> FakeOperation:
+        self.calls.append((action, len(room_ids)))
+        return FakeOperation(room_ids)
+
+    def get_all_task_room_ids(self) -> Iterator[int]:
+        yield 100
+        yield 200
+
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
@@ -66,10 +99,26 @@ def test_batch_task_action_returns_per_room_results(
 
     assert response.status_code == 200
     assert response.json() == {
+        'operationId': None,
+        'status': None,
         'results': [
-            {'roomId': 100, 'accepted': True, 'message': '已触发文件切割'},
-            {'roomId': 200, 'accepted': False, 'message': '当前不能切割文件'},
-        ]
+            {
+                'roomId': 100,
+                'accepted': True,
+                'status': 'succeeded',
+                'operationId': None,
+                'errorCode': None,
+                'message': '已触发文件切割',
+            },
+            {
+                'roomId': 200,
+                'accepted': False,
+                'status': 'rejected',
+                'operationId': None,
+                'errorCode': None,
+                'message': '当前不能切割文件',
+            },
+        ],
     }
     app = tasks.app
     assert isinstance(app, FakeApplication)
@@ -96,21 +145,94 @@ def test_batch_task_action_rejects_duplicate_rooms(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize(
-    ('action', 'expected_call'),
-    (
-        ('force_stop', ('force_stop', 100)),
-        ('recorder_force_disable', ('recorder_force_disable', 100)),
-    ),
-)
+@pytest.mark.parametrize('action', ('force_stop', 'recorder_force_disable'))
 def test_batch_task_action_supports_force_operations(
-    client: TestClient, action: str, expected_call: Tuple[str, int]
+    client: TestClient, action: str
 ) -> None:
     response = client.post(
         '/api/v1/tasks/actions', json={'action': action, 'roomIds': [100]}
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     app = tasks.app
     assert isinstance(app, FakeApplication)
-    assert app.calls == [expected_call]
+    assert app.calls == [(action, 1)]
+
+
+def test_batch_lifecycle_action_returns_202_without_running_lifecycle(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        '/api/v1/tasks/actions', json={'action': 'start', 'roomIds': [100, 404]}
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        'operationId': 'operation-1',
+        'status': 'accepted',
+        'results': [
+            {
+                'roomId': 100,
+                'accepted': True,
+                'status': 'queued',
+                'operationId': 'operation-1',
+                'errorCode': None,
+                'message': '操作已提交',
+            },
+            {
+                'roomId': 404,
+                'accepted': False,
+                'status': 'rejected',
+                'operationId': 'operation-1',
+                'errorCode': 'TASK_NOT_FOUND',
+                'message': '录制任务不存在',
+            },
+        ],
+    }
+    app = tasks.app
+    assert isinstance(app, FakeApplication)
+    assert app.calls == [('start', 2)]
+
+
+@pytest.mark.parametrize(
+    ('path', 'expected_action'),
+    (
+        ('/api/v1/tasks/start', 'start'),
+        ('/api/v1/tasks/stop', 'stop'),
+        ('/api/v1/tasks/recorder/enable', 'recorder_enable'),
+        ('/api/v1/tasks/recorder/disable', 'recorder_disable'),
+    ),
+)
+def test_all_lifecycle_routes_return_operation_admission(
+    client: TestClient, path: str, expected_action: str
+) -> None:
+    response = client.post(path, json={})
+
+    assert response.status_code == 202
+    assert response.json()['operationId'] == 'operation-1'
+    assert [item['roomId'] for item in response.json()['results']] == [100, 200]
+    app = tasks.app
+    assert isinstance(app, FakeApplication)
+    assert app.calls == [(expected_action, 2)]
+
+
+@pytest.mark.parametrize(
+    ('path', 'body', 'expected_action'),
+    (
+        ('/api/v1/tasks/100/start', None, 'start'),
+        ('/api/v1/tasks/100/stop', {'force': False}, 'stop'),
+        ('/api/v1/tasks/100/recorder/enable', None, 'recorder_enable'),
+        ('/api/v1/tasks/100/recorder/disable', {'force': False}, 'recorder_disable'),
+    ),
+)
+def test_single_lifecycle_routes_return_operation_admission(
+    client: TestClient, path: str, body: object, expected_action: str
+) -> None:
+    response = client.post(path, json=body)
+
+    assert response.status_code == 202
+    assert response.json()['operationId'] == 'operation-1'
+    assert response.json()['results'][0]['roomId'] == 100
+    app = tasks.app
+    assert isinstance(app, FakeApplication)
+    assert app.calls == [(expected_action, 1)]

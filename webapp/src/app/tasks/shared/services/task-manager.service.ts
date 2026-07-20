@@ -1,13 +1,15 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
-import { catchError, map, tap } from 'rxjs/operators';
-import { Observable, of } from 'rxjs';
+import { catchError, concatMap, map, switchMap, tap } from 'rxjs/operators';
+import { concat, Observable, of } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { TaskService } from './task.service';
 import { ResponseMessage } from 'src/app/shared/api.models';
 import { TaskBatchAction, TaskBatchActionResponse } from '../task.model';
+import { ControlOperationService } from 'src/app/core/services/control-operation.service';
+import type { ControlOperation } from 'src/app/core/services/control-operation.service';
 
 export interface AddTaskResultMessage {
   type: 'success' | 'info' | 'warning' | 'error';
@@ -20,7 +22,8 @@ export interface AddTaskResultMessage {
 export class TaskManagerService {
   constructor(
     private message: NzMessageService,
-    private taskService: TaskService
+    private taskService: TaskService,
+    private controlOperations: ControlOperationService
   ) {}
 
   getAllTaskRoomIds(): Observable<number[]> {
@@ -34,13 +37,23 @@ export class TaskManagerService {
     roomIds: readonly number[]
   ): Observable<TaskBatchActionResponse> {
     return this.taskService.runBatchAction(action, roomIds).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
         (response) => {
           const accepted = response.results.filter((result) => result.accepted);
-          const rejected = response.results.filter((result) => !result.accepted);
-          if (rejected.length > 0) {
+          const failed = response.results.filter(
+            (result) =>
+              result.status === 'rejected' || result.status === 'failed'
+          );
+          if (response.status === 'accepted' || response.status === 'running') {
+            this.message.success(`已提交 ${accepted.length} 个任务`);
+            return;
+          }
+          if (failed.length > 0) {
             this.message.warning(
-              `已完成 ${accepted.length} 个，跳过 ${rejected.length} 个：${rejected[0].message}`
+              `成功 ${accepted.length - failed.length} 个，失败 ${failed.length} 个：${this.controlErrorMessage(
+                failed[0].errorCode
+              )}`
             );
           } else {
             this.message.success(`已完成 ${accepted.length} 个任务`);
@@ -155,15 +168,20 @@ export class TaskManagerService {
     );
   }
 
-  startTask(roomId: number): Observable<ResponseMessage> {
+  startTask(roomId: number): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading(`[${roomId}] 正在运行任务...`, {
       nzDuration: 0,
     }).messageId;
     return this.taskService.startTask(roomId).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success(`[${roomId}] 成功运行任务`);
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            `[${roomId}] 任务已提交`,
+            `[${roomId}] 成功运行任务`
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -173,15 +191,20 @@ export class TaskManagerService {
     );
   }
 
-  startAllTasks(): Observable<ResponseMessage> {
+  startAllTasks(): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading('正在运行全部任务...', {
       nzDuration: 0,
     }).messageId;
     return this.taskService.startAllTasks().pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success('成功运行全部任务');
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            '全部任务已提交',
+            '成功运行全部任务'
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -194,15 +217,20 @@ export class TaskManagerService {
   stopTask(
     roomId: number,
     force: boolean = false
-  ): Observable<ResponseMessage> {
+  ): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading(`[${roomId}] 正在停止任务...`, {
       nzDuration: 0,
     }).messageId;
     return this.taskService.stopTask(roomId, force).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success(`[${roomId}] 成功停止任务`);
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            `[${roomId}] 停止操作已提交`,
+            `[${roomId}] 成功停止任务`
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -212,15 +240,20 @@ export class TaskManagerService {
     );
   }
 
-  stopAllTasks(force: boolean = false): Observable<ResponseMessage> {
+  stopAllTasks(force: boolean = false): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading('正在停止全部任务...', {
       nzDuration: 0,
     }).messageId;
     return this.taskService.stopAllTasks(force).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success('成功停止全部任务');
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            '全部停止操作已提交',
+            '成功停止全部任务'
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -230,15 +263,20 @@ export class TaskManagerService {
     );
   }
 
-  enableRecorder(roomId: number): Observable<ResponseMessage> {
+  enableRecorder(roomId: number): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading(`[${roomId}] 正在开启录制...`, {
       nzDuration: 0,
     }).messageId;
     return this.taskService.enableTaskRecorder(roomId).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success(`[${roomId}] 成功开启录制`);
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            `[${roomId}] 开启录制已提交`,
+            `[${roomId}] 成功开启录制`
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -253,15 +291,20 @@ export class TaskManagerService {
    * Enable all tasks' recorder will cause some problems.
    * Tasks those monitor are disabled won't work as expected!
    */
-  enableAllRecorders(): Observable<ResponseMessage> {
+  enableAllRecorders(): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading('正在开启全部任务的录制...', {
       nzDuration: 0,
     }).messageId;
     return this.taskService.enableAllRecorders().pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success('成功开启全部任务的录制');
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            '全部开启录制操作已提交',
+            '成功开启全部任务的录制'
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -274,15 +317,20 @@ export class TaskManagerService {
   disableRecorder(
     roomId: number,
     force: boolean = false
-  ): Observable<ResponseMessage> {
+  ): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading(`[${roomId}] 正在关闭录制...`, {
       nzDuration: 0,
     }).messageId;
     return this.taskService.disableTaskRecorder(roomId, force).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success(`[${roomId}] 成功关闭录制`);
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            `[${roomId}] 关闭录制已提交`,
+            `[${roomId}] 成功关闭录制`
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -292,15 +340,22 @@ export class TaskManagerService {
     );
   }
 
-  disableAllRecorders(force: boolean = false): Observable<ResponseMessage> {
+  disableAllRecorders(
+    force: boolean = false
+  ): Observable<TaskBatchActionResponse> {
     const messageId = this.message.loading('正在关闭全部任务的录制...', {
       nzDuration: 0,
     }).messageId;
     return this.taskService.disableAllRecorders(force).pipe(
+      switchMap((admission) => this.observeControl(admission)),
       tap(
-        () => {
-          this.message.remove(messageId);
-          this.message.success('成功关闭全部任务的录制');
+        (response) => {
+          this.notifyControl(
+            response,
+            messageId,
+            '全部关闭录制操作已提交',
+            '成功关闭全部任务的录制'
+          );
         },
         (error: HttpErrorResponse) => {
           this.message.remove(messageId);
@@ -335,5 +390,91 @@ export class TaskManagerService {
         }
       )
     );
+  }
+
+  private observeControl(
+    admission: TaskBatchActionResponse
+  ): Observable<TaskBatchActionResponse> {
+    if (
+      !admission.operationId ||
+      admission.status === 'succeeded' ||
+      admission.status === 'failed'
+    ) {
+      return of(admission);
+    }
+    return concat(
+      of(admission),
+      this.controlOperations.poll(admission.operationId).pipe(
+        map((operation) => this.operationResult(admission, operation)),
+        concatMap((result) => {
+          if (result.status !== 'succeeded' && result.status !== 'failed') {
+            return of(result);
+          }
+          return this.taskService.getAllTaskData().pipe(map(() => result));
+        })
+      )
+    );
+  }
+
+  private notifyControl(
+    response: TaskBatchActionResponse,
+    loadingMessageId: string,
+    submittedMessage: string,
+    succeededMessage: string
+  ): void {
+    if (response.status === 'running') {
+      return;
+    }
+    this.message.remove(loadingMessageId);
+    if (response.status === 'accepted') {
+      this.message.success(submittedMessage);
+      return;
+    }
+    if (response.status === 'failed') {
+      const failed = response.results.find(
+        (result) => result.status === 'failed' || result.status === 'rejected'
+      );
+      this.message.error(this.controlErrorMessage(failed?.errorCode));
+      return;
+    }
+    this.message.success(succeededMessage);
+  }
+
+  private controlErrorMessage(errorCode: string | null | undefined): string {
+    if (errorCode === 'TASK_NOT_FOUND') {
+      return '录制任务不存在';
+    }
+    if (errorCode === 'TASK_LIFECYCLE_FAILED') {
+      return '任务状态切换失败';
+    }
+    return errorCode ? `任务操作失败（${errorCode}）` : '任务操作失败';
+  }
+
+  private operationResult(
+    admission: TaskBatchActionResponse,
+    operation: ControlOperation
+  ): TaskBatchActionResponse {
+    const admittedByRoom = new Map(
+      admission.results.map((result) => [result.roomId, result])
+    );
+    return {
+      operationId: operation.id,
+      status: operation.status,
+      results: operation.steps.map((step) => {
+        const roomId = Number(step.key);
+        const admitted = admittedByRoom.get(roomId);
+        return {
+          roomId,
+          accepted: admitted?.accepted ?? step.status !== 'rejected',
+          status: step.status,
+          operationId: operation.id,
+          errorCode: step.errorCode,
+          message:
+            step.status === 'succeeded'
+              ? '操作已完成'
+              : step.errorCode ?? admitted?.message ?? '操作处理中',
+        };
+      }),
+    };
   }
 }

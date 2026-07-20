@@ -127,8 +127,12 @@ describe('TaskItemComponent', () => {
       'TaskManagerService',
       ['updateTaskInfo', 'startTask', 'stopTask'],
     );
-    taskManager.startTask.and.returnValue(of({ code: 0, message: '已开启' }));
-    taskManager.stopTask.and.returnValue(of({ code: 0, message: '已关闭' }));
+    taskManager.startTask.and.returnValue(
+      of({ status: 'succeeded', results: [] })
+    );
+    taskManager.stopTask.and.returnValue(
+      of({ status: 'succeeded', results: [] })
+    );
     policyService = jasmine.createSpyObj<RoomUploadPolicyService>(
       'RoomUploadPolicyService',
       ['save'],

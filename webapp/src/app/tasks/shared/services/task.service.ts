@@ -95,31 +95,31 @@ export class TaskService {
     return this.http.delete<ResponseMessage>(url);
   }
 
-  startTask(roomId: number): Observable<ResponseMessage> {
+  startTask(roomId: number): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/${roomId}/start`);
-    return this.http.post<ResponseMessage>(url, null);
+    return this.http.post<TaskBatchActionResponse>(url, null);
   }
 
-  startAllTasks(): Observable<ResponseMessage> {
+  startAllTasks(): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/start`);
-    return this.http.post<ResponseMessage>(url, null);
+    return this.http.post<TaskBatchActionResponse>(url, null);
   }
 
   stopTask(
     roomId: number,
     force: boolean = false,
     background: boolean = false
-  ): Observable<ResponseMessage> {
+  ): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/${roomId}/stop`);
-    return this.http.post<ResponseMessage>(url, { force, background });
+    return this.http.post<TaskBatchActionResponse>(url, { force, background });
   }
 
   stopAllTasks(
     force: boolean = false,
     background: boolean = false
-  ): Observable<ResponseMessage> {
+  ): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/stop`);
-    return this.http.post<ResponseMessage>(url, { force, background });
+    return this.http.post<TaskBatchActionResponse>(url, { force, background });
   }
 
   enableTaskMonitor(roomId: number): Observable<ResponseMessage> {
@@ -145,31 +145,31 @@ export class TaskService {
     return this.http.post<ResponseMessage>(url, { background });
   }
 
-  enableTaskRecorder(roomId: number): Observable<ResponseMessage> {
+  enableTaskRecorder(roomId: number): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/${roomId}/recorder/enable`);
-    return this.http.post<ResponseMessage>(url, null);
+    return this.http.post<TaskBatchActionResponse>(url, null);
   }
 
-  enableAllRecorders(): Observable<ResponseMessage> {
+  enableAllRecorders(): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/recorder/enable`);
-    return this.http.post<ResponseMessage>(url, null);
+    return this.http.post<TaskBatchActionResponse>(url, null);
   }
 
   disableTaskRecorder(
     roomId: number,
     force: boolean = false,
     background: boolean = false
-  ): Observable<ResponseMessage> {
+  ): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/${roomId}/recorder/disable`);
-    return this.http.post<ResponseMessage>(url, { force, background });
+    return this.http.post<TaskBatchActionResponse>(url, { force, background });
   }
 
   disableAllRecorders(
     force: boolean = false,
     background: boolean = false
-  ): Observable<ResponseMessage> {
+  ): Observable<TaskBatchActionResponse> {
     const url = this.url.makeApiUrl(`/api/v1/tasks/recorder/disable`);
-    return this.http.post<ResponseMessage>(url, { force, background });
+    return this.http.post<TaskBatchActionResponse>(url, { force, background });
   }
 
   canCutStream(roomId: number) {

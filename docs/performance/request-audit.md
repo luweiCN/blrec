@@ -234,11 +234,20 @@ the NAS.
 | I-102 | POST | `/api/v1/browser-extension/rooms/{room_id}/collect` | browser_extension | R,W,X | EXT | `src/blrec/web/routers/browser_extension.py:collect_room` -> add/start task and optional policy/category work | Combines room normalization, task lifecycle, and optional cached upstream category validation. | Write/media and Outbound: recoverable operation, shared room data, fixed request cadence. |
 | I-103 | POST | `/api/v1/browser-extension/rooms/{room_id}/highlights` | browser_extension | R,W | C100 | `src/blrec/web/routers/browser_extension.py:create_highlight` -> marker insert | Single local marker write after throttled extension auth. | Keep. |
 
+### `control_operations` router (1)
+
+| ID | Method | Normalized path | Router | IO | Budget | Evidence | Finding | Disposition |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| I-107 | GET | `/api/v1/control-operations/{operation_id}` | control_operations | R | D100 | `src/blrec/web/routers/control_operations.py:get_control_operation` -> dedicated control journal | Reads one durable operation and its bounded per-item steps without running lifecycle work. | Write/media WM-06: status-only polling for accepted task controls; I-106 remains reserved for WM-05. |
+
 Machine count:
 
 ```bash
-test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" = 105
+test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" = 106
 ```
+
+The temporary 106-row implementation ledger intentionally skips reserved I-106;
+WM-05 adds that inspection-status route and restores the planned 107/107 gate.
 
 ## Outbound operation groups
 

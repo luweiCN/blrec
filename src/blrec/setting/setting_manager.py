@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Iterable, Optional, Set, Tuple, cast
 
 from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
@@ -42,6 +42,7 @@ class SettingsManager:
     def __init__(self, app: Application, settings: Settings) -> None:
         self._app = app
         self._settings = settings
+        self._task_desired_state_lock = asyncio.Lock()
 
     def get_settings(
         self,
@@ -173,75 +174,120 @@ class SettingsManager:
         self._settings.tasks.clear()
         await self.dump_settings()
 
-    async def mark_task_enabled(self, room_id: int) -> None:
+    def get_task_desired_state(self, room_id: int) -> Tuple[bool, bool]:
         settings = self.find_task_settings(room_id)
-        assert settings is not None
-        settings.enable_monitor = True
-        settings.enable_recorder = True
-        await self.dump_settings()
+        if settings is None:
+            raise NotFoundError(f'task settings of room {room_id} not found')
+        return settings.enable_monitor, settings.enable_recorder
+
+    async def change_task_desired_states(
+        self,
+        room_ids: Iterable[int],
+        *,
+        enable_monitor: Optional[bool] = None,
+        enable_recorder: Optional[bool] = None,
+    ) -> Set[int]:
+        """Persist a batch of desired task states with at most one file write."""
+
+        normalized_room_ids = tuple(dict.fromkeys(room_ids))
+        async with self._task_desired_state_lock:
+            task_settings = []
+            for room_id in normalized_room_ids:
+                settings = self.find_task_settings(room_id)
+                if settings is None:
+                    raise NotFoundError(f'task settings of room {room_id} not found')
+                task_settings.append(settings)
+
+            previous_states = {
+                settings.room_id: (settings.enable_monitor, settings.enable_recorder)
+                for settings in task_settings
+            }
+            changed: Set[int] = set()
+            for settings in task_settings:
+                if (
+                    enable_monitor is not None
+                    and settings.enable_monitor != enable_monitor
+                ):
+                    settings.enable_monitor = enable_monitor
+                    changed.add(settings.room_id)
+                if (
+                    enable_recorder is not None
+                    and settings.enable_recorder != enable_recorder
+                ):
+                    settings.enable_recorder = enable_recorder
+                    changed.add(settings.room_id)
+
+            if changed:
+                try:
+                    await self.dump_settings()
+                except BaseException:
+                    for settings in task_settings:
+                        previous_monitor, previous_recorder = previous_states[
+                            settings.room_id
+                        ]
+                        settings.enable_monitor = previous_monitor
+                        settings.enable_recorder = previous_recorder
+                    raise
+            return changed
+
+    async def mark_task_enabled(self, room_id: int) -> None:
+        await self.change_task_desired_states(
+            [room_id], enable_monitor=True, enable_recorder=True
+        )
 
     async def mark_task_disabled(self, room_id: int) -> None:
-        settings = self.find_task_settings(room_id)
-        assert settings is not None
-        settings.enable_monitor = False
-        settings.enable_recorder = False
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            [room_id], enable_monitor=False, enable_recorder=False
+        )
 
     async def mark_all_tasks_enabled(self) -> None:
-        for settings in self._settings.tasks:
-            settings.enable_monitor = True
-            settings.enable_recorder = True
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            (settings.room_id for settings in self._settings.tasks),
+            enable_monitor=True,
+            enable_recorder=True,
+        )
 
     async def mark_all_tasks_disabled(self) -> None:
-        for settings in self._settings.tasks:
-            settings.enable_monitor = False
-            settings.enable_recorder = False
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            (settings.room_id for settings in self._settings.tasks),
+            enable_monitor=False,
+            enable_recorder=False,
+        )
 
     async def mark_task_monitor_enabled(self, room_id: int) -> None:
-        settings = self.find_task_settings(room_id)
-        assert settings is not None
-        settings.enable_monitor = True
-        await self.dump_settings()
+        await self.change_task_desired_states([room_id], enable_monitor=True)
 
     async def mark_task_monitor_disabled(self, room_id: int) -> None:
-        settings = self.find_task_settings(room_id)
-        assert settings is not None
-        settings.enable_monitor = False
-        await self.dump_settings()
+        await self.change_task_desired_states([room_id], enable_monitor=False)
 
     async def mark_all_task_monitors_enabled(self) -> None:
-        for settings in self._settings.tasks:
-            settings.enable_monitor = True
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            (settings.room_id for settings in self._settings.tasks), enable_monitor=True
+        )
 
     async def mark_all_task_monitors_disabled(self) -> None:
-        for settings in self._settings.tasks:
-            settings.enable_monitor = False
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            (settings.room_id for settings in self._settings.tasks),
+            enable_monitor=False,
+        )
 
     async def mark_task_recorder_enabled(self, room_id: int) -> None:
-        settings = self.find_task_settings(room_id)
-        assert settings is not None
-        settings.enable_recorder = True
-        await self.dump_settings()
+        await self.change_task_desired_states([room_id], enable_recorder=True)
 
     async def mark_task_recorder_disabled(self, room_id: int) -> None:
-        settings = self.find_task_settings(room_id)
-        assert settings is not None
-        settings.enable_recorder = False
-        await self.dump_settings()
+        await self.change_task_desired_states([room_id], enable_recorder=False)
 
     async def mark_all_task_recorders_enabled(self) -> None:
-        for settings in self._settings.tasks:
-            settings.enable_recorder = True
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            (settings.room_id for settings in self._settings.tasks),
+            enable_recorder=True,
+        )
 
     async def mark_all_task_recorders_disabled(self) -> None:
-        for settings in self._settings.tasks:
-            settings.enable_recorder = False
-        await self.dump_settings()
+        await self.change_task_desired_states(
+            (settings.room_id for settings in self._settings.tasks),
+            enable_recorder=False,
+        )
 
     async def apply_task_header_settings(
         self,

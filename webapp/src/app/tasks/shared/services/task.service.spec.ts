@@ -39,4 +39,24 @@ describe('TaskService', () => {
     });
     request.flush({ results: [] });
   });
+
+  it('keeps the operation identity returned by a 202 lifecycle admission', () => {
+    let operationId: string | null | undefined;
+    service.startTask(100).subscribe((response) => {
+      operationId = response.operationId;
+    });
+
+    const request = http.expectOne('/api/v1/tasks/100/start');
+    expect(request.request.method).toBe('POST');
+    request.flush(
+      {
+        operationId: 'operation-1',
+        status: 'accepted',
+        results: [],
+      },
+      { status: 202, statusText: 'Accepted' }
+    );
+
+    expect(operationId).toBe('operation-1');
+  });
 });

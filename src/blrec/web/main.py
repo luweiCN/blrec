@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import attr
@@ -22,6 +23,7 @@ from blrec.bili_upload.recording_content import (
     RecordingContentUnavailable,
 )
 from blrec.bili_upload.runtime import BiliAccountRuntime
+from blrec.control.operations import ControlOperationJournal
 from blrec.exception import ExistsError, ForbiddenError, NotFoundError
 from blrec.networking.manager import NetworkRouteManager
 from blrec.notification.providers import (
@@ -50,6 +52,7 @@ from .routers import (
     bili_accounts,
     bili_collections,
     browser_extension,
+    control_operations,
     highlights,
     live_status,
     network,
@@ -84,6 +87,9 @@ _admin_auth_store.open()
 _password_work_coordinator: Optional[PasswordWorkCoordinator] = None
 _active_media_service: Optional[ActiveMediaService] = None
 _application_started = False
+_control_operation_journal = ControlOperationJournal(
+    Path(_path).with_name('control.sqlite3')
+)
 _network_route_manager = NetworkRouteManager(lambda: _settings.network)
 
 
@@ -142,6 +148,7 @@ app = Application(
     recording_journal_provider=lambda: _bili_account_runtime.journal,
     recording_retention_provider=(lambda: _bili_account_runtime.retention_manager),
     network_route_manager=_network_route_manager,
+    control_operation_journal=_control_operation_journal,
 )
 
 
@@ -267,6 +274,7 @@ browser_extension.policy_manager = None
 browser_extension.category_catalog = None
 browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
 network.manager = _network_route_manager
+control_operations.journal = _control_operation_journal
 
 _dependencies = [Depends(security.authenticate)]
 
@@ -437,6 +445,7 @@ async def on_startup() -> None:
                         _active_media_service = None
                         _password_work_coordinator = None
                         _admin_auth_store.close()
+                        await _control_operation_journal.close()
         raise
 
 
@@ -492,6 +501,7 @@ async def on_shuntdown() -> None:
                 _active_media_service = None
                 _password_work_coordinator = None
                 _admin_auth_store.close()
+                await _control_operation_journal.close()
 
 
 tasks.app = app
@@ -502,6 +512,7 @@ websockets.app = app
 update.app = app
 live_status.app = app
 api.include_router(auth.router, prefix='/api/v1')
+api.include_router(control_operations.router, prefix='/api/v1')
 api.include_router(tasks.router)
 api.include_router(settings.router)
 api.include_router(application.router)

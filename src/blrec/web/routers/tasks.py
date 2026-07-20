@@ -1,11 +1,12 @@
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 import attr
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field, PositiveInt, conint, validator
 
 from ...application import Application
-from ...exception import ForbiddenError, NotFoundError
+from ...control.operations import ControlJournalClosed, ControlLaneSaturated
+from ...exception import ForbiddenError
 from ...logging.audit import audit
 from ...utils.ffprobe import StreamProfile
 from ...utils.string import camel_case
@@ -56,11 +57,60 @@ class TaskBatchActionRequest(ApiModel):
 class TaskBatchActionResult(ApiModel):
     room_id: int
     accepted: bool
+    status: Literal['queued', 'rejected', 'running', 'succeeded', 'failed']
+    operation_id: Optional[str] = None
+    error_code: Optional[str] = None
     message: str
 
 
 class TaskBatchActionResponse(ApiModel):
+    operation_id: Optional[str] = None
+    status: Optional[Literal['accepted', 'running', 'succeeded', 'failed']] = None
     results: List[TaskBatchActionResult]
+
+
+_LIFECYCLE_ACTIONS = frozenset(
+    (
+        'start',
+        'stop',
+        'force_stop',
+        'recorder_enable',
+        'recorder_disable',
+        'recorder_force_disable',
+    )
+)
+
+
+async def _submit_control(
+    action: str, room_ids: List[int], *, force: bool = False
+) -> TaskBatchActionResponse:
+    if not room_ids:
+        return TaskBatchActionResponse(status='succeeded', results=[])
+    try:
+        operation = await app.submit_task_control(action, room_ids, force=force)
+    except (ControlJournalClosed, ControlLaneSaturated) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='任务操作队列繁忙，请稍后重试',
+            headers={'Retry-After': '1'},
+        ) from error
+    results = []
+    for step in operation.steps:
+        room_id = int(step.key)
+        accepted = step.status != 'rejected'
+        results.append(
+            TaskBatchActionResult(
+                room_id=room_id,
+                accepted=accepted,
+                status=step.status,
+                operation_id=operation.id,
+                error_code=step.error_code,
+                message='操作已提交' if accepted else '录制任务不存在',
+            )
+        )
+    return TaskBatchActionResponse(
+        operation_id=operation.id, status=operation.status, results=results
+    )
 
 
 @router.get('/data')
@@ -85,44 +135,46 @@ async def get_task_data(
 
 @router.post('/actions', response_model=TaskBatchActionResponse)
 async def run_task_batch_action(
-    command: TaskBatchActionRequest,
+    command: TaskBatchActionRequest, response: Response
 ) -> TaskBatchActionResponse:
+    if command.action in _LIFECYCLE_ACTIONS:
+        result = await _submit_control(command.action, command.room_ids)
+        response.status_code = status.HTTP_202_ACCEPTED
+        rejected = sum(not item.accepted for item in result.results)
+        audit(
+            'recording_task_action',
+            level='WARNING' if rejected else 'INFO',
+            action=command.action,
+            room_ids=command.room_ids,
+            accepted=len(result.results) - rejected,
+            rejected=rejected,
+            operation_id=result.operation_id,
+        )
+        return result
     results = []
     for room_id in command.room_ids:
         if not app.has_task(room_id):
             results.append(
                 TaskBatchActionResult(
-                    room_id=room_id, accepted=False, message='录制任务不存在'
+                    room_id=room_id,
+                    accepted=False,
+                    status='rejected',
+                    message='录制任务不存在',
                 )
             )
             continue
         try:
-            if command.action == 'start':
-                await app.start_task(room_id)
-                message = '任务已运行'
-            elif command.action == 'stop':
-                await app.stop_task(room_id, False)
-                message = '任务已停止'
-            elif command.action == 'force_stop':
-                await app.stop_task(room_id, True)
-                message = '任务已强制停止'
-            elif command.action == 'recorder_enable':
-                await app.enable_task_recorder(room_id)
-                message = '录制已开启'
-            elif command.action == 'recorder_disable':
-                await app.disable_task_recorder(room_id, False)
-                message = '录制已关闭'
-            elif command.action == 'recorder_force_disable':
-                await app.disable_task_recorder(room_id, True)
-                message = '录制已强制关闭'
-            elif command.action == 'refresh':
+            if command.action == 'refresh':
                 await app.update_task_info(room_id)
                 message = '任务数据已刷新'
             elif command.action == 'cut':
                 if not app.cut_stream(room_id):
                     results.append(
                         TaskBatchActionResult(
-                            room_id=room_id, accepted=False, message='当前不能切割文件'
+                            room_id=room_id,
+                            accepted=False,
+                            status='rejected',
+                            message='当前不能切割文件',
                         )
                     )
                     continue
@@ -133,12 +185,17 @@ async def run_task_batch_action(
         except Exception as error:
             results.append(
                 TaskBatchActionResult(
-                    room_id=room_id, accepted=False, message=str(error) or '操作失败'
+                    room_id=room_id,
+                    accepted=False,
+                    status='failed',
+                    message=str(error) or '操作失败',
                 )
             )
         else:
             results.append(
-                TaskBatchActionResult(room_id=room_id, accepted=True, message=message)
+                TaskBatchActionResult(
+                    room_id=room_id, accepted=True, status='succeeded', message=message
+                )
             )
     rejected = sum(not result.accepted for result in results)
     audit(
@@ -224,121 +281,96 @@ async def cut_stream(room_id: int) -> ResponseMessage:
 
 
 @router.post(
-    '/start', response_model=ResponseMessage, responses={**not_found_responses}
+    '/start',
+    response_model=TaskBatchActionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={**not_found_responses},
 )
-async def start_all_tasks() -> ResponseMessage:
-    await app.start_all_tasks()
-    return ResponseMessage(message='All tasks have been started')
+async def start_all_tasks() -> TaskBatchActionResponse:
+    return await _submit_control('start', list(app.get_all_task_room_ids()))
 
 
 @router.post(
     '/{room_id}/start',
-    response_model=ResponseMessage,
+    response_model=TaskBatchActionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     responses={**not_found_responses},
 )
-async def start_task(room_id: int) -> ResponseMessage:
-    await app.start_task(room_id)
-    return ResponseMessage(message='The task has been started')
+async def start_task(room_id: int) -> TaskBatchActionResponse:
+    return await _submit_control('start', [room_id])
 
 
 @router.post(
     '/stop',
-    response_model=ResponseMessage,
+    response_model=TaskBatchActionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={**accepted_responses},
 )
 async def stop_all_tasks(
-    background_tasks: BackgroundTasks,
-    force: bool = Body(False),
-    background: bool = Body(False),
-) -> ResponseMessage:
-    if background:
-        background_tasks.add_task(app.stop_all_tasks, force)
-        return ResponseMessage(message='Stopping all tasks on the background')
-
-    await app.stop_all_tasks(force)
-    return ResponseMessage(message='All tasks have been stopped')
+    force: bool = Body(False), background: bool = Body(False)
+) -> TaskBatchActionResponse:
+    del background
+    return await _submit_control('stop', list(app.get_all_task_room_ids()), force=force)
 
 
 @router.post(
     '/{room_id}/stop',
-    response_model=ResponseMessage,
+    response_model=TaskBatchActionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={**not_found_responses, **accepted_responses},
 )
 async def stop_task(
-    background_tasks: BackgroundTasks,
-    room_id: int,
-    force: bool = Body(False),
-    background: bool = Body(False),
-) -> ResponseMessage:
-    if not app.has_task(room_id):
-        raise NotFoundError(f'No task for the room {room_id}')
-
-    if background:
-        background_tasks.add_task(app.stop_task, room_id, force)
-        return ResponseMessage(message='Stopping the task on the background')
-
-    await app.stop_task(room_id, force)
-    return ResponseMessage(message='The task has been stopped')
+    room_id: int, force: bool = Body(False), background: bool = Body(False)
+) -> TaskBatchActionResponse:
+    del background
+    return await _submit_control('stop', [room_id], force=force)
 
 
-@router.post('/recorder/enable', response_model=ResponseMessage)
-async def enable_all_task_recorders() -> ResponseMessage:
-    await app.enable_all_task_recorders()
-    return ResponseMessage(message='All task recorders have been enabled')
+@router.post(
+    '/recorder/enable',
+    response_model=TaskBatchActionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def enable_all_task_recorders() -> TaskBatchActionResponse:
+    return await _submit_control('recorder_enable', list(app.get_all_task_room_ids()))
 
 
 @router.post(
     '/{room_id}/recorder/enable',
-    response_model=ResponseMessage,
+    response_model=TaskBatchActionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     responses={**not_found_responses},
 )
-async def enable_task_recorder(room_id: int) -> ResponseMessage:
-    await app.enable_task_recorder(room_id)
-    return ResponseMessage(message='The task recorder has been enabled')
+async def enable_task_recorder(room_id: int) -> TaskBatchActionResponse:
+    return await _submit_control('recorder_enable', [room_id])
 
 
 @router.post(
     '/recorder/disable',
-    response_model=ResponseMessage,
+    response_model=TaskBatchActionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={**accepted_responses},
 )
 async def disable_all_task_recorders(
-    background_tasks: BackgroundTasks,
-    force: bool = Body(False),
-    background: bool = Body(False),
-) -> ResponseMessage:
-    if background:
-        background_tasks.add_task(app.disable_all_task_recorders, force)
-        return ResponseMessage(message='Disabling all task recorders on the background')
-
-    await app.disable_all_task_recorders(force)
-    return ResponseMessage(message='All task recorders have been disabled')
+    force: bool = Body(False), background: bool = Body(False)
+) -> TaskBatchActionResponse:
+    del background
+    return await _submit_control(
+        'recorder_disable', list(app.get_all_task_room_ids()), force=force
+    )
 
 
 @router.post(
     '/{room_id}/recorder/disable',
-    response_model=ResponseMessage,
+    response_model=TaskBatchActionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={**not_found_responses, **accepted_responses},
 )
 async def disable_task_recorder(
-    background_tasks: BackgroundTasks,
-    room_id: int,
-    force: bool = Body(False),
-    background: bool = Body(False),
-) -> ResponseMessage:
-    if not app.has_task(room_id):
-        raise NotFoundError(f'No task for the room {room_id}')
-
-    if background:
-        background_tasks.add_task(app.disable_task_recorder, room_id, force)
-        return ResponseMessage(message='Disabling the task recorder on the background')
-
-    await app.disable_task_recorder(room_id, force)
-    return ResponseMessage(message='The task recorder has been disabled')
+    room_id: int, force: bool = Body(False), background: bool = Body(False)
+) -> TaskBatchActionResponse:
+    del background
+    return await _submit_control('recorder_disable', [room_id], force=force)
 
 
 @router.post(
