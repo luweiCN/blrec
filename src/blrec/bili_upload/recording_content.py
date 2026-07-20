@@ -527,16 +527,19 @@ class RecordingContentReader:
     ) -> DanmakuPage:
         self._validate_danmaku_stream(stream)
         items = []
+        remaining_bytes = self._DANMAKU_READ_BYTES
         if stream.pending is not None:
             items.append(stream.pending)
             stream.pending = None
         while len(items) < limit:
-            item = self._next_danmaku(stream)
+            item, remaining_bytes = self._next_danmaku(stream, remaining_bytes)
             if item is None:
                 break
             items.append(item)
         if len(items) == limit:
-            stream.pending = self._next_danmaku(stream)
+            stream.pending, remaining_bytes = self._next_danmaku(
+                stream, remaining_bytes
+            )
         stream.next_cursor = cursor + len(items)
         if stream.pending is not None or not stream.parser_closed:
             return DanmakuPage(items=tuple(items), next_cursor=stream.next_cursor)
@@ -558,7 +561,9 @@ class RecordingContentReader:
             raise RecordingContentCursorStale('danmaku cursor stale')
         stream.observed_size = int(file_stat.st_size)
 
-    def _next_danmaku(self, stream: _DanmakuStream) -> Optional[DanmakuLine]:
+    def _next_danmaku(
+        self, stream: _DanmakuStream, remaining_bytes: int
+    ) -> Tuple[Optional[DanmakuLine], int]:
         while True:
             event = next(stream.parser.read_events(), None)
             if event is not None:
@@ -569,13 +574,14 @@ class RecordingContentReader:
                 parent = element.getparent()
                 while parent is not None and element.getprevious() is not None:
                     del parent[0]
-                return item
+                return item, remaining_bytes
             available = stream.observed_size - stream.read_offset
-            if available > 0:
-                chunk = stream.file.read(min(self._DANMAKU_READ_BYTES, available))
+            if available > 0 and remaining_bytes > 0:
+                chunk = stream.file.read(min(remaining_bytes, available))
                 if not chunk:
-                    return None
+                    return None, remaining_bytes
                 stream.read_offset += len(chunk)
+                remaining_bytes -= len(chunk)
                 if len(stream.prefix) < self._DANMAKU_PREFIX_BYTES:
                     remaining = self._DANMAKU_PREFIX_BYTES - len(stream.prefix)
                     stream.prefix.extend(chunk[:remaining])
@@ -584,11 +590,13 @@ class RecordingContentReader:
                         raise RecordingContentInvalid('弹幕文件格式无效')
                 stream.parser.feed(chunk)
                 continue
+            if available > 0:
+                return None, remaining_bytes
             if stream.finalized and not stream.parser_closed:
                 stream.parser.close()
                 stream.parser_closed = True
                 continue
-            return None
+            return None, remaining_bytes
 
     def _discard_danmaku_stream(
         self, key: Tuple[int, int, int], stream: _DanmakuStream

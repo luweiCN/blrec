@@ -284,6 +284,33 @@ async def test_danmaku_first_page_does_not_parse_the_whole_file(
 
 
 @pytest.mark.asyncio
+async def test_danmaku_page_has_a_fixed_input_byte_budget(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'large-header.xml'
+    xml.write_text(
+        '<i><metadata>{}</metadata><d p="1,1,25,1">第一条</d></i>'.format(
+            'x' * (RecordingContentReader._DANMAKU_READ_BYTES * 3)
+        ),
+        encoding='utf8',
+    )
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=1 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+
+    page = await reader.danmaku(part_id, cursor=0, limit=1)
+    stream = next(iter(reader._danmaku_streams.values()))
+
+    assert page.items == ()
+    assert page.next_cursor == 0
+    assert stream.read_offset == RecordingContentReader._DANMAKU_READ_BYTES
+
+
+@pytest.mark.asyncio
 async def test_danmaku_rejects_malformed_xml(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
