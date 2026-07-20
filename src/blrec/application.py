@@ -227,6 +227,15 @@ class Application:
                     'Webhook teardown after launch failure: {}',
                     type(cleanup_error).__name__,
                 )
+            try:
+                self._destroy()
+            except asyncio.CancelledError as cleanup_error:
+                raise cleanup_error from error
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Application teardown after launch failure: {}',
+                    type(cleanup_error).__name__,
+                )
             await self._teardown_live_status_monitor_after_failure(error)
             raise
         logger.debug(f'Default umask {os.umask(0o000)}')
@@ -261,10 +270,12 @@ class Application:
         self._task_control_reconciler = None
         if reconciler is not None:
             await _collect_teardown_error(reconciler.shutdown(), errors)
-        await _collect_teardown_error(
-            self._task_manager.stop_all_tasks(force=force), errors
-        )
-        await _collect_teardown_error(self._task_manager.destroy_all_tasks(), errors)
+        task_manager = getattr(self, '_task_manager', None)
+        if task_manager is not None:
+            await _collect_teardown_error(
+                task_manager.stop_all_tasks(force=force), errors
+            )
+            await _collect_teardown_error(task_manager.destroy_all_tasks(), errors)
         await _collect_teardown_error(self._teardown_live_status_monitor(), errors)
         await _collect_teardown_error(self._teardown_bili_validation_session(), errors)
         await _collect_teardown_error(self._teardown_network_sessions(), errors)
@@ -769,27 +780,44 @@ class Application:
             del self._update_metadata_client
 
     def _destroy(self) -> None:
-        self._destroy_notifiers()
-        self._destroy_exception_handler()
+        errors: List[BaseException] = []
+        for operation in (self._destroy_notifiers, self._destroy_exception_handler):
+            try:
+                operation()
+            except BaseException as error:
+                errors.append(error)
+        _raise_teardown_errors(errors)
 
     def _destroy_notifiers(self) -> None:
-        self._email_notifier.disable()
-        self._serverchan_notifier.disable()
-        self._pushdeer_notifier.disable()
-        self._pushplus_notifier.disable()
-        self._telegram_notifier.disable()
-        self._bark_notifier.disable()
-        del self._email_notifier
-        del self._serverchan_notifier
-        del self._pushdeer_notifier
-        del self._pushplus_notifier
-        del self._telegram_notifier
-        del self._bark_notifier
+        errors: List[BaseException] = []
+        for name in (
+            '_email_notifier',
+            '_serverchan_notifier',
+            '_pushdeer_notifier',
+            '_pushplus_notifier',
+            '_telegram_notifier',
+            '_bark_notifier',
+        ):
+            notifier = getattr(self, name, None)
+            if notifier is None:
+                continue
+            try:
+                notifier.disable()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                if getattr(self, name, None) is notifier:
+                    delattr(self, name)
+        _raise_teardown_errors(errors)
 
     def _destroy_webhooks(self) -> None:
         self._webhook_emitter.disable()
         del self._webhook_emitter
 
     def _destroy_exception_handler(self) -> None:
-        self._exception_handler.disable()
-        del self._exception_handler
+        handler = getattr(self, '_exception_handler', None)
+        if handler is None:
+            return
+        handler.disable()
+        if getattr(self, '_exception_handler', None) is handler:
+            del self._exception_handler

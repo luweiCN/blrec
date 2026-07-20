@@ -375,7 +375,7 @@ async def on_startup() -> None:
     active_media = ActiveMediaService()
     _password_work_coordinator = password_work
     _active_media_service = active_media
-    application_launched = False
+    application_launch_entered = False
     try:
         security.configure(
             _admin_auth_store, bootstrap_api_key=_env_settings.api_key or ''
@@ -425,8 +425,8 @@ async def on_startup() -> None:
         browser_extension.policy_manager = _bili_account_runtime.policy_manager
         browser_extension.category_catalog = _bili_account_runtime.category_catalog
         browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
+        application_launch_entered = True
         await app.launch()
-        application_launched = True
         _application_started = True
         await app.refresh_managed_cookie()
         _realtime_sampler.start()
@@ -457,7 +457,7 @@ async def on_startup() -> None:
             highlights.clip_deleter = None
             browser_extension.reset()
             await _realtime_sampler.stop()
-            if application_launched:
+            if application_launch_entered:
                 await app.exit()
         finally:
             try:

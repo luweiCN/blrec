@@ -66,6 +66,15 @@ class _TaskManager:
         self._calls.append('tasks.destroy')
 
 
+class _DisableProbe:
+    def __init__(self, calls: List[str], name: str) -> None:
+        self._calls = calls
+        self._name = name
+
+    def disable(self) -> None:
+        self._calls.append('{}.disable'.format(self._name))
+
+
 class _ValidationSession:
     def __init__(self) -> None:
         self.closed = False
@@ -204,6 +213,20 @@ def test_application_notifiers_share_injected_dispatcher() -> None:
         app._destroy_notifiers()
 
 
+def test_partial_notifier_teardown_is_idempotent() -> None:
+    calls: List[str] = []
+    app = object.__new__(Application)
+    app._email_notifier = _DisableProbe(calls, 'email')
+    app._serverchan_notifier = _DisableProbe(calls, 'serverchan')
+
+    app._destroy_notifiers()
+    app._destroy_notifiers()
+
+    assert calls == ['email.disable', 'serverchan.disable']
+    assert not hasattr(app, '_email_notifier')
+    assert not hasattr(app, '_serverchan_notifier')
+
+
 @pytest.mark.asyncio
 async def test_exit_disables_webhooks_before_drain_and_deletes_emitter() -> None:
     calls: List[str] = []
@@ -293,7 +316,13 @@ async def test_launch_failure_after_webhook_start_still_closes_session() -> None
     app = object.__new__(Application)
     app._setup_logger = lambda: None
     app._setup_live_status_monitor = _noop
-    app._setup = lambda: setattr(app, '_webhook_emitter', _Emitter(calls))
+
+    def setup() -> None:
+        app._webhook_emitter = _Emitter(calls)
+        app._email_notifier = _DisableProbe(calls, 'email')
+        app._exception_handler = _DisableProbe(calls, 'exceptions')
+
+    app._setup = setup
     app._control_operation_journal = _FailingJournal()
     app._teardown_live_status_monitor_after_failure = _noop
 
@@ -305,7 +334,11 @@ async def test_launch_failure_after_webhook_start_still_closes_session() -> None
         'webhook.enable',
         'webhook.disable',
         'webhook.close',
+        'email.disable',
+        'exceptions.disable',
     ]
+    assert not hasattr(app, '_email_notifier')
+    assert not hasattr(app, '_exception_handler')
 
 
 @pytest.mark.asyncio

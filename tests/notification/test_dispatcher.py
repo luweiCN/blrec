@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
+import time
 from typing import List, Optional, Tuple
 
 import aiohttp
@@ -57,6 +59,20 @@ class BlockingSmtpSender:
         self.release.wait()
 
 
+class DeadlineAwareSmtpSender:
+    def __init__(self, attempt_seconds: float) -> None:
+        self.attempt_seconds = attempt_seconds
+        self.started = threading.Event()
+        self.deadlines: List[float] = []
+
+    def send_with_deadline(
+        self, _title: str, _content: str, _message_type: str, deadline_at: float
+    ) -> None:
+        self.deadlines.append(deadline_at)
+        self.started.set()
+        time.sleep(min(self.attempt_seconds, max(0, deadline_at - time.monotonic())))
+
+
 @pytest.mark.asyncio
 async def test_prestart_capacity_is_bounded_without_creating_tasks() -> None:
     sender = RecordingSender()
@@ -109,6 +125,34 @@ async def test_channel_order_and_global_concurrency_are_bounded() -> None:
     )
 
 
+def test_restart_rebinds_global_concurrency_to_the_running_loop() -> None:
+    senders = {name: RecordingSender() for name in ('a', 'b', 'c', 'd', 'e')}
+    dispatcher = NotificationDispatcher(senders, session_factory=FakeSession)
+
+    async def run_cycle(cycle: int) -> None:
+        release = asyncio.Event()
+        for sender in senders.values():
+            sender.release = release
+        await dispatcher.start()
+        for channel in senders:
+            assert dispatcher.enqueue(channel, str(cycle), '', 'text')
+
+        for _ in range(100):
+            if sum(sender.active for sender in senders.values()) == 4:
+                break
+            await asyncio.sleep(0)
+        assert sum(sender.active for sender in senders.values()) == 4
+        release.set()
+        await dispatcher.close()
+
+    asyncio.run(run_cycle(1))
+    asyncio.run(run_cycle(2))
+
+    assert all(
+        [call[0] for call in sender.calls] == ['1', '2'] for sender in senders.values()
+    )
+
+
 @pytest.mark.asyncio
 async def test_keyed_pending_delivery_is_replaced_without_growing_queue() -> None:
     sender = RecordingSender()
@@ -135,6 +179,9 @@ async def test_keyed_pending_delivery_is_replaced_without_growing_queue() -> Non
         (aiohttp.ClientResponseError(None, (), status=503), 3),
         (aiohttp.ClientConnectionError('offline'), 3),
         (asyncio.TimeoutError(), 3),
+        (ConnectionRefusedError('connection refused'), 3),
+        (socket.timeout('timed out'), 3),
+        (socket.gaierror(-2, 'name lookup failed'), 3),
     ],
 )
 async def test_retry_classification_is_bounded(
@@ -191,19 +238,47 @@ async def test_channel_adapter_only_enqueues_and_close_restarts_cleanly() -> Non
 
 
 @pytest.mark.asyncio
-async def test_close_observes_running_smtp_executor_future() -> None:
+async def test_close_budget_does_not_wait_unbounded_for_smtp_executor() -> None:
     sender = BlockingSmtpSender()
     dispatcher = NotificationDispatcher(
-        {'email': sender}, close_timeout_seconds=0.01, session_factory=FakeSession
+        {'email': sender}, close_timeout_seconds=0.03, session_factory=FakeSession
     )
     await dispatcher.start()
     assert dispatcher.enqueue('email', 'title', 'body', 'text')
     await asyncio.get_running_loop().run_in_executor(None, sender.started.wait)
 
-    close_task = asyncio.create_task(dispatcher.close())
-    await asyncio.sleep(0.02)
+    started_at = time.monotonic()
+    await dispatcher.close()
+    elapsed = time.monotonic() - started_at
 
-    assert not close_task.done()
+    assert elapsed < 0.15
+    assert dispatcher.pending_count == 0
+    assert dispatcher._smtp_futures
+
     sender.release.set()
-    await close_task
+    for _ in range(100):
+        if not dispatcher._smtp_futures:
+            break
+        await asyncio.sleep(0.001)
+    assert not dispatcher._smtp_futures
+
+
+@pytest.mark.asyncio
+async def test_close_deadline_limits_late_smtp_attempts() -> None:
+    sender = DeadlineAwareSmtpSender(attempt_seconds=0.08)
+    dispatcher = NotificationDispatcher(
+        {'email': sender}, close_timeout_seconds=0.1, session_factory=FakeSession
+    )
+    await dispatcher.start()
+    assert dispatcher.enqueue('email', 'first', 'body', 'text')
+    assert dispatcher.enqueue('email', 'second', 'body', 'text')
+    await asyncio.get_running_loop().run_in_executor(None, sender.started.wait)
+
+    started_at = time.monotonic()
+    await dispatcher.close()
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.15
+    assert len(sender.deadlines) == 2
+    assert sender.deadlines[1] <= started_at + 0.11
     assert dispatcher.pending_count == 0

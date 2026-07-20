@@ -77,6 +77,54 @@ class NotificationDispatcherProbe:
         self.events.append('notifications.close')
 
 
+class RuntimeProbe:
+    manager = None
+    unavailable_reason = None
+    journal = None
+    content_reader = None
+    task_actions = None
+    run_recording_session_action = None
+    session_submission_manager = None
+    retention_manager = None
+    policy_manager = None
+    category_catalog = None
+    cover_library = None
+    collection_manager = None
+    highlight_service = None
+    highlight_worker = None
+    create_highlight_upload_task = None
+    delete_highlight_clip = None
+
+    def __init__(self, events) -> None:
+        self.events = events
+
+    async def start(self) -> None:
+        self.events.append('runtime.start')
+
+    async def close(self) -> None:
+        self.events.append('runtime.close')
+
+
+class FailingApplicationProbe:
+    def __init__(self, events) -> None:
+        self.events = events
+
+    async def launch(self) -> None:
+        self.events.append('app.launch')
+        raise RuntimeError('application launch failed')
+
+    async def exit(self) -> None:
+        self.events.append('app.exit')
+
+
+class JournalProbe:
+    def __init__(self, events) -> None:
+        self.events = events
+
+    async def close(self) -> None:
+        self.events.append('journal.close')
+
+
 @pytest.mark.asyncio
 async def test_startup_failure_always_closes_password_work_and_auth_store(
     monkeypatch,
@@ -136,6 +184,47 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     assert events.index('password.shutdown') > events.index('runtime.close')
     assert events.index('active_media.shutdown') > events.index('runtime.close')
     assert events.index('store.close') > events.index('password.shutdown')
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_after_application_launch_entered_calls_exit(
+    monkeypatch,
+) -> None:
+    events = []
+    password_work = PasswordWorkProbe(events)
+    active_media = ActiveMediaProbe(events)
+    dispatcher = NotificationDispatcherProbe(events)
+
+    monkeypatch.setattr(
+        web_main,
+        '_admin_auth_store',
+        SimpleNamespace(
+            open=lambda: events.append('store.open'),
+            close=lambda: events.append('store.close'),
+        ),
+    )
+    monkeypatch.setattr(web_main, 'PasswordWorkCoordinator', lambda: password_work)
+    monkeypatch.setattr(web_main, 'ActiveMediaService', lambda: active_media)
+    monkeypatch.setattr(web_main, '_notification_dispatcher', dispatcher)
+    monkeypatch.setattr(web_main, '_bili_account_runtime', RuntimeProbe(events))
+    monkeypatch.setattr(web_main, 'app', FailingApplicationProbe(events))
+    monkeypatch.setattr(web_main, '_control_operation_journal', JournalProbe(events))
+    monkeypatch.setattr(
+        web_main._realtime_sampler,
+        'stop',
+        AsyncMock(side_effect=lambda: events.append('realtime.stop')),
+    )
+    monkeypatch.setattr(web_main.security, 'configure', lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_main.auth, 'configure', lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_main.security, 'reset', lambda: None)
+    monkeypatch.setattr(web_main.auth, 'reset', lambda: None)
+    monkeypatch.setattr(web_main.browser_extension, 'reset', lambda: None)
+
+    with pytest.raises(RuntimeError, match='application launch failed'):
+        await web_main.on_startup()
+
+    assert events.index('app.launch') < events.index('app.exit')
+    assert events.index('app.exit') < events.index('notifications.close')
 
 
 @pytest.mark.asyncio

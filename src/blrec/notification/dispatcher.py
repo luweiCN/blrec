@@ -81,6 +81,7 @@ class NotificationDispatcher:
             raise ValueError('notification close timeout must be positive')
         self._senders = dict(senders)
         self._capacity = capacity
+        self._max_concurrency = max_concurrency
         self._delivery_timeout_seconds = delivery_timeout_seconds
         self._attempt_timeout_seconds = attempt_timeout_seconds
         self._close_timeout_seconds = close_timeout_seconds
@@ -92,7 +93,8 @@ class NotificationDispatcher:
         self._pending_by_key: Dict[CoalesceKey, _Delivery] = {}
         self._workers: Dict[str, asyncio.Task[None]] = {}
         self._smtp_futures: Set[asyncio.Future[Any]] = set()
-        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._close_deadline_at: Optional[float] = None
         self._pending_count = 0
         self._dropped_count = 0
         self._started = False
@@ -161,6 +163,8 @@ class NotificationDispatcher:
             return
         if self._closing:
             raise RuntimeError('notification dispatcher is closing')
+        self._semaphore = asyncio.Semaphore(self._max_concurrency)
+        self._close_deadline_at = None
         self._session = self._create_session()
         self._bind_session(self._session)
         self._started = True
@@ -179,31 +183,53 @@ class NotificationDispatcher:
             if drain_timeout_seconds is None
             else drain_timeout_seconds
         )
+        loop_deadline = asyncio.get_running_loop().time() + max(0, timeout_seconds)
+        self._close_deadline_at = self._monotonic() + max(0, timeout_seconds)
         try:
             workers = list(self._workers.values())
             if workers:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*workers, return_exceptions=True),
-                        timeout=timeout_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    for worker in list(self._workers.values()):
-                        worker.cancel()
-                    await asyncio.gather(
-                        *list(self._workers.values()), return_exceptions=True
+                _, pending = await asyncio.wait(
+                    workers, timeout=self._remaining_close_budget(loop_deadline)
+                )
+                for worker in pending:
+                    worker.cancel()
+                if pending:
+                    await asyncio.wait(
+                        pending, timeout=self._remaining_close_budget(loop_deadline)
                     )
             if self._smtp_futures:
-                await asyncio.gather(*list(self._smtp_futures), return_exceptions=True)
+                await asyncio.wait(
+                    list(self._smtp_futures),
+                    timeout=self._remaining_close_budget(loop_deadline),
+                )
             session = self._session
-            if session is not None:
-                await session.close()
-                if self._session is session:
-                    self._session = None
+            self._session = None
             self._bind_session(None)
+            if session is not None:
+                close_task = asyncio.create_task(session.close())
+                close_task.add_done_callback(self._session_close_done)
+                await asyncio.wait(
+                    (close_task,), timeout=self._remaining_close_budget(loop_deadline)
+                )
         finally:
             self._started = False
             self._closing = False
+            self._semaphore = None
+
+    @staticmethod
+    def _remaining_close_budget(deadline_at: float) -> float:
+        return max(0, deadline_at - asyncio.get_running_loop().time())
+
+    @staticmethod
+    def _session_close_done(task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException as error:
+            logger.warning(
+                'Notification session close failed error={}', type(error).__name__
+            )
 
     def _create_session(self) -> Any:
         if self._session_factory is not None:
@@ -261,21 +287,27 @@ class NotificationDispatcher:
 
     async def _run_channel(self, channel: str) -> None:
         queue = self._queues[channel]
+        semaphore = self._semaphore
+        if semaphore is None:
+            return
         while queue:
-            delivery = queue.popleft()
-            if delivery.coalesce_key is not None:
-                if self._pending_by_key.get(delivery.coalesce_key) is delivery:
-                    del self._pending_by_key[delivery.coalesce_key]
-            try:
-                async with self._semaphore:
+            async with semaphore:
+                delivery = queue.popleft()
+                if delivery.coalesce_key is not None:
+                    if self._pending_by_key.get(delivery.coalesce_key) is delivery:
+                        del self._pending_by_key[delivery.coalesce_key]
+                try:
                     await self._deliver(delivery)
-            finally:
-                self._pending_count -= 1
+                finally:
+                    self._pending_count -= 1
 
     async def _deliver(self, delivery: _Delivery) -> None:
         sender = self._senders[delivery.channel]
         for attempt in range(1, 4):
-            remaining = delivery.deadline_at - self._monotonic()
+            effective_deadline = delivery.deadline_at
+            if self._close_deadline_at is not None:
+                effective_deadline = min(effective_deadline, self._close_deadline_at)
+            remaining = effective_deadline - self._monotonic()
             if remaining <= 0:
                 return
             try:
@@ -296,7 +328,7 @@ class NotificationDispatcher:
                     return
                 delay = min(
                     self._jitter(float(attempt)),
-                    max(0, delivery.deadline_at - self._monotonic()),
+                    max(0, effective_deadline - self._monotonic()),
                 )
                 if delay > 0:
                     await self._sleeper(delay)
@@ -349,7 +381,7 @@ class NotificationDispatcher:
             return False
         if isinstance(error, smtplib.SMTPResponseException):
             return 400 <= error.smtp_code <= 499
-        return isinstance(error, smtplib.SMTPException)
+        return isinstance(error, (smtplib.SMTPException, OSError))
 
 
 __all__ = ('NotificationChannel', 'NotificationDispatcher')
