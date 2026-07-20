@@ -12,7 +12,7 @@ import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzDropDownDirective, NzDropDownModule } from 'ng-zorro-antd/dropdown';
 import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 
 import { SettingService } from 'src/app/settings/shared/services/setting.service';
 import { TaskManagerService } from '../shared/services/task-manager.service';
@@ -305,6 +305,18 @@ describe('TaskItemComponent', () => {
 
     expect(taskManager.stopTask).toHaveBeenCalledOnceWith(1);
     expect(taskManager.startTask).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight task control when the row is destroyed', () => {
+    const pending = new Subject<never>();
+    taskManager.startTask.and.returnValue(pending);
+
+    component.toggleTask();
+    expect(pending.observers.length).toBe(1);
+
+    fixture.destroy();
+
+    expect(pending.observers.length).toBe(0);
   });
 
   it('opens投稿设置 before first enabling automatic submission', () => {

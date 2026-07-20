@@ -1,13 +1,24 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
-import { catchError, concatMap, map, switchMap, tap } from 'rxjs/operators';
-import { concat, Observable, of } from 'rxjs';
+import {
+  catchError,
+  concatMap,
+  filter,
+  map,
+  switchMap,
+  tap,
+} from 'rxjs/operators';
+import { concat, Observable, of, Subject } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { TaskService } from './task.service';
 import { ResponseMessage } from 'src/app/shared/api.models';
-import { TaskBatchAction, TaskBatchActionResponse } from '../task.model';
+import {
+  TaskBatchAction,
+  TaskBatchActionResponse,
+  TaskData,
+} from '../task.model';
 import { ControlOperationService } from 'src/app/core/services/control-operation.service';
 import type { ControlOperation } from 'src/app/core/services/control-operation.service';
 
@@ -20,6 +31,9 @@ export interface AddTaskResultMessage {
   providedIn: 'root',
 })
 export class TaskManagerService {
+  private readonly taskDataRefreshSubject = new Subject<TaskData[]>();
+  readonly taskDataRefresh$ = this.taskDataRefreshSubject.asObservable();
+
   constructor(
     private message: NzMessageService,
     private taskService: TaskService,
@@ -40,23 +54,31 @@ export class TaskManagerService {
       switchMap((admission) => this.observeControl(admission)),
       tap(
         (response) => {
-          const accepted = response.results.filter((result) => result.accepted);
+          if (response.status === 'running') {
+            return;
+          }
+          if (response.status === 'accepted') {
+            const acceptedCount = response.results.filter(
+              (result) => result.accepted
+            ).length;
+            this.message.success(`已提交 ${acceptedCount} 个任务`);
+            return;
+          }
+          const succeededCount = response.results.filter(
+            (result) => result.status === 'succeeded'
+          ).length;
           const failed = response.results.filter(
             (result) =>
               result.status === 'rejected' || result.status === 'failed'
           );
-          if (response.status === 'accepted' || response.status === 'running') {
-            this.message.success(`已提交 ${accepted.length} 个任务`);
-            return;
-          }
           if (failed.length > 0) {
             this.message.warning(
-              `成功 ${accepted.length - failed.length} 个，失败 ${failed.length} 个：${this.controlErrorMessage(
+              `成功 ${succeededCount} 个，失败 ${failed.length} 个：${this.controlErrorMessage(
                 failed[0].errorCode
               )}`
             );
           } else {
-            this.message.success(`已完成 ${accepted.length} 个任务`);
+            this.message.success(`已完成 ${succeededCount} 个任务`);
           }
         },
         (error: HttpErrorResponse) => {
@@ -406,11 +428,15 @@ export class TaskManagerService {
       of(admission),
       this.controlOperations.poll(admission.operationId).pipe(
         map((operation) => this.operationResult(admission, operation)),
+        filter(
+          (result) =>
+            result.status === 'succeeded' || result.status === 'failed'
+        ),
         concatMap((result) => {
-          if (result.status !== 'succeeded' && result.status !== 'failed') {
-            return of(result);
-          }
-          return this.taskService.getAllTaskData().pipe(map(() => result));
+          return this.taskService.getAllTaskData().pipe(
+            tap((tasks) => this.taskDataRefreshSubject.next(tasks)),
+            map(() => result)
+          );
         })
       )
     );

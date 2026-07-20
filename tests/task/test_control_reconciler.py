@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Tuple
-from unittest.mock import AsyncMock
+from typing import Any, List, Tuple
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -12,6 +12,7 @@ from blrec.control.operations import ControlOperationJournal
 from blrec.setting.models import Settings, TaskSettings
 from blrec.setting.setting_manager import SettingsManager
 from blrec.task.control_reconciler import TaskControlReconciler
+from blrec.task.task import RecordTask
 
 
 class FakeSettingsApplication:
@@ -26,6 +27,7 @@ class FakeTaskManager:
         self.calls: List[Tuple[str, int]] = []
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        self.start_failures = 0
 
     def has_task(self, room_id: int) -> bool:
         return room_id in self.states
@@ -45,6 +47,9 @@ class FakeTaskManager:
         self.entered.set()
         await self.release.wait()
         self.states[room_id].monitor_enabled = True
+        if self.start_failures:
+            self.start_failures -= 1
+            raise RuntimeError('recorder start failed')
         self.states[room_id].recorder_enabled = True
 
     async def stop_task(self, room_id: int, force: bool = False) -> None:
@@ -65,6 +70,18 @@ class FakeTaskManager:
         self.states[room_id].recorder_enabled = False
 
 
+def make_record_task(*, monitor_enabled: bool, recorder_enabled: bool) -> RecordTask:
+    task = object.__new__(RecordTask)
+    task._monitor_enabled = monitor_enabled
+    task._recorder_enabled = recorder_enabled
+    task._batch_monitoring = False
+    task._danmaku_client = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    task._live_monitor = SimpleNamespace(enable=Mock(), disable=Mock())
+    task._postprocessor = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    task._recorder = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    return task
+
+
 def make_settings_manager(settings: Settings) -> SettingsManager:
     manager = SettingsManager(
         FakeSettingsApplication(), settings  # type: ignore[arg-type]
@@ -78,7 +95,11 @@ async def test_reconciler_serializes_lifecycle_and_exposes_terminal_step(
     tmp_path: Path,
 ) -> None:
     settings_manager = make_settings_manager(
-        Settings(tasks=[TaskSettings(room_id=100)])
+        Settings(
+            tasks=[
+                TaskSettings(room_id=100, enable_monitor=False, enable_recorder=False)
+            ]
+        )
     )
     await settings_manager.change_task_desired_states(
         [100], enable_monitor=False, enable_recorder=False
@@ -222,3 +243,199 @@ async def test_noop_desired_and_actual_state_skips_lifecycle_calls(
     finally:
         await reconciler.shutdown()
         await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_partial_lifecycle_failure_executes_remaining_work(
+    tmp_path: Path,
+) -> None:
+    settings_manager = make_settings_manager(
+        Settings(tasks=[TaskSettings(room_id=100)])
+    )
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    task_manager = FakeTaskManager()
+    task_manager.release.set()
+    task_manager.start_failures = 1
+    reconciler = TaskControlReconciler(journal, settings_manager, task_manager)
+    reconciler.start()
+    try:
+        first = await reconciler.submit('start', [100], rejected={}, force=False)
+        await reconciler.wait_idle()
+        failed = await journal.get(first.id)
+        assert failed is not None
+        assert failed.status == 'failed'
+        assert task_manager.get_task_control_state(100) == (True, False)
+
+        retry = await reconciler.submit('start', [100], rejected={}, force=False)
+        await reconciler.wait_idle()
+        succeeded = await journal.get(retry.id)
+        assert succeeded is not None
+        assert succeeded.status == 'succeeded'
+        assert task_manager.get_task_control_state(100) == (True, True)
+        assert task_manager.calls == [('start', 100), ('start', 100)]
+    finally:
+        await reconciler.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_failure_terminates_admitted_operation_before_worker_claim(
+    tmp_path: Path,
+) -> None:
+    settings_manager = make_settings_manager(
+        Settings(
+            tasks=[
+                TaskSettings(room_id=100, enable_monitor=False, enable_recorder=False)
+            ]
+        )
+    )
+    settings_manager.dump_settings = AsyncMock(  # type: ignore[method-assign]
+        side_effect=OSError('disk full')
+    )
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    admitted: List[Any] = []
+    real_admit = journal.admit
+
+    async def capture_admit(**kwargs: Any) -> Any:
+        operation = await real_admit(**kwargs)
+        admitted.append(operation)
+        return operation
+
+    journal.admit = capture_admit  # type: ignore[method-assign]
+    task_manager = FakeTaskManager()
+    task_manager.release.set()
+    reconciler = TaskControlReconciler(journal, settings_manager, task_manager)
+    reconciler.start()
+    try:
+        with pytest.raises(OSError, match='disk full'):
+            await reconciler.submit('start', [100], rejected={}, force=False)
+
+        assert len(admitted) == 1
+        failed = await journal.get(admitted[0].id)
+        assert failed is not None
+        assert failed.status == 'failed'
+        assert failed.error_code == 'SETTINGS_PERSIST_FAILED'
+        assert {step.status for step in failed.steps} == {'failed'}
+        assert await journal.queued_count('task-state') == 0
+        assert task_manager.calls == []
+    finally:
+        await reconciler.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_admission_before_waiting_submitter_can_admit(
+    tmp_path: Path,
+) -> None:
+    settings_manager = make_settings_manager(
+        Settings(tasks=[TaskSettings(room_id=100)])
+    )
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    task_manager = FakeTaskManager()
+    task_manager.release.set()
+    reconciler = TaskControlReconciler(journal, settings_manager, task_manager)
+
+    await reconciler._submission_lock.acquire()
+    submit = asyncio.create_task(
+        reconciler.submit('start', [100], rejected={}, force=False)
+    )
+    shutdown = asyncio.create_task(reconciler.shutdown())
+    try:
+        while reconciler._accepting:
+            await asyncio.sleep(0)
+        reconciler._submission_lock.release()
+
+        with pytest.raises(RuntimeError, match='admission is closed'):
+            await submit
+        await shutdown
+        assert await journal.queued_count('task-state') == 0
+        assert task_manager.calls == []
+    finally:
+        if reconciler._submission_lock.locked():
+            reconciler._submission_lock.release()
+        if not shutdown.done():
+            shutdown.cancel()
+            await asyncio.gather(shutdown, return_exceptions=True)
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_monitor_enable_commits_state_only_after_lifecycle_succeeds() -> None:
+    task = make_record_task(monitor_enabled=False, recorder_enabled=False)
+    task._danmaku_client.start.side_effect = [RuntimeError('start failed'), None]
+
+    with pytest.raises(RuntimeError, match='start failed'):
+        await task.enable_monitor()
+    assert task.monitor_enabled is False
+
+    await task.enable_monitor()
+    assert task.monitor_enabled is True
+    assert task._danmaku_client.start.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_monitor_disable_retries_partial_lifecycle_work() -> None:
+    task = make_record_task(monitor_enabled=True, recorder_enabled=False)
+    task._danmaku_client.stop.side_effect = [RuntimeError('stop failed'), None]
+
+    with pytest.raises(RuntimeError, match='stop failed'):
+        await task.disable_monitor()
+    assert task.monitor_enabled is True
+
+    await task.disable_monitor()
+    assert task.monitor_enabled is False
+    assert task._danmaku_client.stop.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_monitor_disable_retries_after_unregister_succeeds() -> None:
+    task = make_record_task(monitor_enabled=True, recorder_enabled=False)
+    task._batch_monitoring = True
+    task._live_status_coordinator = SimpleNamespace(unregister=Mock())
+    task._monitor_registration_key = 100
+    task._connection_controller = SimpleNamespace(
+        close=AsyncMock(side_effect=[RuntimeError('close failed'), None])
+    )
+
+    with pytest.raises(RuntimeError, match='close failed'):
+        await task.disable_monitor()
+    assert task.monitor_enabled is True
+    assert task._monitor_registration_key is None
+
+    await task.disable_monitor()
+    assert task.monitor_enabled is False
+    task._live_status_coordinator.unregister.assert_called_once_with(100)
+    assert task._connection_controller.close.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_recorder_enable_retries_after_partial_lifecycle_failure() -> None:
+    task = make_record_task(monitor_enabled=True, recorder_enabled=False)
+    task._recorder.start.side_effect = [RuntimeError('start failed'), None]
+
+    with pytest.raises(RuntimeError, match='start failed'):
+        await task.enable_recorder()
+    assert task.recorder_enabled is False
+
+    await task.enable_recorder()
+    assert task.recorder_enabled is True
+    assert task._postprocessor.start.await_count == 2
+    assert task._recorder.start.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_recorder_disable_retries_after_partial_lifecycle_failure() -> None:
+    task = make_record_task(monitor_enabled=True, recorder_enabled=True)
+    task._postprocessor.stop.side_effect = [RuntimeError('stop failed'), None]
+
+    with pytest.raises(RuntimeError, match='stop failed'):
+        await task.disable_recorder()
+    assert task.recorder_enabled is True
+
+    await task.disable_recorder()
+    assert task.recorder_enabled is False
+    assert task._recorder.stop.await_count == 2
+    assert task._postprocessor.stop.await_count == 2

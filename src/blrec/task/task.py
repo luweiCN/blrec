@@ -523,7 +523,6 @@ class RecordTask:
     async def enable_monitor(self) -> None:
         if self._monitor_enabled:
             return
-        self._monitor_enabled = True
 
         if self._batch_monitoring:
             assert self._live_status_coordinator is not None
@@ -539,36 +538,49 @@ class RecordTask:
                 confirmer_uses_room_id=True,
             )
         else:
-            await self._danmaku_client.start()
-            self._live_monitor.enable()
+            try:
+                await self._danmaku_client.start()
+                self._live_monitor.enable()
+            except BaseException:
+                self._live_monitor.disable()
+                with suppress(BaseException):
+                    await self._danmaku_client.stop()
+                raise
+        self._monitor_enabled = True
 
     async def disable_monitor(self) -> None:
         if not self._monitor_enabled:
             return
-        self._monitor_enabled = False
 
         if self._batch_monitoring:
             assert self._live_status_coordinator is not None
-            assert self._monitor_registration_key is not None
-            self._live_status_coordinator.unregister(self._monitor_registration_key)
-            self._monitor_registration_key = None
+            if self._monitor_registration_key is not None:
+                self._live_status_coordinator.unregister(self._monitor_registration_key)
+                self._monitor_registration_key = None
             await self._connection_controller.close()
         else:
             self._live_monitor.disable()
             await self._danmaku_client.stop()
+        self._monitor_enabled = False
 
     async def enable_recorder(self) -> None:
         if self._recorder_enabled:
             return
-        self._recorder_enabled = True
 
-        await self._postprocessor.start()
-        await self._recorder.start()
+        try:
+            await self._postprocessor.start()
+            await self._recorder.start()
+        except BaseException:
+            with suppress(BaseException):
+                await self._recorder.stop()
+            with suppress(BaseException):
+                await self._postprocessor.stop()
+            raise
+        self._recorder_enabled = True
 
     async def disable_recorder(self, force: bool = False) -> None:
         if not self._recorder_enabled:
             return
-        self._recorder_enabled = False
 
         if force:
             await self._postprocessor.stop()
@@ -576,6 +588,7 @@ class RecordTask:
         else:
             await self._recorder.stop()
             await self._postprocessor.stop()
+        self._recorder_enabled = False
 
     async def suppress_current_live(self) -> None:
         """Stop this broadcast while leaving the room task enabled."""

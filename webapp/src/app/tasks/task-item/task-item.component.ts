@@ -7,14 +7,15 @@ import {
   HostBinding,
   Input,
   OnChanges,
+  OnDestroy,
   Output,
   SimpleChanges,
 } from '@angular/core';
 
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
-import { zip } from 'rxjs';
-import { finalize } from 'rxjs/operators';
+import { Subject, zip } from 'rxjs';
+import { finalize, takeUntil } from 'rxjs/operators';
 
 import { retry } from '../../shared/rx-operators';
 import { SettingService } from '../../settings/shared/services/setting.service';
@@ -37,7 +38,7 @@ import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-pol
   styleUrls: ['./task-item.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TaskItemComponent implements OnChanges {
+export class TaskItemComponent implements OnChanges, OnDestroy {
   @Input() data!: TaskData;
   @Input() selected = false;
   @Input() uploadPolicy: RoomUploadPolicy | null = null;
@@ -55,6 +56,7 @@ export class TaskItemComponent implements OnChanges {
   automaticSubmissionPending = false;
 
   readonly RunningStatus = RunningStatus;
+  private readonly destroy$ = new Subject<void>();
 
   constructor(
     private changeDetector: ChangeDetectorRef,
@@ -166,6 +168,11 @@ export class TaskItemComponent implements OnChanges {
       this.data.task_status.running_status === RunningStatus.STOPPED;
   }
 
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
   updateTaskInfo(): void {
     this.taskManager.updateTaskInfo(this.roomId).subscribe();
   }
@@ -180,6 +187,7 @@ export class TaskItemComponent implements OnChanges {
       : this.taskManager.startTask(this.roomId);
     request
       .pipe(
+        takeUntil(this.destroy$),
         finalize(() => {
           this.switchPending = false;
           this.changeDetector.markForCheck();

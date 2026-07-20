@@ -12,6 +12,7 @@ import { Subscription } from 'rxjs';
 import { retry } from 'src/app/shared/rx-operators';
 import { StorageService } from '../core/services/storage.service';
 import { RealtimeService } from '../core/services/realtime.service';
+import { TaskManagerService } from './shared/services/task-manager.service';
 import { TaskService } from './shared/services/task.service';
 import {
   AutomaticSubmissionFilter,
@@ -50,6 +51,7 @@ export class TasksComponent implements OnInit, OnDestroy {
   private dataSubscription?: Subscription;
   private policySubscription?: Subscription;
   private realtimeSubscription?: Subscription;
+  private controlRefreshSubscription?: Subscription;
   private allDataList: TaskData[] = [];
 
   constructor(
@@ -57,6 +59,7 @@ export class TasksComponent implements OnInit, OnDestroy {
     private notification: NzNotificationService,
     private storage: StorageService,
     private taskService: TaskService,
+    private taskManager: TaskManagerService,
     private realtime: RealtimeService,
     private roomUploadPolicyService: RoomUploadPolicyService,
   ) {
@@ -67,6 +70,9 @@ export class TasksComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.syncTaskData();
     this.syncRoomUploadPolicies();
+    this.controlRefreshSubscription = this.taskManager.taskDataRefresh$.subscribe(
+      (tasks) => this.applyTaskData(tasks),
+    );
     this.realtimeSubscription = this.realtime.events$.subscribe((event) => {
       if (event.type === 'resync') {
         this.syncTaskData();
@@ -85,6 +91,7 @@ export class TasksComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.desyncTaskData();
     this.policySubscription?.unsubscribe();
+    this.controlRefreshSubscription?.unsubscribe();
   }
 
   refreshRoomUploadPolicies(): void {

@@ -193,6 +193,64 @@ async def test_closed_admission_rejects_new_operations(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_preparation_terminates_unclaimed_operation_durably(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'control.sqlite3'
+    journal = ControlOperationJournal(path, max_nonterminal_per_lane=1)
+    await journal.open()
+    operation = await journal.admit(
+        lane='task-state',
+        kind='start',
+        target_key='100,404',
+        steps=[
+            ControlStepInput(key='100'),
+            ControlStepInput(key='404', status='rejected', error_code='TASK_NOT_FOUND'),
+        ],
+    )
+
+    try:
+        assert await journal.fail_unclaimed_operation(
+            operation.id, error_code='SETTINGS_PERSIST_FAILED'
+        )
+        assert await journal.queued_count('task-state') == 0
+        assert await journal.claim_next('task-state') is None
+
+        failed = await journal.get(operation.id)
+        assert failed is not None
+        assert failed.status == 'failed'
+        assert failed.error_code == 'SETTINGS_PERSIST_FAILED'
+        assert [(step.key, step.status, step.error_code) for step in failed.steps] == [
+            ('100', 'failed', 'SETTINGS_PERSIST_FAILED'),
+            ('404', 'rejected', 'TASK_NOT_FOUND'),
+        ]
+        replacement = await journal.admit(
+            lane='task-state',
+            kind='start',
+            target_key='200',
+            steps=[ControlStepInput(key='200')],
+        )
+        assert replacement.status == 'accepted'
+        assert await journal.fail_unclaimed_operation(
+            replacement.id, error_code='TEST_CLEANUP'
+        )
+    finally:
+        await journal.close()
+
+    reopened = ControlOperationJournal(path)
+    await reopened.open()
+    try:
+        assert await reopened.queued_count('task-state') == 0
+        assert await reopened.claim_next('task-state') is None
+        failed = await reopened.get(operation.id)
+        assert failed is not None
+        assert failed.status == 'failed'
+        assert failed.error_code == 'SETTINGS_PERSIST_FAILED'
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_reopen_prunes_only_expired_terminal_operations(tmp_path: Path) -> None:
     now = [1.0]
     path = tmp_path / 'control.sqlite3'

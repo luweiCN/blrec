@@ -2,7 +2,7 @@ import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 
 import { SettingService } from '../../settings/shared/services/setting.service';
 import { TaskManagerService } from '../shared/services/task-manager.service';
@@ -133,6 +133,21 @@ describe('TaskListComponent', () => {
       fixture.nativeElement.querySelector('.task-list-header'),
     ).not.toBeNull();
     expect(fixture.nativeElement.querySelector('nz-card')).toBeNull();
+  });
+
+  it('cancels an in-flight batch control when the list is destroyed', () => {
+    const pending = new Subject<never>();
+    taskManager.runBatchAction.and.returnValue(pending);
+    fixture.componentRef.setInput('dataList', [taskData]);
+    fixture.detectChanges();
+    component.setTaskSelected(1, true);
+
+    component.runBatchAction('start');
+    expect(pending.observers.length).toBe(1);
+
+    fixture.destroy();
+
+    expect(pending.observers.length).toBe(0);
   });
 
   it('presents monitoring and recording as one task state', () => {

@@ -56,10 +56,10 @@ disposition 含 `Outbound` 的 20 个入站触发点；未修改 production/test
 
 | 入站 ID | 入口 | 涉及的出站组 | 当前同步等待点 |
 | --- | --- | --- | --- |
-| I-011 | `POST /tasks/actions` | Room detail、Play info、Recording transfer | 最多 100 个 action 串行；`start/update/recorder_enable` 会进入远端路径。 |
+| I-011 | `POST /tasks/actions` | Room detail、Play info、Recording transfer | `start/stop/recorder_*` 已由 durable `task-state` worker 串行收敛；只有 `refresh` 仍在请求内等待远端，`cut/delete` 保持本地同步语义。 |
 | I-018/I-019 | `POST /tasks/info`、`/{room_id}/info` | Room detail | 等待每房间详情；全量版本串行。 |
-| I-022/I-023 | `POST /tasks/start`、`/{room_id}/start` | Room detail、Play info、Recording transfer、Danmaku WS | `start_task()` 先 refresh，再启动 monitor/recorder；当前直播时可同步进入取流。 |
-| I-026/I-027 | `POST /tasks/recorder/enable`、`/{room_id}/recorder/enable` | Play info、Recording transfer | 当前直播时 `Recorder._do_start()` 会直接 `_start_recording()`。 |
+| I-022/I-023 | `POST /tasks/start`、`/{room_id}/start` | Room detail、Play info、Recording transfer、Danmaku WS | 请求只做 202 admission 与一次 desired-state 持久化；worker 内仍会先 refresh 再启动 monitor/recorder，远端去重由 Outbound 继续处理。 |
+| I-026/I-027 | `POST /tasks/recorder/enable`、`/{room_id}/recorder/enable` | Play info、Recording transfer | 请求只做 202 admission；当前直播时 worker 内的 `Recorder._do_start()` 仍会进入 `_start_recording()`。 |
 | I-030 | `POST /tasks/{room_id}` | Room detail、Play info、Danmaku WS | `ensure_room_id()`、`RecordTask.setup()->Live.init()` 及可选 monitor/recorder 均在请求内。 |
 | I-036 | `PATCH /settings/tasks/{room_id}` | Danmaku WS | header/cookie 改变时请求内 `restart_danmaku_client()`。 |
 | I-042 | `POST /validation/cookie` | B 站导航验证 | 新 session，等待嵌套 WebApi retry。 |

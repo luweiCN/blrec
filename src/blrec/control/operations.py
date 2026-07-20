@@ -187,6 +187,17 @@ class ControlOperationJournal:
             error_code,
         )
 
+    async def fail_unclaimed_operation(
+        self, operation_id: str, *, error_code: str
+    ) -> bool:
+        """Fail every queued step before an admitted operation can be claimed."""
+
+        if not error_code:
+            raise ValueError('failed control operation requires an error code')
+        return await self._run(
+            self._fail_unclaimed_operation_sync, operation_id, error_code
+        )
+
     async def supersede_queued_steps(
         self, *, lane: str, keys: Sequence[str], keep_operation_id: str, generation: int
     ) -> int:
@@ -485,6 +496,39 @@ class ControlOperationJournal:
             return True
         except BaseException:
             connection.execute('ROLLBACK')
+            raise
+
+    def _fail_unclaimed_operation_sync(
+        self, operation_id: str, error_code: str
+    ) -> bool:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            running_count = int(
+                connection.execute(
+                    'SELECT COUNT(*) FROM control_operation_steps '
+                    "WHERE operation_id=? AND status='running'",
+                    (operation_id,),
+                ).fetchone()[0]
+            )
+            if running_count:
+                raise RuntimeError('cannot fail an operation after it was claimed')
+            cursor = connection.execute(
+                "UPDATE control_operation_steps SET status='failed',"
+                'result_json=NULL,error_code=?,updated_at=? '
+                "WHERE operation_id=? AND status='queued'",
+                (error_code, now, operation_id),
+            )
+            if cursor.rowcount == 0:
+                connection.execute('ROLLBACK')
+                return False
+            self._refresh_operation_sync(connection, operation_id, now)
+            connection.execute('COMMIT')
+            return True
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute('ROLLBACK')
             raise
 
     def _queued_count_sync(self, lane: str) -> int:

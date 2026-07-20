@@ -1,8 +1,8 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
-import { Observable, timer } from 'rxjs';
-import { switchMap, take, takeWhile } from 'rxjs/operators';
+import { EMPTY, Observable, timer } from 'rxjs';
+import { concatMap, expand, takeWhile } from 'rxjs/operators';
 
 import { UrlService } from './url.service';
 
@@ -44,8 +44,6 @@ export interface ControlOperation {
 
 @Injectable({ providedIn: 'root' })
 export class ControlOperationService {
-  private readonly maxPolls = 120;
-
   constructor(private http: HttpClient, private url: UrlService) {}
 
   get(operationId: string): Observable<ControlOperation> {
@@ -59,9 +57,14 @@ export class ControlOperationService {
     operationId: string,
     intervalMilliseconds: number = 500
   ): Observable<ControlOperation> {
-    return timer(0, intervalMilliseconds).pipe(
-      take(this.maxPolls),
-      switchMap(() => this.get(operationId)),
+    return this.get(operationId).pipe(
+      expand((operation) =>
+        operation.status === 'succeeded' || operation.status === 'failed'
+          ? EMPTY
+          : timer(intervalMilliseconds).pipe(
+              concatMap(() => this.get(operationId))
+            )
+      ),
       takeWhile(
         (operation) =>
           operation.status !== 'succeeded' && operation.status !== 'failed',

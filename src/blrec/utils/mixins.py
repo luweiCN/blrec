@@ -104,7 +104,11 @@ class AsyncStoppableMixin(ABC):
             if self._stopped:
                 return
             self._stopped = True
-            await self._do_stop()
+            try:
+                await self._do_stop()
+            except BaseException:
+                self._stopped = False
+                raise
 
     @abstractmethod
     async def _do_start(self) -> None:

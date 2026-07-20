@@ -5,19 +5,22 @@ import { TaskService } from './task.service';
 import { TaskManagerService } from './task-manager.service';
 import { ControlOperationService } from 'src/app/core/services/control-operation.service';
 import { of } from 'rxjs';
+import { TaskData } from '../task.model';
 
 describe('TaskManagerService', () => {
   let service: TaskManagerService;
+  let message: jasmine.SpyObj<NzMessageService>;
 
   beforeEach(() => {
+    message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+      'success',
+      'warning',
+    ]);
     TestBed.configureTestingModule({
       providers: [
         {
           provide: NzMessageService,
-          useValue: jasmine.createSpyObj<NzMessageService>(
-            'NzMessageService',
-            ['success']
-          ),
+          useValue: message,
         },
         {
           provide: TaskService,
@@ -100,4 +103,149 @@ describe('TaskManagerService', () => {
     expect(operations.poll).toHaveBeenCalledOnceWith('operation-1');
     expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
   });
+
+  it('publishes the terminal task snapshot to the page owner', () => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    const refreshed = [{ room_info: { room_id: 100 } }] as TaskData[];
+    taskService.runBatchAction.and.returnValue(
+      of({
+        operationId: 'operation-1',
+        status: 'accepted',
+        results: [],
+      })
+    );
+    taskService.getAllTaskData.and.returnValue(of(refreshed));
+    operations.poll.and.returnValue(
+      of({
+        id: 'operation-1',
+        lane: 'task-state',
+        kind: 'start',
+        targetKey: '100',
+        attempt: 1,
+        generation: 1,
+        status: 'succeeded',
+        result: null,
+        errorCode: null,
+        createdAt: 1,
+        updatedAt: 2,
+        steps: [],
+      })
+    );
+    const snapshots: TaskData[][] = [];
+    service.taskDataRefresh$.subscribe((tasks) => snapshots.push(tasks));
+
+    service.runBatchAction('start', [100]).subscribe();
+
+    expect(snapshots).toEqual([refreshed]);
+  });
+
+  it('reports batch admission once and terminal counts from real statuses', () => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    taskService.runBatchAction.and.returnValue(
+      of({
+        operationId: 'operation-1',
+        status: 'accepted',
+        results: [
+          batchResult(100, true, 'queued'),
+          batchResult(200, true, 'queued'),
+          batchResult(300, false, 'rejected'),
+        ],
+      })
+    );
+    taskService.getAllTaskData.and.returnValue(of([]));
+    operations.poll.and.returnValue(
+      of(
+        controlOperation('accepted', [
+          controlStep(100, 'queued'),
+          controlStep(200, 'queued'),
+          controlStep(300, 'rejected'),
+        ]),
+        controlOperation('accepted', [
+          controlStep(100, 'queued'),
+          controlStep(200, 'queued'),
+          controlStep(300, 'rejected'),
+        ]),
+        controlOperation('running', [
+          controlStep(100, 'running'),
+          controlStep(200, 'queued'),
+          controlStep(300, 'rejected'),
+        ]),
+        controlOperation('failed', [
+          controlStep(100, 'succeeded'),
+          controlStep(200, 'failed'),
+          controlStep(300, 'rejected'),
+        ])
+      )
+    );
+
+    service.runBatchAction('start', [100, 200, 300]).subscribe();
+
+    expect(message.success).toHaveBeenCalledOnceWith('已提交 2 个任务');
+    expect(message.warning).toHaveBeenCalledOnceWith(
+      jasmine.stringMatching(/^成功 1 个，失败 2 个：/)
+    );
+  });
 });
+
+function batchResult(
+  roomId: number,
+  accepted: boolean,
+  status: 'queued' | 'rejected'
+) {
+  return {
+    roomId,
+    accepted,
+    status,
+    operationId: 'operation-1',
+    errorCode: status === 'rejected' ? 'TASK_NOT_FOUND' : null,
+    message: '',
+  } as const;
+}
+
+function controlStep(
+  roomId: number,
+  status: 'queued' | 'rejected' | 'running' | 'succeeded' | 'failed'
+) {
+  return {
+    key: String(roomId),
+    generation: 1,
+    status,
+    result: null,
+    errorCode:
+      status === 'failed'
+        ? 'TASK_LIFECYCLE_FAILED'
+        : status === 'rejected'
+        ? 'TASK_NOT_FOUND'
+        : null,
+  } as const;
+}
+
+function controlOperation(
+  status: 'accepted' | 'running' | 'failed',
+  steps: ReturnType<typeof controlStep>[]
+) {
+  return {
+    id: 'operation-1',
+    lane: 'task-state',
+    kind: 'start',
+    targetKey: '100,200,300',
+    attempt: 1,
+    generation: 1,
+    status,
+    result: null,
+    errorCode: status === 'failed' ? 'TASK_LIFECYCLE_FAILED' : null,
+    createdAt: 1,
+    updatedAt: 2,
+    steps,
+  } as const;
+}

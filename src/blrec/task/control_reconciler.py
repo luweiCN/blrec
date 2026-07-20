@@ -72,8 +72,6 @@ class TaskControlReconciler:
         rejected: Mapping[int, str],
         force: bool,
     ) -> ControlOperationSnapshot:
-        if not self._accepting:
-            raise RuntimeError('task control admission is closed')
         if kind not in self._CONTROL_KINDS - {'recover'}:
             raise ValueError('unsupported task control kind: {}'.format(kind))
         normalized = tuple(dict.fromkeys(int(room_id) for room_id in room_ids))
@@ -83,6 +81,8 @@ class TaskControlReconciler:
         persisted_kind = self._force_kind(kind, force)
         target_key = ','.join(str(room_id) for room_id in sorted(all_room_ids))
         async with self._submission_lock:
+            if not self._accepting:
+                raise RuntimeError('task control admission is closed')
             operation = await self._journal.admit(
                 lane=self.LANE,
                 kind=persisted_kind,
@@ -97,7 +97,13 @@ class TaskControlReconciler:
                     for room_id in all_room_ids
                 ],
             )
-            await self._persist_desired_state(persisted_kind, normalized)
+            try:
+                await self._persist_desired_state(persisted_kind, normalized)
+            except BaseException:
+                await self._journal.fail_unclaimed_operation(
+                    operation.id, error_code='SETTINGS_PERSIST_FAILED'
+                )
+                raise
             await self._journal.supersede_queued_steps(
                 lane=self.LANE,
                 keys=[str(room_id) for room_id in normalized],
@@ -144,9 +150,15 @@ class TaskControlReconciler:
 
     async def shutdown(self) -> None:
         self.close_admission()
+        async with self._submission_lock:
+            pass
         worker = self._worker
         if worker is None:
-            return
+            if await self._journal.queued_count(self.LANE) == 0:
+                return
+            self.start()
+            worker = self._worker
+            assert worker is not None
         await self.wait_idle()
         self._stop_event.set()
         self._wake_event.set()

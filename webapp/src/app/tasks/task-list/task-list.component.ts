@@ -6,14 +6,15 @@ import {
   EventEmitter,
   Input,
   OnChanges,
+  OnDestroy,
   Output,
   SimpleChanges,
 } from '@angular/core';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
-import { forkJoin, zip } from 'rxjs';
-import { finalize } from 'rxjs/operators';
+import { forkJoin, Subject, zip } from 'rxjs';
+import { finalize, takeUntil } from 'rxjs/operators';
 
 import { retry } from '../../shared/rx-operators';
 import {
@@ -39,7 +40,7 @@ import { RoomUploadPolicyService } from '../upload-policy-dialog/room-upload-pol
   styleUrls: ['./task-list.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class TaskListComponent implements OnChanges {
+export class TaskListComponent implements OnChanges, OnDestroy {
   @Input() dataList: TaskData[] = [];
   @Input() automaticSubmissionFilter: AutomaticSubmissionFilter = null;
   @Input() submissionVisibilityFilter: SubmissionVisibilityFilter = null;
@@ -55,6 +56,7 @@ export class TaskListComponent implements OnChanges {
   batchGlobalSettings?: GlobalTaskSettings;
   policiesByRoomId = new Map<number, RoomUploadPolicy>();
   collectionLabelsByKey = new Map<string, string>();
+  private readonly destroy$ = new Subject<void>();
 
   constructor(
     private changeDetector: ChangeDetectorRef,
@@ -81,6 +83,11 @@ export class TaskListComponent implements OnChanges {
         this.selectedRoomIds.delete(roomId);
       }
     }
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
   }
 
   get selectedCount(): number {
@@ -363,6 +370,7 @@ export class TaskListComponent implements OnChanges {
     this.taskManager
       .runBatchAction(action, roomIds)
       .pipe(
+        takeUntil(this.destroy$),
         finalize(() => {
           this.batchLoading = false;
           this.changeDetector.markForCheck();

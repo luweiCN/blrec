@@ -2,7 +2,7 @@ import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
 import { NzNotificationService } from 'ng-zorro-antd/notification';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 
 import {
   EVENT_SOURCE_FACTORY,
@@ -14,6 +14,7 @@ import { StorageService } from '../core/services/storage.service';
 import { UrlService } from '../core/services/url.service';
 import { FilterTasksPipe } from './shared/pipes/filter-tasks.pipe';
 import { TaskService } from './shared/services/task.service';
+import { TaskManagerService } from './shared/services/task-manager.service';
 import {
   DataSelection,
   PostprocessorStatus,
@@ -58,6 +59,7 @@ describe('TasksComponent', () => {
   let taskService: jasmine.SpyObj<TaskService>;
   let policyService: jasmine.SpyObj<RoomUploadPolicyService>;
   let realtimeEvents: FakeRealtimeSource;
+  let taskRefreshes: Subject<TaskData[]>;
 
   const taskData: TaskData = {
     user_info: {
@@ -135,6 +137,7 @@ describe('TasksComponent', () => {
       ]),
     );
     realtimeEvents = new FakeRealtimeSource();
+    taskRefreshes = new Subject<TaskData[]>();
     const storage = jasmine.createSpyObj<StorageService>('StorageService', [
       'getData',
       'setData',
@@ -163,6 +166,10 @@ describe('TasksComponent', () => {
           useValue: { makeApiUrl: (path: string) => path },
         },
         { provide: TaskService, useValue: taskService },
+        {
+          provide: TaskManagerService,
+          useValue: { taskDataRefresh$: taskRefreshes.asObservable() },
+        },
         { provide: RoomUploadPolicyService, useValue: policyService },
       ],
       schemas: [NO_ERRORS_SCHEMA],
@@ -201,6 +208,13 @@ describe('TasksComponent', () => {
     expect(component.dataList).toEqual([taskData]);
     expect(component.loading).toBeFalse();
     expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the terminal control snapshot published by the task manager', () => {
+    taskRefreshes.next([taskData]);
+
+    expect(component.dataList).toEqual([taskData]);
+    expect(component.loading).toBeFalse();
   });
 
   it('skips the bootstrap resync and reloads for the next resync', () => {
