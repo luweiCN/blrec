@@ -119,13 +119,15 @@ class EmailService(MessagingProvider):
                 self.smtp_port,
                 timeout=self._remaining_timeout(deadline_at),
             )
+        except ssl.SSLCertVerificationError:
+            raise
         except ssl.SSLError:
             smtp = smtplib.SMTP(
                 self.smtp_host,
                 self.smtp_port,
                 timeout=self._remaining_timeout(deadline_at),
             )
-            with smtp:
+            try:
                 self._set_phase_timeout(smtp, deadline_at)
                 context = ssl.create_default_context()
                 smtp.starttls(context=context)
@@ -133,12 +135,17 @@ class EmailService(MessagingProvider):
                 smtp.login(self.src_addr, self.auth_code)
                 self._set_phase_timeout(smtp, deadline_at)
                 smtp.send_message(msg, self.src_addr, self.dst_addr)
+            finally:
+                smtp.close()
         else:
-            with smtp_ssl as smtp:
+            try:
+                smtp = smtp_ssl
                 self._set_phase_timeout(smtp, deadline_at)
                 smtp.login(self.src_addr, self.auth_code)
                 self._set_phase_timeout(smtp, deadline_at)
                 smtp.send_message(msg, self.src_addr, self.dst_addr)
+            finally:
+                smtp_ssl.close()
 
     def _remaining_timeout(self, deadline_at: float) -> float:
         remaining = deadline_at - self._monotonic()

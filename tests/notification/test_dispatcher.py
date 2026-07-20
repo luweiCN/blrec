@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import smtplib
 import socket
+import ssl
 import threading
 import time
 from typing import List, Optional, Tuple
@@ -71,6 +73,28 @@ class DeadlineAwareSmtpSender:
         self.deadlines.append(deadline_at)
         self.started.set()
         time.sleep(min(self.attempt_seconds, max(0, deadline_at - time.monotonic())))
+
+
+class SerialSmtpSender:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.calls: List[str] = []
+        self.active = 0
+        self.max_active = 0
+
+    def send_with_deadline(
+        self, title: str, _content: str, _message_type: str, _deadline_at: float
+    ) -> None:
+        with self._lock:
+            self.calls.append(title)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.started.set()
+        self.release.wait()
+        with self._lock:
+            self.active -= 1
 
 
 @pytest.mark.asyncio
@@ -182,6 +206,8 @@ async def test_keyed_pending_delivery_is_replaced_without_growing_queue() -> Non
         (ConnectionRefusedError('connection refused'), 3),
         (socket.timeout('timed out'), 3),
         (socket.gaierror(-2, 'name lookup failed'), 3),
+        (smtplib.SMTPNotSupportedError('AUTH unsupported'), 1),
+        (ssl.SSLCertVerificationError(1, 'certificate verify failed'), 1),
     ],
 )
 async def test_retry_classification_is_bounded(
@@ -282,3 +308,36 @@ async def test_close_deadline_limits_late_smtp_attempts() -> None:
     assert len(sender.deadlines) == 2
     assert sender.deadlines[1] <= started_at + 0.11
     assert dispatcher.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_restart_serializes_smtp_left_running_by_close_timeout() -> None:
+    sender = SerialSmtpSender()
+    dispatcher = NotificationDispatcher(
+        {'email': sender}, close_timeout_seconds=0.01, session_factory=FakeSession
+    )
+    await dispatcher.start()
+    assert dispatcher.enqueue('email', 'old', 'body', 'text')
+    await asyncio.get_running_loop().run_in_executor(None, sender.started.wait)
+
+    await dispatcher.close()
+    assert sender.active == 1
+
+    sender.started.clear()
+    await dispatcher.start()
+    assert dispatcher.enqueue('email', 'new', 'body', 'text')
+    try:
+        await asyncio.sleep(0.02)
+
+        assert sender.calls == ['old']
+        assert sender.max_active == 1
+    finally:
+        sender.release.set()
+        for _ in range(100):
+            if sender.calls == ['old', 'new'] and sender.active == 0:
+                break
+            await asyncio.sleep(0.001)
+        await dispatcher.close(drain_timeout_seconds=0.2)
+
+    assert sender.calls == ['old', 'new']
+    assert sender.max_active == 1

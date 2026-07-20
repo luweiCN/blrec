@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import smtplib
+import ssl
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -342,6 +343,20 @@ class NotificationDispatcher:
             attempt_deadline = min(
                 delivery.deadline_at, self._monotonic() + timeout_seconds
             )
+            previous_futures = tuple(
+                future for future in self._smtp_futures if not future.done()
+            )
+            if previous_futures:
+                if any(future.get_loop() is not loop for future in previous_futures):
+                    raise RuntimeError('previous SMTP delivery is still closing')
+                _, pending = await asyncio.wait(
+                    previous_futures,
+                    timeout=max(0, attempt_deadline - self._monotonic()),
+                )
+                if pending:
+                    raise asyncio.TimeoutError()
+            if attempt_deadline - self._monotonic() <= 0:
+                raise asyncio.TimeoutError()
             future = cast(
                 asyncio.Future[Any],
                 loop.run_in_executor(
@@ -377,7 +392,14 @@ class NotificationDispatcher:
             return error.status == 429 or 500 <= error.status <= 599
         if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
             return True
-        if isinstance(error, smtplib.SMTPAuthenticationError):
+        if isinstance(
+            error,
+            (
+                smtplib.SMTPAuthenticationError,
+                smtplib.SMTPNotSupportedError,
+                ssl.SSLCertVerificationError,
+            ),
+        ):
             return False
         if isinstance(error, smtplib.SMTPResponseException):
             return 400 <= error.smtp_code <= 499
