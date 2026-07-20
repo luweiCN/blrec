@@ -14,6 +14,7 @@ from blrec.bili_upload import (
     LeaseLost,
     UnsupportedDatabaseFilesystem,
 )
+from blrec.request_metrics import request_metrics_scope
 
 REQUIRED_TABLES = {
     'schema_migrations',
@@ -676,6 +677,19 @@ async def test_reads_and_writes_share_one_database_actor(tmp_path: Path) -> None
 
         assert read_thread == write_thread
         assert read_thread != caller_thread
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_database_executor_records_request_metrics(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    try:
+        with request_metrics_scope() as metrics:
+            await database.open()
+
+        assert metrics.database_calls == 1
+        assert metrics.database_ms > 0.0
     finally:
         await database.close()
 

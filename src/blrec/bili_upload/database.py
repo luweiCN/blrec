@@ -24,6 +24,8 @@ from typing import (
     TypeVar,
 )
 
+from blrec.request_metrics import record_database_call
+
 __all__ = (
     'BiliUploadDatabase',
     'DatabaseLocked',
@@ -185,7 +187,11 @@ class BiliUploadDatabase:
         if self._executor_closed:
             raise RuntimeError('database has been closed')
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, partial(operation, *args))
+        started = time.perf_counter()
+        try:
+            return await loop.run_in_executor(self._executor, partial(operation, *args))
+        finally:
+            record_database_call(time.perf_counter() - started)
 
     def _open_sync(self) -> None:
         self._directory.mkdir(parents=True, mode=0o700, exist_ok=True)

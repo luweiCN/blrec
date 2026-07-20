@@ -31,6 +31,7 @@ from blrec.notification.providers import (
 from blrec.path.helpers import create_file, file_exists
 from blrec.setting import EnvSettings, Settings, SettingsIn
 from blrec.web.middlewares.base_herf import BaseHrefMiddleware
+from blrec.web.middlewares.request_performance import RequestPerformanceMiddleware
 from blrec.web.middlewares.route_redirect import RouteRedirectMiddleware
 from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
 
@@ -264,6 +265,7 @@ api = FastAPI(
 )
 
 api.add_middleware(BaseHrefMiddleware)
+api.add_middleware(RequestPerformanceMiddleware)
 api.add_middleware(BrotliMiddleware)
 api.add_middleware(SecurityHeadersMiddleware)
 api.add_middleware(
