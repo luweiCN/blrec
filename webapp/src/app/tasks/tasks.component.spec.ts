@@ -1,13 +1,17 @@
 import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 import { NzNotificationService } from 'ng-zorro-antd/notification';
-import { of, Subject } from 'rxjs';
+import { of } from 'rxjs';
 
 import {
+  EVENT_SOURCE_FACTORY,
+  EventSourceLike,
   RealtimeEvent,
   RealtimeService,
 } from '../core/services/realtime.service';
 import { StorageService } from '../core/services/storage.service';
+import { UrlService } from '../core/services/url.service';
 import { FilterTasksPipe } from './shared/pipes/filter-tasks.pipe';
 import { TaskService } from './shared/services/task.service';
 import {
@@ -20,12 +24,40 @@ import { TasksComponent } from './tasks.component';
 import { RoomUploadPolicy } from './upload-policy-dialog/room-upload-policy.model';
 import { RoomUploadPolicyService } from './upload-policy-dialog/room-upload-policy.service';
 
+class FakeRealtimeSource implements EventSourceLike {
+  private readonly listeners = new Map<string, EventListener[]>();
+
+  addEventListener(type: string, listener: EventListener): void {
+    const values = this.listeners.get(type) ?? [];
+    values.push(listener);
+    this.listeners.set(type, values);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((value) => value !== listener),
+    );
+  }
+
+  close(): void {}
+
+  next(event: RealtimeEvent): void {
+    const message = new MessageEvent(event.type, {
+      data: JSON.stringify(event.data),
+    });
+    for (const listener of this.listeners.get(event.type) ?? []) {
+      listener(message);
+    }
+  }
+}
+
 describe('TasksComponent', () => {
   let component: TasksComponent;
   let fixture: ComponentFixture<TasksComponent>;
   let taskService: jasmine.SpyObj<TaskService>;
   let policyService: jasmine.SpyObj<RoomUploadPolicyService>;
-  let realtimeEvents: Subject<RealtimeEvent>;
+  let realtimeEvents: FakeRealtimeSource;
 
   const taskData: TaskData = {
     user_info: {
@@ -102,7 +134,7 @@ describe('TasksComponent', () => {
         } as RoomUploadPolicy,
       ]),
     );
-    realtimeEvents = new Subject<RealtimeEvent>();
+    realtimeEvents = new FakeRealtimeSource();
     const storage = jasmine.createSpyObj<StorageService>('StorageService', [
       'getData',
       'setData',
@@ -123,9 +155,12 @@ describe('TasksComponent', () => {
           provide: StorageService,
           useValue: storage,
         },
+        RealtimeService,
+        { provide: EVENT_SOURCE_FACTORY, useValue: () => realtimeEvents },
+        { provide: Router, useValue: { url: '/tasks' } },
         {
-          provide: RealtimeService,
-          useValue: { events$: realtimeEvents.asObservable() },
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
         },
         { provide: TaskService, useValue: taskService },
         { provide: RoomUploadPolicyService, useValue: policyService },
@@ -166,6 +201,16 @@ describe('TasksComponent', () => {
     expect(component.dataList).toEqual([taskData]);
     expect(component.loading).toBeFalse();
     expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the bootstrap resync and reloads for the next resync', () => {
+    expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({ type: 'resync', data: {} });
+    expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({ type: 'resync', data: {} });
+    expect(taskService.getAllTaskData).toHaveBeenCalledTimes(2);
   });
 
   it('loads one room policy snapshot and derives unique account filters', () => {

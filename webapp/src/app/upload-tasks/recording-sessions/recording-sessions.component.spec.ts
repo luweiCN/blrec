@@ -5,6 +5,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { of, Subject, throwError } from 'rxjs';
@@ -36,9 +37,12 @@ import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 import { NzProgressModule } from 'ng-zorro-antd/progress';
 
 import {
+  EVENT_SOURCE_FACTORY,
+  EventSourceLike,
   RealtimeEvent,
   RealtimeService,
 } from '../../core/services/realtime.service';
+import { UrlService } from '../../core/services/url.service';
 import { RecordingSession } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightService } from '../shared/highlight.service';
@@ -61,6 +65,34 @@ class UploadPolicyDialogStubComponent {
   @Input() liveAreaName = '';
   @Input() liveParentAreaName = '';
   @Output() readonly closed = new EventEmitter<void>();
+}
+
+class FakeRealtimeSource implements EventSourceLike {
+  private readonly listeners = new Map<string, EventListener[]>();
+
+  addEventListener(type: string, listener: EventListener): void {
+    const values = this.listeners.get(type) ?? [];
+    values.push(listener);
+    this.listeners.set(type, values);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((value) => value !== listener),
+    );
+  }
+
+  close(): void {}
+
+  next(event: RealtimeEvent): void {
+    const message = new MessageEvent(event.type, {
+      data: JSON.stringify(event.data),
+    });
+    for (const listener of this.listeners.get(event.type) ?? []) {
+      listener(message);
+    }
+  }
 }
 
 function realtimeUploadJob(
@@ -94,7 +126,7 @@ describe('RecordingSessionsComponent', () => {
   let message: jasmine.SpyObj<NzMessageService>;
   let taskManager: jasmine.SpyObj<TaskManagerService>;
   let highlights: jasmine.SpyObj<HighlightService>;
-  let realtimeEvents: Subject<RealtimeEvent>;
+  let realtimeEvents: FakeRealtimeSource;
 
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
@@ -143,7 +175,7 @@ describe('RecordingSessionsComponent', () => {
         markers: [],
       }),
     );
-    realtimeEvents = new Subject<RealtimeEvent>();
+    realtimeEvents = new FakeRealtimeSource();
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
     service.retryFailedJobs.and.returnValue(of({ results: [] }));
@@ -331,9 +363,11 @@ describe('RecordingSessionsComponent', () => {
         { provide: NzMessageService, useValue: message },
         { provide: TaskManagerService, useValue: taskManager },
         { provide: HighlightService, useValue: highlights },
+        RealtimeService,
+        { provide: EVENT_SOURCE_FACTORY, useValue: () => realtimeEvents },
         {
-          provide: RealtimeService,
-          useValue: { events$: realtimeEvents.asObservable() },
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
         },
         {
           provide: NZ_ICONS,
@@ -349,6 +383,9 @@ describe('RecordingSessionsComponent', () => {
       ],
     }).compileComponents();
 
+    spyOnProperty(TestBed.inject(Router), 'url', 'get').and.returnValue(
+      '/upload-tasks',
+    );
     fixture = TestBed.createComponent(RecordingSessionsComponent);
   });
 
@@ -1154,6 +1191,17 @@ describe('RecordingSessionsComponent', () => {
 
     expect(fixture.componentInstance.sessions[0].uploadJob?.percent).toBe(75);
     expect(service.listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the bootstrap resync and reloads for the next resync', () => {
+    fixture.detectChanges();
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({ type: 'resync', data: {} });
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({ type: 'resync', data: {} });
+    expect(service.listSessions).toHaveBeenCalledTimes(2);
   });
 
   it('reloads when SSE announces a new visible preupload task', () => {

@@ -1,10 +1,17 @@
 import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 
-import { of, Subject } from 'rxjs';
+import { of } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
-import { RealtimeEvent, RealtimeService } from '../core/services/realtime.service';
+import {
+  EVENT_SOURCE_FACTORY,
+  EventSourceLike,
+  RealtimeEvent,
+  RealtimeService,
+} from '../core/services/realtime.service';
+import { UrlService } from '../core/services/url.service';
 import { SettingService } from '../settings/shared/services/setting.service';
 import {
   NetworkSettings,
@@ -13,11 +20,39 @@ import {
 import { NetworkComponent } from './network.component';
 import { NetworkService } from './network.service';
 
+class FakeRealtimeSource implements EventSourceLike {
+  private readonly listeners = new Map<string, EventListener[]>();
+
+  addEventListener(type: string, listener: EventListener): void {
+    const values = this.listeners.get(type) ?? [];
+    values.push(listener);
+    this.listeners.set(type, values);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((value) => value !== listener)
+    );
+  }
+
+  close(): void {}
+
+  next(event: RealtimeEvent): void {
+    const message = new MessageEvent(event.type, {
+      data: JSON.stringify(event.data),
+    });
+    for (const listener of this.listeners.get(event.type) ?? []) {
+      listener(message);
+    }
+  }
+}
+
 describe('NetworkComponent', () => {
   let fixture: ComponentFixture<NetworkComponent>;
   let networkService: jasmine.SpyObj<NetworkService>;
   let settingService: jasmine.SpyObj<SettingService>;
-  let realtimeEvents: Subject<RealtimeEvent>;
+  let realtimeEvents: FakeRealtimeSource;
 
   const networkInterface = {
     name: 'eth0',
@@ -64,16 +99,19 @@ describe('NetworkComponent', () => {
     );
     settingService.getSettings.and.returnValue(of({ network } as Settings));
     settingService.changeSettings.and.returnValue(of({ network } as Settings));
-    realtimeEvents = new Subject<RealtimeEvent>();
+    realtimeEvents = new FakeRealtimeSource();
 
     await TestBed.configureTestingModule({
       declarations: [NetworkComponent],
       providers: [
         { provide: NetworkService, useValue: networkService },
         { provide: SettingService, useValue: settingService },
+        RealtimeService,
+        { provide: EVENT_SOURCE_FACTORY, useValue: () => realtimeEvents },
+        { provide: Router, useValue: { url: '/network' } },
         {
-          provide: RealtimeService,
-          useValue: { events$: realtimeEvents.asObservable() },
+          provide: UrlService,
+          useValue: { makeApiUrl: (path: string) => path },
         },
         {
           provide: NzMessageService,
@@ -143,6 +181,19 @@ describe('NetworkComponent', () => {
 
     expect(fixture.componentInstance.interfaces[0].uploadBps).toBe(4096);
     expect(networkService.getInterfaces).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the bootstrap resync and reloads for the next resync', () => {
+    expect(networkService.getInterfaces).toHaveBeenCalledTimes(1);
+    expect(settingService.getSettings).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({ type: 'resync', data: {} });
+    expect(networkService.getInterfaces).toHaveBeenCalledTimes(1);
+    expect(settingService.getSettings).toHaveBeenCalledTimes(1);
+
+    realtimeEvents.next({ type: 'resync', data: {} });
+    expect(networkService.getInterfaces).toHaveBeenCalledTimes(2);
+    expect(settingService.getSettings).toHaveBeenCalledTimes(2);
   });
 });
 

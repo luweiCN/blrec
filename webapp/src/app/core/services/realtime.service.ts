@@ -1,19 +1,53 @@
 import { Inject, Injectable, InjectionToken, NgZone } from '@angular/core';
+import { Router } from '@angular/router';
 import { Observable } from 'rxjs';
 import { share } from 'rxjs/operators';
 
 import { UrlService } from './url.service';
 
-const EVENT_TYPES = [
-  'resync',
+const REALTIME_TOPICS = [
   'tasks',
   'network',
   'upload_progress',
   'highlight_progress',
+] as const;
+
+const CONTROL_EVENT_TYPES = [
+  'resync',
   'heartbeat',
 ] as const;
 
+const EVENT_TYPES = [...REALTIME_TOPICS, ...CONTROL_EVENT_TYPES] as const;
+
 export type RealtimeEventType = (typeof EVENT_TYPES)[number];
+
+type RealtimeTopic = (typeof REALTIME_TOPICS)[number];
+
+const ROUTE_TOPICS: ReadonlyArray<
+  readonly [route: string, topics: readonly RealtimeTopic[]]
+> = [
+  ['/tasks', ['tasks']],
+  ['/network', ['network']],
+  ['/recordings', ['upload_progress']],
+  ['/upload-tasks', ['upload_progress']],
+  ['/clips', ['upload_progress', 'highlight_progress']],
+];
+
+export function realtimeTopicsForUrl(
+  url: string
+): readonly RealtimeEventType[] {
+  const path = (url.split(/[?#]/, 1)[0] || '/').replace(/\/+$/, '') || '/';
+  const requested = new Set<RealtimeTopic>();
+  for (const [route, topics] of ROUTE_TOPICS) {
+    if (path !== route && !path.startsWith(`${route}/`)) {
+      continue;
+    }
+    for (const topic of topics) {
+      requested.add(topic);
+    }
+  }
+  return REALTIME_TOPICS.filter((topic) => requested.has(topic));
+}
 
 export interface RealtimeEvent {
   readonly type: RealtimeEventType;
@@ -43,25 +77,36 @@ export class RealtimeService {
   constructor(
     private url: UrlService,
     private zone: NgZone,
+    private router: Router,
     @Inject(EVENT_SOURCE_FACTORY) private eventSourceFactory: EventSourceFactory
   ) {
     this.events$ = new Observable<RealtimeEvent>((subscriber) => {
+      const topics = realtimeTopicsForUrl(this.router.url);
+      const params = encodeURIComponent(topics.join(','));
       const source = this.eventSourceFactory(
-        this.url.makeApiUrl('/api/v1/realtime')
+        this.url.makeApiUrl(`/api/v1/realtime?topics=${params}`)
       );
       const listeners = new Map<string, EventListener>();
-      for (const type of EVENT_TYPES) {
+      let bootstrapResyncPending = true;
+      for (const type of [...topics, ...CONTROL_EVENT_TYPES]) {
         const listener: EventListener = (event) => {
           if (!(event instanceof MessageEvent)) {
             return;
           }
-          let value: RealtimeEvent;
+          let data: unknown;
           try {
-            value = { type, data: JSON.parse(String(event.data)) };
+            data = JSON.parse(String(event.data));
           } catch (_error) {
-            value = { type: 'resync', data: {} };
+            this.zone.run(() =>
+              subscriber.next({ type: 'resync', data: {} })
+            );
+            return;
           }
-          this.zone.run(() => subscriber.next(value));
+          if (type === 'resync' && bootstrapResyncPending) {
+            bootstrapResyncPending = false;
+            return;
+          }
+          this.zone.run(() => subscriber.next({ type, data }));
         };
         listeners.set(type, listener);
         source.addEventListener(type, listener);
