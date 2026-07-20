@@ -1,18 +1,23 @@
+import asyncio
 import hashlib
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Iterator
 
 import pytest
+from argon2 import PasswordHasher
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from blrec.web import security
 from blrec.web.auth_store import AdminAuthStore
 from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
+from blrec.web.password_work import PasswordWorkCoordinator, PasswordWorkSaturated
 from blrec.web.routers import auth as auth_router
 
 
@@ -20,8 +25,11 @@ from blrec.web.routers import auth as auth_router
 def client(tmp_path: Path) -> Iterator[TestClient]:
     store = AdminAuthStore(str(tmp_path / 'auth.sqlite3'), admin_username='owner')
     store.open()
+    password_work = PasswordWorkCoordinator()
     security.configure(store, bootstrap_api_key='bootstrap-key')
-    auth_router.configure(store, bootstrap_api_key='bootstrap-key')
+    auth_router.configure(
+        store, password_work=password_work, bootstrap_api_key='bootstrap-key'
+    )
     api = FastAPI(dependencies=[Depends(security.authenticate)])
     api.add_middleware(SecurityHeadersMiddleware)
     api.include_router(auth_router.router, prefix='/api/v1')
@@ -38,7 +46,74 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield value
     security.reset()
     auth_router.reset()
+    asyncio.run(password_work.shutdown())
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_password_worker_admits_one_active_and_four_waiting_jobs() -> None:
+    coordinator = PasswordWorkCoordinator()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    active = 0
+    peak_active = 0
+    active_lock = threading.Lock()
+
+    def blocking_job(value: int) -> int:
+        nonlocal active, peak_active
+        with active_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        if value == 0:
+            first_started.set()
+            assert release_first.wait(5)
+        with active_lock:
+            active -= 1
+        return value
+
+    jobs = [
+        asyncio.create_task(coordinator.run(lambda value=value: blocking_job(value)))
+        for value in range(5)
+    ]
+    loop = asyncio.get_running_loop()
+    assert await loop.run_in_executor(None, first_started.wait, 5)
+    for _ in range(10):
+        if coordinator.admitted_count == 5:
+            break
+        await asyncio.sleep(0)
+    assert coordinator.admitted_count == 5
+
+    with pytest.raises(PasswordWorkSaturated) as error:
+        await coordinator.run(lambda: 6)
+    assert error.value.retry_after == 1
+
+    release_first.set()
+    assert await asyncio.gather(*jobs) == [0, 1, 2, 3, 4]
+    assert peak_active == 1
+    await coordinator.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_password_worker_shutdown_waits_for_admitted_work() -> None:
+    coordinator = PasswordWorkCoordinator()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job() -> str:
+        started.set()
+        assert release.wait(5)
+        return 'done'
+
+    job = asyncio.create_task(coordinator.run(blocking_job))
+    loop = asyncio.get_running_loop()
+    assert await loop.run_in_executor(None, started.wait, 5)
+    shutdown = asyncio.create_task(coordinator.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    release.set()
+    assert await job == 'done'
+    await shutdown
 
 
 def setup_admin(client: TestClient) -> str:
@@ -331,3 +406,122 @@ def test_extension_token_is_not_an_administrator_session(client: TestClient) -> 
     )
 
     assert response.status_code == 401
+
+
+def test_password_routes_run_argon2_only_in_the_password_worker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    original_hash = PasswordHasher.hash
+    original_verify = PasswordHasher.verify
+
+    def recording_hash(hasher: PasswordHasher, password: str) -> str:
+        calls.append(('hash', threading.current_thread().name))
+        return str(original_hash(hasher, password))
+
+    def recording_verify(
+        hasher: PasswordHasher, encoded_hash: str, password: str
+    ) -> bool:
+        calls.append(('verify', threading.current_thread().name))
+        return bool(original_verify(hasher, encoded_hash, password))
+
+    monkeypatch.setattr(PasswordHasher, 'hash', recording_hash)
+    monkeypatch.setattr(PasswordHasher, 'verify', recording_verify)
+
+    setup_admin(client)
+    login = client.post(
+        '/api/v1/auth/login',
+        headers={'origin': 'https://testserver'},
+        json={'username': 'owner', 'password': 'correct horse battery staple'},
+    )
+    assert login.status_code == 200
+    csrf_token = str(login.json()['csrfToken'])
+    changed = client.post(
+        '/api/v1/auth/change-password',
+        headers={'origin': 'https://testserver', 'x-csrf-token': csrf_token},
+        json={
+            'currentPassword': 'correct horse battery staple',
+            'newPassword': 'new correct horse battery staple',
+        },
+    )
+    assert changed.status_code == 204
+    recovered = client.post(
+        '/api/v1/auth/recover',
+        headers={'origin': 'https://testserver'},
+        json={
+            'username': 'owner',
+            'apiKey': 'bootstrap-key',
+            'newPassword': 'recovered correct password',
+        },
+    )
+    assert recovered.status_code == 204
+
+    assert [kind for kind, _ in calls].count('hash') == 3
+    assert [kind for kind, _ in calls].count('verify') == 2
+    assert all(name.startswith('blrec-password') for _, name in calls)
+
+
+def test_saturated_password_worker_returns_retryable_503_without_login_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup_admin(client)
+    client.cookies.clear()
+    store = security.auth_store
+    assert store is not None
+    connection = store._connection
+    assert connection is not None
+    before = connection.execute('SELECT COUNT(*) FROM login_failures').fetchone()[0]
+    coordinator = auth_router.password_work
+    assert coordinator is not None
+    verify_started = threading.Event()
+    release_verify = threading.Event()
+    original_verify = PasswordHasher.verify
+    first_call = True
+    call_lock = threading.Lock()
+
+    def blocking_first_verify(
+        hasher: PasswordHasher, encoded_hash: str, password: str
+    ) -> bool:
+        nonlocal first_call
+        with call_lock:
+            should_block = first_call
+            first_call = False
+        if should_block:
+            verify_started.set()
+            assert release_verify.wait(5)
+        return bool(original_verify(hasher, encoded_hash, password))
+
+    monkeypatch.setattr(PasswordHasher, 'verify', blocking_first_verify)
+
+    def request_login() -> object:
+        return client.post(
+            '/api/v1/auth/login',
+            headers={'origin': 'https://testserver'},
+            json={'username': 'owner', 'password': 'wrong password'},
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        admitted = [executor.submit(request_login)]
+        assert verify_started.wait(5)
+        admitted.extend(executor.submit(request_login) for _ in range(4))
+        deadline = time.monotonic() + 5
+        while coordinator.admitted_count != 5 and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert coordinator.admitted_count == 5
+
+        rejected = executor.submit(request_login)
+        try:
+            response = rejected.result(timeout=1)
+            assert response.status_code == 503
+            assert response.headers['retry-after'] == '1'
+            assert response.json()['detail'] == 'Password authentication is busy'
+            during = connection.execute(
+                'SELECT COUNT(*) FROM login_failures'
+            ).fetchone()[0]
+            assert during == before
+        finally:
+            release_verify.set()
+        statuses = [future.result(timeout=5).status_code for future in admitted]
+
+    assert statuses.count(401) == 4
+    assert statuses.count(429) == 1

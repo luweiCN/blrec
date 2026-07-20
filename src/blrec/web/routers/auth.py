@@ -5,7 +5,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from email.utils import format_datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TypeVar
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.exceptions import HTTPException
@@ -19,11 +19,15 @@ from blrec.web.auth_store import (
     AuthenticationRateLimited,
     SessionCredentials,
 )
+from blrec.web.password_work import PasswordWorkCoordinator, PasswordWorkSaturated
 
 router = APIRouter(prefix='/auth', tags=['administrator-auth'])
 
 store: Optional[AdminAuthStore] = None
+password_work: Optional[PasswordWorkCoordinator] = None
 bootstrap_api_key = ''
+
+T = TypeVar('T')
 
 
 class SetupRequest(BaseModel):
@@ -67,15 +71,22 @@ class ExtensionTokenResponse(BaseModel):
         allow_population_by_field_name = True
 
 
-def configure(value: AdminAuthStore, *, bootstrap_api_key: str = '') -> None:
+def configure(
+    value: AdminAuthStore,
+    *,
+    password_work: PasswordWorkCoordinator,
+    bootstrap_api_key: str = '',
+) -> None:
     global store
     globals()['bootstrap_api_key'] = bootstrap_api_key
+    globals()['password_work'] = password_work
     store = value
 
 
 def reset() -> None:
-    global bootstrap_api_key, store
+    global bootstrap_api_key, password_work, store
     store = None
+    password_work = None
     bootstrap_api_key = ''
 
 
@@ -101,7 +112,10 @@ async def setup(request: Request, command: SetupRequest) -> Response:
         )
     _require_bootstrap(request, command.username, command.api_key)
     try:
-        credentials = auth_store.initialize(command.username, command.password)
+        password_hash = await _run_password_work(
+            lambda: auth_store.hash_password(command.password)
+        )
+        credentials = auth_store.commit_initialize(command.username, password_hash)
     except AdminAlreadyInitialized:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -121,9 +135,11 @@ async def login(request: Request, command: LoginRequest) -> Response:
         )
     client_key = request.client.host if request.client is not None else 'unknown'
     try:
-        credentials = auth_store.login(
-            command.username, command.password, client_key=client_key
+        ticket = auth_store.prepare_login(command.username, client_key=client_key)
+        verification = await _run_password_work(
+            lambda: auth_store.check_login_password(ticket, command.password)
         )
+        credentials = auth_store.commit_login(ticket, verification)
     except AuthenticationRateLimited as error:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -166,8 +182,15 @@ async def logout(request: Request) -> Response:
 
 @router.post('/change-password', status_code=status.HTTP_204_NO_CONTENT)
 async def change_password(request: Request, command: ChangePasswordRequest) -> Response:
+    auth_store = _store()
     try:
-        _store().change_password(command.current_password, command.new_password)
+        ticket = auth_store.prepare_password_change()
+        verification = await _run_password_work(
+            lambda: auth_store.check_password_change(
+                ticket, command.current_password, command.new_password
+            )
+        )
+        auth_store.commit_password_change(ticket, verification)
     except AuthenticationFailed:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail='Password is invalid'
@@ -210,8 +233,13 @@ async def revoke_extension_token(token_id: int) -> Response:
 async def recover(request: Request, command: RecoverPasswordRequest) -> Response:
     security.require_same_origin(request)
     _require_bootstrap(request, command.username, command.api_key)
+    auth_store = _store()
     try:
-        _store().reset_password(command.new_password)
+        ticket = auth_store.prepare_password_reset()
+        password_hash = await _run_password_work(
+            lambda: auth_store.hash_password(command.new_password)
+        )
+        auth_store.commit_password_reset(ticket, password_hash)
     except AuthenticationFailed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -296,3 +324,20 @@ def _store() -> AdminAuthStore:
             detail='Administrator authentication is unavailable',
         )
     return store
+
+
+async def _run_password_work(work: Callable[[], T]) -> T:
+    coordinator = password_work
+    if coordinator is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Administrator authentication is unavailable',
+        )
+    try:
+        return await coordinator.run(work)
+    except PasswordWorkSaturated as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Password authentication is busy',
+            headers={'Retry-After': str(error.retry_after)},
+        ) from None

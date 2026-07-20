@@ -38,6 +38,7 @@ from blrec.web.middlewares.security_headers import SecurityHeadersMiddleware
 from ..application import Application
 from . import security
 from .auth_store import AdminAuthStore
+from .password_work import PasswordWorkCoordinator
 from .realtime import RealtimeSampler
 from .routers import (
     application,
@@ -76,6 +77,7 @@ _admin_auth_store = AdminAuthStore(
     _auth_database_path, admin_username=_env_settings.admin_username
 )
 _admin_auth_store.open()
+_password_work_coordinator: Optional[PasswordWorkCoordinator] = None
 _application_started = False
 _network_route_manager = NetworkRouteManager(lambda: _settings.network)
 
@@ -322,10 +324,16 @@ async def validation_error_handler(
 
 @api.on_event('startup')
 async def on_startup() -> None:
-    global _application_started
+    global _application_started, _password_work_coordinator
     _admin_auth_store.open()
+    password_work = PasswordWorkCoordinator()
+    _password_work_coordinator = password_work
     security.configure(_admin_auth_store, bootstrap_api_key=_env_settings.api_key or '')
-    auth.configure(_admin_auth_store, bootstrap_api_key=_env_settings.api_key or '')
+    auth.configure(
+        _admin_auth_store,
+        password_work=password_work,
+        bootstrap_api_key=_env_settings.api_key or '',
+    )
     application_launched = False
     try:
         browser_extension.application = app
@@ -395,12 +403,16 @@ async def on_startup() -> None:
                 await app.exit()
         finally:
             await _bili_account_runtime.close()
+        security.reset()
+        auth.reset()
+        await password_work.shutdown()
+        _password_work_coordinator = None
         raise
 
 
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
-    global _application_started
+    global _application_started, _password_work_coordinator
     await _realtime_sampler.stop()
     _application_started = False
     bili_accounts.manager = None
@@ -422,13 +434,18 @@ async def on_shuntdown() -> None:
     try:
         await app.exit()
     finally:
-        _settings.dump()
         try:
-            await _bili_account_runtime.close()
+            _settings.dump()
         finally:
-            security.reset()
-            auth.reset()
-            _admin_auth_store.close()
+            try:
+                await _bili_account_runtime.close()
+            finally:
+                security.reset()
+                auth.reset()
+                if _password_work_coordinator is not None:
+                    await _password_work_coordinator.shutdown()
+                    _password_work_coordinator = None
+                _admin_auth_store.close()
 
 
 tasks.app = app

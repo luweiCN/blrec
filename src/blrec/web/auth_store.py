@@ -23,7 +23,16 @@ __all__ = (
     'AuthenticationRateLimited',
     'ExtensionCredentials',
     'ExtensionIdentity',
+    'LoginPasswordTicket',
+    'PasswordChangeTicket',
+    'PasswordVerification',
     'SessionCredentials',
+)
+
+
+_DUMMY_PASSWORD_HASH = (
+    '$argon2id$v=19$m=65536,t=3,p=2$eQiU2klEfhE8PD4nTZrjeQ$'
+    'EqOjlRVZ1s435cSL1/by7PsqbiP0d0xgAouzy4Ez6DM'
 )
 
 
@@ -61,6 +70,27 @@ class ExtensionIdentity:
     created_at: int
     last_used_at: int
     revoked_at: Optional[int]
+
+
+@dataclass(frozen=True)
+class LoginPasswordTicket:
+    encoded_hash: str
+    admin_exists: bool
+    username_matches: bool
+    rate_limit_key: str
+    observed_updated_at: Optional[int]
+
+
+@dataclass(frozen=True)
+class PasswordChangeTicket:
+    encoded_hash: str
+    observed_updated_at: int
+
+
+@dataclass(frozen=True)
+class PasswordVerification:
+    valid: bool
+    replacement_hash: Optional[str] = None
 
 
 class AdminAuthStore:
@@ -107,7 +137,6 @@ class AdminAuthStore:
             salt_len=16,
             type=Type.ID,
         )
-        self._dummy_password_hash: Optional[str] = None
         self._media_signing_key: Optional[bytes] = None
 
     def open(self) -> None:
@@ -131,9 +160,6 @@ class AdminAuthStore:
                 connection.execute('PRAGMA synchronous=FULL')
                 self._create_schema(connection)
                 self._media_signing_key = self._load_or_create_media_key(connection)
-                self._dummy_password_hash = self._password_hasher.hash(
-                    secrets.token_urlsafe(32)
-                )
             except BaseException:
                 connection.close()
                 raise
@@ -144,7 +170,6 @@ class AdminAuthStore:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
-            self._dummy_password_hash = None
             self._media_signing_key = None
 
     @property
@@ -162,9 +187,13 @@ class AdminAuthStore:
             )
 
     def initialize(self, username: str, password: str) -> SessionCredentials:
-        self._validate_password(password)
+        password_hash = self.hash_password(password)
+        return self.commit_initialize(username, password_hash)
+
+    def commit_initialize(
+        self, username: str, password_hash: str
+    ) -> SessionCredentials:
         connection = self._require_open()
-        password_hash = self._password_hasher.hash(password)
         if not self._username_matches(username):
             raise AuthenticationFailed('invalid credentials')
         now = int(self._clock())
@@ -182,40 +211,83 @@ class AdminAuthStore:
     def login(
         self, username: str, password: str, *, client_key: str
     ) -> SessionCredentials:
+        ticket = self.prepare_login(username, client_key=client_key)
+        verification = self.check_login_password(ticket, password)
+        return self.commit_login(ticket, verification)
+
+    def prepare_login(self, username: str, *, client_key: str) -> LoginPasswordTicket:
         connection = self._require_open()
         now = int(self._clock())
         rate_limit_key = self._rate_limit_key('login', client_key)
-        with self._lock, connection:
+        with self._lock:
             self._ensure_not_rate_limited(connection, rate_limit_key, now)
             row = connection.execute(
-                'SELECT password_hash FROM admin WHERE id=1'
+                'SELECT password_hash,updated_at FROM admin WHERE id=1'
             ).fetchone()
-            encoded_hash = (
-                str(row['password_hash'])
-                if row is not None
-                else self._dummy_password_hash
+            return LoginPasswordTicket(
+                encoded_hash=(
+                    str(row['password_hash'])
+                    if row is not None
+                    else _DUMMY_PASSWORD_HASH
+                ),
+                admin_exists=row is not None,
+                username_matches=self._username_matches(username),
+                rate_limit_key=rate_limit_key,
+                observed_updated_at=(
+                    int(row['updated_at']) if row is not None else None
+                ),
             )
-            assert encoded_hash is not None
-            try:
-                valid: bool = bool(self._password_hasher.verify(encoded_hash, password))
-            except (VerifyMismatchError, InvalidHashError):
-                valid = False
-            if row is None or not valid or not self._username_matches(username):
+
+    def check_login_password(
+        self, ticket: LoginPasswordTicket, password: str
+    ) -> PasswordVerification:
+        valid = self.verify_password(ticket.encoded_hash, password)
+        replacement_hash = None
+        if valid and self._password_hasher.check_needs_rehash(ticket.encoded_hash):
+            replacement_hash = self.hash_password(password)
+        return PasswordVerification(valid=valid, replacement_hash=replacement_hash)
+
+    def commit_login(
+        self, ticket: LoginPasswordTicket, verification: PasswordVerification
+    ) -> SessionCredentials:
+        connection = self._require_open()
+        now = int(self._clock())
+        with self._lock, connection:
+            self._ensure_not_rate_limited(connection, ticket.rate_limit_key, now)
+            row = connection.execute(
+                'SELECT password_hash,updated_at FROM admin WHERE id=1'
+            ).fetchone()
+            if not self._login_ticket_matches(ticket, row):
+                raise AuthenticationFailed('invalid credentials')
+            if (
+                not ticket.admin_exists
+                or not verification.valid
+                or not ticket.username_matches
+            ):
                 retry_after = self._record_failed_login(
-                    connection, rate_limit_key, now, scope='login'
+                    connection, ticket.rate_limit_key, now, scope='login'
                 )
                 connection.commit()
                 if retry_after is not None:
                     raise AuthenticationRateLimited(retry_after)
                 raise AuthenticationFailed('invalid credentials')
             connection.execute(
-                'DELETE FROM login_failures WHERE client_key=?', (rate_limit_key,)
+                'DELETE FROM login_failures WHERE client_key=?',
+                (ticket.rate_limit_key,),
             )
-            if self._password_hasher.check_needs_rehash(encoded_hash):
-                connection.execute(
-                    'UPDATE admin SET password_hash=?,updated_at=? WHERE id=1',
-                    (self._password_hasher.hash(password), now),
+            if verification.replacement_hash is not None:
+                updated = connection.execute(
+                    'UPDATE admin SET password_hash=?,updated_at=? '
+                    'WHERE id=1 AND password_hash=? AND updated_at=?',
+                    (
+                        verification.replacement_hash,
+                        now,
+                        ticket.encoded_hash,
+                        ticket.observed_updated_at,
+                    ),
                 )
+                if updated.rowcount != 1:
+                    raise AuthenticationFailed('invalid credentials')
             self._audit(connection, 'login_succeeded', now)
             return self._create_session(connection, now)
 
@@ -407,31 +479,76 @@ class AdminAuthStore:
             return True
 
     def change_password(self, current_password: str, new_password: str) -> None:
-        self._validate_password(new_password)
+        ticket = self.prepare_password_change()
+        verification = self.check_password_change(
+            ticket, current_password, new_password
+        )
+        self.commit_password_change(ticket, verification)
+
+    def prepare_password_change(self) -> PasswordChangeTicket:
         connection = self._require_open()
-        now = int(self._clock())
-        with self._lock, connection:
+        with self._lock:
             row = connection.execute(
-                'SELECT password_hash FROM admin WHERE id=1'
+                'SELECT password_hash,updated_at FROM admin WHERE id=1'
             ).fetchone()
             if row is None:
                 raise AuthenticationFailed('invalid credentials')
-            try:
-                self._password_hasher.verify(
-                    str(row['password_hash']), current_password
-                )
-            except (VerifyMismatchError, InvalidHashError):
-                raise AuthenticationFailed('invalid credentials') from None
-            self._replace_password(connection, new_password, now, 'password_changed')
+            return PasswordChangeTicket(
+                encoded_hash=str(row['password_hash']),
+                observed_updated_at=int(row['updated_at']),
+            )
+
+    def check_password_change(
+        self, ticket: PasswordChangeTicket, current_password: str, new_password: str
+    ) -> PasswordVerification:
+        self._validate_password(new_password)
+        valid = self.verify_password(ticket.encoded_hash, current_password)
+        return PasswordVerification(
+            valid=valid,
+            replacement_hash=self.hash_password(new_password) if valid else None,
+        )
+
+    def commit_password_change(
+        self, ticket: PasswordChangeTicket, verification: PasswordVerification
+    ) -> None:
+        if not verification.valid or verification.replacement_hash is None:
+            raise AuthenticationFailed('invalid credentials')
+        self._commit_password_replacement(
+            ticket, verification.replacement_hash, 'password_changed'
+        )
 
     def reset_password(self, new_password: str) -> None:
-        self._validate_password(new_password)
+        ticket = self.prepare_password_reset()
+        password_hash = self.hash_password(new_password)
+        self.commit_password_reset(ticket, password_hash)
+
+    def prepare_password_reset(self) -> PasswordChangeTicket:
         connection = self._require_open()
-        now = int(self._clock())
-        with self._lock, connection:
-            if connection.execute('SELECT 1 FROM admin WHERE id=1').fetchone() is None:
+        with self._lock:
+            row = connection.execute(
+                'SELECT password_hash,updated_at FROM admin WHERE id=1'
+            ).fetchone()
+            if row is None:
                 raise AuthenticationFailed('administrator is not initialized')
-            self._replace_password(connection, new_password, now, 'password_reset')
+            return PasswordChangeTicket(
+                encoded_hash=str(row['password_hash']),
+                observed_updated_at=int(row['updated_at']),
+            )
+
+    def commit_password_reset(
+        self, ticket: PasswordChangeTicket, password_hash: str
+    ) -> None:
+        self._commit_password_replacement(ticket, password_hash, 'password_reset')
+
+    def hash_password(self, password: str) -> str:
+        self._validate_password(password)
+        return str(self._password_hasher.hash(password))
+
+    def verify_password(self, encoded_hash: str, password: str) -> bool:
+        try:
+            return bool(self._password_hasher.verify(encoded_hash, password))
+        except (VerifyMismatchError, InvalidHashError):
+            return False
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
@@ -566,16 +683,34 @@ class AdminAuthStore:
         self._audit(connection, '{}_failed'.format(scope), now)
         return None
 
-    def _replace_password(
-        self, connection: sqlite3.Connection, password: str, now: int, event: str
-    ) -> None:
-        connection.execute(
-            'UPDATE admin SET password_hash=?,updated_at=? WHERE id=1',
-            (self._password_hasher.hash(password), now),
+    @staticmethod
+    def _login_ticket_matches(
+        ticket: LoginPasswordTicket, row: Optional[sqlite3.Row]
+    ) -> bool:
+        if row is None:
+            return not ticket.admin_exists
+        return (
+            ticket.admin_exists
+            and str(row['password_hash']) == ticket.encoded_hash
+            and int(row['updated_at']) == ticket.observed_updated_at
         )
-        connection.execute('DELETE FROM admin_sessions')
-        connection.execute('DELETE FROM login_failures')
-        self._audit(connection, event, now)
+
+    def _commit_password_replacement(
+        self, ticket: PasswordChangeTicket, password_hash: str, event: str
+    ) -> None:
+        connection = self._require_open()
+        now = int(self._clock())
+        with self._lock, connection:
+            updated = connection.execute(
+                'UPDATE admin SET password_hash=?,updated_at=? '
+                'WHERE id=1 AND password_hash=? AND updated_at=?',
+                (password_hash, now, ticket.encoded_hash, ticket.observed_updated_at),
+            )
+            if updated.rowcount != 1:
+                raise AuthenticationFailed('invalid credentials')
+            connection.execute('DELETE FROM admin_sessions')
+            connection.execute('DELETE FROM login_failures')
+            self._audit(connection, event, now)
 
     def _csrf_token(self, session_token: str) -> str:
         digest = hmac.new(

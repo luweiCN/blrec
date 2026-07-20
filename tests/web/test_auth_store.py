@@ -1,4 +1,6 @@
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -206,6 +208,72 @@ def test_wrong_username_is_rejected_after_password_verification(
         )
 
     assert calls == 1
+    auth.close()
+
+
+def test_password_verification_does_not_hold_the_session_store_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    auth = store(tmp_path, clock)
+    auth.open()
+    credentials = auth.initialize('owner', 'correct horse battery staple')
+    verify_started = threading.Event()
+    release_verify = threading.Event()
+    original_verify = PasswordHasher.verify
+
+    def blocking_verify(
+        hasher: PasswordHasher, encoded_hash: str, password: str
+    ) -> bool:
+        verify_started.set()
+        assert release_verify.wait(5)
+        return bool(original_verify(hasher, encoded_hash, password))
+
+    monkeypatch.setattr(PasswordHasher, 'verify', blocking_verify)
+    session_checked = threading.Event()
+
+    def authenticate() -> None:
+        assert auth.authenticate_session(credentials.session_token) is not None
+        session_checked.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        login = executor.submit(
+            auth.login, 'owner', 'correct horse battery staple', client_key='192.0.2.30'
+        )
+        assert verify_started.wait(5)
+        session = executor.submit(authenticate)
+        try:
+            assert session_checked.wait(
+                1
+            ), 'session auth waited for password verification'
+        finally:
+            release_verify.set()
+        login.result(timeout=5)
+        session.result(timeout=5)
+
+    auth.close()
+
+
+def test_login_commit_rejects_a_password_changed_after_verification(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    auth = store(tmp_path, clock)
+    auth.open()
+    auth.initialize('owner', 'correct horse battery staple')
+    ticket = auth.prepare_login('owner', client_key='192.0.2.31')
+    verification = auth.check_login_password(ticket, 'correct horse battery staple')
+
+    auth.reset_password('new correct horse battery staple')
+
+    with pytest.raises(AuthenticationFailed):
+        auth.commit_login(ticket, verification)
+    assert (
+        auth.login(
+            'owner', 'new correct horse battery staple', client_key='192.0.2.31'
+        ).session_token
+        != ''
+    )
     auth.close()
 
 
