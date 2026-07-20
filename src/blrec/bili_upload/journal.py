@@ -638,6 +638,13 @@ class RecordingJournalBridge:
                             if decision.used_source
                             else '录制异常中断，已自动恢复成品文件'
                         )
+                        owned_final_path = artifact.path
+                        if (
+                            deleting
+                            and decision.existing_path is not None
+                            and decision.existing_path != str(part['source_path'])
+                        ):
+                            owned_final_path = decision.existing_path
                         connection.execute(
                             'UPDATE recording_parts SET artifact_state=?,final_path=?,'
                             'file_size_bytes=?,record_end_time=?,'
@@ -647,7 +654,7 @@ class RecordingJournalBridge:
                             'WHERE id=?',
                             (
                                 'failed' if deleting else 'ready',
-                                artifact.path,
+                                owned_final_path,
                                 artifact.size_bytes,
                                 record_end_time,
                                 duration,
@@ -819,7 +826,7 @@ class RecordingJournalBridge:
                     artifact=artifact,
                     any_path_exists=True,
                     used_source=used_source,
-                    existing_path=path,
+                    existing_path=existing_path,
                 )
         return _ArtifactRecoveryDecision(
             artifact=None,

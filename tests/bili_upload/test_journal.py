@@ -1115,6 +1115,57 @@ async def test_startup_recovery_owns_derived_mp4_when_source_was_removed(
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_retains_invalid_derived_mp4_beside_valid_source(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'source-valid.flv'
+    final = tmp_path / 'source-valid.mp4'
+    source.write_bytes(b'source')
+
+    def probe(path: str) -> Optional[RecoveredArtifact]:
+        if path != str(source):
+            return None
+        return RecoveredArtifact(path, source.stat().st_size, 1)
+
+    journal = RecordingJournalBridge(
+        database, clock=lambda: 1_000, artifact_probe=probe
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await journal.video_completed(run_id, str(source))
+    session = await journal.session_for_run(run_id)
+    deletion = LocalDeletionWorker(
+        database,
+        recording_root=tmp_path,
+        clip_root=tmp_path / 'clips',
+        clock=lambda: 1_001,
+    )
+    await deletion.request_session(session.id, manager_subject='manager')
+    await journal.recording_finished(run_id)
+    final.write_bytes(b'invalid-mp4')
+
+    restarted = RecordingJournalBridge(
+        database, clock=lambda: 1_002, artifact_probe=probe
+    )
+    await restarted.reconcile_open_sessions()
+
+    part = await database.fetchone(
+        'SELECT artifact_state,source_path,final_path '
+        'FROM recording_parts WHERE session_id=?',
+        (session.id,),
+    )
+    assert part is not None
+    assert dict(part) == {
+        'artifact_state': 'failed',
+        'source_path': str(source),
+        'final_path': str(final),
+    }
+    assert await deletion.run_once() == ('session', session.id)
+    assert not source.exists()
+    assert not final.exists()
+
+
+@pytest.mark.asyncio
 async def test_legacy_started_payload_uses_original_generation_for_handoff(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
