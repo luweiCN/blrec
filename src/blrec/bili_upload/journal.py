@@ -208,6 +208,96 @@ class UploadJobProgress:
 
 
 @dataclass(frozen=True)
+class UploadJobSummary:
+    id: int
+    session_id: int
+    account_id: int
+    account_uid: int
+    account_display_name: str
+    state: str
+    submit_state: str
+    comment_branch_state: str
+    danmaku_branch_state: str
+    aid: Optional[int]
+    bvid: Optional[str]
+    review_reason: Optional[str]
+    attempt: int
+    next_attempt_at: int
+    created_at: int
+    updated_at: int
+    danmaku_total: int
+    danmaku_confirmed: int
+    danmaku_pending: int
+    danmaku_unknown: int
+    danmaku_failed: int
+    repair_state: str
+    repair_message: Optional[str]
+    repair_error: Optional[str]
+    can_retry: bool
+    can_repair: bool
+    can_skip: bool
+    can_repost: bool
+    can_delete: bool
+    operator_paused: bool
+    scheduled_publish_at: Optional[int]
+    collection_branch_state: str
+    collection_error: Optional[str]
+    submission_verification_state: str
+    submission_verified_at: Optional[int]
+    comment_error: Optional[str]
+    danmaku_error: Optional[str]
+    can_pause: bool
+    can_resume: bool
+    can_edit: bool
+    can_backfill_danmaku: bool
+    confirmed_bytes: int
+    total_bytes: int
+    percent: float
+    bytes_per_second: Optional[float]
+    eta_seconds: Optional[int]
+    current_part_index: Optional[int]
+    confirmed_part_count: int
+    discovered_part_count: int
+    preupload_finalized: bool
+    display_state: UploadJobDisplayState
+    title: str = ''
+
+
+@dataclass(frozen=True)
+class RecordingSessionSummary:
+    id: int
+    room_id: int
+    live_start_time: Optional[int]
+    state: str
+    started_at: int
+    ended_at: Optional[int]
+    title: str
+    cover_url: str
+    anchor_uid: Optional[int]
+    anchor_name: str
+    area_id: Optional[int]
+    area_name: str
+    parent_area_id: Optional[int]
+    parent_area_name: str
+    live_end_time: Optional[int]
+    part_count: int
+    danmaku_count: int
+    total_file_size_bytes: int
+    record_duration_seconds: int
+    upload_intent: str
+    upload_decision: str
+    submission_inherited: bool
+    upload_resolution_state: str
+    upload_resolution_error: Optional[str]
+    upload_suppressed: bool
+    deletion_state: str
+    deletion_error: Optional[str]
+    source_kind: str
+    highlight_clip_id: Optional[int]
+    upload_job: Optional[UploadJobSummary]
+
+
+@dataclass(frozen=True)
 class _ArtifactRecoveryDecision:
     artifact: Optional[RecoveredArtifact]
     any_path_exists: bool
@@ -1054,6 +1144,36 @@ class RecordingJournalBridge:
             raise ValueError("unknown recording run '{}'".format(run_id))
         return self._make_session(row, await self.parts_for_session(int(row['id'])))
 
+    async def get_session(self, session_id: int) -> RecordingSession:
+        row = await self._database.fetchone(
+            'SELECT session.id,session.room_id,session.broadcast_session_key,'
+            'session.live_start_time,session.state,session.started_at,'
+            'session.ended_at,session.title,session.cover_url,session.cover_path,'
+            'session.anchor_uid,session.anchor_name,session.area_id,'
+            'session.area_name,session.parent_area_id,session.parent_area_name,'
+            'session.live_end_time,'
+            "CASE WHEN suppression.session_id IS NOT NULL "
+            "OR session.upload_decision='skip' THEN 'skip' "
+            "WHEN session.upload_decision='upload' THEN 'upload' "
+            "WHEN policy.enabled=1 THEN 'auto' ELSE 'none' END AS upload_intent,"
+            'session.upload_decision,session.upload_override_json,'
+            'session.upload_resolution_state,session.upload_resolution_error,'
+            'session.deletion_state,session.deletion_error,session.source_kind,'
+            'clip.id AS highlight_clip_id,'
+            'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
+            'AS upload_suppressed FROM recording_sessions session '
+            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
+            'LEFT JOIN upload_suppressions suppression '
+            'ON suppression.session_id=session.id '
+            'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
+            'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
+            'WHERE session.id=?',
+            (session_id,),
+        )
+        if row is None:
+            raise ValueError("unknown recording session '{}'".format(session_id))
+        return self._make_session(row, await self.parts_for_session(session_id))
+
     async def count_sessions(
         self,
         *,
@@ -1146,6 +1266,236 @@ class RecordingJournalBridge:
                 self._make_session(row, await self.parts_for_session(session_id))
             )
         return tuple(sessions)
+
+    async def list_session_summaries(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        scope: str = 'all',
+        query: str = '',
+        session_state: Optional[str] = None,
+        upload_state: Optional[str] = None,
+        started_from: Optional[int] = None,
+        started_to: Optional[int] = None,
+        sort_order: str = 'newest',
+    ) -> Tuple[RecordingSessionSummary, ...]:
+        if limit < 1 or limit > 200:
+            raise ValueError('limit must be between 1 and 200')
+        if offset < 0:
+            raise ValueError('offset must not be negative')
+        if sort_order not in ('newest', 'oldest'):
+            raise ValueError('sort order must be newest or oldest')
+        where_sql, parameters = self._session_filters(
+            scope=scope,
+            query=query,
+            session_state=session_state,
+            upload_state=upload_state,
+            started_from=started_from,
+            started_to=started_to,
+        )
+        direction = 'DESC' if sort_order == 'newest' else 'ASC'
+        summary_sql = (
+            'WITH selected_sessions AS ('
+            'SELECT session.id AS session_id,job.id AS job_id '
+            'FROM recording_sessions session '
+            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
+            'LEFT JOIN bili_accounts account ON account.id=job.account_id '
+            'LEFT JOIN upload_suppressions suppression '
+            'ON suppression.session_id=session.id '
+            + where_sql
+            + ' ORDER BY session.started_at {0},session.id {0} '
+            'LIMIT ? OFFSET ?),'
+            'part_summary AS ('
+            'SELECT recording_part.session_id,'
+            'COUNT(*) AS part_count,'
+            'COALESCE(SUM(recording_part.danmaku_count),0) AS danmaku_count,'
+            'COALESCE(SUM(recording_part.file_size_bytes),0) '
+            'AS total_file_size_bytes,'
+            'COALESCE(SUM(recording_part.record_duration_seconds),0) '
+            'AS record_duration_seconds,'
+            'COUNT(CASE WHEN recording_part.xml_path IS NOT NULL '
+            'AND recording_part.xml_completed=1 THEN 1 END) '
+            'AS danmaku_part_count '
+            'FROM selected_sessions selected '
+            'CROSS JOIN recording_parts recording_part '
+            'ON recording_part.session_id=selected.session_id '
+            'GROUP BY recording_part.session_id),'
+            'selected_upload_parts AS ('
+            'SELECT upload_part.id,upload_part.job_id,selected.session_id,'
+            'upload_part.part_index,upload_part.upload_state,'
+            'upload_part.remote_filename,upload_part.cid,'
+            'upload_part.transcode_state '
+            'FROM selected_sessions selected '
+            'CROSS JOIN upload_parts upload_part '
+            'ON upload_part.job_id=selected.job_id),'
+            'chunk_by_part AS ('
+            'SELECT selected_upload_part.id,selected_upload_part.job_id,'
+            'selected_upload_part.session_id,selected_upload_part.part_index,'
+            'selected_upload_part.upload_state,'
+            'selected_upload_part.remote_filename,selected_upload_part.cid,'
+            'selected_upload_part.transcode_state,'
+            'COALESCE(SUM(upload_chunk.size),0) AS total_bytes,'
+            "COALESCE(SUM(CASE WHEN upload_chunk.state='confirmed' "
+            'THEN upload_chunk.size ELSE 0 END),0) AS confirmed_bytes '
+            'FROM selected_upload_parts selected_upload_part '
+            'LEFT JOIN upload_chunks upload_chunk '
+            'ON upload_chunk.part_id=selected_upload_part.id '
+            'GROUP BY selected_upload_part.id,selected_upload_part.job_id,'
+            'selected_upload_part.session_id,selected_upload_part.part_index,'
+            'selected_upload_part.upload_state,'
+            'selected_upload_part.remote_filename,selected_upload_part.cid,'
+            'selected_upload_part.transcode_state),'
+            'chunk_summary AS ('
+            'SELECT part.job_id,COALESCE(SUM(part.total_bytes),0) AS total_bytes,'
+            'COALESCE(SUM(part.confirmed_bytes),0) AS confirmed_bytes,'
+            'COUNT(*) AS discovered_part_count,'
+            "COUNT(CASE WHEN part.upload_state='confirmed' THEN 1 END) "
+            'AS confirmed_part_count,'
+            'COALESCE('
+            'MIN(CASE WHEN part.total_bytes<=0 '
+            'OR part.confirmed_bytes<part.total_bytes '
+            "OR part.upload_state!='confirmed' THEN part.part_index END),"
+            'MAX(part.part_index)) AS current_part_index,'
+            "COUNT(CASE WHEN part.transcode_state='failed' THEN 1 END) "
+            'AS failed_transcode_part_count,'
+            "COUNT(CASE WHEN part.upload_state='prepared' "
+            'AND part.remote_filename IS NULL THEN 1 END) AS editable_part_count,'
+            'COUNT(CASE WHEN part.cid IS NOT NULL THEN 1 END) '
+            'AS uploaded_part_count,'
+            'COUNT(CASE WHEN part.cid IS NOT NULL '
+            'AND recording_part_match.xml_path IS NOT NULL '
+            'AND recording_part_match.xml_completed=1 THEN 1 END) '
+            'AS backfill_match_count '
+            'FROM chunk_by_part part '
+            'LEFT JOIN recording_parts recording_part_match '
+            'ON recording_part_match.session_id=part.session_id '
+            'AND recording_part_match.part_index=part.part_index '
+            'GROUP BY part.job_id),'
+            'danmaku_summary AS ('
+            'SELECT selected_upload_part.job_id,COUNT(*) AS total,'
+            "SUM(CASE WHEN danmaku_item.state='confirmed' THEN 1 ELSE 0 END) "
+            'AS confirmed,'
+            "SUM(CASE WHEN danmaku_item.state IN ('prepared','in_flight') "
+            'THEN 1 ELSE 0 END) AS pending,'
+            "SUM(CASE WHEN danmaku_item.state='unknown_outcome' "
+            'THEN 1 ELSE 0 END) AS unknown_count,'
+            "SUM(CASE WHEN danmaku_item.state='failed_permanent' "
+            'THEN 1 ELSE 0 END) AS failed '
+            'FROM selected_upload_parts selected_upload_part '
+            'CROSS JOIN danmaku_items danmaku_item '
+            'ON danmaku_item.part_id=selected_upload_part.id '
+            'GROUP BY selected_upload_part.job_id) '
+            'SELECT session.id AS session_id,session.room_id,'
+            'session.live_start_time,session.state AS session_state,'
+            'session.started_at,session.ended_at,session.title AS session_title,'
+            'session.cover_url,session.anchor_uid,session.anchor_name,'
+            'session.area_id,session.area_name,session.parent_area_id,'
+            'session.parent_area_name,session.live_end_time,'
+            'COALESCE(part_summary.part_count,0) AS part_count,'
+            'COALESCE(part_summary.danmaku_count,0) AS recording_danmaku_count,'
+            'COALESCE(part_summary.total_file_size_bytes,0) '
+            'AS total_file_size_bytes,'
+            'COALESCE(part_summary.record_duration_seconds,0) '
+            'AS record_duration_seconds,'
+            "CASE WHEN suppression.session_id IS NOT NULL "
+            "OR session.upload_decision='skip' THEN 'skip' "
+            "WHEN session.upload_decision='upload' THEN 'upload' "
+            "WHEN policy.enabled=1 THEN 'auto' ELSE 'none' END AS upload_intent,"
+            'session.upload_decision,'
+            'CASE WHEN session.upload_override_json IS NULL THEN 1 ELSE 0 END '
+            'AS submission_inherited,'
+            'session.upload_resolution_state,session.upload_resolution_error,'
+            'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
+            'AS upload_suppressed,'
+            'session.deletion_state,session.deletion_error,session.source_kind,'
+            'clip.id AS highlight_clip_id,job.id AS job_id,'
+            'job.session_id AS job_session_id,job.account_id,'
+            'account.uid AS account_uid,'
+            'account.display_name AS account_display_name,'
+            'job.state AS job_state,job.submit_state,'
+            'job.comment_branch_state,job.danmaku_branch_state,job.aid,job.bvid,'
+            'job.review_reason,job.attempt,job.next_attempt_at,job.created_at,'
+            'job.updated_at,job.repair_state,job.repair_message,job.repair_error,'
+            'job.operator_paused,job.scheduled_publish_at,'
+            'job.collection_branch_state,job.collection_error,'
+            'job.submission_verification_state,job.submission_verified_at,'
+            'job.preupload_finalized,job.policy_snapshot_json AS upload_title_source,'
+            'COALESCE(chunk_summary.total_bytes,0) AS upload_total_bytes,'
+            'COALESCE(chunk_summary.confirmed_bytes,0) AS upload_confirmed_bytes,'
+            'COALESCE(chunk_summary.discovered_part_count,0) '
+            'AS discovered_part_count,'
+            'COALESCE(chunk_summary.confirmed_part_count,0) '
+            'AS confirmed_part_count,'
+            'chunk_summary.current_part_index,'
+            'COALESCE(danmaku_summary.total,0) AS danmaku_total,'
+            'COALESCE(danmaku_summary.confirmed,0) AS danmaku_confirmed,'
+            'COALESCE(danmaku_summary.pending,0) AS danmaku_pending,'
+            'COALESCE(danmaku_summary.unknown_count,0) AS danmaku_unknown,'
+            'COALESCE(danmaku_summary.failed,0) AS danmaku_failed,'
+            "CASE WHEN job.state='paused' "
+            "AND job.submit_state NOT IN ('in_flight','unknown_outcome') "
+            "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
+            'THEN 1 ELSE 0 END AS can_retry,'
+            "CASE WHEN job.state IN ('waiting_review','approved','rejected',"
+            "'paused','completed') AND job.submit_state='confirmed' "
+            'AND job.aid IS NOT NULL AND COALESCE(job.bvid,\'\')!=\'\' '
+            "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
+            "AND NOT (job.repair_state='waiting_review' "
+            "AND job.state='waiting_review') "
+            'AND COALESCE(chunk_summary.failed_transcode_part_count,0)>0 '
+            'THEN 1 ELSE 0 END AS can_repair,'
+            "CASE WHEN job.state IN ('waiting_artifacts','ready') "
+            "AND job.submit_state='prepared' "
+            'AND (job.lease_until IS NULL OR job.lease_until<=?) '
+            'THEN 1 ELSE 0 END AS can_skip,'
+            "CASE WHEN job.state IN ('approved','completed') "
+            "AND job.submit_state='confirmed' AND job.aid IS NOT NULL "
+            "AND COALESCE(job.bvid,'')!='' "
+            "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
+            'THEN 1 ELSE 0 END AS can_repost,'
+            'CASE WHEN job.id IS NOT NULL '
+            'AND (job.lease_until IS NULL OR job.lease_until<=?) '
+            "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
+            'THEN 1 ELSE 0 END AS can_delete,'
+            "CASE WHEN job.state IN ('ready','uploading','submitting') "
+            "AND job.submit_state='prepared' AND job.operator_paused=0 "
+            'THEN 1 ELSE 0 END AS can_pause,'
+            "CASE WHEN job.state='paused' AND job.submit_state='prepared' "
+            'AND job.operator_paused=1 THEN 1 ELSE 0 END AS can_resume,'
+            "CASE WHEN job.state IN ('waiting_artifacts','ready','paused') "
+            "AND (job.state!='paused' OR job.operator_paused=1) "
+            "AND job.submit_state='prepared' "
+            'AND (job.lease_until IS NULL OR job.lease_until<=?) '
+            'AND COALESCE(chunk_summary.discovered_part_count,0)>0 '
+            'AND chunk_summary.editable_part_count='
+            'chunk_summary.discovered_part_count '
+            'THEN 1 ELSE 0 END AS can_edit,'
+            "CASE WHEN job.state IN ('approved','completed') "
+            "AND job.danmaku_branch_state='disabled' "
+            'AND COALESCE(part_summary.danmaku_part_count,0)>0 '
+            'AND part_summary.danmaku_part_count=chunk_summary.uploaded_part_count '
+            'AND part_summary.danmaku_part_count=chunk_summary.backfill_match_count '
+            'THEN 1 ELSE 0 END AS can_backfill_danmaku '
+            'FROM selected_sessions selected '
+            'JOIN recording_sessions session ON session.id=selected.session_id '
+            'LEFT JOIN upload_jobs job ON job.id=selected.job_id '
+            'LEFT JOIN bili_accounts account ON account.id=job.account_id '
+            'LEFT JOIN upload_suppressions suppression '
+            'ON suppression.session_id=session.id '
+            'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
+            'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
+            'LEFT JOIN part_summary ON part_summary.session_id=session.id '
+            'LEFT JOIN chunk_summary ON chunk_summary.job_id=job.id '
+            'LEFT JOIN danmaku_summary ON danmaku_summary.job_id=job.id '
+            'ORDER BY session.started_at {0},session.id {0}'
+        ).format(direction)
+        now = int(self._clock())
+        rows = await self._database.fetchall(
+            summary_sql, (*parameters, limit, offset, now, now, now)
+        )
+        sampled_at = self._clock()
+        return tuple(self._make_session_summary(row, sampled_at) for row in rows)
 
     @staticmethod
     def _session_filters(
@@ -1747,6 +2097,200 @@ class RecordingJournalBridge:
             (session_id,),
         )
         return tuple(self._make_part(row) for row in rows)
+
+    def _make_session_summary(
+        self, row: sqlite3.Row, sampled_at: float
+    ) -> RecordingSessionSummary:
+        upload_job = (
+            None
+            if row['job_id'] is None
+            else self._make_upload_job_summary(row, sampled_at)
+        )
+        source_kind = str(row['source_kind'])
+        title = str(row['session_title'])
+        if source_kind == 'highlight' and upload_job is not None and upload_job.title:
+            title = upload_job.title
+        return RecordingSessionSummary(
+            id=int(row['session_id']),
+            room_id=int(row['room_id']),
+            live_start_time=(
+                None if row['live_start_time'] is None else int(row['live_start_time'])
+            ),
+            state=str(row['session_state']),
+            started_at=int(row['started_at']),
+            ended_at=None if row['ended_at'] is None else int(row['ended_at']),
+            title=title,
+            cover_url=str(row['cover_url']),
+            anchor_uid=None if row['anchor_uid'] is None else int(row['anchor_uid']),
+            anchor_name=str(row['anchor_name']),
+            area_id=None if row['area_id'] is None else int(row['area_id']),
+            area_name=str(row['area_name']),
+            parent_area_id=(
+                None if row['parent_area_id'] is None else int(row['parent_area_id'])
+            ),
+            parent_area_name=str(row['parent_area_name']),
+            live_end_time=(
+                None if row['live_end_time'] is None else int(row['live_end_time'])
+            ),
+            part_count=int(row['part_count']),
+            danmaku_count=int(row['recording_danmaku_count']),
+            total_file_size_bytes=int(row['total_file_size_bytes']),
+            record_duration_seconds=int(row['record_duration_seconds']),
+            upload_intent=str(row['upload_intent']),
+            upload_decision=str(row['upload_decision']),
+            submission_inherited=bool(row['submission_inherited']),
+            upload_resolution_state=str(row['upload_resolution_state']),
+            upload_resolution_error=(
+                None
+                if row['upload_resolution_error'] is None
+                else str(row['upload_resolution_error'])
+            ),
+            upload_suppressed=bool(row['upload_suppressed']),
+            deletion_state=str(row['deletion_state']),
+            deletion_error=(
+                None if row['deletion_error'] is None else str(row['deletion_error'])
+            ),
+            source_kind=source_kind,
+            highlight_clip_id=(
+                None
+                if row['highlight_clip_id'] is None
+                else int(row['highlight_clip_id'])
+            ),
+            upload_job=upload_job,
+        )
+
+    def _make_upload_job_summary(
+        self, row: sqlite3.Row, sampled_at: float
+    ) -> UploadJobSummary:
+        job_id = int(row['job_id'])
+        confirmed_bytes = int(row['upload_confirmed_bytes'])
+        total_bytes = int(row['upload_total_bytes'])
+        percent = (
+            0.0
+            if total_bytes <= 0
+            else round(min(100.0, confirmed_bytes * 100.0 / total_bytes), 2)
+        )
+        bytes_per_second: Optional[float] = None
+        previous_sample = self._upload_speed_samples.get(job_id)
+        if previous_sample is not None:
+            elapsed = sampled_at - previous_sample[0]
+            byte_delta = confirmed_bytes - previous_sample[1]
+            if elapsed > 0 and byte_delta > 0:
+                bytes_per_second = byte_delta / elapsed
+        self._upload_speed_samples[job_id] = (sampled_at, confirmed_bytes)
+        eta_seconds: Optional[int] = None
+        if bytes_per_second is not None and bytes_per_second > 0:
+            remaining = max(0, total_bytes - confirmed_bytes)
+            eta_seconds = int((remaining / bytes_per_second) + 0.999)
+        discovered_part_count = int(row['discovered_part_count'])
+        confirmed_part_count = int(row['confirmed_part_count'])
+        preupload_finalized = bool(row['preupload_finalized'])
+        if preupload_finalized:
+            display_state: UploadJobDisplayState = 'standard'
+        elif str(row['job_state']) == 'paused':
+            display_state = 'preupload_paused'
+        elif (
+            str(row['job_state']) in ('ready', 'uploading')
+            or discovered_part_count == 0
+            or confirmed_part_count != discovered_part_count
+        ):
+            display_state = 'preuploading'
+        else:
+            display_state = 'preuploaded_waiting'
+        upload_title = ''
+        try:
+            policy_snapshot = json.loads(str(row['upload_title_source']))
+            if isinstance(policy_snapshot, dict) and isinstance(
+                policy_snapshot.get('title'), str
+            ):
+                upload_title = str(policy_snapshot['title']).strip()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        review_reason = (
+            None if row['review_reason'] is None else str(row['review_reason'])
+        )
+        return UploadJobSummary(
+            id=job_id,
+            session_id=int(row['job_session_id']),
+            account_id=int(row['account_id']),
+            account_uid=int(row['account_uid']),
+            account_display_name=str(row['account_display_name']),
+            state=str(row['job_state']),
+            submit_state=str(row['submit_state']),
+            comment_branch_state=str(row['comment_branch_state']),
+            danmaku_branch_state=str(row['danmaku_branch_state']),
+            aid=None if row['aid'] is None else int(row['aid']),
+            bvid=None if row['bvid'] is None else str(row['bvid']),
+            review_reason=review_reason,
+            attempt=int(row['attempt']),
+            next_attempt_at=int(row['next_attempt_at']),
+            created_at=int(row['created_at']),
+            updated_at=int(row['updated_at']),
+            danmaku_total=int(row['danmaku_total']),
+            danmaku_confirmed=int(row['danmaku_confirmed']),
+            danmaku_pending=int(row['danmaku_pending']),
+            danmaku_unknown=int(row['danmaku_unknown']),
+            danmaku_failed=int(row['danmaku_failed']),
+            repair_state=str(row['repair_state']),
+            repair_message=(
+                None if row['repair_message'] is None else str(row['repair_message'])
+            ),
+            repair_error=(
+                None if row['repair_error'] is None else str(row['repair_error'])
+            ),
+            can_retry=bool(row['can_retry']),
+            can_repair=bool(row['can_repair']),
+            can_skip=bool(row['can_skip']),
+            can_repost=bool(row['can_repost']),
+            can_delete=bool(row['can_delete']),
+            operator_paused=bool(row['operator_paused']),
+            scheduled_publish_at=(
+                None
+                if row['scheduled_publish_at'] is None
+                else int(row['scheduled_publish_at'])
+            ),
+            collection_branch_state=str(row['collection_branch_state']),
+            collection_error=(
+                None
+                if row['collection_error'] is None
+                else str(row['collection_error'])
+            ),
+            submission_verification_state=str(row['submission_verification_state']),
+            submission_verified_at=(
+                None
+                if row['submission_verified_at'] is None
+                else int(row['submission_verified_at'])
+            ),
+            comment_error=(
+                review_reason
+                if str(row['comment_branch_state']) in ('paused', 'failed')
+                else None
+            ),
+            danmaku_error=(
+                review_reason
+                if str(row['danmaku_branch_state']) in ('paused', 'failed')
+                else None
+            ),
+            can_pause=bool(row['can_pause']),
+            can_resume=bool(row['can_resume']),
+            can_edit=bool(row['can_edit']),
+            can_backfill_danmaku=bool(row['can_backfill_danmaku']),
+            confirmed_bytes=confirmed_bytes,
+            total_bytes=total_bytes,
+            percent=percent,
+            bytes_per_second=bytes_per_second,
+            eta_seconds=eta_seconds,
+            current_part_index=(
+                None
+                if row['current_part_index'] is None
+                else int(row['current_part_index'])
+            ),
+            confirmed_part_count=confirmed_part_count,
+            discovered_part_count=discovered_part_count,
+            preupload_finalized=preupload_finalized,
+            display_state=display_state,
+            title=upload_title,
+        )
 
     @staticmethod
     def _make_session(

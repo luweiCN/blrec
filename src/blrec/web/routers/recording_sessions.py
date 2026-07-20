@@ -13,6 +13,7 @@ from typing import (
     Mapping,
     Optional,
     Tuple,
+    Union,
 )
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
@@ -25,7 +26,9 @@ from blrec.bili_upload.journal import (
     RecordingJournalBridge,
     RecordingPart,
     RecordingSession,
+    RecordingSessionSummary,
     UploadJobProgress,
+    UploadJobSummary,
     UploadPartProgress,
 )
 from blrec.bili_upload.policies import InvalidRoomUploadPolicy
@@ -185,6 +188,60 @@ class UploadJobProgressResponse(ApiModel):
     parts: List[UploadPartProgressResponse]
 
 
+class UploadJobSummaryResponse(ApiModel):
+    id: int
+    account_id: int
+    account_uid: int
+    account_display_name: str
+    state: str
+    submit_state: str
+    preupload_finalized: bool
+    display_state: Literal[
+        'standard', 'preuploading', 'preuploaded_waiting', 'preupload_paused'
+    ]
+    comment_branch_state: str
+    danmaku_branch_state: str
+    aid: Optional[int]
+    bvid: Optional[str]
+    review_reason: Optional[str]
+    attempt: int
+    next_attempt_at: int
+    created_at: int
+    updated_at: int
+    danmaku_total: int
+    danmaku_confirmed: int
+    danmaku_pending: int
+    danmaku_unknown: int
+    danmaku_failed: int
+    repair_state: str
+    repair_message: Optional[str]
+    repair_error: Optional[str]
+    can_retry: bool
+    can_repair: bool
+    can_skip: bool
+    can_repost: bool
+    can_delete: bool
+    operator_paused: bool
+    scheduled_publish_at: Optional[int]
+    collection_branch_state: str
+    collection_error: Optional[str]
+    submission_verification_state: str
+    submission_verified_at: Optional[int]
+    comment_error: Optional[str]
+    danmaku_error: Optional[str]
+    can_pause: bool
+    can_resume: bool
+    can_edit: bool
+    confirmed_bytes: int
+    total_bytes: int
+    percent: float
+    bytes_per_second: Optional[float]
+    eta_seconds: Optional[int]
+    current_part_index: Optional[int]
+    confirmed_part_count: int
+    discovered_part_count: int
+
+
 class UploadJobActionRequest(ApiModel):
     action: Literal[
         'retry_failed',
@@ -323,10 +380,45 @@ class RecordingSessionResponse(ApiModel):
     parts: List[RecordingPartResponse]
 
 
+class RecordingSessionSummaryResponse(ApiModel):
+    id: int
+    room_id: int
+    live_start_time: Optional[int]
+    state: str
+    started_at: int
+    ended_at: Optional[int]
+    title: str
+    cover_url: str
+    anchor_uid: Optional[int]
+    anchor_name: str
+    area_id: Optional[int]
+    area_name: str
+    parent_area_id: Optional[int]
+    parent_area_name: str
+    live_end_time: Optional[int]
+    part_count: int
+    danmaku_count: int
+    total_file_size_bytes: int
+    record_duration_seconds: int
+    upload_intent: str
+    upload_decision: str
+    submission_inherited: bool
+    upload_resolution_state: str
+    upload_resolution_error: Optional[str]
+    upload_suppressed: bool
+    deletion_state: str
+    deletion_error: Optional[str]
+    source_kind: str
+    highlight_clip_id: Optional[int]
+    display_state: str
+    available_actions: List[str]
+    upload_job: Optional[UploadJobSummaryResponse]
+
+
 class RecordingSessionsResponse(ApiModel):
     degraded_reason: Optional[str]
     total: int
-    sessions: List[RecordingSessionResponse]
+    sessions: List[RecordingSessionSummaryResponse]
 
 
 class SessionSubmissionSettingsResponse(ApiModel):
@@ -453,7 +545,8 @@ def get_submission_manager() -> SessionSubmissionManager:
 
 
 def _session_display(
-    session: RecordingSession, upload_job: Optional[UploadJobProgress]
+    session: Union[RecordingSession, RecordingSessionSummary],
+    upload_job: Optional[Union[UploadJobProgress, UploadJobSummary]],
 ) -> Tuple[str, List[str]]:
     actions: List[str] = []
     if session.deletion_state in ('requested', 'deleting'):
@@ -473,20 +566,25 @@ def _session_display(
             actions.append('resume_upload')
         if upload_job.can_edit:
             actions.append('edit_task')
-        recorded_part_indexes = {
-            part.part_index
-            for part in session.parts
-            if part.xml_path and part.xml_completed
-        }
-        upload_part_indexes = {
-            part.part_index for part in upload_job.parts if part.cid is not None
-        }
-        if (
-            upload_job.state in ('approved', 'completed')
-            and upload_job.danmaku_branch_state == 'disabled'
-            and recorded_part_indexes
-            and recorded_part_indexes == upload_part_indexes
-        ):
+        can_backfill_danmaku = False
+        if isinstance(upload_job, UploadJobSummary):
+            can_backfill_danmaku = upload_job.can_backfill_danmaku
+        elif isinstance(session, RecordingSession):
+            recorded_part_indexes = {
+                part.part_index
+                for part in session.parts
+                if part.xml_path and part.xml_completed
+            }
+            upload_part_indexes = {
+                part.part_index for part in upload_job.parts if part.cid is not None
+            }
+            can_backfill_danmaku = (
+                upload_job.state in ('approved', 'completed')
+                and upload_job.danmaku_branch_state == 'disabled'
+                and bool(recorded_part_indexes)
+                and recorded_part_indexes == upload_part_indexes
+            )
+        if can_backfill_danmaku:
             actions.append('backfill_danmaku')
     elif session.upload_decision != 'skip' and session.upload_resolution_state != (
         'not_requested'
@@ -707,6 +805,60 @@ def _upload_job_response(job: UploadJobProgress) -> UploadJobProgressResponse:
     )
 
 
+def _upload_job_summary_response(job: UploadJobSummary) -> UploadJobSummaryResponse:
+    return UploadJobSummaryResponse(
+        id=job.id,
+        account_id=job.account_id,
+        account_uid=job.account_uid,
+        account_display_name=job.account_display_name,
+        state=job.state,
+        submit_state=job.submit_state,
+        preupload_finalized=job.preupload_finalized,
+        display_state=job.display_state,
+        comment_branch_state=job.comment_branch_state,
+        danmaku_branch_state=job.danmaku_branch_state,
+        aid=job.aid,
+        bvid=job.bvid,
+        review_reason=job.review_reason,
+        attempt=job.attempt,
+        next_attempt_at=job.next_attempt_at,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        danmaku_total=job.danmaku_total,
+        danmaku_confirmed=job.danmaku_confirmed,
+        danmaku_pending=job.danmaku_pending,
+        danmaku_unknown=job.danmaku_unknown,
+        danmaku_failed=job.danmaku_failed,
+        repair_state=job.repair_state,
+        repair_message=job.repair_message,
+        repair_error=job.repair_error,
+        can_retry=job.can_retry,
+        can_repair=job.can_repair,
+        can_skip=job.can_skip,
+        can_repost=job.can_repost,
+        can_delete=job.can_delete,
+        operator_paused=job.operator_paused,
+        scheduled_publish_at=job.scheduled_publish_at,
+        collection_branch_state=job.collection_branch_state,
+        collection_error=job.collection_error,
+        submission_verification_state=job.submission_verification_state,
+        submission_verified_at=job.submission_verified_at,
+        comment_error=job.comment_error,
+        danmaku_error=job.danmaku_error,
+        can_pause=job.can_pause,
+        can_resume=job.can_resume,
+        can_edit=job.can_edit,
+        confirmed_bytes=job.confirmed_bytes,
+        total_bytes=job.total_bytes,
+        percent=job.percent,
+        bytes_per_second=job.bytes_per_second,
+        eta_seconds=job.eta_seconds,
+        current_part_index=job.current_part_index,
+        confirmed_part_count=job.confirmed_part_count,
+        discovered_part_count=job.discovered_part_count,
+    )
+
+
 def _session_response(
     session: RecordingSession, upload_job: Optional[UploadJobProgress]
 ) -> RecordingSessionResponse:
@@ -753,6 +905,50 @@ def _session_response(
         available_actions=available_actions,
         upload_job=(None if upload_job is None else _upload_job_response(upload_job)),
         parts=[_part_response(part) for part in session.parts],
+    )
+
+
+def _session_summary_response(
+    session: RecordingSessionSummary,
+) -> RecordingSessionSummaryResponse:
+    display_state, available_actions = _session_display(session, session.upload_job)
+    return RecordingSessionSummaryResponse(
+        id=session.id,
+        room_id=session.room_id,
+        live_start_time=session.live_start_time,
+        state=session.state,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        title=session.title,
+        cover_url=session.cover_url,
+        anchor_uid=session.anchor_uid,
+        anchor_name=session.anchor_name,
+        area_id=session.area_id,
+        area_name=session.area_name,
+        parent_area_id=session.parent_area_id,
+        parent_area_name=session.parent_area_name,
+        live_end_time=session.live_end_time,
+        part_count=session.part_count,
+        danmaku_count=session.danmaku_count,
+        total_file_size_bytes=session.total_file_size_bytes,
+        record_duration_seconds=session.record_duration_seconds,
+        upload_intent=session.upload_intent,
+        upload_decision=session.upload_decision,
+        submission_inherited=session.submission_inherited,
+        upload_resolution_state=session.upload_resolution_state,
+        upload_resolution_error=session.upload_resolution_error,
+        upload_suppressed=session.upload_suppressed,
+        deletion_state=session.deletion_state,
+        deletion_error=session.deletion_error,
+        source_kind=session.source_kind,
+        highlight_clip_id=session.highlight_clip_id,
+        display_state=display_state,
+        available_actions=available_actions,
+        upload_job=(
+            None
+            if session.upload_job is None
+            else _upload_job_summary_response(session.upload_job)
+        ),
     )
 
 
@@ -807,7 +1003,7 @@ async def list_recording_sessions(
         started_from=started_from,
         started_to=started_to,
     )
-    sessions = await recording_journal.list_sessions(
+    sessions = await recording_journal.list_session_summaries(
         limit=limit,
         offset=offset,
         scope=scope,
@@ -818,17 +1014,22 @@ async def list_recording_sessions(
         started_to=started_to,
         sort_order=sort_order,
     )
-    upload_jobs = await recording_journal.upload_jobs_for_sessions(
-        [session.id for session in sessions]
-    )
     return RecordingSessionsResponse(
         degraded_reason=recording_journal.degraded_reason,
         total=total,
-        sessions=[
-            _session_response(session, upload_jobs.get(session.id))
-            for session in sessions
-        ],
+        sessions=[_session_summary_response(session) for session in sessions],
     )
+
+
+@router.get('/{session_id}', response_model=RecordingSessionResponse)
+async def get_recording_session(
+    session_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    recording_journal: RecordingJournalBridge = Depends(get_recording_journal),
+) -> RecordingSessionResponse:
+    session = await recording_journal.get_session(session_id)
+    upload_jobs = await recording_journal.upload_jobs_for_sessions((session_id,))
+    return _session_response(session, upload_jobs.get(session_id))
 
 
 def _submission_settings_response(

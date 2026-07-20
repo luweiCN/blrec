@@ -12,7 +12,9 @@ from blrec.bili_upload.journal import (
     DanmakuItemProgress,
     RecordingPart,
     RecordingSession,
+    RecordingSessionSummary,
     UploadJobProgress,
+    UploadJobSummary,
     UploadPartProgress,
 )
 from blrec.bili_upload.policies import default_room_upload_policy
@@ -41,8 +43,13 @@ class FakeJournal:
         self.upload_job_state = 'waiting_review'
         self.danmaku_branch_state = 'pending'
         self.upload_part_cid = None
+        self.count_calls = 0
+        self.summary_calls = 0
+        self.detail_calls = 0
+        self.upload_job_calls = 0
 
     async def count_sessions(self, **filters: object) -> int:
+        self.count_calls += 1
         self.count_filters = filters
         return 41
 
@@ -94,64 +101,109 @@ class FakeJournal:
             ),
         )
 
+    async def list_session_summaries(
+        self, *, limit: int = 50, offset: int = 0, **filters: object
+    ) -> Tuple[RecordingSessionSummary, ...]:
+        self.summary_calls += 1
+        sessions = await self.list_sessions(limit=limit, offset=offset, **filters)
+        session = sessions[0]
+        upload_job = self._upload_job()
+        session_values = asdict(session)
+        for field in ('broadcast_session_key', 'cover_path', 'parts'):
+            session_values.pop(field)
+        session_values.update(
+            part_count=session.part_count,
+            danmaku_count=session.danmaku_count,
+            total_file_size_bytes=session.total_file_size_bytes,
+            record_duration_seconds=session.record_duration_seconds,
+            upload_job=self._upload_job_summary(upload_job),
+        )
+        return (RecordingSessionSummary(**session_values),)
+
+    async def get_session(self, session_id: int) -> RecordingSession:
+        assert session_id == 1
+        self.detail_calls += 1
+        return (await self.list_sessions(limit=20, offset=40))[0]
+
+    def _upload_job(self) -> UploadJobProgress:
+        return UploadJobProgress(
+            id=9,
+            session_id=1,
+            account_id=7,
+            account_uid=42,
+            account_display_name='投稿账号',
+            state=self.upload_job_state,
+            submit_state='confirmed',
+            comment_branch_state='pending',
+            danmaku_branch_state=self.danmaku_branch_state,
+            aid=123,
+            bvid='BV1test',
+            review_reason='等待 B 站审核',
+            attempt=2,
+            next_attempt_at=1_100,
+            created_at=1_001,
+            updated_at=1_050,
+            danmaku_total=1,
+            danmaku_confirmed=0,
+            danmaku_pending=0,
+            danmaku_unknown=1,
+            danmaku_failed=0,
+            can_repair=False,
+            submission_verification_state='partial',
+            submission_verified_at=1_040,
+            submission_verification={
+                'state': 'partial',
+                'checked': ['title'],
+                'missing': ['up_selection_reply'],
+                'mismatches': [],
+            },
+            unknown_danmaku_items=(
+                DanmakuItemProgress(
+                    id=11,
+                    part_index=1,
+                    progress_ms=12_000,
+                    content='需要确认的弹幕',
+                    error_message='远端结果未知',
+                ),
+            ),
+            parts=(
+                UploadPartProgress(
+                    id=10,
+                    job_id=9,
+                    part_index=1,
+                    upload_state='confirmed',
+                    danmaku_import_state='pending',
+                    remote_filename='remote-p1',
+                    cid=self.upload_part_cid,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _upload_job_summary(job: UploadJobProgress) -> UploadJobSummary:
+        job_values = asdict(job)
+        for field in ('parts', 'unknown_danmaku_items', 'submission_verification'):
+            job_values.pop(field)
+        job_values.update(
+            can_backfill_danmaku=(
+                job.state in ('approved', 'completed')
+                and job.danmaku_branch_state == 'disabled'
+                and bool(job.parts)
+                and all(part.cid is not None for part in job.parts)
+            ),
+            confirmed_part_count=sum(
+                part.upload_state == 'confirmed' for part in job.parts
+            ),
+            discovered_part_count=len(job.parts),
+        )
+        return UploadJobSummary(**job_values)
+
     async def upload_jobs_for_sessions(
         self, session_ids: Sequence[int]
     ) -> Dict[int, UploadJobProgress]:
         assert tuple(session_ids) == (1,)
-        return {
-            1: UploadJobProgress(
-                id=9,
-                session_id=1,
-                account_id=7,
-                account_uid=42,
-                account_display_name='投稿账号',
-                state=self.upload_job_state,
-                submit_state='confirmed',
-                comment_branch_state='pending',
-                danmaku_branch_state=self.danmaku_branch_state,
-                aid=123,
-                bvid='BV1test',
-                review_reason='等待 B 站审核',
-                attempt=2,
-                next_attempt_at=1_100,
-                created_at=1_001,
-                updated_at=1_050,
-                danmaku_total=1,
-                danmaku_confirmed=0,
-                danmaku_pending=0,
-                danmaku_unknown=1,
-                danmaku_failed=0,
-                can_repair=False,
-                submission_verification_state='partial',
-                submission_verified_at=1_040,
-                submission_verification={
-                    'state': 'partial',
-                    'checked': ['title'],
-                    'missing': ['up_selection_reply'],
-                    'mismatches': [],
-                },
-                unknown_danmaku_items=(
-                    DanmakuItemProgress(
-                        id=11,
-                        part_index=1,
-                        progress_ms=12_000,
-                        content='需要确认的弹幕',
-                        error_message='远端结果未知',
-                    ),
-                ),
-                parts=(
-                    UploadPartProgress(
-                        id=10,
-                        job_id=9,
-                        part_index=1,
-                        upload_state='confirmed',
-                        danmaku_import_state='pending',
-                        remote_filename='remote-p1',
-                        cid=self.upload_part_cid,
-                    ),
-                ),
-            )
-        }
+        self.upload_job_calls += 1
+        return {1: self._upload_job()}
 
 
 class FakeContentReader:
@@ -309,14 +361,12 @@ def test_list_recording_sessions_returns_redacted_part_state(
             {
                 'id': 1,
                 'roomId': 100,
-                'broadcastSessionKey': '100:900',
                 'liveStartTime': 900,
                 'state': 'closed',
                 'startedAt': 900,
                 'endedAt': 1_000,
                 'title': '今晚挑战通关',
                 'coverUrl': 'https://example.invalid/cover.jpg',
-                'coverPath': '/rec/cover.jpg',
                 'anchorUid': 42,
                 'anchorName': '主播名',
                 'areaId': 1,
@@ -377,12 +427,6 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'collectionError': None,
                     'submissionVerificationState': 'partial',
                     'submissionVerifiedAt': 1_040,
-                    'submissionVerification': {
-                        'state': 'partial',
-                        'checked': ['title'],
-                        'missing': ['up_selection_reply'],
-                        'mismatches': [],
-                    },
                     'commentError': None,
                     'danmakuError': None,
                     'canPause': False,
@@ -396,62 +440,55 @@ def test_list_recording_sessions_returns_redacted_part_state(
                     'currentPartIndex': None,
                     'confirmedPartCount': 1,
                     'discoveredPartCount': 1,
-                    'unknownDanmakuItems': [
-                        {
-                            'id': 11,
-                            'partIndex': 1,
-                            'progressMs': 12_000,
-                            'content': '需要确认的弹幕',
-                            'errorMessage': '远端结果未知',
-                        }
-                    ],
-                    'parts': [
-                        {
-                            'id': 10,
-                            'partIndex': 1,
-                            'uploadState': 'confirmed',
-                            'danmakuImportState': 'pending',
-                            'remoteFilename': 'remote-p1',
-                            'cid': None,
-                            'transcodeState': 'unknown',
-                            'transcodeFailCode': None,
-                            'transcodeFailDesc': None,
-                            'repairStage': 'none',
-                            'repairDiagnostic': None,
-                            'confirmedBytes': 0,
-                            'totalBytes': 0,
-                        }
-                    ],
                 },
-                'parts': [
-                    {
-                        'id': 2,
-                        'runId': 'run-1',
-                        'partIndex': 1,
-                        'sourcePath': '/rec/p1.flv',
-                        'finalPath': '/rec/p1.mp4',
-                        'xmlPath': '/rec/p1.xml',
-                        'recordStartTime': 901,
-                        'recordEndTime': 960,
-                        'recordDurationSeconds': 59,
-                        'fileSizeBytes': 1_048_576,
-                        'danmakuCount': 321,
-                        'artifactState': 'ready',
-                        'xmlCompleted': True,
-                        'sourceExists': False,
-                        'finalExists': True,
-                        'errorMessage': None,
-                        'uploadExcludedReason': None,
-                        'mediaIndexState': 'pending',
-                        'mediaIndexError': None,
-                        'mediaIndexProgress': 0.0,
-                    }
-                ],
             }
         ],
     }
     assert 'cookie' not in response.text.lower()
     assert 'token' not in response.text.lower()
+
+
+def test_recording_session_list_is_summary_and_detail_stays_complete(
+    client: TestClient,
+) -> None:
+    headers = {'x-api-key': 'test-api-key'}
+
+    response = client.get(
+        '/api/v1/recording-sessions?limit=20&offset=40', headers=headers
+    )
+
+    assert response.status_code == 200
+    item = response.json()['sessions'][0]
+    assert {
+        'broadcastSessionKey',
+        'coverPath',
+        'parts',
+        'unknownDanmakuItems',
+        'submissionVerification',
+    }.isdisjoint(item)
+    assert item['uploadJob']['accountDisplayName'] == '投稿账号'
+    assert item['uploadJob']['discoveredPartCount'] == 1
+    assert 'parts' not in item['uploadJob']
+    assert 'unknownDanmakuItems' not in item['uploadJob']
+    assert 'submissionVerification' not in item['uploadJob']
+    assert 'unknownDanmakuItems' not in str(item)
+    fake = recording_sessions.journal
+    assert isinstance(fake, FakeJournal)
+    assert fake.count_calls == 1
+    assert fake.summary_calls == 1
+    assert fake.upload_job_calls == 0
+
+    detail = client.get('/api/v1/recording-sessions/1', headers=headers)
+
+    assert detail.status_code == 200
+    assert detail.json()['broadcastSessionKey'] == '100:900'
+    assert detail.json()['coverPath'] == '/rec/cover.jpg'
+    assert detail.json()['parts'][0]['sourcePath'] == '/rec/p1.flv'
+    assert detail.json()['uploadJob']['parts'][0]['remoteFilename'] == 'remote-p1'
+    assert detail.json()['uploadJob']['unknownDanmakuItems'][0]['id'] == 11
+    assert detail.json()['uploadJob']['submissionVerification']['state'] == 'partial'
+    assert fake.detail_calls == 1
+    assert fake.upload_job_calls == 1
 
 
 def test_highlight_upload_uses_the_final_submission_title() -> None:

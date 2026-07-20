@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncIterator, List, Sequence, Tuple
+from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
 import pytest
 import pytest_asyncio
@@ -9,6 +9,7 @@ import pytest_asyncio
 from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.journal import RecordingJournalBridge, RecordingJournalListener
+from blrec.web.routers import recording_sessions
 
 
 @pytest_asyncio.fixture
@@ -46,6 +47,480 @@ async def seed_upload_policy(
         "'{}',1,1)",
         (room_id, int(enabled)),
     )
+
+
+def _seed_summary_sessions(
+    connection: sqlite3.Connection, sessions: Sequence[Tuple[int, int]]
+) -> None:
+    connection.execute(
+        "INSERT OR IGNORE INTO bili_accounts("
+        "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+        "state,created_at,updated_at) "
+        "VALUES(1,42,'summary-account',X'00',1,'k','active',1,1)"
+    )
+    connection.executemany(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,live_start_time,state,started_at,ended_at,'
+        'title,cover_url,anchor_uid,anchor_name,area_id,area_name,parent_area_id,'
+        'parent_area_name,live_end_time,upload_decision,upload_resolution_state) '
+        "VALUES(?,?,?,?,'closed',?,?,?,?,?,?,?,?,?,?,?,?, 'job_created')",
+        [
+            (
+                session_id,
+                10_000 + session_id,
+                'summary-{}'.format(session_id),
+                started_at - 100,
+                started_at,
+                started_at + 60,
+                'session {}'.format(session_id),
+                'https://example.invalid/{}.jpg'.format(session_id),
+                20_000 + session_id,
+                'anchor {}'.format(session_id),
+                1,
+                'area',
+                2,
+                'parent area',
+                started_at + 60,
+                'follow_room',
+            )
+            for session_id, started_at in sessions
+        ],
+    )
+    connection.executemany(
+        'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+        "VALUES(?,?,'finished',?,?)",
+        [
+            (
+                'summary-run-{}'.format(session_id),
+                session_id,
+                started_at,
+                started_at + 60,
+            )
+            for session_id, started_at in sessions
+        ],
+    )
+    recording_parts = [
+        (
+            session_id * 10 + part_index,
+            session_id,
+            'summary-run-{}'.format(session_id),
+            part_index,
+            '/rec/{}/p{}.flv'.format(session_id, part_index),
+            '/rec/{}/p{}.mp4'.format(session_id, part_index),
+            '/rec/{}/p{}.xml'.format(session_id, part_index),
+            started_at + (part_index - 1) * 10,
+            started_at + part_index * 10,
+            part_index * 10,
+            part_index * 1_000,
+            part_index + 2,
+            'ready',
+            1,
+            started_at,
+            started_at,
+        )
+        for session_id, started_at in sessions
+        for part_index in (1, 2)
+    ]
+    connection.executemany(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,final_path,xml_path,'
+        'record_start_time,record_end_time,record_duration_seconds,file_size_bytes,'
+        'danmaku_count,artifact_state,xml_completed,created_at,updated_at) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        recording_parts,
+    )
+    connection.executemany(
+        'INSERT INTO upload_jobs('
+        'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'comment_branch_state,danmaku_branch_state,repair_state,operator_paused,'
+        'preupload_finalized,created_at,updated_at) '
+        "VALUES(?,?,1,?,'uploading','prepared','disabled','disabled','idle',0,1,?,?)",
+        [
+            (
+                session_id,
+                session_id,
+                '{"title":"upload %s"}' % session_id,
+                started_at,
+                started_at,
+            )
+            for session_id, started_at in sessions
+        ],
+    )
+    upload_parts = [
+        (
+            session_id * 10 + part_index,
+            session_id,
+            part_index,
+            '/upload/{}/p{}.mp4'.format(session_id, part_index),
+            'ready',
+            'confirmed' if part_index == 1 else 'uploading',
+            'disabled',
+            'remote-{}-{}'.format(session_id, part_index),
+            session_id * 10 + part_index,
+        )
+        for session_id, _started_at in sessions
+        for part_index in (1, 2)
+    ]
+    connection.executemany(
+        'INSERT INTO upload_parts('
+        'id,job_id,part_index,source_path,artifact_state,upload_state,'
+        'danmaku_import_state,remote_filename,cid) '
+        'VALUES(?,?,?,?,?,?,?,?,?)',
+        upload_parts,
+    )
+    connection.executemany(
+        'INSERT INTO upload_chunks('
+        'part_id,chunk_no,offset,size,state,attempt) VALUES(?,?,?,?,?,0)',
+        [
+            (
+                session_id * 10 + part_index,
+                chunk_no,
+                chunk_no * 100,
+                (chunk_no + 1) * 100,
+                'confirmed' if part_index == 1 else 'prepared',
+            )
+            for session_id, _started_at in sessions
+            for part_index in (1, 2)
+            for chunk_no in (0, 1)
+        ],
+    )
+    connection.executemany(
+        'INSERT INTO danmaku_items('
+        'part_id,xml_identity,original_index,progress_ms,mode,fontsize,color,'
+        'content,request_fingerprint,state) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        [
+            (
+                session_id * 10 + part_index,
+                'xml-{}'.format(part_index),
+                item_index,
+                item_index * 1_000,
+                1,
+                25,
+                16_777_215,
+                'danmaku',
+                'request-{}-{}-{}'.format(session_id, part_index, item_index),
+                (
+                    'confirmed'
+                    if part_index == 1
+                    else 'prepared' if item_index == 0 else 'failed_permanent'
+                ),
+            )
+            for session_id, _started_at in sessions
+            for part_index in (1, 2)
+            for item_index in (0, 1)
+        ],
+    )
+
+
+def _summary_child_accesses(
+    plan: Sequence[sqlite3.Row],
+) -> Dict[str, Tuple[Tuple[str, Optional[str]], ...]]:
+    aliases = (
+        'recording_part',
+        'recording_part_match',
+        'upload_part',
+        'upload_chunk',
+        'danmaku_item',
+    )
+    result: Dict[str, List[Tuple[str, Optional[str]]]] = {
+        alias: [] for alias in aliases
+    }
+    for row in plan:
+        tokens = str(row['detail']).replace('`', '').split()
+        if len(tokens) < 2 or tokens[0] not in ('SCAN', 'SEARCH'):
+            continue
+        relation_index = 1 if tokens[1] != 'TABLE' else 2
+        if len(tokens) <= relation_index:
+            continue
+        relation = tokens[relation_index]
+        if relation in result:
+            index_name = None
+            if 'INDEX' in tokens:
+                index_position = tokens.index('INDEX') + 1
+                if index_position < len(tokens):
+                    index_name = tokens[index_position]
+            result[relation].append((tokens[0], index_name))
+    return {alias: tuple(accesses) for alias, accesses in result.items()}
+
+
+@pytest.mark.asyncio
+async def test_list_session_summary_bounds_child_work_to_selected_page(
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial_history = tuple((value, 1_000 + value) for value in range(1, 501))
+    selected_page = tuple((value, 10_000 + value) for value in range(501, 521))
+    await database.write(
+        lambda connection: _seed_summary_sessions(
+            connection, initial_history + selected_page
+        )
+    )
+    journal = RecordingJournalBridge(database, clock=lambda: 20_000)
+    original_fetchall = database.fetchall
+    original_scalar = database.scalar
+    database_calls: List[Tuple[str, str, Tuple[object, ...]]] = []
+    filesystem_calls: List[str] = []
+
+    async def counting_fetchall(
+        sql: str, parameters: Sequence[object] = ()
+    ) -> List[sqlite3.Row]:
+        database_calls.append(('fetchall', sql, tuple(parameters)))
+        return await original_fetchall(sql, parameters)
+
+    async def counting_scalar(sql: str, parameters: Sequence[object] = ()) -> object:
+        database_calls.append(('scalar', sql, tuple(parameters)))
+        return await original_scalar(sql, parameters)
+
+    def unexpected_filesystem_call(*_args: object, **_kwargs: object) -> None:
+        filesystem_calls.append('called')
+        raise AssertionError('recording summary lists must not inspect files')
+
+    monkeypatch.setattr(database, 'fetchall', counting_fetchall)
+    monkeypatch.setattr(database, 'scalar', counting_scalar)
+    with monkeypatch.context() as filesystem:
+        filesystem.setattr('os.path.exists', unexpected_filesystem_call)
+        filesystem.setattr('os.path.getsize', unexpected_filesystem_call)
+        filesystem.setattr(Path, 'stat', unexpected_filesystem_call)
+        summaries = await journal.list_session_summaries(
+            limit=20, offset=0, scope='uploads', sort_order='newest'
+        )
+
+    assert [summary.id for summary in summaries] == list(range(520, 500, -1))
+    assert len(database_calls) == 1
+    assert database_calls[0][0] == 'fetchall'
+    assert filesystem_calls == []
+    assert summaries[0].part_count == 2
+    assert summaries[0].danmaku_count == 7
+    assert summaries[0].total_file_size_bytes == 3_000
+    assert summaries[0].record_duration_seconds == 30
+    assert summaries[0].upload_job is not None
+    assert summaries[0].upload_job.total_bytes == 600
+    assert summaries[0].upload_job.confirmed_bytes == 300
+    assert summaries[0].upload_job.percent == 50.0
+    assert summaries[0].upload_job.current_part_index == 2
+    assert summaries[0].upload_job.discovered_part_count == 2
+    assert summaries[0].upload_job.confirmed_part_count == 1
+    assert (
+        summaries[0].upload_job.danmaku_total,
+        summaries[0].upload_job.danmaku_confirmed,
+        summaries[0].upload_job.danmaku_pending,
+        summaries[0].upload_job.danmaku_unknown,
+        summaries[0].upload_job.danmaku_failed,
+    ) == (4, 2, 1, 0, 1)
+    assert summaries[0].upload_job.can_pause is True
+    assert summaries[0].upload_job.can_delete is True
+    assert summaries[0].upload_job.can_edit is False
+    assert summaries[0].upload_job.can_skip is False
+    forbidden_fields = {
+        'broadcast_session_key',
+        'cover_path',
+        'source_path',
+        'final_path',
+        'xml_path',
+        'parts',
+        'unknown_danmaku_items',
+        'policy_snapshot_json',
+        'submission_verification',
+    }
+    assert forbidden_fields.isdisjoint(summaries[0].__dataclass_fields__)
+    assert forbidden_fields.isdisjoint(summaries[0].upload_job.__dataclass_fields__)
+
+    summary_sql = database_calls[0][1]
+    summary_parameters = database_calls[0][2]
+    normalized_sql = ' '.join(summary_sql.split())
+    selected_sql, aggregate_sql = normalized_sql.split('),part_summary AS', 1)
+    assert selected_sql.startswith(
+        'WITH selected_sessions AS (SELECT session.id AS session_id,' 'job.id AS job_id'
+    )
+    assert 'WHERE job.id IS NOT NULL' in selected_sql
+    assert (
+        'ORDER BY session.started_at DESC,session.id DESC LIMIT ? OFFSET ?'
+        in selected_sql
+    )
+    assert 'LIMIT' not in aggregate_sql
+    assert 'AS MATERIALIZED' not in normalized_sql
+    assert normalized_sql.index('LIMIT ? OFFSET ?') < normalized_sql.index(
+        'recording_parts recording_part'
+    )
+    for selected_join in (
+        'selected_sessions selected CROSS JOIN recording_parts recording_part',
+        'selected_sessions selected CROSS JOIN upload_parts upload_part',
+        'selected_upload_parts selected_upload_part '
+        'LEFT JOIN upload_chunks upload_chunk',
+        'selected_upload_parts selected_upload_part '
+        'CROSS JOIN danmaku_items danmaku_item',
+    ):
+        assert selected_join in normalized_sql
+    explained_plan = await original_fetchall(
+        'EXPLAIN QUERY PLAN ' + summary_sql, summary_parameters
+    )
+    child_accesses = _summary_child_accesses(explained_plan)
+    assert all(child_accesses.values())
+    child_tables = {
+        'recording_part': 'recording_parts',
+        'recording_part_match': 'recording_parts',
+        'upload_part': 'upload_parts',
+        'upload_chunk': 'upload_chunks',
+        'danmaku_item': 'danmaku_items',
+    }
+    child_indexes = {
+        alias: {
+            str(row['name'])
+            for row in await original_fetchall(
+                'PRAGMA index_list({})'.format(table_name)
+            )
+        }
+        for alias, table_name in child_tables.items()
+    }
+    assert all(
+        operation == 'SEARCH' and index_name in child_indexes[alias]
+        for alias, accesses in child_accesses.items()
+        for operation, index_name in accesses
+    ), '{}\n{}'.format(
+        child_accesses, '\n'.join(str(row['detail']) for row in explained_plan)
+    )
+
+    doubled_history = tuple((value, value - 520) for value in range(521, 1_021))
+    await database.write(
+        lambda connection: _seed_summary_sessions(connection, doubled_history)
+    )
+    database_calls.clear()
+    with monkeypatch.context() as filesystem:
+        filesystem.setattr('os.path.exists', unexpected_filesystem_call)
+        filesystem.setattr('os.path.getsize', unexpected_filesystem_call)
+        filesystem.setattr(Path, 'stat', unexpected_filesystem_call)
+        doubled_summaries = await journal.list_session_summaries(
+            limit=20, offset=0, scope='uploads', sort_order='newest'
+        )
+
+    assert doubled_summaries == summaries
+    assert len(database_calls) == 1
+    assert database_calls[0][0] == 'fetchall'
+    doubled_plan = await original_fetchall(
+        'EXPLAIN QUERY PLAN ' + database_calls[0][1], database_calls[0][2]
+    )
+    assert _summary_child_accesses(doubled_plan) == child_accesses
+
+
+@pytest.mark.asyncio
+async def test_session_summary_dto_matches_full_projection_scalars_and_actions(
+    database: BiliUploadDatabase,
+) -> None:
+    await database.write(
+        lambda connection: _seed_summary_sessions(
+            connection,
+            tuple((session_id, session_id * 1_000) for session_id in range(1, 7)),
+        )
+    )
+
+    def configure_representative_states(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "UPDATE upload_jobs SET state='paused',operator_paused=1 WHERE id=1"
+        )
+        connection.execute(
+            "UPDATE upload_parts SET upload_state='prepared',remote_filename=NULL "
+            'WHERE job_id=1'
+        )
+        connection.execute(
+            "UPDATE upload_jobs SET state='approved',submit_state='confirmed',"
+            "aid=2,bvid='BVrepair' WHERE id=2"
+        )
+        connection.execute(
+            "UPDATE upload_parts SET transcode_state='failed' WHERE job_id=2 "
+            'AND part_index=1'
+        )
+        connection.execute(
+            "UPDATE upload_jobs SET state='approved',submit_state='confirmed',"
+            "aid=3,bvid='BVbackfill',danmaku_branch_state='disabled' WHERE id=3"
+        )
+        connection.execute(
+            "UPDATE upload_jobs SET state='waiting_artifacts',preupload_finalized=0 "
+            'WHERE id=4'
+        )
+        connection.execute(
+            "UPDATE upload_parts SET upload_state='confirmed' WHERE job_id=4"
+        )
+        connection.execute('DELETE FROM danmaku_items WHERE part_id IN (51,52)')
+        connection.execute('DELETE FROM upload_chunks WHERE part_id IN (51,52)')
+        connection.execute('DELETE FROM upload_parts WHERE job_id=5')
+        connection.execute(
+            "UPDATE upload_jobs SET state='waiting_artifacts',preupload_finalized=0 "
+            'WHERE id=5'
+        )
+        connection.execute(
+            "UPDATE recording_sessions SET source_kind='highlight',"
+            "title='local highlight' WHERE id=6"
+        )
+        connection.execute(
+            'UPDATE upload_jobs SET policy_snapshot_json=? WHERE id=6',
+            ('{"title":"final highlight title"}',),
+        )
+
+    await database.write(configure_representative_states)
+    journal = RecordingJournalBridge(database, clock=lambda: 20_000)
+
+    full_sessions = await journal.list_sessions(sort_order='oldest')
+    full_jobs = await journal.upload_jobs_for_sessions(
+        tuple(session.id for session in full_sessions)
+    )
+    summaries = await journal.list_session_summaries(sort_order='oldest')
+
+    full_by_id = {session.id: session for session in full_sessions}
+    summary_by_id = {summary.id: summary for summary in summaries}
+    for session_id in range(1, 7):
+        full_payload = recording_sessions._session_response(
+            full_by_id[session_id], full_jobs[session_id]
+        ).dict()
+        for field in ('broadcast_session_key', 'cover_path', 'parts'):
+            full_payload.pop(field)
+        full_upload_job = full_payload['upload_job']
+        assert isinstance(full_upload_job, dict)
+        for field in ('parts', 'unknown_danmaku_items', 'submission_verification'):
+            full_upload_job.pop(field)
+        summary_payload = recording_sessions._session_summary_response(
+            summary_by_id[session_id]
+        ).dict()
+        assert summary_payload == full_payload
+
+    assert summary_by_id[1].upload_job is not None
+    assert summary_by_id[1].upload_job.can_retry is True
+    assert summary_by_id[1].upload_job.can_resume is True
+    assert summary_by_id[1].upload_job.can_edit is True
+    assert summary_by_id[2].upload_job is not None
+    assert summary_by_id[2].upload_job.can_repair is True
+    assert (
+        'backfill_danmaku'
+        in recording_sessions._session_summary_response(
+            summary_by_id[3]
+        ).available_actions
+    )
+    assert summary_by_id[4].upload_job is not None
+    assert summary_by_id[4].upload_job.display_state == 'preuploaded_waiting'
+    assert summary_by_id[5].upload_job is not None
+    assert summary_by_id[5].upload_job.discovered_part_count == 0
+    assert summary_by_id[5].upload_job.display_state == 'preuploading'
+    assert summary_by_id[6].title == 'final highlight title'
+
+
+@pytest.mark.asyncio
+async def test_get_session_keeps_full_recording_detail(database) -> None:
+    await database.write(
+        lambda connection: _seed_summary_sessions(connection, ((1, 1_000),))
+    )
+
+    session = await RecordingJournalBridge(database).get_session(1)
+
+    assert session.broadcast_session_key == 'summary-1'
+    assert session.cover_path is None
+    assert [part.source_path for part in session.parts] == [
+        '/rec/1/p1.flv',
+        '/rec/1/p2.flv',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_session_rejects_an_unknown_id(database) -> None:
+    with pytest.raises(ValueError, match="unknown recording session '404'"):
+        await RecordingJournalBridge(database).get_session(404)
 
 
 @pytest.mark.asyncio
@@ -255,6 +730,8 @@ async def test_list_sessions_identifies_derived_highlight_media(database) -> Non
     assert [item.id for item in uploads] == [2]
     jobs = await journal.upload_jobs_for_sessions((2,))
     assert jobs[2].title == '最终投稿标题'
+    summaries = await journal.list_session_summaries(scope='uploads')
+    assert summaries[0].title == '最终投稿标题'
 
 
 @pytest.mark.asyncio
