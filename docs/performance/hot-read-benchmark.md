@@ -46,7 +46,7 @@ parity tests.
   overwrite the latest criteria, and an error does not terminate retry handling.
 - Recording rows are OnPush. A progress-only SSE update replaces only the
   matching row input; an identical update replaces none.
-- Full Angular regression: 405 tests passed. Targeted changed-file ESLint passed.
+- Full Angular regression: 406 tests passed. Targeted changed-file ESLint passed.
   Full `ng lint` still reports exactly the five pre-existing errors outside the
   changed files.
 - Production estimated transfer sizes: recording/upload list 37,199 B, highlight
