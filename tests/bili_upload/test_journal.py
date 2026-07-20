@@ -431,6 +431,39 @@ async def test_list_session_summary_bounds_child_work_to_selected_page(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('filters', 'expected_index'),
+    (
+        ({'scope': 'recordings'}, 'recording_sessions_source_started_idx'),
+        ({'upload_state': 'paused'}, 'upload_jobs_state_session_idx'),
+    ),
+)
+async def test_session_summary_query_uses_proven_list_index(
+    database: BiliUploadDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    filters: dict,
+    expected_index: str,
+) -> None:
+    journal = RecordingJournalBridge(database)
+    original_fetchall = database.fetchall
+    statements = []
+
+    async def capture_fetchall(sql, parameters=()):
+        statements.append((sql, tuple(parameters)))
+        return await original_fetchall(sql, parameters)
+
+    monkeypatch.setattr(database, 'fetchall', capture_fetchall)
+    await journal.list_session_summaries(limit=20, offset=0, **filters)
+
+    assert len(statements) == 1
+    plan = await original_fetchall(
+        'EXPLAIN QUERY PLAN ' + statements[0][0], statements[0][1]
+    )
+    details = [str(row['detail']) for row in plan]
+    assert any(expected_index in detail for detail in details), '\n'.join(details)
+
+
+@pytest.mark.asyncio
 async def test_session_summary_dto_matches_full_projection_scalars_and_actions(
     database: BiliUploadDatabase,
 ) -> None:

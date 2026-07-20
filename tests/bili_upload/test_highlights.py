@@ -798,6 +798,20 @@ async def test_clip_summary_query_bounds_child_aggregation_to_selected_jobs(
 
 
 @pytest.mark.asyncio
+async def test_clip_summary_query_uses_library_order_index(
+    database: BiliUploadDatabase,
+) -> None:
+    plan = await database.fetchall(
+        'EXPLAIN QUERY PLAN ' + HighlightService._CLIP_SUMMARY_SELECT, (20, 0)
+    )
+    details = [str(row['detail']) for row in plan]
+
+    assert any(
+        'highlight_clips_library_idx' in detail for detail in details
+    ), '\n'.join(details)
+
+
+@pytest.mark.asyncio
 async def test_delete_clip_removes_its_local_upload_task(
     database, tmp_path: Path
 ) -> None:
