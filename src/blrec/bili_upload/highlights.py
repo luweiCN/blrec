@@ -197,7 +197,9 @@ class HighlightClipSummary:
     deletion_error: Optional[str] = None
 
 
-def _source_fingerprint(source: ClipSource) -> Dict[str, object]:
+def _source_fingerprint(
+    source: ClipSource, *, stable_end_ms: Optional[int] = None
+) -> Dict[str, object]:
     path = Path(source.path).resolve(strict=True)
     stat = path.stat()
     if not path.is_file() or stat.st_size <= 0:
@@ -205,18 +207,79 @@ def _source_fingerprint(source: ClipSource) -> Dict[str, object]:
     return {
         'partId': source.part_id,
         'realpath': str(path),
+        'device': stat.st_dev,
+        'inode': stat.st_ino,
         'size': stat.st_size,
         'mtimeNs': stat.st_mtime_ns,
+        'recording': source.recording,
+        'validatedStartMs': source.requested_start_ms,
+        'validatedEndMs': source.requested_end_ms,
+        'stableEndMs': (
+            source.requested_end_ms
+            if stable_end_ms is None
+            else max(0, int(stable_end_ms))
+        ),
     }
 
 
-def _fingerprint_json(source: ClipSource) -> str:
+def _fingerprint_json(
+    source: ClipSource, *, stable_end_ms: Optional[int] = None
+) -> str:
     return json.dumps(
-        _source_fingerprint(source),
+        _source_fingerprint(source, stable_end_ms=stable_end_ms),
         ensure_ascii=True,
         sort_keys=True,
         separators=(',', ':'),
     )
+
+
+def _fingerprint_matches(stored_json: str, current_json: str) -> bool:
+    try:
+        stored = json.loads(stored_json)
+        current = json.loads(current_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(stored, dict) or not isinstance(current, dict):
+        return False
+    identity_fields = (
+        'partId',
+        'realpath',
+        'device',
+        'inode',
+        'validatedStartMs',
+        'validatedEndMs',
+    )
+    if any(field not in stored or field not in current for field in identity_fields):
+        return stored_json == current_json
+    if any(stored[field] != current[field] for field in identity_fields):
+        return False
+    try:
+        validated_end_ms = int(stored['validatedEndMs'])
+        stored_stable_end_ms = int(stored['stableEndMs'])
+        current_stable_end_ms = int(current['stableEndMs'])
+        stored_size = int(stored['size'])
+        current_size = int(current['size'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if (
+        stored_stable_end_ms < validated_end_ms
+        or current_stable_end_ms < validated_end_ms
+    ):
+        return False
+    if bool(stored.get('recording')):
+        return current_size >= stored_size
+    return current_size == stored_size and current.get('mtimeNs') == stored.get(
+        'mtimeNs'
+    )
+
+
+def _stable_end_for_source(source: ClipSource, safe_tail_ms: int) -> int:
+    duration_ms = (
+        source.requested_end_ms
+        if source.duration_ms is None
+        else max(0, int(source.duration_ms))
+    )
+    return max(0, duration_ms - (safe_tail_ms if source.recording else 0))
 
 
 def _inspection_json(inspection: ClipInspection) -> str:
@@ -605,29 +668,45 @@ class HighlightService:
             )
             source = sources[0]
             fingerprint = await asyncio.get_running_loop().run_in_executor(
-                None, _fingerprint_json, source
+                None,
+                partial(
+                    _fingerprint_json,
+                    source,
+                    stable_end_ms=_stable_end_for_source(
+                        source, self.ACTIVE_SAFE_TAIL_MS
+                    ),
+                ),
             )
             cache_key = '{}:{}:{}'.format(
                 fingerprint,
                 int(row['requested_start_ms']),
                 int(row['requested_end_ms']),
             )
-            reusable = await self._database.fetchone(
-                'SELECT result_json FROM highlight_inspections '
+            reusable_rows = await self._database.fetchall(
+                'SELECT result_json,fingerprint_json FROM highlight_inspections '
                 "WHERE state='succeeded' AND session_id=? "
                 'AND requested_start_ms=? AND requested_end_ms=? '
-                'AND fingerprint_json=? AND result_json IS NOT NULL '
-                'ORDER BY updated_at DESC LIMIT 1',
+                'AND fingerprint_json IS NOT NULL AND result_json IS NOT NULL '
+                'ORDER BY updated_at DESC LIMIT 32',
                 (
                     int(row['session_id']),
                     int(row['requested_start_ms']),
                     int(row['requested_end_ms']),
-                    fingerprint,
                 ),
+            )
+            reusable = next(
+                (
+                    candidate
+                    for candidate in reusable_rows
+                    if _fingerprint_matches(
+                        str(candidate['fingerprint_json']), fingerprint
+                    )
+                ),
+                None,
             )
             if reusable is not None:
                 result_json = str(reusable['result_json'])
-                _inspection_from_json(result_json, fingerprint)
+                _inspection_from_json(result_json, str(reusable['fingerprint_json']))
             else:
                 future = self._probe_futures.get(cache_key)
                 if future is None:
@@ -646,7 +725,9 @@ class HighlightService:
                         )
                     )
                     self._probe_futures[cache_key] = future
-                    self._trim_probe_futures()
+                    future.add_done_callback(
+                        partial(self._forget_probe_future, cache_key)
+                    )
                 result_json, fingerprint = await asyncio.shield(future)
             completed_at = int(self._clock())
             await self._database.execute(
@@ -748,10 +829,13 @@ class HighlightService:
                 )
                 connection.execute(
                     'UPDATE highlight_inspections SET claim_key_hash=?,token_hash=?,'
-                    'token_expires_at=?,updated_at=? WHERE operation_id=?',
+                    'token_expires_at=?,terminal_expires_at='
+                    'MAX(COALESCE(terminal_expires_at,0),?),updated_at=? '
+                    'WHERE operation_id=?',
                     (
                         claim_hash,
                         self._token_hash(token),
+                        expires_at,
                         expires_at,
                         now,
                         operation_id,
@@ -775,22 +859,20 @@ class HighlightService:
 
     async def _cleanup_expired_inspections(self, now: int) -> None:
         await self._database.execute(
-            "DELETE FROM highlight_inspections WHERE state IN ('succeeded','failed') "
-            'AND terminal_expires_at IS NOT NULL AND terminal_expires_at<=? '
-            'AND operation_id IN (SELECT operation_id FROM highlight_inspections '
+            'DELETE FROM highlight_inspections WHERE operation_id IN ('
+            'SELECT operation_id FROM highlight_inspections '
             "WHERE state IN ('succeeded','failed') AND terminal_expires_at<=? "
+            'AND (token_expires_at IS NULL OR token_expires_at<=? '
+            'OR token_consumed_at IS NOT NULL) '
             'ORDER BY terminal_expires_at,operation_id LIMIT 32)',
             (now, now),
         )
 
-    def _trim_probe_futures(self) -> None:
-        if len(self._probe_futures) <= 32:
-            return
-        for key, future in tuple(self._probe_futures.items()):
-            if future.done():
-                del self._probe_futures[key]
-                if len(self._probe_futures) <= 32:
-                    return
+    def _forget_probe_future(
+        self, cache_key: str, future: asyncio.Future[Tuple[str, str]]
+    ) -> None:
+        if self._probe_futures.get(cache_key) is future:
+            self._probe_futures.pop(cache_key, None)
 
     def _make_inspection_token(
         self, operation_id: str, idempotency_key: str, claim_key: str, expiry: int
@@ -1164,6 +1246,7 @@ class HighlightService:
             fingerprint = await asyncio.get_running_loop().run_in_executor(
                 None, _fingerprint_json, clip_sources[0]
             )
+            assert fingerprint is not None
             inspection_row = await self._database.fetchone(
                 'SELECT * FROM highlight_inspections WHERE token_hash=?',
                 (self._token_hash(inspection_token),),
@@ -1180,7 +1263,9 @@ class HighlightService:
                 raise HighlightInspectionConflict('检查令牌与剪辑范围绑定不一致')
             if str(inspection_row['state']) != 'succeeded':
                 raise HighlightInspectionConflict('检查结果尚未就绪')
-            if str(inspection_row['fingerprint_json']) != fingerprint:
+            if not _fingerprint_matches(
+                str(inspection_row['fingerprint_json']), fingerprint
+            ):
                 return await self._restart_stale_inspection(
                     inspection_row, active_durations_ms=active_durations_ms
                 )
@@ -1225,7 +1310,9 @@ class HighlightService:
                     or operation['token_consumed_at'] is not None
                     or expires_at is None
                     or int(expires_at) <= now
-                    or str(operation['fingerprint_json']) != fingerprint
+                    or not _fingerprint_matches(
+                        str(operation['fingerprint_json']), fingerprint
+                    )
                 ):
                     raise HighlightInspectionConflict('检查令牌已失效')
             session = connection.execute(

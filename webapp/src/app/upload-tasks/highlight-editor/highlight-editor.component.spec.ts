@@ -1229,6 +1229,48 @@ describe('HighlightEditorComponent', () => {
     expect(highlights.createClip).toHaveBeenCalled();
   }));
 
+  it('recovers a lost admission response and claims a succeeded operation', () => {
+    let admissionAttempts = 0;
+    highlights.inspectClip.and.callFake(() => {
+      admissionAttempts += 1;
+      return admissionAttempts === 1
+        ? throwError(() => ({ status: 0 }))
+        : of({
+            ...readyInspection({
+              ...inspection,
+              extraLeadMs: 0,
+              confirmationRequired: false,
+            }),
+            inspectionToken: null,
+          });
+    });
+    highlights.getClipInspection.and.returnValue(
+      of(
+        readyInspection({
+          ...inspection,
+          extraLeadMs: 0,
+          confirmationRequired: false,
+        }),
+      ),
+    );
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+
+    component.createSelectedDraft();
+
+    expect(highlights.inspectClip).toHaveBeenCalledTimes(2);
+    expect(highlights.inspectClip.calls.argsFor(1)[3]).toBe(
+      highlights.inspectClip.calls.argsFor(0)[3],
+    );
+    expect(highlights.getClipInspection).toHaveBeenCalledWith(
+      'inspection-operation',
+      jasmine.any(String),
+    );
+    expect(highlights.createClip).toHaveBeenCalled();
+  });
+
   it('turns a blue pending range green after the clip is created', () => {
     highlights.inspectClip.and.returnValue(
       of(

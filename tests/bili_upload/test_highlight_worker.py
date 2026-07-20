@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sqlite3
 import threading
@@ -19,6 +20,7 @@ from blrec.bili_upload.highlight_cut import (
     CutArtifact,
     HighlightCutError,
     InspectedClipSource,
+    LosslessClipper,
     MediaProfile,
 )
 from blrec.bili_upload.highlight_danmaku import DanmakuClipSource, DanmakuCutResult
@@ -27,6 +29,7 @@ from blrec.bili_upload.highlights import (
     HighlightConfirmationRequired,
     HighlightInspectionBusy,
     HighlightInspectionConflict,
+    HighlightInspectionOperation,
     HighlightRangeUnavailable,
     HighlightService,
 )
@@ -108,6 +111,37 @@ class BlockingInspectionClipper(FakeClipper):
         return super().inspect(*args, **kwargs)
 
 
+class FlakyInspectionClipper(FakeClipper):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def inspect(self, *args, **kwargs) -> ClipInspection:
+        self.attempts += 1
+        if self.attempts == 1:
+            self.inspect_calls.append((tuple(args[0]), None, None, None))
+            raise HighlightCutError('temporary ffprobe failure')
+        return super().inspect(*args, **kwargs)
+
+
+class LegacyMultiClipper(LosslessClipper):
+    def __init__(self) -> None:
+        super().__init__(
+            probe=lambda _path: (
+                MediaProfile('h264', 1920, 1080, '60/1', 42, 120_000, True),
+                (0, 18_000),
+            )
+        )
+        self.cut_calls = []
+
+    def cut(self, inspection: ClipInspection, output_path: str) -> CutArtifact:
+        self.cut_calls.append((inspection, output_path))
+        Path(output_path).write_bytes(b'legacy-multi-clip')
+        return CutArtifact(
+            output_path, len(b'legacy-multi-clip'), inspection.output_duration_ms
+        )
+
+
 class FakeDanmakuClipper:
     def __init__(self) -> None:
         self.calls = []
@@ -164,6 +198,17 @@ async def seed_active_recording(database: BiliUploadDatabase, root: Path) -> Pat
         (str(video), str(xml)),
     )
     return video
+
+
+async def wait_for_inspection(
+    service: HighlightService, operation_id: str, *, claim_key: str
+) -> HighlightInspectionOperation:
+    for _attempt in range(100):
+        operation = await service.get_clip_inspection(operation_id, claim_key=claim_key)
+        if operation.state in ('succeeded', 'failed'):
+            return operation
+        await asyncio.sleep(0.01)
+    raise AssertionError('highlight inspection did not reach a terminal state')
 
 
 @pytest.mark.asyncio
@@ -365,6 +410,230 @@ async def test_inspection_token_creates_idempotent_clip_and_worker_reuses_probe(
 
 
 @pytest.mark.asyncio
+async def test_growing_recording_keeps_validated_inspection_for_create_and_worker(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    source = await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    claim_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        ready = await wait_for_inspection(
+            service, accepted.operation_id, claim_key=claim_key
+        )
+        assert ready.state == 'succeeded'
+        assert ready.inspection_token is not None
+
+        with source.open('ab') as stream:
+            stream.write(b'-appended-after-inspection')
+        clip = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='录制中高光',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 130_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+
+        assert not isinstance(clip, HighlightInspectionOperation)
+        worker = HighlightWorker(
+            database, clipper, FakeDanmakuClipper(), worker_id='worker'
+        )
+        assert await worker.run_once() == clip.id
+        assert len(clipper.inspect_calls) == 1
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mutation', ('replace', 'shrink'))
+async def test_growing_recording_rejects_replaced_or_shrunk_inspection_source(
+    database: BiliUploadDatabase, tmp_path: Path, mutation: str
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    source = await seed_active_recording(database, root)
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=FakeClipper(),
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    claim_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        ready = await wait_for_inspection(
+            service, accepted.operation_id, claim_key=claim_key
+        )
+        assert ready.inspection_token is not None
+        if mutation == 'replace':
+            replacement = root / 'replacement.flv'
+            replacement.write_bytes(b'replaced-video-source')
+            os.replace(str(replacement), str(source))
+        else:
+            source.write_bytes(b'x')
+
+        result = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='变化的高光',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 130_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+
+        assert isinstance(result, HighlightInspectionOperation)
+        assert result.state == 'accepted'
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_claim_extends_terminal_retention_through_token_expiry(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    now = [1_000]
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=FakeClipper(),
+        clock=lambda: now[0],
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    claim_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        for _attempt in range(100):
+            state = await database.scalar(
+                'SELECT state FROM highlight_inspections WHERE operation_id=?',
+                (accepted.operation_id,),
+            )
+            if state == 'succeeded':
+                break
+            await asyncio.sleep(0.01)
+        assert state == 'succeeded'
+
+        now[0] = 1_299
+        ready = await service.get_clip_inspection(
+            accepted.operation_id, claim_key=claim_key
+        )
+        assert ready.inspection_token is not None
+        now[0] = 1_300
+        await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=str(uuid.uuid4()),
+        )
+
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM highlight_inspections WHERE operation_id=?',
+                (accepted.operation_id,),
+            )
+            == 1
+        )
+        clip = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='延长有效期',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 120_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+        assert not isinstance(clip, HighlightInspectionOperation)
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_probe_singleflight_forgets_terminal_success_and_failure(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = FlakyInspectionClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    try:
+        first = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=str(uuid.uuid4()),
+        )
+        failed = await wait_for_inspection(
+            service, first.operation_id, claim_key=str(uuid.uuid4())
+        )
+        assert failed.state == 'failed'
+        assert service._probe_futures == {}
+
+        second = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=str(uuid.uuid4()),
+        )
+        succeeded = await wait_for_inspection(
+            service, second.operation_id, claim_key=str(uuid.uuid4())
+        )
+        assert succeeded.state == 'succeeded'
+        assert clipper.attempts == 2
+        assert service._probe_futures == {}
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_inspection_admission_is_bounded_to_two_active_and_eight_waiting(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
@@ -494,7 +763,139 @@ async def test_worker_completes_video_and_danmaku_atomically(
     assert len(danmaku.calls) == 1
     worker_sources = clipper.inspect_calls[-1][0]
     assert worker_sources[0].duration_ms == 70_000
-    assert worker_sources[0].keyframes_ms == (18_000,)
+    assert worker_sources[0].keyframes_ms == ()
+
+
+@pytest.mark.asyncio
+async def test_worker_reprobes_profile_and_keyframes_after_source_replacement(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    source = await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        ready = await wait_for_inspection(
+            service, accepted.operation_id, claim_key=str(uuid.uuid4())
+        )
+        assert ready.inspection_token is not None
+        clip = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='替换源文件',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 120_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+        assert not isinstance(clip, HighlightInspectionOperation)
+        stored_before = await database.scalar(
+            'SELECT source_fingerprint_json FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+
+        replacement = root / 'replacement.flv'
+        replacement.write_bytes(b'replacement-source-with-new-inode')
+        os.replace(str(replacement), str(source))
+        clipper.extra_lead_ms = 5_000
+        worker = HighlightWorker(
+            database, clipper, FakeDanmakuClipper(), worker_id='worker'
+        )
+        assert await worker.run_once() == clip.id
+
+        reprobe_sources = clipper.inspect_calls[-1][0]
+        assert reprobe_sources[0].keyframes_ms == ()
+        row = await database.fetchone(
+            'SELECT actual_start_ms,inspection_json,source_fingerprint_json '
+            'FROM highlight_clips WHERE id=?',
+            (clip.id,),
+        )
+        assert row is not None
+        assert int(row['actual_start_ms']) == 15_000
+        assert json.loads(str(row['inspection_json']))['actualStartMs'] == 15_000
+        assert str(row['source_fingerprint_json']) != str(stored_before)
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_worker_keeps_migration_27_legacy_multi_part_clip_processable(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    output_root = root / 'highlights' / '200'
+    root.mkdir()
+    output_root.mkdir(parents=True)
+    first = root / 'legacy-p1.flv'
+    second = root / 'legacy-p2.flv'
+    first.write_bytes(b'legacy-first')
+    second.write_bytes(b'legacy-second')
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,title,anchor_name) '
+        "VALUES(9,200,'200:900','closed',900,'旧直播','主播')"
+    )
+    await database.execute(
+        'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+        "VALUES('legacy-run',9,'finished',900,1020)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,final_path,'
+        'record_start_time,timeline_start_at_ms,record_duration_seconds,'
+        'artifact_state,xml_completed,created_at,updated_at) '
+        "VALUES(91,9,'legacy-run',1,?,?,900,900000,90,'ready',1,900,900),"
+        "(92,9,'legacy-run',2,?,?,990,990000,30,'ready',1,990,990)",
+        (str(first), str(first), str(second), str(second)),
+    )
+    output_video = output_root / 'highlight-1.mp4'
+    output_xml = output_root / 'highlight-1.xml'
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,name,requested_start_ms,requested_end_ms,'
+        'actual_start_ms,actual_end_ms,output_video_path,output_xml_path,state,'
+        'keyframe_confirmation_required,keyframe_confirmed,created_at,updated_at,'
+        'inspection_json,source_fingerprint_json) '
+        "VALUES(1,200,9,'迁移前多P片段',20000,120000,18000,120000,?,?,'queued',"
+        '0,0,1,1,NULL,NULL)',
+        (str(output_video), str(output_xml)),
+    )
+    await database.execute(
+        'INSERT INTO highlight_clip_sources('
+        'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms,'
+        'actual_start_ms,actual_end_ms) VALUES'
+        '(1,91,1,20000,90000,18000,90000),'
+        '(1,92,2,0,30000,0,30000)'
+    )
+    clipper = LegacyMultiClipper()
+    worker = HighlightWorker(
+        database, clipper, FakeDanmakuClipper(), worker_id='worker'
+    )
+
+    assert await worker.run_once() == 1
+
+    row = await database.fetchone(
+        'SELECT state,file_size_bytes FROM highlight_clips WHERE id=1'
+    )
+    assert row is not None
+    assert dict(row) == {'state': 'ready', 'file_size_bytes': len(b'legacy-multi-clip')}
+    assert output_video.read_bytes() == b'legacy-multi-clip'
+    assert len(clipper.cut_calls[0][0].sources) == 2
 
 
 @pytest.mark.asyncio

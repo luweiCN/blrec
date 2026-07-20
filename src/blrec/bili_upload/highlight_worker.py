@@ -29,6 +29,7 @@ from .highlight_danmaku import (
 from .highlights import (
     HighlightService,
     _fingerprint_json,
+    _fingerprint_matches,
     _inspection_from_json,
     _inspection_json,
 )
@@ -69,7 +70,7 @@ class _ProcessResult:
     danmaku: DanmakuCutResult
     output_xml_path: Optional[str]
     elapsed_seconds: float
-    source_fingerprint_json: str
+    source_fingerprint_json: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -583,7 +584,7 @@ class HighlightWorker:
 
     def _process_sync(self, work: _ClipWork) -> _ProcessResult:
         started_at = self._monotonic()
-        clip_sources = tuple(
+        hinted_sources = tuple(
             ClipSource(
                 source.part_id,
                 source.video_path,
@@ -597,23 +598,9 @@ class HighlightWorker:
             )
             for source in work.sources
         )
-        fingerprint_json = _fingerprint_json(clip_sources[0])
-        if (
-            work.inspection_json is not None
-            and work.source_fingerprint_json == fingerprint_json
-        ):
-            persisted = _inspection_from_json(
-                work.inspection_json, work.source_fingerprint_json
-            )
-            persisted_source = replace(
-                persisted.sources[0],
-                path=clip_sources[0].path,
-                recording=clip_sources[0].recording,
-            )
-            inspection = replace(persisted, sources=(persisted_source,))
-        else:
-            inspection = self._clipper.inspect(
-                clip_sources,
+        if len(hinted_sources) > 1:
+            inspection = self._clipper.inspect_legacy(
+                hinted_sources,
                 requested_start_ms=work.requested_start_ms,
                 requested_end_ms=work.requested_end_ms,
                 stable_end_ms=work.requested_end_ms,
@@ -621,6 +608,36 @@ class HighlightWorker:
                     self._monotonic() + HighlightService.INSPECTION_DEADLINE_SECONDS
                 ),
             )
+            fingerprint_json: Optional[str] = None
+        else:
+            fingerprint_json = _fingerprint_json(hinted_sources[0])
+            if (
+                work.inspection_json is not None
+                and work.source_fingerprint_json is not None
+                and _fingerprint_matches(work.source_fingerprint_json, fingerprint_json)
+            ):
+                persisted = _inspection_from_json(
+                    work.inspection_json, work.source_fingerprint_json
+                )
+                persisted_source = replace(
+                    persisted.sources[0],
+                    path=hinted_sources[0].path,
+                    recording=hinted_sources[0].recording,
+                )
+                inspection = replace(persisted, sources=(persisted_source,))
+            else:
+                reprobe_sources = tuple(
+                    replace(source, keyframes_ms=()) for source in hinted_sources
+                )
+                inspection = self._clipper.inspect(
+                    reprobe_sources,
+                    requested_start_ms=work.requested_start_ms,
+                    requested_end_ms=work.requested_end_ms,
+                    stable_end_ms=work.requested_end_ms,
+                    deadline_monotonic=(
+                        self._monotonic() + HighlightService.INSPECTION_DEADLINE_SECONDS
+                    ),
+                )
         if inspection.confirmation_required and not work.confirmation_confirmed:
             raise HighlightCutError('关键帧偏差尚未确认')
         video_partial = self._partial_path(work.output_video_path)

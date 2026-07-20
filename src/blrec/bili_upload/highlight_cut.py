@@ -104,7 +104,44 @@ class LosslessClipper:
         stable_end_ms: int,
         deadline_monotonic: Optional[float] = None,
     ) -> ClipInspection:
-        if len(sources) != 1:
+        return self._inspect(
+            sources,
+            requested_start_ms=requested_start_ms,
+            requested_end_ms=requested_end_ms,
+            stable_end_ms=stable_end_ms,
+            deadline_monotonic=deadline_monotonic,
+            allow_multiple_sources=False,
+        )
+
+    def inspect_legacy(
+        self,
+        sources: Sequence[ClipSource],
+        *,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        stable_end_ms: int,
+        deadline_monotonic: Optional[float] = None,
+    ) -> ClipInspection:
+        return self._inspect(
+            sources,
+            requested_start_ms=requested_start_ms,
+            requested_end_ms=requested_end_ms,
+            stable_end_ms=stable_end_ms,
+            deadline_monotonic=deadline_monotonic,
+            allow_multiple_sources=True,
+        )
+
+    def _inspect(
+        self,
+        sources: Sequence[ClipSource],
+        *,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        stable_end_ms: int,
+        deadline_monotonic: Optional[float],
+        allow_multiple_sources: bool,
+    ) -> ClipInspection:
+        if not sources or (not allow_multiple_sources and len(sources) != 1):
             raise HighlightCutError('每次剪辑必须且只能选择一个视频分段')
         if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
             raise HighlightCutError('剪辑时间范围无效')

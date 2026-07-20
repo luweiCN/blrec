@@ -98,6 +98,28 @@ def test_inspect_accepts_exactly_one_source(tmp_path: Path) -> None:
         )
 
 
+def test_legacy_worker_inspection_keeps_existing_multi_source_clips(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / 'first.flv'
+    second = tmp_path / 'second.flv'
+    first.write_bytes(b'first')
+    second.write_bytes(b'second')
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (0, 5_000)))
+
+    inspection = clipper.inspect_legacy(
+        (
+            ClipSource(1, str(first), 5_000, 10_000),
+            ClipSource(2, str(second), 0, 10_000),
+        ),
+        requested_start_ms=5_000,
+        requested_end_ms=20_000,
+        stable_end_ms=20_000,
+    )
+
+    assert [source.part_id for source in inspection.sources] == [1, 2]
+
+
 def test_inspect_uses_one_absolute_probe_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

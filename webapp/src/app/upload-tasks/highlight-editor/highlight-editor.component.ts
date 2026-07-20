@@ -565,8 +565,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     draft.state = 'inspecting';
     draft.error = null;
-    draft.idempotencyKey = this.newPrivateKey();
-    draft.claimKey = this.newPrivateKey();
+    if (!draft.idempotencyKey) {
+      draft.idempotencyKey = this.newPrivateKey();
+    }
+    if (!draft.claimKey) {
+      draft.claimKey = this.newPrivateKey();
+    }
     draft.reinspectionCount = 0;
     this.actionError = null;
     this.startDraftInspection(draft);
@@ -1346,7 +1350,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     draft.inspectionRequest?.unsubscribe();
     const initial$ = initialOperation
       ? of(initialOperation)
-      : this.highlights.inspectClip(
+      : this.submitDraftInspection(
           this.sessionId,
           draft.startMs,
           draft.endMs,
@@ -1409,24 +1413,57 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private waitForInspection(
     operation: HighlightInspectionOperation,
     claimKey: string,
+    deferRequest = false,
   ): Observable<HighlightInspectionOperation> {
-    if (operation.state === 'succeeded' || operation.state === 'failed') {
+    if (operation.state === 'failed') {
       return of(operation);
     }
-    return timer(Math.max(100, operation.retryAfterMs)).pipe(
+    if (operation.state === 'succeeded' && operation.inspectionToken) {
+      return of(operation);
+    }
+    const retryAfterMs = Math.max(100, operation.retryAfterMs);
+    const trigger$ =
+      operation.state === 'succeeded' && !deferRequest
+        ? of(0)
+        : timer(retryAfterMs);
+    return trigger$.pipe(
       switchMap(() =>
         this.highlights
           .getClipInspection(operation.operationId, claimKey)
           .pipe(
             catchError((error: unknown) =>
               this.isTransientHttpError(error)
-                ? of(operation)
+                ? this.waitForInspection(operation, claimKey, true)
                 : throwError(() => error),
             ),
           ),
       ),
       switchMap((next) => this.waitForInspection(next, claimKey)),
     );
+  }
+
+  private submitDraftInspection(
+    sessionId: number,
+    startMs: number,
+    endMs: number,
+    idempotencyKey: string,
+    responseRetry = 0,
+  ): Observable<HighlightInspectionOperation> {
+    return this.highlights
+      .inspectClip(sessionId, startMs, endMs, idempotencyKey)
+      .pipe(
+        catchError((error: unknown) =>
+          responseRetry < 1 && this.isTransientHttpError(error)
+            ? this.submitDraftInspection(
+                sessionId,
+                startMs,
+                endMs,
+                idempotencyKey,
+                responseRetry + 1,
+              )
+            : throwError(() => error),
+        ),
+      );
   }
 
   private inspectionFailureMessage(errorCode: string | null): string {
