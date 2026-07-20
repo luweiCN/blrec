@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.8+, asyncio, aiohttp, requests, FastAPI, SQLite, pytest, Angular 15, RxJS, Jasmine/Karma.
 
-**Source Evidence:** `docs/superpowers/specs/2026-07-20-end-to-end-request-performance-design.md` defines the target architecture and non-goals; `docs/performance/request-audit.md` is the current 105-route/18-group ledger (`I-104` is recording detail and `I-105` is marker counts); `docs/performance/outbound-request-audit.md` supplies the code-verified O-01–O-15 findings and corrects the stale QR/Review descriptions. New inbound work must start at `I-106`; this plan does not reuse an existing ID. When implementation discovers drift, update the failing test and this plan before changing the stated request budget.
+**Source Evidence:** `docs/superpowers/specs/2026-07-20-end-to-end-request-performance-design.md` defines the target architecture and non-goals; `docs/performance/request-audit.md` starts at the current 105-route/18-group ledger (`I-104` is recording detail and `I-105` is marker counts); `docs/performance/outbound-request-audit.md` supplies the code-verified O-01–O-15 findings and corrects the stale QR/Review descriptions. Outbound Tasks 3–15 have a hard post-Write/media baseline of 107/107 routes: `I-106` is highlight inspection status and `I-107` is control-operation status. The next available inbound ID is `I-108`; this plan allocates none. When implementation discovers drift, update the failing test and this plan before changing the stated request budget.
 
 ## Global Constraints
 
@@ -357,7 +357,7 @@ git commit -m "fix: preserve unknown danmaku outcomes"
 - `Live.info_revision: int` advances once per successful composite room+anchor application.
 - `Live.update_info()` is same-instance single-flight and has one injected `_info_timeout_seconds=10` absolute deadline over the complete web→app→HTML fallback sequence; tests pass `0.01`.
 - `RecordTask.info_revision` exposes the current `Live` revision.
-- **Hard prerequisite:** Write/media Task 6 (`TaskControlReconciler`) and Task 7 (durable membership/control-operation journal) are merged first. This task extends those owners; it does not add a second route-local operation model.
+- **Hard prerequisite:** the complete Write/media plan is merged first, including Task 5 inspection status and Tasks 6–7 durable control owners. Before any Outbound Task 3 production edit, FastAPI and the ledger must match at 107/107 with `I-106` inspection status and `I-107` control-operation status. Tasks 3–15 retain that baseline and do not add a route. This task extends those owners; it does not add a second route-local operation model.
 - The durable operation step carries `reuse_info_revision` from add/collect to start and consumes it exactly once. HTTP `start`, `recorder_enable`, and browser collect only persist intent and return `accepted`; their final per-room result is read from the existing control-operation endpoint.
 - `refresh` remains synchronous and read-only. Refresh work and durable remote-bearing control steps share fixed concurrency 2 and retain stable input-order results.
 - `SettingsManager.change_task_desired_states(...)` is the only batch desired-state writer and performs at most one `dump_settings()` for the whole batch.
@@ -401,10 +401,43 @@ Add route tests proving `start`, `recorder_enable`, and browser collect return C
 Run:
 
 ```bash
+PYTHONPATH=src .venv/bin/python - <<'PY'
+import re
+from pathlib import Path
+
+from fastapi.routing import APIRoute
+from starlette.routing import WebSocketRoute
+
+from blrec.web.main import api
+
+ledger = Path('docs/performance/request-audit.md').read_text()
+ledger_routes = {
+    (match.group(2), match.group(3))
+    for line in ledger.splitlines()
+    for match in [re.match(r'\| (I-\d{3}) \| ([A-Z]+) \| `([^`]+)` \|', line)]
+    if match
+}
+actual_routes = set()
+for route in api.routes:
+    if isinstance(route, APIRoute) and route.path.startswith('/api/'):
+        actual_routes.update(
+            (method, route.path)
+            for method in route.methods
+            if method not in {'HEAD', 'OPTIONS'}
+        )
+    elif isinstance(route, WebSocketRoute) and route.path.startswith('/ws/'):
+        actual_routes.add(('WS', route.path))
+
+assert len(ledger_routes) == 107, len(ledger_routes)
+assert len(actual_routes) == 107, len(actual_routes)
+assert ledger_routes == actual_routes
+assert ('GET', '/api/v1/highlights/inspections/{operation_id}') in ledger_routes
+assert ('GET', '/api/v1/control-operations/{operation_id}') in ledger_routes
+PY
 PYTHONPATH=src .venv/bin/python -m pytest tests/bili/test_live_info_refresh.py tests/task/test_task_manager_outbound.py tests/control/test_operations.py tests/web/test_tasks_routes.py tests/web/test_browser_extension_routes.py tests/task/test_live_connection_controller.py -q
 ```
 
-Expected: new interfaces are missing, a successful refresh makes two overlapping `getInfoByRoom` calls, add→start refreshes twice, batch desired state dumps per room or waits in HTTP, and durable worker concurrency/restart assertions fail.
+Expected: the 107/107 prerequisite guard passes before the new red tests run. The red tests then fail because new interfaces are missing, a successful refresh makes two overlapping `getInfoByRoom` calls, add→start refreshes twice, batch desired state dumps per room or waits in HTTP, and durable worker concurrency/restart assertions fail.
 
 - [ ] **Step 4: Implement one composite, single-flight refresh**
 
@@ -1692,15 +1725,54 @@ for id in 011 018 019 022 023 026 027 030 036 042 045 056 057 059 076 078 083 08
 test "$(rg -c '^\| [0-9]+ \| [A-Z]' docs/superpowers/plans/2026-07-20-outbound-request-performance.md)" -eq 18
 rg -q '^\| I-104 \| GET \| `/api/v1/recording-sessions/\{session_id\}`' docs/performance/request-audit.md
 rg -q '^\| I-105 \| GET \| `/api/v1/highlights/sessions/\{session_id\}/marker-counts`' docs/performance/request-audit.md
-test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" -ge 105
+rg -q '^\| I-106 \| GET \| `/api/v1/highlights/inspections/\{operation_id\}`' docs/performance/request-audit.md
+rg -q '^\| I-107 \| GET \| `/api/v1/control-operations/\{operation_id\}`' docs/performance/request-audit.md
+test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" -eq 107
 ! rg -n 'T[B]D|TO-[D]O|implement[ ]later|same[ ]as[ ]above|similar[ ]to' docs/superpowers/plans/2026-07-20-outbound-request-performance.md
 rg -q "target-version = \['py38'\]" pyproject.toml
 ! rg -n 'asyncio\.(timeout|TaskGroup)|except\s*\*' src/blrec tests
+PYTHONPATH=src .venv/bin/python - <<'PY'
+import re
+from pathlib import Path
+
+from fastapi.routing import APIRoute
+from starlette.routing import WebSocketRoute
+
+from blrec.web.main import api
+
+ledger = Path('docs/performance/request-audit.md').read_text()
+ledger_routes = {
+    (match.group(2), match.group(3))
+    for line in ledger.splitlines()
+    for match in [re.match(r'\| (I-\d{3}) \| ([A-Z]+) \| `([^`]+)` \|', line)]
+    if match
+}
+actual_routes = set()
+for route in api.routes:
+    if isinstance(route, APIRoute) and route.path.startswith('/api/'):
+        actual_routes.update(
+            (method, route.path)
+            for method in route.methods
+            if method not in {'HEAD', 'OPTIONS'}
+        )
+    elif isinstance(route, WebSocketRoute) and route.path.startswith('/ws/'):
+        actual_routes.add(('WS', route.path))
+
+assert len(ledger_routes) == 107, len(ledger_routes)
+assert len(actual_routes) == 107, len(actual_routes)
+assert ledger_routes == actual_routes, (
+    sorted(actual_routes - ledger_routes),
+    sorted(ledger_routes - actual_routes),
+)
+assert ('GET', '/api/v1/highlights/inspections/{operation_id}') in ledger_routes
+assert ('GET', '/api/v1/control-operations/{operation_id}') in ledger_routes
+print('Outbound prerequisite route ledger: 107/107')
+PY
 git diff --check
 git status --short
 ```
 
-The O-table has 14 rows because only O-03/O-04 are deliberately paired; the loop proves all 15 IDs are present. The route ledger may exceed 105 after the prerequisite Write/media plan, but I-104 and I-105 must retain their current meanings and this plan must not allocate another inbound ID. Black runs with the repository's `py38` target, the mechanical guard rejects 3.11-only asyncio/exception syntax, and the normal CI/runtime matrix must still run on Python 3.8. Before committing, inspect status and stage only the ledger.
+The O-table has 14 rows because only O-03/O-04 are deliberately paired; the loop proves all 15 IDs are present. Tasks 3–15 require the post-Write/media route ledger to remain exactly 107/107: I-104/I-105 retain their Hot-read meanings, I-106/I-107 retain inspection/control status, and the next available ID is I-108. Black runs with the repository's `py38` target, the mechanical guard rejects 3.11-only asyncio/exception syntax, and the normal CI/runtime matrix must still run on Python 3.8. Before committing, inspect status and stage only the ledger.
 
 **Budget and invariants:** this task makes zero outbound calls except loopback fakes and zero production-code changes. Completion requires 18/18 groups and 20/20 triggers accounted for, no higher cadence/concurrency, no upload-line change, no new lint errors, no leaked sessions/tasks, and no weakened unknown-outcome fence.
 
@@ -1728,4 +1800,4 @@ Before calling the implementation complete, answer every item with a test name a
 
 ## Implementation Completion Criteria
 
-The plan is complete only when all fifteen task commits exist in order, all verification commands pass under the documented lint baseline, `docs/performance/request-audit.md` contains evidence for all 18 groups and 20 triggers, `docs/performance/outbound-request-audit.md` is tracked, and `git status --short` contains no unreviewed files from this work.
+The plan is complete only when all fifteen task commits exist in order, Tasks 3–15 preserve the post-Write/media FastAPI/ledger baseline at 107/107 (`I-106` inspection, `I-107` control, next ID `I-108`), all verification commands pass under the documented lint baseline, `docs/performance/request-audit.md` contains evidence for all 18 groups and 20 triggers, `docs/performance/outbound-request-audit.md` is tracked, and `git status --short` contains no unreviewed files from this work.
