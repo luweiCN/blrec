@@ -16,6 +16,8 @@ from blrec.bili_upload.highlights import (
     HighlightClip,
     HighlightClipSource,
     HighlightClipSummary,
+    HighlightInspectionBusy,
+    HighlightInspectionOperation,
     HighlightMarker,
     HighlightRangeUnavailable,
     HighlightTimeline,
@@ -113,7 +115,17 @@ class FakeHighlightService:
         self.create_marker = AsyncMock(return_value=marker())
         self.update_marker = AsyncMock(return_value=marker())
         self.delete_marker = AsyncMock(return_value=None)
-        self.inspect_clip = AsyncMock(return_value=inspection())
+        self.submit_clip_inspection = AsyncMock(
+            return_value=HighlightInspectionOperation('inspection-op', 'accepted')
+        )
+        self.get_clip_inspection = AsyncMock(
+            return_value=HighlightInspectionOperation(
+                'inspection-op',
+                'succeeded',
+                inspection=inspection(),
+                inspection_token='inspection-token-value-123',
+            )
+        )
         self.create_clip = AsyncMock(return_value=clip())
         self.list_clips = AsyncMock(return_value=(clip(),))
         self.list_clip_summaries = AsyncMock(return_value=(1, (clip_summary(),)))
@@ -319,11 +331,29 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     inspected = client.post(
         '/api/v1/highlights/sessions/9/clips/inspect',
         headers=auth(),
-        json={'startMs': 20_000, 'endMs': 70_000},
+        json={
+            'startMs': 20_000,
+            'endMs': 70_000,
+            'idempotencyKey': 'f7cbb86a-6f17-4c77-8d40-3561d178831f',
+        },
     )
-    assert inspected.status_code == 200
-    assert inspected.json()['actualStartMs'] == 18_000
-    assert inspected.json()['confirmationRequired'] is False
+    assert inspected.status_code == 202
+    assert inspected.json() == {
+        'operationId': 'inspection-op',
+        'state': 'accepted',
+        'retryAfterMs': 500,
+        'inspection': None,
+        'inspectionToken': None,
+        'errorCode': None,
+    }
+
+    ready = client.get(
+        '/api/v1/highlights/inspections/inspection-op',
+        headers={**auth(), 'X-BLREC-Inspection-Claim': 'claim-key'},
+    )
+    assert ready.status_code == 200
+    assert ready.json()['inspection']['actualStartMs'] == 18_000
+    assert ready.json()['inspectionToken'] == 'inspection-token-value-123'
 
     created = client.post(
         '/api/v1/highlights/sessions/9/clips',
@@ -334,6 +364,8 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
             'startMs': 20_000,
             'endMs': 70_000,
             'confirmKeyframe': False,
+            'inspectionToken': 'inspection-token-value-123',
+            'idempotencyKey': 'f7cbb86a-6f17-4c77-8d40-3561d178831f',
         },
     )
     assert created.status_code == 201
@@ -374,6 +406,25 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     deleter.assert_awaited_once_with(3)
 
 
+def test_inspection_overload_returns_retry_after(client: TestClient) -> None:
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.submit_clip_inspection.side_effect = HighlightInspectionBusy('busy')
+
+    response = client.post(
+        '/api/v1/highlights/sessions/9/clips/inspect',
+        headers=auth(),
+        json={
+            'startMs': 20_000,
+            'endMs': 70_000,
+            'idempotencyKey': 'f7cbb86a-6f17-4c77-8d40-3561d178831f',
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.headers['retry-after'] == '1'
+
+
 def test_unsafe_clip_range_returns_conflict(client: TestClient) -> None:
     service = highlights.service
     assert isinstance(service, FakeHighlightService)
@@ -384,7 +435,13 @@ def test_unsafe_clip_range_returns_conflict(client: TestClient) -> None:
     response = client.post(
         '/api/v1/highlights/sessions/9/clips',
         headers=auth(),
-        json={'name': '过近', 'startMs': 100_000, 'endMs': 119_000},
+        json={
+            'name': '过近',
+            'startMs': 100_000,
+            'endMs': 119_000,
+            'idempotencyKey': 'f7cbb86a-6f17-4c77-8d40-3561d178831f',
+            'inspectionToken': 'inspection-token-value-123',
+        },
     )
 
     assert response.status_code == 409

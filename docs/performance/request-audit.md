@@ -2,8 +2,8 @@
 
 Audited baseline: `57361f7` (2026-07-20); hot-read evidence is current through
 `2c7b933`. The inventory is generated from the registered FastAPI routes, then
-checked against each router handler. It contains exactly 105 inbound endpoints:
-103 HTTP endpoints and 2 WebSocket endpoints.
+checked against each router handler. It contains exactly 107 inbound endpoints:
+105 HTTP endpoints and 2 WebSocket endpoints.
 
 This ledger records only normalized route templates and repository-relative source
 evidence. It intentionally contains no credentials, request/query values, runtime
@@ -204,7 +204,7 @@ the NAS.
 | I-083 | GET | `/api/v1/bili-collections` | bili_collections | R,X | D100 cached; EXT refresh | `src/blrec/web/routers/bili_collections.py:list_bili_collections` -> remote collection list | No 30-60 second TTL or single-flight; repeated dialogs can duplicate calls. | Outbound: short TTL, per-account single-flight, stale-on-error policy. |
 | I-084 | POST | `/api/v1/bili-collections` | bili_collections | R,W,F,X | EXT | `src/blrec/web/routers/bili_collections.py:create_bili_collection` -> cover resolution/upload and remote create | Multi-step non-idempotent remote operation must preserve unknown-outcome safety. | Outbound: account gate, absolute deadline, no blind retry. |
 
-### `highlights` router (16)
+### `highlights` router (17)
 
 | ID | Method | Normalized path | Router | IO | Budget | Evidence | Finding | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -212,8 +212,8 @@ the NAS.
 | I-086 | PATCH | `/api/v1/highlights/{marker_id}` | highlights | R,W | C100 | `src/blrec/web/routers/highlights.py:update_marker` -> marker update | Single local marker mutation. | Keep. |
 | I-087 | DELETE | `/api/v1/highlights/{marker_id}` | highlights | W | C100 | `src/blrec/web/routers/highlights.py:delete_marker` -> marker delete | Single local destructive mutation. | Keep; focused test only. |
 | I-088 | GET | `/api/v1/highlights/sessions/{session_id}/timeline` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:get_timeline`; `src/blrec/bili_upload/highlights.py:timeline`, `_available_path` | The full filesystem-aware timeline remains necessary for the editor, but recording rows/details no longer request it just to display counts. | Hot read complete at the call boundary: timeline is editor-only; I-105 supplies the zero-file count projection. |
-| I-089 | POST | `/api/v1/highlights/sessions/{session_id}/clips/inspect` | highlights | R,F,P | T150 handshake; bounded probe | `src/blrec/web/routers/highlights.py:inspect_clip` -> keyframe/source inspection | Probe work is CPU/filesystem-sensitive and must be bounded off-loop. | Write/media: probe queue and explicit inspection deadline. |
-| I-090 | POST | `/api/v1/highlights/sessions/{session_id}/clips` | highlights | R,W,F,P | C100 ack | `src/blrec/web/routers/highlights.py:create_clip` -> inspect then enqueue clip | Request can perform inspection before queueing worker work. | Write/media: bounded inspect, then recoverable background clip operation. |
+| I-089 | POST | `/api/v1/highlights/sessions/{session_id}/clips/inspect` | highlights | R,W | T150 handshake; bounded probe | `src/blrec/web/routers/highlights.py:inspect_clip` -> `HighlightService.submit_clip_inspection` | The request admits a durable operation and returns 202; at most two workers probe while eight operations wait, under one absolute 30-second FFprobe deadline. | Write/media WM-05: bounded durable admission with fingerprint/range single-flight reuse. |
+| I-090 | POST | `/api/v1/highlights/sessions/{session_id}/clips` | highlights | R,W,F | C100 ack | `src/blrec/web/routers/highlights.py:create_clip` -> token validation and atomic clip enqueue | A ready one-use inspection token is consumed in the same transaction as the idempotent clip insert; stale fingerprints return the existing background inspection operation instead of probing in the request. | Write/media WM-05: response-loss-safe create and worker reuse of persisted inspection. |
 | I-091 | GET | `/api/v1/highlights/sessions/{session_id}/clips` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:list_clips` -> full clip projections | Full projections include source/upload/file-derived fields. | Hot read: counts/summary for rows; full list only when opened. |
 | I-092 | GET | `/api/v1/highlights/clips` | highlights | R,F | L150 | `src/blrec/web/routers/highlights.py:list_all_clips` -> count plus page-first clip summary | Both 20- and 100-row pages use exactly two database calls and zero `getsize`/`stat`/`lstat`; size is persisted on create/recovery and unknown legacy size stays `null`. | Hot read implemented: selected-page chunk aggregation, migration-24 size lifecycle, at-most-100 startup backfill, unchanged full detail paths/sources, and proven partial index; completion remains pending until warm NAS p95 is below 150 ms. |
 | I-093 | GET | `/api/v1/highlights/clips/{clip_id}` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:get_clip` -> full clip detail | Detail route is the correct place for full projection. | Keep; bound file work. |
@@ -224,6 +224,7 @@ the NAS.
 | I-098 | POST | `/api/v1/highlights/clips/{clip_id}/upload-session` | highlights | R,W | C100 | `src/blrec/web/routers/highlights.py:prepare_upload_session` -> ensure local session | Local idempotent session creation. | Keep; assert bounded queries. |
 | I-099 | POST | `/api/v1/highlights/clips/{clip_id}/upload-task` | highlights | R,W,X | C100 cached; EXT catalog refresh | `src/blrec/web/routers/highlights.py:create_upload_task`; `src/blrec/bili_upload/runtime.py:create_highlight_upload_task` -> catalog validation then local job creation | The media upload remains worker-owned, but a category-catalog cache miss can refresh Bilibili data before the local job is created. | Outbound: preserve the category TTL/single-flight, explicit remote deadline and stale behavior without increasing request cadence; keep the cached local path within C100. |
 | I-105 | GET | `/api/v1/highlights/sessions/{session_id}/marker-counts` | highlights | R | D100 | `src/blrec/web/routers/highlights.py:get_marker_counts` -> `HighlightService.marker_counts` | Persisted marker links and legacy time-boundary mapping are counted with at most two queries, including zero-count parts, without selecting paths or touching files. | Hot read implemented: lightweight detail-row counts with editor-compatible boundary semantics; NAS p95 is pending. |
+| I-106 | GET | `/api/v1/highlights/inspections/{operation_id}` | highlights | R,W | D100 | `src/blrec/web/routers/highlights.py:get_clip_inspection` -> durable inspection status/token claim | Reads accepted/running/terminal state; a succeeded result exchanges the claim header for a deterministic one-use token in a short transaction without persisting either plaintext secret. | Write/media WM-05: safe polling and response-loss recovery; no local path, probe diagnostic, secret, or token hash is returned. |
 
 ### `browser_extension` router (4)
 
@@ -243,11 +244,8 @@ the NAS.
 Machine count:
 
 ```bash
-test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" = 106
+test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" = 107
 ```
-
-The temporary 106-row implementation ledger intentionally skips reserved I-106;
-WM-05 adds that inspection-status route and restores the planned 107/107 gate.
 
 ## Outbound operation groups
 

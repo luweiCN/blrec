@@ -262,6 +262,7 @@ class BiliAccountRuntime:
         assert self._credential_key is not None
 
         database = BiliUploadDatabase(self._settings.database_path)
+        highlight_service: Optional[HighlightService] = None
         try:
             await database.open()
             journal = RecordingJournalBridge(database, clock=self._clock)
@@ -278,6 +279,9 @@ class BiliAccountRuntime:
                 ),
                 clipper=lossless_clipper,
                 clock=self._clock,
+                inspection_secret=hashlib.sha256(
+                    b'blrec-highlight-inspection\0' + self._credential_key
+                ).digest(),
             )
             if self._recording_root is not None:
                 await highlight_service.migrate_legacy_outputs(
@@ -447,8 +451,11 @@ class BiliAccountRuntime:
                     ),
                     network_route_manager=self._network_route_manager,
                 )
+            await highlight_service.start()
         except Exception:
             logger.exception('Bilibili account management failed to start')
+            if highlight_service is not None:
+                await highlight_service.shutdown()
             await self._close_partial(database)
             self._unavailable_reason = 'Bilibili account management failed to start'
             return False
@@ -666,6 +673,9 @@ class BiliAccountRuntime:
             cover_library.close_admission()
         if self._deletion_worker is not None:
             self._deletion_worker.stop_admission()
+        service = self._highlight_service
+        if service is not None:
+            await service.shutdown()
         await self._stop_deletion_worker()
         await self._stop_media_index_worker()
         await self._stop_highlight_worker()

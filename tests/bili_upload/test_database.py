@@ -41,6 +41,7 @@ REQUIRED_TABLES = {
     'highlight_markers',
     'highlight_clips',
     'highlight_clip_sources',
+    'highlight_inspections',
     'local_deletion_items',
     'owner_handoff_outcomes',
 }
@@ -77,7 +78,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -439,7 +440,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
     finally:
         await database.close()
 
@@ -487,7 +488,7 @@ async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
             'output_video_path': '/clips/legacy.mp4',
             'file_size_bytes': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
     finally:
         await database.close()
 
@@ -525,7 +526,7 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
         assert (
             await database.scalar(
                 'SELECT file_size_bytes FROM highlight_clips WHERE id=8'
@@ -589,7 +590,7 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
         sessions = await database.fetchall(
             'SELECT id,cancellation_generation FROM recording_sessions ORDER BY id'
         )
@@ -621,6 +622,66 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
                 'owner_kind,owner_id,side_effect_key,source_generation,'
                 'outcome_state,outcome_json) '
                 "VALUES('upload',1,'submit',0,'unknown_terminal','{}')"
+            )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_twenty_seventh_migration_persists_safe_highlight_inspections(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 27):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,state,'
+            'created_at,updated_at) '
+            "VALUES(7,100,'旧片段',0,1000,'ready',1,1)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        legacy = await database.fetchone(
+            'SELECT inspection_json,source_fingerprint_json,idempotency_key '
+            'FROM highlight_clips WHERE id=7'
+        )
+        assert legacy is not None and dict(legacy) == {
+            'inspection_json': None,
+            'source_fingerprint_json': None,
+            'idempotency_key': None,
+        }
+        await database.execute(
+            'INSERT INTO highlight_inspections('
+            'operation_id,session_id,requested_start_ms,requested_end_ms,'
+            "idempotency_key,state,active_durations_json,created_at,updated_at) "
+            "VALUES('op',1,0,1000,'idem','accepted','{}',1,1)"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'INSERT INTO highlight_inspections('
+                'operation_id,session_id,requested_start_ms,requested_end_ms,'
+                "idempotency_key,state,active_durations_json,created_at,updated_at) "
+                "VALUES('other',1,0,1000,'idem','accepted','{}',1,1)"
             )
     finally:
         await database.close()

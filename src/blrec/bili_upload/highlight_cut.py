@@ -5,6 +5,7 @@ import math
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
@@ -83,6 +84,7 @@ class LosslessClipper:
         probe: Optional[Probe] = None,
         cut_timeout_seconds: int = 3600,
         probe_timeout_seconds: int = 30,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if cut_timeout_seconds <= 0 or probe_timeout_seconds <= 0:
             raise ValueError('FFmpeg timeout must be positive')
@@ -91,6 +93,7 @@ class LosslessClipper:
         self._probe_override = probe
         self._cut_timeout_seconds = cut_timeout_seconds
         self._probe_timeout_seconds = probe_timeout_seconds
+        self._monotonic = monotonic
 
     def inspect(
         self,
@@ -99,9 +102,10 @@ class LosslessClipper:
         requested_start_ms: int,
         requested_end_ms: int,
         stable_end_ms: int,
+        deadline_monotonic: Optional[float] = None,
     ) -> ClipInspection:
-        if not sources:
-            raise HighlightCutError('没有可用于剪辑的视频分段')
+        if len(sources) != 1:
+            raise HighlightCutError('每次剪辑必须且只能选择一个视频分段')
         if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
             raise HighlightCutError('剪辑时间范围无效')
         if requested_end_ms > stable_end_ms:
@@ -126,6 +130,7 @@ class LosslessClipper:
                     None if source.keyframes_ms else source.requested_start_ms
                 ),
                 known_duration_ms=source.duration_ms,
+                deadline_monotonic=deadline_monotonic,
             )
             if source.requested_end_ms > profile.duration_ms:
                 raise HighlightCutError('剪辑范围超出源视频可用时长')
@@ -307,6 +312,7 @@ class LosslessClipper:
         *,
         keyframe_at_ms: Optional[int] = None,
         known_duration_ms: Optional[int] = None,
+        deadline_monotonic: Optional[float] = None,
     ) -> Tuple[MediaProfile, Tuple[int, ...]]:
         if self._probe_override is not None:
             profile, keyframes = self._probe_override(path)
@@ -323,7 +329,8 @@ class LosslessClipper:
             path,
         )
         profile = self._parse_profile(
-            self._run_ffprobe(profile_command), known_duration_ms=known_duration_ms
+            self._run_ffprobe(profile_command, deadline_monotonic),
+            known_duration_ms=known_duration_ms,
         )
         if keyframe_at_ms is None:
             return profile, ()
@@ -348,17 +355,23 @@ class LosslessClipper:
             'json',
             path,
         )
-        keyframes = self._parse_keyframes(self._run_ffprobe(keyframe_command))
+        keyframes = self._parse_keyframes(
+            self._run_ffprobe(keyframe_command, deadline_monotonic)
+        )
         return profile, keyframes
 
-    def _run_ffprobe(self, command: Tuple[str, ...]) -> Mapping[str, Any]:
+    def _run_ffprobe(
+        self, command: Tuple[str, ...], deadline_monotonic: Optional[float] = None
+    ) -> Mapping[str, Any]:
+        timeout = float(self._probe_timeout_seconds)
+        if deadline_monotonic is not None:
+            remaining = deadline_monotonic - self._monotonic()
+            if remaining <= 0:
+                raise HighlightCutError('ffprobe 检查视频超时')
+            timeout = min(timeout, remaining)
         try:
             result = subprocess.run(
-                command,
-                capture_output=True,
-                check=False,
-                shell=False,
-                timeout=self._probe_timeout_seconds,
+                command, capture_output=True, check=False, shell=False, timeout=timeout
             )
         except subprocess.TimeoutExpired as error:
             raise HighlightCutError('ffprobe 检查视频超时') from error

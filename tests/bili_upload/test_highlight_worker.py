@@ -2,6 +2,7 @@ import asyncio
 import os
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 from typing import AsyncIterator, Sequence
 
@@ -24,6 +25,8 @@ from blrec.bili_upload.highlight_danmaku import DanmakuClipSource, DanmakuCutRes
 from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.highlights import (
     HighlightConfirmationRequired,
+    HighlightInspectionBusy,
+    HighlightInspectionConflict,
     HighlightRangeUnavailable,
     HighlightService,
 )
@@ -52,6 +55,7 @@ class FakeClipper:
         requested_start_ms: int,
         requested_end_ms: int,
         stable_end_ms: int,
+        deadline_monotonic=None,
     ) -> ClipInspection:
         self.inspect_calls.append(
             (tuple(sources), requested_start_ms, requested_end_ms, stable_end_ms)
@@ -90,6 +94,18 @@ class FakeClipper:
         return CutArtifact(
             output_path, len(b'clipped-video'), inspection.output_duration_ms
         )
+
+
+class BlockingInspectionClipper(FakeClipper):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def inspect(self, *args, **kwargs) -> ClipInspection:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().inspect(*args, **kwargs)
 
 
 class FakeDanmakuClipper:
@@ -243,6 +259,154 @@ async def test_create_clip_persists_ordered_sources_and_rejects_unsafe_tail(
             confirm_keyframe=False,
             active_durations_ms={1: 120_000},
         )
+
+
+@pytest.mark.asyncio
+async def test_inspection_token_creates_idempotent_clip_and_worker_reuses_probe(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    claim_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        assert accepted.state == 'accepted'
+
+        ready = None
+        for _attempt in range(100):
+            value = await service.get_clip_inspection(
+                accepted.operation_id, claim_key=claim_key
+            )
+            if value.state == 'succeeded':
+                ready = value
+                break
+            await asyncio.sleep(0.01)
+        assert ready is not None
+        assert ready.inspection_token
+        assert ready.inspection is not None
+        assert len(clipper.inspect_calls) == 1
+        reclaimed = await service.get_clip_inspection(
+            accepted.operation_id, claim_key=claim_key
+        )
+        assert reclaimed.inspection_token == ready.inspection_token
+
+        stored = await database.fetchone(
+            'SELECT claim_key_hash,token_hash FROM highlight_inspections '
+            'WHERE operation_id=?',
+            (accepted.operation_id,),
+        )
+        assert stored is not None
+        assert claim_key not in tuple(str(value) for value in stored)
+        assert ready.inspection_token not in tuple(str(value) for value in stored)
+
+        with pytest.raises(HighlightInspectionConflict, match='绑定'):
+            await service.create_clip(
+                session_id=1,
+                marker_id=None,
+                name='错误重放',
+                requested_start_ms=20_000,
+                requested_end_ms=70_000,
+                confirm_keyframe=False,
+                active_durations_ms={1: 120_000},
+                inspection_token=ready.inspection_token,
+                idempotency_key=str(uuid.uuid4()),
+            )
+
+        clip = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='第一段高光',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 120_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+        repeated = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='第一段高光',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 120_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+        assert repeated.id == clip.id
+        with pytest.raises(HighlightInspectionConflict, match='已经使用'):
+            await service.get_clip_inspection(
+                accepted.operation_id, claim_key=claim_key
+            )
+
+        worker = HighlightWorker(
+            database, clipper, FakeDanmakuClipper(), worker_id='worker'
+        )
+        assert await worker.run_once() == clip.id
+        assert len(clipper.inspect_calls) == 1
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_inspection_admission_is_bounded_to_two_active_and_eight_waiting(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = BlockingInspectionClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    try:
+        operations = []
+        for _index in range(10):
+            operations.append(
+                await service.submit_clip_inspection(
+                    session_id=1,
+                    requested_start_ms=20_000,
+                    requested_end_ms=70_000,
+                    active_durations_ms={1: 120_000},
+                    idempotency_key=str(uuid.uuid4()),
+                )
+            )
+        assert all(operation.state == 'accepted' for operation in operations)
+        assert await asyncio.get_running_loop().run_in_executor(
+            None, clipper.started.wait, 1
+        )
+
+        with pytest.raises(HighlightInspectionBusy):
+            await service.submit_clip_inspection(
+                session_id=1,
+                requested_start_ms=20_000,
+                requested_end_ms=70_000,
+                active_durations_ms={1: 120_000},
+                idempotency_key=str(uuid.uuid4()),
+            )
+    finally:
+        clipper.release.set()
+        await service.shutdown()
+    assert len(clipper.inspect_calls) == 1
 
 
 @pytest.mark.asyncio

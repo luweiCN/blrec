@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from blrec.bili_upload.highlight_cut import (
+    ClipInspection,
     ClipSource,
     HighlightCutError,
+    InspectedClipSource,
     LosslessClipper,
     MediaProfile,
 )
@@ -73,7 +75,97 @@ def test_inspect_requires_confirmation_above_ten_seconds(tmp_path: Path) -> None
     assert inspection.confirmation_required is True
 
 
-def test_inspect_rejects_unsafe_tail_and_incompatible_parts(tmp_path: Path) -> None:
+def test_inspect_accepts_exactly_one_source(tmp_path: Path) -> None:
+    first = tmp_path / 'first.flv'
+    second = tmp_path / 'second.flv'
+    first.write_bytes(b'first')
+    second.write_bytes(b'second')
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (0,)))
+
+    with pytest.raises(HighlightCutError, match='一个视频分段'):
+        clipper.inspect(
+            (), requested_start_ms=0, requested_end_ms=10_000, stable_end_ms=10_000
+        )
+    with pytest.raises(HighlightCutError, match='一个视频分段'):
+        clipper.inspect(
+            (
+                ClipSource(1, str(first), 0, 10_000),
+                ClipSource(2, str(second), 0, 10_000),
+            ),
+            requested_start_ms=0,
+            requested_end_ms=20_000,
+            stable_end_ms=20_000,
+        )
+
+
+def test_inspect_uses_one_absolute_probe_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    now = [100.0]
+    timeouts = []
+
+    def run(command, **kwargs):
+        timeouts.append(kwargs['timeout'])
+        now[0] += 12.0
+        document = (
+            {'frames': [{'best_effort_timestamp_time': '0.0'}]}
+            if '-skip_frame' in command
+            else {
+                'streams': [
+                    {
+                        'codec_type': 'video',
+                        'codec_name': 'h264',
+                        'width': 1920,
+                        'height': 1080,
+                        'r_frame_rate': '60/1',
+                        'extradata_size': 42,
+                    },
+                    {'codec_type': 'audio'},
+                ],
+                'format': {'duration': '100.0'},
+            }
+        )
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps(document).encode('utf8'), stderr=b''
+        )
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(monotonic=lambda: now[0])
+
+    clipper.inspect(
+        (ClipSource(1, str(source), 1_000, 10_000),),
+        requested_start_ms=1_000,
+        requested_end_ms=10_000,
+        stable_end_ms=10_000,
+        deadline_monotonic=130.0,
+    )
+
+    assert timeouts == [30.0, 18.0]
+
+
+def test_inspect_does_not_start_probe_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    calls = []
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: calls.append(args))
+
+    with pytest.raises(HighlightCutError, match='检查视频超时'):
+        LosslessClipper(monotonic=lambda: 30.0).inspect(
+            (ClipSource(1, str(source), 0, 10_000),),
+            requested_start_ms=0,
+            requested_end_ms=10_000,
+            stable_end_ms=10_000,
+            deadline_monotonic=30.0,
+        )
+
+    assert calls == []
+
+
+def test_inspect_rejects_unsafe_tail_and_multiple_parts(tmp_path: Path) -> None:
     first = tmp_path / 'first.flv'
     second = tmp_path / 'second.flv'
     first.write_bytes(b'first')
@@ -88,12 +180,8 @@ def test_inspect_rejects_unsafe_tail_and_incompatible_parts(tmp_path: Path) -> N
             stable_end_ms=75_000,
         )
 
-    def incompatible(path: str):
-        return (profile(width=1920 if path == str(first) else 1280), (0,))
-
-    clipper = LosslessClipper(probe=incompatible)
-    with pytest.raises(HighlightCutError, match='不兼容'):
-        clipper.inspect(
+    with pytest.raises(HighlightCutError, match='一个视频分段'):
+        safe.inspect(
             (
                 ClipSource(1, str(first), 0, 10_000),
                 ClipSource(2, str(second), 0, 10_000),
@@ -305,11 +393,18 @@ def test_cut_concatenates_compatible_sources_without_a_shell(
 
     monkeypatch.setattr(subprocess, 'run', run)
     clipper = LosslessClipper(probe=probe)
-    inspection = clipper.inspect(
-        (ClipSource(1, str(first), 0, 10_000), ClipSource(2, str(second), 0, 10_000)),
+    source_profile = profile(duration_ms=10_000)
+    inspection = ClipInspection(
+        sources=(
+            InspectedClipSource(1, str(first), 0, 10_000, 0, source_profile),
+            InspectedClipSource(2, str(second), 0, 10_000, 10_000, source_profile),
+        ),
         requested_start_ms=0,
         requested_end_ms=20_000,
-        stable_end_ms=20_000,
+        actual_start_ms=0,
+        actual_end_ms=20_000,
+        extra_lead_ms=0,
+        confirmation_required=False,
     )
 
     clipper.cut(inspection, str(output))

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, List, Literal, Mapping, Optional
+from typing import Awaitable, Callable, List, Literal, Mapping, Optional, Union
 from urllib.parse import quote
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
@@ -16,6 +17,9 @@ from blrec.bili_upload.highlights import (
     HighlightClip,
     HighlightClipSummary,
     HighlightConfirmationRequired,
+    HighlightInspectionBusy,
+    HighlightInspectionConflict,
+    HighlightInspectionOperation,
     HighlightMarker,
     HighlightRangeUnavailable,
     HighlightService,
@@ -131,12 +135,14 @@ class MarkerCountResponse(ApiModel):
 class InspectClipRequest(ApiModel):
     start_ms: int = Field(..., ge=0)
     end_ms: int = Field(..., gt=0)
+    idempotency_key: UUID
 
 
 class CreateClipRequest(InspectClipRequest):
     marker_id: Optional[int] = Field(None, gt=0)
     name: str = Field(..., min_length=1, max_length=200)
     confirm_keyframe: bool = False
+    inspection_token: Optional[str] = Field(None, min_length=20, max_length=200)
 
 
 class InspectedSourceResponse(ApiModel):
@@ -155,6 +161,15 @@ class ClipInspectionResponse(ApiModel):
     confirmation_required: bool
     compatible: bool = True
     sources: List[InspectedSourceResponse]
+
+
+class InspectionOperationResponse(ApiModel):
+    operation_id: str
+    state: Literal['accepted', 'running', 'succeeded', 'failed']
+    retry_after_ms: int
+    inspection: Optional[ClipInspectionResponse]
+    inspection_token: Optional[str]
+    error_code: Optional[str]
 
 
 class ClipSourceResponse(ApiModel):
@@ -360,6 +375,21 @@ def _inspection_response(value: ClipInspection) -> ClipInspectionResponse:
     )
 
 
+def _inspection_operation_response(
+    value: HighlightInspectionOperation,
+) -> InspectionOperationResponse:
+    return InspectionOperationResponse(
+        operation_id=value.operation_id,
+        state=value.state,
+        retry_after_ms=value.retry_after_ms,
+        inspection=(
+            None if value.inspection is None else _inspection_response(value.inspection)
+        ),
+        inspection_token=value.inspection_token,
+        error_code=value.error_code,
+    )
+
+
 def _clip_response(value: HighlightClip) -> ClipResponse:
     return ClipResponse(
         id=value.id,
@@ -431,6 +461,24 @@ async def create_marker(
     return _marker_response(value)
 
 
+@router.get('/inspections/{operation_id}', response_model=InspectionOperationResponse)
+async def get_clip_inspection(
+    operation_id: str,
+    inspection_claim: Optional[str] = Header(None, alias='X-BLREC-Inspection-Claim'),
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> InspectionOperationResponse:
+    try:
+        value = await highlight_service.get_clip_inspection(
+            operation_id, claim_key=inspection_claim
+        )
+    except HighlightInspectionConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    except ValueError as error:
+        raise _not_found(error) from None
+    return _inspection_operation_response(value)
+
+
 @router.patch('/{marker_id}', response_model=MarkerResponse)
 async def update_marker(
     marker_id: int,
@@ -494,39 +542,51 @@ async def get_timeline(
 
 
 @router.post(
-    '/sessions/{session_id}/clips/inspect', response_model=ClipInspectionResponse
+    '/sessions/{session_id}/clips/inspect',
+    response_model=InspectionOperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def inspect_clip(
     session_id: int,
     payload: InspectClipRequest,
     _subject: str = Depends(authenticated_manager_subject),
     highlight_service: HighlightService = Depends(get_service),
-) -> ClipInspectionResponse:
+) -> InspectionOperationResponse:
     try:
-        value = await highlight_service.inspect_clip(
+        value = await highlight_service.submit_clip_inspection(
             session_id=session_id,
             requested_start_ms=payload.start_ms,
             requested_end_ms=payload.end_ms,
             active_durations_ms=await _active_durations(session_id),
+            idempotency_key=str(payload.idempotency_key),
         )
+    except HighlightInspectionBusy as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+            headers={'Retry-After': '1'},
+        ) from None
+    except HighlightInspectionConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
     except (HighlightRangeUnavailable, HighlightCutError) as error:
         raise _clip_conflict(error) from None
     except ValueError as error:
         raise _not_found(error) from None
-    return _inspection_response(value)
+    return _inspection_operation_response(value)
 
 
 @router.post(
     '/sessions/{session_id}/clips',
-    response_model=ClipResponse,
+    response_model=Union[ClipResponse, InspectionOperationResponse],
     status_code=status.HTTP_201_CREATED,
 )
 async def create_clip(
     session_id: int,
     payload: CreateClipRequest,
+    response: Response,
     _subject: str = Depends(authenticated_manager_subject),
     highlight_service: HighlightService = Depends(get_service),
-) -> ClipResponse:
+) -> Union[ClipResponse, InspectionOperationResponse]:
     try:
         value = await highlight_service.create_clip(
             session_id=session_id,
@@ -536,13 +596,25 @@ async def create_clip(
             requested_end_ms=payload.end_ms,
             confirm_keyframe=payload.confirm_keyframe,
             active_durations_ms=await _active_durations(session_id),
+            inspection_token=payload.inspection_token,
+            idempotency_key=str(payload.idempotency_key),
         )
+    except HighlightInspectionBusy as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+            headers={'Retry-After': '1'},
+        ) from None
     except (
         HighlightRangeUnavailable,
         HighlightConfirmationRequired,
         HighlightCutError,
+        HighlightInspectionConflict,
     ) as error:
         raise _clip_conflict(error) from None
+    if isinstance(value, HighlightInspectionOperation):
+        response.status_code = status.HTTP_202_ACCEPTED
+        return _inspection_operation_response(value)
     return _clip_response(value)
 
 

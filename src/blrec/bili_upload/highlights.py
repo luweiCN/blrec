@@ -1,22 +1,53 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import os
+import secrets
 import shutil
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+    cast,
+)
 
 from blrec.logging.audit import audit
 
 from .database import BiliUploadDatabase
-from .highlight_cut import ClipInspection, ClipSource, LosslessClipper
+from .highlight_cut import (
+    ClipInspection,
+    ClipSource,
+    HighlightCutError,
+    LosslessClipper,
+)
 
 
 class HighlightRangeUnavailable(RuntimeError):
+    pass
+
+
+class HighlightInspectionBusy(RuntimeError):
+    pass
+
+
+class HighlightInspectionConflict(RuntimeError):
     pass
 
 
@@ -91,6 +122,16 @@ class HighlightTimeline:
 
 
 @dataclass(frozen=True)
+class HighlightInspectionOperation:
+    operation_id: str
+    state: Literal['accepted', 'running', 'succeeded', 'failed']
+    retry_after_ms: int = 500
+    inspection: Optional[ClipInspection] = None
+    inspection_token: Optional[str] = None
+    error_code: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class HighlightClipSource:
     part_id: int
     ordinal: int
@@ -156,8 +197,110 @@ class HighlightClipSummary:
     deletion_error: Optional[str] = None
 
 
+def _source_fingerprint(source: ClipSource) -> Dict[str, object]:
+    path = Path(source.path).resolve(strict=True)
+    stat = path.stat()
+    if not path.is_file() or stat.st_size <= 0:
+        raise HighlightCutError('剪辑源视频不存在或为空')
+    return {
+        'partId': source.part_id,
+        'realpath': str(path),
+        'size': stat.st_size,
+        'mtimeNs': stat.st_mtime_ns,
+    }
+
+
+def _fingerprint_json(source: ClipSource) -> str:
+    return json.dumps(
+        _source_fingerprint(source),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+
+
+def _inspection_json(inspection: ClipInspection) -> str:
+    return json.dumps(
+        {
+            'requestedStartMs': inspection.requested_start_ms,
+            'requestedEndMs': inspection.requested_end_ms,
+            'actualStartMs': inspection.actual_start_ms,
+            'actualEndMs': inspection.actual_end_ms,
+            'extraLeadMs': inspection.extra_lead_ms,
+            'confirmationRequired': inspection.confirmation_required,
+            'sources': [
+                {
+                    'partId': source.part_id,
+                    'actualStartMs': source.actual_start_ms,
+                    'actualEndMs': source.actual_end_ms,
+                    'outputOffsetMs': source.output_offset_ms,
+                    'recording': source.recording,
+                    'profile': {
+                        'codecName': source.profile.codec_name,
+                        'width': source.profile.width,
+                        'height': source.profile.height,
+                        'rFrameRate': source.profile.r_frame_rate,
+                        'extradataSize': source.profile.extradata_size,
+                        'durationMs': source.profile.duration_ms,
+                        'hasAudio': source.profile.has_audio,
+                    },
+                }
+                for source in inspection.sources
+            ],
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+
+
+def _inspection_from_json(value: str, fingerprint_json: str) -> ClipInspection:
+    from .highlight_cut import InspectedClipSource, MediaProfile
+
+    document = json.loads(value)
+    fingerprint = json.loads(fingerprint_json)
+    sources = document['sources']
+    if not isinstance(sources, list) or len(sources) != 1:
+        raise HighlightCutError('高光检查结果无效')
+    source = sources[0]
+    profile = source['profile']
+    if int(source['partId']) != int(fingerprint['partId']):
+        raise HighlightCutError('高光检查结果与源视频不匹配')
+    inspected = InspectedClipSource(
+        part_id=int(source['partId']),
+        path=str(fingerprint['realpath']),
+        actual_start_ms=int(source['actualStartMs']),
+        actual_end_ms=int(source['actualEndMs']),
+        output_offset_ms=int(source['outputOffsetMs']),
+        profile=MediaProfile(
+            codec_name=str(profile['codecName']),
+            width=int(profile['width']),
+            height=int(profile['height']),
+            r_frame_rate=str(profile['rFrameRate']),
+            extradata_size=int(profile['extradataSize']),
+            duration_ms=int(profile['durationMs']),
+            has_audio=bool(profile['hasAudio']),
+        ),
+        recording=bool(source.get('recording', False)),
+    )
+    return ClipInspection(
+        sources=(inspected,),
+        requested_start_ms=int(document['requestedStartMs']),
+        requested_end_ms=int(document['requestedEndMs']),
+        actual_start_ms=int(document['actualStartMs']),
+        actual_end_ms=int(document['actualEndMs']),
+        extra_lead_ms=int(document['extraLeadMs']),
+        confirmation_required=bool(document['confirmationRequired']),
+    )
+
+
 class HighlightService:
     ACTIVE_SAFE_TAIL_MS = 10_000
+    INSPECTION_ACTIVE_LIMIT = 2
+    INSPECTION_WAITING_LIMIT = 8
+    INSPECTION_DEADLINE_SECONDS = 30.0
+    INSPECTION_TOKEN_TTL_SECONDS = 120
+    INSPECTION_TERMINAL_TTL_SECONDS = 300
     _CLIP_WITH_UPLOAD_SELECT = (
         'SELECT clip.*,job.id AS upload_job_id,job.state AS upload_state,'
         'job.bvid AS upload_bvid '
@@ -212,6 +355,8 @@ class HighlightService:
         clip_root: Optional[Path] = None,
         clipper: Optional[LosslessClipper] = None,
         clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
+        inspection_secret: Optional[bytes] = None,
     ) -> None:
         self._database = database
         self._clip_root = (
@@ -225,6 +370,481 @@ class HighlightService:
         )
         self._clipper = clipper
         self._clock = clock
+        self._monotonic = monotonic
+        self._inspection_secret = inspection_secret or secrets.token_bytes(32)
+        self._inspection_queue: Optional[asyncio.Queue[str]] = None
+        self._inspection_workers: Tuple[asyncio.Task[None], ...] = ()
+        self._inspection_lifecycle_lock = asyncio.Lock()
+        self._inspection_admission_lock = asyncio.Lock()
+        self._inspection_admission_open = True
+        self._scheduled_inspections: Set[str] = set()
+        self._probe_futures: Dict[str, asyncio.Future[Tuple[str, str]]] = {}
+
+    async def start(self) -> None:
+        async with self._inspection_lifecycle_lock:
+            if self._inspection_workers:
+                return
+            async with self._inspection_admission_lock:
+                self._inspection_admission_open = True
+            now = int(self._clock())
+            await self._database.execute(
+                "UPDATE highlight_inspections SET state='accepted',updated_at=? "
+                "WHERE state='running'",
+                (now,),
+            )
+            await self._cleanup_expired_inspections(now)
+            self._inspection_queue = asyncio.Queue(
+                maxsize=self.INSPECTION_WAITING_LIMIT
+            )
+            self._inspection_workers = tuple(
+                asyncio.create_task(self._inspection_worker_loop())
+                for _index in range(self.INSPECTION_ACTIVE_LIMIT)
+            )
+            rows = await self._database.fetchall(
+                "SELECT operation_id FROM highlight_inspections "
+                "WHERE state='accepted' ORDER BY created_at,operation_id"
+            )
+            for row in rows:
+                await self._enqueue_inspection(str(row['operation_id']))
+
+    async def shutdown(self) -> None:
+        async with self._inspection_lifecycle_lock:
+            async with self._inspection_admission_lock:
+                self._inspection_admission_open = False
+            queue = self._inspection_queue
+            workers = self._inspection_workers
+        if queue is None or not workers:
+            return
+        await queue.join()
+        for _worker in workers:
+            await queue.put('')
+        await asyncio.gather(*workers)
+        async with self._inspection_lifecycle_lock:
+            self._inspection_workers = ()
+            self._inspection_queue = None
+            self._scheduled_inspections.clear()
+            self._probe_futures.clear()
+
+    async def submit_clip_inspection(
+        self,
+        *,
+        session_id: int,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        active_durations_ms: Mapping[int, int],
+        idempotency_key: str,
+    ) -> HighlightInspectionOperation:
+        self._validate_idempotency_key(idempotency_key)
+        if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
+            raise HighlightRangeUnavailable('高光剪辑时间范围无效')
+        await self.start()
+        async with self._inspection_admission_lock:
+            if not self._inspection_admission_open:
+                raise HighlightInspectionBusy('高光检查服务正在关闭')
+            return await self._admit_clip_inspection(
+                session_id=session_id,
+                requested_start_ms=requested_start_ms,
+                requested_end_ms=requested_end_ms,
+                active_durations_ms=active_durations_ms,
+                idempotency_key=idempotency_key,
+            )
+
+    async def _admit_clip_inspection(
+        self,
+        *,
+        session_id: int,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        active_durations_ms: Mapping[int, int],
+        idempotency_key: str,
+    ) -> HighlightInspectionOperation:
+        now = int(self._clock())
+        await self._cleanup_expired_inspections(now)
+        active_json = json.dumps(
+            {str(key): int(value) for key, value in active_durations_ms.items()},
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+
+        def admit(connection: sqlite3.Connection) -> Tuple[sqlite3.Row, bool]:
+            existing = connection.execute(
+                'SELECT * FROM highlight_inspections WHERE idempotency_key=?',
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    int(existing['session_id']) != session_id
+                    or int(existing['requested_start_ms']) != requested_start_ms
+                    or int(existing['requested_end_ms']) != requested_end_ms
+                ):
+                    raise HighlightInspectionConflict(
+                        '幂等键已经绑定到另一个高光检查范围'
+                    )
+                if (
+                    str(existing['state']) == 'succeeded'
+                    and existing['token_expires_at'] is not None
+                    and int(existing['token_expires_at']) <= now
+                    and existing['token_consumed_at'] is None
+                ):
+                    connection.execute(
+                        "UPDATE highlight_inspections SET state='accepted',"
+                        'active_durations_json=?,result_json=NULL,error_code=NULL,'
+                        'fingerprint_json=NULL,claim_key_hash=NULL,token_hash=NULL,'
+                        'token_expires_at=NULL,terminal_expires_at=NULL,updated_at=? '
+                        'WHERE operation_id=?',
+                        (active_json, now, str(existing['operation_id'])),
+                    )
+                    existing = connection.execute(
+                        'SELECT * FROM highlight_inspections WHERE operation_id=?',
+                        (str(existing['operation_id']),),
+                    ).fetchone()
+                    assert existing is not None
+                    return existing, True
+                return existing, False
+            admitted = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM highlight_inspections "
+                    "WHERE state IN ('accepted','running')"
+                ).fetchone()[0]
+            )
+            if admitted >= self.INSPECTION_ACTIVE_LIMIT + self.INSPECTION_WAITING_LIMIT:
+                raise HighlightInspectionBusy('高光检查队列繁忙，请稍后重试')
+            operation_id = str(uuid.uuid4())
+            connection.execute(
+                'INSERT INTO highlight_inspections('
+                'operation_id,session_id,requested_start_ms,requested_end_ms,'
+                'idempotency_key,state,active_durations_json,created_at,updated_at) '
+                "VALUES(?,?,?,?,?,'accepted',?,?,?)",
+                (
+                    operation_id,
+                    session_id,
+                    requested_start_ms,
+                    requested_end_ms,
+                    idempotency_key,
+                    active_json,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                'SELECT * FROM highlight_inspections WHERE operation_id=?',
+                (operation_id,),
+            ).fetchone()
+            assert row is not None
+            return row, True
+
+        row, enqueue = await self._database.write(admit)
+        if enqueue or str(row['state']) == 'accepted':
+            await self._enqueue_inspection(str(row['operation_id']))
+        return self._operation_from_row(row)
+
+    async def get_clip_inspection(
+        self, operation_id: str, *, claim_key: Optional[str]
+    ) -> HighlightInspectionOperation:
+        row = await self._database.fetchone(
+            'SELECT * FROM highlight_inspections WHERE operation_id=?', (operation_id,)
+        )
+        if row is None:
+            raise ValueError("unknown highlight inspection '{}'".format(operation_id))
+        if str(row['state']) != 'succeeded':
+            return self._operation_from_row(row)
+        if not claim_key:
+            raise HighlightInspectionConflict('领取检查结果需要 claim key')
+        return await self._claim_inspection_token(operation_id, claim_key)
+
+    async def _enqueue_inspection(self, operation_id: str) -> None:
+        queue = self._inspection_queue
+        if queue is None or operation_id in self._scheduled_inspections:
+            return
+        self._scheduled_inspections.add(operation_id)
+        await queue.put(operation_id)
+
+    async def _inspection_worker_loop(self) -> None:
+        queue = self._inspection_queue
+        assert queue is not None
+        while True:
+            operation_id = await queue.get()
+            try:
+                if not operation_id:
+                    return
+                await self._run_inspection(operation_id)
+            finally:
+                if operation_id:
+                    self._scheduled_inspections.discard(operation_id)
+                queue.task_done()
+
+    async def _run_inspection(self, operation_id: str) -> None:
+        now = int(self._clock())
+
+        def begin(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
+            updated = connection.execute(
+                "UPDATE highlight_inspections SET state='running',updated_at=? "
+                "WHERE operation_id=? AND state='accepted'",
+                (now, operation_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            return connection.execute(
+                'SELECT * FROM highlight_inspections WHERE operation_id=?',
+                (operation_id,),
+            ).fetchone()
+
+        row = await self._database.write(begin)
+        if row is None:
+            return
+        try:
+            durations_document = json.loads(str(row['active_durations_json']))
+            durations = {
+                int(key): int(value) for key, value in durations_document.items()
+            }
+            _timeline, _ranges, sources = await self._prepare_clip_sources(
+                session_id=int(row['session_id']),
+                requested_start_ms=int(row['requested_start_ms']),
+                requested_end_ms=int(row['requested_end_ms']),
+                active_durations_ms=durations,
+            )
+            source = sources[0]
+            fingerprint = await asyncio.get_running_loop().run_in_executor(
+                None, _fingerprint_json, source
+            )
+            cache_key = '{}:{}:{}'.format(
+                fingerprint,
+                int(row['requested_start_ms']),
+                int(row['requested_end_ms']),
+            )
+            reusable = await self._database.fetchone(
+                'SELECT result_json FROM highlight_inspections '
+                "WHERE state='succeeded' AND session_id=? "
+                'AND requested_start_ms=? AND requested_end_ms=? '
+                'AND fingerprint_json=? AND result_json IS NOT NULL '
+                'ORDER BY updated_at DESC LIMIT 1',
+                (
+                    int(row['session_id']),
+                    int(row['requested_start_ms']),
+                    int(row['requested_end_ms']),
+                    fingerprint,
+                ),
+            )
+            if reusable is not None:
+                result_json = str(reusable['result_json'])
+                _inspection_from_json(result_json, fingerprint)
+            else:
+                future = self._probe_futures.get(cache_key)
+                if future is None:
+                    deadline = self._monotonic() + self.INSPECTION_DEADLINE_SECONDS
+                    future = asyncio.ensure_future(
+                        asyncio.get_running_loop().run_in_executor(
+                            None,
+                            partial(
+                                self._inspect_sources_sync,
+                                sources,
+                                int(row['requested_start_ms']),
+                                int(row['requested_end_ms']),
+                                deadline,
+                                fingerprint,
+                            ),
+                        )
+                    )
+                    self._probe_futures[cache_key] = future
+                    self._trim_probe_futures()
+                result_json, fingerprint = await asyncio.shield(future)
+            completed_at = int(self._clock())
+            await self._database.execute(
+                "UPDATE highlight_inspections SET state='succeeded',result_json=?,"
+                'fingerprint_json=?,error_code=NULL,terminal_expires_at=?,updated_at=? '
+                "WHERE operation_id=? AND state='running'",
+                (
+                    result_json,
+                    fingerprint,
+                    completed_at + self.INSPECTION_TERMINAL_TTL_SECONDS,
+                    completed_at,
+                    operation_id,
+                ),
+            )
+            audit(
+                'highlight_inspection_completed',
+                operation_id=operation_id,
+                result='succeeded',
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            failed_at = int(self._clock())
+            error_code = self._inspection_error_code(error)
+            await self._database.execute(
+                "UPDATE highlight_inspections SET state='failed',result_json=NULL,"
+                'error_code=?,terminal_expires_at=?,updated_at=? '
+                "WHERE operation_id=? AND state='running'",
+                (
+                    error_code,
+                    failed_at + self.INSPECTION_TERMINAL_TTL_SECONDS,
+                    failed_at,
+                    operation_id,
+                ),
+            )
+            audit(
+                'highlight_inspection_failed',
+                level='WARNING',
+                operation_id=operation_id,
+                error_code=error_code,
+                result='failed',
+            )
+
+    def _inspect_sources_sync(
+        self,
+        sources: Tuple[ClipSource, ...],
+        requested_start_ms: int,
+        requested_end_ms: int,
+        deadline: float,
+        fingerprint: str,
+    ) -> Tuple[str, str]:
+        clipper = self._clipper
+        if clipper is None:
+            raise RuntimeError('highlight clipping is not configured')
+        inspection = clipper.inspect(
+            sources,
+            requested_start_ms=requested_start_ms,
+            requested_end_ms=requested_end_ms,
+            stable_end_ms=requested_end_ms,
+            deadline_monotonic=deadline,
+        )
+        return _inspection_json(inspection), fingerprint
+
+    async def _claim_inspection_token(
+        self, operation_id: str, claim_key: str
+    ) -> HighlightInspectionOperation:
+        if not claim_key or len(claim_key) > 200:
+            raise HighlightInspectionConflict('claim key 无效')
+        now = int(self._clock())
+        claim_hash = hashlib.sha256(claim_key.encode('utf8')).hexdigest()
+
+        def claim(connection: sqlite3.Connection) -> sqlite3.Row:
+            row = connection.execute(
+                'SELECT * FROM highlight_inspections WHERE operation_id=?',
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    "unknown highlight inspection '{}'".format(operation_id)
+                )
+            if str(row['state']) != 'succeeded':
+                return row
+            if row['token_consumed_at'] is not None:
+                raise HighlightInspectionConflict('检查令牌已经使用')
+            existing_claim = row['claim_key_hash']
+            expires_at = (
+                None
+                if row['token_expires_at'] is None
+                else int(row['token_expires_at'])
+            )
+            if existing_claim is not None and str(existing_claim) != claim_hash:
+                raise HighlightInspectionConflict('检查结果已经由另一个请求领取')
+            if expires_at is not None and expires_at <= now:
+                raise HighlightInspectionConflict('检查令牌已经过期，请重新检查')
+            if expires_at is None:
+                expires_at = now + self.INSPECTION_TOKEN_TTL_SECONDS
+                token = self._make_inspection_token(
+                    operation_id, str(row['idempotency_key']), claim_key, expires_at
+                )
+                connection.execute(
+                    'UPDATE highlight_inspections SET claim_key_hash=?,token_hash=?,'
+                    'token_expires_at=?,updated_at=? WHERE operation_id=?',
+                    (
+                        claim_hash,
+                        self._token_hash(token),
+                        expires_at,
+                        now,
+                        operation_id,
+                    ),
+                )
+                row = connection.execute(
+                    'SELECT * FROM highlight_inspections WHERE operation_id=?',
+                    (operation_id,),
+                ).fetchone()
+                assert row is not None
+            return row
+
+        row = await self._database.write(claim)
+        expires_at = int(row['token_expires_at'])
+        token = self._make_inspection_token(
+            operation_id, str(row['idempotency_key']), claim_key, expires_at
+        )
+        if not hmac.compare_digest(str(row['token_hash']), self._token_hash(token)):
+            raise HighlightInspectionConflict('检查令牌状态无效')
+        return self._operation_from_row(row, inspection_token=token)
+
+    async def _cleanup_expired_inspections(self, now: int) -> None:
+        await self._database.execute(
+            "DELETE FROM highlight_inspections WHERE state IN ('succeeded','failed') "
+            'AND terminal_expires_at IS NOT NULL AND terminal_expires_at<=? '
+            'AND operation_id IN (SELECT operation_id FROM highlight_inspections '
+            "WHERE state IN ('succeeded','failed') AND terminal_expires_at<=? "
+            'ORDER BY terminal_expires_at,operation_id LIMIT 32)',
+            (now, now),
+        )
+
+    def _trim_probe_futures(self) -> None:
+        if len(self._probe_futures) <= 32:
+            return
+        for key, future in tuple(self._probe_futures.items()):
+            if future.done():
+                del self._probe_futures[key]
+                if len(self._probe_futures) <= 32:
+                    return
+
+    def _make_inspection_token(
+        self, operation_id: str, idempotency_key: str, claim_key: str, expiry: int
+    ) -> str:
+        message = '{}|{}|{}|{}'.format(
+            operation_id, idempotency_key, claim_key, expiry
+        ).encode('utf8')
+        digest = hmac.new(self._inspection_secret, message, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode('ascii')).hexdigest()
+
+    @staticmethod
+    def _validate_idempotency_key(value: str) -> None:
+        try:
+            parsed = uuid.UUID(value)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError('idempotency key must be a UUID') from error
+        if str(parsed) != value.lower():
+            raise ValueError('idempotency key must use canonical UUID format')
+
+    @staticmethod
+    def _inspection_error_code(error: Exception) -> str:
+        if isinstance(error, HighlightRangeUnavailable):
+            return 'range_unavailable'
+        if isinstance(error, HighlightCutError) and '超时' in str(error):
+            return 'probe_timeout'
+        if isinstance(error, HighlightCutError):
+            return 'probe_failed'
+        return 'inspection_failed'
+
+    @staticmethod
+    def _operation_from_row(
+        row: sqlite3.Row, *, inspection_token: Optional[str] = None
+    ) -> HighlightInspectionOperation:
+        result_json = row['result_json']
+        fingerprint_json = row['fingerprint_json']
+        inspection = (
+            None
+            if result_json is None or fingerprint_json is None
+            else _inspection_from_json(str(result_json), str(fingerprint_json))
+        )
+        state = str(row['state'])
+        if state not in ('accepted', 'running', 'succeeded', 'failed'):
+            raise RuntimeError('invalid highlight inspection state')
+        return HighlightInspectionOperation(
+            operation_id=str(row['operation_id']),
+            state=cast(Literal['accepted', 'running', 'succeeded', 'failed'], state),
+            inspection=inspection,
+            inspection_token=inspection_token,
+            error_code=None if row['error_code'] is None else str(row['error_code']),
+        )
 
     async def migrate_legacy_outputs(self, recording_root: Path) -> int:
         if self._clip_root is None:
@@ -499,22 +1119,6 @@ class HighlightService:
             result='deleted',
         )
 
-    async def inspect_clip(
-        self,
-        *,
-        session_id: int,
-        requested_start_ms: int,
-        requested_end_ms: int,
-        active_durations_ms: Mapping[int, int],
-    ) -> ClipInspection:
-        _timeline, _sources, inspection = await self._prepare_clip(
-            session_id=session_id,
-            requested_start_ms=requested_start_ms,
-            requested_end_ms=requested_end_ms,
-            active_durations_ms=active_durations_ms,
-        )
-        return inspection
-
     async def create_clip(
         self,
         *,
@@ -525,18 +1129,71 @@ class HighlightService:
         requested_end_ms: int,
         confirm_keyframe: bool,
         active_durations_ms: Mapping[int, int],
-    ) -> HighlightClip:
+        inspection_token: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Union[HighlightClip, HighlightInspectionOperation]:
         normalized_name = name.strip()
         if not normalized_name or len(normalized_name) > 200:
             raise ValueError('highlight clip name must contain 1 to 200 characters')
         if self._clip_root is None or self._clipper is None:
             raise RuntimeError('highlight clipping is not configured')
-        _timeline, source_ranges, inspection = await self._prepare_clip(
-            session_id=session_id,
-            requested_start_ms=requested_start_ms,
-            requested_end_ms=requested_end_ms,
-            active_durations_ms=active_durations_ms,
-        )
+        inspection_row: Optional[sqlite3.Row] = None
+        fingerprint: Optional[str] = None
+        if idempotency_key is not None:
+            self._validate_idempotency_key(idempotency_key)
+            existing = await self._database.fetchone(
+                'SELECT id FROM highlight_clips WHERE idempotency_key=?',
+                (idempotency_key,),
+            )
+            if existing is not None:
+                return await self.get_clip(int(existing['id']))
+            if not inspection_token:
+                return await self.submit_clip_inspection(
+                    session_id=session_id,
+                    requested_start_ms=requested_start_ms,
+                    requested_end_ms=requested_end_ms,
+                    active_durations_ms=active_durations_ms,
+                    idempotency_key=idempotency_key,
+                )
+            _timeline, source_ranges, clip_sources = await self._prepare_clip_sources(
+                session_id=session_id,
+                requested_start_ms=requested_start_ms,
+                requested_end_ms=requested_end_ms,
+                active_durations_ms=active_durations_ms,
+            )
+            fingerprint = await asyncio.get_running_loop().run_in_executor(
+                None, _fingerprint_json, clip_sources[0]
+            )
+            inspection_row = await self._database.fetchone(
+                'SELECT * FROM highlight_inspections WHERE token_hash=?',
+                (self._token_hash(inspection_token),),
+            )
+            if inspection_row is None:
+                raise HighlightInspectionConflict('检查令牌无效')
+            if str(inspection_row['idempotency_key']) != idempotency_key:
+                raise HighlightInspectionConflict('检查令牌与幂等键绑定不一致')
+            if (
+                int(inspection_row['session_id']) != session_id
+                or int(inspection_row['requested_start_ms']) != requested_start_ms
+                or int(inspection_row['requested_end_ms']) != requested_end_ms
+            ):
+                raise HighlightInspectionConflict('检查令牌与剪辑范围绑定不一致')
+            if str(inspection_row['state']) != 'succeeded':
+                raise HighlightInspectionConflict('检查结果尚未就绪')
+            if str(inspection_row['fingerprint_json']) != fingerprint:
+                return await self._restart_stale_inspection(
+                    inspection_row, active_durations_ms=active_durations_ms
+                )
+            inspection = _inspection_from_json(
+                str(inspection_row['result_json']), fingerprint
+            )
+        else:
+            _timeline, source_ranges, inspection = await self._prepare_clip(
+                session_id=session_id,
+                requested_start_ms=requested_start_ms,
+                requested_end_ms=requested_end_ms,
+                active_durations_ms=active_durations_ms,
+            )
         if inspection.confirmation_required and not confirm_keyframe:
             raise HighlightConfirmationRequired(inspection)
 
@@ -545,6 +1202,32 @@ class HighlightService:
         inspected_by_part = {source.part_id: source for source in inspection.sources}
 
         def write(connection: sqlite3.Connection) -> int:
+            if idempotency_key is not None:
+                existing_clip = connection.execute(
+                    'SELECT id FROM highlight_clips WHERE idempotency_key=?',
+                    (idempotency_key,),
+                ).fetchone()
+                if existing_clip is not None:
+                    return int(existing_clip['id'])
+                assert inspection_token is not None
+                assert fingerprint is not None
+                operation = connection.execute(
+                    'SELECT * FROM highlight_inspections WHERE token_hash=?',
+                    (self._token_hash(inspection_token),),
+                ).fetchone()
+                if operation is None:
+                    raise HighlightInspectionConflict('检查令牌无效')
+                if str(operation['idempotency_key']) != idempotency_key:
+                    raise HighlightInspectionConflict('检查令牌与幂等键绑定不一致')
+                expires_at = operation['token_expires_at']
+                if (
+                    str(operation['state']) != 'succeeded'
+                    or operation['token_consumed_at'] is not None
+                    or expires_at is None
+                    or int(expires_at) <= now
+                    or str(operation['fingerprint_json']) != fingerprint
+                ):
+                    raise HighlightInspectionConflict('检查令牌已失效')
             session = connection.execute(
                 'SELECT room_id,source_kind FROM recording_sessions WHERE id=?',
                 (session_id,),
@@ -599,8 +1282,9 @@ class HighlightService:
                 'marker_id,room_id,source_session_id,name,requested_start_ms,'
                 'requested_end_ms,actual_start_ms,actual_end_ms,state,'
                 'keyframe_confirmation_required,keyframe_confirmed,'
-                'next_attempt_at,created_at,updated_at) '
-                "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                'next_attempt_at,created_at,updated_at,inspection_json,'
+                'source_fingerprint_json,idempotency_key) '
+                "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?)",
                 (
                     marker_id,
                     room_id,
@@ -615,9 +1299,21 @@ class HighlightService:
                     0,
                     now,
                     now,
+                    _inspection_json(inspection),
+                    fingerprint,
+                    idempotency_key,
                 ),
             )
             clip_id = int(cursor.lastrowid)
+            if idempotency_key is not None:
+                assert inspection_row is not None
+                consumed = connection.execute(
+                    'UPDATE highlight_inspections SET token_consumed_at=?,updated_at=? '
+                    'WHERE operation_id=? AND token_consumed_at IS NULL',
+                    (now, now, str(inspection_row['operation_id'])),
+                )
+                if consumed.rowcount != 1:
+                    raise HighlightInspectionConflict('检查令牌已失效')
             output_directory = root / str(room_id)
             output_video_path = output_directory / 'highlight-{}.mp4'.format(clip_id)
             output_xml_path = output_directory / 'highlight-{}.xml'.format(clip_id)
@@ -665,6 +1361,41 @@ class HighlightService:
         )
         return clip
 
+    async def _restart_stale_inspection(
+        self, row: sqlite3.Row, *, active_durations_ms: Mapping[int, int]
+    ) -> HighlightInspectionOperation:
+        async with self._inspection_admission_lock:
+            if not self._inspection_admission_open:
+                raise HighlightInspectionBusy('高光检查服务正在关闭')
+            return await self._restart_stale_inspection_admitted(
+                row, active_durations_ms=active_durations_ms
+            )
+
+    async def _restart_stale_inspection_admitted(
+        self, row: sqlite3.Row, *, active_durations_ms: Mapping[int, int]
+    ) -> HighlightInspectionOperation:
+        now = int(self._clock())
+        active_json = json.dumps(
+            {str(key): int(value) for key, value in active_durations_ms.items()},
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        await self._database.execute(
+            "UPDATE highlight_inspections SET state='accepted',"
+            'active_durations_json=?,result_json=NULL,error_code=NULL,'
+            'fingerprint_json=NULL,claim_key_hash=NULL,token_hash=NULL,'
+            'token_expires_at=NULL,token_consumed_at=NULL,'
+            'terminal_expires_at=NULL,updated_at=? WHERE operation_id=?',
+            (active_json, now, str(row['operation_id'])),
+        )
+        await self._enqueue_inspection(str(row['operation_id']))
+        refreshed = await self._database.fetchone(
+            'SELECT * FROM highlight_inspections WHERE operation_id=?',
+            (str(row['operation_id']),),
+        )
+        assert refreshed is not None
+        return self._operation_from_row(refreshed)
+
     async def _prepare_clip(
         self,
         *,
@@ -678,26 +1409,11 @@ class HighlightService:
         clipper = self._clipper
         if clipper is None:
             raise RuntimeError('highlight clipping is not configured')
-        if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
-            raise HighlightRangeUnavailable('高光剪辑时间范围无效')
-        timeline = await self.timeline(session_id, active_durations_ms)
-        if not timeline.parts:
-            raise HighlightRangeUnavailable('本场没有可用的本地录像')
-        if requested_end_ms > timeline.stable_end_ms:
-            raise HighlightRangeUnavailable('所选范围进入录制中的最后 10 秒')
-        source_ranges = self._resolve_clip_sources(
-            timeline.parts, requested_start_ms, requested_end_ms
-        )
-        clip_sources = tuple(
-            ClipSource(
-                part_id=part.part_id,
-                path=part.path,
-                requested_start_ms=local_start_ms,
-                requested_end_ms=local_end_ms,
-                duration_ms=part.duration_ms,
-                recording=part.recording,
-            )
-            for part, local_start_ms, local_end_ms in source_ranges
+        timeline, source_ranges, clip_sources = await self._prepare_clip_sources(
+            session_id=session_id,
+            requested_start_ms=requested_start_ms,
+            requested_end_ms=requested_end_ms,
+            active_durations_ms=active_durations_ms,
         )
         inspection = await asyncio.get_running_loop().run_in_executor(
             None,
@@ -710,6 +1426,45 @@ class HighlightService:
             ),
         )
         return timeline, source_ranges, inspection
+
+    async def _prepare_clip_sources(
+        self,
+        *,
+        session_id: int,
+        requested_start_ms: int,
+        requested_end_ms: int,
+        active_durations_ms: Mapping[int, int],
+    ) -> Tuple[
+        HighlightTimeline,
+        Tuple[Tuple[TimelinePart, int, int], ...],
+        Tuple[ClipSource, ...],
+    ]:
+        if self._clipper is None:
+            raise RuntimeError('highlight clipping is not configured')
+        if requested_start_ms < 0 or requested_end_ms <= requested_start_ms:
+            raise HighlightRangeUnavailable('高光剪辑时间范围无效')
+        timeline = await self.timeline(session_id, active_durations_ms)
+        if not timeline.parts:
+            raise HighlightRangeUnavailable('本场没有可用的本地录像')
+        if requested_end_ms > timeline.stable_end_ms:
+            raise HighlightRangeUnavailable('所选范围进入录制中的最后 10 秒')
+        source_ranges = self._resolve_clip_sources(
+            timeline.parts, requested_start_ms, requested_end_ms
+        )
+        if len(source_ranges) != 1:
+            raise HighlightRangeUnavailable('每个高光片段只能选择一个分 P')
+        clip_sources = tuple(
+            ClipSource(
+                part_id=part.part_id,
+                path=part.path,
+                requested_start_ms=local_start_ms,
+                requested_end_ms=local_end_ms,
+                duration_ms=part.duration_ms,
+                recording=part.recording,
+            )
+            for part, local_start_ms, local_end_ms in source_ranges
+        )
+        return timeline, source_ranges, clip_sources
 
     async def get_clip(self, clip_id: int) -> HighlightClip:
         row = await self._database.fetchone(

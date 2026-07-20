@@ -5,7 +5,7 @@ import os
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, List, Mapping, Optional, Tuple
 
@@ -25,6 +25,12 @@ from .highlight_danmaku import (
     DanmakuCutError,
     DanmakuCutResult,
     HighlightDanmakuClipper,
+)
+from .highlights import (
+    HighlightService,
+    _fingerprint_json,
+    _inspection_from_json,
+    _inspection_json,
 )
 
 
@@ -52,6 +58,8 @@ class _ClipWork:
     output_video_path: str
     output_xml_path: str
     sources: Tuple[_WorkSource, ...]
+    inspection_json: Optional[str]
+    source_fingerprint_json: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,7 @@ class _ProcessResult:
     danmaku: DanmakuCutResult
     output_xml_path: Optional[str]
     elapsed_seconds: float
+    source_fingerprint_json: str
 
 
 @dataclass(frozen=True)
@@ -395,7 +404,8 @@ class HighlightWorker:
         row = await self._database.fetchone(
             'SELECT requested_start_ms,requested_end_ms,keyframe_confirmed,'
             'output_video_path,output_xml_path,cancellation_generation,'
-            'deletion_state FROM highlight_clips '
+            'deletion_state,inspection_json,source_fingerprint_json '
+            'FROM highlight_clips '
             'WHERE id=? AND lease_owner=? AND lease_generation=? '
             "AND state='processing'",
             (claim.id, claim.lease_owner, claim.lease_generation),
@@ -465,6 +475,14 @@ class HighlightWorker:
             output_video_path=str(row['output_video_path']),
             output_xml_path=str(row['output_xml_path']),
             sources=tuple(sources),
+            inspection_json=(
+                None if row['inspection_json'] is None else str(row['inspection_json'])
+            ),
+            source_fingerprint_json=(
+                None
+                if row['source_fingerprint_json'] is None
+                else str(row['source_fingerprint_json'])
+            ),
         )
 
     def _process_sync(self, work: _ClipWork) -> _ProcessResult:
@@ -483,12 +501,30 @@ class HighlightWorker:
             )
             for source in work.sources
         )
-        inspection = self._clipper.inspect(
-            clip_sources,
-            requested_start_ms=work.requested_start_ms,
-            requested_end_ms=work.requested_end_ms,
-            stable_end_ms=work.requested_end_ms,
-        )
+        fingerprint_json = _fingerprint_json(clip_sources[0])
+        if (
+            work.inspection_json is not None
+            and work.source_fingerprint_json == fingerprint_json
+        ):
+            persisted = _inspection_from_json(
+                work.inspection_json, work.source_fingerprint_json
+            )
+            persisted_source = replace(
+                persisted.sources[0],
+                path=clip_sources[0].path,
+                recording=clip_sources[0].recording,
+            )
+            inspection = replace(persisted, sources=(persisted_source,))
+        else:
+            inspection = self._clipper.inspect(
+                clip_sources,
+                requested_start_ms=work.requested_start_ms,
+                requested_end_ms=work.requested_end_ms,
+                stable_end_ms=work.requested_end_ms,
+                deadline_monotonic=(
+                    self._monotonic() + HighlightService.INSPECTION_DEADLINE_SECONDS
+                ),
+            )
         if inspection.confirmation_required and not work.confirmation_confirmed:
             raise HighlightCutError('关键帧偏差尚未确认')
         video_partial = self._partial_path(work.output_video_path)
@@ -525,6 +561,7 @@ class HighlightWorker:
             danmaku=danmaku,
             output_xml_path=output_xml_path,
             elapsed_seconds=max(0.0, self._monotonic() - started_at),
+            source_fingerprint_json=fingerprint_json,
         )
 
     async def _complete(
@@ -543,6 +580,7 @@ class HighlightWorker:
             cursor = connection.execute(
                 "UPDATE highlight_clips SET state='ready',actual_start_ms=?,"
                 'actual_end_ms=?,output_xml_path=?,file_size_bytes=?,'
+                'inspection_json=?,source_fingerprint_json=?,'
                 'error_message=NULL,'
                 'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,updated_at=? '
                 'WHERE id=? AND lease_owner=? AND lease_generation=? '
@@ -553,6 +591,8 @@ class HighlightWorker:
                     result.inspection.actual_end_ms,
                     result.output_xml_path,
                     result.artifact.size_bytes,
+                    _inspection_json(result.inspection),
+                    result.source_fingerprint_json,
                     now,
                     claim.id,
                     claim.lease_owner,
