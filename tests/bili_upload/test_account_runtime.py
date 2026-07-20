@@ -14,6 +14,7 @@ from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.policies import default_room_upload_policy
+from blrec.bili_upload.recording_content import RecordingContentReader
 from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.setting.models import BiliUploadSettings
 
@@ -68,6 +69,25 @@ class IdentityProtocol:
 
     async def web_nav(self, _bundle: Any) -> Mapping[str, Any]:
         return {'code': 0, 'data': {'isLogin': True, 'mid': 42, 'uname': 'fixture'}}
+
+
+async def open_danmaku_stream(
+    database: BiliUploadDatabase, reader: RecordingContentReader, tmp_path: Path
+) -> Any:
+    source = tmp_path / 'runtime-part.flv'
+    source.write_bytes(b'video')
+    xml = tmp_path / 'runtime-part.xml'
+    xml.write_text('<i><d p="1,1,25,1">弹幕</d>', encoding='utf8')
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    part_id = (await journal.parts_for_run(run_id))[0].id
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    await reader.danmaku(part_id, cursor=0, limit=1)
+    return next(iter(reader._danmaku_streams.values()))
 
 
 @pytest.mark.asyncio
@@ -235,6 +255,64 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.highlight_worker is None
     assert runtime.media_index_worker is None
     assert runtime.deletion_worker is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_waits_for_and_closes_content_reader_files(
+    tmp_path: Path,
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+    )
+    assert await runtime.start()
+    assert runtime._database is not None
+    assert runtime.content_reader is not None
+    stream = await open_danmaku_stream(
+        runtime._database, runtime.content_reader, tmp_path
+    )
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_stream() -> None:
+        with stream.lock:
+            locked.set()
+            assert release.wait(2)
+
+    holder = threading.Thread(target=hold_stream)
+    holder.start()
+    assert locked.wait(2)
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+
+    await runtime.close()
+    holder.join(timeout=2)
+    timer.cancel()
+
+    assert not holder.is_alive()
+    assert stream.file.closed is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_partial_close_closes_content_reader_files(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+    )
+    reader = RecordingContentReader(database)
+    runtime._content_reader = reader
+    stream = await open_danmaku_stream(database, reader, tmp_path)
+
+    await runtime._close_partial(database)
+
+    assert stream.file.closed is True
 
 
 @pytest.mark.asyncio

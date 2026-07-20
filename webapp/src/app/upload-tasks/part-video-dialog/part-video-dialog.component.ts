@@ -359,7 +359,6 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
           state.rebuiltItems = this.mergeDanmakuItems(
             state.rebuiltItems,
             page.items,
-            false,
           );
           const nextCursor =
             page.nextCursor !== null && page.nextCursor >= cursor

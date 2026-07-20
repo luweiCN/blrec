@@ -1,4 +1,6 @@
 import asyncio
+import builtins
+import os
 import threading
 from io import BytesIO
 from pathlib import Path
@@ -284,30 +286,72 @@ async def test_danmaku_first_page_does_not_parse_the_whole_file(
 
 
 @pytest.mark.asyncio
-async def test_danmaku_page_has_a_fixed_input_byte_budget(
+async def test_danmaku_cursor_zero_reopens_after_a_zero_item_page(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
     source = tmp_path / 'part.flv'
     part_id = await _seed_part(database, source)
-    xml = tmp_path / 'large-header.xml'
+    xml = tmp_path / 'active-header.xml'
     xml.write_text(
-        '<i><metadata>{}</metadata><d p="1,1,25,1">第一条</d></i>'.format(
-            'x' * (RecordingContentReader._DANMAKU_READ_BYTES * 3)
-        ),
+        '<i><metadata>{}'.format('x' * RecordingContentReader._DANMAKU_READ_BYTES),
         encoding='utf8',
     )
     await database.execute(
-        'UPDATE recording_parts SET xml_path=?,xml_completed=1 WHERE id=?',
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
         (str(xml), part_id),
     )
     reader = RecordingContentReader(database)
 
-    page = await reader.danmaku(part_id, cursor=0, limit=1)
-    stream = next(iter(reader._danmaku_streams.values()))
+    first = await reader.danmaku(part_id, cursor=0, limit=1)
+    first_stream = next(iter(reader._danmaku_streams.values()))
+    second = await reader.danmaku(part_id, cursor=0, limit=1)
+    second_stream = next(iter(reader._danmaku_streams.values()))
 
-    assert page.items == ()
-    assert page.next_cursor == 0
-    assert stream.read_offset == RecordingContentReader._DANMAKU_READ_BYTES
+    assert first.items == second.items == ()
+    assert first.next_cursor == second.next_cursor == 0
+    assert first_stream is not second_stream
+    assert first_stream.file.closed is True
+    assert first_stream.read_offset == second_stream.read_offset
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ('non_d_prefix', 'unfinished_d'))
+async def test_danmaku_closes_parser_input_that_exceeds_the_memory_cap(
+    database: BiliUploadDatabase,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'oversized.xml'
+    prefix = '<i><metadata>' if kind == 'non_d_prefix' else '<i><d p="1,1,25,1">'
+    xml.write_text(
+        prefix + 'x' * (RecordingContentReader._DANMAKU_PENDING_BYTES + 1),
+        encoding='utf8',
+    )
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+    opened = []
+    new_stream = reader._new_danmaku_stream
+
+    def capture_stream(*args, **kwargs):
+        stream = new_stream(*args, **kwargs)
+        opened.append(stream)
+        return stream
+
+    monkeypatch.setattr(reader, '_new_danmaku_stream', capture_stream)
+
+    with pytest.raises(RecordingContentCursorStale):
+        await reader.danmaku(part_id, cursor=0, limit=1)
+
+    assert len(opened) == 1
+    assert opened[0].read_offset <= RecordingContentReader._DANMAKU_PENDING_BYTES
+    assert opened[0].file.closed is True
+    assert reader._danmaku_streams == {}
 
 
 @pytest.mark.asyncio
@@ -418,6 +462,70 @@ async def test_danmaku_continues_after_append_to_the_same_active_file(
     assert first.next_cursor == 1
     assert [item.content for item in second.items] == ['第二条']
     assert second.next_cursor == 2
+
+
+@pytest.mark.asyncio
+async def test_danmaku_accepts_same_inode_growth_between_stat_and_fstat(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text('<i><d p="1,1,25,1">第一条</d>', encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    original_fstat = os.fstat
+    first_fstat = True
+
+    def grow_before_fstat(fd):
+        nonlocal first_fstat
+        if first_fstat:
+            first_fstat = False
+            with xml.open('a', encoding='utf8') as file:
+                file.write('<d p="2,1,25,1">第二条</d>')
+        return original_fstat(fd)
+
+    monkeypatch.setattr(os, 'fstat', grow_before_fstat)
+
+    page = await RecordingContentReader(database).danmaku(part_id, cursor=0, limit=10)
+
+    assert [item.content for item in page.items] == ['第一条', '第二条']
+
+
+@pytest.mark.asyncio
+async def test_danmaku_closes_an_open_file_when_fstat_fails(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text('<i>', encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    original_open = builtins.open
+    opened = []
+
+    def tracking_open(path, *args, **kwargs):
+        file = original_open(path, *args, **kwargs)
+        if str(path) == str(xml):
+            opened.append(file)
+        return file
+
+    def failing_fstat(_fd):
+        raise OSError('injected fstat failure')
+
+    monkeypatch.setattr(builtins, 'open', tracking_open)
+    monkeypatch.setattr(os, 'fstat', failing_fstat)
+
+    with pytest.raises(RecordingContentUnavailable):
+        await RecordingContentReader(database).danmaku(part_id, cursor=0, limit=1)
+
+    assert len(opened) == 1
+    assert opened[0].closed is True
 
 
 @pytest.mark.asyncio
@@ -563,4 +671,25 @@ async def test_danmaku_reader_close_releases_cached_files(
     reader.close()
 
     assert stream.file.closed is True
+    assert reader._danmaku_streams == {}
+
+
+@pytest.mark.asyncio
+async def test_closed_danmaku_reader_does_not_open_new_streams(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text('<i>', encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+    reader.close()
+
+    with pytest.raises(RecordingContentUnavailable):
+        await reader.danmaku(part_id, cursor=0, limit=1)
+
     assert reader._danmaku_streams == {}

@@ -674,7 +674,9 @@ class BiliAccountRuntime:
         self._media_index_worker = None
         self._deletion_worker = None
         self._notification_scanner = None
-        self._content_reader = None
+        content_reader, self._content_reader = self._content_reader, None
+        if content_reader is not None:
+            content_reader.close()
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()
@@ -946,7 +948,9 @@ class BiliAccountRuntime:
         self._deletion_worker = None
         self._notification_scanner = None
         self._journal = None
-        self._content_reader = None
+        content_reader, self._content_reader = self._content_reader, None
+        if content_reader is not None:
+            content_reader.close()
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.close()

@@ -477,6 +477,113 @@ describe('PartVideoDialogComponent', () => {
     expect(fixture.componentInstance.danmakuError).toBeNull();
   });
 
+  it('keeps every stale-cursor recovery page within the rendered window bound', () => {
+    let staleSent = false;
+    service.listDanmaku.and.callFake((_partId, cursor = 0) => {
+      if (cursor === 500 && !staleSent) {
+        staleSent = true;
+        return throwError(
+          () =>
+            new HttpErrorResponse({
+              status: 409,
+              error: {
+                detail:
+                  '弹幕分页状态已失效，请从第一页重新加载',
+              },
+            }),
+        );
+      }
+      return of({
+        items: Array.from({ length: 500 }, (_value, offset) => ({
+          index: cursor + offset,
+          progressMs: (cursor + offset) * 1_000,
+          mode: 1,
+          fontSize: 25,
+          color: 1,
+          user: null,
+          uid: null,
+          content: `弹幕 ${cursor + offset}`,
+        })),
+        nextCursor: cursor + 500,
+      });
+    });
+    const component = fixture.componentInstance as unknown as {
+      mergeDanmakuItems: (
+        current: readonly unknown[],
+        incoming: readonly unknown[],
+        bounded?: boolean,
+      ) => readonly unknown[];
+    };
+    const merge = component.mergeDanmakuItems.bind(component);
+    let largestIntermediateWindow = 0;
+    spyOn(component, 'mergeDanmakuItems').and.callFake(
+      (current, incoming, bounded = true) => {
+        const result = merge(current, incoming, bounded);
+        largestIntermediateWindow = Math.max(
+          largestIntermediateWindow,
+          result.length,
+        );
+        return result;
+      },
+    );
+    fixture.detectChanges();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+    Object.defineProperty(video, 'currentTime', {
+      configurable: true,
+      value: 3_200,
+      writable: true,
+    });
+
+    fixture.componentInstance.loadMoreDanmaku();
+
+    expect(service.listDanmaku.calls.count()).toBe(9);
+    expect(largestIntermediateWindow).toBeLessThanOrEqual(1_000);
+    expect(fixture.componentInstance.danmakuItems.length).toBe(1_000);
+    expect(fixture.componentInstance.danmakuItems[0].index).toBe(2_500);
+    expect(fixture.componentInstance.danmakuItems[999].index).toBe(3_499);
+  });
+
+  it('does not apply a delayed cursor recovery after the dialog closes', () => {
+    const recovery = new Subject<{
+      items: readonly never[];
+      nextCursor: number | null;
+    }>();
+    let firstPage = true;
+    service.listDanmaku.and.callFake((_partId, cursor = 0) => {
+      if (cursor === 0 && firstPage) {
+        firstPage = false;
+        return of({
+          items: [],
+          nextCursor: 2,
+        });
+      }
+      if (cursor === 2) {
+        return throwError(
+          () =>
+            new HttpErrorResponse({
+              status: 409,
+              error: {
+                detail:
+                  '弹幕分页状态已失效，请从第一页重新加载',
+              },
+            }),
+        );
+      }
+      return recovery;
+    });
+    fixture.detectChanges();
+    fixture.componentInstance.loadMoreDanmaku();
+
+    fixture.componentInstance.handleClose();
+    recovery.next({ items: [], nextCursor: null });
+
+    expect(fixture.componentInstance.danmakuItems).toEqual([]);
+    expect(fixture.componentInstance.danmakuLoading).toBeFalse();
+    expect(fixture.componentInstance.danmakuError).toBeNull();
+  });
+
   it('highlights the danmaku nearest to the current video time', () => {
     fixture.detectChanges();
     const video = overlayContainer
