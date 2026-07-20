@@ -69,6 +69,25 @@ export interface HighlightClipInspection {
   readonly sources: readonly HighlightClipInspectionSource[];
 }
 
+export type HighlightInspectionState =
+  | 'accepted'
+  | 'running'
+  | 'succeeded'
+  | 'failed';
+
+export interface HighlightInspectionOperation {
+  readonly operationId: string;
+  readonly state: HighlightInspectionState;
+  readonly retryAfterMs: number;
+  readonly inspection: HighlightClipInspection | null;
+  readonly inspectionToken: string | null;
+  readonly errorCode: string | null;
+}
+
+export type HighlightClipCreateResult =
+  | HighlightClip
+  | HighlightInspectionOperation;
+
 export type HighlightClipState =
   'queued' | 'processing' | 'ready' | 'failed' | 'cancelled';
 
@@ -142,6 +161,8 @@ export interface CreateHighlightClipRequest {
   readonly startMs: number;
   readonly endMs: number;
   readonly confirmKeyframe: boolean;
+  readonly idempotencyKey: string;
+  readonly inspectionToken: string;
 }
 
 export interface HighlightUploadTaskResponse {

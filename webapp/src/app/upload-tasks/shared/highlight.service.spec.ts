@@ -36,7 +36,7 @@ describe('HighlightService', () => {
     expect(timeline.request.method).toBe('GET');
     timeline.flush({ parts: [], markers: [] });
 
-    service.inspectClip(9, 20_000, 70_000).subscribe();
+    service.inspectClip(9, 20_000, 70_000, 'idempotency-key').subscribe();
     const inspection = http.expectOne(
       '/api/v1/highlights/sessions/9/clips/inspect',
     );
@@ -44,8 +44,21 @@ describe('HighlightService', () => {
     expect(inspection.request.body).toEqual({
       startMs: 20_000,
       endMs: 70_000,
+      idempotencyKey: 'idempotency-key',
     });
     inspection.flush({});
+
+    service
+      .getClipInspection('operation-id', 'private-claim-key')
+      .subscribe();
+    const status = http.expectOne(
+      '/api/v1/highlights/inspections/operation-id',
+    );
+    expect(status.request.method).toBe('GET');
+    expect(status.request.headers.get('X-BLREC-Inspection-Claim')).toBe(
+      'private-claim-key',
+    );
+    status.flush({});
   });
 
   it('loads lightweight marker counts without the full timeline', () => {
@@ -71,6 +84,8 @@ describe('HighlightService', () => {
         startMs: 20_000,
         endMs: 70_000,
         confirmKeyframe: true,
+        idempotencyKey: 'idempotency-key',
+        inspectionToken: 'inspection-token',
       })
       .subscribe();
     const create = http.expectOne('/api/v1/highlights/sessions/9/clips');
@@ -81,6 +96,8 @@ describe('HighlightService', () => {
       startMs: 20_000,
       endMs: 70_000,
       confirmKeyframe: true,
+      idempotencyKey: 'idempotency-key',
+      inspectionToken: 'inspection-token',
     });
     create.flush({});
 

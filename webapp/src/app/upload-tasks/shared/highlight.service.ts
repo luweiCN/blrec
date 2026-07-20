@@ -1,4 +1,4 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import { Observable } from 'rxjs';
@@ -8,8 +8,9 @@ import { RoomUploadPolicyRequest } from 'src/app/tasks/upload-policy-dialog/room
 import {
   CreateHighlightClipRequest,
   HighlightClip,
+  HighlightClipCreateResult,
   HighlightClipList,
-  HighlightClipInspection,
+  HighlightInspectionOperation,
   HighlightMarker,
   HighlightMarkerCount,
   HighlightMediaAccess,
@@ -44,20 +45,39 @@ export class HighlightService {
     sessionId: number,
     startMs: number,
     endMs: number,
-  ): Observable<HighlightClipInspection> {
+    idempotencyKey: string,
+  ): Observable<HighlightInspectionOperation> {
     const path = `/api/v1/highlights/sessions/${sessionId}/clips/inspect`;
-    return this.http.post<HighlightClipInspection>(this.url.makeApiUrl(path), {
-      startMs,
-      endMs,
-    });
+    return this.http.post<HighlightInspectionOperation>(
+      this.url.makeApiUrl(path),
+      { startMs, endMs, idempotencyKey },
+    );
+  }
+
+  getClipInspection(
+    operationId: string,
+    claimKey: string,
+  ): Observable<HighlightInspectionOperation> {
+    const path = `/api/v1/highlights/inspections/${operationId}`;
+    return this.http.get<HighlightInspectionOperation>(
+      this.url.makeApiUrl(path),
+      {
+        headers: new HttpHeaders({
+          'X-BLREC-Inspection-Claim': claimKey,
+        }),
+      },
+    );
   }
 
   createClip(
     sessionId: number,
     request: CreateHighlightClipRequest,
-  ): Observable<HighlightClip> {
+  ): Observable<HighlightClipCreateResult> {
     const path = `/api/v1/highlights/sessions/${sessionId}/clips`;
-    return this.http.post<HighlightClip>(this.url.makeApiUrl(path), request);
+    return this.http.post<HighlightClipCreateResult>(
+      this.url.makeApiUrl(path),
+      request,
+    );
   }
 
   listClips(sessionId: number): Observable<readonly HighlightClip[]> {

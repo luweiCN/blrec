@@ -6,13 +6,14 @@ import {
   TestBed,
   fakeAsync,
   flushMicrotasks,
+  tick,
 } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { of, Subject } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { NzToolTipModule, NzTooltipDirective } from 'ng-zorro-antd/tooltip';
 
 import {
@@ -30,6 +31,7 @@ import type {
 import {
   HighlightClip,
   HighlightClipInspection,
+  HighlightInspectionOperation,
   HighlightTimeline,
 } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
@@ -198,11 +200,23 @@ describe('HighlightEditorComponent', () => {
     fileSizeBytes: null,
   };
 
+  const readyInspection = (
+    value: HighlightClipInspection,
+  ): HighlightInspectionOperation => ({
+    operationId: 'inspection-operation',
+    state: 'succeeded',
+    retryAfterMs: 500,
+    inspection: value,
+    inspectionToken: 'inspection-token-value-123',
+    errorCode: null,
+  });
+
   beforeEach(async () => {
     highlights = jasmine.createSpyObj<HighlightService>('HighlightService', [
       'getTimeline',
       'listClips',
       'inspectClip',
+      'getClipInspection',
       'createClip',
       'getClip',
       'retryClip',
@@ -216,7 +230,10 @@ describe('HighlightEditorComponent', () => {
     ]);
     highlights.getTimeline.and.returnValue(of(timeline));
     highlights.listClips.and.returnValue(of([]));
-    highlights.inspectClip.and.returnValue(of(inspection));
+    highlights.inspectClip.and.returnValue(of(readyInspection(inspection)));
+    highlights.getClipInspection.and.returnValue(
+      of(readyInspection(inspection)),
+    );
     highlights.createClip.and.returnValue(of(processingClip));
     highlights.getClip.and.returnValue(
       of({
@@ -991,7 +1008,7 @@ describe('HighlightEditorComponent', () => {
   });
 
   it('keeps the submitted range stable while inspection is in flight', () => {
-    const inspectionResponse = new Subject<HighlightClipInspection>();
+    const inspectionResponse = new Subject<HighlightInspectionOperation>();
     highlights.inspectClip.and.returnValue(inspectionResponse);
     component.playheadMs = 10_000;
     component.setSelectionStartFromPlayhead();
@@ -1007,33 +1024,8 @@ describe('HighlightEditorComponent', () => {
     expect(component.selectedDraftLocked).toBeTrue();
     expect([draft.startMs, draft.endMs]).toEqual([10_000, 20_000]);
 
-    inspectionResponse.next({
-      ...inspection,
-      requestedStartMs: 10_000,
-      requestedEndMs: 20_000,
-      actualStartMs: 10_000,
-      actualEndMs: 20_000,
-      extraLeadMs: 0,
-      confirmationRequired: false,
-      sources: [
-        {
-          partId: 11,
-          actualStartMs: 10_000,
-          actualEndMs: 20_000,
-          outputOffsetMs: 0,
-        },
-      ],
-    });
-
-    expect(highlights.createClip).toHaveBeenCalledWith(
-      9,
-      jasmine.objectContaining({ startMs: 10_000, endMs: 20_000 }),
-    );
-  });
-
-  it('turns a blue pending range green after the clip is created', () => {
-    highlights.inspectClip.and.returnValue(
-      of({
+    inspectionResponse.next(
+      readyInspection({
         ...inspection,
         requestedStartMs: 10_000,
         requestedEndMs: 20_000,
@@ -1050,6 +1042,214 @@ describe('HighlightEditorComponent', () => {
           },
         ],
       }),
+    );
+
+    expect(highlights.createClip).toHaveBeenCalledWith(
+      9,
+      jasmine.objectContaining({ startMs: 10_000, endMs: 20_000 }),
+    );
+  });
+
+  it('polls one accepted inspection and creates with the same private intent', fakeAsync(() => {
+    highlights.inspectClip.and.returnValue(
+      of({
+        operationId: 'pending-operation',
+        state: 'accepted',
+        retryAfterMs: 500,
+        inspection: null,
+        inspectionToken: null,
+        errorCode: null,
+      }),
+    );
+    highlights.getClipInspection.and.returnValue(
+      of(
+        readyInspection({
+          ...inspection,
+          requestedStartMs: 10_000,
+          requestedEndMs: 20_000,
+          actualStartMs: 10_000,
+          actualEndMs: 20_000,
+          extraLeadMs: 0,
+          confirmationRequired: false,
+        }),
+      ),
+    );
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+
+    component.createSelectedDraft();
+    expect(highlights.createClip).not.toHaveBeenCalled();
+    tick(500);
+
+    expect(highlights.getClipInspection).toHaveBeenCalledWith(
+      'pending-operation',
+      jasmine.any(String),
+    );
+    const inspectionIntent = highlights.inspectClip.calls.mostRecent().args[3];
+    const createRequest = highlights.createClip.calls.mostRecent().args[1];
+    expect(createRequest.idempotencyKey).toBe(inspectionIntent);
+    expect(createRequest.inspectionToken).toBe('inspection-token-value-123');
+  }));
+
+  it('cancels polling when the selected range changes', fakeAsync(() => {
+    const status = new Subject<HighlightInspectionOperation>();
+    highlights.inspectClip.and.returnValue(
+      of({
+        operationId: 'stale-operation',
+        state: 'accepted',
+        retryAfterMs: 100,
+        inspection: null,
+        inspectionToken: null,
+        errorCode: null,
+      }),
+    );
+    highlights.getClipInspection.and.returnValue(status);
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+    const draft = component.drafts[0];
+    component.createSelectedDraft();
+    tick(100);
+
+    component.updateDraft(draft);
+    status.next(readyInspection(inspection));
+
+    expect(highlights.createClip).not.toHaveBeenCalled();
+    expect(draft.state).toBe('idle');
+    expect(draft.inspection).toBeNull();
+  }));
+
+  it('retries a lost create response with the same idempotency key', () => {
+    let attempts = 0;
+    highlights.inspectClip.and.returnValue(
+      of(
+        readyInspection({
+          ...inspection,
+          extraLeadMs: 0,
+          confirmationRequired: false,
+        }),
+      ),
+    );
+    highlights.createClip.and.callFake(() => {
+      attempts += 1;
+      return attempts === 1
+        ? throwError(() => ({ status: 0 }))
+        : of(processingClip);
+    });
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+
+    component.createSelectedDraft();
+
+    expect(highlights.createClip).toHaveBeenCalledTimes(2);
+    const first = highlights.createClip.calls.argsFor(0)[1];
+    const second = highlights.createClip.calls.argsFor(1)[1];
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    expect(second.inspectionToken).toBe(first.inspectionToken);
+  });
+
+  it('re-inspects an expired token once with the same private intent', () => {
+    let createAttempts = 0;
+    highlights.inspectClip.and.returnValue(
+      of(
+        readyInspection({
+          ...inspection,
+          extraLeadMs: 0,
+          confirmationRequired: false,
+        }),
+      ),
+    );
+    highlights.createClip.and.callFake(() => {
+      createAttempts += 1;
+      return createAttempts === 1
+        ? throwError(() => ({
+            status: 409,
+            error: { detail: '检查令牌已经过期，请重新检查' },
+          }))
+        : of(processingClip);
+    });
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+
+    component.createSelectedDraft();
+
+    expect(highlights.inspectClip).toHaveBeenCalledTimes(2);
+    expect(highlights.createClip).toHaveBeenCalledTimes(2);
+    expect(highlights.inspectClip.calls.argsFor(1)[3]).toBe(
+      highlights.inspectClip.calls.argsFor(0)[3],
+    );
+    expect(highlights.createClip.calls.argsFor(1)[1].idempotencyKey).toBe(
+      highlights.createClip.calls.argsFor(0)[1].idempotencyKey,
+    );
+  });
+
+  it('reuses the claim key when one status response is lost', fakeAsync(() => {
+    let statusAttempts = 0;
+    highlights.inspectClip.and.returnValue(
+      of({
+        operationId: 'response-loss-operation',
+        state: 'accepted',
+        retryAfterMs: 100,
+        inspection: null,
+        inspectionToken: null,
+        errorCode: null,
+      }),
+    );
+    highlights.getClipInspection.and.callFake(() => {
+      statusAttempts += 1;
+      return statusAttempts === 1
+        ? throwError(() => ({ status: 0 }))
+        : of(
+            readyInspection({
+              ...inspection,
+              extraLeadMs: 0,
+              confirmationRequired: false,
+            }),
+          );
+    });
+    component.playheadMs = 10_000;
+    component.setSelectionStartFromPlayhead();
+    component.playheadMs = 20_000;
+    component.setSelectionEndFromPlayhead();
+
+    component.createSelectedDraft();
+    tick(200);
+
+    expect(highlights.getClipInspection).toHaveBeenCalledTimes(2);
+    expect(highlights.getClipInspection.calls.argsFor(1)[1]).toBe(
+      highlights.getClipInspection.calls.argsFor(0)[1],
+    );
+    expect(highlights.createClip).toHaveBeenCalled();
+  }));
+
+  it('turns a blue pending range green after the clip is created', () => {
+    highlights.inspectClip.and.returnValue(
+      of(
+        readyInspection({
+          ...inspection,
+          requestedStartMs: 10_000,
+          requestedEndMs: 20_000,
+          actualStartMs: 10_000,
+          actualEndMs: 20_000,
+          extraLeadMs: 0,
+          confirmationRequired: false,
+          sources: [
+            {
+              partId: 11,
+              actualStartMs: 10_000,
+              actualEndMs: 20_000,
+              outputOffsetMs: 0,
+            },
+          ],
+        }),
+      ),
     );
     highlights.createClip.and.returnValue(
       of({
@@ -1654,7 +1854,9 @@ describe('HighlightEditorComponent', () => {
         },
       ],
     };
-    highlights.inspectClip.and.returnValue(of(partInspection));
+    highlights.inspectClip.and.returnValue(
+      of(readyInspection(partInspection)),
+    );
     component.startMs = 10_000;
     component.endMs = 30_000;
     component.clipName = '';
@@ -1687,6 +1889,8 @@ describe('HighlightEditorComponent', () => {
       startMs: 10_000,
       endMs: 30_000,
       confirmKeyframe: true,
+      idempotencyKey: jasmine.any(String),
+      inspectionToken: 'inspection-token-value-123',
     });
   });
 

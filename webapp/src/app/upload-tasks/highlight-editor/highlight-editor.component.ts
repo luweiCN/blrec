@@ -12,7 +12,15 @@ import {
 } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 
-import { Subscription } from 'rxjs';
+import {
+  catchError,
+  Observable,
+  of,
+  Subscription,
+  switchMap,
+  throwError,
+  timer,
+} from 'rxjs';
 
 import {
   RealtimeEvent,
@@ -28,6 +36,7 @@ import { RoomUploadPolicyRequest } from '../../tasks/upload-policy-dialog/room-u
 import {
   HighlightClip,
   HighlightClipInspection,
+  HighlightInspectionOperation,
   HighlightProgressEvent,
   HighlightTimeline,
   HighlightTimelinePart,
@@ -44,8 +53,13 @@ interface HighlightClipDraft {
   startMs: number;
   endMs: number;
   inspection: HighlightClipInspection | null;
+  inspectionToken: string | null;
   state: 'idle' | 'inspecting' | 'confirmation' | 'creating';
   error: string | null;
+  idempotencyKey: string | null;
+  claimKey: string | null;
+  inspectionRequest?: Subscription;
+  reinspectionCount: number;
 }
 
 type TimelinePopover =
@@ -495,7 +509,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   updateDraft(draft: HighlightClipDraft): void {
+    draft.inspectionRequest?.unsubscribe();
+    draft.inspectionRequest = undefined;
     draft.inspection = null;
+    draft.inspectionToken = null;
+    draft.idempotencyKey = null;
+    draft.claimKey = null;
+    draft.reinspectionCount = 0;
     draft.state = 'idle';
     draft.error = null;
   }
@@ -504,6 +524,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (draft.state === 'inspecting' || draft.state === 'creating') {
       return;
     }
+    draft.inspectionRequest?.unsubscribe();
     this.drafts = this.drafts.filter((item) => item.id !== draft.id);
     if (this.editingDraftId === draft.id) {
       this.resetWorkingSelection();
@@ -544,30 +565,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     draft.state = 'inspecting';
     draft.error = null;
+    draft.idempotencyKey = this.newPrivateKey();
+    draft.claimKey = this.newPrivateKey();
+    draft.reinspectionCount = 0;
     this.actionError = null;
-    this.subscriptions.add(
-      this.highlights
-        .inspectClip(this.sessionId, draft.startMs, draft.endMs)
-        .subscribe({
-          next: (inspection) => {
-            draft.inspection = inspection;
-            if (!inspection.compatible) {
-              draft.state = 'idle';
-              draft.error = '所选分段编码不兼容，无法无损合并';
-            } else if (inspection.confirmationRequired) {
-              draft.state = 'confirmation';
-            } else {
-              this.persistDraft(draft, false);
-            }
-            this.changeDetector.markForCheck();
-          },
-          error: (error: unknown) => {
-            draft.state = 'idle';
-            draft.error = this.describeError(error, '无法创建这个片段');
-            this.changeDetector.markForCheck();
-          },
-        }),
-    );
+    this.startDraftInspection(draft);
   }
 
   confirmDraft(draft: HighlightClipDraft): void {
@@ -1230,8 +1232,12 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       startMs,
       endMs,
       inspection: null,
+      inspectionToken: null,
       state: 'idle',
       error: null,
+      idempotencyKey: null,
+      claimKey: null,
+      reinspectionCount: 0,
     };
   }
 
@@ -1325,6 +1331,131 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.timelineOverlay?.overlayRef?.updatePosition();
   }
 
+  private startDraftInspection(
+    draft: HighlightClipDraft,
+    initialOperation?: HighlightInspectionOperation,
+    confirmAfterInspection = false,
+  ): void {
+    const idempotencyKey = draft.idempotencyKey;
+    const claimKey = draft.claimKey;
+    if (!idempotencyKey || !claimKey) {
+      draft.state = 'idle';
+      draft.error = '高光检查凭据已经失效，请重新创建';
+      return;
+    }
+    draft.inspectionRequest?.unsubscribe();
+    const initial$ = initialOperation
+      ? of(initialOperation)
+      : this.highlights.inspectClip(
+          this.sessionId,
+          draft.startMs,
+          draft.endMs,
+          idempotencyKey,
+        );
+    const request = new Subscription();
+    draft.inspectionRequest = request;
+    this.subscriptions.add(request);
+    request.add(
+      initial$
+      .pipe(
+        switchMap((operation) => this.waitForInspection(operation, claimKey)),
+      )
+      .subscribe({
+        next: (operation) => {
+          if (
+            draft.idempotencyKey !== idempotencyKey ||
+            draft.claimKey !== claimKey
+          ) {
+            return;
+          }
+          if (operation.state === 'failed') {
+            draft.state = 'idle';
+            draft.error = this.inspectionFailureMessage(operation.errorCode);
+            this.changeDetector.markForCheck();
+            return;
+          }
+          const inspection = operation.inspection;
+          const inspectionToken = operation.inspectionToken;
+          if (!inspection || !inspectionToken) {
+            draft.state = 'idle';
+            draft.error = '高光检查结果不完整，请重试';
+            this.changeDetector.markForCheck();
+            return;
+          }
+          draft.inspection = inspection;
+          draft.inspectionToken = inspectionToken;
+          if (!inspection.compatible) {
+            draft.state = 'idle';
+            draft.error = '所选分段编码不兼容，无法无损剪辑';
+          } else if (inspection.confirmationRequired && !confirmAfterInspection) {
+            draft.state = 'confirmation';
+          } else {
+            this.persistDraft(draft, confirmAfterInspection);
+          }
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          if (draft.idempotencyKey !== idempotencyKey) {
+            return;
+          }
+          draft.state = 'idle';
+          draft.error = this.describeError(error, '无法创建这个片段');
+          this.changeDetector.markForCheck();
+        },
+      }),
+    );
+  }
+
+  private waitForInspection(
+    operation: HighlightInspectionOperation,
+    claimKey: string,
+  ): Observable<HighlightInspectionOperation> {
+    if (operation.state === 'succeeded' || operation.state === 'failed') {
+      return of(operation);
+    }
+    return timer(Math.max(100, operation.retryAfterMs)).pipe(
+      switchMap(() =>
+        this.highlights
+          .getClipInspection(operation.operationId, claimKey)
+          .pipe(
+            catchError((error: unknown) =>
+              this.isTransientHttpError(error)
+                ? of(operation)
+                : throwError(() => error),
+            ),
+          ),
+      ),
+      switchMap((next) => this.waitForInspection(next, claimKey)),
+    );
+  }
+
+  private inspectionFailureMessage(errorCode: string | null): string {
+    const messages: Record<string, string> = {
+      range_unavailable: '所选范围当前不可剪辑',
+      probe_timeout: '检查录像超时，请稍后重试',
+      probe_failed: '无法读取这段录像',
+      inspection_failed: '检查录像失败，请稍后重试',
+    };
+    return errorCode ? (messages[errorCode] ?? '检查录像失败') : '检查录像失败';
+  }
+
+  private newPrivateKey(): string {
+    const cryptoApi = this.document.defaultView?.crypto;
+    if (!cryptoApi) {
+      throw new Error('浏览器不支持安全随机数');
+    }
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const value = Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(
+      12,
+      16,
+    )}-${value.slice(16, 20)}-${value.slice(20)}`;
+  }
+
   private pausePlayback(): void {
     this.videoElement?.pause();
     this.isPlaying = false;
@@ -1333,7 +1464,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private persistDraft(
     draft: HighlightClipDraft,
     confirmKeyframe: boolean,
+    responseRetry = 0,
   ): void {
+    if (!draft.idempotencyKey || !draft.claimKey) {
+      draft.state = 'idle';
+      draft.error = '高光检查凭据已经失效，请重新创建';
+      return;
+    }
+    const idempotencyKey = draft.idempotencyKey;
+    const inspectionToken = draft.inspectionToken;
+    if (!inspectionToken) {
+      draft.state = 'idle';
+      draft.error = '高光检查结果已经失效，请重新创建';
+      return;
+    }
     this.cancelClipLoad();
     draft.state = 'creating';
     draft.error = null;
@@ -1345,9 +1489,24 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           startMs: draft.startMs,
           endMs: draft.endMs,
           confirmKeyframe,
+          idempotencyKey,
+          inspectionToken,
         })
         .subscribe({
-          next: (clip) => {
+          next: (result) => {
+            if ('operationId' in result) {
+              if (draft.reinspectionCount >= 1) {
+                draft.state = 'idle';
+                draft.error = '源录像已再次变化，请重新创建片段';
+                this.changeDetector.markForCheck();
+                return;
+              }
+              draft.reinspectionCount += 1;
+              draft.state = 'inspecting';
+              this.startDraftInspection(draft, result, confirmKeyframe);
+              return;
+            }
+            const clip = result;
             this.clips = [...this.clips, clip];
             this.drafts = this.drafts.filter((item) => item.id !== draft.id);
             if (this.editingDraftId === draft.id) {
@@ -1356,6 +1515,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             this.changeDetector.markForCheck();
           },
           error: (error: unknown) => {
+            if (responseRetry < 1 && this.isTransientHttpError(error)) {
+              this.persistDraft(draft, confirmKeyframe, responseRetry + 1);
+              return;
+            }
+            if (
+              draft.reinspectionCount < 1 &&
+              this.isExpiredInspectionError(error)
+            ) {
+              draft.reinspectionCount += 1;
+              draft.state = 'inspecting';
+              draft.inspectionToken = null;
+              this.startDraftInspection(draft, undefined, confirmKeyframe);
+              return;
+            }
             draft.state = draft.inspection?.confirmationRequired
               ? 'confirmation'
               : 'idle';
@@ -1363,6 +1536,29 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             this.changeDetector.markForCheck();
           },
         }),
+    );
+  }
+
+  private isTransientHttpError(error: unknown): boolean {
+    if (!error || typeof error !== 'object' || !('status' in error)) {
+      return false;
+    }
+    const status = Number((error as { status?: unknown }).status);
+    return status === 0 || status >= 500;
+  }
+
+  private isExpiredInspectionError(error: unknown): boolean {
+    if (!error || typeof error !== 'object' || !('status' in error)) {
+      return false;
+    }
+    if (Number((error as { status?: unknown }).status) !== 409) {
+      return false;
+    }
+    const detail = (error as { error?: { detail?: unknown } }).error?.detail;
+    return (
+      typeof detail === 'string' &&
+      detail.includes('检查令牌') &&
+      (detail.includes('过期') || detail.includes('失效'))
     );
   }
 
