@@ -13,6 +13,9 @@
 ## Constraints and budgets
 
 - Do not use git worktrees.
+- Keep SQL compatible with the SQLite versions bundled by supported Python 3.8+
+  environments; do not require `AS MATERIALIZED` or another unguarded version-only
+  syntax. Use query-plan tests to prove page-bounded execution instead.
 - Do not change upload, review, comment, danmaku, room-status, or stream polling frequency.
 - Do not expose local media paths, credentials, query values, or concrete account identifiers in logs or performance fixtures.
 - Preserve existing list filters, sort order, display states, available actions, realtime progress merge behavior, detail drawers, and route URLs.
@@ -162,7 +165,7 @@ two database calls.
 Required query shape:
 
 ```sql
-WITH selected_sessions AS MATERIALIZED (
+WITH selected_sessions AS (
     SELECT session.id AS session_id,job.id AS job_id
     FROM recording_sessions session
     LEFT JOIN upload_jobs job ON job.session_id=session.id
@@ -183,7 +186,7 @@ part_summary AS (
     JOIN selected_sessions selected ON selected.session_id=part.session_id
     GROUP BY part.session_id
 ),
-selected_upload_parts AS MATERIALIZED (
+selected_upload_parts AS (
     SELECT part.id,part.job_id,part.upload_state
     FROM upload_parts part
     JOIN selected_sessions selected ON selected.job_id=part.job_id
@@ -591,14 +594,14 @@ Keep the count as the first database call. The second statement must select the
 page before aggregating upload chunks:
 
 ```sql
-WITH selected_clips AS MATERIALIZED (
+WITH selected_clips AS (
     SELECT id
     FROM highlight_clips
     WHERE state!='cancelled'
     ORDER BY created_at DESC,id DESC
     LIMIT ? OFFSET ?
 ),
-selected_jobs AS MATERIALIZED (
+selected_jobs AS (
     SELECT job.id
     FROM selected_clips selected
     JOIN highlight_clips clip ON clip.id=selected.id
