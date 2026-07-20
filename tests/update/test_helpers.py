@@ -1,4 +1,5 @@
 import asyncio
+import gc
 from collections import deque
 from typing import Any, Deque, Dict, List, Mapping, Optional
 
@@ -147,6 +148,56 @@ async def test_expiry_refreshes_once_and_error_uses_only_nonexpired_stale() -> N
 
 
 @pytest.mark.asyncio
+async def test_failed_refresh_is_cooled_down_for_thirty_minutes() -> None:
+    session = _Session(
+        [_metadata('1.0.0'), OSError('first failure'), OSError('second failure')]
+    )
+    clock = _Clock()
+    client = UpdateMetadataClient(
+        session_factory=lambda **_kwargs: session, monotonic=clock
+    )
+    await client.start()
+
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    clock.advance(1_801)
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    clock.advance(1_799)
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    assert len(session.calls) == 2
+
+    clock.advance(1)
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    assert len(session.calls) == 3
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_cooldown_does_not_extend_stale_lifetime() -> None:
+    session = _Session(
+        [_metadata('1.0.0'), OSError('near expiry'), OSError('must not be sent')]
+    )
+    clock = _Clock()
+    client = UpdateMetadataClient(
+        session_factory=lambda **_kwargs: session, monotonic=clock
+    )
+    await client.start()
+
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    clock.advance(client.STALE_SECONDS - 1)
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    clock.advance(1)
+    assert await client.get_latest_version_string('blrec') == '1.0.0'
+    assert len(session.calls) == 2
+
+    clock.advance(0.001)
+    with pytest.raises(RuntimeError, match='cooling down'):
+        await client.get_latest_version_string('blrec')
+    assert len(session.calls) == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_not_found_is_cached_and_project_release_keys_do_not_collide() -> None:
     session = _Session([_not_found(), _metadata('release'), _metadata('project')])
     client = UpdateMetadataClient(session_factory=lambda **_kwargs: session)
@@ -181,6 +232,40 @@ async def test_waiter_cancellation_does_not_cancel_shared_refresh() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_only_waiter_consumes_background_refresh_failure() -> None:
+    release = asyncio.Event()
+    session = _Session([OSError('secret response body')], release=release)
+    client = UpdateMetadataClient(session_factory=lambda **_kwargs: session)
+    await client.start()
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    contexts: List[Dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    try:
+        waiter = asyncio.create_task(client.get_project_metadata('secret-project'))
+        await session.started.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        del waiter
+
+        release.set()
+        for _ in range(20):
+            if client.inflight_count == 0:
+                break
+            await asyncio.sleep(0)
+        assert client.inflight_count == 0
+        await client.close()
+        for _ in range(5):
+            gc.collect()
+            await asyncio.sleep(0)
+
+        assert contexts == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_owned_refresh_and_closes_session_once() -> None:
     session = _Session([_metadata('never')], release=asyncio.Event())
     client = UpdateMetadataClient(
@@ -201,11 +286,19 @@ async def test_close_cancels_owned_refresh_and_closes_session_once() -> None:
 @pytest.mark.asyncio
 async def test_invalid_metadata_is_not_cached() -> None:
     session = _Session([{'info': {}}, _metadata('valid')])
-    client = UpdateMetadataClient(session_factory=lambda **_kwargs: session)
+    clock = _Clock()
+    client = UpdateMetadataClient(
+        session_factory=lambda **_kwargs: session, monotonic=clock
+    )
     await client.start()
 
     with pytest.raises(ValueError, match='invalid'):
         await client.get_project_metadata('blrec')
+    with pytest.raises(RuntimeError, match='cooling down'):
+        await client.get_latest_version_string('blrec')
+    assert len(session.calls) == 1
+
+    clock.advance(client.FRESH_SECONDS)
     assert await client.get_latest_version_string('blrec') == 'valid'
     assert len(session.calls) == 2
     await client.close()

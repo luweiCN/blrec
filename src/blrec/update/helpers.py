@@ -47,6 +47,7 @@ class UpdateMetadataClient:
         self._monotonic = monotonic
         self._session: Optional[Any] = None
         self._cache: Dict[_CacheKey, _CacheEntry] = {}
+        self._refresh_attempted_at: Dict[_CacheKey, float] = {}
         self._inflight: Dict[_CacheKey, asyncio.Task[Optional[Metadata]]] = {}
         self._accepting = False
         self._close_task: Optional[asyncio.Task[None]] = None
@@ -138,6 +139,12 @@ class UpdateMetadataClient:
             return cached.value
         task = self._inflight.get(key)
         if task is None:
+            attempted_at = self._refresh_attempted_at.get(key)
+            if attempted_at is not None and now - attempted_at < self.FRESH_SECONDS:
+                if cached is not None and now - cached.stored_at <= self.STALE_SECONDS:
+                    return cached.value
+                raise RuntimeError('update metadata refresh is cooling down')
+            self._refresh_attempted_at[key] = now
             task = asyncio.create_task(self._refresh(key, loader))
             self._inflight[key] = task
             task.add_done_callback(
@@ -177,6 +184,8 @@ class UpdateMetadataClient:
     def _clear_inflight(
         self, key: _CacheKey, completed: asyncio.Task[Optional[Metadata]]
     ) -> None:
+        if not completed.cancelled():
+            completed.exception()
         if self._inflight.get(key) is completed:
             self._inflight.pop(key, None)
 
