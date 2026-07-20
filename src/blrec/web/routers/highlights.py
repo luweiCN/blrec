@@ -122,6 +122,11 @@ class TimelineResponse(ApiModel):
     markers: List[MappedMarkerResponse]
 
 
+class MarkerCountResponse(ApiModel):
+    part_id: int
+    count: int
+
+
 class InspectClipRequest(ApiModel):
     start_ms: int = Field(..., ge=0)
     end_ms: int = Field(..., gt=0)
@@ -423,6 +428,24 @@ async def delete_marker(
     except ValueError as error:
         raise _not_found(error) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    '/sessions/{session_id}/marker-counts', response_model=List[MarkerCountResponse]
+)
+async def get_marker_counts(
+    session_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> List[MarkerCountResponse]:
+    try:
+        values = await highlight_service.marker_counts(session_id)
+    except ValueError as error:
+        raise _not_found(error) from None
+    return [
+        MarkerCountResponse(part_id=value.part_id, count=value.count)
+        for value in values
+    ]
 
 
 @router.get('/sessions/{session_id}/timeline', response_model=TimelineResponse)

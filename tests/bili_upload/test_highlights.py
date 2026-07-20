@@ -251,6 +251,122 @@ async def test_timeline_falls_back_to_server_record_start_time(
 
 
 @pytest.mark.asyncio
+async def test_marker_counts_use_persisted_links_and_legacy_boundaries_without_io(
+    database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+        "VALUES(1,100,'100:target','closed',1000,'live'),"
+        "(2,100,'100:other','closed',1000,'live'),"
+        "(3,101,'101:other','closed',1000,'live')"
+    )
+    await database.execute(
+        'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+        "VALUES('target',1,'finished',1000,1220),"
+        "('other-session',2,'finished',1000,1060),"
+        "('other-room',3,'finished',1000,1060)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,record_start_time,'
+        'timeline_start_at_ms,record_duration_seconds,artifact_state,'
+        'video_deleted_at,created_at,updated_at) '
+        "VALUES(1,1,'target',1,'/never/read/p1.flv',1000,1000000,60,'ready',"
+        'NULL,1,1),'
+        "(2,1,'target',2,'/never/read/p2.flv',1060,1060000,40,"
+        "'postprocessing',NULL,1,1),"
+        "(3,1,'target',3,'/never/read/p3.flv',1200,1200000,20,'recording',"
+        'NULL,1,1),'
+        "(4,1,'target',4,'/never/read/failed.flv',1300,1300000,20,'failed',"
+        'NULL,1,1),'
+        "(5,1,'target',5,'/never/read/deleted.flv',1400,1400000,20,'ready',"
+        '2,1,1),'
+        "(6,2,'other-session',1,'/never/read/other-session.flv',1000,"
+        "1000000,60,'ready',NULL,1,1),"
+        "(7,3,'other-room',1,'/never/read/other-room.flv',1000,1000000,60,"
+        "'ready',NULL,1,1)"
+    )
+    await database.execute(
+        'INSERT INTO highlight_markers('
+        'id,room_id,observed_at_ms,player_delay_ms,content_at_ms,title,'
+        'anchor_name,name,note,source,created_at,updated_at,recording_part_id) '
+        "VALUES(1,100,9000000,0,9000000,'','','direct','','web',1,1,1),"
+        "(2,100,1060000,0,1060000,'','','boundary','','web',1,1,NULL),"
+        "(3,100,1100000,0,1100000,'','','final-end','','web',1,1,NULL),"
+        "(4,100,1010000,0,1010000,'','','other-session','','web',1,1,6),"
+        "(5,101,1010000,0,1010000,'','','other-room','','web',1,1,NULL),"
+        "(6,100,1310000,0,1310000,'','','failed-part','','web',1,1,4),"
+        "(7,100,1410000,0,1410000,'','','deleted-part','','web',1,1,5)"
+    )
+    service = HighlightService(database)
+    database_calls = []
+    filesystem_calls = []
+    mapper_calls = []
+    original_run = database._run
+    original_mapper = HighlightService._part_containing
+
+    async def counting_run(operation, *args):
+        database_calls.append((operation.__name__, str(args[0])))
+        return await original_run(operation, *args)
+
+    def forbidden_isfile(path: str) -> bool:
+        filesystem_calls.append(path)
+        raise AssertionError('marker counts must not inspect recording paths')
+
+    def counting_mapper(parts, content_at_ms):
+        mapper_calls.append(content_at_ms)
+        return original_mapper(parts, content_at_ms)
+
+    monkeypatch.setattr(database, '_run', counting_run)
+    monkeypatch.setattr('blrec.bili_upload.highlights.os.path.isfile', forbidden_isfile)
+    monkeypatch.setattr(
+        HighlightService, '_part_containing', staticmethod(counting_mapper)
+    )
+
+    counts = await service.marker_counts(1)
+
+    assert [(value.part_id, value.count) for value in counts] == [
+        (1, 2),
+        (2, 1),
+        (3, 0),
+    ]
+    assert len(database_calls) <= 2
+    assert all('source_path' not in sql for _operation, sql in database_calls)
+    assert all('SELECT *' not in sql.upper() for _operation, sql in database_calls)
+    assert filesystem_calls == []
+    assert sorted(mapper_calls) == [1_060_000, 1_100_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('session_id', (1, 999))
+async def test_marker_counts_reject_missing_or_non_live_sessions(
+    database, session_id: int
+) -> None:
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+        "VALUES(1,100,'highlight:1','closed',1,'highlight')"
+    )
+
+    with pytest.raises(ValueError, match='unknown live recording session'):
+        await HighlightService(database).marker_counts(session_id)
+
+
+@pytest.mark.asyncio
+async def test_marker_counts_return_empty_for_a_live_session_without_parts(
+    database,
+) -> None:
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+        "VALUES(1,100,'100:empty','closed',1,'live')"
+    )
+
+    assert await HighlightService(database).marker_counts(1) == ()
+
+
+@pytest.mark.asyncio
 async def test_ready_clip_exposes_only_an_owned_existing_video(
     database, tmp_path: Path
 ) -> None:

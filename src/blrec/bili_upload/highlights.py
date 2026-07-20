@@ -55,6 +55,12 @@ class HighlightMarker:
 
 
 @dataclass(frozen=True)
+class HighlightMarkerCount:
+    part_id: int
+    count: int
+
+
+@dataclass(frozen=True)
 class TimelinePart:
     part_id: int
     part_index: int
@@ -1100,6 +1106,88 @@ class HighlightService:
             result='ready_for_draft',
         )
         return session_id
+
+    async def marker_counts(self, session_id: int) -> Sequence[HighlightMarkerCount]:
+        rows = await self._database.fetchall(
+            'SELECT session.room_id,part.id AS part_id,part.part_index,'
+            'part.record_start_time,part.timeline_start_at_ms,'
+            'part.record_duration_seconds,part.artifact_state,'
+            'part.video_deleted_at '
+            'FROM recording_sessions session '
+            'LEFT JOIN recording_parts part ON part.session_id=session.id '
+            "AND part.artifact_state IN ('recording','postprocessing','ready') "
+            'AND part.video_deleted_at IS NULL '
+            "WHERE session.id=? AND session.source_kind='live' "
+            'ORDER BY part.part_index',
+            (session_id,),
+        )
+        if not rows:
+            raise ValueError("unknown live recording session '{}'".format(session_id))
+        part_rows = [row for row in rows if row['part_id'] is not None]
+        if not part_rows:
+            return ()
+
+        room_id = int(rows[0]['room_id'])
+        origin_ms = min(
+            (
+                int(row['timeline_start_at_ms'])
+                if row['timeline_start_at_ms'] is not None
+                else int(row['record_start_time']) * 1000
+            )
+            for row in part_rows
+        )
+        parts: List[TimelinePart] = []
+        for row in part_rows:
+            absolute_start_at_ms = (
+                int(row['timeline_start_at_ms'])
+                if row['timeline_start_at_ms'] is not None
+                else int(row['record_start_time']) * 1000
+            )
+            duration_ms = (
+                0
+                if row['record_duration_seconds'] is None
+                else max(0, int(row['record_duration_seconds']) * 1000)
+            )
+            recording = str(row['artifact_state']) == 'recording'
+            timeline_start_ms = absolute_start_at_ms - origin_ms
+            stable_duration_ms = (
+                max(0, duration_ms - self.ACTIVE_SAFE_TAIL_MS)
+                if recording
+                else duration_ms
+            )
+            parts.append(
+                TimelinePart(
+                    part_id=int(row['part_id']),
+                    part_index=int(row['part_index']),
+                    path='',
+                    absolute_start_at_ms=absolute_start_at_ms,
+                    timeline_start_ms=timeline_start_ms,
+                    duration_ms=duration_ms,
+                    stable_end_ms=timeline_start_ms + stable_duration_ms,
+                    recording=recording,
+                )
+            )
+
+        counts = {part.part_id: 0 for part in parts}
+        marker_rows = await self._database.fetchall(
+            'SELECT recording_part_id,content_at_ms FROM highlight_markers '
+            'WHERE room_id=? ORDER BY content_at_ms,id',
+            (room_id,),
+        )
+        for row in marker_rows:
+            recording_part_id = row['recording_part_id']
+            if recording_part_id is not None:
+                part_id = int(recording_part_id)
+                if part_id in counts:
+                    counts[part_id] += 1
+                continue
+            part = self._part_containing(parts, int(row['content_at_ms']))
+            if part is not None:
+                counts[part.part_id] += 1
+        return tuple(
+            HighlightMarkerCount(part_id=part.part_id, count=counts[part.part_id])
+            for part in parts
+        )
 
     async def timeline(
         self, session_id: int, active_durations_ms: Mapping[int, int]

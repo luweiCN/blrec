@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 from unittest.mock import AsyncMock
@@ -79,6 +80,12 @@ def clip() -> HighlightClip:
     )
 
 
+@dataclass(frozen=True)
+class MarkerCount:
+    part_id: int
+    count: int
+
+
 class FakeHighlightService:
     def __init__(self) -> None:
         self.create_marker = AsyncMock(return_value=marker())
@@ -93,6 +100,9 @@ class FakeHighlightService:
         self.delete_clip = AsyncMock(return_value='cancelled')
         self.clip_video_path = AsyncMock()
         self.ensure_upload_session = AsyncMock(return_value=12)
+        self.marker_counts = AsyncMock(
+            return_value=(MarkerCount(1, 2), MarkerCount(2, 0))
+        )
 
     async def timeline(self, session_id: int, active_durations_ms):
         value = marker()
@@ -224,6 +234,37 @@ def test_marker_crud_is_authenticated_and_uses_camel_case(client: TestClient) ->
     assert updated.status_code == 200
     deleted = client.delete('/api/v1/highlights/1', headers=auth())
     assert deleted.status_code == 204
+
+
+def test_marker_counts_are_authenticated_and_do_not_load_the_timeline(
+    client: TestClient,
+) -> None:
+    unauthorized = client.get('/api/v1/highlights/sessions/9/marker-counts')
+    assert unauthorized.status_code == 401
+
+    response = client.get('/api/v1/highlights/sessions/9/marker-counts', headers=auth())
+
+    assert response.status_code == 200
+    assert response.json() == [{'partId': 1, 'count': 2}, {'partId': 2, 'count': 0}]
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.marker_counts.assert_awaited_once_with(9)
+    durations = highlights.active_durations_provider
+    assert isinstance(durations, AsyncMock)
+    durations.assert_not_awaited()
+
+
+def test_marker_counts_return_not_found_for_an_unknown_session(
+    client: TestClient,
+) -> None:
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.marker_counts.side_effect = ValueError("unknown live recording session '9'")
+
+    response = client.get('/api/v1/highlights/sessions/9/marker-counts', headers=auth())
+
+    assert response.status_code == 404
+    assert 'unknown live recording session' in response.json()['detail']
 
 
 def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
