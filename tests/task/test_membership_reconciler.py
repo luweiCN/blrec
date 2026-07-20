@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict
+from typing import Dict, Iterator, List, Mapping, Sequence, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,8 +21,8 @@ class FakeSettingsApplication:
 class FakeTaskManager:
     def __init__(self) -> None:
         self.tasks: Dict[int, object] = {}
-        self.add_calls = []
-        self.remove_calls = []
+        self.add_calls: List[Tuple[int, bool]] = []
+        self.remove_calls: List[int] = []
 
     def has_task(self, room_id: int) -> bool:
         return room_id in self.tasks
@@ -37,24 +37,29 @@ class FakeTaskManager:
         self.remove_calls.append(room_id)
         self.tasks.pop(room_id, None)
 
-    def get_all_task_room_ids(self):
+    def get_all_task_room_ids(self) -> Iterator[int]:
         yield from self.tasks
 
 
 class FakeTaskControl:
     def __init__(self) -> None:
-        self.calls = []
+        self.calls: List[Tuple[str, Tuple[int, ...], Mapping[int, str], bool]] = []
 
-    async def submit(self, kind, room_ids, *, rejected, force):
+    async def submit(
+        self,
+        kind: str,
+        room_ids: Sequence[int],
+        *,
+        rejected: Mapping[int, str],
+        force: bool,
+    ) -> SimpleNamespace:
         self.calls.append((kind, tuple(room_ids), rejected, force))
         return SimpleNamespace(id='task-state-operation')
 
 
 def make_settings_manager(settings: Settings) -> SettingsManager:
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings  # type: ignore[arg-type]
-    )
-    manager.dump_settings = AsyncMock()  # type: ignore[method-assign]
+    manager = SettingsManager(FakeSettingsApplication(), settings)
+    manager.dump_settings = AsyncMock()
     return manager
 
 
@@ -79,8 +84,8 @@ async def test_collect_is_deduplicated_and_returns_resolved_terminal_result(
     reconciler = RoomMembershipReconciler(
         journal,
         settings,
-        tasks,  # type: ignore[arg-type]
-        controls,  # type: ignore[arg-type]
+        tasks,
+        controls,
         room_id_resolver=resolve,
         upload_policy_enabler=policy,
     )
@@ -113,7 +118,7 @@ async def test_collect_is_deduplicated_and_returns_resolved_terminal_result(
         assert tasks.add_calls == [(3582149, False)]
         assert controls.calls == [('start', (3582149,), {}, False)]
         policy.assert_awaited_once_with(3582149)
-        settings.dump_settings.assert_awaited_once()  # type: ignore[attr-defined]
+        settings.dump_settings.assert_awaited_once()
     finally:
         await reconciler.shutdown()
         await journal.close()
@@ -124,7 +129,7 @@ async def test_failed_collect_retry_creates_new_attempt_and_skips_existing_add(
     tmp_path: Path,
 ) -> None:
     resolved_room_ids = iter((100, 200))
-    resolve_calls = []
+    resolve_calls: List[int] = []
 
     async def resolve(room_id: int) -> int:
         resolve_calls.append(room_id)
@@ -139,8 +144,8 @@ async def test_failed_collect_retry_creates_new_attempt_and_skips_existing_add(
     reconciler = RoomMembershipReconciler(
         journal,
         settings,
-        tasks,  # type: ignore[arg-type]
-        controls,  # type: ignore[arg-type]
+        tasks,
+        controls,
         room_id_resolver=resolve,
         upload_policy_enabler=policy,
     )
@@ -166,7 +171,7 @@ async def test_failed_collect_retry_creates_new_attempt_and_skips_existing_add(
         assert final.result['resolvedRoomId'] == 100
         assert resolve_calls == [6]
         assert tasks.add_calls == [(100, False)]
-        assert settings.dump_settings.await_count == 1  # type: ignore[attr-defined]
+        assert settings.dump_settings.await_count == 1
         assert policy.await_count == 2
         assert [args.args for args in policy.await_args_list] == [(100,), (100,)]
     finally:
@@ -186,8 +191,8 @@ async def test_remove_tears_down_before_one_settings_dump_and_absent_is_noop(
     reconciler = RoomMembershipReconciler(
         journal,
         settings,
-        tasks,  # type: ignore[arg-type]
-        FakeTaskControl(),  # type: ignore[arg-type]
+        tasks,
+        FakeTaskControl(),
         room_id_resolver=AsyncMock(side_effect=lambda room_id: room_id),
     )
     reconciler.start()
@@ -200,14 +205,14 @@ async def test_remove_tears_down_before_one_settings_dump_and_absent_is_noop(
         assert final is not None and final.status == 'succeeded'
         assert tasks.remove_calls == [100]
         assert not settings.has_task_settings(100)
-        settings.dump_settings.assert_awaited_once()  # type: ignore[attr-defined]
+        settings.dump_settings.assert_awaited_once()
 
         second = await reconciler.submit_remove([100])
         await reconciler.wait_idle()
         second_final = await journal.get(second.id)
         assert second_final is not None and second_final.status == 'succeeded'
         assert tasks.remove_calls == [100]
-        assert settings.dump_settings.await_count == 1  # type: ignore[attr-defined]
+        assert settings.dump_settings.await_count == 1
     finally:
         await reconciler.shutdown()
         await journal.close()
@@ -256,8 +261,8 @@ async def test_recovered_add_observes_existing_task_before_acting(
     reconciler = RoomMembershipReconciler(
         reopened,
         settings,
-        tasks,  # type: ignore[arg-type]
-        FakeTaskControl(),  # type: ignore[arg-type]
+        tasks,
+        FakeTaskControl(),
         room_id_resolver=AsyncMock(side_effect=lambda room_id: room_id),
     )
     reconciler.start()
@@ -266,7 +271,7 @@ async def test_recovered_add_observes_existing_task_before_acting(
         final = await reopened.get(operation.id)
         assert final is not None and final.status == 'succeeded'
         assert tasks.add_calls == []
-        settings.dump_settings.assert_not_awaited()  # type: ignore[attr-defined]
+        settings.dump_settings.assert_not_awaited()
     finally:
         await reconciler.shutdown()
         await reopened.close()
@@ -283,8 +288,8 @@ async def test_remove_all_scopes_pending_add_and_persisted_settings_at_execution
     reconciler = RoomMembershipReconciler(
         journal,
         settings,
-        tasks,  # type: ignore[arg-type]
-        FakeTaskControl(),  # type: ignore[arg-type]
+        tasks,
+        FakeTaskControl(),
         room_id_resolver=AsyncMock(side_effect=lambda room_id: room_id),
     )
     try:
@@ -331,11 +336,7 @@ async def test_shutdown_drains_every_admitted_membership_operation(
     journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
     await journal.open()
     reconciler = RoomMembershipReconciler(
-        journal,
-        settings,
-        tasks,  # type: ignore[arg-type]
-        FakeTaskControl(),  # type: ignore[arg-type]
-        room_id_resolver=resolve,
+        journal, settings, tasks, FakeTaskControl(), room_id_resolver=resolve
     )
     reconciler.start()
     try:
@@ -372,8 +373,8 @@ async def test_pending_remove_all_prevents_startup_task_recreation(
     reconciler = RoomMembershipReconciler(
         journal,
         settings,
-        FakeTaskManager(),  # type: ignore[arg-type]
-        FakeTaskControl(),  # type: ignore[arg-type]
+        FakeTaskManager(),
+        FakeTaskControl(),
         room_id_resolver=AsyncMock(side_effect=lambda room_id: room_id),
     )
     await reconciler.submit_remove([], remove_all=True)
@@ -384,8 +385,8 @@ async def test_pending_remove_all_prevents_startup_task_recreation(
     recovered = RoomMembershipReconciler(
         reopened,
         settings,
-        FakeTaskManager(),  # type: ignore[arg-type]
-        FakeTaskControl(),  # type: ignore[arg-type]
+        FakeTaskManager(),
+        FakeTaskControl(),
         room_id_resolver=AsyncMock(side_effect=lambda room_id: room_id),
     )
     try:

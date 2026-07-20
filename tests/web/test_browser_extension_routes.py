@@ -59,7 +59,9 @@ class FakeApplication:
     async def _enable_recorder(self, _room_id: int) -> None:
         self.recorder_enabled = True
 
-    async def _submit_room_collect(self, room_id: int, *, upload: bool):
+    async def _submit_room_collect(
+        self, room_id: int, *, upload: bool
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             id='membership-operation-1',
             status='accepted',
@@ -267,9 +269,7 @@ def test_extension_token_can_poll_the_shared_control_operation_route(
 
 
 @pytest.mark.asyncio
-async def test_upload_policy_step_observes_enabled_postcondition_before_remote_list() -> (
-    None
-):
+async def test_upload_policy_observes_enabled_before_remote_list() -> None:
     policies = FakePolicyManager()
     from blrec.bili_upload.policies import default_room_upload_policy
 

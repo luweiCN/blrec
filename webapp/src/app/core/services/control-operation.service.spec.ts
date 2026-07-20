@@ -71,7 +71,7 @@ describe('ControlOperationService', () => {
     expect(completed).toBeTrue();
   }));
 
-  it('stops polling when the consumer unsubscribes', fakeAsync(() => {
+  it('stops polling when the consumer unsubscribes before the deadline', fakeAsync(() => {
     const subscription = service.poll('operation-1', 10).subscribe();
     tick();
     http.expectOne('/api/v1/control-operations/operation-1').flush({
@@ -80,28 +80,38 @@ describe('ControlOperationService', () => {
       steps: [],
     });
     subscription.unsubscribe();
-    tick(30);
+    tick(60_100);
 
     http.expectNone('/api/v1/control-operations/operation-1');
     expect(subscription.closed).toBeTrue();
   }));
 
-  it('does not silently complete while an operation is still running', fakeAsync(() => {
+  it('emits a stable failure and stops polling at the fixed deadline', fakeAsync(() => {
     const get = spyOn(service, 'get').and.returnValue(
       of<ControlOperation>(operation('running'))
     );
+    const results: ControlOperation[] = [];
     let completed = false;
-    const subscription = service.poll('operation-1', 10).subscribe({
+    service.poll('operation-1').subscribe({
+      next: (result) => results.push(result),
       complete: () => {
         completed = true;
       },
     });
 
-    tick(1_300);
-
-    expect(get.calls.count()).toBeGreaterThan(120);
+    tick(59_999);
+    expect(results.at(-1)?.status).toBe('running');
     expect(completed).toBeFalse();
-    subscription.unsubscribe();
+
+    tick(1);
+    const callsAtDeadline = get.calls.count();
+
+    expect(results.at(-1)?.status).toBe('failed');
+    expect(results.at(-1)?.errorCode).toBe('CONTROL_OPERATION_POLL_TIMEOUT');
+    expect(completed).toBeTrue();
+
+    tick(1_000);
+    expect(get.calls.count()).toBe(callsAtDeadline);
   }));
 
   it('waits for a slow response before scheduling the next request', fakeAsync(() => {

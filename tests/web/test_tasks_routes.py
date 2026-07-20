@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 from fastapi import FastAPI
@@ -34,7 +34,7 @@ class FakeMembershipOperation:
     id = 'membership-operation-1'
     status = 'accepted'
 
-    def __init__(self, requested_room_id: int = None) -> None:
+    def __init__(self, requested_room_id: Optional[int] = None) -> None:
         self.result = {'requestedRoomId': requested_room_id}
 
 
