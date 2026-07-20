@@ -1,4 +1,4 @@
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import { Observable } from 'rxjs';
@@ -18,6 +18,9 @@ import {
   UploadTaskSettings,
   UploadTaskSettingsUpdateResponse,
 } from './recording-session.model';
+
+const DANMAKU_CURSOR_STALE_DETAIL =
+  '弹幕分页状态已失效，请从第一页重新加载';
 
 @Injectable({ providedIn: 'root' })
 export class RecordingSessionService {
@@ -146,5 +149,13 @@ export class RecordingSessionService {
       `/api/v1/recording-sessions/parts/${partId}/danmaku` +
       `?cursor=${cursor}&limit=${limit}`;
     return this.http.get<RecordingDanmakuPage>(this.url.makeApiUrl(path));
+  }
+
+  isDanmakuCursorStale(error: unknown): boolean {
+    return (
+      error instanceof HttpErrorResponse &&
+      error.status === 409 &&
+      error.error?.detail === DANMAKU_CURSOR_STALE_DETAIL
+    );
   }
 }

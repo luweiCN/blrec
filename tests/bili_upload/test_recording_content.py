@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from io import BytesIO
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -8,7 +10,9 @@ import pytest_asyncio
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.recording_content import (
+    DanmakuPage,
     FlvMediaSnapshot,
+    RecordingContentCursorStale,
     RecordingContentInvalid,
     RecordingContentReader,
     RecordingContentUnavailable,
@@ -328,3 +332,208 @@ async def test_danmaku_validates_cursor_and_limit(database: BiliUploadDatabase) 
         await reader.danmaku(1, cursor=-1, limit=100)
     with pytest.raises(ValueError, match='limit'):
         await reader.danmaku(1, cursor=0, limit=501)
+
+
+@pytest.mark.asyncio
+async def test_danmaku_rejects_an_unknown_cursor_without_scanning(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'many.xml'
+    xml.write_text(
+        '<i>'
+        + ''.join(
+            '<d p="{},1,25,1">{}</d>'.format(index, index) for index in range(100)
+        )
+        + '</i>',
+        encoding='utf8',
+    )
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=1 WHERE id=?',
+        (str(xml), part_id),
+    )
+    parsed = []
+    original = RecordingContentReader._danmaku_line
+
+    def counting(index, element):
+        parsed.append(index)
+        return original(index, element)
+
+    monkeypatch.setattr(RecordingContentReader, '_danmaku_line', staticmethod(counting))
+
+    with pytest.raises(RecordingContentCursorStale):
+        await RecordingContentReader(database).danmaku(part_id, cursor=100_000, limit=2)
+
+    assert parsed == []
+
+
+@pytest.mark.asyncio
+async def test_danmaku_continues_after_append_to_the_same_active_file(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text('<i><d p="1,1,25,1">第一条</d>', encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+
+    first = await reader.danmaku(part_id, cursor=0, limit=10)
+    with xml.open('a', encoding='utf8') as file:
+        file.write('<d p="2,1,25,1">第二条</d>')
+    second = await reader.danmaku(part_id, cursor=first.next_cursor or 0, limit=10)
+
+    assert [item.content for item in first.items] == ['第一条']
+    assert first.next_cursor == 1
+    assert [item.content for item in second.items] == ['第二条']
+    assert second.next_cursor == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ('truncate', 'replace'))
+async def test_danmaku_rejects_a_shrunk_or_replaced_active_file(
+    database: BiliUploadDatabase, tmp_path: Path, change: str
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text('<i><d p="1,1,25,1">第一条</d>', encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+    first = await reader.danmaku(part_id, cursor=0, limit=10)
+
+    if change == 'truncate':
+        xml.write_text('<i>', encoding='utf8')
+    else:
+        replacement = tmp_path / 'replacement.xml'
+        replacement.write_text('<i><d p="2,1,25,1">替换内容</d>', encoding='utf8')
+        replacement.replace(xml)
+
+    with pytest.raises(RecordingContentCursorStale):
+        await reader.danmaku(part_id, cursor=first.next_cursor or 0, limit=10)
+
+
+@pytest.mark.asyncio
+async def test_danmaku_detects_shrink_before_the_unread_tail(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'large-active.xml'
+    xml.write_text(
+        '<i>'
+        + ''.join(
+            '<d p="{},1,25,1">{}</d>'.format(index, 'x' * 100) for index in range(2_000)
+        ),
+        encoding='utf8',
+    )
+    original_size = xml.stat().st_size
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+    first = await reader.danmaku(part_id, cursor=0, limit=1)
+    with xml.open('r+b') as file:
+        file.truncate(original_size - 1)
+
+    with pytest.raises(RecordingContentCursorStale):
+        await reader.danmaku(part_id, cursor=first.next_cursor or 0, limit=1)
+
+
+@pytest.mark.asyncio
+async def test_danmaku_cache_evicts_and_closes_the_oldest_of_three_streams(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    reader = RecordingContentReader(database)
+    part_ids = []
+    for index in range(3):
+        source = tmp_path / 'part-{}.flv'.format(index)
+        part_id = await _seed_part(database, source)
+        xml = tmp_path / 'part-{}.xml'.format(index)
+        xml.write_text('<i><d p="1,1,25,1">{}</d>'.format(index), encoding='utf8')
+        await database.execute(
+            'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+            (str(xml), part_id),
+        )
+        part_ids.append(part_id)
+
+    first_page = await reader.danmaku(part_ids[0], cursor=0, limit=10)
+    first_stream = next(iter(reader._danmaku_streams.values()))
+    await reader.danmaku(part_ids[1], cursor=0, limit=10)
+    await reader.danmaku(part_ids[2], cursor=0, limit=10)
+
+    assert first_stream.file.closed is True
+    assert len(reader._danmaku_streams) == 2
+    with pytest.raises(RecordingContentCursorStale):
+        await reader.danmaku(part_ids[0], cursor=first_page.next_cursor or 0, limit=10)
+
+
+@pytest.mark.asyncio
+async def test_danmaku_serializes_concurrent_consumers_without_duplicates(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text(
+        '<i><d p="1,1,25,1">第一条</d><d p="2,1,25,1">第二条</d>', encoding='utf8'
+    )
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+    first = await reader.danmaku(part_id, cursor=0, limit=1)
+    selected = threading.Barrier(2)
+    select_stream = reader._select_danmaku_stream
+
+    def select_with_barrier(*args, **kwargs):
+        stream = select_stream(*args, **kwargs)
+        if kwargs['cursor'] > 0:
+            selected.wait(timeout=2)
+        return stream
+
+    monkeypatch.setattr(reader, '_select_danmaku_stream', select_with_barrier)
+
+    results = await asyncio.gather(
+        reader.danmaku(part_id, cursor=first.next_cursor or 0, limit=1),
+        reader.danmaku(part_id, cursor=first.next_cursor or 0, limit=1),
+        return_exceptions=True,
+    )
+
+    pages = [result for result in results if isinstance(result, DanmakuPage)]
+    stale = [
+        result for result in results if isinstance(result, RecordingContentCursorStale)
+    ]
+    assert [[item.index for item in page.items] for page in pages] == [[1]]
+    assert len(stale) == 1
+
+
+@pytest.mark.asyncio
+async def test_danmaku_reader_close_releases_cached_files(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'part.flv'
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / 'active.xml'
+    xml.write_text('<i><d p="1,1,25,1">第一条</d>', encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    reader = RecordingContentReader(database)
+    await reader.danmaku(part_id, cursor=0, limit=1)
+    stream = next(iter(reader._danmaku_streams.values()))
+
+    reader.close()
+
+    assert stream.file.closed is True
+    assert reader._danmaku_streams == {}

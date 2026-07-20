@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { OverlayContainer } from '@angular/cdk/overlay';
+import { HttpErrorResponse } from '@angular/common/http';
 import {
   ComponentFixture,
   TestBed,
@@ -9,7 +10,7 @@ import {
 } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 
-import { of, Subject } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { NzAlertModule } from 'ng-zorro-antd/alert';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 
@@ -111,7 +112,19 @@ describe('PartVideoDialogComponent', () => {
   beforeEach(async () => {
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['createMediaAccess', 'mediaUrl', 'listDanmaku'],
+      [
+        'createMediaAccess',
+        'mediaUrl',
+        'listDanmaku',
+        'isDanmakuCursorStale',
+      ],
+    );
+    service.isDanmakuCursorStale.and.callFake(
+      (error) =>
+        error instanceof HttpErrorResponse &&
+        error.status === 409 &&
+        error.error?.detail ===
+          '弹幕分页状态已失效，请从第一页重新加载',
     );
     service.createMediaAccess.and.returnValue(
       of({
@@ -368,6 +381,100 @@ describe('PartVideoDialogComponent', () => {
     expect(fixture.componentInstance.danmakuItems.length).toBe(1_000);
     expect(fixture.componentInstance.danmakuItems[0].index).toBe(500);
     expect(fixture.componentInstance.danmakuItems[999].index).toBe(1_499);
+  });
+
+  it('rebuilds an evicted cursor once without duplicating danmaku or losing UI state', () => {
+    const calls: number[] = [];
+    let staleSent = false;
+    service.listDanmaku.and.callFake((_partId, cursor = 0) => {
+      calls.push(cursor);
+      if (cursor === 2 && !staleSent) {
+        staleSent = true;
+        return throwError(
+          () =>
+            new HttpErrorResponse({
+              status: 409,
+              error: {
+                detail:
+                  '弹幕分页状态已失效，请从第一页重新加载',
+              },
+            }),
+        );
+      }
+      if (cursor === 0) {
+        return of({
+          items: [
+            {
+              index: 0,
+              progressMs: 1_000,
+              mode: 1,
+              fontSize: 25,
+              color: 1,
+              user: null,
+              uid: null,
+              content: '第一条',
+            },
+            {
+              index: 1,
+              progressMs: 2_000,
+              mode: 1,
+              fontSize: 25,
+              color: 1,
+              user: null,
+              uid: null,
+              content: '更新后的第二条',
+            },
+          ],
+          nextCursor: 2,
+        });
+      }
+      return of({
+        items: [
+          {
+            index: 2,
+            progressMs: 3_000,
+            mode: 1,
+            fontSize: 25,
+            color: 1,
+            user: null,
+            uid: null,
+            content: '第三条',
+          },
+        ],
+        nextCursor: null,
+      });
+    });
+    fixture.detectChanges();
+    const overlay = overlayContainer.getContainerElement();
+    const video = overlay.querySelector(
+      '[data-testid="part-video"]',
+    ) as HTMLVideoElement;
+    const list = overlay.querySelector(
+      '[data-testid="danmaku-list"]',
+    ) as HTMLElement;
+    video.currentTime = 3.1;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      value: 19,
+      writable: true,
+    });
+    list.scrollTop = 19;
+    fixture.componentInstance.activeDanmakuIndex = 1;
+    fixture.componentInstance.followDanmaku = false;
+
+    fixture.componentInstance.loadMoreDanmaku();
+
+    expect(calls).toEqual([0, 2, 0, 2]);
+    expect(fixture.componentInstance.danmakuItems.map((item) => item.index)).toEqual([
+      0, 1, 2,
+    ]);
+    expect(fixture.componentInstance.danmakuItems[1].content).toBe(
+      '更新后的第二条',
+    );
+    expect(fixture.componentInstance.activeDanmakuIndex).toBe(1);
+    expect(fixture.componentInstance.followDanmaku).toBeFalse();
+    expect(list.scrollTop).toBe(19);
+    expect(fixture.componentInstance.danmakuError).toBeNull();
   });
 
   it('highlights the danmaku nearest to the current video time', () => {

@@ -37,6 +37,15 @@ type PlaybackState =
   | { readonly kind: 'playing' }
   | { readonly kind: 'error'; readonly message: string };
 
+interface DanmakuRecoveryState {
+  readonly targetMs: number;
+  readonly follow: boolean;
+  readonly activeLineIndex: number | null;
+  readonly scrollTop: number;
+  readonly previousItems: readonly RecordingDanmakuLine[];
+  rebuiltItems: readonly RecordingDanmakuLine[];
+}
+
 const PLAYBACK_DEADLINE_MS = 10_000;
 const MAX_DANMAKU_ROWS = 1_000;
 
@@ -292,29 +301,134 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       .listDanmaku(this.part.id, cursor, 500)
       .subscribe({
         next: (page) => {
-          const items = append
-            ? [...this.danmakuItems, ...page.items]
-            : page.items;
-          this.danmakuItems =
-            items.length > MAX_DANMAKU_ROWS
-              ? items.slice(items.length - MAX_DANMAKU_ROWS)
-              : items;
+          this.danmakuItems = this.mergeDanmakuItems(
+            append ? this.danmakuItems : [],
+            page.items,
+          );
           this.danmakuNextCursor =
-            page.nextCursor !== null && page.nextCursor > cursor
+            page.nextCursor !== null && page.nextCursor >= cursor
               ? page.nextCursor
               : null;
           this.danmakuLoading = false;
           this.changeDetector.markForCheck();
-          if (continuePlaybackSync) {
+          if (
+            continuePlaybackSync &&
+            (page.items.length > 0 || page.nextCursor !== cursor)
+          ) {
             this.handleTimeUpdate();
           }
         },
         error: (error: unknown) => {
+          if (this.recordingSessions.isDanmakuCursorStale(error)) {
+            this.recoverDanmakuCursor();
+            return;
+          }
           this.danmakuLoading = false;
           this.danmakuError = this.describeError(error, '弹幕加载失败');
           this.changeDetector.markForCheck();
         },
       });
+  }
+
+  private recoverDanmakuCursor(): void {
+    const activeLine =
+      this.activeDanmakuIndex === null
+        ? null
+        : this.danmakuItems[this.activeDanmakuIndex] ?? null;
+    const state: DanmakuRecoveryState = {
+      targetMs: Math.max(0, (this.videoElement?.currentTime ?? 0) * 1_000),
+      follow: this.followDanmaku,
+      activeLineIndex: activeLine?.index ?? null,
+      scrollTop: this.danmakuListElement?.scrollTop ?? 0,
+      previousItems: this.danmakuItems,
+      rebuiltItems: [],
+    };
+    this.danmakuError = null;
+    this.danmakuLoading = true;
+    this.loadDanmakuRecoveryPage(0, state);
+  }
+
+  private loadDanmakuRecoveryPage(
+    cursor: number,
+    state: DanmakuRecoveryState,
+  ): void {
+    this.danmakuRequest = this.recordingSessions
+      .listDanmaku(this.part.id, cursor, 500)
+      .subscribe({
+        next: (page) => {
+          state.rebuiltItems = this.mergeDanmakuItems(
+            state.rebuiltItems,
+            page.items,
+            false,
+          );
+          const nextCursor =
+            page.nextCursor !== null && page.nextCursor >= cursor
+              ? page.nextCursor
+              : null;
+          const last = state.rebuiltItems[state.rebuiltItems.length - 1];
+          if (
+            nextCursor !== null &&
+            nextCursor > cursor &&
+            last !== undefined &&
+            last.progressMs < state.targetMs
+          ) {
+            this.loadDanmakuRecoveryPage(nextCursor, state);
+            return;
+          }
+          this.danmakuItems = this.mergeDanmakuItems(
+            state.previousItems,
+            state.rebuiltItems,
+          );
+          this.danmakuNextCursor = nextCursor;
+          this.finishDanmakuRecovery(state);
+        },
+        error: (error: unknown) => {
+          this.danmakuItems = state.previousItems;
+          this.danmakuNextCursor = null;
+          this.danmakuError = this.recordingSessions.isDanmakuCursorStale(error)
+            ? null
+            : this.describeError(error, '弹幕加载失败');
+          this.finishDanmakuRecovery(state);
+        },
+      });
+  }
+
+  private finishDanmakuRecovery(state: DanmakuRecoveryState): void {
+    this.danmakuLoading = false;
+    this.followDanmaku = state.follow;
+    this.activeDanmakuIndex =
+      state.activeLineIndex === null
+        ? null
+        : this.danmakuItems.findIndex(
+            (item) => item.index === state.activeLineIndex,
+          );
+    if (this.activeDanmakuIndex === -1) {
+      this.activeDanmakuIndex = null;
+    }
+    if (this.danmakuListElement !== null) {
+      this.danmakuListElement.scrollTop = state.scrollTop;
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  private mergeDanmakuItems(
+    current: readonly RecordingDanmakuLine[],
+    incoming: readonly RecordingDanmakuLine[],
+    bounded = true,
+  ): readonly RecordingDanmakuLine[] {
+    const byIndex = new Map<number, RecordingDanmakuLine>();
+    for (const item of current) {
+      byIndex.set(item.index, item);
+    }
+    for (const item of incoming) {
+      byIndex.set(item.index, item);
+    }
+    const items = [...byIndex.values()].sort((left, right) =>
+      left.index - right.index,
+    );
+    return bounded && items.length > MAX_DANMAKU_ROWS
+      ? items.slice(items.length - MAX_DANMAKU_ROWS)
+      : items;
   }
 
   private scrollToDanmaku(index: number): void {

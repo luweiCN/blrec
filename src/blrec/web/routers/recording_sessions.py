@@ -37,6 +37,7 @@ from blrec.bili_upload.recording_content import (
     DanmakuPage,
     FlvMediaSnapshot,
     MediaResource,
+    RecordingContentCursorStale,
     RecordingContentInvalid,
     RecordingContentNotFound,
     RecordingContentReader,
@@ -1498,6 +1499,11 @@ async def list_recording_danmaku(
 ) -> DanmakuPageResponse:
     try:
         page: DanmakuPage = await reader.danmaku(part_id, cursor=cursor, limit=limit)
+    except RecordingContentCursorStale:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='弹幕分页状态已失效，请从第一页重新加载',
+        ) from None
     except (
         RecordingContentNotFound,
         RecordingContentUnavailable,

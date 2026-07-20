@@ -24,6 +24,7 @@ from blrec.bili_upload.recording_content import (
     DanmakuPage,
     FlvMediaSnapshot,
     MediaResource,
+    RecordingContentCursorStale,
     RecordingContentNotFound,
     RecordingContentUnavailable,
 )
@@ -232,6 +233,8 @@ class FakeContentReader:
         )
 
     async def danmaku(self, part_id: int, *, cursor: int, limit: int) -> DanmakuPage:
+        if part_id == 409:
+            raise RecordingContentCursorStale('private path and cursor 100000')
         assert part_id == 2
         assert cursor == 3
         assert limit == 2
@@ -1144,3 +1147,17 @@ def test_danmaku_rejects_pages_over_five_hundred(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_danmaku_cursor_stale_returns_a_fixed_redacted_conflict(
+    client: TestClient,
+) -> None:
+    response = client.get(
+        '/api/v1/recording-sessions/parts/409/danmaku?cursor=100000&limit=2',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {'detail': '弹幕分页状态已失效，请从第一页重新加载'}
+    assert 'private' not in response.text
+    assert '100000' not in response.text

@@ -2,6 +2,7 @@ import {
   HttpClientTestingModule,
   HttpTestingController,
 } from '@angular/common/http/testing';
+import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
 
 import { UrlService } from 'src/app/core/services/url.service';
@@ -152,5 +153,22 @@ describe('RecordingSessionService', () => {
     );
     expect(danmakuRequest.request.method).toBe('GET');
     danmakuRequest.flush({ items: [], nextCursor: null });
+  });
+
+  it('recognizes only the fixed danmaku cursor conflict', () => {
+    const stale = new HttpErrorResponse({
+      status: 409,
+      error: {
+        detail: '弹幕分页状态已失效，请从第一页重新加载',
+      },
+    });
+    const otherConflict = new HttpErrorResponse({
+      status: 409,
+      error: { detail: '该分 P 的弹幕文件不可用' },
+    });
+
+    expect(service.isDanmakuCursorStale(stale)).toBeTrue();
+    expect(service.isDanmakuCursorStale(otherConflict)).toBeFalse();
+    expect(service.isDanmakuCursorStale(new Error('409'))).toBeFalse();
   });
 });
