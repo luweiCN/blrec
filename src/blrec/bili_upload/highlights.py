@@ -1002,7 +1002,11 @@ class HighlightService:
 
     async def ensure_upload_session(self, clip_id: int) -> int:
         clip = await self.get_clip(clip_id)
-        if clip.state != 'ready' or clip.output_video_path is None:
+        if (
+            clip.state != 'ready'
+            or clip.deletion_state != 'none'
+            or clip.output_video_path is None
+        ):
             raise ValueError('highlight clip is not ready for upload')
         if clip.upload_session_id is not None:
             return clip.upload_session_id
@@ -1028,11 +1032,14 @@ class HighlightService:
         def create(connection: sqlite3.Connection) -> int:
             current = connection.execute(
                 'SELECT source_session_id,upload_session_id,state,'
-                'output_video_path,output_xml_path FROM highlight_clips WHERE id=?',
+                'deletion_state,output_video_path,output_xml_path '
+                'FROM highlight_clips WHERE id=?',
                 (clip_id,),
             ).fetchone()
             if current is None:
                 raise ValueError('highlight clip does not exist')
+            if str(current['deletion_state']) != 'none':
+                raise ValueError('highlight clip is not ready for upload')
             if current['upload_session_id'] is not None:
                 return int(current['upload_session_id'])
             if (
@@ -1119,17 +1126,19 @@ class HighlightService:
             else:
                 session_id = int(existing['id'])
                 valid = connection.execute(
-                    "SELECT 1 FROM recording_sessions WHERE id=? "
-                    "AND source_kind='highlight'",
+                    'SELECT 1 FROM recording_sessions WHERE id=? '
+                    "AND source_kind='highlight' AND deletion_state='none'",
                     (session_id,),
                 ).fetchone()
                 if valid is None:
                     raise ValueError('highlight upload session key conflicts')
-            connection.execute(
+            updated = connection.execute(
                 'UPDATE highlight_clips SET upload_session_id=?,updated_at=? '
-                'WHERE id=? AND upload_session_id IS NULL',
+                "WHERE id=? AND upload_session_id IS NULL AND deletion_state='none'",
                 (session_id, now, clip_id),
             )
+            if updated.rowcount != 1:
+                raise ValueError('highlight clip is not ready for upload')
             return session_id
 
         session_id = await self._database.write(create)

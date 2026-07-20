@@ -530,6 +530,85 @@ async def test_failed_clip_deletion_stays_visible_with_its_error(
 
 
 @pytest.mark.asyncio
+async def test_late_upload_session_cannot_cross_clip_quiesce_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip_root = tmp_path / 'clips'
+    clip_root.mkdir()
+    output = clip_root / 'clip.mp4'
+    output.write_bytes(b'clip')
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    create_waiting = asyncio.Event()
+    release_create = asyncio.Event()
+    unlinked: List[Path] = []
+    try:
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,anchor_name) '
+            "VALUES(1,100,'live:1','closed',1,'直播','主播')"
+        )
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,source_session_id,name,requested_start_ms,'
+            'requested_end_ms,actual_start_ms,actual_end_ms,output_video_path,'
+            'state,created_at,updated_at) '
+            "VALUES(7,100,1,'clip',0,1000,0,1000,?,'ready',1,1)",
+            (str(output),),
+        )
+        service = HighlightService(database, clip_root=clip_root)
+        worker = LocalDeletionWorker(
+            database,
+            recording_root=tmp_path / 'rec',
+            clip_root=clip_root,
+            unlink=lambda path: unlinked.append(path),
+        )
+        original_write = database.write
+
+        async def gated_write(operation):
+            if getattr(operation, '__name__', '') == 'create':
+                create_waiting.set()
+                await release_create.wait()
+            return await original_write(operation)
+
+        monkeypatch.setattr(database, 'write', gated_write)
+        ensure_task = asyncio.create_task(service.ensure_upload_session(7))
+        await asyncio.wait_for(create_waiting.wait(), timeout=0.5)
+
+        generation = await worker.request_clip(7)
+        assert await worker._quiesce_clip(7, generation)  # noqa: SLF001
+        release_create.set()
+        with pytest.raises(ValueError, match='not ready for upload'):
+            await ensure_task
+
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM recording_sessions WHERE source_kind='highlight'"
+            )
+            == 0
+        )
+        assert (
+            await database.scalar(
+                'SELECT upload_session_id FROM highlight_clips WHERE id=7'
+            )
+            is None
+        )
+        assert unlinked == []
+
+        def unexpected_path_check(_raw_path: str) -> Path:
+            raise AssertionError('deleting clip must fail before local file I/O')
+
+        monkeypatch.setattr(service, '_owned_highlight_path', unexpected_path_check)
+        with pytest.raises(ValueError, match='not ready for upload'):
+            await service.ensure_upload_session(7)
+    finally:
+        release_create.set()
+        if 'ensure_task' in locals():
+            await asyncio.gather(ensure_task, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_deletion_fence_prevents_new_upload_and_highlight_claims(
     tmp_path: Path,
 ) -> None:

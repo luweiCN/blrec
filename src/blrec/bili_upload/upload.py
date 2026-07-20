@@ -1496,14 +1496,8 @@ class UploadCoordinator:
         now = int(self._clock())
 
         def create(connection: sqlite3.Connection) -> Optional[int]:
-            existing = connection.execute(
-                'SELECT id FROM upload_jobs WHERE session_id=?',
-                (int(row['session_id']),),
-            ).fetchone()
-            if existing is not None:
-                return int(existing['id']) if return_existing else None
             session = connection.execute(
-                'SELECT state,source_kind,upload_override_json '
+                'SELECT state,source_kind,upload_override_json,deletion_state '
                 'FROM recording_sessions WHERE id=?',
                 (int(row['session_id']),),
             ).fetchone()
@@ -1511,16 +1505,28 @@ class UploadCoordinator:
                 session is None
                 or str(session['state']) != 'closed'
                 or str(session['source_kind']) != required_source_kind
+                or str(session['deletion_state']) != 'none'
                 or session['upload_override_json'] != row['upload_override_json']
             ):
                 return None
             if required_source_kind == 'highlight':
                 clip = connection.execute(
-                    'SELECT state FROM highlight_clips WHERE upload_session_id=?',
+                    'SELECT state,deletion_state FROM highlight_clips '
+                    'WHERE upload_session_id=?',
                     (int(row['session_id']),),
                 ).fetchone()
-                if clip is None or str(clip['state']) != 'ready':
+                if (
+                    clip is None
+                    or str(clip['state']) != 'ready'
+                    or str(clip['deletion_state']) != 'none'
+                ):
                     return None
+            existing = connection.execute(
+                'SELECT id FROM upload_jobs WHERE session_id=?',
+                (int(row['session_id']),),
+            ).fetchone()
+            if existing is not None:
+                return int(existing['id']) if return_existing else None
             policy = connection.execute(
                 'SELECT account_mode,account_id,updated_at '
                 'FROM room_upload_policies WHERE room_id=?',
@@ -1667,12 +1673,17 @@ class UploadCoordinator:
 
     async def _highlight_candidate(self, session_id: int) -> Tuple[Any, str]:
         session = await self._database.fetchone(
-            'SELECT id AS session_id,room_id,broadcast_session_key,'
-            'live_start_time,live_end_time,title,cover_url,cover_path,anchor_uid,'
-            'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
-            'upload_override_json '
-            "FROM recording_sessions WHERE id=? AND state='closed' "
-            "AND source_kind='highlight'",
+            'SELECT session.id AS session_id,session.room_id,'
+            'session.broadcast_session_key,session.live_start_time,'
+            'session.live_end_time,session.title,session.cover_url,'
+            'session.cover_path,session.anchor_uid,session.anchor_name,'
+            'session.area_id,session.area_name,session.parent_area_id,'
+            'session.parent_area_name,session.upload_override_json '
+            'FROM recording_sessions session JOIN highlight_clips clip '
+            'ON clip.upload_session_id=session.id '
+            "WHERE session.id=? AND session.state='closed' "
+            "AND session.source_kind='highlight' "
+            "AND session.deletion_state='none' AND clip.deletion_state='none'",
             (session_id,),
         )
         if session is None:

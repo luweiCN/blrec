@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import replace
@@ -369,6 +370,64 @@ async def test_highlight_upload_rejects_clip_after_deletion_has_started(
 
         assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fence_owner', ('session', 'clip'))
+async def test_highlight_job_creation_rechecks_deletion_fence_in_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fence_owner: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    create_waiting = asyncio.Event()
+    release_create = asyncio.Event()
+    try:
+        await seed_ready_session(database, tmp_path)
+        session_id = await seed_ready_highlight(database, tmp_path, clip_id=1)
+        await SessionSubmissionManager(
+            database,
+            policy_manager=RoomUploadPolicyManager(database),
+            clock=MutableClock(1000),
+        ).save_override(
+            session_id, default_room_upload_policy(), manager_subject='administrator'
+        )
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        original_write = database.write
+
+        async def gated_write(operation):
+            if getattr(operation, '__name__', '') == 'create':
+                create_waiting.set()
+                await release_create.wait()
+            return await original_write(operation)
+
+        monkeypatch.setattr(database, 'write', gated_write)
+        create_task = asyncio.create_task(worker.create_highlight_job(session_id))
+        await asyncio.wait_for(create_waiting.wait(), timeout=0.5)
+        if fence_owner == 'session':
+            await database.execute(
+                "UPDATE recording_sessions SET deletion_state='requested',"
+                'cancellation_generation=1,deletion_requested_at=1 WHERE id=?',
+                (session_id,),
+            )
+        else:
+            await database.execute(
+                "UPDATE highlight_clips SET deletion_state='requested',"
+                'cancellation_generation=1,deletion_requested_at=1 '
+                'WHERE upload_session_id=?',
+                (session_id,),
+            )
+        release_create.set()
+
+        with pytest.raises(InvalidUploadPolicy, match='could not be created'):
+            await create_task
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+    finally:
+        release_create.set()
+        if 'create_task' in locals():
+            await asyncio.gather(create_task, return_exceptions=True)
         await database.close()
 
 
