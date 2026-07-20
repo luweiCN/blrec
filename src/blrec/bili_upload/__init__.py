@@ -14,6 +14,7 @@ from .database import (
     LeaseLost,
     UnsupportedDatabaseFilesystem,
 )
+from .deletion_worker import LocalDeletionRejected, LocalDeletionWorker
 from .media_index import MediaIndexResult, MediaIndexWorker
 from .models import FeatureUnavailable, JobState, WriteState, validate_feature_gate
 from .retention import RetentionManager, RetentionStatus
@@ -39,6 +40,8 @@ __all__ = (
     'JobState',
     'LeaseClaim',
     'LeaseLost',
+    'LocalDeletionRejected',
+    'LocalDeletionWorker',
     'MediaIndexResult',
     'MediaIndexWorker',
     'RelatedUploadJob',

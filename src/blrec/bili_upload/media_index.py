@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from blrec.flv.common import find_metadata_tag, parse_metadata, read_tags
 from blrec.flv.helpers import get_extra_metadata
@@ -39,6 +39,8 @@ class MediaIndexResult:
 class _ClaimedPart:
     id: int
     path: str
+    session_id: int
+    cancellation_generation: int
 
 
 class MediaIndexWorker:
@@ -84,18 +86,36 @@ class MediaIndexWorker:
         try:
             suffix = Path(claimed.path).suffix.lower()
             if suffix != '.flv':
-                await self._complete(claimed.id, state='not_required')
+                await self._complete(
+                    claimed, state='not_required', side_effect_key='inspect'
+                )
                 return claimed.id
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, self._inspect, claimed.path)
             rebuilt = False
             if result is None:
+                if await self._generation_changed(claimed):
+                    await self._complete_cancelled(claimed, 'inspect')
+                    return claimed.id
                 rebuilt = True
                 result = await loop.run_in_executor(
                     None, self._rebuild, claimed.path, lambda _value: None
                 )
             assert result is not None
-            await self._complete(claimed.id, state='ready', result=result)
+            completed = await self._complete(
+                claimed,
+                state='ready',
+                result=result,
+                side_effect_key='rebuild' if rebuilt else 'inspect',
+            )
+            if not completed:
+                audit(
+                    'media_index_cancelled',
+                    part_id=claimed.id,
+                    reason='local_deletion_requested',
+                    result='cancelled_local',
+                )
+                return claimed.id
             audit(
                 'media_index_completed',
                 part_id=claimed.id,
@@ -111,7 +131,11 @@ class MediaIndexWorker:
         except Exception as error:
             message = '{}: {}'.format(type(error).__name__, error)[:500]
             await self._complete(
-                claimed.id, state='failed', error=message, progress=0.0
+                claimed,
+                state='failed',
+                error=message,
+                progress=0.0,
+                side_effect_key='rebuild',
             )
             audit(
                 'media_index_failed',
@@ -128,11 +152,13 @@ class MediaIndexWorker:
 
         def claim(connection: sqlite3.Connection) -> Optional[_ClaimedPart]:
             row = connection.execute(
-                'SELECT part.id,part.source_path,part.final_path '
+                'SELECT part.id,part.session_id,part.source_path,part.final_path,'
+                'session.cancellation_generation '
                 'FROM recording_parts part '
                 'JOIN recording_sessions session ON session.id=part.session_id '
                 "WHERE part.media_index_state='pending' "
                 "AND part.artifact_state='ready' AND session.state='closed' "
+                "AND session.deletion_state='none' "
                 'AND part.video_deleted_at IS NULL '
                 'AND NOT EXISTS('
                 'SELECT 1 FROM upload_jobs job WHERE job.session_id=part.session_id '
@@ -151,19 +177,32 @@ class MediaIndexWorker:
                     'media_index_updated_at=? WHERE id=?',
                     (now, part_id),
                 )
-                return _ClaimedPart(part_id, '')
+                return _ClaimedPart(
+                    part_id,
+                    '',
+                    int(row['session_id']),
+                    int(row['cancellation_generation']),
+                )
             cursor = connection.execute(
                 "UPDATE recording_parts SET media_index_state='indexing',"
                 'media_index_error=NULL,media_index_progress=0,'
                 'media_index_owner=?,media_index_lease_until=?,'
                 'media_index_attempt=media_index_attempt+1,'
                 'media_index_updated_at=? '
-                "WHERE id=? AND media_index_state='pending'",
+                "WHERE id=? AND media_index_state='pending' AND EXISTS("
+                'SELECT 1 FROM recording_sessions session '
+                'WHERE session.id=recording_parts.session_id '
+                "AND session.deletion_state='none')",
                 (self._worker_id, now + self._LEASE_SECONDS, now, part_id),
             )
             if cursor.rowcount != 1:
                 return None
-            return _ClaimedPart(part_id, path)
+            return _ClaimedPart(
+                part_id,
+                path,
+                int(row['session_id']),
+                int(row['cancellation_generation']),
+            )
 
         claimed = await self._database.write(claim)
         if claimed is not None and not claimed.path:
@@ -181,34 +220,110 @@ class MediaIndexWorker:
 
     async def _complete(
         self,
-        part_id: int,
+        claimed: _ClaimedPart,
         *,
         state: str,
         error: Optional[str] = None,
         progress: float = 1.0,
         result: Optional[MediaIndexResult] = None,
-    ) -> None:
+        side_effect_key: str,
+    ) -> bool:
         now = int(self._clock())
-        count = await self._database.execute(
-            'UPDATE recording_parts SET media_index_state=?,media_index_error=?,'
-            'media_index_progress=?,media_index_updated_at=?,'
-            'media_index_owner=NULL,media_index_lease_until=NULL,'
-            'file_size_bytes=COALESCE(?,file_size_bytes),'
-            'record_duration_seconds=COALESCE(record_duration_seconds,?) '
-            'WHERE id=? AND media_index_owner=?',
-            (
-                state,
-                error,
-                progress,
-                now,
-                None if result is None else result.file_size_bytes,
-                None if result is None else int(math.ceil(result.duration_ms / 1_000)),
-                part_id,
-                self._worker_id,
-            ),
+
+        def complete(connection: sqlite3.Connection) -> Tuple[int, bool]:
+            session = connection.execute(
+                'SELECT cancellation_generation,deletion_state '
+                'FROM recording_sessions WHERE id=?',
+                (claimed.session_id,),
+            ).fetchone()
+            if (
+                session is None
+                or int(session['cancellation_generation'])
+                != claimed.cancellation_generation
+                or str(session['deletion_state']) != 'none'
+            ):
+                return (
+                    self._complete_cancelled_sync(
+                        connection, claimed, side_effect_key, now
+                    ),
+                    True,
+                )
+            cursor = connection.execute(
+                'UPDATE recording_parts SET media_index_state=?,media_index_error=?,'
+                'media_index_progress=?,media_index_updated_at=?,'
+                'media_index_owner=NULL,media_index_lease_until=NULL,'
+                'file_size_bytes=COALESCE(?,file_size_bytes),'
+                'record_duration_seconds=COALESCE(record_duration_seconds,?) '
+                'WHERE id=? AND media_index_owner=?',
+                (
+                    state,
+                    error,
+                    progress,
+                    now,
+                    None if result is None else result.file_size_bytes,
+                    (
+                        None
+                        if result is None
+                        else int(math.ceil(result.duration_ms / 1_000))
+                    ),
+                    claimed.id,
+                    self._worker_id,
+                ),
+            )
+            return cursor.rowcount, False
+
+        count, cancelled = await self._database.write(complete)
+        if count != 1:
+            raise RuntimeError('media index claim is no longer owned')
+        return not cancelled
+
+    async def _generation_changed(self, claimed: _ClaimedPart) -> bool:
+        row = await self._database.fetchone(
+            'SELECT cancellation_generation,deletion_state '
+            'FROM recording_sessions WHERE id=?',
+            (claimed.session_id,),
+        )
+        return (
+            row is None
+            or int(row['cancellation_generation']) != claimed.cancellation_generation
+            or str(row['deletion_state']) != 'none'
+        )
+
+    async def _complete_cancelled(
+        self, claimed: _ClaimedPart, side_effect_key: str
+    ) -> None:
+        count = await self._database.write(
+            lambda connection: self._complete_cancelled_sync(
+                connection, claimed, side_effect_key, int(self._clock())
+            )
         )
         if count != 1:
             raise RuntimeError('media index claim is no longer owned')
+
+    def _complete_cancelled_sync(
+        self,
+        connection: sqlite3.Connection,
+        claimed: _ClaimedPart,
+        side_effect_key: str,
+        now: int,
+    ) -> int:
+        cursor = connection.execute(
+            "UPDATE recording_parts SET media_index_state='failed',"
+            "media_index_error='local_deletion_requested',media_index_progress=0,"
+            'media_index_updated_at=?,media_index_owner=NULL,'
+            'media_index_lease_until=NULL WHERE id=? AND media_index_owner=?',
+            (now, claimed.id, self._worker_id),
+        )
+        if cursor.rowcount != 1:
+            return 0
+        connection.execute(
+            'INSERT OR REPLACE INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('media_index',?,?,?,'cancelled_local','{}',?)",
+            (claimed.id, side_effect_key, claimed.cancellation_generation, now),
+        )
+        return cursor.rowcount
 
 
 def inspect_flv_index(path: str) -> Optional[MediaIndexResult]:

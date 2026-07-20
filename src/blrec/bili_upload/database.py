@@ -274,14 +274,16 @@ class BiliUploadDatabase:
     ) -> Optional[LeaseClaim]:
         connection = self._require_connection()
         placeholders = ','.join('?' for _ in states)
+        owner_fence = self._claim_owner_fence(table)
         connection.execute('BEGIN IMMEDIATE')
         try:
             row = connection.execute(
                 'SELECT id FROM {} WHERE state IN ({}) '
                 'AND next_attempt_at<=? '
                 'AND (lease_until IS NULL OR lease_until<=?) '
+                '{} '
                 'ORDER BY priority DESC,next_attempt_at,id LIMIT 1'.format(
-                    table, placeholders
+                    table, placeholders, owner_fence
                 ),
                 (*states, now, now),
             ).fetchone()
@@ -295,8 +297,8 @@ class BiliUploadDatabase:
                 'lease_generation=lease_generation+1,lease_until=?,attempt=attempt+1 '
                 'WHERE id=? AND state IN ({}) '
                 'AND next_attempt_at<=? '
-                'AND (lease_until IS NULL OR lease_until<=?)'.format(
-                    table, placeholders
+                'AND (lease_until IS NULL OR lease_until<=?) {}'.format(
+                    table, placeholders, owner_fence
                 ),
                 (lease_owner, lease_until, row_id, *states, now, now),
             )
@@ -323,6 +325,43 @@ class BiliUploadDatabase:
             lease_until=int(claimed['lease_until']),
             attempt=int(claimed['attempt']),
         )
+
+    @staticmethod
+    def _claim_owner_fence(table: str) -> str:
+        if table == 'upload_jobs':
+            return (
+                'AND EXISTS(SELECT 1 FROM recording_sessions session '
+                'WHERE session.id=upload_jobs.session_id '
+                "AND session.deletion_state='none')"
+            )
+        if table == 'comment_items':
+            return (
+                'AND EXISTS(SELECT 1 FROM upload_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'WHERE job.id=comment_items.job_id '
+                "AND session.deletion_state='none')"
+            )
+        if table == 'danmaku_items':
+            return (
+                'AND EXISTS(SELECT 1 FROM upload_parts part '
+                'JOIN upload_jobs job ON job.id=part.job_id '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'WHERE part.id=danmaku_items.part_id '
+                "AND session.deletion_state='none')"
+            )
+        if table == 'highlight_clips':
+            return (
+                "AND highlight_clips.deletion_state='none' "
+                'AND NOT EXISTS(SELECT 1 FROM recording_sessions direct_session '
+                'WHERE direct_session.id=highlight_clips.source_session_id '
+                "AND direct_session.deletion_state!='none') "
+                'AND NOT EXISTS(SELECT 1 FROM highlight_clip_sources source '
+                'JOIN recording_parts part ON part.id=source.part_id '
+                'JOIN recording_sessions session ON session.id=part.session_id '
+                'WHERE source.clip_id=highlight_clips.id '
+                "AND session.deletion_state!='none')"
+            )
+        return ''
 
     def _renew_sync(self, claim: LeaseClaim, now: int) -> int:
         cursor = self._require_connection().execute(
@@ -384,7 +423,7 @@ class BiliUploadDatabase:
                 ).fetchone()
                 assert row is not None
                 current_version = int(row[0])
-            latest_version = 25
+            latest_version = 26
             if current_version > latest_version:
                 raise sqlite3.DatabaseError(
                     'database schema is newer than this application'

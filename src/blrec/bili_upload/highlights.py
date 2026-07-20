@@ -130,6 +130,8 @@ class HighlightClip:
     source_title: str = ''
     duration_ms: int = 0
     file_size_bytes: Optional[int] = None
+    deletion_state: str = 'none'
+    deletion_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,8 @@ class HighlightClipSummary:
     upload_state: Optional[str]
     upload_percent: Optional[float]
     upload_bvid: Optional[str]
+    deletion_state: str = 'none'
+    deletion_error: Optional[str] = None
 
 
 class HighlightService:
@@ -179,6 +183,7 @@ class HighlightService:
         'GROUP BY part.job_id) '
         'SELECT clip.id,clip.room_id,clip.source_session_id,clip.name,clip.state,'
         'clip.error_message,clip.created_at,clip.updated_at,'
+        'clip.deletion_state,clip.deletion_error,'
         "COALESCE(source.anchor_name,'') AS source_anchor_name,"
         "COALESCE(source.title,'') AS source_title,"
         'MAX(0,COALESCE(NULLIF(clip.actual_end_ms,0),clip.requested_end_ms)-'
@@ -1575,6 +1580,10 @@ class HighlightService:
             upload_bvid=(
                 None if row['upload_bvid'] is None else str(row['upload_bvid'])
             ),
+            deletion_state=str(row['deletion_state']),
+            deletion_error=(
+                None if row['deletion_error'] is None else str(row['deletion_error'])
+            ),
         )
 
     @staticmethod
@@ -1641,6 +1650,10 @@ class HighlightService:
                 None
                 if 'upload_bvid' not in row.keys() or row['upload_bvid'] is None
                 else str(row['upload_bvid'])
+            ),
+            deletion_state=str(row['deletion_state']),
+            deletion_error=(
+                None if row['deletion_error'] is None else str(row['deletion_error'])
             ),
             source_anchor_name=(
                 ''

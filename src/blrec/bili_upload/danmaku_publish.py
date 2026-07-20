@@ -207,12 +207,14 @@ class DanmakuPublisher:
             'item.progress_ms,item.error_code FROM danmaku_items item '
             'JOIN upload_parts part ON part.id=item.part_id '
             'JOIN upload_jobs job ON job.id=part.job_id '
+            'JOIN recording_sessions session ON session.id=job.session_id '
             'JOIN bili_accounts account ON account.id=job.account_id '
             "WHERE item.state IN ('prepared','in_flight') "
             'AND item.next_attempt_at<=? '
             'AND (item.lease_until IS NULL OR item.lease_until<=?) '
             "AND job.state='approved' "
             "AND job.danmaku_branch_state='publishing' "
+            "AND session.deletion_state='none' "
             "AND account.state='active' AND part.cid IS NOT NULL "
             'ORDER BY job.account_id,part.job_id,item.priority DESC,'
             'item.progress_ms,item.id',
@@ -257,7 +259,12 @@ class DanmakuPublisher:
                 'SELECT state FROM danmaku_items WHERE id=? '
                 "AND state IN ('prepared','in_flight') "
                 'AND next_attempt_at<=? '
-                'AND (lease_until IS NULL OR lease_until<=?)',
+                'AND (lease_until IS NULL OR lease_until<=?) AND EXISTS('
+                'SELECT 1 FROM upload_parts part '
+                'JOIN upload_jobs job ON job.id=part.job_id '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'WHERE part.id=danmaku_items.part_id '
+                "AND session.deletion_state='none')",
                 (item_id, now, now),
             ).fetchone()
             if row is None:
@@ -268,7 +275,12 @@ class DanmakuPublisher:
                 'lease_generation+1,lease_until=?,attempt=attempt+1 WHERE id=? '
                 "AND state IN ('prepared','in_flight') "
                 'AND next_attempt_at<=? '
-                'AND (lease_until IS NULL OR lease_until<=?)',
+                'AND (lease_until IS NULL OR lease_until<=?) AND EXISTS('
+                'SELECT 1 FROM upload_parts part '
+                'JOIN upload_jobs job ON job.id=part.job_id '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'WHERE part.id=danmaku_items.part_id '
+                "AND session.deletion_state='none')",
                 (self._worker_id, lease_until, item_id, now, now),
             )
             if updated.rowcount != 1:

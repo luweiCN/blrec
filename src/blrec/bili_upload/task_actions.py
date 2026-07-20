@@ -21,6 +21,7 @@ from .accounts import (
 from .credentials import CredentialNotFound
 from .crypto import CredentialBundle, InvalidCredentialBundle, InvalidCredentialKey
 from .database import BiliUploadDatabase, LeaseClaim, LeaseLost
+from .deletion_worker import LocalDeletionRejected, LocalDeletionWorker
 from .errors import (
     BiliApiError,
     DefinitelyNotSent,
@@ -107,23 +108,6 @@ class UploadTaskActionManager:
     _REPAIRABLE_JOB_STATES = frozenset(
         ('waiting_review', 'approved', 'rejected', 'paused', 'completed')
     )
-    _LOCAL_FILE_SUFFIXES = frozenset(
-        (
-            '.flv',
-            '.mp4',
-            '.ts',
-            '.m4s',
-            '.m3u8',
-            '.mkv',
-            '.mov',
-            '.webm',
-            '.xml',
-            '.jpg',
-            '.jpeg',
-            '.png',
-            '.webp',
-        )
-    )
 
     def __init__(
         self,
@@ -136,6 +120,7 @@ class UploadTaskActionManager:
         edit_payload_builder: _EditPayloadBuilder,
         recording_root: Optional[Path] = None,
         remuxer: Optional[TranscodeRemuxer] = None,
+        deletion_worker: Optional[LocalDeletionWorker] = None,
         worker_id: Optional[str] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -155,6 +140,14 @@ class UploadTaskActionManager:
         self._remuxer = remuxer or TranscodeRemuxer(
             Path(database.path).parent / 'transcode-remux'
         )
+        self._deletion_worker = deletion_worker
+        if self._deletion_worker is None and self._recording_root is not None:
+            self._deletion_worker = LocalDeletionWorker(
+                database,
+                recording_root=self._recording_root,
+                clip_root=self._recording_root.parent / 'clips',
+                clock=clock,
+            )
         self._worker_id = worker_id or 'repair-{}'.format(uuid.uuid4().hex)
         self._clock = clock
         self._run_lock = asyncio.Lock()
@@ -781,102 +774,21 @@ class UploadTaskActionManager:
             raise UploadTaskActionRejected('管理员身份不能为空')
         if self._recording_root is None:
             raise UploadTaskActionRejected('录像根目录未配置，无法安全删除文件')
-        now = int(self._clock())
-
-        def prepare(connection: sqlite3.Connection) -> Tuple[int, Tuple[str, ...]]:
-            job = connection.execute(
-                'SELECT job.session_id,job.state,job.submit_state,job.repair_state,'
-                'job.lease_until,session.state AS session_state,session.cover_path '
-                'FROM upload_jobs job JOIN recording_sessions session '
-                'ON session.id=job.session_id WHERE job.id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if str(job['session_state']) == 'open':
-                raise UploadTaskActionRejected('本场仍在录制，不能删除任务')
-            active_run = connection.execute(
-                "SELECT 1 FROM recording_runs WHERE session_id=? AND state='recording'",
-                (int(job['session_id']),),
-            ).fetchone()
-            if active_run is not None or self._has_active_lease(job, now):
-                raise UploadTaskActionRejected('任务正在执行，请先停止后再删除')
-            if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
-                raise UploadTaskActionRejected('转码修复正在执行')
-            path_rows = connection.execute(
-                'SELECT source_path,final_path,xml_path FROM recording_parts '
-                'WHERE session_id=? UNION ALL '
-                'SELECT source_path,final_path,xml_path FROM upload_parts '
-                'WHERE job_id=?',
-                (int(job['session_id']), job_id),
-            ).fetchall()
-            raw_paths: Dict[str, None] = {}
-            for row in path_rows:
-                for column in ('source_path', 'final_path', 'xml_path'):
-                    if row[column]:
-                        raw_paths[str(row[column])] = None
-            if job['cover_path']:
-                raw_paths[str(job['cover_path'])] = None
-            connection.execute(
-                "UPDATE upload_jobs SET state='paused',review_reason=?,"
-                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
-                ('正在删除本地任务及文件', now, job_id),
+        deletion_worker = self._deletion_worker
+        if deletion_worker is None:
+            raise UploadTaskActionRejected('本地删除服务当前不可用')
+        row = await self._database.fetchone(
+            'SELECT session_id FROM upload_jobs WHERE id=?', (job_id,)
+        )
+        if row is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        try:
+            await deletion_worker.request_session(
+                int(row['session_id']), manager_subject=manager_subject
             )
-            return int(job['session_id']), tuple(raw_paths)
-
-        def finish(connection: sqlite3.Connection, session_id: int) -> str:
-            job = connection.execute(
-                'SELECT state FROM upload_jobs WHERE id=? AND session_id=?',
-                (job_id, session_id),
-            ).fetchone()
-            if job is None or str(job['state']) != 'paused':
-                raise UploadTaskActionRejected('任务状态已经发生变化')
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='delete_local_upload_task',
-                job_id=job_id,
-                old_state='paused',
-                new_state='deleted_local_only',
-                reason='管理员删除本地任务和归属文件，未修改 B 站稿件',
-                now=now,
-            )
-            self._delete_job_children(connection, job_id)
-            connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
-            connection.execute(
-                'DELETE FROM event_journal WHERE run_id IN('
-                'SELECT id FROM recording_runs WHERE session_id=?)',
-                (session_id,),
-            )
-            connection.execute(
-                'DELETE FROM recording_parts WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM recording_runs WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM upload_suppressions WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM upload_job_archives WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM recording_sessions WHERE id=?', (session_id,)
-            )
-            return '本地任务及其文件已删除，B 站稿件未作任何修改'
-
-        async with self._run_lock:
-            session_id, raw_paths = await self._database.write(prepare)
-            paths = tuple(self._owned_path(path) for path in raw_paths)
-            try:
-                await self._run_file_deletion(paths)
-            except OSError as error:
-                raise UploadTaskActionRejected(
-                    '删除本地文件失败：{}'.format(error)
-                ) from None
-            return await self._database.write(
-                lambda connection: finish(connection, session_id)
-            )
+        except LocalDeletionRejected as error:
+            raise UploadTaskActionRejected(str(error)) from None
+        return '已排队删除本地任务及文件'
 
     async def set_session_upload_intent(
         self, session_id: int, intent: str, *, manager_subject: str
@@ -944,214 +856,16 @@ class UploadTaskActionManager:
             raise UploadTaskActionRejected('管理员身份不能为空')
         if self._recording_root is None:
             raise UploadTaskActionRejected('录像根目录未配置，无法安全删除文件')
-        async with self._run_lock:
-            await self._request_session_deletion(
-                session_id, manager_subject=manager_subject
-            )
-            return await self._continue_session_deletion(
-                session_id, manager_subject=manager_subject
-            )
-
-    async def _request_session_deletion(
-        self, session_id: int, *, manager_subject: str
-    ) -> None:
-        now = int(self._clock())
-
-        def request(connection: sqlite3.Connection) -> None:
-            session = connection.execute(
-                'SELECT deletion_state FROM recording_sessions WHERE id=?',
-                (session_id,),
-            ).fetchone()
-            if session is None:
-                raise UploadTaskActionRejected('录制场次不存在')
-            active = connection.execute(
-                "SELECT 1 FROM recording_runs WHERE session_id=? AND state='recording'",
-                (session_id,),
-            ).fetchone()
-            if active is not None:
-                raise UploadTaskActionRejected('本场仍在录制，请先停止当前场次')
-            highlight = connection.execute(
-                'SELECT 1 FROM recording_parts part '
-                'JOIN highlight_clip_sources source ON source.part_id=part.id '
-                'JOIN highlight_clips clip ON clip.id=source.clip_id '
-                'WHERE part.session_id=? '
-                "AND clip.state IN ('queued','processing') LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            if highlight is not None:
-                raise UploadTaskActionRejected(
-                    '高光片段正在处理，请完成或删除高光任务后再删除录像'
-                )
-            connection.execute(
-                "UPDATE recording_sessions SET deletion_state='requested',"
-                'deletion_error=NULL,deletion_requested_at=? WHERE id=?',
-                (now, session_id),
-            )
-            job = connection.execute(
-                'SELECT id,state FROM upload_jobs WHERE session_id=?', (session_id,)
-            ).fetchone()
-            if job is None:
-                return
-            job_id = int(job['id'])
-            connection.execute(
-                "UPDATE upload_jobs SET state='paused',operator_paused=1,"
-                'operator_resume_state=NULL,review_reason=?,lease_owner=NULL,'
-                'lease_until=NULL,repair_state=CASE WHEN repair_state IN '
-                "('queued','checking','reuploading','editing') THEN 'failed' "
-                'ELSE repair_state END,repair_message=CASE WHEN repair_state IN '
-                "('queued','checking','reuploading','editing') THEN NULL "
-                'ELSE repair_message END,repair_error=CASE WHEN repair_state IN '
-                "('queued','checking','reuploading','editing') THEN ? "
-                'ELSE repair_error END,repair_completed_at=CASE WHEN repair_state IN '
-                "('queued','checking','reuploading','editing') THEN ? "
-                'ELSE repair_completed_at END,comment_branch_state=CASE '
-                "WHEN comment_branch_state IN ('pending','running') THEN 'paused' "
-                'ELSE comment_branch_state END,danmaku_branch_state=CASE '
-                "WHEN danmaku_branch_state IN ('pending','importing','publishing') "
-                "THEN 'paused' ELSE danmaku_branch_state END,updated_at=? WHERE id=?",
-                ('任务正在删除', '任务正在删除，转码修复已终止', now, now, job_id),
-            )
-            connection.execute(
-                'UPDATE comment_items SET lease_owner=NULL,lease_until=NULL,'
-                'next_attempt_at=2147483647 WHERE job_id=?',
-                (job_id,),
-            )
-            connection.execute(
-                'UPDATE danmaku_items SET lease_owner=NULL,lease_until=NULL,'
-                'next_attempt_at=2147483647 WHERE part_id IN('
-                'SELECT id FROM upload_parts WHERE job_id=?)',
-                (job_id,),
-            )
-            self._audit_session(
-                connection,
-                manager_subject=manager_subject,
-                action='request_session_deletion',
-                session_id=session_id,
-                old_state=str(session['deletion_state']),
-                new_state='requested',
-                reason='管理员请求删除本地场次及全部归属文件',
-                now=now,
-            )
-
-        await self._database.write(request)
-
-    async def _continue_session_deletion(
-        self, session_id: int, *, manager_subject: str
-    ) -> str:
-        now = int(self._clock())
-
-        def prepare(
-            connection: sqlite3.Connection,
-        ) -> Tuple[Optional[int], Tuple[str, ...]]:
-            session = connection.execute(
-                'SELECT id,cover_path,deletion_state FROM recording_sessions '
-                'WHERE id=?',
-                (session_id,),
-            ).fetchone()
-            if session is None:
-                return None, ()
-            if str(session['deletion_state']) not in (
-                'requested',
-                'deleting',
-                'failed',
-            ):
-                raise UploadTaskActionRejected('录制场次没有待执行的删除请求')
-            connection.execute(
-                "UPDATE recording_sessions SET deletion_state='deleting',"
-                'deletion_error=NULL WHERE id=?',
-                (session_id,),
-            )
-            job = connection.execute(
-                'SELECT id FROM upload_jobs WHERE session_id=?', (session_id,)
-            ).fetchone()
-            job_id = None if job is None else int(job['id'])
-            path_rows = connection.execute(
-                'SELECT source_path,final_path,xml_path FROM recording_parts '
-                'WHERE session_id=?',
-                (session_id,),
-            ).fetchall()
-            if job_id is not None:
-                path_rows = [
-                    *path_rows,
-                    *connection.execute(
-                        'SELECT source_path,final_path,xml_path FROM upload_parts '
-                        'WHERE job_id=?',
-                        (job_id,),
-                    ).fetchall(),
-                ]
-            raw_paths: Dict[str, None] = {}
-            for part in path_rows:
-                for column in ('source_path', 'final_path', 'xml_path'):
-                    if part[column]:
-                        raw_paths[str(part[column])] = None
-            if session['cover_path']:
-                raw_paths[str(session['cover_path'])] = None
-            return job_id, tuple(raw_paths)
-
-        job_id, raw_paths = await self._database.write(prepare)
-        if job_id is None and not raw_paths:
-            exists = await self._database.scalar(
-                'SELECT COUNT(*) FROM recording_sessions WHERE id=?', (session_id,)
-            )
-            if not exists:
-                return '本地场次及其文件已删除，B 站稿件未作任何修改'
+        deletion_worker = self._deletion_worker
+        if deletion_worker is None:
+            raise UploadTaskActionRejected('本地删除服务当前不可用')
         try:
-            paths = tuple(self._owned_path(path) for path in raw_paths)
-            await self._run_file_deletion(paths)
-        except (OSError, UploadTaskActionRejected) as error:
-            message = '删除本地文件失败：{}'.format(error)
-            await self._database.execute(
-                "UPDATE recording_sessions SET deletion_state='failed',"
-                'deletion_error=? WHERE id=?',
-                (message[:500], session_id),
+            await deletion_worker.request_session(
+                session_id, manager_subject=manager_subject
             )
-            raise UploadTaskActionRejected(message) from None
-
-        def finish(connection: sqlite3.Connection) -> str:
-            current = connection.execute(
-                'SELECT deletion_state FROM recording_sessions WHERE id=?',
-                (session_id,),
-            ).fetchone()
-            if current is None:
-                return '本地场次及其文件已删除，B 站稿件未作任何修改'
-            if str(current['deletion_state']) != 'deleting':
-                raise UploadTaskActionRejected('录制场次删除状态已经发生变化')
-            if job_id is not None:
-                self._audit(
-                    connection,
-                    manager_subject=manager_subject,
-                    action='delete_local_upload_task',
-                    job_id=job_id,
-                    old_state='any',
-                    new_state='deleted_local_only',
-                    reason='管理员删除本地场次和归属文件，未修改 B 站稿件',
-                    now=now,
-                )
-                self._delete_job_children(connection, job_id)
-                connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
-            connection.execute(
-                'DELETE FROM event_journal WHERE run_id IN('
-                'SELECT id FROM recording_runs WHERE session_id=?)',
-                (session_id,),
-            )
-            connection.execute(
-                'DELETE FROM recording_parts WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM recording_runs WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM upload_suppressions WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM upload_job_archives WHERE session_id=?', (session_id,)
-            )
-            connection.execute(
-                'DELETE FROM recording_sessions WHERE id=?', (session_id,)
-            )
-            return '本地场次及其文件已删除，B 站稿件未作任何修改'
-
-        return await self._database.write(finish)
+        except LocalDeletionRejected as error:
+            raise UploadTaskActionRejected(str(error)) from None
+        return '已排队删除本地场次及文件'
 
     async def request_transcode_repair(
         self, job_id: int, *, manager_subject: str
@@ -1318,18 +1032,6 @@ class UploadTaskActionManager:
             )
 
         await self._database.write(recover)
-        pending_deletions = await self._database.fetchall(
-            'SELECT id FROM recording_sessions '
-            "WHERE deletion_state IN ('requested','deleting','failed') "
-            'ORDER BY deletion_requested_at,id'
-        )
-        for row in pending_deletions:
-            try:
-                await self._continue_session_deletion(
-                    int(row['id']), manager_subject='system-recovery'
-                )
-            except UploadTaskActionRejected:
-                continue
 
     async def run_once(self) -> Optional[int]:
         async with self._run_lock:
@@ -2227,40 +1929,6 @@ class UploadTaskActionManager:
                 now,
             ),
         )
-
-    def _owned_path(self, raw_path: str) -> Path:
-        assert self._recording_root is not None
-        path = Path(os.path.abspath(os.path.expanduser(raw_path)))
-        resolved = path.resolve(strict=False)
-        try:
-            resolved.relative_to(self._recording_root)
-        except ValueError:
-            raise UploadTaskActionRejected(
-                "拒绝删除录像根目录外的文件：'{}'".format(path)
-            ) from None
-        if path.suffix.lower() not in self._LOCAL_FILE_SUFFIXES:
-            raise UploadTaskActionRejected(
-                "拒绝删除不支持的任务文件：'{}'".format(path)
-            )
-        return path
-
-    @staticmethod
-    async def _run_file_deletion(paths: Tuple[Path, ...]) -> None:
-        def delete() -> None:
-            unique_paths = tuple(dict.fromkeys(paths))
-            for path in unique_paths:
-                try:
-                    path.lstat()
-                except FileNotFoundError:
-                    continue
-                if not path.is_file() and not path.is_symlink():
-                    raise OSError("task path is not a file: '{}'".format(path))
-            for path in unique_paths:
-                if path.exists() or path.is_symlink():
-                    path.unlink()
-
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, delete)
 
     @staticmethod
     def _text(value: Any) -> Optional[str]:

@@ -50,19 +50,26 @@ class CollectionPublisher:
 
     async def create(self, job_id: int) -> None:
         row = await self._database.fetchone(
-            'SELECT state,collection_branch_state FROM upload_jobs WHERE id=?',
+            'SELECT job.state,job.collection_branch_state,session.deletion_state '
+            'FROM upload_jobs job JOIN recording_sessions session '
+            'ON session.id=job.session_id WHERE job.id=?',
             (job_id,),
         )
         if row is None:
             raise ValueError("unknown upload job '{}'".format(job_id))
         if str(row['collection_branch_state']) != 'pending':
             return
+        if str(row['deletion_state']) != 'none':
+            return
         if str(row['state']) != 'approved':
             raise ValueError('collection job is not ready')
         updated = await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='running',"
             'collection_error=NULL,updated_at=? '
-            "WHERE id=? AND state='approved' AND collection_branch_state='pending'",
+            "WHERE id=? AND state='approved' AND collection_branch_state='pending' "
+            'AND EXISTS(SELECT 1 FROM recording_sessions session '
+            'WHERE session.id=upload_jobs.session_id '
+            "AND session.deletion_state='none')",
             (int(self._clock()), job_id),
         )
         if updated != 1:

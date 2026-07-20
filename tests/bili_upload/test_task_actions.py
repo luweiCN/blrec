@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
-from unittest.mock import AsyncMock
 
 import pytest
 
 from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim, LeaseLost
+from blrec.bili_upload.deletion_worker import LocalDeletionWorker
 from blrec.bili_upload.task_actions import (
     UploadTaskActionManager,
     UploadTaskActionRejected,
@@ -233,6 +233,12 @@ def make_manager(
         edit_payload_builder=payload_builder,
         recording_root=recording_root,
         remuxer=remuxer,
+        deletion_worker=LocalDeletionWorker(
+            database,
+            recording_root=recording_root,
+            clip_root=recording_root.parent / 'clips',
+            clock=lambda: 1_000,
+        ),
         clock=lambda: 1_000,
     )
     return manager, uploader, payload_builder
@@ -1037,7 +1043,11 @@ async def test_delete_local_task_removes_owned_files_and_rows_only(
 
         message = await manager.delete_local_task(9, manager_subject='manager')
 
-        assert message == '本地任务及其文件已删除，B 站稿件未作任何修改'
+        assert message == '已排队删除本地任务及文件'
+        assert (tmp_path / 'p11.mp4').exists()
+        worker = manager._deletion_worker
+        assert worker is not None
+        await worker.run_once()
         assert not (tmp_path / 'p11.mp4').exists()
         assert not xml_path.exists()
         assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
@@ -1115,7 +1125,11 @@ async def test_session_without_upload_job_can_be_deleted(tmp_path: Path) -> None
 
         message = await manager.delete_session(1, manager_subject='manager')
 
-        assert message == '本地场次及其文件已删除，B 站稿件未作任何修改'
+        assert message == '已排队删除本地场次及文件'
+        assert video.exists()
+        worker = manager._deletion_worker
+        assert worker is not None
+        await worker.run_once()
         assert not video.exists()
         assert not danmaku.exists()
         assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
@@ -1124,9 +1138,7 @@ async def test_session_without_upload_job_can_be_deleted(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_session_deletion_rejects_source_used_by_pending_highlight(
-    tmp_path: Path,
-) -> None:
+async def test_session_deletion_waits_for_owned_highlight_work(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
     await database.open()
     try:
@@ -1151,8 +1163,8 @@ async def test_session_deletion_rejects_source_used_by_pending_highlight(
         await database.execute(
             'INSERT INTO highlight_clips('
             'id,room_id,source_session_id,name,requested_start_ms,'
-            'requested_end_ms,state,created_at,updated_at) '
-            "VALUES(1,100,1,'高光',0,1000,'processing',1,1)"
+            'requested_end_ms,state,lease_owner,lease_until,created_at,updated_at) '
+            "VALUES(1,100,1,'高光',0,1000,'processing','owner',2000,1,1)"
         )
         await database.execute(
             'INSERT INTO highlight_clip_sources('
@@ -1163,15 +1175,18 @@ async def test_session_deletion_rejects_source_used_by_pending_highlight(
             database, FakeProtocol(archive_response()), tmp_path
         )
 
-        with pytest.raises(UploadTaskActionRejected, match='高光片段正在处理'):
-            await manager.delete_session(1, manager_subject='manager')
+        message = await manager.delete_session(1, manager_subject='manager')
+        worker = manager._deletion_worker
+        assert worker is not None
+        await worker.run_once()
 
+        assert message == '已排队删除本地场次及文件'
         assert video.exists()
         assert (
             await database.scalar(
                 'SELECT deletion_state FROM recording_sessions WHERE id=1'
             )
-            == 'none'
+            == 'requested'
         )
     finally:
         await database.close()
@@ -1246,6 +1261,9 @@ async def test_deleting_highlight_upload_keeps_original_recording(
         )
 
         await manager.delete_session(2, manager_subject='manager')
+        worker = manager._deletion_worker
+        assert worker is not None
+        await worker.run_once()
 
         assert original.exists()
         assert not output.exists()
@@ -1289,21 +1307,22 @@ async def test_failed_session_deletion_resumes_after_restart(tmp_path: Path) -> 
         manager, _, _ = make_manager(
             database, FakeProtocol(archive_response()), tmp_path
         )
-        manager._run_file_deletion = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OSError('busy')
-        )
+        worker = manager._deletion_worker
+        assert worker is not None
+        worker._unlink = lambda _path: (_ for _ in ()).throw(OSError('busy'))
 
-        with pytest.raises(UploadTaskActionRejected, match='busy'):
-            await manager.delete_session(1, manager_subject='manager')
+        await manager.delete_session(1, manager_subject='manager')
+        await worker.run_once()
         failed = await database.fetchone(
             'SELECT deletion_state,deletion_error FROM recording_sessions WHERE id=1'
         )
         assert failed is not None
         assert failed['deletion_state'] == 'failed'
-        assert 'busy' in str(failed['deletion_error'])
+        assert failed['deletion_error'] == 'unlink_OSError'
 
-        manager._run_file_deletion = UploadTaskActionManager._run_file_deletion
-        await manager.recover_interrupted()
+        worker._unlink = lambda path: path.unlink()
+        await worker.recover_interrupted()
+        await worker.run_once()
 
         assert not video.exists()
         assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
@@ -1312,7 +1331,7 @@ async def test_failed_session_deletion_resumes_after_restart(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_failed_session_deletion_permanently_stops_transcode_repair(
+async def test_session_deletion_cancels_queued_repair_without_remote_request(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
@@ -1322,35 +1341,13 @@ async def test_failed_session_deletion_permanently_stops_transcode_repair(
         protocol = FakeProtocol(archive_response())
         manager, _, _ = make_manager(database, protocol, tmp_path)
         await manager.request_transcode_repair(9, manager_subject='manager')
-        manager._run_file_deletion = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OSError('busy')
-        )
+        await manager.delete_session(1, manager_subject='manager')
+        worker = manager._deletion_worker
+        assert worker is not None
+        await worker.run_once()
 
-        with pytest.raises(UploadTaskActionRejected, match='busy'):
-            await manager.delete_session(1, manager_subject='manager')
-
-        stopped = await database.fetchone(
-            'SELECT operator_paused,repair_state,lease_owner,lease_until '
-            'FROM upload_jobs WHERE id=9'
-        )
-        assert stopped is not None
-        assert dict(stopped) == {
-            'operator_paused': 1,
-            'repair_state': 'failed',
-            'lease_owner': None,
-            'lease_until': None,
-        }
-
-        restarted_protocol = FakeProtocol(archive_response())
-        restarted, uploader, _ = make_manager(database, restarted_protocol, tmp_path)
-        restarted._run_file_deletion = AsyncMock(  # type: ignore[method-assign]
-            side_effect=OSError('still busy')
-        )
-        await restarted.recover_interrupted()
-
-        assert await restarted.run_once() is None
-        assert restarted_protocol.view_calls == []
-        assert uploader.calls == []
-        assert restarted_protocol.edit_calls == []
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+        assert protocol.view_calls == []
+        assert protocol.edit_calls == []
     finally:
         await database.close()

@@ -177,6 +177,7 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.highlight_service is not None
         assert runtime.highlight_worker is not None
         assert runtime.media_index_worker is not None
+        assert runtime.deletion_worker is not None
 
         for _ in range(100):
             if protocol.oauth_calls:
@@ -219,6 +220,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.highlight_service is None
     assert runtime.highlight_worker is None
     assert runtime.media_index_worker is None
+    assert runtime.deletion_worker is None
 
 
 @pytest.mark.asyncio
@@ -249,21 +251,19 @@ async def test_stopping_upload_worker_keeps_stop_event_visible_until_exit(
 
 
 @pytest.mark.asyncio
-async def test_deleting_highlight_stops_workers_before_removing_upload_state(
-    tmp_path: Path,
-) -> None:
+async def test_deleting_highlight_only_queues_local_deletion(tmp_path: Path) -> None:
     runtime = BiliAccountRuntime(
         BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
         api_key='test-api-key',
         credential_key=b'k' * 32,
     )
     events = []
-    service = SimpleNamespace(
-        delete_clip=AsyncMock(
-            side_effect=lambda _clip_id: events.append('delete') or 'deleted'
+    runtime._highlight_service = SimpleNamespace()  # type: ignore[assignment]
+    runtime._deletion_worker = SimpleNamespace(
+        request_clip=AsyncMock(
+            side_effect=lambda _clip_id: events.append('request') or 3
         )
     )
-    runtime._highlight_service = service  # type: ignore[assignment]
     runtime._stop_upload_worker = AsyncMock(  # type: ignore[method-assign]
         side_effect=lambda: events.append('stop_upload')
     )
@@ -279,14 +279,12 @@ async def test_deleting_highlight_stops_workers_before_removing_upload_state(
 
     result = await runtime.delete_highlight_clip(7)
 
-    assert result == 'deleted'
-    assert events == [
-        'stop_upload',
-        'stop_clip',
-        'delete',
-        'start_clip',
-        'start_upload',
-    ]
+    assert result == 'queued'
+    assert events == ['request']
+    runtime._stop_upload_worker.assert_not_awaited()
+    runtime._stop_highlight_worker.assert_not_awaited()
+    runtime._start_highlight_worker.assert_not_awaited()
+    runtime._start_upload_worker.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -395,7 +393,7 @@ async def test_runtime_exposes_primary_cookie_and_forwards_auth_failures(
 
 
 @pytest.mark.asyncio
-async def test_delete_open_session_stops_workers_and_current_recording() -> None:
+async def test_delete_open_session_only_queues_intent() -> None:
     calls = []
     runtime = object.__new__(BiliAccountRuntime)
     runtime._session_action_lock = asyncio.Lock()
@@ -404,8 +402,14 @@ async def test_delete_open_session_stops_workers_and_current_recording() -> None
             return_value={'room_id': 100, 'state': 'open', 'job_id': None}
         )
     )
-    runtime._task_actions = SimpleNamespace(
-        delete_session=AsyncMock(return_value='已删除')
+    runtime._task_actions = SimpleNamespace()
+    runtime._deletion_worker = SimpleNamespace(
+        request_session=AsyncMock(
+            side_effect=lambda session_id, manager_subject: calls.append(
+                ('request', session_id, manager_subject)
+            )
+            or 4
+        )
     )
     runtime._session_submission_manager = SimpleNamespace()
     runtime._active_session_canceller = AsyncMock(
@@ -422,11 +426,14 @@ async def test_delete_open_session_stops_workers_and_current_recording() -> None
         'delete_local', 7, manager_subject='manager'
     )
 
-    assert message == '已删除'
-    assert calls == [('stop_worker', None), ('cancel', 100), ('start_worker', None)]
-    runtime._task_actions.delete_session.assert_awaited_once_with(
+    assert message == '已排队删除本地场次及文件'
+    assert calls == [('request', 7, 'manager')]
+    runtime._deletion_worker.request_session.assert_awaited_once_with(
         7, manager_subject='manager'
     )
+    runtime._active_session_canceller.assert_not_awaited()
+    runtime._stop_upload_worker.assert_not_awaited()
+    runtime._start_upload_worker.assert_not_awaited()
 
 
 @pytest.mark.asyncio

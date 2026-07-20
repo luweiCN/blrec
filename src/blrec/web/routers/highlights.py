@@ -195,6 +195,8 @@ class ClipResponse(ApiModel):
     source_title: str = ''
     duration_ms: int = 0
     file_size_bytes: Optional[int] = None
+    deletion_state: str = 'none'
+    deletion_error: Optional[str] = None
 
 
 class ClipSummaryResponse(ApiModel):
@@ -214,6 +216,8 @@ class ClipSummaryResponse(ApiModel):
     upload_state: Optional[str]
     upload_percent: Optional[float]
     upload_bvid: Optional[str]
+    deletion_state: str = 'none'
+    deletion_error: Optional[str] = None
 
 
 class ClipListResponse(ApiModel):
@@ -386,6 +390,8 @@ def _clip_response(value: HighlightClip) -> ClipResponse:
         source_title=value.source_title,
         duration_ms=value.duration_ms,
         file_size_bytes=value.file_size_bytes,
+        deletion_state=value.deletion_state,
+        deletion_error=value.deletion_error,
     )
 
 

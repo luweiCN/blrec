@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from pathlib import Path
 from typing import AsyncIterator, Callable
 
@@ -5,6 +7,7 @@ import pytest
 import pytest_asyncio
 
 from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.deletion_worker import LocalDeletionWorker
 from blrec.bili_upload.media_index import MediaIndexResult, MediaIndexWorker
 
 
@@ -138,6 +141,89 @@ async def test_worker_never_claims_an_active_recording(
         )
         == 'pending'
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_never_claims_a_session_pending_deletion(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    path = tmp_path / 'deleting.flv'
+    part_id = await seed_part(database, path)
+    await database.execute(
+        "UPDATE recording_sessions SET deletion_state='requested',"
+        'cancellation_generation=1 WHERE id=1'
+    )
+    worker = MediaIndexWorker(
+        database,
+        inspect=lambda _path: pytest.fail('must not inspect deleting session'),
+        rebuild=lambda _path, _progress: pytest.fail(
+            'must not rebuild deleting session'
+        ),
+        clock=lambda: 100,
+        worker_id='test-indexer',
+    )
+
+    assert await worker.run_once() is None
+    assert (
+        await database.scalar(
+            'SELECT media_index_state FROM recording_parts WHERE id=?', (part_id,)
+        )
+        == 'pending'
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_change_during_rebuild_acks_handoff_without_ready_commit(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    path = tmp_path / 'race.flv'
+    part_id = await seed_part(database, path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def rebuild(_path: str, _progress: Callable[[float], None]) -> MediaIndexResult:
+        started.set()
+        release.wait(timeout=5)
+        path.write_bytes(b'rebuilt-after-delete-request')
+        return MediaIndexResult(12_000, path.stat().st_size, 3)
+
+    worker = MediaIndexWorker(
+        database,
+        inspect=lambda _path: None,
+        rebuild=rebuild,
+        clock=lambda: 100,
+        worker_id='test-indexer',
+    )
+    deletion = LocalDeletionWorker(
+        database,
+        recording_root=tmp_path,
+        clip_root=tmp_path / 'clips',
+        clock=lambda: 100,
+    )
+
+    task = asyncio.create_task(worker.run_once())
+    await asyncio.get_running_loop().run_in_executor(None, started.wait)
+    await deletion.request_session(1, manager_subject='manager')
+    release.set()
+    assert await task == part_id
+
+    row = await database.fetchone(
+        'SELECT media_index_state,media_index_owner FROM recording_parts WHERE id=?',
+        (part_id,),
+    )
+    assert row is not None
+    assert dict(row) == {'media_index_state': 'failed', 'media_index_owner': None}
+    outcome = await database.fetchone(
+        'SELECT owner_kind,owner_id,side_effect_key,outcome_state '
+        'FROM owner_handoff_outcomes'
+    )
+    assert outcome is not None
+    assert dict(outcome) == {
+        'owner_kind': 'media_index',
+        'owner_id': part_id,
+        'side_effect_key': 'rebuild',
+        'outcome_state': 'cancelled_local',
+    }
 
 
 @pytest.mark.asyncio

@@ -141,11 +141,16 @@ class DanmakuImporter:
 
     async def create(self, job_id: int) -> None:
         job = await self._database.fetchone(
-            'SELECT state,danmaku_branch_state FROM upload_jobs WHERE id=?', (job_id,)
+            'SELECT job.state,job.danmaku_branch_state,session.deletion_state '
+            'FROM upload_jobs job JOIN recording_sessions session '
+            'ON session.id=job.session_id WHERE job.id=?',
+            (job_id,),
         )
         if job is None:
             raise ValueError("unknown upload job '{}'".format(job_id))
         if str(job['danmaku_branch_state']) != 'pending':
+            return
+        if str(job['deletion_state']) != 'none':
             return
         if str(job['state']) != 'approved':
             raise ValueError('danmaku job is not ready')
@@ -193,7 +198,9 @@ class DanmakuImporter:
         row = await self._database.fetchone(
             'SELECT part.id,part.xml_path,part.danmaku_import_state '
             'FROM upload_parts part JOIN upload_jobs job ON job.id=part.job_id '
+            'JOIN recording_sessions session ON session.id=job.session_id '
             "WHERE job.state='approved' "
+            "AND session.deletion_state='none' "
             "AND job.danmaku_branch_state='importing' "
             "AND part.danmaku_import_state IN "
             "('pending','importing','waiting_capacity') "
@@ -225,7 +232,9 @@ class DanmakuImporter:
         part = await self._database.fetchone(
             'SELECT part.id,part.job_id,part.xml_path,part.danmaku_import_state,'
             'part.cid,job.policy_snapshot_json FROM upload_parts part '
-            'JOIN upload_jobs job ON job.id=part.job_id WHERE part.id=?',
+            'JOIN upload_jobs job ON job.id=part.job_id '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            "WHERE part.id=? AND session.deletion_state='none'",
             (part_id,),
         )
         if part is None:

@@ -41,6 +41,8 @@ REQUIRED_TABLES = {
     'highlight_markers',
     'highlight_clips',
     'highlight_clip_sources',
+    'local_deletion_items',
+    'owner_handoff_outcomes',
 }
 
 
@@ -75,7 +77,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 25
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -93,6 +95,21 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             row['name']
             for row in await database.fetchall('PRAGMA table_info(recording_parts)')
         }
+        session_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(recording_sessions)')
+        }
+        clip_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(highlight_clips)')
+        }
+        assert 'cancellation_generation' in session_columns
+        assert {
+            'cancellation_generation',
+            'deletion_state',
+            'deletion_error',
+            'deletion_requested_at',
+        } <= clip_columns
         assert {'upload_excluded_reason', 'upload_probe_attempt'} <= (
             recording_part_columns
         )
@@ -422,7 +439,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 25
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
     finally:
         await database.close()
 
@@ -470,7 +487,7 @@ async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
             'output_video_path': '/clips/legacy.mp4',
             'file_size_bytes': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 25
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
     finally:
         await database.close()
 
@@ -508,7 +525,7 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 25
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
         assert (
             await database.scalar(
                 'SELECT file_size_bytes FROM highlight_clips WHERE id=8'
@@ -526,6 +543,76 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
             'upload_jobs_state_session_idx',
             'highlight_clips_library_idx',
         } <= indexes
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 26):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(1,100,'legacy:1','closed',1)"
+        )
+        connection.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,state,'
+            'created_at,updated_at) '
+            "VALUES(1,100,'legacy clip',0,1000,'ready',1,1)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
+        session = await database.fetchone(
+            'SELECT cancellation_generation FROM recording_sessions WHERE id=1'
+        )
+        clip = await database.fetchone(
+            'SELECT cancellation_generation,deletion_state,deletion_error '
+            'FROM highlight_clips WHERE id=1'
+        )
+        assert session is not None and dict(session) == {'cancellation_generation': 0}
+        assert clip is not None and dict(clip) == {
+            'cancellation_generation': 0,
+            'deletion_state': 'none',
+            'deletion_error': None,
+        }
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('upload',1,'submit',0,'in_flight','{}',1)"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json) '
+                "VALUES('upload',1,'submit',0,'unknown_terminal','{}')"
+            )
     finally:
         await database.close()
 

@@ -31,6 +31,7 @@ from .crypto import CredentialCipher
 from .danmaku_import import DanmakuImporter
 from .danmaku_publish import DanmakuPublisher
 from .database import BiliUploadDatabase
+from .deletion_worker import LocalDeletionRejected, LocalDeletionWorker
 from .highlight_cut import LosslessClipper
 from .highlight_danmaku import HighlightDanmakuClipper
 from .highlight_worker import HighlightWorker
@@ -127,6 +128,7 @@ class BiliAccountRuntime:
         self._highlight_service: Optional[HighlightService] = None
         self._highlight_worker: Optional[HighlightWorker] = None
         self._media_index_worker: Optional[MediaIndexWorker] = None
+        self._deletion_worker: Optional[LocalDeletionWorker] = None
         self._notification_scanner: Optional[OperationalHealthScanner] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
@@ -135,6 +137,8 @@ class BiliAccountRuntime:
         self._highlight_stop_event: Optional[asyncio.Event] = None
         self._media_index_task: Optional[asyncio.Task[Any]] = None
         self._media_index_stop_event: Optional[asyncio.Event] = None
+        self._deletion_task: Optional[asyncio.Task[Any]] = None
+        self._deletion_stop_event: Optional[asyncio.Event] = None
         self._session_action_lock = asyncio.Lock()
         self._unavailable_reason: Optional[str] = (
             'Bilibili account management is not ready'
@@ -225,6 +229,10 @@ class BiliAccountRuntime:
         return self._media_index_worker
 
     @property
+    def deletion_worker(self) -> Optional[LocalDeletionWorker]:
+        return self._deletion_worker
+
+    @property
     def unavailable_reason(self) -> Optional[str]:
         return self._unavailable_reason
 
@@ -271,6 +279,19 @@ class BiliAccountRuntime:
             await highlight_worker.backfill_file_sizes(limit=100)
             media_index_worker = MediaIndexWorker(database, clock=self._clock)
             await media_index_worker.recover_interrupted()
+            recording_root = (
+                Path(self._recording_root)
+                if self._recording_root is not None
+                else Path(database.path).parent / 'rec'
+            )
+            deletion_worker = LocalDeletionWorker(
+                database,
+                recording_root=recording_root,
+                clip_root=recording_root.resolve().parent / 'clips',
+                active_session_canceller=self._active_session_canceller,
+                clock=self._clock,
+            )
+            await deletion_worker.recover_interrupted()
             key_id = hashlib.sha256(self._credential_key).hexdigest()
             keys: Dict[str, bytes] = dict(self._old_credential_keys)
             keys[key_id] = self._credential_key
@@ -335,6 +356,7 @@ class BiliAccountRuntime:
                 recording_root=(
                     None if self._recording_root is None else Path(self._recording_root)
                 ),
+                deletion_worker=deletion_worker,
                 clock=self._clock,
             )
             await task_actions.recover_interrupted()
@@ -442,12 +464,14 @@ class BiliAccountRuntime:
         self._highlight_service = highlight_service
         self._highlight_worker = highlight_worker
         self._media_index_worker = media_index_worker
+        self._deletion_worker = deletion_worker
         self._notification_scanner = notification_scanner
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
         await self._start_upload_worker()
         await self._start_highlight_worker()
         await self._start_media_index_worker()
+        await self._start_deletion_worker()
         return True
 
     async def primary_cookie_header(self, url: str) -> Optional[str]:
@@ -520,17 +544,14 @@ class BiliAccountRuntime:
             return await coordinator.create_highlight_job(session_id)
 
     async def delete_highlight_clip(self, clip_id: int) -> str:
-        service = self._highlight_service
-        if service is None:
+        deletion_worker = self._deletion_worker
+        if deletion_worker is None:
             raise UploadTaskActionRejected('高光片段管理当前不可用')
-        async with self._session_action_lock:
-            await self._stop_upload_worker()
-            await self._stop_highlight_worker()
-            try:
-                return await service.delete_clip(clip_id)
-            finally:
-                await self._start_highlight_worker()
-                await self._start_upload_worker()
+        try:
+            await deletion_worker.request_clip(clip_id)
+        except LocalDeletionRejected as error:
+            raise UploadTaskActionRejected(str(error)) from None
+        return 'queued'
 
     async def run_recording_session_action(
         self, action: str, session_id: int, *, manager_subject: str
@@ -551,64 +572,47 @@ class BiliAccountRuntime:
         if row is None:
             raise UploadTaskActionRejected('录制场次不存在')
 
-        if action in (
-            'set_upload',
-            'set_skip',
-            'delete_local',
-            'pause_upload',
-            'resume_upload',
-        ):
+        if action == 'delete_local':
+            deletion_worker = self._deletion_worker
+            if deletion_worker is None:
+                raise UploadTaskActionRejected('本地删除服务当前不可用')
+            try:
+                await deletion_worker.request_session(
+                    session_id, manager_subject=manager_subject
+                )
+            except LocalDeletionRejected as error:
+                raise UploadTaskActionRejected(str(error)) from None
+            return '已排队删除本地场次及文件'
+
+        if action in ('set_upload', 'set_skip', 'pause_upload', 'resume_upload'):
             async with self._session_action_lock:
-                await self._stop_upload_worker()
-                try:
-                    if action == 'delete_local':
-                        if str(row['state']) == 'open':
-                            if self._active_session_canceller is None:
-                                raise UploadTaskActionRejected(
-                                    '当前录制无法停止，请稍后再试'
-                                )
-                            try:
-                                await self._active_session_canceller(
-                                    int(row['room_id'])
-                                )
-                            except UploadTaskActionRejected:
-                                raise
-                            except Exception as error:
-                                raise UploadTaskActionRejected(
-                                    '停止当前录制失败：{}'.format(error)
-                                ) from None
-                        return await actions.delete_session(
-                            session_id, manager_subject=manager_subject
-                        )
-                    job_id = row['job_id']
-                    if action in ('pause_upload', 'resume_upload'):
-                        if job_id is None:
-                            raise UploadTaskActionRejected('本场录像尚未创建上传任务')
-                        if action == 'pause_upload':
-                            return await actions.pause_upload(
-                                int(job_id), manager_subject=manager_subject
-                            )
-                        return await actions.resume_upload(
+                job_id = row['job_id']
+                if action in ('pause_upload', 'resume_upload'):
+                    if job_id is None:
+                        raise UploadTaskActionRejected('本场录像尚未创建上传任务')
+                    if action == 'pause_upload':
+                        return await actions.pause_upload(
                             int(job_id), manager_subject=manager_subject
                         )
-                    if row['job_id'] is not None:
-                        if action == 'set_skip':
-                            return await actions.skip_upload(
-                                int(row['job_id']), manager_subject=manager_subject
-                            )
-                        return '本场录像已经创建上传任务'
-                    await submissions.set_decision(
-                        session_id,
-                        'upload' if action == 'set_upload' else 'skip',
-                        manager_subject=manager_subject,
+                    return await actions.resume_upload(
+                        int(job_id), manager_subject=manager_subject
                     )
-                    return (
-                        '本场录像将在录制结束后创建上传任务'
-                        if action == 'set_upload'
-                        else '本场录像已设为不投稿'
-                    )
-                finally:
-                    await self._start_upload_worker()
+                if row['job_id'] is not None:
+                    if action == 'set_skip':
+                        return await actions.skip_upload(
+                            int(row['job_id']), manager_subject=manager_subject
+                        )
+                    return '本场录像已经创建上传任务'
+                await submissions.set_decision(
+                    session_id,
+                    'upload' if action == 'set_upload' else 'skip',
+                    manager_subject=manager_subject,
+                )
+                return (
+                    '本场录像将在录制结束后创建上传任务'
+                    if action == 'set_upload'
+                    else '本场录像已设为不投稿'
+                )
 
         job_id = row['job_id']
         if job_id is None:
@@ -633,6 +637,9 @@ class BiliAccountRuntime:
         raise UploadTaskActionRejected('不支持的场次操作')
 
     async def close(self) -> None:
+        if self._deletion_worker is not None:
+            self._deletion_worker.stop_admission()
+        await self._stop_deletion_worker()
         await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
@@ -661,6 +668,7 @@ class BiliAccountRuntime:
         self._highlight_service = None
         self._highlight_worker = None
         self._media_index_worker = None
+        self._deletion_worker = None
         self._notification_scanner = None
         self._content_reader = None
         transport, self._transport = self._transport, None
@@ -876,6 +884,24 @@ class BiliAccountRuntime:
         if task is not None:
             await task
 
+    async def _stop_deletion_worker(self) -> None:
+        stop_event, self._deletion_stop_event = self._deletion_stop_event, None
+        if stop_event is not None:
+            stop_event.set()
+        task, self._deletion_task = self._deletion_task, None
+        if task is not None:
+            await task
+
+    async def _start_deletion_worker(self) -> None:
+        if self._deletion_task is not None and not self._deletion_task.done():
+            return
+        worker = self._deletion_worker
+        if worker is None:
+            return
+        stop_event = asyncio.Event()
+        self._deletion_stop_event = stop_event
+        self._deletion_task = asyncio.create_task(worker.run(stop_event))
+
     async def _start_media_index_worker(self) -> None:
         if self._media_index_task is not None and not self._media_index_task.done():
             return
@@ -889,6 +915,9 @@ class BiliAccountRuntime:
         )
 
     async def _close_partial(self, database: BiliUploadDatabase) -> None:
+        if self._deletion_worker is not None:
+            self._deletion_worker.stop_admission()
+        await self._stop_deletion_worker()
         await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
@@ -910,6 +939,7 @@ class BiliAccountRuntime:
         self._highlight_service = None
         self._highlight_worker = None
         self._media_index_worker = None
+        self._deletion_worker = None
         self._notification_scanner = None
         self._journal = None
         self._content_reader = None

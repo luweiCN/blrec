@@ -186,14 +186,18 @@ class CommentPlanner:
         database = self._require_database()
         job = await database.fetchone(
             'SELECT job.id,job.account_id,job.aid,job.comment_branch_state,'
-            'job.state,account.uid AS account_uid FROM upload_jobs job '
+            'job.state,account.uid AS account_uid,session.deletion_state '
+            'FROM upload_jobs job '
             'JOIN bili_accounts account ON account.id=job.account_id '
+            'JOIN recording_sessions session ON session.id=job.session_id '
             'WHERE job.id=?',
             (job_id,),
         )
         if job is None:
             raise ValueError("unknown upload job '{}'".format(job_id))
         if str(job['comment_branch_state']) != 'pending':
+            return
+        if str(job['deletion_state']) != 'none':
             return
         aid = self._positive_int(job['aid'])
         if str(job['state']) != 'approved' or aid is None:
@@ -225,14 +229,17 @@ class CommentPlanner:
 
         def persist(connection: sqlite3.Connection) -> None:
             current = connection.execute(
-                'SELECT state,account_id,aid,comment_branch_state '
-                'FROM upload_jobs WHERE id=?',
+                'SELECT job.state,job.account_id,job.aid,job.comment_branch_state,'
+                'session.deletion_state FROM upload_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'WHERE job.id=?',
                 (job_id,),
             ).fetchone()
             if (
                 current is None
                 or str(current['state']) != 'approved'
                 or str(current['comment_branch_state']) != 'pending'
+                or str(current['deletion_state']) != 'none'
                 or int(current['account_id']) != account_id
                 or self._positive_int(current['aid']) != aid
             ):

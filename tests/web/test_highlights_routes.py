@@ -207,6 +207,8 @@ def test_global_clip_library_route_is_paginated(client: TestClient) -> None:
         'uploadState': None,
         'uploadPercent': None,
         'uploadBvid': None,
+        'deletionState': 'none',
+        'deletionError': None,
     }
     service = highlights.service
     assert service is not None
