@@ -427,14 +427,12 @@ class UposUploader:
                     body=body,
                 )
             except asyncio.CancelledError:
-                await asyncio.shield(
-                    self._settle_chunk_failure(
-                        part_id,
-                        chunk.chunk_no,
-                        claim,
-                        outcome_state='unknown_terminal',
-                        outcome={},
-                    )
+                await self._settle_chunk_failure(
+                    part_id,
+                    chunk.chunk_no,
+                    claim,
+                    outcome_state='unknown_terminal',
+                    outcome={},
                 )
                 raise
             except BiliApiError as error:
@@ -1064,7 +1062,12 @@ class UposUploader:
                 ),
             )
 
-        await self._database.write(begin)
+        _, cancelled = await self._drain_boundary(self._database.write(begin))
+        if cancelled:
+            await self._settle_chunk_failure(
+                part_id, chunk_no, claim, outcome_state='cancelled_local', outcome={}
+            )
+            raise asyncio.CancelledError()
 
     async def _complete_chunk_request(
         self,
@@ -1108,7 +1111,10 @@ class UposUploader:
             )
             return True
 
-        return await self._database.write(complete)
+        active, cancelled = await self._drain_boundary(self._database.write(complete))
+        if cancelled:
+            raise asyncio.CancelledError()
+        return bool(active)
 
     async def _settle_chunk_failure(
         self,
@@ -1151,7 +1157,22 @@ class UposUploader:
             )
             return False
 
-        return await self._database.write(settle)
+        active, cancelled = await self._drain_boundary(self._database.write(settle))
+        if cancelled:
+            raise asyncio.CancelledError()
+        return bool(active)
+
+    @staticmethod
+    async def _drain_boundary(operation: Any) -> Tuple[Any, bool]:
+        task = asyncio.ensure_future(operation)
+        cancelled = False
+        while True:
+            try:
+                return await asyncio.shield(task), cancelled
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    return task.result(), cancelled
 
     async def _begin_completion(
         self, part_id: int, claim: LeaseClaim, session_json: str

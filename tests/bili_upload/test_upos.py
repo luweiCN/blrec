@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,12 +10,15 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pytest
 
+from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim, LeaseLost
+from blrec.bili_upload.deletion_worker import LocalDeletionWorker
 from blrec.bili_upload.errors import (
     BiliApiError,
     DefinitelyNotSent,
     RemoteOutcomeUnknown,
 )
+from blrec.bili_upload.upload import UploadCoordinator
 from blrec.bili_upload.upos import (
     FileIdentity,
     UposUploadDeferred,
@@ -957,4 +961,261 @@ async def test_completion_not_sent_state_is_atomic_before_followup_work(
             == 0
         )
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_chunk_intent_commit_does_not_block_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcdefgh')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    intent_committed = threading.Event()
+    release_database_thread = threading.Event()
+    target_ready = asyncio.Event()
+    peer_failed = asyncio.Event()
+    original_write_sync = database._write_sync
+    loop = asyncio.get_running_loop()
+
+    def block_after_target_intent_commit(operation: Any) -> Any:
+        result = original_write_sync(operation)
+        if getattr(operation, '__name__', '') == 'begin':
+            committed = (
+                database._require_connection()
+                .execute(
+                    "SELECT 1 FROM owner_handoff_outcomes WHERE owner_kind='upos' "
+                    "AND side_effect_key='chunk:1' AND outcome_state='in_flight'"
+                )
+                .fetchone()
+            )
+            if committed is not None and not intent_committed.is_set():
+                intent_committed.set()
+                loop.call_soon_threadsafe(target_ready.set)
+                if not release_database_thread.wait(timeout=5):
+                    raise RuntimeError('test chunk intent barrier timed out')
+        return result
+
+    monkeypatch.setattr(database, '_write_sync', block_after_target_intent_commit)
+    try:
+        await prepared_part(database, path)
+        protocol = FakeProtocol()
+        uploader = UposUploader(
+            database, protocol, chunk_size=4, concurrency=2, clock=lambda: 1000
+        )
+        original_upload_chunk = uploader._upload_chunk
+
+        async def fail_peer_before_intent(
+            part_id: int,
+            identity: FileIdentity,
+            session: Any,
+            session_json: str,
+            claim: LeaseClaim,
+            chunk: Any,
+            chunks: int,
+        ) -> None:
+            if chunk.chunk_no == 0:
+                await target_ready.wait()
+                peer_failed.set()
+                raise UposUploadDeferred(30, 'peer chunk deferred')
+            await original_upload_chunk(
+                part_id, identity, session, session_json, claim, chunk, chunks
+            )
+
+        uploader._upload_chunk = fail_peer_before_intent  # type: ignore
+
+        async def load_bundle(account_id: int) -> object:
+            assert account_id == 1
+            return object()
+
+        coordinator = UploadCoordinator(
+            database,
+            protocol,
+            uploader,
+            bundle_loader=load_bundle,
+            account_gates=AccountWriteGate(database),
+            cover_resolver=object(),
+            worker_id='upload-test',
+            clock=lambda: 1000,
+        )
+        process = asyncio.create_task(coordinator.run_once())
+        committed = await loop.run_in_executor(None, intent_committed.wait, 2)
+        assert committed
+        await asyncio.wait_for(peer_failed.wait(), timeout=1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release_database_thread.set()
+
+        assert await asyncio.wait_for(process, timeout=2) == 1
+        chunks = await database.fetchall(
+            'SELECT chunk_no,state FROM upload_chunks ORDER BY chunk_no'
+        )
+        assert [(int(row['chunk_no']), str(row['state'])) for row in chunks] == [
+            (0, 'prepared'),
+            (1, 'prepared'),
+        ]
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upos' AND outcome_state='in_flight'"
+            )
+            == 0
+        )
+
+        deletion = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        await deletion.request_session(1, manager_subject='manager')
+        assert await deletion.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+        assert not path.exists()
+    finally:
+        release_database_thread.set()
+        if 'process' in locals():
+            await asyncio.gather(process, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_chunk_success_commit_preserves_etag_and_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcdefgh')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    database_thread_blocked = threading.Event()
+    release_database_thread = threading.Event()
+    allow_target_response = asyncio.Event()
+    deletion_write_queued = asyncio.Event()
+    complete_write_queued = asyncio.Event()
+    peer_failed = asyncio.Event()
+    blocker_tasks: List[asyncio.Task[Any]] = []
+    original_write = database.write
+    loop = asyncio.get_running_loop()
+
+    async def observe_chunk_complete(operation: Any) -> Any:
+        operation_name = getattr(operation, '__name__', '')
+        if operation_name == 'complete':
+            complete_write_queued.set()
+        elif operation_name == 'request':
+            deletion_write_queued.set()
+        return await original_write(operation)
+
+    monkeypatch.setattr(database, 'write', observe_chunk_complete)
+
+    class SuccessfulTargetProtocol(FakeProtocol):
+        async def upload_chunk(
+            self,
+            session: FakeSession,
+            *,
+            chunk_no: int,
+            chunks: int,
+            start: int,
+            total: int,
+            body: bytes,
+        ) -> Mapping[str, Any]:
+            del session, chunks, start, total, body
+            self.chunk_calls.append(chunk_no)
+
+            def occupy_database(_connection: Any) -> None:
+                database_thread_blocked.set()
+                if not release_database_thread.wait(timeout=5):
+                    raise RuntimeError('test chunk completion barrier timed out')
+
+            blocker_tasks.append(asyncio.create_task(database.write(occupy_database)))
+            blocked = await loop.run_in_executor(None, database_thread_blocked.wait, 2)
+            assert blocked
+            await allow_target_response.wait()
+            return {'etag': 'etag-known-success'}
+
+    try:
+        await prepared_part(database, path)
+        protocol = SuccessfulTargetProtocol()
+        uploader = UposUploader(
+            database, protocol, chunk_size=4, concurrency=2, clock=lambda: 1000
+        )
+        original_upload_chunk = uploader._upload_chunk
+
+        async def fail_peer_before_intent(
+            part_id: int,
+            identity: FileIdentity,
+            session: Any,
+            session_json: str,
+            claim: LeaseClaim,
+            chunk: Any,
+            chunks: int,
+        ) -> None:
+            if chunk.chunk_no == 0:
+                await complete_write_queued.wait()
+                peer_failed.set()
+                raise UposUploadDeferred(30, 'peer chunk deferred')
+            await original_upload_chunk(
+                part_id, identity, session, session_json, claim, chunk, chunks
+            )
+
+        uploader._upload_chunk = fail_peer_before_intent  # type: ignore
+
+        async def load_bundle(account_id: int) -> object:
+            assert account_id == 1
+            return object()
+
+        coordinator = UploadCoordinator(
+            database,
+            protocol,
+            uploader,
+            bundle_loader=load_bundle,
+            account_gates=AccountWriteGate(database),
+            cover_resolver=object(),
+            worker_id='upload-test',
+            clock=lambda: 1000,
+        )
+        process = asyncio.create_task(coordinator.run_once())
+        blocked = await loop.run_in_executor(None, database_thread_blocked.wait, 2)
+        assert blocked
+        deletion = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        deletion_request = asyncio.create_task(
+            deletion.request_session(1, manager_subject='manager')
+        )
+        await asyncio.wait_for(deletion_write_queued.wait(), timeout=1)
+        allow_target_response.set()
+        await asyncio.wait_for(peer_failed.wait(), timeout=2)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release_database_thread.set()
+
+        assert await asyncio.wait_for(deletion_request, timeout=2) == 1
+        assert await asyncio.wait_for(process, timeout=2) == 1
+        target = await database.fetchone(
+            'SELECT state,etag FROM upload_chunks WHERE chunk_no=1'
+        )
+        assert target is not None
+        assert dict(target) == {'state': 'confirmed', 'etag': 'etag-known-success'}
+        outcome = await database.fetchone(
+            'SELECT outcome_state,outcome_json,acknowledged_at '
+            "FROM owner_handoff_outcomes WHERE owner_kind='upos' "
+            "AND side_effect_key='chunk:1'"
+        )
+        assert outcome is not None
+        assert outcome['outcome_state'] == 'confirmed_success'
+        assert json.loads(str(outcome['outcome_json'])) == {
+            'etag': 'etag-known-success'
+        }
+        assert outcome['acknowledged_at'] is not None
+
+        assert await deletion.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+        assert not path.exists()
+    finally:
+        allow_target_response.set()
+        release_database_thread.set()
+        if blocker_tasks:
+            await asyncio.gather(*blocker_tasks, return_exceptions=True)
+        if 'deletion_request' in locals():
+            await asyncio.gather(deletion_request, return_exceptions=True)
+        if 'process' in locals():
+            await asyncio.gather(process, return_exceptions=True)
         await database.close()
