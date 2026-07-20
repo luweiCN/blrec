@@ -1,8 +1,9 @@
 # Request Performance Audit
 
-Audited baseline: `57361f7` (2026-07-20). The inventory is generated from the
-registered FastAPI routes, then checked against each router handler. It contains
-exactly 103 inbound endpoints: 101 HTTP endpoints and 2 WebSocket endpoints.
+Audited baseline: `57361f7` (2026-07-20); hot-read evidence is current through
+`2c7b933`. The inventory is generated from the registered FastAPI routes, then
+checked against each router handler. It contains exactly 105 inbound endpoints:
+103 HTTP endpoints and 2 WebSocket endpoints.
 
 This ledger records only normalized route templates and repository-relative source
 evidence. It intentionally contains no credentials, request/query values, runtime
@@ -152,11 +153,11 @@ the NAS.
 | I-058 | DELETE | `/api/v1/bili-accounts/qr-sessions/{session_id}` | bili_accounts | W | C100 | `src/blrec/web/routers/bili_accounts.py:cancel_qr_session` -> local session cancellation | Local cancellation is bounded. | Keep. |
 | I-059 | POST | `/api/v1/bili-accounts/{account_id}/refresh` | bili_accounts | R,W,X | EXT | `src/blrec/web/routers/bili_accounts.py:refresh_account` -> credential renewal | Non-idempotent renewal has explicit unknown-outcome handling. | Outbound: retain the account write gate and outcome fence. |
 
-### `recording_sessions` router (14)
+### `recording_sessions` router (15)
 
 | ID | Method | Normalized path | Router | IO | Budget | Evidence | Finding | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| I-060 | GET | `/api/v1/recording-sessions` | recording_sessions | R,F | L150 | `src/blrec/web/routers/recording_sessions.py:list_recording_sessions` -> count, sessions, per-session upload projection | Confirmed 26 SQL calls for 20 rows and list-time file existence work. | Hot read: lightweight summaries, bulk aggregates, zero list-time `stat`, matching indexes. |
+| I-060 | GET | `/api/v1/recording-sessions` | recording_sessions | R | L150 | `src/blrec/web/routers/recording_sessions.py:list_recording_sessions` -> `count_sessions`, `list_session_summaries` | A 20-row page now uses count plus one page-first aggregate query and performs no list-time path checks; child scans are index-bounded to selected IDs. | Hot read implemented: deterministic two-call/zero-file budget, summary/detail split, SQLite 3.22/current query-plan evidence; NAS p95 is pending. |
 | I-061 | GET | `/api/v1/recording-sessions/{session_id}/submission-settings` | recording_sessions | R | D100 | `src/blrec/web/routers/recording_sessions.py:get_session_submission_settings` -> session submission manager | Detail-only policy projection; appropriate outside the list. | Keep; fixed query-budget test. |
 | I-062 | PUT | `/api/v1/recording-sessions/{session_id}/submission-settings` | recording_sessions | R,W | C100 | `src/blrec/web/routers/recording_sessions.py:save_session_submission_settings` -> override transaction | Local validated override; no confirmed hotspot. | Keep; transaction regression tests. |
 | I-063 | DELETE | `/api/v1/recording-sessions/{session_id}/submission-settings` | recording_sessions | R,W | C100 | `src/blrec/web/routers/recording_sessions.py:clear_session_submission_settings` -> clear override | Local validated mutation. | Keep. |
@@ -166,22 +167,23 @@ the NAS.
 | I-067 | PUT | `/api/v1/recording-sessions/upload-jobs/{job_id}/settings` | recording_sessions | R,W | C100 | `src/blrec/web/routers/recording_sessions.py:update_upload_task_settings` -> update then detail read | Performs a post-write read; acceptable for one job. | Keep; assert bounded database calls. |
 | I-068 | POST | `/api/v1/recording-sessions/actions` | recording_sessions | R,W,F | C100 ack; local batch <2 s | `src/blrec/web/routers/recording_sessions.py:run_recording_session_actions` -> serial session action runner | Up to 100 actions are serial and can delete/backfill local artifacts. | Write/media: group local mutations and bound file work. |
 | I-069 | POST | `/api/v1/recording-sessions/upload-jobs/retry-failed` | recording_sessions | R,W | C100 ack | `src/blrec/web/routers/recording_sessions.py:retry_all_failed_upload_jobs` -> list then serial retries | Cardinality-dependent serial mutation. | Write/media: one batch selection/transaction; one worker wakeup. |
-| I-070 | GET | `/api/v1/recording-sessions/upload-jobs/retry-failed-preview` | recording_sessions | R | L150 | `src/blrec/web/routers/recording_sessions.py:preview_retryable_failed_upload_jobs` -> retry preview list | Summary path must not hydrate full upload details. | Hot read: reuse lightweight upload summary/query indexes. |
+| I-070 | GET | `/api/v1/recording-sessions/upload-jobs/retry-failed-preview` | recording_sessions | R | L150 | `src/blrec/web/routers/recording_sessions.py:preview_retryable_failed_upload_jobs` -> `UploadTaskActionManager.retryable_failed_jobs` | The preview is a single joined scalar projection and never hydrates upload parts, chunks, danmaku items, or local paths. | Hot read implemented: one database query; NAS p95 is pending and mutation behavior remains in Write/media scope. |
 | I-071 | POST | `/api/v1/recording-sessions/parts/{part_id}/media-access` | recording_sessions | R,F | T150 | `src/blrec/web/routers/recording_sessions.py:create_recording_media_access` -> media lookup and FLV snapshot | Active FLV snapshot/index work can touch the file in the request path. | Write/media: bounded worker, first-byte metrics, snapshot budget. |
 | I-072 | GET | `/api/v1/recording-sessions/parts/{part_id}/media` | recording_sessions | R,F,S | T150 | `src/blrec/web/routers/recording_sessions.py:stream_recording_media` -> range-aware file stream | Range exists, but completed media still uses `no-store` and lacks ETag/conditional requests. | Write/media: completed-file ETag/cache; active snapshots remain `no-store`. |
 | I-073 | GET | `/api/v1/recording-sessions/parts/{part_id}/danmaku` | recording_sessions | R,F | D100 | `src/blrec/web/routers/recording_sessions.py:list_recording_danmaku` -> paged XML read | File parse is detail-only but must not block the event loop. | Write/media: bounded file worker and page latency test. |
+| I-104 | GET | `/api/v1/recording-sessions/{session_id}` | recording_sessions | R,F | D100 | `src/blrec/web/routers/recording_sessions.py:get_recording_session` -> `get_session`, full upload detail | Complete parts, paths, unknown danmaku items, and submission verification are loaded only after the drawer opens; missing IDs return 404. | Hot read implemented: on-demand detail preserves the full contract and is never called by the list pipeline. Per-part availability checks remain intentionally detail-only; NAS p95 is pending. |
 
 ### `recording_retention` router (1)
 
 | ID | Method | Normalized path | Router | IO | Budget | Evidence | Finding | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| I-074 | GET | `/api/v1/recording-retention/status` | recording_retention | R,F | D100 | `src/blrec/web/routers/recording_retention.py:get_retention_status` -> retention manager status | Managed bytes/capacity can repeat aggregate and filesystem work. | Hot read: cached aggregate plus explicit invalidation and no per-part scan. |
+| I-074 | GET | `/api/v1/recording-retention/status` | recording_retention | R | D100 | `src/blrec/web/routers/recording_retention.py:get_retention_status` -> persisted managed-size aggregate | Status uses one aggregate query and no recording-path IO. Capacity cleanup still measures the real filesystem, including active rows with unknown persisted size. | Hot read implemented: one-call/zero-file status budget without weakening destructive cleanup; NAS p95 is pending. |
 
 ### `room_upload_policies` router (5)
 
 | ID | Method | Normalized path | Router | IO | Budget | Evidence | Finding | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| I-075 | GET | `/api/v1/room-upload-policies` | room_upload_policies | R | L150 | `src/blrec/web/routers/room_upload_policies.py:list_room_upload_policies` -> policy manager list | Confirmed policy-to-account N+1 lookup. | Hot read: bulk policies and account names with constant SQL. |
+| I-075 | GET | `/api/v1/room-upload-policies` | room_upload_policies | R | L150 | `src/blrec/web/routers/room_upload_policies.py:list_room_upload_policies` -> joined policy/account projection | Primary and fixed accounts are resolved by one query for 1, 20, and 100 policies; missing, paused, and archived-account semantics are retained. | Hot read implemented: one database call with no policy-to-account N+1; NAS p95 is pending. |
 | I-076 | GET | `/api/v1/room-upload-policies/categories` | room_upload_policies | R,X | D100 cached; EXT forced | `src/blrec/web/routers/room_upload_policies.py:list_upload_categories` -> category catalog | Existing 24-hour cache and per-account single-flight are appropriate. | Keep; Outbound only verifies deadline/stale behavior. |
 | I-077 | GET | `/api/v1/room-upload-policies/{room_id}` | room_upload_policies | R | D100 | `src/blrec/web/routers/room_upload_policies.py:get_room_upload_policy` -> one resolved policy | One detail read; no list amplification. | Keep. |
 | I-078 | PUT | `/api/v1/room-upload-policies/{room_id}` | room_upload_policies | R,W,X | C100 cached; EXT refresh | `src/blrec/web/routers/room_upload_policies.py:upsert_room_upload_policy` -> cached category validation and upsert | Cache miss may call upstream, but local mutation remains one validated write. | Keep cache; Outbound verifies explicit remote deadline. |
@@ -202,18 +204,18 @@ the NAS.
 | I-083 | GET | `/api/v1/bili-collections` | bili_collections | R,X | D100 cached; EXT refresh | `src/blrec/web/routers/bili_collections.py:list_bili_collections` -> remote collection list | No 30-60 second TTL or single-flight; repeated dialogs can duplicate calls. | Outbound: short TTL, per-account single-flight, stale-on-error policy. |
 | I-084 | POST | `/api/v1/bili-collections` | bili_collections | R,W,F,X | EXT | `src/blrec/web/routers/bili_collections.py:create_bili_collection` -> cover resolution/upload and remote create | Multi-step non-idempotent remote operation must preserve unknown-outcome safety. | Outbound: account gate, absolute deadline, no blind retry. |
 
-### `highlights` router (15)
+### `highlights` router (16)
 
 | ID | Method | Normalized path | Router | IO | Budget | Evidence | Finding | Disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | I-085 | POST | `/api/v1/highlights` | highlights | R,W | C100 | `src/blrec/web/routers/highlights.py:create_marker` -> marker insert | Single local marker write. | Keep. |
 | I-086 | PATCH | `/api/v1/highlights/{marker_id}` | highlights | R,W | C100 | `src/blrec/web/routers/highlights.py:update_marker` -> marker update | Single local marker mutation. | Keep. |
 | I-087 | DELETE | `/api/v1/highlights/{marker_id}` | highlights | W | C100 | `src/blrec/web/routers/highlights.py:delete_marker` -> marker delete | Single local destructive mutation. | Keep; focused test only. |
-| I-088 | GET | `/api/v1/highlights/sessions/{session_id}/timeline` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:get_timeline`; `src/blrec/bili_upload/highlights.py:timeline`, `_available_path` | Full marker/part timeline is loaded and candidate paths are checked with `isfile`, while row views only need counts. | Hot read: add lightweight counts; keep the filesystem-aware full timeline lazy in editor. |
+| I-088 | GET | `/api/v1/highlights/sessions/{session_id}/timeline` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:get_timeline`; `src/blrec/bili_upload/highlights.py:timeline`, `_available_path` | The full filesystem-aware timeline remains necessary for the editor, but recording rows/details no longer request it just to display counts. | Hot read complete at the call boundary: timeline is editor-only; I-105 supplies the zero-file count projection. |
 | I-089 | POST | `/api/v1/highlights/sessions/{session_id}/clips/inspect` | highlights | R,F,P | T150 handshake; bounded probe | `src/blrec/web/routers/highlights.py:inspect_clip` -> keyframe/source inspection | Probe work is CPU/filesystem-sensitive and must be bounded off-loop. | Write/media: probe queue and explicit inspection deadline. |
 | I-090 | POST | `/api/v1/highlights/sessions/{session_id}/clips` | highlights | R,W,F,P | C100 ack | `src/blrec/web/routers/highlights.py:create_clip` -> inspect then enqueue clip | Request can perform inspection before queueing worker work. | Write/media: bounded inspect, then recoverable background clip operation. |
 | I-091 | GET | `/api/v1/highlights/sessions/{session_id}/clips` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:list_clips` -> full clip projections | Full projections include source/upload/file-derived fields. | Hot read: counts/summary for rows; full list only when opened. |
-| I-092 | GET | `/api/v1/highlights/clips` | highlights | R,F | L150 | `src/blrec/web/routers/highlights.py:list_all_clips` -> count plus full clip list | Paged list may hydrate sources/upload summaries and file metadata per item. | Hot read: persisted-size bulk summaries, constant SQL, zero per-row `stat`, full detail retained, and only proven indexes. |
+| I-092 | GET | `/api/v1/highlights/clips` | highlights | R | L150 | `src/blrec/web/routers/highlights.py:list_all_clips` -> count plus page-first clip summary | Both 20- and 100-row pages use exactly two database calls and zero `getsize`/`stat`/`lstat`; size is persisted on create/recovery and unknown legacy size stays `null`. | Hot read implemented: selected-page chunk aggregation, migration-24 size lifecycle, at-most-100 startup backfill, unchanged full detail paths/sources, and proven partial index; completion remains pending until warm NAS p95 is below 150 ms. |
 | I-093 | GET | `/api/v1/highlights/clips/{clip_id}` | highlights | R,F | D100 | `src/blrec/web/routers/highlights.py:get_clip` -> full clip detail | Detail route is the correct place for full projection. | Keep; bound file work. |
 | I-094 | POST | `/api/v1/highlights/clips/{clip_id}/retry` | highlights | R,W | C100 | `src/blrec/web/routers/highlights.py:retry_clip` -> state transition | Local queue-state transition only. | Keep; worker performs expensive work later. |
 | I-095 | POST | `/api/v1/highlights/clips/{clip_id}/media-access` | highlights | R,F | T150 | `src/blrec/web/routers/highlights.py:create_clip_media_access` -> path lookup and synchronous `stat` | Synchronous file `stat` occurs in the async request path. | Write/media: move path validation/stat off-loop. |
@@ -221,6 +223,7 @@ the NAS.
 | I-097 | DELETE | `/api/v1/highlights/clips/{clip_id}` | highlights | R,W,F | C100 ack | `src/blrec/web/routers/highlights.py:delete_clip` -> upload guard and local deletion | Destructive file/database work can outlive a control request. | Write/media: recoverable background operation; no bulk NAS test. |
 | I-098 | POST | `/api/v1/highlights/clips/{clip_id}/upload-session` | highlights | R,W | C100 | `src/blrec/web/routers/highlights.py:prepare_upload_session` -> ensure local session | Local idempotent session creation. | Keep; assert bounded queries. |
 | I-099 | POST | `/api/v1/highlights/clips/{clip_id}/upload-task` | highlights | R,W,X | C100 cached; EXT catalog refresh | `src/blrec/web/routers/highlights.py:create_upload_task`; `src/blrec/bili_upload/runtime.py:create_highlight_upload_task` -> catalog validation then local job creation | The media upload remains worker-owned, but a category-catalog cache miss can refresh Bilibili data before the local job is created. | Outbound: preserve the category TTL/single-flight, explicit remote deadline and stale behavior without increasing request cadence; keep the cached local path within C100. |
+| I-105 | GET | `/api/v1/highlights/sessions/{session_id}/marker-counts` | highlights | R | D100 | `src/blrec/web/routers/highlights.py:get_marker_counts` -> `HighlightService.marker_counts` | Persisted marker links and legacy time-boundary mapping are counted with at most two queries, including zero-count parts, without selecting paths or touching files. | Hot read implemented: lightweight detail-row counts with editor-compatible boundary semantics; NAS p95 is pending. |
 
 ### `browser_extension` router (4)
 
@@ -234,7 +237,7 @@ the NAS.
 Machine count:
 
 ```bash
-test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" = 103
+test "$(rg -c '^\| I-[0-9]{3} \|' docs/performance/request-audit.md)" = 105
 ```
 
 ## Outbound operation groups
