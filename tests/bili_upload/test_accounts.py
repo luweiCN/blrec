@@ -140,6 +140,7 @@ class ScriptedProtocol:
         self.poll_results = list(poll_results or [])
         self.refresh_results = list(refresh_results or [])
         self.oauth_results = list(oauth_results or [])
+        self.create_calls = 0
         self.poll_calls = 0
         self.concurrent_pollers = 0
         self.max_concurrent_pollers = 0
@@ -148,11 +149,14 @@ class ScriptedProtocol:
         self.refresh_calls = 0
 
     async def create_qr(self, _params: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.create_calls += 1
         return {
             'code': 0,
             'data': {
-                'auth_code': 'raw-auth-code',
-                'url': 'https://passport.example.invalid/qr',
+                'auth_code': 'raw-auth-code-{}'.format(self.create_calls),
+                'url': 'https://passport.example.invalid/qr/{}'.format(
+                    self.create_calls
+                ),
             },
         }
 
@@ -203,6 +207,61 @@ class ScriptedProtocol:
         return result
 
 
+class BlockingCreateProtocol(ScriptedProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_started = asyncio.Event()
+        self.release_create = asyncio.Event()
+
+    async def create_qr(self, _params: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.create_calls += 1
+        self.create_started.set()
+        await self.release_create.wait()
+        return {
+            'code': 0,
+            'data': {
+                'auth_code': 'raw-auth-code-{}'.format(self.create_calls),
+                'url': 'https://passport.example.invalid/qr/{}'.format(
+                    self.create_calls
+                ),
+            },
+        }
+
+
+class FirstCreateBlockedProtocol(ScriptedProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_create_started = asyncio.Event()
+        self.release_first_create = asyncio.Event()
+
+    async def create_qr(self, _params: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.create_calls += 1
+        call = self.create_calls
+        if call == 1:
+            self.first_create_started.set()
+            await self.release_first_create.wait()
+        return {
+            'code': 0,
+            'data': {
+                'auth_code': 'raw-auth-code-{}'.format(call),
+                'url': 'https://passport.example.invalid/qr/{}'.format(call),
+            },
+        }
+
+
+class BlockingUnknownCreateProtocol(ScriptedProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_started = asyncio.Event()
+        self.release_create = asyncio.Event()
+
+    async def create_qr(self, _params: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.create_calls += 1
+        self.create_started.set()
+        await self.release_create.wait()
+        raise RemoteOutcomeUnknown('create_qr')
+
+
 async def never_wake(_seconds: float) -> None:
     await asyncio.Event().wait()
 
@@ -231,6 +290,239 @@ async def components(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_qr_create_is_single_flight_per_manager_subject(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = BlockingCreateProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    tasks = [
+        asyncio.create_task(manager.create_qr(manager_subject='admin-a'))
+        for _ in range(20)
+    ]
+    try:
+        await asyncio.wait_for(protocol.create_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert protocol.create_calls == 1
+
+        protocol.release_create.set()
+        views = await asyncio.gather(*tasks)
+        for _ in range(100):
+            if protocol.poll_calls:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len({view.id for view in views}) == 1
+        assert len({view.poller_id for view in views}) == 1
+        assert protocol.max_concurrent_pollers == 1
+    finally:
+        protocol.release_create.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_unknown_qr_create_is_not_repeated(tmp_path: Path) -> None:
+    clock = FakeClock()
+    protocol = BlockingUnknownCreateProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    tasks = [
+        asyncio.create_task(manager.create_qr(manager_subject='admin'))
+        for _ in range(20)
+    ]
+    try:
+        await asyncio.wait_for(protocol.create_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        protocol.release_create.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert protocol.create_calls == 1
+        assert all(isinstance(result, RemoteOutcomeUnknown) for result in results)
+        assert manager._runtimes == {}
+    finally:
+        protocol.release_create.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_qr_create_waiter_keeps_shared_create_alive(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = BlockingCreateProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    leader = asyncio.create_task(manager.create_qr(manager_subject='admin'))
+    followers = []
+    try:
+        await asyncio.wait_for(protocol.create_started.wait(), timeout=1)
+        followers = [
+            asyncio.create_task(manager.create_qr(manager_subject='admin'))
+            for _ in range(19)
+        ]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+        await asyncio.sleep(0)
+        assert protocol.create_calls == 1
+
+        protocol.release_create.set()
+        views = await asyncio.gather(*followers)
+        assert len({view.id for view in views}) == 1
+        assert protocol.create_calls == 1
+    finally:
+        protocol.release_create.set()
+        await asyncio.gather(leader, *followers, return_exceptions=True)
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_qr_create_locks_are_isolated_by_manager_subject(tmp_path: Path) -> None:
+    clock = FakeClock()
+    protocol = FirstCreateBlockedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    first = asyncio.create_task(manager.create_qr(manager_subject='admin-a'))
+    try:
+        await asyncio.wait_for(protocol.first_create_started.wait(), timeout=1)
+        second = await asyncio.wait_for(
+            manager.create_qr(manager_subject='admin-b'), timeout=1
+        )
+        protocol.release_first_create.set()
+        first_view = await asyncio.wait_for(first, timeout=1)
+
+        assert first_view.id != second.id
+        assert protocol.create_calls == 2
+    finally:
+        protocol.release_first_create.set()
+        await asyncio.gather(first, return_exceptions=True)
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_qr_is_reused_until_cancelled(tmp_path: Path) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        first = await manager.create_qr(manager_subject='admin')
+        reused = await manager.create_qr(manager_subject='admin')
+
+        assert reused.id == first.id
+        assert reused.poller_id == first.poller_id
+        assert protocol.create_calls == 1
+
+        cancelled = await manager.cancel(first.id, manager_subject='admin')
+        replacement = await manager.create_qr(manager_subject='admin')
+
+        assert cancelled.state == 'cancelled'
+        assert replacement.id != first.id
+        assert protocol.create_calls == 2
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_qr_status_is_local_and_close_clears_single_flight_state(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        session = await manager.create_qr(manager_subject='admin')
+        for _ in range(100):
+            if protocol.poll_calls:
+                break
+            await asyncio.sleep(0.01)
+        upstream_calls = (protocol.create_calls, protocol.poll_calls)
+
+        views = await asyncio.gather(
+            *(manager.status(session.id, manager_subject='admin') for _ in range(20))
+        )
+
+        assert {view.id for view in views} == {session.id}
+        assert (protocol.create_calls, protocol.poll_calls) == upstream_calls
+
+        poll_tasks = [
+            runtime.task
+            for runtime in manager._runtimes.values()
+            if runtime.task is not None
+        ]
+        await manager.close()
+
+        assert poll_tasks
+        assert all(task.done() for task in poll_tasks)
+        assert all(runtime.task is None for runtime in manager._runtimes.values())
+        assert manager._qr_create_tasks == {}
+        assert manager._qr_create_locks == {}
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_close_prevents_in_flight_qr_create_from_starting_a_poller(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = BlockingCreateProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    creating = asyncio.create_task(manager.create_qr(manager_subject='admin'))
+    try:
+        await asyncio.wait_for(protocol.create_started.wait(), timeout=1)
+        await manager.close()
+        protocol.release_create.set()
+
+        with pytest.raises(RuntimeError, match='account manager is closed'):
+            await creating
+
+        assert manager._runtimes == {}
+        assert manager._qr_create_locks == {}
+    finally:
+        protocol.release_create.set()
+        await asyncio.gather(creating, return_exceptions=True)
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_close_before_shared_qr_task_starts_reports_manager_closed(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        creating = asyncio.create_task(manager.create_qr(manager_subject='admin'))
+        closing = asyncio.create_task(manager.close())
+        create_result, close_result = await asyncio.gather(
+            creating, closing, return_exceptions=True
+        )
+
+        assert isinstance(create_result, RuntimeError)
+        assert str(create_result) == 'account manager is closed'
+        assert close_result is None
+        assert protocol.create_calls == 0
+        assert manager._runtimes == {}
+        assert manager._qr_create_tasks == {}
+        assert manager._qr_create_locks == {}
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_one_poller_expires_after_180_seconds(tmp_path: Path) -> None:
     clock = FakeClock()
     protocol = ScriptedProtocol()
@@ -254,6 +546,10 @@ async def test_one_poller_expires_after_180_seconds(tmp_path: Path) -> None:
         assert row is not None
         assert row['auth_code_hash'] != 'raw-auth-code'
         assert row['state'] == 'expired'
+
+        replacement = await manager.create_qr(manager_subject='admin')
+        assert replacement.id != session.id
+        assert protocol.create_calls == 2
     finally:
         await manager.close()
         await database.close()
@@ -291,6 +587,54 @@ async def test_unknown_qr_code_fails_without_repeated_polling(tmp_path: Path) ->
 
         assert current.state == 'failed'
         assert protocol.poll_calls == 1
+
+        replacement = await manager.create_qr(manager_subject='admin')
+        assert replacement.id != session.id
+        assert protocol.create_calls == 2
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_qr_allows_one_new_session(tmp_path: Path) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol(poll_results=[confirmed_response()])
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        session = await manager.create_qr(manager_subject='admin')
+        for _ in range(100):
+            current = await manager.status(session.id, manager_subject='admin')
+            if current.state == 'confirmed':
+                break
+            await asyncio.sleep(0.01)
+
+        replacement = await manager.create_qr(manager_subject='admin')
+
+        assert current.state == 'confirmed'
+        assert replacement.id != session.id
+        assert protocol.create_calls == 2
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_qr_create_is_not_retried(tmp_path: Path) -> None:
+    class UnknownCreateProtocol(ScriptedProtocol):
+        async def create_qr(self, _params: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.create_calls += 1
+            raise RemoteOutcomeUnknown('create_qr')
+
+    clock = FakeClock()
+    protocol = UnknownCreateProtocol()
+    database, _store, _cipher, manager = await components(tmp_path, protocol, clock)
+    try:
+        with pytest.raises(RemoteOutcomeUnknown):
+            await manager.create_qr(manager_subject='admin')
+
+        assert protocol.create_calls == 1
+        assert manager._runtimes == {}
     finally:
         await manager.close()
         await database.close()

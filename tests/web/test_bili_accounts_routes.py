@@ -35,10 +35,13 @@ class FakeAccountManager:
     missing_session: bool = False
     missing_account: bool = False
     last_subject: Optional[str] = None
+    create_calls: int = 0
+    status_calls: int = 0
     last_removal_command: Optional[AccountRemovalCommand] = None
     removal_error: Optional[Exception] = None
 
     async def create_qr(self, *, manager_subject: str) -> QrSessionView:
+        self.create_calls += 1
         self.last_subject = manager_subject
         return QrSessionView(
             id='session-1',
@@ -49,6 +52,7 @@ class FakeAccountManager:
         )
 
     async def status(self, session_id: str, *, manager_subject: str) -> QrSessionView:
+        self.status_calls += 1
         self.last_subject = manager_subject
         if self.missing_session:
             raise QrSessionNotFound('QR session not found')
@@ -194,11 +198,15 @@ def test_create_and_poll_qr_session_returns_no_internal_poller(
     client: TestClient, manager: FakeAccountManager
 ) -> None:
     created = client.post('/api/v1/bili-accounts/qr-sessions', headers=auth_headers())
+    first_subject = manager.last_subject
+    reused = client.post('/api/v1/bili-accounts/qr-sessions', headers=auth_headers())
     status = client.get(
         '/api/v1/bili-accounts/qr-sessions/session-1', headers=auth_headers()
     )
 
     assert created.status_code == 201
+    assert reused.status_code == 201
+    assert reused.json()['id'] == created.json()['id']
     assert created.json() == {
         'id': 'session-1',
         'state': 'pending',
@@ -210,6 +218,9 @@ def test_create_and_poll_qr_session_returns_no_internal_poller(
     assert status.json()['accountId'] == 7
     assert 'pollerId' not in created.json()
     assert manager.last_subject
+    assert first_subject == manager.last_subject
+    assert manager.create_calls == 2
+    assert manager.status_calls == 1
     assert 'test-api-key' not in manager.last_subject
 
 

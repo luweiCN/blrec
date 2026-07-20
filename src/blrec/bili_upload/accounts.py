@@ -200,6 +200,8 @@ class AccountManager:
         self._lifecycle = AccountLifecycle(database, clock=clock)
         self._on_primary_credential_changed = on_primary_credential_changed
         self._runtimes: Dict[str, _QrRuntime] = {}
+        self._qr_create_locks: Dict[str, asyncio.Lock] = {}
+        self._qr_create_tasks: Dict[str, asyncio.Task[QrSessionView]] = {}
         self._started = False
         self._closed = False
         self._start_lock = asyncio.Lock()
@@ -222,21 +224,84 @@ class AccountManager:
             self._started = True
 
     async def close(self) -> None:
-        self._closed = True
-        tasks = []
-        for runtime in self._runtimes.values():
-            if runtime.task is not None and not runtime.task.done():
-                runtime.task.cancel()
-                tasks.append(runtime.task)
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        async with self._start_lock:
+            self._closed = True
+            create_tasks = list(self._qr_create_tasks.values())
+            for task in create_tasks:
+                if not task.done():
+                    task.cancel()
+            if create_tasks:
+                await asyncio.gather(*create_tasks, return_exceptions=True)
+            tasks = []
+            for runtime in self._runtimes.values():
+                if runtime.task is not None and not runtime.task.done():
+                    runtime.task.cancel()
+                    tasks.append(runtime.task)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            for runtime in self._runtimes.values():
+                runtime.task = None
+            self._qr_create_tasks.clear()
+            self._qr_create_locks.clear()
 
     async def create_qr(self, *, manager_subject: str) -> QrSessionView:
         if not manager_subject:
             raise QrSessionForbidden('manager subject is required')
         if self._closed:
             raise RuntimeError('account manager is closed')
-        await self.start()
+        lock = self._qr_create_locks.setdefault(manager_subject, asyncio.Lock())
+        async with lock:
+            if self._closed:
+                raise RuntimeError('account manager is closed')
+            active = next(
+                (
+                    runtime
+                    for runtime in self._runtimes.values()
+                    if runtime.manager_subject == manager_subject
+                    and runtime.state in self._NONTERMINAL_QR_STATES
+                ),
+                None,
+            )
+            if active is not None:
+                return self._runtime_view(active)
+            task = self._qr_create_tasks.get(manager_subject)
+            if task is None:
+                task = asyncio.create_task(self._create_qr_task(manager_subject))
+                self._qr_create_tasks[manager_subject] = task
+
+                def finish(finished: asyncio.Task[QrSessionView]) -> None:
+                    self._finish_qr_create_task(manager_subject, finished)
+
+                task.add_done_callback(finish)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if self._closed and task.cancelled():
+                raise RuntimeError('account manager is closed') from None
+            raise
+
+    async def _create_qr_task(self, manager_subject: str) -> QrSessionView:
+        try:
+            if self._closed:
+                raise RuntimeError('account manager is closed')
+            await self.start()
+            if self._closed:
+                raise RuntimeError('account manager is closed')
+            return await self._create_qr_locked(manager_subject)
+        except asyncio.CancelledError:
+            if self._closed:
+                raise RuntimeError('account manager is closed') from None
+            raise
+
+    def _finish_qr_create_task(
+        self, manager_subject: str, task: asyncio.Task[QrSessionView]
+    ) -> None:
+        if self._qr_create_tasks.get(manager_subject) is task:
+            self._qr_create_tasks.pop(manager_subject, None)
+        if not task.cancelled():
+            task.exception()
+
+    async def _create_qr_locked(self, manager_subject: str) -> QrSessionView:
         response = await self._protocol.create_qr({})
         data = self._response_data(response, 'QR create')
         auth_code = self._required_text(data, 'auth_code', 'QR create')
@@ -252,24 +317,27 @@ class AccountManager:
             poller_id=uuid.uuid4().hex,
             app_device_id=secrets.token_hex(16),
         )
-        await self._database.execute(
-            'INSERT INTO qr_sessions('
-            'id,manager_subject,auth_code_hash,state,expires_at,created_at,updated_at'
-            ') VALUES(?,?,?,?,?,?,?)',
-            (
-                session_id,
-                manager_subject,
-                hashlib.sha256(auth_code.encode('utf8')).hexdigest(),
-                runtime.state,
-                runtime.expires_at,
-                now,
-                now,
-            ),
-        )
-        self._runtimes[session_id] = runtime
-        runtime.task = asyncio.create_task(self._poll(runtime))
-        await asyncio.sleep(0)
-        return self._runtime_view(runtime)
+        async with self._start_lock:
+            if self._closed:
+                raise RuntimeError('account manager is closed')
+            await self._database.execute(
+                'INSERT INTO qr_sessions('
+                'id,manager_subject,auth_code_hash,state,expires_at,created_at,'
+                'updated_at) VALUES(?,?,?,?,?,?,?)',
+                (
+                    session_id,
+                    manager_subject,
+                    hashlib.sha256(auth_code.encode('utf8')).hexdigest(),
+                    runtime.state,
+                    runtime.expires_at,
+                    now,
+                    now,
+                ),
+            )
+            self._runtimes[session_id] = runtime
+            runtime.task = asyncio.create_task(self._poll(runtime))
+            await asyncio.sleep(0)
+            return self._runtime_view(runtime)
 
     async def status(self, session_id: str, *, manager_subject: str) -> QrSessionView:
         await self.start()
