@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from blrec.bili_upload.covers import CoverLibrary
+from blrec.bili_upload.covers import CoverLibrary, CoverWorkSaturated
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.web import security
 from blrec.web.routers import upload_covers
@@ -43,6 +43,9 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
     @api.on_event('shutdown')
     async def stop() -> None:
+        current_library = upload_covers.library
+        if current_library is not None:
+            await current_library.shutdown()
         await state['database'].close()
 
     try:
@@ -100,3 +103,28 @@ def test_upload_rejects_oversized_body_before_storing(client: TestClient) -> Non
     )
 
     assert response.status_code == 413
+
+
+def test_upload_returns_retryable_503_when_cover_worker_is_saturated(
+    client: TestClient,
+) -> None:
+    previous = upload_covers.library
+
+    class SaturatedLibrary:
+        async def add(self, _content: bytes, _filename: str) -> None:
+            raise CoverWorkSaturated(retry_after=1)
+
+    upload_covers.library = SaturatedLibrary()  # type: ignore[assignment]
+    try:
+        response = client.post(
+            '/api/v1/upload-covers',
+            params={'filename': 'cover.png'},
+            headers=headers(),
+            content=png(),
+        )
+    finally:
+        upload_covers.library = previous
+
+    assert response.status_code == 503
+    assert response.headers['retry-after'] == '1'
+    assert response.json() == {'detail': 'Cover processing is busy'}

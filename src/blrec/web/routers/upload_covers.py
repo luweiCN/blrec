@@ -9,6 +9,7 @@ from blrec.bili_upload.covers import (
     CoverAssetNotFound,
     CoverAssetView,
     CoverLibrary,
+    CoverWorkSaturated,
     InvalidCover,
     StoredCoverUnavailable,
 )
@@ -87,6 +88,12 @@ async def add_upload_cover(
             )
     try:
         asset = await cover_library.add(bytes(content), filename)
+    except CoverWorkSaturated as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Cover processing is busy',
+            headers={'Retry-After': str(error.retry_after)},
+        ) from None
     except InvalidCover as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)

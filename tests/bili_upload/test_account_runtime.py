@@ -1,4 +1,6 @@
 import asyncio
+import struct
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from blrec.bili_upload.covers import CoverLibrary
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.journal import RecordingJournalBridge
@@ -42,6 +45,17 @@ def confirmed_response() -> Mapping[str, Any]:
             },
         },
     }
+
+
+def cover_png() -> bytes:
+    return (
+        b'\x89PNG\r\n\x1a\n'
+        + struct.pack('>I', 13)
+        + b'IHDR'
+        + struct.pack('>II', 1600, 1000)
+        + b'\x08\x02\x00\x00\x00'
+        + b'\x00\x00\x00\x00'
+    )
 
 
 class IdentityProtocol:
@@ -221,6 +235,52 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.highlight_worker is None
     assert runtime.media_index_worker is None
     assert runtime.deletion_worker is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_stops_cover_admission_and_drains_admitted_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+    )
+    loop = asyncio.get_running_loop()
+    inspection_started = asyncio.Event()
+    release_inspection = threading.Event()
+    original_inspection = CoverLibrary._inspect_content
+
+    def blocking_inspection(content: bytes) -> Any:
+        loop.call_soon_threadsafe(inspection_started.set)
+        assert release_inspection.wait(5)
+        return original_inspection(content)
+
+    monkeypatch.setattr(
+        CoverLibrary, '_inspect_content', staticmethod(blocking_inspection)
+    )
+    assert await runtime.start()
+    await runtime._stop_deletion_worker()
+    await runtime._stop_media_index_worker()
+    await runtime._stop_highlight_worker()
+    await runtime._stop_upload_worker()
+    library = runtime.cover_library
+    assert library is not None
+    addition = asyncio.create_task(library.add(cover_png(), 'cover.png'))
+    await asyncio.wait_for(inspection_started.wait(), timeout=5)
+    closing = asyncio.create_task(runtime.close())
+    try:
+        await asyncio.sleep(0)
+        assert not closing.done()
+    finally:
+        release_inspection.set()
+
+    asset = await addition
+    await closing
+    assert asset.filename == 'cover.png'
+    with pytest.raises(RuntimeError, match='cover work coordinator is closed'):
+        await library.add(cover_png(), 'other.png')
 
 
 @pytest.mark.asyncio

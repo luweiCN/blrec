@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import stat
 import struct
+import threading
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple, TypeVar
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -21,9 +25,13 @@ __all__ = (
     'CoverLibrary',
     'CoverResolver',
     'CoverResolutionError',
+    'CoverWorkCoordinator',
+    'CoverWorkSaturated',
     'InvalidCover',
     'StoredCoverUnavailable',
 )
+
+T = TypeVar('T')
 
 
 class InvalidCover(RuntimeError):
@@ -40,6 +48,90 @@ class StoredCoverUnavailable(RuntimeError):
 
 class CoverResolutionError(RuntimeError):
     pass
+
+
+class CoverWorkSaturated(RuntimeError):
+    def __init__(self, retry_after: int = 1) -> None:
+        super().__init__('cover work capacity is exhausted')
+        self.retry_after = max(1, int(retry_after))
+
+
+class CoverWorkCoordinator:
+    def __init__(self, *, max_workers: int = 2, max_waiting: int = 8) -> None:
+        if max_workers <= 0 or max_waiting < 0:
+            raise ValueError('cover work capacity must be non-negative')
+        self._max_admitted = max_workers + max_waiting
+        self._semaphore = asyncio.Semaphore(max_workers)
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix='blrec-cover'
+        )
+        self._lock = threading.Lock()
+        self._jobs: Set[asyncio.Task[Any]] = set()
+        self._active = 0
+        self._closed = False
+        self._executor_closed = False
+
+    @property
+    def admitted_count(self) -> int:
+        with self._lock:
+            return len(self._jobs)
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return self._active
+
+    @property
+    def waiting_count(self) -> int:
+        with self._lock:
+            return max(0, len(self._jobs) - self._active)
+
+    async def run(self, operation: Callable[[], Awaitable[T]]) -> T:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('cover work coordinator is closed')
+            if len(self._jobs) >= self._max_admitted:
+                raise CoverWorkSaturated(retry_after=1)
+            job = asyncio.create_task(self._execute(operation))
+            self._jobs.add(job)
+        job.add_done_callback(self._release)
+        return await asyncio.shield(job)
+
+    async def offload(self, operation: Callable[[], T]) -> T:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, operation)
+
+    def close_admission(self) -> None:
+        with self._lock:
+            self._closed = True
+
+    async def shutdown(self) -> None:
+        self.close_admission()
+        with self._lock:
+            jobs = tuple(self._jobs)
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
+        with self._lock:
+            if self._executor_closed:
+                return
+            self._executor_closed = True
+        self._executor.shutdown(wait=True)
+
+    async def _execute(self, operation: Callable[[], Awaitable[T]]) -> T:
+        async with self._semaphore:
+            with self._lock:
+                self._active += 1
+            try:
+                return await operation()
+            finally:
+                with self._lock:
+                    self._active -= 1
+
+    def _release(self, job: asyncio.Task[Any]) -> None:
+        with self._lock:
+            self._jobs.discard(job)
+        if not job.cancelled():
+            job.exception()
 
 
 @dataclass(frozen=True)
@@ -59,6 +151,22 @@ class CoverAssetFile:
     path: Path
 
 
+@dataclass(frozen=True)
+class _CoverInspection:
+    digest: str
+    mime_type: str
+    width: int
+    height: int
+    extension: str
+
+
+@dataclass
+class _DigestWork:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    consumers: int = 0
+    created_file: bool = False
+
+
 class CoverLibrary:
     MAX_BYTES = 2 * 1024 * 1024
     MIN_WIDTH = 1146
@@ -74,54 +182,122 @@ class CoverLibrary:
         self._database = database
         self._root = Path(os.path.abspath(os.path.expanduser(str(root))))
         self._clock = clock
-        self._write_lock = asyncio.Lock()
+        self._work = CoverWorkCoordinator(max_workers=2, max_waiting=8)
+        self._digest_work: Dict[str, _DigestWork] = {}
 
     async def add(self, content: bytes, filename: str) -> CoverAssetView:
+        return await self._work.run(lambda: self._add_admitted(content, filename))
+
+    def close_admission(self) -> None:
+        self._work.close_admission()
+
+    async def shutdown(self) -> None:
+        await self._work.shutdown()
+
+    async def _add_admitted(self, content: bytes, filename: str) -> CoverAssetView:
+        inspection = await self._work.offload(partial(self._inspect_content, content))
+        digest = inspection.digest
+        digest_work = self._digest_work.get(digest)
+        if digest_work is None:
+            digest_work = _DigestWork()
+            self._digest_work[digest] = digest_work
+        digest_work.consumers += 1
+        try:
+            async with digest_work.lock:
+                return await self._add_by_digest(
+                    content, filename, inspection, digest_work
+                )
+        finally:
+            digest_work.consumers -= 1
+            if digest_work.consumers == 0:
+                self._digest_work.pop(digest, None)
+
+    async def _add_by_digest(
+        self,
+        content: bytes,
+        filename: str,
+        inspection: _CoverInspection,
+        digest_work: _DigestWork,
+    ) -> CoverAssetView:
+        digest = inspection.digest
+        existing = await self._find_record_by_digest(digest)
+        if existing is not None:
+            await self._work.offload(
+                partial(
+                    self._verify_recorded_file, existing, digest, inspection.extension
+                )
+            )
+            return self._view(existing)
+
+        safe_filename = self._safe_filename(filename, inspection.extension)
+        path = self._content_path(digest, inspection.extension)
+        created = await self._work.offload(
+            partial(self._store_file, path, content, digest)
+        )
+        if created:
+            digest_work.created_file = True
+        now = int(self._clock())
+        try:
+            await self._database.execute(
+                'INSERT INTO cover_assets('
+                'sha256,storage_path,filename,mime_type,width,height,byte_size,'
+                'created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                (
+                    digest,
+                    str(path),
+                    safe_filename,
+                    inspection.mime_type,
+                    inspection.width,
+                    inspection.height,
+                    len(content),
+                    now,
+                    now,
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._cleanup_failed_insert(path, digest, digest_work)
+            raise
+        stored = await self._find_record_by_digest(digest)
+        if stored is None:
+            await self._cleanup_failed_insert(path, digest, digest_work)
+            raise StoredCoverUnavailable('stored cover metadata is unavailable')
+        digest_work.created_file = False
+        return self._view(stored)
+
+    async def _cleanup_failed_insert(
+        self, path: Path, digest: str, digest_work: _DigestWork
+    ) -> None:
+        if not digest_work.created_file or digest_work.consumers > 1:
+            return
+        try:
+            referenced = await self._database.scalar(
+                'SELECT 1 FROM cover_assets WHERE sha256=? OR storage_path=?',
+                (digest, str(path)),
+            )
+        except Exception:
+            return
+        if referenced is not None:
+            digest_work.created_file = False
+            return
+        try:
+            await self._work.offload(partial(self._cleanup_file, path, digest))
+        except (InvalidCover, OSError, StoredCoverUnavailable):
+            return
+        digest_work.created_file = False
+
+    @classmethod
+    def _inspect_content(cls, content: bytes) -> _CoverInspection:
         if not isinstance(content, bytes) or not content:
             raise InvalidCover('cover must be a JPEG or PNG image')
-        if len(content) > self.MAX_BYTES:
+        if len(content) > cls.MAX_BYTES:
             raise InvalidCover('cover must not exceed 2 MiB')
-        mime_type, width, height, extension = self._image_info(content)
-        if width < self.MIN_WIDTH or height < self.MIN_HEIGHT:
+        mime_type, width, height, extension = cls._image_info(content)
+        if width < cls.MIN_WIDTH or height < cls.MIN_HEIGHT:
             raise InvalidCover('cover must be at least 1146 × 717 pixels')
         digest = hashlib.sha256(content).hexdigest()
-
-        async with self._write_lock:
-            existing = await self._find_by_digest(digest)
-            if existing is not None:
-                return existing
-            safe_filename = self._safe_filename(filename, extension)
-            path = self._root / '{}.{}'.format(digest, extension)
-            loop = asyncio.get_running_loop()
-            created = await loop.run_in_executor(
-                None, self._store_file, path, content, digest
-            )
-            now = int(self._clock())
-            try:
-                await self._database.execute(
-                    'INSERT INTO cover_assets('
-                    'sha256,storage_path,filename,mime_type,width,height,byte_size,'
-                    'created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
-                    (
-                        digest,
-                        str(path),
-                        safe_filename,
-                        mime_type,
-                        width,
-                        height,
-                        len(content),
-                        now,
-                        now,
-                    ),
-                )
-            except BaseException:
-                if created:
-                    path.unlink(missing_ok=True)
-                raise
-            stored = await self._find_by_digest(digest)
-            if stored is None:
-                raise StoredCoverUnavailable('stored cover metadata is unavailable')
-            return stored
+        return _CoverInspection(digest, mime_type, width, height, extension)
 
     async def list(self) -> Tuple[CoverAssetView, ...]:
         rows = await self._database.fetchall(
@@ -158,13 +334,26 @@ class CoverLibrary:
             raise StoredCoverUnavailable('stored cover file size has changed')
         return opened.view, content
 
-    async def _find_by_digest(self, digest: str) -> Optional[CoverAssetView]:
-        row = await self._database.fetchone(
-            'SELECT id,filename,mime_type,width,height,byte_size,created_at '
+    async def _find_record_by_digest(self, digest: str) -> Optional[Any]:
+        return await self._database.fetchone(
+            'SELECT id,sha256,storage_path,filename,mime_type,width,height,'
+            'byte_size,created_at '
             'FROM cover_assets WHERE sha256=?',
             (digest,),
         )
-        return None if row is None else self._view(row)
+
+    def _content_path(self, digest: str, extension: str) -> Path:
+        path = self._root / '{}.{}'.format(digest, extension)
+        if path.parent != self._root:
+            raise StoredCoverUnavailable('stored cover path is outside the cover root')
+        return path
+
+    def _verify_recorded_file(self, row: Any, digest: str, extension: str) -> None:
+        expected = self._content_path(digest, extension)
+        recorded = Path(os.path.abspath(os.path.expanduser(str(row['storage_path']))))
+        if recorded != expected:
+            raise StoredCoverUnavailable('stored cover path is outside the cover root')
+        self._verify_file(expected, digest)
 
     def _store_file(self, path: Path, content: bytes, digest: str) -> bool:
         self._root.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -172,10 +361,7 @@ class CoverLibrary:
         try:
             descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-                raise StoredCoverUnavailable(
-                    'stored cover file does not match its hash'
-                )
+            self._verify_file(path, digest)
             os.chmod(path, 0o600)
             return False
         try:
@@ -187,6 +373,35 @@ class CoverLibrary:
             path.unlink(missing_ok=True)
             raise
         return True
+
+    @classmethod
+    def _cleanup_file(cls, path: Path, digest: str) -> None:
+        try:
+            cls._verify_file(path, digest)
+        except FileNotFoundError:
+            return
+        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _verify_file(path: Path, digest: str) -> None:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        try:
+            descriptor = os.open(str(path), flags)
+        except FileNotFoundError:
+            raise StoredCoverUnavailable('stored cover file is unavailable') from None
+        except OSError:
+            raise StoredCoverUnavailable('stored cover file is unavailable') from None
+        with os.fdopen(descriptor, 'rb') as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise StoredCoverUnavailable('stored cover file is unavailable')
+            hasher = hashlib.sha256()
+            while True:
+                chunk = source.read(64 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        if hasher.hexdigest() != digest:
+            raise InvalidCover('stored cover file does not match its hash')
 
     @staticmethod
     def _safe_filename(filename: str, extension: str) -> str:

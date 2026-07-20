@@ -1,4 +1,8 @@
+import asyncio
+import hashlib
 import struct
+import threading
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +12,8 @@ from blrec.bili_upload.covers import (
     CoverLibrary,
     CoverResolutionError,
     CoverResolver,
+    CoverWorkCoordinator,
+    CoverWorkSaturated,
     InvalidCover,
     StoredCoverUnavailable,
 )
@@ -44,6 +50,403 @@ async def seed_accounts(database: BiliUploadDatabase) -> None:
             'state,created_at,updated_at) VALUES(?,?,?,X\'00\',1,\'k\',\'active\',1,1)',
             (account_id, 40 + account_id, '账号{}'.format(account_id)),
         )
+
+
+async def wait_for_digest_consumers(
+    library: CoverLibrary, digest: str, count: int
+) -> None:
+    while True:
+        work = library._digest_work.get(digest)
+        if work is not None and work.consumers == count:
+            return
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_cover_worker_bounds_active_and_waiting_work_before_executor() -> None:
+    coordinator = CoverWorkCoordinator(max_workers=2, max_waiting=8)
+    loop = asyncio.get_running_loop()
+    entered: asyncio.Queue[int] = asyncio.Queue()
+    release = threading.Event()
+    heartbeat = asyncio.Event()
+
+    def blocking_work(index: int) -> int:
+        loop.call_soon_threadsafe(entered.put_nowait, index)
+        assert release.wait(5)
+        return index
+
+    async def run(index: int) -> int:
+        return await coordinator.run(
+            lambda: coordinator.offload(partial(blocking_work, index))
+        )
+
+    admitted = [asyncio.create_task(run(index)) for index in range(10)]
+    await asyncio.wait_for(entered.get(), timeout=5)
+    await asyncio.wait_for(entered.get(), timeout=5)
+    loop.call_soon(heartbeat.set)
+    await asyncio.wait_for(heartbeat.wait(), timeout=5)
+
+    assert coordinator.active_count == 2
+    assert coordinator.waiting_count == 8
+    assert coordinator.admitted_count == 10
+    with pytest.raises(CoverWorkSaturated) as saturated:
+        await run(10)
+    assert saturated.value.retry_after == 1
+    assert entered.empty()
+
+    release.set()
+    assert await asyncio.gather(*admitted) == list(range(10))
+    await coordinator.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cover_worker_shutdown_drains_every_admitted_job() -> None:
+    coordinator = CoverWorkCoordinator(max_workers=2, max_waiting=8)
+    loop = asyncio.get_running_loop()
+    entered: asyncio.Queue[int] = asyncio.Queue()
+    release = threading.Event()
+
+    def blocking_work(index: int) -> int:
+        loop.call_soon_threadsafe(entered.put_nowait, index)
+        assert release.wait(5)
+        return index
+
+    async def run(index: int) -> int:
+        return await coordinator.run(
+            lambda: coordinator.offload(partial(blocking_work, index))
+        )
+
+    admitted = [asyncio.create_task(run(index)) for index in range(10)]
+    await asyncio.wait_for(entered.get(), timeout=5)
+    await asyncio.wait_for(entered.get(), timeout=5)
+    coordinator.close_admission()
+    shutdown = asyncio.create_task(coordinator.shutdown())
+
+    with pytest.raises(RuntimeError, match='closed'):
+        await run(10)
+    assert not shutdown.done()
+
+    release.set()
+    assert await asyncio.gather(*admitted) == list(range(10))
+    await shutdown
+    assert coordinator.admitted_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('content', (png(), jpeg()))
+async def test_cover_library_scans_and_hashes_without_blocking_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    heartbeat = asyncio.Event()
+    worker_thread_ids = []
+    original = CoverLibrary._inspect_content
+
+    def blocking_inspection(content: bytes) -> Any:
+        worker_thread_ids.append(threading.get_ident())
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        return original(content)
+
+    monkeypatch.setattr(
+        CoverLibrary, '_inspect_content', staticmethod(blocking_inspection)
+    )
+    task = asyncio.create_task(library.add(content, 'cover'))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=5)
+        assert worker_thread_ids == [worker_thread_ids[0]]
+        assert worker_thread_ids[0] != threading.get_ident()
+    finally:
+        release.set()
+    await task
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_cover_serializes_file_and_database_commit_by_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    loop = asyncio.get_running_loop()
+    store_started = asyncio.Event()
+    second_inspected = asyncio.Event()
+    release_store = threading.Event()
+    call_lock = threading.Lock()
+    inspection_calls = 0
+    store_calls = 0
+    insert_calls = 0
+    original_inspect = CoverLibrary._inspect_content
+    original_store = CoverLibrary._store_file
+    original_execute = database.execute
+
+    def observed_inspection(content: bytes) -> Any:
+        nonlocal inspection_calls
+        with call_lock:
+            inspection_calls += 1
+            current = inspection_calls
+        result = original_inspect(content)
+        if current == 2:
+            loop.call_soon_threadsafe(second_inspected.set)
+        return result
+
+    def blocking_store(
+        cover_library: CoverLibrary, path: Path, content: bytes, digest: str
+    ) -> bool:
+        nonlocal store_calls
+        with call_lock:
+            store_calls += 1
+        loop.call_soon_threadsafe(store_started.set)
+        assert release_store.wait(5)
+        return original_store(cover_library, path, content, digest)
+
+    async def counted_execute(sql: str, parameters: Any = ()) -> int:
+        nonlocal insert_calls
+        if sql.startswith('INSERT INTO cover_assets'):
+            insert_calls += 1
+        return await original_execute(sql, parameters)
+
+    monkeypatch.setattr(
+        CoverLibrary, '_inspect_content', staticmethod(observed_inspection)
+    )
+    monkeypatch.setattr(CoverLibrary, '_store_file', blocking_store)
+    monkeypatch.setattr(database, 'execute', counted_execute)
+    first = asyncio.create_task(library.add(png(), 'first.png'))
+    await asyncio.wait_for(store_started.wait(), timeout=5)
+    second = asyncio.create_task(library.add(png(), 'second.png'))
+    await asyncio.wait_for(second_inspected.wait(), timeout=5)
+    digest = hashlib.sha256(png()).hexdigest()
+    await asyncio.wait_for(wait_for_digest_consumers(library, digest, 2), timeout=5)
+    release_store.set()
+
+    first_result, second_result = await asyncio.gather(first, second)
+    assert first_result == second_result
+    assert store_calls == 1
+    assert insert_calls == 1
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_database_failure_keeps_file_for_waiting_digest_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    loop = asyncio.get_running_loop()
+    first_insert_started = asyncio.Event()
+    second_inspected = asyncio.Event()
+    release_first_insert = asyncio.Event()
+    call_lock = threading.Lock()
+    inspection_calls = 0
+    insert_calls = 0
+    original_inspect = CoverLibrary._inspect_content
+    original_execute = database.execute
+
+    def observed_inspection(content: bytes) -> Any:
+        nonlocal inspection_calls
+        with call_lock:
+            inspection_calls += 1
+            current = inspection_calls
+        result = original_inspect(content)
+        if current == 2:
+            loop.call_soon_threadsafe(second_inspected.set)
+        return result
+
+    async def fail_first_insert(sql: str, parameters: Any = ()) -> int:
+        nonlocal insert_calls
+        if sql.startswith('INSERT INTO cover_assets'):
+            insert_calls += 1
+            if insert_calls == 1:
+                first_insert_started.set()
+                await release_first_insert.wait()
+                raise RuntimeError('database insert failed')
+        return await original_execute(sql, parameters)
+
+    monkeypatch.setattr(
+        CoverLibrary, '_inspect_content', staticmethod(observed_inspection)
+    )
+    monkeypatch.setattr(database, 'execute', fail_first_insert)
+    first = asyncio.create_task(library.add(png(), 'first.png'))
+    await asyncio.wait_for(first_insert_started.wait(), timeout=5)
+    second = asyncio.create_task(library.add(png(), 'second.png'))
+    await asyncio.wait_for(second_inspected.wait(), timeout=5)
+    digest = hashlib.sha256(png()).hexdigest()
+    await asyncio.wait_for(wait_for_digest_consumers(library, digest, 2), timeout=5)
+    release_first_insert.set()
+
+    with pytest.raises(RuntimeError, match='database insert failed'):
+        await first
+    stored = await second
+    expected_path = (
+        tmp_path / 'covers' / '{}.png'.format(hashlib.sha256(png()).hexdigest())
+    )
+    assert stored.id == 1
+    assert expected_path.read_bytes() == png()
+    assert insert_calls == 2
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_database_error_after_commit_does_not_delete_referenced_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    original_execute = database.execute
+
+    async def commit_then_fail(sql: str, parameters: Any = ()) -> int:
+        result = await original_execute(sql, parameters)
+        if sql.startswith('INSERT INTO cover_assets'):
+            raise RuntimeError('response lost after commit')
+        return result
+
+    monkeypatch.setattr(database, 'execute', commit_then_fail)
+    with pytest.raises(RuntimeError, match='response lost'):
+        await library.add(png(), 'cover.png')
+
+    digest = hashlib.sha256(png()).hexdigest()
+    expected_path = tmp_path / 'covers' / '{}.png'.format(digest)
+    assert expected_path.read_bytes() == png()
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM cover_assets WHERE sha256=?', (digest,)
+        )
+        == 1
+    )
+    monkeypatch.setattr(database, 'execute', original_execute)
+    recovered = await library.add(png(), 'cover.png')
+    assert recovered.id == 1
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_database_commit_cleans_new_cover_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    original_execute = database.execute
+
+    async def discard_insert(sql: str, parameters: Any = ()) -> int:
+        if sql.startswith('INSERT INTO cover_assets'):
+            return 1
+        return await original_execute(sql, parameters)
+
+    monkeypatch.setattr(database, 'execute', discard_insert)
+    with pytest.raises(StoredCoverUnavailable, match='metadata'):
+        await library.add(png(), 'cover.png')
+
+    digest = hashlib.sha256(png()).hexdigest()
+    expected_path = tmp_path / 'covers' / '{}.png'.format(digest)
+    assert not expected_path.exists()
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_database_failure_cleans_new_cover_file_off_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    cleanup_threads = []
+    original_execute = database.execute
+    original_cleanup = CoverLibrary._cleanup_file
+
+    async def fail_insert(sql: str, parameters: Any = ()) -> int:
+        if sql.startswith('INSERT INTO cover_assets'):
+            raise RuntimeError('database insert failed')
+        return await original_execute(sql, parameters)
+
+    def observed_cleanup(path: Path, digest: str) -> None:
+        cleanup_threads.append(threading.get_ident())
+        original_cleanup(path, digest)
+
+    monkeypatch.setattr(database, 'execute', fail_insert)
+    monkeypatch.setattr(CoverLibrary, '_cleanup_file', staticmethod(observed_cleanup))
+    with pytest.raises(RuntimeError, match='database insert failed'):
+        await library.add(png(), 'cover.png')
+
+    expected_path = (
+        tmp_path / 'covers' / '{}.png'.format(hashlib.sha256(png()).hexdigest())
+    )
+    assert not expected_path.exists()
+    assert cleanup_threads and cleanup_threads[0] != threading.get_ident()
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cover_library_recovers_complete_orphan_metadata(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    digest = hashlib.sha256(png()).hexdigest()
+    orphan = tmp_path / 'covers' / '{}.png'.format(digest)
+    orphan.parent.mkdir()
+    orphan.write_bytes(png())
+
+    asset = await library.add(png(), 'recovered.png')
+
+    assert asset.filename == 'recovered.png'
+    assert await database.scalar('SELECT COUNT(*) FROM cover_assets') == 1
+    assert orphan.read_bytes() == png()
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cover_library_never_overwrites_corrupted_orphan(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    digest = hashlib.sha256(png()).hexdigest()
+    orphan = tmp_path / 'covers' / '{}.png'.format(digest)
+    orphan.parent.mkdir()
+    orphan.write_bytes(b'corrupt')
+
+    with pytest.raises(InvalidCover, match='hash'):
+        await library.add(png(), 'cover.png')
+
+    assert orphan.read_bytes() == b'corrupt'
+    assert await database.scalar('SELECT COUNT(*) FROM cover_assets') == 0
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cover_library_rehashes_stored_file_and_never_overwrites_mismatch(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    asset = await library.add(png(), 'cover.png')
+    opened = await library.open(asset.id)
+    opened.path.write_bytes(b'corrupt')
+
+    with pytest.raises(InvalidCover, match='hash'):
+        await library.add(png(), 'cover.png')
+
+    assert opened.path.read_bytes() == b'corrupt'
+    await library.shutdown()
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -113,6 +516,8 @@ async def test_cover_library_refuses_a_database_path_outside_its_root(
 
         with pytest.raises(StoredCoverUnavailable, match='outside'):
             await library.open(asset.id)
+        with pytest.raises(StoredCoverUnavailable, match='outside'):
+            await library.add(png(), 'cover.png')
     finally:
         await database.close()
 

@@ -637,12 +637,17 @@ class BiliAccountRuntime:
         raise UploadTaskActionRejected('不支持的场次操作')
 
     async def close(self) -> None:
+        cover_library, self._cover_library = self._cover_library, None
+        if cover_library is not None:
+            cover_library.close_admission()
         if self._deletion_worker is not None:
             self._deletion_worker.stop_admission()
         await self._stop_deletion_worker()
         await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
+        if cover_library is not None:
+            await cover_library.shutdown()
         refresh_task, self._refresh_task = self._refresh_task, None
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()
@@ -654,7 +659,6 @@ class BiliAccountRuntime:
         self._policy_manager = None
         self._session_submission_manager = None
         self._category_catalog = None
-        self._cover_library = None
         self._cover_resolver = None
         self._collection_manager = None
         self._collection_publisher = None
