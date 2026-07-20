@@ -1,14 +1,14 @@
 import { NgModule } from '@angular/core';
 import { RouterModule, Routes } from '@angular/router';
 
-import { UploadTasksComponent } from './upload-tasks.component';
+import { ClipLibraryComponent } from './clip-library.component';
 
 const routes: Routes = [
-  { path: '', pathMatch: 'full', component: UploadTasksComponent },
+  { path: '', pathMatch: 'full', component: ClipLibraryComponent },
 ];
 
 @NgModule({
   imports: [RouterModule.forChild(routes)],
   exports: [RouterModule],
 })
-export class UploadTasksRoutingModule {}
+export class ClipLibraryRoutingModule {}

@@ -1,7 +1,12 @@
 import { CommonModule } from '@angular/common';
 import { CdkConnectedOverlay, OverlayModule } from '@angular/cdk/overlay';
 import { Component, EventEmitter, Input, Output } from '@angular/core';
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import {
+  ComponentFixture,
+  TestBed,
+  fakeAsync,
+  flushMicrotasks,
+} from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
@@ -15,18 +20,38 @@ import {
   RealtimeService,
 } from 'src/app/core/services/realtime.service';
 import { RoomUploadPolicyRequest } from 'src/app/tasks/upload-policy-dialog/room-upload-policy.model';
-import {
+import { PART_PLAYER_LOADER } from '../part-video-dialog/part-player.loader';
+import type {
   PartPlayer,
-  PartPlayerFactory,
-} from '../part-video-dialog/part-player.factory';
+  PartPlayerEventHandler,
+  PartPlayerFactoryLike,
+  PartPlayerLoader,
+} from '../part-video-dialog/part-player.loader';
 import {
   HighlightClip,
   HighlightClipInspection,
   HighlightTimeline,
 } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
+import { RecordingMediaAccess } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightEditorComponent } from './highlight-editor.component';
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 @Component({ selector: 'app-upload-policy-dialog', template: '' })
 class UploadPolicyDialogStubComponent {
@@ -48,7 +73,8 @@ describe('HighlightEditorComponent', () => {
   let component: HighlightEditorComponent;
   let highlights: jasmine.SpyObj<HighlightService>;
   let recordings: jasmine.SpyObj<RecordingSessionService>;
-  let playerFactory: jasmine.SpyObj<PartPlayerFactory>;
+  let playerLoader: jasmine.Spy<PartPlayerLoader>;
+  let playerFactory: jasmine.SpyObj<PartPlayerFactoryLike>;
   let player: jasmine.SpyObj<PartPlayer>;
   let realtime: Subject<RealtimeEvent>;
 
@@ -242,11 +268,14 @@ describe('HighlightEditorComponent', () => {
       'detachMediaElement',
       'destroy',
     ]);
-    playerFactory = jasmine.createSpyObj<PartPlayerFactory>(
-      'PartPlayerFactory',
+    playerFactory = jasmine.createSpyObj<PartPlayerFactoryLike>(
+      'PartPlayerFactoryLike',
       ['attachFlv'],
     );
     playerFactory.attachFlv.and.returnValue(player);
+    playerLoader = jasmine
+      .createSpy<PartPlayerLoader>('partPlayerLoader')
+      .and.callFake(() => Promise.resolve(playerFactory));
     realtime = new Subject<RealtimeEvent>();
 
     await TestBed.configureTestingModule({
@@ -261,7 +290,7 @@ describe('HighlightEditorComponent', () => {
       providers: [
         { provide: HighlightService, useValue: highlights },
         { provide: RecordingSessionService, useValue: recordings },
-        { provide: PartPlayerFactory, useValue: playerFactory },
+        { provide: PART_PLAYER_LOADER, useValue: playerLoader },
         { provide: RealtimeService, useValue: { events$: realtime } },
         {
           provide: ActivatedRoute,
@@ -278,7 +307,136 @@ describe('HighlightEditorComponent', () => {
     fixture = TestBed.createComponent(HighlightEditorComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
+    await fixture.whenStable();
   });
+
+  it('single-flights the FLV loader only after media access succeeds', fakeAsync(() => {
+    const access = new Subject<RecordingMediaAccess>();
+    recordings.createMediaAccess.and.returnValue(access);
+    playerLoader.calls.reset();
+    playerFactory.attachFlv.calls.reset();
+
+    component.selectPart(timeline.parts[1]);
+
+    expect(playerLoader).not.toHaveBeenCalled();
+
+    access.next({
+      token: 'signed',
+      expiresAt: 123,
+      snapshotId: 'snapshot',
+      durationMs: 80_000,
+      fileSizeBytes: 2_048,
+      recording: true,
+      playbackMode: 'active_snapshot',
+      indexState: 'pending',
+      retryAfterMs: null,
+      requestId: 'request-editor-loader',
+    });
+    (component as unknown as { attachFlvPlayer(): void }).attachFlvPlayer();
+
+    expect(playerLoader).toHaveBeenCalledTimes(1);
+
+    flushMicrotasks();
+    expect(playerFactory.attachFlv).toHaveBeenCalledTimes(1);
+  }));
+
+  it('does not load the FLV runtime for a native selected part', () => {
+    const nativePart = {
+      ...timeline.parts[1],
+      partId: 13,
+      partIndex: 3,
+      mediaKind: 'native' as const,
+    };
+    playerLoader.calls.reset();
+    playerFactory.attachFlv.calls.reset();
+
+    component.selectPart(nativePart);
+
+    expect(playerLoader).not.toHaveBeenCalled();
+    expect(playerFactory.attachFlv).not.toHaveBeenCalled();
+  });
+
+  it('shows an actionable error when the current FLV loader rejects', fakeAsync(() => {
+    playerLoader.and.returnValue(
+      Promise.reject(new Error('FLV 播放器代码加载失败')),
+    );
+    playerLoader.calls.reset();
+    playerFactory.attachFlv.calls.reset();
+
+    component.selectPart(timeline.parts[1]);
+    flushMicrotasks();
+
+    expect(component.mediaError).toBe('FLV 播放器代码加载失败');
+    expect(playerFactory.attachFlv).not.toHaveBeenCalled();
+  }));
+
+  it('ignores a pending FLV loader after selecting another part', fakeAsync(() => {
+    const pending = deferred<PartPlayerFactoryLike>();
+    const nativePart = {
+      ...timeline.parts[0],
+      partId: 13,
+      partIndex: 3,
+      mediaKind: 'native' as const,
+    };
+    playerLoader.and.returnValue(pending.promise);
+    playerLoader.calls.reset();
+    playerFactory.attachFlv.calls.reset();
+
+    component.selectPart(timeline.parts[1]);
+    expect(playerLoader).toHaveBeenCalledTimes(1);
+
+    component.selectPart(nativePart);
+    pending.resolve(playerFactory);
+    flushMicrotasks();
+
+    expect(playerFactory.attachFlv).not.toHaveBeenCalled();
+  }));
+
+  it('ignores stale player events after the selected part changes', fakeAsync(() => {
+    const callbacks: { onEvent?: PartPlayerEventHandler } = {};
+    playerFactory.attachFlv.and.callFake((_element, _url, _source, handler) => {
+      callbacks.onEvent = handler;
+      return player;
+    });
+
+    component.selectPart(timeline.parts[1]);
+    flushMicrotasks();
+    component.selectPart({
+      ...timeline.parts[0],
+      partId: 13,
+      partIndex: 3,
+      mediaKind: 'native',
+    });
+    callbacks.onEvent?.({ type: 'error', message: '旧播放器错误' });
+
+    expect(component.mediaError).toBeNull();
+  }));
+
+  it('disposes a player invalidated by a synchronous attach event', fakeAsync(() => {
+    component.selectPart({
+      ...timeline.parts[0],
+      partId: 13,
+      partIndex: 3,
+      mediaKind: 'native',
+    });
+    playerFactory.attachFlv.and.callFake((_element, _url, _source, onEvent) => {
+      onEvent({ type: 'error', message: '播放器同步失败' });
+      return player;
+    });
+    player.pause.calls.reset();
+    player.unload.calls.reset();
+    player.detachMediaElement.calls.reset();
+    player.destroy.calls.reset();
+
+    component.selectPart(timeline.parts[1]);
+    flushMicrotasks();
+
+    expect(component.mediaError).toBe('播放器同步失败');
+    expect(player.pause).toHaveBeenCalled();
+    expect(player.unload).toHaveBeenCalled();
+    expect(player.detachMediaElement).toHaveBeenCalled();
+    expect(player.destroy).toHaveBeenCalled();
+  }));
 
   it('keeps the editor scoped to the selected recording part', () => {
     fixture.detectChanges();
@@ -1225,12 +1383,10 @@ describe('HighlightEditorComponent', () => {
     fixture.detectChanges();
 
     expect(component.hoverTimeMs).toBe(45_000);
+    expect(fixture.nativeElement.querySelector('.hover-guide')).not.toBeNull();
     expect(
-      fixture.nativeElement.querySelector('.hover-guide'),
-    ).not.toBeNull();
-    expect(fixture.nativeElement.querySelector('.hover-time')?.textContent).toContain(
-      '00:45',
-    );
+      fixture.nativeElement.querySelector('.hover-time')?.textContent,
+    ).toContain('00:45');
 
     track.dispatchEvent(new MouseEvent('mouseleave'));
     fixture.detectChanges();
@@ -1470,9 +1626,8 @@ describe('HighlightEditorComponent', () => {
     component.createDraft(draft);
     fixture.detectChanges();
 
-    const popoverText = document.body.querySelector(
-      '.timeline-popover',
-    )?.textContent;
+    const popoverText =
+      document.body.querySelector('.timeline-popover')?.textContent;
     expect(popoverText).toContain('实际会从 00:00 开始');
     expect(popoverText).not.toContain('检查裁剪范围');
     expect(highlights.createClip).not.toHaveBeenCalled();

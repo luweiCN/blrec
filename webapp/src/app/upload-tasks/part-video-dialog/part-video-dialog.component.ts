@@ -3,6 +3,7 @@ import {
   Component,
   ElementRef,
   EventEmitter,
+  Inject,
   Input,
   OnChanges,
   OnDestroy,
@@ -21,11 +22,13 @@ import {
   RecordingSession,
 } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
-import {
+import { PART_PLAYER_LOADER } from './part-player.loader';
+import type {
+  FlvPlaybackSource,
   PartPlayer,
   PartPlayerEvent,
-  PartPlayerFactory,
-} from './part-player.factory';
+  PartPlayerLoader,
+} from './part-player.loader';
 
 type PlaybackState =
   | { readonly kind: 'idle' }
@@ -65,19 +68,22 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   private danmakuRequest?: Subscription;
   private deadlineAt = 0;
   private timer: number | null = null;
+  private playerGeneration = 0;
+  private pendingPlayerGeneration: number | null = null;
+  private destroyed = false;
 
   constructor(
     private recordingSessions: RecordingSessionService,
-    private playerFactory: PartPlayerFactory,
+    @Inject(PART_PLAYER_LOADER) private playerLoader: PartPlayerLoader,
     private changeDetector: ChangeDetectorRef,
-    private zone: NgZone
+    private zone: NgZone,
   ) {}
 
   @ViewChild('videoElement')
   set videoElementRef(value: ElementRef<HTMLVideoElement> | undefined) {
     this.videoElement = value?.nativeElement ?? null;
     if (this.videoElement === null) {
-      this.teardownPlayer();
+      this.invalidatePlayer();
       return;
     }
     this.attachFlvPlayer();
@@ -134,6 +140,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.reset();
   }
 
@@ -200,7 +207,8 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     }
     const candidate = low - 1;
     this.activeDanmakuIndex =
-      candidate >= 0 && currentMs - this.danmakuItems[candidate].progressMs <= 2_500
+      candidate >= 0 &&
+      currentMs - this.danmakuItems[candidate].progressMs <= 2_500
         ? candidate
         : null;
     if (this.followDanmaku && this.activeDanmakuIndex !== null) {
@@ -247,7 +255,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
 
   private loadMedia(): void {
     this.request?.unsubscribe();
-    this.teardownPlayer();
+    this.invalidatePlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
     this.playbackState = { kind: 'idle' };
@@ -264,7 +272,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   private loadDanmaku(
     cursor: number,
     append: boolean,
-    continuePlaybackSync = false
+    continuePlaybackSync = false,
   ): void {
     if (!this.part.xmlPath) {
       this.danmakuItems = [];
@@ -314,14 +322,19 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     if (list === null) {
       return;
     }
-    const line = list.querySelector<HTMLElement>(`[data-danmaku-index="${index}"]`);
+    const line = list.querySelector<HTMLElement>(
+      `[data-danmaku-index="${index}"]`,
+    );
     if (line === null) {
       return;
     }
     const top = line.offsetTop;
     const bottom = top + line.offsetHeight;
     if (top < list.scrollTop || bottom > list.scrollTop + list.clientHeight) {
-      list.scrollTop = Math.max(0, top - (list.clientHeight - line.offsetHeight) / 2);
+      list.scrollTop = Math.max(
+        0,
+        top - (list.clientHeight - line.offsetHeight) / 2,
+      );
     }
   }
 
@@ -348,27 +361,88 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   private attachFlvPlayer(): void {
-    if (!this.isFlv || !this.videoElement || !this.mediaUrl || this.player) {
+    const element = this.videoElement;
+    const url = this.mediaUrl;
+    const access = this.mediaAccess;
+    const partId = this.part?.id;
+    if (
+      this.destroyed ||
+      !this.visible ||
+      !this.isFlv ||
+      !element ||
+      !url ||
+      !access ||
+      !partId ||
+      this.player
+    ) {
       return;
     }
-    const access = this.mediaAccess;
-    this.player = this.playerFactory.attachFlv(
-      this.videoElement,
-      this.mediaUrl,
-      {
-        playbackMode: access?.playbackMode ?? 'sequential',
-        durationMs: access?.durationMs ?? null,
-        fileSizeBytes: access?.fileSizeBytes ?? null,
-      },
-      (event) => {
-        this.zone.run(() => {
-          this.handlePlayerEvent(event);
-        });
-      }
-    );
-    if (this.player === null) {
-      this.fail('当前浏览器不支持 FLV 播放');
+    const generation = this.playerGeneration;
+    if (this.pendingPlayerGeneration === generation) {
+      return;
     }
+    const source: FlvPlaybackSource = {
+      playbackMode: access.playbackMode,
+      durationMs: access.durationMs,
+      fileSizeBytes: access.fileSizeBytes,
+    };
+    this.pendingPlayerGeneration = generation;
+    void this.playerLoader()
+      .then((factory) => {
+        if (
+          !this.matchesPlayerIdentity(generation, partId, url, element) ||
+          this.pendingPlayerGeneration !== generation
+        ) {
+          return;
+        }
+        const player = factory.attachFlv(element, url, source, (event) => {
+          if (!this.matchesPlayerIdentity(generation, partId, url, element)) {
+            return;
+          }
+          this.zone.run(() => {
+            this.handlePlayerEvent(event);
+          });
+        });
+        if (
+          !this.matchesPlayerIdentity(generation, partId, url, element) ||
+          this.pendingPlayerGeneration !== generation
+        ) {
+          this.destroyPlayer(player);
+          return;
+        }
+        this.pendingPlayerGeneration = null;
+        this.player = player;
+        if (this.player === null) {
+          this.fail('当前浏览器不支持 FLV 播放');
+        }
+      })
+      .catch((error: unknown) => {
+        if (this.pendingPlayerGeneration !== generation) {
+          return;
+        }
+        this.pendingPlayerGeneration = null;
+        if (!this.matchesPlayerIdentity(generation, partId, url, element)) {
+          return;
+        }
+        this.fail(this.describeError(error, 'FLV 播放器加载失败，请重新打开'));
+      });
+  }
+
+  private matchesPlayerIdentity(
+    generation: number,
+    partId: number,
+    url: string,
+    element: HTMLVideoElement,
+  ): boolean {
+    return (
+      !this.destroyed &&
+      this.visible &&
+      this.playerGeneration === generation &&
+      this.part?.id === partId &&
+      this.mediaUrl === url &&
+      this.videoElement === element &&
+      this.isFlv
+    );
   }
 
   private handlePlayerEvent(event: PartPlayerEvent): void {
@@ -392,10 +466,13 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       return;
     }
     this.clearTimer();
-    this.timer = window.setTimeout(() => {
-      this.timer = null;
-      this.requestMediaAccess();
-    }, Math.min(delayMs, remaining));
+    this.timer = window.setTimeout(
+      () => {
+        this.timer = null;
+        this.requestMediaAccess();
+      },
+      Math.min(delayMs, remaining),
+    );
   }
 
   private scheduleDeadline(): void {
@@ -416,7 +493,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   private fail(message: string): void {
     this.clearTimer();
     this.playbackState = { kind: 'error', message };
-    this.teardownPlayer();
+    this.invalidatePlayer();
     this.changeDetector.markForCheck();
   }
 
@@ -428,14 +505,22 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   private teardownPlayer(): void {
-    if (this.player === null) {
-      return;
-    }
-    this.player.pause();
-    this.player.unload();
-    this.player.detachMediaElement();
-    this.player.destroy();
+    const player = this.player;
     this.player = null;
+    this.destroyPlayer(player);
+  }
+
+  private destroyPlayer(player: PartPlayer | null): void {
+    player?.pause();
+    player?.unload();
+    player?.detachMediaElement();
+    player?.destroy();
+  }
+
+  private invalidatePlayer(): void {
+    this.playerGeneration += 1;
+    this.pendingPlayerGeneration = null;
+    this.teardownPlayer();
   }
 
   private reset(): void {
@@ -444,7 +529,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     this.danmakuRequest?.unsubscribe();
     this.danmakuRequest = undefined;
     this.clearTimer();
-    this.teardownPlayer();
+    this.invalidatePlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
     this.playbackState = { kind: 'idle' };

@@ -18,10 +18,12 @@ import {
   RealtimeEvent,
   RealtimeService,
 } from 'src/app/core/services/realtime.service';
-import {
+import { PART_PLAYER_LOADER } from '../part-video-dialog/part-player.loader';
+import type {
+  FlvPlaybackSource,
   PartPlayer,
-  PartPlayerFactory,
-} from '../part-video-dialog/part-player.factory';
+  PartPlayerLoader,
+} from '../part-video-dialog/part-player.loader';
 import { RoomUploadPolicyRequest } from '../../tasks/upload-policy-dialog/room-upload-policy.model';
 import {
   HighlightClip,
@@ -147,13 +149,16 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private previewingDraftId: number | null = null;
   private draggingPointerId: number | null = null;
   private readonly subscriptions = new Subscription();
+  private playerGeneration = 0;
+  private pendingPlayerGeneration: number | null = null;
+  private destroyed = false;
 
   constructor(
     @Inject(DOCUMENT) private document: Document,
     route: ActivatedRoute,
     private highlights: HighlightService,
     private recordings: RecordingSessionService,
-    private playerFactory: PartPlayerFactory,
+    @Inject(PART_PLAYER_LOADER) private playerLoader: PartPlayerLoader,
     private changeDetector: ChangeDetectorRef,
     private zone: NgZone,
     realtime: RealtimeService,
@@ -170,7 +175,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   set videoElementRef(value: ElementRef<HTMLVideoElement> | undefined) {
     this.videoElement = value?.nativeElement ?? null;
     if (this.videoElement === null) {
-      this.teardownPlayer();
+      this.invalidatePlayer();
       return;
     }
     this.attachFlvPlayer();
@@ -291,10 +296,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.mediaRequest?.unsubscribe();
     this.clipsRequest?.unsubscribe();
     this.subscriptions.unsubscribe();
-    this.teardownPlayer();
+    this.invalidatePlayer();
   }
 
   refreshTimeline(): void {
@@ -1404,7 +1410,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             : undefined;
           if (initial && this.initialPartId !== null && !requestedPart) {
             this.mediaRequest?.unsubscribe();
-            this.teardownPlayer();
+            this.invalidatePlayer();
             this.selectedPart = null;
             this.mediaUrl = null;
             this.error = '所选分段的本地录像已不存在，无法剪辑';
@@ -1481,7 +1487,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     const part = this.selectedPart;
     this.mediaRequest?.unsubscribe();
-    this.teardownPlayer();
+    this.invalidatePlayer();
+    const generation = this.playerGeneration;
     this.mediaUrl = null;
     this.mediaAccess = null;
     this.mediaError = null;
@@ -1490,7 +1497,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       .createMediaAccess(part.partId)
       .subscribe({
         next: (access) => {
-          if (this.selectedPart?.partId !== part.partId) {
+          if (
+            this.destroyed ||
+            this.playerGeneration !== generation ||
+            this.selectedPart?.partId !== part.partId
+          ) {
             return;
           }
           this.mediaAccess = access;
@@ -1501,6 +1512,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
+          if (
+            this.destroyed ||
+            this.playerGeneration !== generation ||
+            this.selectedPart?.partId !== part.partId
+          ) {
+            return;
+          }
           this.mediaLoading = false;
           this.mediaError = this.describeError(error, '无法打开本地视频');
           this.changeDetector.markForCheck();
@@ -1509,38 +1527,98 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private attachFlvPlayer(): void {
+    const part = this.selectedPart;
+    const element = this.videoElement;
+    const url = this.mediaUrl;
+    const access = this.mediaAccess;
     if (
-      this.selectedPart?.mediaKind !== 'flv' ||
-      !this.videoElement ||
-      !this.mediaUrl ||
+      this.destroyed ||
+      part?.mediaKind !== 'flv' ||
+      !element ||
+      !url ||
+      !access ||
       this.player
     ) {
       return;
     }
-    this.player = this.playerFactory.attachFlv(
-      this.videoElement,
-      this.mediaUrl,
-      {
-        playbackMode: this.mediaAccess?.playbackMode ?? 'sequential',
-        durationMs: this.mediaAccess?.durationMs ?? null,
-        fileSizeBytes: this.mediaAccess?.fileSizeBytes ?? null,
-      },
-      (event) => {
-        this.zone.run(() => {
-          if (event.type === 'error') {
-            this.mediaError = event.message;
-            this.teardownPlayer();
-            this.changeDetector.markForCheck();
-          } else if (event.type === 'stalled') {
-            this.handleMediaStalled();
-            this.changeDetector.markForCheck();
-          }
-        });
-      },
-    );
-    if (this.player === null) {
-      this.mediaError = '当前浏览器不支持 FLV 播放';
+    const generation = this.playerGeneration;
+    if (this.pendingPlayerGeneration === generation) {
+      return;
     }
+    const partId = part.partId;
+    const source: FlvPlaybackSource = {
+      playbackMode: access.playbackMode,
+      durationMs: access.durationMs,
+      fileSizeBytes: access.fileSizeBytes,
+    };
+    this.pendingPlayerGeneration = generation;
+    void this.playerLoader()
+      .then((factory) => {
+        if (
+          !this.matchesPlayerIdentity(generation, partId, url, element) ||
+          this.pendingPlayerGeneration !== generation
+        ) {
+          return;
+        }
+        const player = factory.attachFlv(element, url, source, (event) => {
+          if (!this.matchesPlayerIdentity(generation, partId, url, element)) {
+            return;
+          }
+          this.zone.run(() => {
+            if (event.type === 'error') {
+              this.mediaError = event.message;
+              this.invalidatePlayer();
+              this.changeDetector.markForCheck();
+            } else if (event.type === 'stalled') {
+              this.handleMediaStalled();
+              this.changeDetector.markForCheck();
+            }
+          });
+        });
+        if (
+          !this.matchesPlayerIdentity(generation, partId, url, element) ||
+          this.pendingPlayerGeneration !== generation
+        ) {
+          this.destroyPlayer(player);
+          return;
+        }
+        this.pendingPlayerGeneration = null;
+        this.player = player;
+        if (this.player === null) {
+          this.mediaError = '当前浏览器不支持 FLV 播放';
+          this.changeDetector.markForCheck();
+        }
+      })
+      .catch((error: unknown) => {
+        if (this.pendingPlayerGeneration !== generation) {
+          return;
+        }
+        this.pendingPlayerGeneration = null;
+        if (!this.matchesPlayerIdentity(generation, partId, url, element)) {
+          return;
+        }
+        this.mediaError = this.describeError(
+          error,
+          'FLV 播放器加载失败，请重新打开',
+        );
+        this.changeDetector.markForCheck();
+      });
+  }
+
+  private matchesPlayerIdentity(
+    generation: number,
+    partId: number,
+    url: string,
+    element: HTMLVideoElement,
+  ): boolean {
+    return (
+      !this.destroyed &&
+      this.playerGeneration === generation &&
+      this.selectedPart?.partId === partId &&
+      this.selectedPart.mediaKind === 'flv' &&
+      this.mediaUrl === url &&
+      this.videoElement === element
+    );
   }
 
   private applyPendingSeek(): void {
@@ -1562,14 +1640,22 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   private teardownPlayer(): void {
-    if (!this.player) {
-      return;
-    }
-    this.player.pause();
-    this.player.unload();
-    this.player.detachMediaElement();
-    this.player.destroy();
+    const player = this.player;
     this.player = null;
+    this.destroyPlayer(player);
+  }
+
+  private destroyPlayer(player: PartPlayer | null): void {
+    player?.pause();
+    player?.unload();
+    player?.detachMediaElement();
+    player?.destroy();
+  }
+
+  private invalidatePlayer(): void {
+    this.playerGeneration += 1;
+    this.pendingPlayerGeneration = null;
+    this.teardownPlayer();
   }
 
   private handleRealtimeEvent(event: RealtimeEvent): void {

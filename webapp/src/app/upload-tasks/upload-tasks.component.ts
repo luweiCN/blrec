@@ -10,15 +10,11 @@ import { RecordingSessionScope } from './shared/recording-session.model';
 })
 export class UploadTasksComponent {
   readonly scope: RecordingSessionScope;
-  readonly clipLibrary: boolean;
 
   constructor(@Optional() route: ActivatedRoute | null) {
     const configuredScope =
       route?.snapshot.data.sessionScope ??
       route?.parent?.snapshot.data.sessionScope;
-    this.clipLibrary = Boolean(
-      route?.snapshot.data.clipLibrary ?? route?.parent?.snapshot.data.clipLibrary,
-    );
     this.scope = configuredScope === 'recordings' ? 'recordings' : 'uploads';
   }
 }

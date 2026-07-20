@@ -1,6 +1,10 @@
 import mpegts from 'mpegts.js';
 
 import { PartPlayerFactory } from './part-player.factory';
+import type {
+  FlvPlaybackSource,
+  PartPlayerEventHandler,
+} from './part-player.loader';
 
 describe('PartPlayerFactory', () => {
   let createPlayer: jasmine.Spy;
@@ -9,7 +13,7 @@ describe('PartPlayerFactory', () => {
   beforeEach(() => {
     player = jasmine.createSpyObj<ReturnType<typeof mpegts.createPlayer>>(
       'Player',
-      ['on', 'attachMediaElement', 'load']
+      ['on', 'attachMediaElement', 'load'],
     );
     spyOn(mpegts, 'isSupported').and.returnValue(true);
     createPlayer = spyOn(mpegts, 'createPlayer').and.returnValue(player);
@@ -17,16 +21,18 @@ describe('PartPlayerFactory', () => {
 
   it('loads a finite recording snapshot lazily without a transmuxing worker', () => {
     const element = document.createElement('video');
+    const source: FlvPlaybackSource = {
+      playbackMode: 'seekable',
+      durationMs: 12_500,
+      fileSizeBytes: 1_024 * 1_024 * 1_024,
+    };
+    const onEvent: PartPlayerEventHandler = () => undefined;
 
     new PartPlayerFactory().attachFlv(
       element,
       '/api/media?signed',
-      {
-        playbackMode: 'seekable',
-        durationMs: 12_500,
-        fileSizeBytes: 1_024 * 1_024 * 1_024,
-      },
-      () => undefined
+      source,
+      onEvent,
     );
 
     expect(createPlayer).toHaveBeenCalledWith(
@@ -41,7 +47,7 @@ describe('PartPlayerFactory', () => {
         enableWorker: false,
         enableStashBuffer: false,
         lazyLoad: true,
-      })
+      }),
     );
     expect(player.attachMediaElement).toHaveBeenCalledOnceWith(element);
     expect(player.load).toHaveBeenCalled();

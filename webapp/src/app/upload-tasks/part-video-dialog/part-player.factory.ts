@@ -1,35 +1,17 @@
-import { Injectable } from '@angular/core';
-
 import mpegts from 'mpegts.js';
 
-export interface PartPlayer {
-  pause(): void;
-  unload(): void;
-  detachMediaElement(): void;
-  destroy(): void;
-}
+import type {
+  FlvPlaybackSource,
+  PartPlayer,
+  PartPlayerEventHandler,
+} from './part-player.loader';
 
-export type PartPlayerEvent =
-  | { readonly type: 'attached' }
-  | { readonly type: 'first_frame' }
-  | { readonly type: 'stalled' }
-  | { readonly type: 'error'; readonly message: string };
-
-export type PartPlayerEventHandler = (event: PartPlayerEvent) => void;
-
-export interface FlvPlaybackSource {
-  readonly playbackMode: 'seekable' | 'sequential' | 'active_snapshot';
-  readonly durationMs: number | null;
-  readonly fileSizeBytes: number | null;
-}
-
-@Injectable({ providedIn: 'root' })
 export class PartPlayerFactory {
   attachFlv(
     element: HTMLVideoElement,
     url: string,
     source: FlvPlaybackSource,
-    onEvent: PartPlayerEventHandler
+    onEvent: PartPlayerEventHandler,
   ): PartPlayer | null {
     if (!mpegts.isSupported()) {
       return null;
@@ -61,8 +43,11 @@ export class PartPlayerFactory {
     player.on(
       mpegts.Events.ERROR,
       (type: unknown, detail: unknown, info: unknown) => {
-        onEvent({ type: 'error', message: this.describeError(type, detail, info) });
-      }
+        onEvent({
+          type: 'error',
+          message: this.describeError(type, detail, info),
+        });
+      },
     );
     let firstFrameReported = false;
     const firstFrame = () => {

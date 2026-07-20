@@ -1,5 +1,5 @@
 import { NgModule } from '@angular/core';
-import { Routes, RouterModule, PreloadAllModules } from '@angular/router';
+import { NoPreloading, RouterModule, Routes } from '@angular/router';
 
 import { PageNotFoundComponent } from './page-not-found/page-not-found.component';
 import { RouteScrollBehaviour } from './core/services/router-scroll.service.intf';
@@ -36,7 +36,31 @@ const routes: Routes = [
     canActivate: [AuthGuard],
     loadChildren: () =>
       import('./notifications/notifications.module').then(
-        (m) => m.NotificationsModule
+        (m) => m.NotificationsModule,
+      ),
+  },
+  {
+    path: 'recordings/highlights/:sessionId',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./upload-tasks/highlight-editor/highlight-editor.module').then(
+        (m) => m.HighlightEditorModule,
+      ),
+  },
+  {
+    path: 'upload-tasks/highlights/:sessionId',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./upload-tasks/highlight-editor/highlight-editor.module').then(
+        (m) => m.HighlightEditorModule,
+      ),
+  },
+  {
+    path: 'clips/highlights/:sessionId',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./upload-tasks/highlight-editor/highlight-editor.module').then(
+        (m) => m.HighlightEditorModule,
       ),
   },
   {
@@ -60,10 +84,9 @@ const routes: Routes = [
   {
     path: 'clips',
     canActivate: [AuthGuard],
-    data: { clipLibrary: true },
     loadChildren: () =>
-      import('./upload-tasks/upload-tasks.module').then(
-        (m) => m.UploadTasksModule,
+      import('./upload-tasks/clip-library/clip-library.module').then(
+        (m) => m.ClipLibraryModule,
       ),
   },
   {
@@ -90,7 +113,7 @@ const routes: Routes = [
 @NgModule({
   imports: [
     RouterModule.forRoot(routes, {
-      preloadingStrategy: PreloadAllModules,
+      preloadingStrategy: NoPreloading,
     }),
   ],
   exports: [RouterModule],
