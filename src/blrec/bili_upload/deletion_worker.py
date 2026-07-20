@@ -189,6 +189,14 @@ class LocalDeletionWorker:
                 "WHERE outcome_state='in_flight'",
                 (int(self._clock()),),
             )
+            connection.execute(
+                'DELETE FROM upload_chunks WHERE part_id IN('
+                'SELECT part.id FROM upload_parts part '
+                'JOIN upload_jobs job ON job.id=part.job_id '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                "WHERE job.repair_state='reuploading' "
+                "AND session.deletion_state!='none')"
+            )
 
         await self._database.write(recover)
         self.wake()

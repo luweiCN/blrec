@@ -113,6 +113,10 @@ class UnknownEditProtocol(FakeProtocol):
         raise RemoteOutcomeUnknown('response lost')
 
 
+class SimulatedProcessCrash(BaseException):
+    pass
+
+
 class LeaseStealingProtocol(FakeProtocol):
     def __init__(self, database: BiliUploadDatabase) -> None:
         super().__init__(archive_response())
@@ -197,6 +201,31 @@ def archive_response(*, second_state: str = 'failed') -> Mapping[str, Any]:
             ],
         },
     }
+
+
+def repair_reupload_snapshot(*, mode: str = 'original') -> str:
+    return json.dumps(
+        {
+            'format_version': 1,
+            'cover_url': 'https://archive.biliimg.com/fixture.jpg',
+            'failed_parts': [
+                {
+                    'local_id': 12,
+                    'part_index': 2,
+                    'filename': 'remote-12',
+                    'cid': 102,
+                    'fail_code': 9,
+                    'xcode_state': 3,
+                    'fail_desc': '服务端转码失败',
+                    'mode': mode,
+                }
+            ],
+            'healthy_cids': {'11': 101},
+        },
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+    )
 
 
 async def seed_job(
@@ -954,6 +983,411 @@ async def test_repair_recovery_does_not_restore_remux_after_deletion_generation(
 
 
 @pytest.mark.asyncio
+async def test_repair_restart_before_replacement_resumes_persisted_plan(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response(second_state='failed')), tmp_path
+        )
+
+        async def crash_before_upload(
+            part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            del part_id, bundle, claim
+            raise SimulatedProcessCrash()
+
+        manager._uploader.upload_part = crash_before_upload  # type: ignore
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        with pytest.raises(SimulatedProcessCrash):
+            await manager.run_once()
+
+        assert (
+            await database.scalar(
+                'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=9'
+            )
+            == repair_reupload_snapshot()
+        )
+        interrupted = await database.fetchone(
+            'SELECT upload_state,remote_filename,repair_stage '
+            'FROM upload_parts WHERE id=12'
+        )
+        assert interrupted is not None
+        assert dict(interrupted) == {
+            'upload_state': 'prepared',
+            'remote_filename': None,
+            'repair_stage': 'original',
+        }
+
+        protocol = FakeProtocol(archive_response(second_state='ready'))
+        restarted, uploader, _ = make_manager(database, protocol, tmp_path)
+        await restarted.recover_interrupted()
+
+        assert await restarted.run_once() == 9
+        assert protocol.view_calls == []
+        assert uploader.calls == [12]
+        assert len(protocol.edit_calls) == 1
+        assert (
+            await database.scalar(
+                'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=9'
+            )
+            is None
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_restart_after_replacement_edits_without_reupload(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        manager, first_uploader, _ = make_manager(
+            database, FakeProtocol(archive_response(second_state='failed')), tmp_path
+        )
+
+        async def crash_before_edit(
+            job_id: int, healthy_cids: Mapping[int, int], cover_url: Optional[str]
+        ) -> Mapping[str, Any]:
+            del job_id, healthy_cids, cover_url
+            raise SimulatedProcessCrash()
+
+        manager._edit_payload_builder = crash_before_edit
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        with pytest.raises(SimulatedProcessCrash):
+            await manager.run_once()
+        assert first_uploader.calls == [12]
+        assert (
+            await database.scalar(
+                'SELECT remote_filename FROM upload_parts WHERE id=12'
+            )
+            == 'replacement-12'
+        )
+
+        protocol = FakeProtocol(archive_response(second_state='ready'))
+        restarted, uploader, payload_builder = make_manager(
+            database, protocol, tmp_path
+        )
+        await restarted.recover_interrupted()
+
+        assert await restarted.run_once() == 9
+        assert protocol.view_calls == []
+        assert uploader.calls == []
+        assert payload_builder.calls == [{11: 101}]
+        assert len(protocol.edit_calls) == 1
+        assert (
+            await database.scalar(
+                'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=9'
+            )
+            is None
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_restart_normalizes_owned_in_flight_chunk_before_resume(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response(second_state='failed')), tmp_path
+        )
+
+        async def crash_during_chunk(
+            part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            del bundle
+
+            def persist(connection: Any) -> None:
+                connection.execute(
+                    "UPDATE upload_parts SET upload_state='uploading',"
+                    "remote_filename='replacement-12',upload_session_json='{}' "
+                    'WHERE id=?',
+                    (part_id,),
+                )
+                connection.execute(
+                    'INSERT INTO upload_chunks('
+                    "part_id,chunk_no,offset,size,state,attempt) "
+                    "VALUES(?,0,0,8,'in_flight',1)",
+                    (part_id,),
+                )
+                connection.execute(
+                    'INSERT INTO owner_handoff_outcomes('
+                    'owner_kind,owner_id,side_effect_key,source_generation,'
+                    'outcome_state,outcome_json,acknowledged_at) '
+                    "VALUES('upos',?,'chunk:0',?,'in_flight','{}',NULL)",
+                    (part_id, claim.cancellation_generation),
+                )
+
+            await database.write(persist)
+            raise SimulatedProcessCrash()
+
+        manager._uploader.upload_part = crash_during_chunk  # type: ignore
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        with pytest.raises(SimulatedProcessCrash):
+            await manager.run_once()
+
+        protocol = FakeProtocol(archive_response(second_state='ready'))
+        restarted, uploader, _ = make_manager(database, protocol, tmp_path)
+        deletion = restarted._deletion_worker
+        assert deletion is not None
+        await deletion.recover_interrupted()
+        await restarted.recover_interrupted()
+
+        part = await database.fetchone(
+            'SELECT upload_state,remote_filename,upload_session_json '
+            'FROM upload_parts WHERE id=12'
+        )
+        assert part is not None
+        assert dict(part) == {
+            'upload_state': 'prepared',
+            'remote_filename': None,
+            'upload_session_json': None,
+        }
+        assert await database.scalar('SELECT COUNT(*) FROM upload_chunks') == 0
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upos' AND outcome_state='in_flight'"
+            )
+            == 0
+        )
+
+        assert await restarted.run_once() == 9
+        assert protocol.view_calls == []
+        assert uploader.calls == [12]
+        assert len(protocol.edit_calls) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_restart_never_blindly_retries_unknown_completion(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response(second_state='failed')), tmp_path
+        )
+
+        async def crash_during_completion(
+            part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            del bundle
+
+            def persist(connection: Any) -> None:
+                connection.execute(
+                    "UPDATE upload_parts SET upload_state='completing',"
+                    "remote_filename='replacement-12',upload_session_json='{}' "
+                    'WHERE id=?',
+                    (part_id,),
+                )
+                connection.execute(
+                    'INSERT INTO owner_handoff_outcomes('
+                    'owner_kind,owner_id,side_effect_key,source_generation,'
+                    'outcome_state,outcome_json,acknowledged_at) '
+                    "VALUES('upos',?,'complete',?,'in_flight','{}',NULL)",
+                    (part_id, claim.cancellation_generation),
+                )
+
+            await database.write(persist)
+            raise SimulatedProcessCrash()
+
+        manager._uploader.upload_part = crash_during_completion  # type: ignore
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        with pytest.raises(SimulatedProcessCrash):
+            await manager.run_once()
+
+        protocol = FakeProtocol(archive_response(second_state='ready'))
+        restarted, uploader, _ = make_manager(database, protocol, tmp_path)
+        deletion = restarted._deletion_worker
+        assert deletion is not None
+        await deletion.recover_interrupted()
+        await restarted.recover_interrupted()
+
+        job = await database.fetchone(
+            'SELECT state,repair_state,operator_paused,lease_owner '
+            'FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'repair_state': 'unknown_outcome',
+            'operator_paused': 1,
+            'lease_owner': None,
+        }
+        assert await restarted.run_once() is None
+        assert protocol.view_calls == []
+        assert uploader.calls == []
+        assert protocol.edit_calls == []
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE outcome_state='in_flight'"
+            )
+            == 0
+        )
+
+        await deletion.request_session(1, manager_subject='manager')
+        for _ in range(8):
+            await deletion.run_once()
+            if not await database.scalar(
+                'SELECT COUNT(*) FROM recording_sessions WHERE id=1'
+            ):
+                break
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM recording_sessions WHERE id=1')
+            == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('temporary_exists', (True, False))
+@pytest.mark.parametrize('replacement_confirmed', (True, False))
+async def test_repair_restart_restores_remux_and_resumes_persisted_plan(
+    tmp_path: Path, temporary_exists: bool, replacement_confirmed: bool
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        original_path = tmp_path / 'p12.mp4'
+        original_identity = FileIdentity.from_path(str(original_path)).to_json()
+        temporary_path = tmp_path / 'interrupted-remux-12.mp4'
+        temporary_path.write_bytes(b'interrupted-remux')
+        temporary_identity = FileIdentity.from_path(str(temporary_path)).to_json()
+        if not temporary_exists:
+            temporary_path.unlink()
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='reuploading',"
+            'repair_reupload_snapshot_json=?,lease_owner=?,lease_generation=4,'
+            'lease_until=2000 WHERE id=9',
+            (repair_reupload_snapshot(mode='remux'), 'stale-worker'),
+        )
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='remux',repair_remux_attempts=1,"
+            'repair_temp_path=?,repair_original_path=?,repair_original_identity=?,'
+            'final_path=?,file_identity=?,upload_state=?,remote_filename=? WHERE id=12',
+            (
+                str(temporary_path),
+                str(original_path),
+                original_identity,
+                str(temporary_path),
+                temporary_identity,
+                'confirmed' if replacement_confirmed else 'prepared',
+                'replacement-12' if replacement_confirmed else None,
+            ),
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('repair',9,'lease:4',0,'in_flight','{}',NULL)"
+        )
+        remuxer = FakeRemuxer(tmp_path)
+        protocol = FakeProtocol(archive_response(second_state='ready'))
+        manager, uploader, _ = make_manager(
+            database, protocol, tmp_path, remuxer=remuxer
+        )
+
+        await manager.recover_interrupted()
+        assert await manager.run_once() == 9
+
+        assert not temporary_path.exists()
+        assert await database.scalar(
+            'SELECT final_path FROM upload_parts WHERE id=12'
+        ) == str(original_path)
+        assert protocol.view_calls == []
+        assert uploader.calls == ([] if replacement_confirmed else [12])
+        assert remuxer.calls == (
+            [] if replacement_confirmed else [(str(original_path), 12)]
+        )
+        assert len(protocol.edit_calls) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_deleting_interrupted_repair_normalizes_upos_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='reuploading',"
+            'repair_reupload_snapshot_json=?,lease_owner=?,lease_generation=4,'
+            'lease_until=2000 WHERE id=9',
+            (repair_reupload_snapshot(), 'repair-stale'),
+        )
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='original',upload_state='uploading',"
+            "remote_filename='replacement-12',upload_session_json='{}' WHERE id=12"
+        )
+        await database.execute(
+            'INSERT INTO upload_chunks('
+            "part_id,chunk_no,offset,size,state,attempt) "
+            "VALUES(12,0,0,8,'in_flight',1)"
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('repair',9,'lease:4',0,'in_flight','{}',NULL),"
+            "('upos',12,'chunk:0',0,'in_flight','{}',NULL)"
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+        deletion = manager._deletion_worker
+        assert deletion is not None
+
+        await deletion.recover_interrupted()
+        assert await database.scalar('SELECT COUNT(*) FROM upload_chunks') == 0
+        await manager.recover_interrupted()
+
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE outcome_state='in_flight'"
+            )
+            == 0
+        )
+        for _ in range(8):
+            await deletion.run_once()
+            if not await database.scalar(
+                'SELECT COUNT(*) FROM recording_sessions WHERE id=1'
+            ):
+                break
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM recording_sessions WHERE id=1')
+            == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_deletion_during_remux_drains_and_removes_artifact_before_ack(
     tmp_path: Path,
 ) -> None:
@@ -1471,7 +1905,8 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
         await database.execute(
             'UPDATE upload_jobs SET policy_snapshot_json=?,'
             "submission_verification_state='passed',"
-            'submission_verified_at=123,submission_verification_json=? WHERE id=9',
+            'submission_verified_at=123,submission_verification_json=?,'
+            'repair_reupload_snapshot_json=? WHERE id=9',
             (
                 json.dumps(
                     {
@@ -1481,6 +1916,7 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
                     }
                 ),
                 '{"state":"passed"}',
+                repair_reupload_snapshot(),
             ),
         )
         manager, _, _ = make_manager(
@@ -1494,7 +1930,8 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
             'SELECT state,submit_state,aid,bvid,comment_branch_state,'
             'danmaku_branch_state,collection_branch_state,'
             'submission_verification_state,submission_verified_at,'
-            'submission_verification_json FROM upload_jobs WHERE id=9'
+            'submission_verification_json,repair_reupload_snapshot_json '
+            'FROM upload_jobs WHERE id=9'
         )
         assert job is not None
         assert dict(job) == {
@@ -1508,6 +1945,7 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
             'submission_verification_state': 'pending',
             'submission_verified_at': None,
             'submission_verification_json': None,
+            'repair_reupload_snapshot_json': None,
         }
         archived = await database.fetchone(
             'SELECT aid,bvid,reason FROM upload_job_archives WHERE old_job_id=9'

@@ -78,7 +78,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -151,6 +151,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'repair_attempt',
             'repair_requested_at',
             'repair_completed_at',
+            'repair_reupload_snapshot_json',
             'operator_paused',
             'operator_resume_state',
             'submission_verification_state',
@@ -440,7 +441,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
     finally:
         await database.close()
 
@@ -488,7 +489,7 @@ async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
             'output_video_path': '/clips/legacy.mp4',
             'file_size_bytes': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
     finally:
         await database.close()
 
@@ -526,7 +527,7 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
         assert (
             await database.scalar(
                 'SELECT file_size_bytes FROM highlight_clips WHERE id=8'
@@ -590,7 +591,7 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
         sessions = await database.fetchall(
             'SELECT id,cancellation_generation FROM recording_sessions ORDER BY id'
         )
@@ -660,7 +661,7 @@ async def test_twenty_seventh_migration_persists_safe_highlight_inspections(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 27
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
         legacy = await database.fetchone(
             'SELECT inspection_json,source_fingerprint_json,idempotency_key '
             'FROM highlight_clips WHERE id=7'
@@ -683,6 +684,71 @@ async def test_twenty_seventh_migration_persists_safe_highlight_inspections(
                 "idempotency_key,state,active_durations_json,created_at,updated_at) "
                 "VALUES('other',1,0,1000,'idem','accepted','{}',1,1)"
             )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_twenty_eighth_migration_adds_repair_reupload_snapshot(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 28):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(1,42,'u',X'00',1,'k','active',1,1)"
+        )
+        connection.execute(
+            "INSERT INTO recording_sessions("
+            "id,room_id,broadcast_session_key,state,started_at) "
+            "VALUES(1,100,'100:1','closed',1)"
+        )
+        connection.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            "created_at,updated_at) VALUES(1,1,1,'{}','waiting_review',"
+            "'confirmed',1,1)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert (
+            await database.scalar(
+                'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=1'
+            )
+            is None
+        )
+        await database.execute(
+            'UPDATE upload_jobs SET repair_reupload_snapshot_json=? WHERE id=1',
+            ('{"format_version":1}',),
+        )
+        assert (
+            await database.scalar(
+                'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=1'
+            )
+            == '{"format_version":1}'
+        )
     finally:
         await database.close()
 

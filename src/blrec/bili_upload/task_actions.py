@@ -107,6 +107,14 @@ class _RemotePart:
     state: str
 
 
+@dataclass(frozen=True)
+class _RepairResumePlan:
+    failed_parts: Tuple[_RemotePart, ...]
+    healthy_cids: Mapping[int, int]
+    repair_modes: Mapping[int, str]
+    cover_url: Optional[str]
+
+
 class UploadTaskActionManager:
     _ACTIVE_REPAIR_STATES = frozenset(('queued', 'checking', 'reuploading', 'editing'))
     _REPAIRABLE_JOB_STATES = frozenset(
@@ -748,6 +756,7 @@ class UploadTaskActionManager:
                 'submission_verified_at=NULL,submission_verification_json=NULL,'
                 "repair_state='idle',repair_message=NULL,repair_error=NULL,"
                 'repair_attempt=0,repair_requested_at=NULL,repair_completed_at=NULL,'
+                'repair_reupload_snapshot_json=NULL,'
                 'updated_at=? WHERE id=?',
                 (
                     comment_state,
@@ -1034,6 +1043,11 @@ class UploadTaskActionManager:
                     if generation_row is None
                     else int(generation_row['source_generation'])
                 )
+                completion_unknown = False
+                if str(row['repair_state']) == 'reuploading':
+                    completion_unknown = self._recover_repair_upos_in_transaction(
+                        connection, job_id=job_id, deleting=deleting, now=now
+                    )
                 if editing:
                     connection.execute(
                         'INSERT INTO owner_handoff_outcomes('
@@ -1047,7 +1061,11 @@ class UploadTaskActionManager:
                         'acknowledged_at=excluded.acknowledged_at',
                         (job_id, source_generation, now),
                     )
-                lease_outcome = 'unknown_terminal' if editing else 'cancelled_local'
+                lease_outcome = (
+                    'unknown_terminal'
+                    if editing or completion_unknown
+                    else 'cancelled_local'
+                )
                 connection.execute(
                     'UPDATE owner_handoff_outcomes SET outcome_state=?,'
                     "outcome_json='{}',acknowledged_at=? "
@@ -1062,6 +1080,19 @@ class UploadTaskActionManager:
                         "repair_state='failed',repair_message=NULL,repair_error=?,"
                         'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
                         ('任务正在删除', now, job_id),
+                    )
+                elif completion_unknown:
+                    connection.execute(
+                        "UPDATE upload_jobs SET state='paused',operator_paused=1,"
+                        "repair_state='unknown_outcome',repair_message=NULL,"
+                        'repair_error=?,review_reason=?,lease_owner=NULL,'
+                        'lease_until=NULL,updated_at=? WHERE id=?',
+                        (
+                            '修复分 P 的 UPOS 完成结果未知，已停止自动重试',
+                            '转码修复上传结果未知，需要人工确认后再处理',
+                            now,
+                            job_id,
+                        ),
                     )
             connection.execute(
                 "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
@@ -1089,6 +1120,79 @@ class UploadTaskActionManager:
             )
 
         await self._database.write(recover)
+
+    @staticmethod
+    def _recover_repair_upos_in_transaction(
+        connection: sqlite3.Connection, *, job_id: int, deleting: bool, now: int
+    ) -> bool:
+        parts = connection.execute(
+            'SELECT id,upload_state FROM upload_parts WHERE job_id=? '
+            "AND repair_stage IN ('original','remux')",
+            (job_id,),
+        ).fetchall()
+        part_ids = tuple(int(part['id']) for part in parts)
+        if not part_ids:
+            return False
+        placeholders = ','.join('?' for _ in part_ids)
+        completion_unknown = any(
+            str(part['upload_state']) in ('completing', 'unknown_outcome')
+            for part in parts
+        )
+        if not deleting and not completion_unknown:
+            completion_unknown = (
+                connection.execute(
+                    (
+                        'SELECT 1 FROM owner_handoff_outcomes '
+                        "WHERE owner_kind='upos' AND owner_id IN ({}) "
+                        "AND side_effect_key='complete' "
+                        "AND outcome_state IN ('in_flight','unknown_terminal') "
+                        'LIMIT 1'
+                    ).format(placeholders),
+                    part_ids,
+                ).fetchone()
+                is not None
+            )
+        connection.execute(
+            'UPDATE owner_handoff_outcomes SET outcome_state=?,outcome_json=?, '
+            'acknowledged_at=? WHERE owner_kind=? '
+            'AND owner_id IN ({}) AND outcome_state=?'.format(placeholders),
+            ('unknown_terminal', '{}', now, 'upos', *part_ids, 'in_flight'),
+        )
+        if deleting:
+            connection.execute(
+                'DELETE FROM upload_chunks WHERE part_id IN ({})'.format(placeholders),
+                part_ids,
+            )
+            return completion_unknown
+        if completion_unknown:
+            connection.execute(
+                "UPDATE upload_chunks SET state='prepared' "
+                "WHERE part_id IN ({}) AND state='in_flight'".format(placeholders),
+                part_ids,
+            )
+            return True
+        incomplete_ids = tuple(
+            int(part['id'])
+            for part in parts
+            if str(part['upload_state']) != 'confirmed'
+        )
+        if not incomplete_ids:
+            return False
+        incomplete_placeholders = ','.join('?' for _ in incomplete_ids)
+        connection.execute(
+            'DELETE FROM upload_chunks WHERE part_id IN ({})'.format(
+                incomplete_placeholders
+            ),
+            incomplete_ids,
+        )
+        connection.execute(
+            "UPDATE upload_parts SET upload_state='prepared',remote_filename=NULL,"
+            'cid=NULL,upload_session_json=NULL WHERE id IN ({})'.format(
+                incomplete_placeholders
+            ),
+            incomplete_ids,
+        )
+        return False
 
     async def _recover_interrupted_remux_artifacts(self) -> None:
         rows = await self._database.fetchall(
@@ -1237,33 +1341,62 @@ class UploadTaskActionManager:
             async with gate.hold(job.credential_version):
                 bundle = await self._bundle_loader(job.account_id)
                 await self._assert_active_repair(claim)
-                response = await self._protocol.archive_view(
-                    bundle,
-                    {'topic_grey': 1, 'bvid': job.bvid, 't': int(self._clock() * 1000)},
-                )
-                remote_parts, cover_url = await self._inspect_remote(job, response)
-                await self._store_transcode_inspection(claim, remote_parts)
-                failed = [part for part in remote_parts if part.state == 'failed']
-                processing = [
-                    part for part in remote_parts if part.state == 'processing'
-                ]
-                if not failed:
-                    message = (
-                        'B 站仍在转码，暂不重传'
-                        if processing
-                        else '未发现需要修复的分 P'
+                resume_plan = await self._load_repair_resume_plan(claim)
+                if resume_plan is None:
+                    response = await self._protocol.archive_view(
+                        bundle,
+                        {
+                            'topic_grey': 1,
+                            'bvid': job.bvid,
+                            't': int(self._clock() * 1000),
+                        },
                     )
-                    await self._finish_noop(claim, message)
-                    return
+                    remote_parts, cover_url = await self._inspect_remote(job, response)
+                    await self._store_transcode_inspection(claim, remote_parts)
+                    failed = [part for part in remote_parts if part.state == 'failed']
+                    processing = [
+                        part for part in remote_parts if part.state == 'processing'
+                    ]
+                    if not failed:
+                        message = (
+                            'B 站仍在转码，暂不重传'
+                            if processing
+                            else '未发现需要修复的分 P'
+                        )
+                        await self._finish_noop(claim, message)
+                        return
+                    repair_modes = await self._select_repair_modes(claim, failed)
+                    healthy_cids = {
+                        part.local_id: part.cid
+                        for part in remote_parts
+                        if part.state != 'failed'
+                    }
+                    pending = failed
+                else:
+                    failed = list(resume_plan.failed_parts)
+                    healthy_cids = dict(resume_plan.healthy_cids)
+                    repair_modes = dict(resume_plan.repair_modes)
+                    cover_url = resume_plan.cover_url
+                    pending = await self._pending_repair_parts(claim, failed)
+                    audit(
+                        'transcode_repair_reupload_resumed',
+                        job_id=job.id,
+                        pending_parts=len(pending),
+                        confirmed_parts=len(failed) - len(pending),
+                        result='resumed',
+                    )
 
-                repair_modes = await self._select_repair_modes(claim, failed)
-                await self._verify_local_files(claim, failed)
+                if pending:
+                    await self._verify_local_files(claim, pending)
                 remux_part_ids = await self._prepare_remux_artifacts(
-                    claim, failed, repair_modes
+                    claim, pending, repair_modes
                 )
                 try:
-                    await self._prepare_failed_parts(claim, failed, repair_modes)
-                    for part in failed:
+                    if resume_plan is None:
+                        await self._prepare_failed_parts(
+                            claim, failed, repair_modes, healthy_cids, cover_url
+                        )
+                    for part in pending:
                         await self._assert_active_repair(claim)
                         await self._uploader.upload_part(
                             part.local_id, bundle=bundle, claim=claim
@@ -1271,11 +1404,6 @@ class UploadTaskActionManager:
                 finally:
                     if remux_part_ids:
                         await self._restore_remux_paths(claim, remux_part_ids)
-                healthy_cids = {
-                    part.local_id: part.cid
-                    for part in remote_parts
-                    if part.state != 'failed'
-                }
                 payload = await self._edit_payload_builder(
                     job.id, healthy_cids, cover_url
                 )
@@ -1367,6 +1495,189 @@ class UploadTaskActionManager:
             credential_version=int(row['credential_version']),
             aid=aid,
             bvid=bvid,
+        )
+
+    async def _load_repair_resume_plan(
+        self, claim: LeaseClaim
+    ) -> Optional[_RepairResumePlan]:
+        row = await self._database.fetchone(
+            'SELECT job.repair_reupload_snapshot_json FROM upload_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'WHERE job.id=? AND job.lease_owner=? AND job.lease_generation=? '
+            "AND job.repair_state='checking' AND job.operator_paused=0 "
+            "AND session.deletion_state='none' "
+            'AND session.cancellation_generation=?',
+            (
+                claim.id,
+                claim.lease_owner,
+                claim.lease_generation,
+                self._repair_source_generation(claim),
+            ),
+        )
+        if row is None:
+            raise LeaseLost('转码修复任务租约已失效')
+        value = self._text(row['repair_reupload_snapshot_json'])
+        if value is None:
+            return None
+        return self._decode_repair_resume_plan(value)
+
+    async def _pending_repair_parts(
+        self, claim: LeaseClaim, failed: List[_RemotePart]
+    ) -> List[_RemotePart]:
+        ids = tuple(part.local_id for part in failed)
+        placeholders = ','.join('?' for _ in ids)
+        rows = await self._database.fetchall(
+            'SELECT id,part_index,repair_stage,upload_state,remote_filename '
+            'FROM upload_parts WHERE job_id=? AND id IN ({})'.format(placeholders),
+            (claim.id, *ids),
+        )
+        by_id = {int(row['id']): row for row in rows}
+        pending: List[_RemotePart] = []
+        for part in failed:
+            row = by_id.get(part.local_id)
+            if row is None or int(row['part_index']) != part.part_index:
+                raise ProtocolContractError('转码修复的分 P 快照与本地记录不一致')
+            state = str(row['upload_state'])
+            if state == 'confirmed':
+                if self._text(row['remote_filename']) is None:
+                    raise ProtocolContractError('已重传分 P 缺少远端 filename')
+                continue
+            if state != 'prepared' or row['remote_filename'] is not None:
+                raise ProtocolContractError('中断的分 P 上传状态尚未安全恢复')
+            pending.append(part)
+        return pending
+
+    @staticmethod
+    def _encode_repair_resume_plan(
+        failed: List[_RemotePart],
+        healthy_cids: Mapping[int, int],
+        repair_modes: Mapping[int, str],
+        cover_url: Optional[str],
+    ) -> str:
+        payload = {
+            'format_version': 1,
+            'cover_url': cover_url,
+            'failed_parts': [
+                {
+                    'local_id': part.local_id,
+                    'part_index': part.part_index,
+                    'filename': part.filename,
+                    'cid': part.cid,
+                    'fail_code': part.fail_code,
+                    'xcode_state': part.xcode_state,
+                    'fail_desc': part.fail_desc,
+                    'mode': repair_modes[part.local_id],
+                }
+                for part in failed
+            ],
+            'healthy_cids': {
+                str(part_id): cid for part_id, cid in sorted(healthy_cids.items())
+            },
+        }
+        return json.dumps(
+            payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+        )
+
+    @classmethod
+    def _decode_repair_resume_plan(cls, value: str) -> _RepairResumePlan:
+        try:
+            payload = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            raise ProtocolContractError('转码修复续传快照无法读取') from None
+        if not isinstance(payload, dict) or set(payload) != {
+            'format_version',
+            'cover_url',
+            'failed_parts',
+            'healthy_cids',
+        }:
+            raise ProtocolContractError('转码修复续传快照结构无效')
+        if payload['format_version'] != 1:
+            raise ProtocolContractError('转码修复续传快照版本无效')
+        cover_url = payload['cover_url']
+        if cover_url is not None and (
+            not isinstance(cover_url, str) or not cover_url.startswith('https://')
+        ):
+            raise ProtocolContractError('转码修复续传封面地址无效')
+        raw_healthy = payload['healthy_cids']
+        if not isinstance(raw_healthy, dict):
+            raise ProtocolContractError('转码修复续传 CID 快照无效')
+        healthy_cids: Dict[int, int] = {}
+        for raw_id, raw_cid in raw_healthy.items():
+            if (
+                not isinstance(raw_id, str)
+                or not raw_id.isdigit()
+                or type(raw_cid) is not int
+                or raw_cid <= 0
+            ):
+                raise ProtocolContractError('转码修复续传 CID 快照无效')
+            healthy_cids[int(raw_id)] = raw_cid
+        raw_failed = payload['failed_parts']
+        if not isinstance(raw_failed, list) or not raw_failed:
+            raise ProtocolContractError('转码修复续传分 P 快照无效')
+        failed: List[_RemotePart] = []
+        repair_modes: Dict[int, str] = {}
+        seen_ids = set()
+        seen_indexes = set()
+        fields = {
+            'local_id',
+            'part_index',
+            'filename',
+            'cid',
+            'fail_code',
+            'xcode_state',
+            'fail_desc',
+            'mode',
+        }
+        for item in raw_failed:
+            if not isinstance(item, dict) or set(item) != fields:
+                raise ProtocolContractError('转码修复续传分 P 快照无效')
+            local_id = item['local_id']
+            part_index = item['part_index']
+            cid = item['cid']
+            fail_code = item['fail_code']
+            xcode_state = item['xcode_state']
+            filename = item['filename']
+            fail_desc = item['fail_desc']
+            mode = item['mode']
+            if (
+                type(local_id) is not int
+                or local_id <= 0
+                or type(part_index) is not int
+                or part_index <= 0
+                or type(cid) is not int
+                or cid <= 0
+                or type(fail_code) is not int
+                or type(xcode_state) is not int
+                or not isinstance(filename, str)
+                or not filename
+                or not isinstance(fail_desc, str)
+                or mode not in ('original', 'remux')
+                or local_id in seen_ids
+                or part_index in seen_indexes
+                or local_id in healthy_cids
+            ):
+                raise ProtocolContractError('转码修复续传分 P 快照无效')
+            failed.append(
+                _RemotePart(
+                    local_id=local_id,
+                    part_index=part_index,
+                    filename=filename,
+                    cid=cid,
+                    fail_code=fail_code,
+                    xcode_state=xcode_state,
+                    fail_desc=fail_desc,
+                    state='failed',
+                )
+            )
+            repair_modes[local_id] = str(mode)
+            seen_ids.add(local_id)
+            seen_indexes.add(part_index)
+        failed.sort(key=lambda part: part.part_index)
+        return _RepairResumePlan(
+            failed_parts=tuple(failed),
+            healthy_cids=healthy_cids,
+            repair_modes=repair_modes,
+            cover_url=cover_url,
         )
 
     @staticmethod
@@ -1976,8 +2287,13 @@ class UploadTaskActionManager:
         claim: LeaseClaim,
         failed: List[_RemotePart],
         repair_modes: Mapping[int, str],
+        healthy_cids: Mapping[int, int],
+        cover_url: Optional[str],
     ) -> None:
         now = int(self._clock())
+        snapshot_json = self._encode_repair_resume_plan(
+            failed, healthy_cids, repair_modes, cover_url
+        )
 
         def prepare(connection: sqlite3.Connection) -> None:
             self._require_claim(connection, claim)
@@ -1993,8 +2309,14 @@ class UploadTaskActionManager:
                 )
             connection.execute(
                 "UPDATE upload_jobs SET repair_state='reuploading',"
-                'repair_message=?,updated_at=? WHERE id=?',
-                (self._repair_progress_message(failed, repair_modes), now, claim.id),
+                'repair_reupload_snapshot_json=?,repair_message=?,updated_at=? '
+                'WHERE id=?',
+                (
+                    snapshot_json,
+                    self._repair_progress_message(failed, repair_modes),
+                    now,
+                    claim.id,
+                ),
             )
 
         await self._database.write(prepare)
@@ -2066,6 +2388,7 @@ class UploadTaskActionManager:
             cursor = connection.execute(
                 "UPDATE upload_jobs SET state='waiting_review',"
                 "repair_state='waiting_review',repair_message=?,repair_error=NULL,"
+                'repair_reupload_snapshot_json=NULL,'
                 'repair_completed_at=?,review_reason=?,approved_at=NULL,'
                 'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? '
                 'AND lease_owner=? AND lease_generation=?',
