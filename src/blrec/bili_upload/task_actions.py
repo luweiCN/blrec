@@ -1007,6 +1007,7 @@ class UploadTaskActionManager:
         return await self._database.write(request)
 
     async def recover_interrupted(self) -> None:
+        await self._recover_interrupted_remux_artifacts()
         now = int(self._clock())
 
         def recover(connection: sqlite3.Connection) -> None:
@@ -1088,6 +1089,54 @@ class UploadTaskActionManager:
             )
 
         await self._database.write(recover)
+
+    async def _recover_interrupted_remux_artifacts(self) -> None:
+        rows = await self._database.fetchall(
+            'SELECT part.id,part.job_id,part.repair_temp_path,'
+            'part.repair_original_path,part.repair_original_identity,'
+            'session.cancellation_generation FROM upload_parts part '
+            'JOIN upload_jobs job ON job.id=part.job_id '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'WHERE part.repair_original_path IS NOT NULL '
+            'AND part.repair_original_identity IS NOT NULL '
+            "AND session.deletion_state='none'"
+        )
+        if not rows:
+            return
+        for row in rows:
+            temporary_path = self._text(row['repair_temp_path'])
+            if temporary_path is not None:
+                await self._remove_remux_path(temporary_path)
+
+        def restore(connection: sqlite3.Connection) -> None:
+            for row in rows:
+                temporary_path = self._text(row['repair_temp_path'])
+                original_path = str(row['repair_original_path'])
+                original_identity = str(row['repair_original_identity'])
+                connection.execute(
+                    'UPDATE upload_parts SET final_path=?,file_identity=?,'
+                    'repair_temp_path=NULL,repair_original_path=NULL,'
+                    'repair_original_identity=NULL WHERE id=? AND job_id=? '
+                    'AND repair_temp_path IS ? AND repair_original_path=? '
+                    'AND repair_original_identity=? AND EXISTS('
+                    'SELECT 1 FROM upload_jobs job '
+                    'JOIN recording_sessions session ON session.id=job.session_id '
+                    'WHERE job.id=upload_parts.job_id '
+                    "AND session.deletion_state='none' "
+                    'AND session.cancellation_generation=?)',
+                    (
+                        original_path,
+                        original_identity,
+                        int(row['id']),
+                        int(row['job_id']),
+                        temporary_path,
+                        original_path,
+                        original_identity,
+                        int(row['cancellation_generation']),
+                    ),
+                )
+
+        await self._database.write(restore)
 
     async def run_once(self) -> Optional[int]:
         async with self._run_lock:
@@ -1414,6 +1463,13 @@ class UploadTaskActionManager:
                 active = self._repair_owner_active(connection, claim)
             except LeaseLost:
                 return
+            archive_intent = connection.execute(
+                'SELECT 1 FROM owner_handoff_outcomes '
+                "WHERE owner_kind='repair' AND owner_id=? "
+                "AND side_effect_key='archive_edit' AND source_generation=? "
+                "AND outcome_state='in_flight'",
+                (claim.id, self._repair_source_generation(claim)),
+            ).fetchone()
             if not active:
                 if edit_started:
                     self._ack_repair_intent(
@@ -1421,6 +1477,14 @@ class UploadTaskActionManager:
                         claim,
                         side_effect_key='archive_edit',
                         outcome_state='unknown_terminal',
+                        now=now,
+                    )
+                elif archive_intent is not None:
+                    self._ack_repair_intent(
+                        connection,
+                        claim,
+                        side_effect_key='archive_edit',
+                        outcome_state='cancelled_local',
                         now=now,
                     )
                 self._release_deleted_claim(connection, claim, now=now)
@@ -1453,6 +1517,13 @@ class UploadTaskActionManager:
                     ),
                 )
                 return
+            if archive_intent is not None:
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+                    "AND owner_id=? AND side_effect_key='archive_edit' "
+                    'AND source_generation=?',
+                    (claim.id, self._repair_source_generation(claim)),
+                )
             connection.execute(
                 "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
                 'repair_error=NULL,lease_owner=NULL,lease_until=NULL,updated_at=? '

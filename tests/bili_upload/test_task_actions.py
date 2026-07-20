@@ -755,6 +755,205 @@ async def test_repair_claim_captures_session_generation_and_journals_owner(
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_archive_intent_commit_clears_intent_without_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    intent_committed = threading.Event()
+    release_database_thread = threading.Event()
+    original_write_sync = database._write_sync
+
+    def block_after_archive_intent_commit(operation: Any) -> Any:
+        result = original_write_sync(operation)
+        if getattr(operation, '__name__', '') == 'begin':
+            intent_committed.set()
+            if not release_database_thread.wait(timeout=5):
+                raise RuntimeError('test archive intent barrier timed out')
+        return result
+
+    monkeypatch.setattr(database, '_write_sync', block_after_archive_intent_commit)
+    try:
+        await seed_job(database, tmp_path)
+        protocol = FakeProtocol(archive_response(second_state='failed'))
+        manager, _, _ = make_manager(database, protocol, tmp_path)
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        repair = asyncio.create_task(manager.run_once())
+        committed = await asyncio.get_running_loop().run_in_executor(
+            None, intent_committed.wait, 2
+        )
+        assert committed
+
+        repair.cancel()
+        release_database_thread.set()
+        with pytest.raises(asyncio.CancelledError):
+            await repair
+
+        assert protocol.edit_calls == []
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='repair' AND owner_id=9"
+            )
+            == 0
+        )
+        job = await database.fetchone(
+            'SELECT repair_state,lease_owner FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {'repair_state': 'queued', 'lease_owner': None}
+
+        await manager.delete_session(1, manager_subject='manager')
+        worker = manager._deletion_worker
+        assert worker is not None
+        assert await worker.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        release_database_thread.set()
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('temporary_exists', (True, False))
+@pytest.mark.parametrize('remote_state', ('processing', 'ready'))
+async def test_repair_recovery_restores_interrupted_remux_before_remote_noop(
+    tmp_path: Path, temporary_exists: bool, remote_state: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        original_path = tmp_path / 'p12.mp4'
+        original_identity = FileIdentity.from_path(str(original_path)).to_json()
+        temporary_path = tmp_path / 'interrupted-remux-12.mp4'
+        temporary_path.write_bytes(b'interrupted-remux')
+        temporary_identity = FileIdentity.from_path(str(temporary_path)).to_json()
+        if not temporary_exists:
+            temporary_path.unlink()
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='reuploading',"
+            "lease_owner='stale-worker',lease_generation=4,lease_until=2000 "
+            'WHERE id=9'
+        )
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='remux',"
+            'repair_remux_attempts=1,repair_temp_path=?,repair_original_path=?,'
+            'repair_original_identity=?,final_path=?,file_identity=? WHERE id=12',
+            (
+                str(temporary_path),
+                str(original_path),
+                original_identity,
+                str(temporary_path),
+                temporary_identity,
+            ),
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('repair',9,'lease:4',0,'in_flight','{}',NULL)"
+        )
+        manager, uploader, _ = make_manager(
+            database,
+            FakeProtocol(archive_response(second_state=remote_state)),
+            tmp_path,
+        )
+
+        await manager.recover_interrupted()
+
+        restored = await database.fetchone(
+            'SELECT final_path,file_identity,repair_temp_path,'
+            'repair_original_path,repair_original_identity '
+            'FROM upload_parts WHERE id=12'
+        )
+        assert restored is not None
+        assert dict(restored) == {
+            'final_path': str(original_path),
+            'file_identity': original_identity,
+            'repair_temp_path': None,
+            'repair_original_path': None,
+            'repair_original_identity': None,
+        }
+        assert not temporary_path.exists()
+
+        assert await manager.run_once() == 9
+        assert uploader.calls == []
+        assert (
+            await database.scalar('SELECT repair_state FROM upload_jobs WHERE id=9')
+            == 'not_needed'
+        )
+        assert await database.scalar(
+            'SELECT final_path FROM upload_parts WHERE id=12'
+        ) == str(original_path)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_recovery_does_not_restore_remux_after_deletion_generation(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        original_path = tmp_path / 'p12.mp4'
+        original_identity = FileIdentity.from_path(str(original_path)).to_json()
+        temporary_path = tmp_path / 'deleting-remux-12.mp4'
+        temporary_path.write_bytes(b'interrupted-remux')
+        temporary_identity = FileIdentity.from_path(str(temporary_path)).to_json()
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET repair_state='reuploading',"
+            "lease_owner='stale-worker',lease_generation=4,lease_until=2000 "
+            'WHERE id=9'
+        )
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='remux',"
+            'repair_remux_attempts=1,repair_temp_path=?,repair_original_path=?,'
+            'repair_original_identity=?,final_path=?,file_identity=? WHERE id=12',
+            (
+                str(temporary_path),
+                str(original_path),
+                original_identity,
+                str(temporary_path),
+                temporary_identity,
+            ),
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('repair',9,'lease:4',0,'in_flight','{}',NULL)"
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        await manager.recover_interrupted()
+
+        part = await database.fetchone(
+            'SELECT final_path,file_identity,repair_temp_path,'
+            'repair_original_path,repair_original_identity '
+            'FROM upload_parts WHERE id=12'
+        )
+        assert part is not None
+        assert dict(part) == {
+            'final_path': str(temporary_path),
+            'file_identity': temporary_identity,
+            'repair_temp_path': str(temporary_path),
+            'repair_original_path': str(original_path),
+            'repair_original_identity': original_identity,
+        }
+        assert temporary_path.exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_deletion_during_remux_drains_and_removes_artifact_before_ack(
     tmp_path: Path,
 ) -> None:
