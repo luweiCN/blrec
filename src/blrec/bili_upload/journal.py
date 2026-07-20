@@ -311,6 +311,14 @@ class _ArtifactRecoveryDecision:
     used_source: bool
 
 
+@dataclass(frozen=True)
+class _RecordingOwnerState:
+    session_id: int
+    room_id: int
+    source_generation: int
+    cancelled: bool
+
+
 _T = TypeVar('_T')
 
 
@@ -366,10 +374,12 @@ class RecordingJournalBridge:
                 return str(replayed['run_id'])
             if live_start_time > 0:
                 row = connection.execute(
-                    'SELECT id,broadcast_session_key FROM recording_sessions '
+                    'SELECT id,broadcast_session_key,cancellation_generation '
+                    'FROM recording_sessions '
                     'WHERE room_id=? AND live_start_time=? '
                     "AND source_kind='live' "
                     "AND state IN ('open','cancelled') "
+                    "AND deletion_state='none' "
                     'AND NOT EXISTS(SELECT 1 FROM upload_jobs '
                     'WHERE upload_jobs.session_id=recording_sessions.id) '
                     'ORDER BY id DESC LIMIT 1',
@@ -391,9 +401,10 @@ class RecordingJournalBridge:
                     )
             else:
                 row = connection.execute(
-                    'SELECT id,broadcast_session_key FROM recording_sessions '
+                    'SELECT id,broadcast_session_key,cancellation_generation '
+                    'FROM recording_sessions '
                     'WHERE room_id=? AND live_start_time IS NULL '
-                    "AND source_kind='live' AND state=? "
+                    "AND source_kind='live' AND state=? AND deletion_state='none' "
                     'ORDER BY id DESC LIMIT 1',
                     (room_id, 'open'),
                 ).fetchone()
@@ -427,9 +438,11 @@ class RecordingJournalBridge:
                     ),
                 )
                 session_id = int(cursor.lastrowid)
+                cancellation_generation = 0
             else:
                 session_id = int(row['id'])
-                connection.execute(
+                cancellation_generation = int(row['cancellation_generation'])
+                updated = connection.execute(
                     "UPDATE recording_sessions SET state='open',ended_at=NULL,"
                     'live_end_time=NULL,'
                     "title=CASE WHEN title='' THEN ? ELSE title END,"
@@ -440,7 +453,8 @@ class RecordingJournalBridge:
                     "area_name=CASE WHEN area_name='' THEN ? ELSE area_name END,"
                     'parent_area_id=COALESCE(parent_area_id,?),'
                     'parent_area_name=CASE WHEN parent_area_name=\'\' THEN ? '
-                    'ELSE parent_area_name END WHERE id=?',
+                    "ELSE parent_area_name END WHERE id=? AND deletion_state='none' "
+                    'AND cancellation_generation=?',
                     (
                         '' if metadata is None else metadata.title,
                         '' if metadata is None else metadata.cover_url,
@@ -451,8 +465,15 @@ class RecordingJournalBridge:
                         None if metadata is None else metadata.parent_area_id,
                         '' if metadata is None else metadata.parent_area_name,
                         session_id,
+                        cancellation_generation,
                     ),
                 )
+                if updated.rowcount != 1:
+                    raise JournalConsistencyError(
+                        "recording session '{}' changed while starting".format(
+                            session_id
+                        )
+                    )
             connection.execute(
                 'INSERT INTO recording_runs(id,session_id,state,started_at) '
                 "VALUES(?,?,'recording',?)",
@@ -465,7 +486,10 @@ class RecordingJournalBridge:
                 room_id,
                 run_id,
                 None,
-                {'live_start_time': live_start_time},
+                {
+                    'live_start_time': live_start_time,
+                    'cancellation_generation': cancellation_generation,
+                },
                 now,
             )
             return run_id
@@ -490,18 +514,26 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'cover_downloaded'):
                 return
-            session_id = self._session_id_for_run(connection, run_id)
-            room_id = self._room_id_for_run(connection, run_id)
+            owner = self._recording_owner_state(connection, run_id)
             connection.execute(
                 'UPDATE recording_sessions SET cover_path=COALESCE(cover_path,?) '
                 'WHERE id=?',
-                (cover_path, session_id),
+                (cover_path, owner.session_id),
             )
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='cover_downloaded',
+                    event_id=journal_id,
+                    now=now,
+                )
             self._insert_event(
                 connection,
                 journal_id,
                 'cover_downloaded',
-                room_id,
+                owner.room_id,
                 run_id,
                 cover_path,
                 {},
@@ -522,7 +554,8 @@ class RecordingJournalBridge:
         sessions = await self._database.fetchall(
             'SELECT id FROM recording_sessions '
             "WHERE source_kind='live' "
-            "AND state IN ('open','cancelled','manual_review')"
+            "AND state IN ('open','cancelled','manual_review') "
+            "AND deletion_state='none'"
         )
         recoveries: Dict[int, _ArtifactRecoveryDecision] = {}
         loop = asyncio.get_running_loop()
@@ -551,7 +584,8 @@ class RecordingJournalBridge:
             sessions = connection.execute(
                 'SELECT id,state FROM recording_sessions '
                 "WHERE source_kind='live' "
-                "AND state IN ('open','cancelled','manual_review')"
+                "AND state IN ('open','cancelled','manual_review') "
+                "AND deletion_state='none'"
             ).fetchall()
             for session in sessions:
                 session_id = int(session['id'])
@@ -677,6 +711,7 @@ class RecordingJournalBridge:
             sessions = connection.execute(
                 'SELECT id FROM recording_sessions '
                 "WHERE source_kind='live' AND state='cancelled' "
+                "AND deletion_state='none' "
                 'AND ended_at IS NOT NULL AND ended_at<=?',
                 (cutoff,),
             ).fetchall()
@@ -706,7 +741,7 @@ class RecordingJournalBridge:
                 updated = connection.execute(
                     'UPDATE recording_sessions SET state=?, '
                     'live_end_time=COALESCE(live_end_time,ended_at) '
-                    "WHERE id=? AND state='cancelled'",
+                    "WHERE id=? AND state='cancelled' AND deletion_state='none'",
                     (state, session_id),
                 ).rowcount
                 finalized += int(updated)
@@ -754,18 +789,8 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'video_created'):
                 return
-            row = connection.execute(
-                'SELECT run.session_id,session.room_id '
-                'FROM recording_runs run '
-                'JOIN recording_sessions session ON session.id=run.session_id '
-                'WHERE run.id=?',
-                (run_id,),
-            ).fetchone()
-            if row is None:
-                raise JournalConsistencyError(
-                    "unknown recording run '{}'".format(run_id)
-                )
-            session_id = int(row['session_id'])
+            owner = self._recording_owner_state(connection, run_id)
+            session_id = owner.session_id
             existing = connection.execute(
                 'SELECT id FROM recording_parts WHERE run_id=? AND source_path=?',
                 (run_id, source_path),
@@ -781,8 +806,8 @@ class RecordingJournalBridge:
                 connection.execute(
                     'INSERT INTO recording_parts('
                     'session_id,run_id,part_index,source_path,record_start_time,'
-                    'timeline_start_at_ms,artifact_state,created_at,updated_at) '
-                    "VALUES(?,?,?,?,?,?,'recording',?,?)",
+                    'timeline_start_at_ms,artifact_state,error_message,created_at,'
+                    'updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
                     (
                         session_id,
                         run_id,
@@ -790,15 +815,32 @@ class RecordingJournalBridge:
                         source_path,
                         int(record_start_time),
                         timeline_start_at_ms,
+                        'failed' if owner.cancelled else 'recording',
+                        '本地删除已请求' if owner.cancelled else None,
                         now,
                         now,
                     ),
+                )
+            elif owner.cancelled:
+                connection.execute(
+                    "UPDATE recording_parts SET artifact_state='failed',"
+                    "error_message='本地删除已请求',updated_at=? WHERE id=?",
+                    (now, int(existing['id'])),
+                )
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='video_created',
+                    event_id=journal_id,
+                    now=now,
                 )
             self._insert_event(
                 connection,
                 journal_id,
                 'video_created',
-                int(row['room_id']),
+                owner.room_id,
                 run_id,
                 source_path,
                 {
@@ -828,23 +870,41 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'video_completed'):
                 return
-            room_id = self._room_id_for_run(connection, run_id)
+            owner = self._recording_owner_state(connection, run_id)
             cursor = connection.execute(
                 'UPDATE recording_parts SET artifact_state=?,source_completed_at=?,'
                 'record_end_time=?,record_duration_seconds='
-                'MAX(0,?-record_start_time),updated_at=? '
+                'MAX(0,?-record_start_time),error_message=?,updated_at=? '
                 'WHERE run_id=? AND source_path=?',
-                ('postprocessing', now, now, now, now, run_id, source_path),
+                (
+                    'failed' if owner.cancelled else 'postprocessing',
+                    now,
+                    now,
+                    now,
+                    '本地删除已请求' if owner.cancelled else None,
+                    now,
+                    run_id,
+                    source_path,
+                ),
             )
             if cursor.rowcount != 1:
                 raise JournalConsistencyError(
                     "unknown recording part '{}'".format(path)
                 )
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='video_completed',
+                    event_id=journal_id,
+                    now=now,
+                )
             self._insert_event(
                 connection,
                 journal_id,
                 'video_completed',
-                room_id,
+                owner.room_id,
                 run_id,
                 source_path,
                 {},
@@ -879,24 +939,42 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'video_postprocessed'):
                 return
-            room_id = self._room_id_for_run(connection, run_id)
+            owner = self._recording_owner_state(connection, run_id)
             cursor = connection.execute(
                 'UPDATE recording_parts SET artifact_state=?,final_path=?,'
-                'file_size_bytes=?,postprocessed_at=?,updated_at=? '
+                'file_size_bytes=?,error_message=?,postprocessed_at=?,updated_at=? '
                 'WHERE run_id=? AND source_path=?',
-                ('ready', final, file_size_bytes, now, now, run_id, source),
+                (
+                    'failed' if owner.cancelled else 'ready',
+                    final,
+                    file_size_bytes,
+                    '本地删除已请求' if owner.cancelled else None,
+                    now,
+                    now,
+                    run_id,
+                    source,
+                ),
             )
             if cursor.rowcount != 1:
                 raise JournalConsistencyError(
                     "unknown recording part '{}'".format(source_path)
                 )
-            session_id = self._session_id_for_run(connection, run_id)
-            self._refresh_session_state(connection, session_id, now)
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='video_postprocessed',
+                    event_id=journal_id,
+                    now=now,
+                )
+            else:
+                self._refresh_session_state(connection, owner.session_id, now)
             self._insert_event(
                 connection,
                 journal_id,
                 'video_postprocessed',
-                room_id,
+                owner.room_id,
                 run_id,
                 final,
                 {'source_path': source},
@@ -922,31 +1000,32 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'recording_cancelled'):
                 return
-            row = connection.execute(
-                'SELECT run.session_id,session.room_id '
-                'FROM recording_runs run '
-                'JOIN recording_sessions session ON session.id=run.session_id '
-                'WHERE run.id=?',
-                (run_id,),
-            ).fetchone()
-            if row is None:
-                raise JournalConsistencyError(
-                    "unknown recording run '{}'".format(run_id)
-                )
+            owner = self._recording_owner_state(connection, run_id)
             connection.execute(
                 "UPDATE recording_runs SET state='cancelled',ended_at=? WHERE id=?",
                 (now, run_id),
             )
-            connection.execute(
-                "UPDATE recording_sessions SET state='cancelled',ended_at=? "
-                'WHERE id=?',
-                (now, int(row['session_id'])),
-            )
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='recording_cancelled',
+                    event_id=journal_id,
+                    now=now,
+                )
+            else:
+                connection.execute(
+                    "UPDATE recording_sessions SET state='cancelled',ended_at=? "
+                    "WHERE id=? AND deletion_state='none' "
+                    'AND cancellation_generation=?',
+                    (now, owner.session_id, owner.source_generation),
+                )
             self._insert_event(
                 connection,
                 journal_id,
                 'recording_cancelled',
-                int(row['room_id']),
+                owner.room_id,
                 run_id,
                 None,
                 {},
@@ -965,22 +1044,32 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'recording_finished'):
                 return
-            session_id = self._session_id_for_run(connection, run_id)
-            room_id = self._room_id_for_run(connection, run_id)
+            owner = self._recording_owner_state(connection, run_id)
             connection.execute(
                 "UPDATE recording_runs SET state='finished',ended_at=? WHERE id=?",
                 (now, run_id),
             )
-            connection.execute(
-                'UPDATE recording_sessions SET live_end_time=? WHERE id=?',
-                (now, session_id),
-            )
-            self._refresh_session_state(connection, session_id, now)
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='recording_finished',
+                    event_id=journal_id,
+                    now=now,
+                )
+            else:
+                connection.execute(
+                    'UPDATE recording_sessions SET live_end_time=? WHERE id=? '
+                    "AND deletion_state='none' AND cancellation_generation=?",
+                    (now, owner.session_id, owner.source_generation),
+                )
+                self._refresh_session_state(connection, owner.session_id, now)
             self._insert_event(
                 connection,
                 journal_id,
                 'recording_finished',
-                room_id,
+                owner.room_id,
                 run_id,
                 None,
                 {},
@@ -1013,8 +1102,24 @@ class RecordingJournalBridge:
                 connection, journal_id, 'video_postprocessing_failed'
             ):
                 return
-            room_id = self._room_id_for_run(connection, run_id)
-            if artifact is None:
+            owner = self._recording_owner_state(connection, run_id)
+            if owner.cancelled:
+                cursor = connection.execute(
+                    "UPDATE recording_parts SET artifact_state='failed',"
+                    'final_path=COALESCE(?,final_path),'
+                    'file_size_bytes=COALESCE(?,file_size_bytes),'
+                    "error_message='本地删除已请求',postprocessed_at=?,updated_at=? "
+                    'WHERE run_id=? AND source_path=?',
+                    (
+                        None if artifact is None else artifact.path,
+                        None if artifact is None else artifact.size_bytes,
+                        now,
+                        now,
+                        run_id,
+                        source,
+                    ),
+                )
+            elif artifact is None:
                 cursor = connection.execute(
                     'UPDATE recording_parts SET artifact_state=?,error_message=?,'
                     'postprocessed_at=?,updated_at=? '
@@ -1047,13 +1152,22 @@ class RecordingJournalBridge:
                 raise JournalConsistencyError(
                     "unknown recording part '{}'".format(source_path)
                 )
-            session_id = self._session_id_for_run(connection, run_id)
-            self._refresh_session_state(connection, session_id, now)
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='video_postprocessing_failed',
+                    event_id=journal_id,
+                    now=now,
+                )
+            else:
+                self._refresh_session_state(connection, owner.session_id, now)
             self._insert_event(
                 connection,
                 journal_id,
                 'video_postprocessing_failed',
-                room_id,
+                owner.room_id,
                 run_id,
                 source,
                 {'error': message},
@@ -1085,7 +1199,7 @@ class RecordingJournalBridge:
         def write(connection: sqlite3.Connection) -> None:
             if self._event_was_recorded(connection, journal_id, 'danmaku_completed'):
                 return
-            room_id = self._room_id_for_run(connection, run_id)
+            owner = self._recording_owner_state(connection, run_id)
             rows = connection.execute(
                 'SELECT id,source_path FROM recording_parts '
                 'WHERE run_id=? ORDER BY part_index',
@@ -1104,16 +1218,31 @@ class RecordingJournalBridge:
                     "cannot bind danmaku file '{}' to one recording part".format(path)
                 )
             connection.execute(
-                'UPDATE recording_parts SET xml_path=?,xml_completed=1,'
+                'UPDATE recording_parts SET xml_path=?,xml_completed=?,'
                 'danmaku_count=?,updated_at=? '
                 'WHERE id=?',
-                (xml_path, danmaku_count, now, int(matches[0]['id'])),
+                (
+                    xml_path,
+                    0 if owner.cancelled else 1,
+                    danmaku_count,
+                    now,
+                    int(matches[0]['id']),
+                ),
             )
+            if owner.cancelled:
+                self._record_local_handoff(
+                    connection,
+                    owner=owner,
+                    run_id=run_id,
+                    event_type='danmaku_completed',
+                    event_id=journal_id,
+                    now=now,
+                )
             self._insert_event(
                 connection,
                 journal_id,
                 'danmaku_completed',
-                room_id,
+                owner.room_id,
                 run_id,
                 xml_path,
                 {},
@@ -2493,6 +2622,74 @@ class RecordingJournalBridge:
         )
 
     @staticmethod
+    def _recording_owner_state(
+        connection: sqlite3.Connection, run_id: str
+    ) -> _RecordingOwnerState:
+        row = connection.execute(
+            'SELECT session.id AS session_id,session.room_id,'
+            'session.cancellation_generation,session.deletion_state '
+            'FROM recording_runs run '
+            'JOIN recording_sessions session ON session.id=run.session_id '
+            'WHERE run.id=?',
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise JournalConsistencyError("unknown recording run '{}'".format(run_id))
+        started = connection.execute(
+            "SELECT payload_json FROM event_journal WHERE run_id=? "
+            "AND event_type='recording_started' ORDER BY occurred_at,id LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        current_generation = int(row['cancellation_generation'])
+        source_generation = current_generation
+        if started is not None:
+            try:
+                payload = json.loads(str(started['payload_json']))
+                source_generation = int(
+                    payload.get('cancellation_generation', current_generation)
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                source_generation = current_generation
+        elif str(row['deletion_state']) != 'none':
+            # Runs created before generation journaling all started at generation 0.
+            source_generation = 0
+        return _RecordingOwnerState(
+            session_id=int(row['session_id']),
+            room_id=int(row['room_id']),
+            source_generation=source_generation,
+            cancelled=(
+                str(row['deletion_state']) != 'none'
+                or current_generation != source_generation
+            ),
+        )
+
+    @staticmethod
+    def _record_local_handoff(
+        connection: sqlite3.Connection,
+        *,
+        owner: _RecordingOwnerState,
+        run_id: str,
+        event_type: str,
+        event_id: str,
+        now: int,
+    ) -> None:
+        connection.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('recorder',?,?,?,'cancelled_local','{}',?) "
+            'ON CONFLICT(owner_kind,owner_id,side_effect_key,source_generation) '
+            "DO UPDATE SET outcome_state='cancelled_local',outcome_json='{}',"
+            'acknowledged_at=excluded.acknowledged_at',
+            (
+                owner.session_id,
+                '{}:{}:{}'.format(run_id, event_type, event_id),
+                owner.source_generation,
+                now,
+            ),
+        )
+
+    @staticmethod
     def _session_id_for_run(connection: sqlite3.Connection, run_id: str) -> int:
         row = connection.execute(
             'SELECT session_id FROM recording_runs WHERE id=?', (run_id,)
@@ -2517,13 +2714,17 @@ class RecordingJournalBridge:
         connection: sqlite3.Connection, session_id: int, now: int
     ) -> None:
         session = connection.execute(
-            'SELECT state FROM recording_sessions WHERE id=?', (session_id,)
+            'SELECT state,deletion_state FROM recording_sessions WHERE id=?',
+            (session_id,),
         ).fetchone()
         if session is None:
             raise JournalConsistencyError(
                 "unknown recording session '{}'".format(session_id)
             )
-        if session['state'] in ('cancelled', 'skipped'):
+        if (
+            session['state'] in ('cancelled', 'skipped')
+            or session['deletion_state'] != 'none'
+        ):
             return
         recording_runs = int(
             connection.execute(
