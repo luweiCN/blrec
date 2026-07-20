@@ -569,8 +569,12 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
             )
         connection.execute(
             'INSERT INTO recording_sessions('
-            'id,room_id,broadcast_session_key,state,started_at) '
-            "VALUES(1,100,'legacy:1','closed',1)"
+            'id,room_id,broadcast_session_key,state,started_at,deletion_state,'
+            'deletion_requested_at) '
+            "VALUES(1,100,'legacy:1','closed',1,'none',NULL),"
+            "(2,100,'legacy:2','closed',1,'requested',1),"
+            "(3,100,'legacy:3','closed',1,'deleting',1),"
+            "(4,100,'legacy:4','closed',1,'failed',1)"
         )
         connection.execute(
             'INSERT INTO highlight_clips('
@@ -586,14 +590,19 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
     await database.open()
     try:
         assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 26
-        session = await database.fetchone(
-            'SELECT cancellation_generation FROM recording_sessions WHERE id=1'
+        sessions = await database.fetchall(
+            'SELECT id,cancellation_generation FROM recording_sessions ORDER BY id'
         )
         clip = await database.fetchone(
             'SELECT cancellation_generation,deletion_state,deletion_error '
             'FROM highlight_clips WHERE id=1'
         )
-        assert session is not None and dict(session) == {'cancellation_generation': 0}
+        assert [dict(session) for session in sessions] == [
+            {'id': 1, 'cancellation_generation': 0},
+            {'id': 2, 'cancellation_generation': 1},
+            {'id': 3, 'cancellation_generation': 1},
+            {'id': 4, 'cancellation_generation': 1},
+        ]
         assert clip is not None and dict(clip) == {
             'cancellation_generation': 0,
             'deletion_state': 'none',

@@ -2,6 +2,10 @@ ALTER TABLE recording_sessions
 ADD COLUMN cancellation_generation INTEGER NOT NULL DEFAULT 0
 CHECK (cancellation_generation >= 0);
 
+UPDATE recording_sessions
+SET cancellation_generation=1
+WHERE deletion_state!='none' AND cancellation_generation=0;
+
 ALTER TABLE highlight_clips
 ADD COLUMN cancellation_generation INTEGER NOT NULL DEFAULT 0
 CHECK (cancellation_generation >= 0);

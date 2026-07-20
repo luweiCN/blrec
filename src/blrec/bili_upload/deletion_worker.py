@@ -63,6 +63,7 @@ class LocalDeletionWorker:
         self._unlink = unlink
         self._run_lock = asyncio.Lock()
         self._wake_event = asyncio.Event()
+        self._wake_generation = 0
         self._accepting = True
 
     async def request_session(self, session_id: int, *, manager_subject: str) -> int:
@@ -115,7 +116,7 @@ class LocalDeletionWorker:
 
         def request(connection: sqlite3.Connection) -> int:
             row = connection.execute(
-                'SELECT deletion_state,cancellation_generation '
+                'SELECT deletion_state,cancellation_generation,upload_session_id '
                 'FROM highlight_clips WHERE id=?',
                 (clip_id,),
             ).fetchone()
@@ -128,6 +129,15 @@ class LocalDeletionWorker:
                 'cancellation_generation=? WHERE id=?',
                 (now, generation, clip_id),
             )
+            upload_session_id = row['upload_session_id']
+            if upload_session_id is not None:
+                connection.execute(
+                    "UPDATE recording_sessions SET deletion_state='requested',"
+                    'deletion_error=NULL,deletion_requested_at=?,'
+                    'cancellation_generation=cancellation_generation+1 '
+                    'WHERE id=?',
+                    (now, int(upload_session_id)),
+                )
             return generation
 
         generation = await self._database.write(request)
@@ -135,6 +145,7 @@ class LocalDeletionWorker:
         return generation
 
     def wake(self) -> None:
+        self._wake_generation += 1
         self._wake_event.set()
 
     def stop_admission(self) -> None:
@@ -143,6 +154,20 @@ class LocalDeletionWorker:
 
     async def recover_interrupted(self) -> None:
         def recover(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "UPDATE recording_sessions SET deletion_state='requested',"
+                'deletion_error=NULL,deletion_requested_at=?,'
+                'cancellation_generation=cancellation_generation+1 '
+                "WHERE deletion_state='none' AND EXISTS("
+                'SELECT 1 FROM highlight_clips clip '
+                'WHERE clip.upload_session_id=recording_sessions.id '
+                "AND clip.deletion_state!='none')",
+                (int(self._clock()),),
+            )
+            connection.execute(
+                'UPDATE recording_sessions SET cancellation_generation=1 '
+                "WHERE deletion_state!='none' AND cancellation_generation=0"
+            )
             connection.execute(
                 "UPDATE local_deletion_items SET state='pending',error=NULL "
                 "WHERE state='deleting'"
@@ -170,6 +195,7 @@ class LocalDeletionWorker:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
+            wake_generation = self._wake_generation
             try:
                 processed = await self.run_once(stop_event=stop_event)
             except asyncio.CancelledError:
@@ -191,6 +217,8 @@ class LocalDeletionWorker:
             self._wake_event.clear()
             if stop_event.is_set():
                 return
+            if self._wake_generation != wake_generation:
+                continue
             wake_task = asyncio.create_task(self._wake_event.wait())
             stop_task = asyncio.create_task(stop_event.wait())
             done, pending = await asyncio.wait(
@@ -234,9 +262,13 @@ class LocalDeletionWorker:
 
     async def _next_owner(self) -> Optional[Tuple[str, int, int]]:
         session = await self._database.fetchone(
-            'SELECT id,cancellation_generation FROM recording_sessions '
-            "WHERE deletion_state IN ('requested','deleting') "
-            'ORDER BY deletion_requested_at,id LIMIT 1'
+            'SELECT session.id,session.cancellation_generation '
+            'FROM recording_sessions session '
+            "WHERE session.deletion_state IN ('requested','deleting') "
+            'AND NOT EXISTS(SELECT 1 FROM highlight_clips clip '
+            'WHERE clip.upload_session_id=session.id '
+            "AND clip.deletion_state!='none') "
+            'ORDER BY session.deletion_requested_at,session.id LIMIT 1'
         )
         if session is not None:
             return (
@@ -294,35 +326,45 @@ class LocalDeletionWorker:
         return True
 
     async def _quiesce_clip(self, clip_id: int, generation: int) -> bool:
-        row = await self._database.fetchone(
-            'SELECT state,lease_owner,lease_until,upload_session_id '
-            'FROM highlight_clips WHERE id=? AND cancellation_generation=?',
-            (clip_id, generation),
-        )
-        if row is None:
-            return False
-        if str(row['state']) == 'processing' and row['lease_owner'] is not None:
-            return False
-        upload_session_id = row['upload_session_id']
-        if upload_session_id is not None:
-            blockers = await self._session_blockers(int(upload_session_id))
-            if blockers:
-                return False
-
         def cancel_local(connection: sqlite3.Connection) -> bool:
             current = connection.execute(
-                'SELECT state,lease_until FROM highlight_clips '
+                'SELECT state,lease_owner,upload_session_id FROM highlight_clips '
                 'WHERE id=? AND cancellation_generation=?',
                 (clip_id, generation),
             ).fetchone()
             if current is None:
                 return False
-            if current['lease_until'] is not None:
+            if current['lease_owner'] is not None:
                 return False
+            upload_session_id = current['upload_session_id']
+            if upload_session_id is not None:
+                session_id = int(upload_session_id)
+                connection.execute(
+                    "UPDATE recording_sessions SET deletion_state='requested',"
+                    'deletion_error=NULL,deletion_requested_at=?,'
+                    'cancellation_generation=cancellation_generation+1 '
+                    "WHERE id=? AND deletion_state='none'",
+                    (int(self._clock()), session_id),
+                )
+                blockers = self._session_blockers_in_transaction(connection, session_id)
+                if blockers:
+                    return False
+                session = connection.execute(
+                    'SELECT cancellation_generation FROM recording_sessions '
+                    'WHERE id=?',
+                    (session_id,),
+                ).fetchone()
+                if session is None:
+                    return False
+                self._cancel_idle_local_work_in_transaction(
+                    connection,
+                    session_id,
+                    int(session['cancellation_generation']),
+                    int(self._clock()),
+                )
             connection.execute(
-                "UPDATE highlight_clips SET state='cancelled',"
-                "deletion_state='quiescing',lease_owner=NULL,lease_until=NULL,"
-                'next_attempt_at=0,file_size_bytes=NULL,updated_at=? '
+                "UPDATE highlight_clips SET deletion_state='quiescing',"
+                'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,updated_at=? '
                 'WHERE id=? AND cancellation_generation=?',
                 (int(self._clock()), clip_id, generation),
             )
@@ -331,60 +373,74 @@ class LocalDeletionWorker:
         return await self._database.write(cancel_local)
 
     async def _session_blockers(self, session_id: int) -> Tuple[str, ...]:
-        row = await self._database.fetchone(
-            'SELECT job.id,job.lease_owner,job.lease_until,job.collection_branch_state '
-            'FROM upload_jobs job WHERE job.session_id=?',
-            (session_id,),
+        return await self._database.read(
+            lambda connection: self._session_blockers_in_transaction(
+                connection, session_id
+            )
         )
+
+    @staticmethod
+    def _session_blockers_in_transaction(
+        connection: sqlite3.Connection, session_id: int
+    ) -> Tuple[str, ...]:
+        row = connection.execute(
+            'SELECT job.id,job.lease_owner,job.submit_state,'
+            'job.collection_branch_state,job.danmaku_branch_state,'
+            'job.repair_state FROM upload_jobs job WHERE job.session_id=?',
+            (session_id,),
+        ).fetchone()
         blockers: List[str] = []
         if row is not None:
             job_id = int(row['id'])
             if row['lease_owner'] is not None:
                 blockers.append('upload')
+            elif str(row['submit_state']) == 'in_flight':
+                blockers.append('upload_submit')
             if str(row['collection_branch_state']) == 'running':
                 blockers.append('collection')
-            branch = await self._database.fetchone(
-                'SELECT comment_branch_state,danmaku_branch_state,repair_state '
-                'FROM upload_jobs WHERE id=?',
-                (job_id,),
-            )
-            if (
-                branch is not None
-                and str(branch['danmaku_branch_state']) == 'importing'
-            ):
+            if str(row['danmaku_branch_state']) == 'importing':
                 blockers.append('danmaku_import')
-            comment = await self._database.scalar(
+            if str(row['repair_state']) in ('checking', 'reuploading', 'editing'):
+                blockers.append('repair')
+            in_flight_chunks = connection.execute(
+                'SELECT COUNT(*) FROM upload_chunks WHERE part_id IN('
+                'SELECT id FROM upload_parts WHERE job_id=?) '
+                "AND state='in_flight'",
+                (job_id,),
+            ).fetchone()[0]
+            if in_flight_chunks:
+                blockers.append('upos')
+            comment = connection.execute(
                 'SELECT COUNT(*) FROM comment_items WHERE job_id=? '
                 'AND lease_owner IS NOT NULL',
                 (job_id,),
-            )
-            if comment:
+            ).fetchone()[0]
+            if int(comment):
                 blockers.append('comment')
-            danmaku = await self._database.scalar(
+            danmaku = connection.execute(
                 'SELECT COUNT(*) FROM danmaku_items WHERE part_id IN('
                 'SELECT id FROM upload_parts WHERE job_id=?) '
                 'AND lease_owner IS NOT NULL',
                 (job_id,),
-            )
-            if danmaku:
+            ).fetchone()[0]
+            if int(danmaku):
                 blockers.append('danmaku')
-        media = await self._database.scalar(
+        media = connection.execute(
             'SELECT COUNT(*) FROM recording_parts WHERE session_id=? '
-            "AND media_index_state='indexing' AND media_index_owner IS NOT NULL "
-            '',
+            "AND media_index_state='indexing' AND media_index_owner IS NOT NULL",
             (session_id,),
-        )
-        if media:
+        ).fetchone()[0]
+        if int(media):
             blockers.append('media_index')
-        highlight = await self._database.scalar(
+        highlight = connection.execute(
             'SELECT COUNT(*) FROM highlight_clips clip '
             'JOIN highlight_clip_sources source ON source.clip_id=clip.id '
             'JOIN recording_parts part ON part.id=source.part_id '
             "WHERE part.session_id=? AND clip.state='processing' "
             'AND clip.lease_owner IS NOT NULL',
             (session_id,),
-        )
-        if highlight:
+        ).fetchone()[0]
+        if int(highlight):
             blockers.append('highlight')
         return tuple(blockers)
 
@@ -392,89 +448,95 @@ class LocalDeletionWorker:
         now = int(self._clock())
 
         def cancel(connection: sqlite3.Connection) -> None:
-            current = connection.execute(
-                'SELECT cancellation_generation FROM recording_sessions WHERE id=?',
-                (session_id,),
-            ).fetchone()
-            if current is None or int(current['cancellation_generation']) != generation:
-                return
-            job = connection.execute(
-                'SELECT id,submit_state FROM upload_jobs WHERE session_id=?',
-                (session_id,),
-            ).fetchone()
-            if job is None:
-                return
-            job_id = int(job['id'])
-            if str(job['submit_state']) == 'unknown_outcome':
-                self._record_terminal_handoff(
-                    connection,
-                    owner_kind='upload',
-                    owner_id=job_id,
-                    side_effect_key='archive_submit',
-                    source_generation=generation - 1,
-                    now=now,
-                )
-            unknown_parts = connection.execute(
-                "SELECT id FROM upload_parts WHERE job_id=? "
-                "AND upload_state='unknown_outcome'",
-                (job_id,),
-            ).fetchall()
-            for part in unknown_parts:
-                self._record_terminal_handoff(
-                    connection,
-                    owner_kind='upos',
-                    owner_id=int(part['id']),
-                    side_effect_key='complete',
-                    source_generation=generation - 1,
-                    now=now,
-                )
-            unknown_comments = connection.execute(
-                "SELECT id FROM comment_items WHERE job_id=? "
-                "AND state='unknown_outcome'",
-                (job_id,),
-            ).fetchall()
-            for item in unknown_comments:
-                self._record_terminal_handoff(
-                    connection,
-                    owner_kind='comment',
-                    owner_id=int(item['id']),
-                    side_effect_key='publish',
-                    source_generation=generation - 1,
-                    now=now,
-                )
-            unknown_danmaku = connection.execute(
-                "SELECT item.id FROM danmaku_items item "
-                'JOIN upload_parts part ON part.id=item.part_id '
-                "WHERE part.job_id=? AND item.state='unknown_outcome'",
-                (job_id,),
-            ).fetchall()
-            for item in unknown_danmaku:
-                self._record_terminal_handoff(
-                    connection,
-                    owner_kind='danmaku',
-                    owner_id=int(item['id']),
-                    side_effect_key='publish',
-                    source_generation=generation - 1,
-                    now=now,
-                )
-            connection.execute(
-                "UPDATE upload_jobs SET state='paused',operator_paused=1,"
-                "operator_resume_state=NULL,review_reason='任务正在删除',"
-                "repair_state=CASE WHEN repair_state IN "
-                "('queued','checking','reuploading') THEN 'failed' "
-                'ELSE repair_state END,'
-                "repair_error=CASE WHEN repair_state IN "
-                "('queued','checking','reuploading') THEN '任务正在删除' "
-                'ELSE repair_error END,'
-                "comment_branch_state=CASE WHEN comment_branch_state IN "
-                "('pending','running') THEN 'paused' ELSE comment_branch_state END,"
-                "danmaku_branch_state=CASE WHEN danmaku_branch_state IN "
-                "('pending','publishing') THEN 'paused' ELSE danmaku_branch_state END,"
-                'updated_at=? WHERE id=?',
-                (now, job_id),
+            self._cancel_idle_local_work_in_transaction(
+                connection, session_id, generation, now
             )
 
         await self._database.write(cancel)
+
+    def _cancel_idle_local_work_in_transaction(
+        self, connection: sqlite3.Connection, session_id: int, generation: int, now: int
+    ) -> None:
+        current = connection.execute(
+            'SELECT cancellation_generation FROM recording_sessions WHERE id=?',
+            (session_id,),
+        ).fetchone()
+        if current is None or int(current['cancellation_generation']) != generation:
+            return
+        job = connection.execute(
+            'SELECT id,submit_state FROM upload_jobs WHERE session_id=?', (session_id,)
+        ).fetchone()
+        if job is None:
+            return
+        job_id = int(job['id'])
+        if str(job['submit_state']) == 'unknown_outcome':
+            self._record_terminal_handoff(
+                connection,
+                owner_kind='upload',
+                owner_id=job_id,
+                side_effect_key='archive_submit',
+                source_generation=generation - 1,
+                now=now,
+            )
+        unknown_parts = connection.execute(
+            "SELECT id FROM upload_parts WHERE job_id=? "
+            "AND upload_state='unknown_outcome'",
+            (job_id,),
+        ).fetchall()
+        for part in unknown_parts:
+            self._record_terminal_handoff(
+                connection,
+                owner_kind='upos',
+                owner_id=int(part['id']),
+                side_effect_key='complete',
+                source_generation=generation - 1,
+                now=now,
+            )
+        unknown_comments = connection.execute(
+            "SELECT id FROM comment_items WHERE job_id=? "
+            "AND state='unknown_outcome'",
+            (job_id,),
+        ).fetchall()
+        for item in unknown_comments:
+            self._record_terminal_handoff(
+                connection,
+                owner_kind='comment',
+                owner_id=int(item['id']),
+                side_effect_key='publish',
+                source_generation=generation - 1,
+                now=now,
+            )
+        unknown_danmaku = connection.execute(
+            "SELECT item.id FROM danmaku_items item "
+            'JOIN upload_parts part ON part.id=item.part_id '
+            "WHERE part.job_id=? AND item.state='unknown_outcome'",
+            (job_id,),
+        ).fetchall()
+        for item in unknown_danmaku:
+            self._record_terminal_handoff(
+                connection,
+                owner_kind='danmaku',
+                owner_id=int(item['id']),
+                side_effect_key='publish',
+                source_generation=generation - 1,
+                now=now,
+            )
+        connection.execute(
+            "UPDATE upload_jobs SET state='paused',operator_paused=1,"
+            "operator_resume_state=NULL,review_reason='任务正在删除',"
+            "repair_state=CASE WHEN repair_state IN "
+            "('queued','checking','reuploading') THEN 'failed' "
+            'ELSE repair_state END,'
+            "repair_error=CASE WHEN repair_state IN "
+            "('queued','checking','reuploading') THEN '任务正在删除' "
+            'ELSE repair_error END,'
+            "comment_branch_state=CASE WHEN comment_branch_state IN "
+            "('pending','running') THEN 'paused' ELSE comment_branch_state END,"
+            "danmaku_branch_state=CASE WHEN danmaku_branch_state IN "
+            "('pending','publishing') THEN 'paused' ELSE danmaku_branch_state END,"
+            'updated_at=? WHERE id=?',
+            (now, job_id),
+        )
 
     @staticmethod
     def _record_terminal_handoff(
@@ -497,6 +559,8 @@ class LocalDeletionWorker:
     async def _snapshot_items(
         self, owner_kind: str, owner_id: int, generation: int
     ) -> None:
+        if generation <= 0:
+            raise LocalDeletionRejected('invalid_cancellation_generation')
         if owner_kind == 'clip':
             row = await self._database.fetchone(
                 'SELECT output_video_path,output_xml_path FROM highlight_clips '
@@ -563,9 +627,10 @@ class LocalDeletionWorker:
                 (owner_kind, owner_id, generation),
             )
             connection.executemany(
-                'INSERT OR IGNORE INTO local_deletion_items('
+                'INSERT INTO local_deletion_items('
                 'owner_kind,owner_id,cancellation_generation,path,state) '
-                "VALUES(?,?,?,?,'pending')",
+                "VALUES(?,?,?,?,'pending') ON CONFLICT("
+                'owner_kind,owner_id,cancellation_generation,path) DO NOTHING',
                 ((owner_kind, owner_id, generation, str(path)) for path in paths),
             )
 
@@ -686,7 +751,7 @@ class LocalDeletionWorker:
         )
 
     async def _finish_clip(self, clip_id: int, generation: int) -> None:
-        def finish(connection: sqlite3.Connection) -> None:
+        def finish(connection: sqlite3.Connection) -> bool:
             current = connection.execute(
                 'SELECT upload_session_id,deletion_state,cancellation_generation '
                 'FROM highlight_clips WHERE id=?',
@@ -697,9 +762,11 @@ class LocalDeletionWorker:
                 or int(current['cancellation_generation']) != generation
                 or str(current['deletion_state']) != 'deleting'
             ):
-                return
+                return False
             session_id = current['upload_session_id']
             if session_id is not None:
+                if self._session_blockers_in_transaction(connection, int(session_id)):
+                    return False
                 job = connection.execute(
                     'SELECT id FROM upload_jobs WHERE session_id=?', (int(session_id),)
                 ).fetchone()
@@ -732,15 +799,16 @@ class LocalDeletionWorker:
                 'AND owner_id=? AND cancellation_generation=?',
                 (clip_id, generation),
             )
+            return True
 
-        await self._database.write(finish)
-        audit(
-            'local_deletion_completed',
-            owner_kind='clip',
-            owner_id=clip_id,
-            generation=generation,
-            result='deleted_local_only',
-        )
+        if await self._database.write(finish):
+            audit(
+                'local_deletion_completed',
+                owner_kind='clip',
+                owner_id=clip_id,
+                generation=generation,
+                result='deleted_local_only',
+            )
 
     async def _fail_owner(
         self, owner_kind: str, owner_id: int, generation: int, error: str

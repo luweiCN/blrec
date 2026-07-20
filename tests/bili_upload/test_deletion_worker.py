@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from typing import List
 
@@ -8,6 +9,7 @@ import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.deletion_worker import LocalDeletionWorker
+from blrec.bili_upload.highlights import HighlightService
 
 
 async def _seed_session(
@@ -83,6 +85,110 @@ async def test_request_session_only_persists_generation_and_wakes(
             'cancellation_generation': 1,
         }
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_v25_requested_session_keeps_its_file_in_the_deletion_cursor(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / 'db.sqlite3'
+    video_path = tmp_path / 'legacy.flv'
+    video_path.write_bytes(b'video')
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(database_path))
+    try:
+        for version in range(1, 26):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,deletion_state,'
+            'deletion_requested_at) '
+            "VALUES(1,100,'legacy','closed',1,'requested',1)"
+        )
+        connection.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            "VALUES('run-1',1,'finished',1,2)"
+        )
+        connection.execute(
+            'INSERT INTO recording_parts('
+            'session_id,run_id,part_index,source_path,final_path,'
+            'record_start_time,artifact_state,created_at,updated_at) '
+            "VALUES(1,'run-1',1,?,?,1,'ready',1,1)",
+            (str(video_path), str(video_path)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(database_path))
+    await database.open()
+    try:
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+
+        assert await worker.run_once() == ('session', 1)
+
+        assert not video_path.exists()
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_run_rechecks_after_a_wake_between_empty_scan_and_wait(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    stop_event = asyncio.Event()
+    first_scan = asyncio.Event()
+    release_first_scan = asyncio.Event()
+    second_scan = asyncio.Event()
+    try:
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        calls = 0
+
+        async def controlled_run_once(*, stop_event: asyncio.Event) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_scan.set()
+                await release_first_scan.wait()
+                return None
+            second_scan.set()
+            stop_event.set()
+            return None
+
+        worker.run_once = controlled_run_once  # type: ignore[method-assign]
+        run_task = asyncio.create_task(worker.run(stop_event))
+        await first_scan.wait()
+
+        worker.wake()
+        release_first_scan.set()
+        await asyncio.wait_for(second_scan.wait(), timeout=0.5)
+        await asyncio.wait_for(run_task, timeout=0.5)
+
+        assert calls == 2
+    finally:
+        stop_event.set()
+        if 'worker' in locals():
+            worker.wake()
+        if 'run_task' in locals():
+            await asyncio.gather(run_task, return_exceptions=True)
         await database.close()
 
 
@@ -300,6 +406,125 @@ async def test_clip_deletion_keeps_source_recording_and_removes_local_upload(
             )
             == 0
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_clip_deletion_waits_for_bound_upload_owners_and_branches(
+    tmp_path: Path,
+) -> None:
+    clip_root = tmp_path / 'clips'
+    clip_root.mkdir()
+    output = clip_root / 'clip.mp4'
+    output.write_bytes(b'clip')
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'account',X'00',1,'k','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+            "VALUES(2,100,'highlight:7','closed',2,'highlight')"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'collection_branch_state,created_at,updated_at) '
+            "VALUES(9,2,1,'{}','ready','prepared','running',2,2)"
+        )
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,upload_session_id,name,requested_start_ms,'
+            'requested_end_ms,output_video_path,state,created_at,updated_at) '
+            "VALUES(7,100,2,'clip',0,1000,?,'ready',1,1)",
+            (str(output),),
+        )
+        claim = await database.claim('upload_jobs', ('ready',), 'upload-owner', now=10)
+        assert claim is not None
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path / 'rec', clip_root=clip_root
+        )
+
+        await worker.request_clip(7)
+        blocked_claim = await database.claim(
+            'upload_jobs', ('ready',), 'second-owner', now=200
+        )
+        assert blocked_claim is None
+        assert await worker.run_once() == ('clip', 7)
+        assert output.exists()
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 1
+        assert (
+            await database.scalar('SELECT lease_owner FROM upload_jobs WHERE id=9')
+            == 'upload-owner'
+        )
+
+        await database.execute(
+            'UPDATE upload_jobs SET lease_owner=NULL,lease_until=NULL '
+            'WHERE id=? AND lease_owner=? AND lease_generation=?',
+            (claim.id, claim.lease_owner, claim.lease_generation),
+        )
+        assert await worker.run_once() == ('clip', 7)
+        assert output.exists()
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 1
+
+        await database.execute(
+            "UPDATE upload_jobs SET collection_branch_state='completed' WHERE id=9"
+        )
+        assert await worker.run_once() == ('clip', 7)
+        assert not output.exists()
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_clip_deletion_stays_visible_with_its_error(
+    tmp_path: Path,
+) -> None:
+    clip_root = tmp_path / 'clips'
+    clip_root.mkdir()
+    output = clip_root / 'clip.mp4'
+    output.write_bytes(b'clip')
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,'
+            'output_video_path,state,created_at,updated_at) '
+            "VALUES(7,100,'clip',0,1000,?,'ready',1,1)",
+            (str(output),),
+        )
+
+        def refuse_unlink(_path: Path) -> None:
+            raise PermissionError('NAS refused deletion')
+
+        worker = LocalDeletionWorker(
+            database,
+            recording_root=tmp_path / 'rec',
+            clip_root=clip_root,
+            unlink=refuse_unlink,
+        )
+        await worker.request_clip(7)
+        await worker.run_once()
+
+        total, summaries = await HighlightService(database).list_clip_summaries(
+            limit=20, offset=0
+        )
+        detail = await HighlightService(database).get_clip(7)
+
+        assert total == 1
+        assert summaries[0].deletion_state == 'failed'
+        assert summaries[0].deletion_error == 'unlink_PermissionError'
+        assert detail.deletion_state == 'failed'
+        assert detail.deletion_error == 'unlink_PermissionError'
+        assert output.exists()
     finally:
         await database.close()
 
