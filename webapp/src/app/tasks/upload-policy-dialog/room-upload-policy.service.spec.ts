@@ -135,6 +135,18 @@ describe('RoomUploadPolicyService', () => {
         candidate.params.get('accountId') === '7',
     );
     expect(request.request.method).toBe('GET');
+    expect(request.request.params.has('forceRefresh')).toBeFalse();
+    request.flush({ accountId: 7, collections: [] });
+
+    service.collections('primary', null, true).subscribe();
+    request = http.expectOne(
+      (candidate) =>
+        candidate.url === '/api/v1/bili-collections' &&
+        candidate.params.get('accountMode') === 'primary' &&
+        candidate.params.get('forceRefresh') === 'true' &&
+        !candidate.params.has('accountId'),
+    );
+    expect(request.request.method).toBe('GET');
     request.flush({ accountId: 7, collections: [] });
 
     const payload = {

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,6 +24,28 @@ class FakeProtocol:
         if self.fail:
             raise self.error
         return self.response
+
+
+class BlockingProtocol(FakeProtocol):
+    def __init__(self, response: Mapping[str, Any]) -> None:
+        super().__init__(response)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def archive_pre(self, bundle: Any) -> Mapping[str, Any]:
+        self.calls.append(bundle)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        self.started.set()
+        try:
+            await self.release.wait()
+            if self.fail:
+                raise self.error
+            return self.response
+        finally:
+            self.in_flight -= 1
 
 
 def category_response(*, child_id: int = 17) -> Mapping[str, Any]:
@@ -114,6 +137,79 @@ async def test_catalog_fetches_normalizes_and_reuses_fresh_cache(
         assert 'typelist' not in str(cached['payload_json'])
         assert '"format_version":2' in str(cached['payload_json'])
         assert int(cached['fetched_at']) == 1000
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_catalog_coalesces_concurrent_normal_and_forced_generations(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = BlockingProtocol(category_response())
+
+        async def load_bundle(account_id: int) -> Any:
+            return 'bundle-{}'.format(account_id)
+
+        catalog = UploadCategoryCatalog(
+            database, protocol, bundle_loader=load_bundle, clock=lambda: 1000
+        )
+
+        normal = asyncio.gather(*(catalog.list('primary', None) for _ in range(20)))
+        await asyncio.wait_for(protocol.started.wait(), timeout=1)
+        assert protocol.calls == ['bundle-1']
+        protocol.release.set()
+        normal_results = await normal
+
+        assert all(result.stale is False for result in normal_results)
+        protocol.started = asyncio.Event()
+        protocol.release = asyncio.Event()
+        forced = asyncio.gather(
+            *(catalog.list('primary', None, force_refresh=True) for _ in range(20))
+        )
+        await asyncio.wait_for(protocol.started.wait(), timeout=1)
+        assert len(protocol.calls) == 2
+        protocol.release.set()
+        forced_results = await forced
+
+        assert all(result.stale is False for result in forced_results)
+        assert len(protocol.calls) == 2
+        assert protocol.max_in_flight == 1
+
+        await catalog.list('primary', None, force_refresh=True)
+        assert len(protocol.calls) == 3
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_catalog_failed_generation_is_evicted_for_a_later_retry(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = FakeProtocol(category_response())
+        protocol.fail = True
+
+        async def load_bundle(account_id: int) -> Any:
+            return 'bundle-{}'.format(account_id)
+
+        catalog = UploadCategoryCatalog(
+            database, protocol, bundle_loader=load_bundle, clock=lambda: 1000
+        )
+        with pytest.raises(UploadCategoryUnavailable):
+            await catalog.list('primary', None)
+
+        protocol.fail = False
+        result = await catalog.list('primary', None)
+
+        assert result.account_id == 1
+        assert protocol.calls == ['bundle-1', 'bundle-1']
     finally:
         await database.close()
 

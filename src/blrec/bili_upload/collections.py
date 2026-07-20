@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
 from .covers import CoverAssetNotFound, CoverResolver, StoredCoverUnavailable
 from .database import BiliUploadDatabase
@@ -59,6 +61,14 @@ class CollectionCreationView:
 @dataclass(frozen=True)
 class _ResolvedAccount:
     id: int
+    credential_version: int
+
+
+@dataclass(frozen=True)
+class _CatalogEntry:
+    catalog: CollectionCatalogView
+    fresh_until: float
+    stale_until: float
 
 
 class CollectionManager:
@@ -69,23 +79,117 @@ class CollectionManager:
         cover_resolver: CoverResolver,
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._database = database
         self._protocol = protocol
         self._cover_resolver = cover_resolver
         self._bundle_loader = bundle_loader
+        self._clock = clock
+        self._catalogs: Dict[Tuple[int, int], _CatalogEntry] = {}
+        self._list_tasks: Dict[
+            Tuple[str, Optional[int], bool], asyncio.Task[CollectionCatalogView]
+        ] = {}
+        self._refresh_tasks: Dict[
+            Tuple[int, int], asyncio.Task[CollectionCatalogView]
+        ] = {}
 
     async def list(
-        self, account_mode: str, account_id: Optional[int]
+        self,
+        account_mode: str,
+        account_id: Optional[int],
+        *,
+        force_refresh: bool = False,
+    ) -> CollectionCatalogView:
+        request_key = (account_mode, account_id, force_refresh)
+        task = self._list_tasks.get(request_key)
+        if task is None:
+            task = asyncio.create_task(
+                self._list(account_mode, account_id, force_refresh=force_refresh)
+            )
+            self._list_tasks[request_key] = task
+
+            def clear_list_task(
+                completed: asyncio.Future[CollectionCatalogView],
+            ) -> None:
+                self._clear_list_task(request_key, completed)
+
+            task.add_done_callback(clear_list_task)
+        return await asyncio.shield(task)
+
+    async def _list(
+        self, account_mode: str, account_id: Optional[int], *, force_refresh: bool
     ) -> CollectionCatalogView:
         account = await self._resolve_account(account_mode, account_id)
+        key = (account.id, account.credential_version)
+        current = self._catalogs.get(key)
+        if (
+            not force_refresh
+            and current is not None
+            and self._clock() < current.fresh_until
+        ):
+            return current.catalog
+        return await self._refresh_catalog(key, account, stale=current)
+
+    def _clear_list_task(
+        self,
+        key: Tuple[str, Optional[int], bool],
+        task: asyncio.Future[CollectionCatalogView],
+    ) -> None:
+        if self._list_tasks.get(key) is task:
+            self._list_tasks.pop(key, None)
+        if not task.cancelled():
+            task.exception()
+
+    async def _refresh_catalog(
+        self,
+        key: Tuple[int, int],
+        account: _ResolvedAccount,
+        *,
+        stale: Optional[_CatalogEntry],
+    ) -> CollectionCatalogView:
+        task = self._refresh_tasks.get(key)
+        if task is None:
+            task = asyncio.create_task(self._load_catalog(key, account, stale=stale))
+            self._refresh_tasks[key] = task
+
+            def clear_refresh_task(
+                completed: asyncio.Future[CollectionCatalogView],
+            ) -> None:
+                self._clear_refresh_task(key, completed)
+
+            task.add_done_callback(clear_refresh_task)
+        return await asyncio.shield(task)
+
+    async def _load_catalog(
+        self,
+        key: Tuple[int, int],
+        account: _ResolvedAccount,
+        *,
+        stale: Optional[_CatalogEntry],
+    ) -> CollectionCatalogView:
         try:
             bundle = await self._bundle_loader(account.id)
             response = await self._protocol.list_collections(bundle)
             collections = self._normalize(response)
         except Exception:
+            if stale is not None and self._clock() < stale.stale_until:
+                return stale.catalog
             raise CollectionUnavailable('collections are unavailable') from None
-        return CollectionCatalogView(account_id=account.id, collections=collections)
+        catalog = CollectionCatalogView(account_id=account.id, collections=collections)
+        now = self._clock()
+        self._catalogs[key] = _CatalogEntry(
+            catalog=catalog, fresh_until=now + 60, stale_until=now + 15 * 60
+        )
+        return catalog
+
+    def _clear_refresh_task(
+        self, key: Tuple[int, int], task: asyncio.Future[CollectionCatalogView]
+    ) -> None:
+        if self._refresh_tasks.get(key) is task:
+            self._refresh_tasks.pop(key, None)
+        if not task.cancelled():
+            task.exception()
 
     async def create(
         self,
@@ -105,6 +209,7 @@ class CollectionManager:
         if type(cover_asset_id) is not int or cover_asset_id <= 0:
             raise InvalidCollectionRequest('collection cover is required')
         account = await self._resolve_account(account_mode, account_id)
+        key = (account.id, account.credential_version)
         try:
             cover_url = await self._cover_resolver.remote_url(
                 cover_asset_id, account.id
@@ -120,6 +225,7 @@ class CollectionManager:
                 bundle, title=title, description=description, cover_url=cover_url
             )
         except RemoteOutcomeUnknown:
+            self._catalogs.pop(key, None)
             raise CollectionUnavailable(
                 'collection creation result is unknown; refresh before trying again'
             ) from None
@@ -129,9 +235,11 @@ class CollectionManager:
         if type(collection_id) is not int or collection_id <= 0:
             raise CollectionUnavailable('collection creation response is incomplete')
 
+        stale = self._catalogs.pop(key, None)
         try:
-            collections = self._normalize(await self._protocol.list_collections(bundle))
-        except Exception:
+            catalog = await self._refresh_catalog(key, account, stale=stale)
+            collections = catalog.collections
+        except CollectionUnavailable:
             collections = ()
         created = next(
             (
@@ -163,7 +271,8 @@ class CollectionManager:
                     'accountId must be empty when following the primary account'
                 )
             row = await self._database.fetchone(
-                'SELECT account.id,account.state FROM bili_account_selection selection '
+                'SELECT account.id,account.state,account.credential_version '
+                'FROM bili_account_selection selection '
                 'JOIN bili_accounts account '
                 'ON account.id=selection.primary_account_id WHERE selection.id=1'
             )
@@ -173,13 +282,16 @@ class CollectionManager:
                     'accountId is required for a fixed account policy'
                 )
             row = await self._database.fetchone(
-                'SELECT id,state FROM bili_accounts WHERE id=?', (account_id,)
+                'SELECT id,state,credential_version FROM bili_accounts WHERE id=?',
+                (account_id,),
             )
         else:
             raise InvalidCollectionRequest('accountMode must be primary or fixed')
         if row is None or str(row['state']) != 'active':
             raise InvalidCollectionRequest('an active upload account is required')
-        return _ResolvedAccount(id=int(row['id']))
+        return _ResolvedAccount(
+            id=int(row['id']), credential_version=int(row['credential_version'])
+        )
 
     @classmethod
     def _normalize(cls, response: Mapping[str, Any]) -> Tuple[CollectionView, ...]:

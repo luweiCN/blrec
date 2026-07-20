@@ -113,11 +113,15 @@ export class RoomUploadPolicyService {
   collections(
     accountMode: UploadAccountMode,
     accountId: number | null,
+    forceRefresh = false,
   ): Observable<BiliCollectionCatalog> {
     const url = this.url.makeApiUrl('/api/v1/bili-collections');
     let params = new HttpParams().set('accountMode', accountMode);
     if (accountMode === 'fixed' && accountId !== null) {
       params = params.set('accountId', String(accountId));
+    }
+    if (forceRefresh) {
+      params = params.set('forceRefresh', 'true');
     }
     return this.http.get<BiliCollectionCatalog>(url, { params });
   }

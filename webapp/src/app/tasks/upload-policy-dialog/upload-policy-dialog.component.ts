@@ -538,12 +538,30 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (result) => {
           this.newCollectionVisible = false;
+          const existing =
+            this.collectionCatalog?.accountId === result.accountId
+              ? this.collectionCatalog.collections
+              : [];
+          this.collectionCatalog = {
+            accountId: result.accountId,
+            collections: [
+              result.collection,
+              ...existing.filter((item) => item.id !== result.collection.id),
+            ],
+          };
+          const defaultSection = result.collection.selectable
+            ? result.collection.sections[0]
+            : undefined;
+          if (defaultSection !== undefined) {
+            this.collectionChanged(
+              `${result.collection.id}:${defaultSection.id}`,
+            );
+          }
           this.message.success(
             result.collection.selectable
               ? '合集已创建'
               : '合集已提交 B 站审核，通过后即可选择',
           );
-          this.loadCollections();
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
@@ -573,7 +591,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   }
 
   refreshCollections(): void {
-    this.loadCollections();
+    this.loadCollections(true);
   }
 
   save(): void {
@@ -784,7 +802,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       });
   }
 
-  private loadCollections(): void {
+  private loadCollections(forceRefresh = false): void {
     const generation = ++this.collectionLoadGeneration;
     if (this.draft.accountMode === 'fixed' && this.draft.accountId === null) {
       this.collectionCatalog = null;
@@ -796,7 +814,11 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.collectionLoading = true;
     this.collectionError = null;
     this.policyService
-      .collections(this.draft.accountMode, this.draft.accountId)
+      .collections(
+        this.draft.accountMode,
+        this.draft.accountId,
+        forceRefresh,
+      )
       .pipe(
         finalize(() => {
           if (generation === this.collectionLoadGeneration) {

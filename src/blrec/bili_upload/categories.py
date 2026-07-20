@@ -75,6 +75,12 @@ class UploadCategoryCatalog:
         self._clock = clock
         self._ttl_seconds = ttl_seconds
         self._locks: Dict[int, asyncio.Lock] = {}
+        self._list_tasks: Dict[
+            Tuple[str, Optional[int], bool], asyncio.Task[UploadCategoryCatalogView]
+        ] = {}
+        self._refresh_tasks: Dict[
+            Tuple[int, int], asyncio.Task[UploadCategoryCatalogView]
+        ] = {}
 
     async def list(
         self,
@@ -83,9 +89,32 @@ class UploadCategoryCatalog:
         *,
         force_refresh: bool = False,
     ) -> UploadCategoryCatalogView:
+        request_key = (account_mode, account_id, force_refresh)
+        task = self._list_tasks.get(request_key)
+        if task is None:
+            task = asyncio.create_task(
+                self._list(account_mode, account_id, force_refresh=force_refresh)
+            )
+            self._list_tasks[request_key] = task
+
+            def clear_list_task(
+                completed: asyncio.Future[UploadCategoryCatalogView],
+            ) -> None:
+                self._clear_list_task(request_key, completed)
+
+            task.add_done_callback(clear_list_task)
+        return await asyncio.shield(task)
+
+    async def _list(
+        self, account_mode: str, account_id: Optional[int], *, force_refresh: bool
+    ) -> UploadCategoryCatalogView:
         account = await self._resolve_account(account_mode, account_id)
         cached = await self._cached(account.id)
         now = int(self._clock())
+        key = (account.id, account.credential_version)
+        task = self._refresh_tasks.get(key)
+        if task is not None:
+            return await asyncio.shield(task)
         if not force_refresh and self._is_fresh(cached, account, now):
             assert cached is not None
             return cached
@@ -95,60 +124,103 @@ class UploadCategoryCatalog:
             account = await self._resolve_account(account_mode, account_id)
             cached = await self._cached(account.id)
             now = int(self._clock())
-            if not force_refresh and self._is_fresh(cached, account, now):
+            key = (account.id, account.credential_version)
+            task = self._refresh_tasks.get(key)
+            if (
+                task is None
+                and not force_refresh
+                and self._is_fresh(cached, account, now)
+            ):
                 assert cached is not None
                 return cached
-            try:
-                bundle = await self._bundle_loader(account.id)
-                response = await self._protocol.archive_pre(bundle)
-                categories, creation_statements, creation_statement_tip = (
-                    self._normalize(response)
-                )
-            except Exception:
-                if cached is not None:
-                    return UploadCategoryCatalogView(
-                        account_id=cached.account_id,
-                        credential_version=cached.credential_version,
-                        fetched_at=cached.fetched_at,
-                        stale=True,
-                        categories=cached.categories,
-                        creation_statements=cached.creation_statements,
-                        creation_statement_tip=cached.creation_statement_tip,
-                    )
-                raise UploadCategoryUnavailable(
-                    'upload categories are unavailable'
-                ) from None
+            if task is None:
+                task = asyncio.create_task(self._refresh(account, cached, now))
+                self._refresh_tasks[key] = task
 
-            payload_json = json.dumps(
-                {
-                    'format_version': 2,
-                    'categories': [asdict(category) for category in categories],
-                    'creation_statements': [
-                        asdict(statement) for statement in creation_statements
-                    ],
-                    'creation_statement_tip': creation_statement_tip,
-                },
-                ensure_ascii=False,
-                separators=(',', ':'),
-                sort_keys=True,
+                def clear_refresh_task(
+                    completed: asyncio.Future[UploadCategoryCatalogView],
+                ) -> None:
+                    self._clear_refresh_task(key, completed)
+
+                task.add_done_callback(clear_refresh_task)
+        assert task is not None
+        return await asyncio.shield(task)
+
+    def _clear_list_task(
+        self,
+        key: Tuple[str, Optional[int], bool],
+        task: asyncio.Future[UploadCategoryCatalogView],
+    ) -> None:
+        if self._list_tasks.get(key) is task:
+            self._list_tasks.pop(key, None)
+        if not task.cancelled():
+            task.exception()
+
+    async def _refresh(
+        self,
+        account: _ResolvedAccount,
+        cached: Optional[UploadCategoryCatalogView],
+        now: int,
+    ) -> UploadCategoryCatalogView:
+        try:
+            bundle = await self._bundle_loader(account.id)
+            response = await self._protocol.archive_pre(bundle)
+            categories, creation_statements, creation_statement_tip = self._normalize(
+                response
             )
-            await self._database.execute(
-                'INSERT INTO upload_category_cache('
-                'account_id,credential_version,payload_json,fetched_at) '
-                'VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET '
-                'credential_version=excluded.credential_version,'
-                'payload_json=excluded.payload_json,fetched_at=excluded.fetched_at',
-                (account.id, account.credential_version, payload_json, now),
-            )
-            return UploadCategoryCatalogView(
-                account_id=account.id,
-                credential_version=account.credential_version,
-                fetched_at=now,
-                stale=False,
-                categories=categories,
-                creation_statements=creation_statements,
-                creation_statement_tip=creation_statement_tip,
-            )
+        except Exception:
+            if cached is not None:
+                return UploadCategoryCatalogView(
+                    account_id=cached.account_id,
+                    credential_version=cached.credential_version,
+                    fetched_at=cached.fetched_at,
+                    stale=True,
+                    categories=cached.categories,
+                    creation_statements=cached.creation_statements,
+                    creation_statement_tip=cached.creation_statement_tip,
+                )
+            raise UploadCategoryUnavailable(
+                'upload categories are unavailable'
+            ) from None
+
+        payload_json = json.dumps(
+            {
+                'format_version': 2,
+                'categories': [asdict(category) for category in categories],
+                'creation_statements': [
+                    asdict(statement) for statement in creation_statements
+                ],
+                'creation_statement_tip': creation_statement_tip,
+            },
+            ensure_ascii=False,
+            separators=(',', ':'),
+            sort_keys=True,
+        )
+        await self._database.execute(
+            'INSERT INTO upload_category_cache('
+            'account_id,credential_version,payload_json,fetched_at) '
+            'VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET '
+            'credential_version=excluded.credential_version,'
+            'payload_json=excluded.payload_json,fetched_at=excluded.fetched_at',
+            (account.id, account.credential_version, payload_json, now),
+        )
+        return UploadCategoryCatalogView(
+            account_id=account.id,
+            credential_version=account.credential_version,
+            fetched_at=now,
+            stale=False,
+            categories=categories,
+            creation_statements=creation_statements,
+            creation_statement_tip=creation_statement_tip,
+        )
+
+    def _clear_refresh_task(
+        self, key: Tuple[int, int], task: asyncio.Future[UploadCategoryCatalogView]
+    ) -> None:
+        if self._refresh_tasks.get(key) is task:
+            self._refresh_tasks.pop(key, None)
+        if not task.cancelled():
+            task.exception()
 
     async def _resolve_account(
         self, account_mode: str, account_id: Optional[int]

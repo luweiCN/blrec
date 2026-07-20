@@ -532,7 +532,11 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.collectionSelection).toBeNull();
     expect(component.draft.collectionSeasonId).toBeNull();
     expect(component.draft.collectionSectionId).toBeNull();
-    expect(policyService.collections).toHaveBeenCalledWith('primary', null);
+    expect(policyService.collections).toHaveBeenCalledWith(
+      'primary',
+      null,
+      false,
+    );
   });
 
   it('submits a newly selected cover collection and native publish delay', () => {
@@ -562,6 +566,19 @@ describe('UploadPolicyDialogComponent', () => {
   });
 
   it('creates a collection for the currently selected upload account', () => {
+    const createdCollection = {
+      id: 9,
+      title: '主播录播合集',
+      description: '直播录像',
+      coverUrl: '',
+      state: 0,
+      rejectReason: '',
+      selectable: true,
+      sections: [{ id: 91, title: '正片' }],
+    };
+    policyService.createCollection.and.returnValue(
+      of({ accountId: 7, collection: createdCollection }),
+    );
     create();
     component.openCreateCollection();
     component.newCollectionTitle = '主播录播合集';
@@ -577,6 +594,22 @@ describe('UploadPolicyDialogComponent', () => {
       description: '直播录像',
       coverAssetId: 3,
     });
+    expect(policyService.collections).toHaveBeenCalledTimes(1);
+    expect(component.collections).toContain(createdCollection);
+    expect(component.collectionSelection).toBe('9:91');
     expect(component.newCollectionVisible).toBeFalse();
+  });
+
+  it('forces collection refresh only from the manual refresh action', () => {
+    create();
+    policyService.collections.calls.reset();
+
+    component.refreshCollections();
+
+    expect(policyService.collections).toHaveBeenCalledOnceWith(
+      'primary',
+      null,
+      true,
+    );
   });
 });

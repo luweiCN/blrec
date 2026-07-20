@@ -37,13 +37,17 @@ class FakeManager:
     unavailable: bool = False
 
     async def list(
-        self, account_mode: str, account_id: Optional[int]
+        self,
+        account_mode: str,
+        account_id: Optional[int],
+        *,
+        force_refresh: bool = False,
     ) -> CollectionCatalogView:
         if self.invalid:
             raise InvalidCollectionRequest('invalid request')
         if self.unavailable:
             raise CollectionUnavailable('collections unavailable')
-        self.request = ('list', account_mode, account_id)
+        self.request = ('list', account_mode, account_id, force_refresh)
         return CollectionCatalogView(account_id=7, collections=(collection(),))
 
     async def create(self, account_mode: str, account_id: Optional[int], **values):
@@ -94,10 +98,23 @@ def test_list_collections_uses_selected_account(
     )
 
     assert response.status_code == 200
-    assert manager.request == ('list', 'fixed', 7)
+    assert manager.request == ('list', 'fixed', 7, False)
     assert response.json()['collections'][0]['sections'] == [
         {'id': 11, 'title': '正片'}
     ]
+
+
+def test_list_collections_forwards_only_explicit_force_refresh(
+    client: TestClient, manager: FakeManager
+) -> None:
+    response = client.get(
+        '/api/v1/bili-collections',
+        params={'accountMode': 'fixed', 'accountId': 7, 'forceRefresh': 'true'},
+        headers=headers(),
+    )
+
+    assert response.status_code == 200
+    assert manager.request == ('list', 'fixed', 7, True)
 
 
 def test_create_collection_forwards_cover_asset(

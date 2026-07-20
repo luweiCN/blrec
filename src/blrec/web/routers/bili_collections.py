@@ -75,11 +75,14 @@ router = APIRouter(prefix='/bili-collections', tags=['bili-collections'])
 async def list_bili_collections(
     account_mode: Literal['primary', 'fixed'] = Query(..., alias='accountMode'),
     account_id: Optional[int] = Query(None, alias='accountId'),
+    force_refresh: bool = Query(False, alias='forceRefresh'),
     _subject: str = Depends(authenticated_manager_subject),
     collection_manager: CollectionManager = Depends(get_manager),
 ) -> CollectionCatalogView:
     try:
-        return await collection_manager.list(account_mode, account_id)
+        return await collection_manager.list(
+            account_mode, account_id, force_refresh=force_refresh
+        )
     except InvalidCollectionRequest as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
