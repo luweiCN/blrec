@@ -8,6 +8,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from blrec.bili_upload.active_media import ActiveMediaBusy, ActiveMediaMetadata
 from blrec.bili_upload.journal import (
     DanmakuItemProgress,
     RecordingPart,
@@ -21,6 +22,7 @@ from blrec.bili_upload.policies import default_room_upload_policy
 from blrec.bili_upload.recording_content import (
     DanmakuLine,
     DanmakuPage,
+    FlvMediaSnapshot,
     MediaResource,
     RecordingContentNotFound,
     RecordingContentUnavailable,
@@ -258,6 +260,20 @@ class FakeContentReader:
         )
 
 
+class FakeActiveMediaService:
+    def __init__(self) -> None:
+        self.calls = []
+        self.error = None
+
+    async def snapshot(self, part_id, path, source_size, metadata):
+        self.calls.append((part_id, path, source_size, metadata))
+        if self.error is not None:
+            raise self.error
+        if isinstance(metadata, ActiveMediaMetadata):
+            metadata = metadata.value
+        return FlvMediaSnapshot.create(path, source_size, metadata)
+
+
 class FakeSubmissionManager:
     def __init__(self) -> None:
         self.saved = None
@@ -310,6 +326,7 @@ def restore_router_state() -> Iterator[None]:
     old_metadata_provider = getattr(
         recording_sessions, 'active_recording_metadata_provider', None
     )
+    old_active_media_service = getattr(recording_sessions, 'active_media_service', None)
     had_content_reader = hasattr(recording_sessions, 'content_reader')
     old_content_reader = getattr(recording_sessions, 'content_reader', None)
     old_key = security.api_key
@@ -320,6 +337,7 @@ def restore_router_state() -> Iterator[None]:
     recording_sessions.session_action_runner = old_session_action_runner
     recording_sessions.submission_manager = old_submission_manager
     recording_sessions.active_recording_metadata_provider = old_metadata_provider
+    recording_sessions.active_media_service = old_active_media_service
     if hasattr(recording_sessions, 'media_snapshot_store'):
         recording_sessions.media_snapshot_store.clear()
     if had_content_reader:
@@ -341,6 +359,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     media = tmp_path / 'part.flv'
     media.write_bytes(b'0123456789')
     recording_sessions.content_reader = FakeContentReader(media)
+    recording_sessions.active_media_service = FakeActiveMediaService()
     recording_sessions.unavailable_reason = None
     with TestClient(api) as value:
         yield value
@@ -960,6 +979,10 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
     assert body['fileSizeBytes'] > media.stat().st_size
     assert body['recording'] is True
     assert body['playbackMode'] == 'active_snapshot'
+    service = recording_sessions.active_media_service
+    assert isinstance(service, FakeActiveMediaService)
+    assert len(service.calls) == 1
+    assert service.calls[0][:3] == (2, str(media), media.stat().st_size)
 
     response = client.get(
         '/api/v1/recording-sessions/parts/2/media',
@@ -971,6 +994,7 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
     )
     assert response.status_code == 200
     assert len(response.content) == body['fileSizeBytes']
+    assert response.headers['cache-control'] == 'no-store'
     reader = FlvReader(BytesIO(response.content))
     reader.read_header()
     metadata = parse_metadata(reader.read_tag())
@@ -1027,6 +1051,39 @@ def test_media_access_freezes_a_growing_flv_when_index_creation_fails(
     assert response.status_code == 200
     assert response.headers['content-length'] == str(len(opened_content))
     assert response.content == opened_content
+
+
+def test_media_access_returns_retry_after_when_active_media_is_busy(
+    client: TestClient,
+) -> None:
+    service = recording_sessions.active_media_service
+    assert isinstance(service, FakeActiveMediaService)
+    service.error = ActiveMediaBusy(retry_after=1)
+    recording_sessions.active_recording_metadata_provider = lambda _resource: {
+        'lastkeyframelocation': 1.0,
+        'lastkeyframetimestamp': 1.0,
+    }
+
+    response = client.post(
+        '/api/v1/recording-sessions/parts/2/media-access',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 503
+    assert response.headers['retry-after'] == '1'
+    assert response.json()['detail'] == '活动视频快照暂时繁忙，请稍后重试'
+
+
+def test_media_snapshot_store_keeps_only_the_latest_64_tokens() -> None:
+    store = recording_sessions.MediaSnapshotStore()
+    snapshots = []
+    for part_id in range(65):
+        snapshot = FlvMediaSnapshot.frozen('/rec/{}.flv'.format(part_id), part_id)
+        token = store.add(part_id, 2**31, snapshot)
+        snapshots.append((part_id, token))
+
+    assert store.get(*snapshots[0]) is None
+    assert all(store.get(*item) is not None for item in snapshots[1:])
 
 
 def test_media_access_rejects_a_tampered_token(client: TestClient) -> None:

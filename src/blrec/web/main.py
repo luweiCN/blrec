@@ -11,8 +11,12 @@ from pkg_resources import resource_filename
 from pydantic import ValidationError
 from starlette.responses import Response
 
+from blrec.bili_upload.active_media import (
+    ActiveMediaBusy,
+    ActiveMediaMetadata,
+    ActiveMediaService,
+)
 from blrec.bili_upload.recording_content import (
-    FlvMediaSnapshot,
     MediaResource,
     RecordingContentNotFound,
     RecordingContentUnavailable,
@@ -78,6 +82,7 @@ _admin_auth_store = AdminAuthStore(
 )
 _admin_auth_store.open()
 _password_work_coordinator: Optional[PasswordWorkCoordinator] = None
+_active_media_service: Optional[ActiveMediaService] = None
 _application_started = False
 _network_route_manager = NetworkRouteManager(lambda: _settings.network)
 
@@ -176,7 +181,7 @@ _realtime_sampler = RealtimeSampler(
 )
 
 
-def _active_recording_metadata(resource: MediaResource) -> Optional[Mapping[str, Any]]:
+def _active_recording_metadata(resource: MediaResource) -> Optional[object]:
     if not _application_started or resource.path is None:
         return None
     try:
@@ -185,45 +190,50 @@ def _active_recording_metadata(resource: MediaResource) -> Optional[Mapping[str,
     except (NotFoundError, RuntimeError):
         return None
     recording_path = task.task_status.recording_path
-    if (
-        recording_path is None
-        or os.path.realpath(recording_path) != os.path.realpath(resource.path)
-        or metadata is None
-    ):
+    if recording_path is None or metadata is None:
         return None
-    return attr.asdict(metadata)
+    return ActiveMediaMetadata(recording_path=recording_path, value=metadata)
 
 
 async def _active_highlight_durations(session_id: int) -> Mapping[int, int]:
     journal = _bili_account_runtime.journal
     reader = _bili_account_runtime.content_reader
-    if not _application_started or journal is None or reader is None:
+    service = _active_media_service
+    if not _application_started or journal is None or reader is None or service is None:
         return {}
-    durations: Dict[int, int] = {}
-    for part in await journal.parts_for_session(session_id):
-        try:
-            resource = await reader.media(part.id)
-        except (RecordingContentNotFound, RecordingContentUnavailable):
-            continue
-        if (
-            not resource.recording
-            or resource.path is None
-            or resource.size is None
-            or resource.content_type != 'video/x-flv'
-        ):
-            continue
-        snapshot = FlvMediaSnapshot.frozen(resource.path, resource.size)
-        metadata = _active_recording_metadata(resource)
-        if metadata is not None:
-            try:
-                snapshot = FlvMediaSnapshot.create(
-                    resource.path, resource.size, metadata
-                )
-            except (OSError, EOFError, ValueError, AssertionError, RuntimeError):
-                pass
-        if snapshot.duration_ms is not None:
-            durations[part.id] = snapshot.duration_ms
-    return durations
+    part = await journal.active_part_for_session(session_id)
+    if part is None:
+        return {}
+    try:
+        resource = await reader.media(part.id)
+    except (RecordingContentNotFound, RecordingContentUnavailable):
+        return {}
+    if (
+        not resource.recording
+        or resource.path is None
+        or resource.size is None
+        or resource.content_type != 'video/x-flv'
+    ):
+        return {}
+    metadata = _active_recording_metadata(resource)
+    if metadata is None:
+        return {}
+    try:
+        snapshot = await service.snapshot(
+            part.id, resource.path, resource.size, metadata
+        )
+    except (
+        ActiveMediaBusy,
+        OSError,
+        EOFError,
+        ValueError,
+        AssertionError,
+        RuntimeError,
+    ):
+        return {}
+    if snapshot.duration_ms is None:
+        return {}
+    return {part.id: snapshot.duration_ms}
 
 
 bili_accounts.manager = None
@@ -233,6 +243,7 @@ recording_sessions.content_reader = None
 recording_sessions.task_actions = None
 recording_sessions.session_action_runner = None
 recording_sessions.submission_manager = None
+recording_sessions.active_media_service = None
 recording_sessions.active_recording_metadata_provider = _active_recording_metadata
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_retention.manager = None
@@ -324,10 +335,12 @@ async def validation_error_handler(
 
 @api.on_event('startup')
 async def on_startup() -> None:
-    global _application_started, _password_work_coordinator
+    global _active_media_service, _application_started, _password_work_coordinator
     _admin_auth_store.open()
     password_work = PasswordWorkCoordinator()
+    active_media = ActiveMediaService()
     _password_work_coordinator = password_work
+    _active_media_service = active_media
     application_launched = False
     try:
         security.configure(
@@ -351,6 +364,7 @@ async def on_startup() -> None:
         recording_sessions.submission_manager = (
             _bili_account_runtime.session_submission_manager
         )
+        recording_sessions.active_media_service = active_media
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_retention.manager = _bili_account_runtime.retention_manager
         recording_retention.unavailable_reason = (
@@ -383,6 +397,7 @@ async def on_startup() -> None:
         _realtime_sampler.start()
     except BaseException:
         password_work.close_admission()
+        active_media.close_admission()
         _application_started = False
         try:
             try:
@@ -395,6 +410,7 @@ async def on_startup() -> None:
             recording_sessions.task_actions = None
             recording_sessions.session_action_runner = None
             recording_sessions.submission_manager = None
+            recording_sessions.active_media_service = None
             recording_retention.manager = None
             room_upload_policies.manager = None
             room_upload_policies.category_catalog = None
@@ -413,19 +429,26 @@ async def on_startup() -> None:
                 await _bili_account_runtime.close()
             finally:
                 try:
-                    await password_work.shutdown()
+                    await active_media.shutdown()
                 finally:
-                    _password_work_coordinator = None
-                    _admin_auth_store.close()
+                    try:
+                        await password_work.shutdown()
+                    finally:
+                        _active_media_service = None
+                        _password_work_coordinator = None
+                        _admin_auth_store.close()
         raise
 
 
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
-    global _application_started, _password_work_coordinator
+    global _active_media_service, _application_started, _password_work_coordinator
     password_work = _password_work_coordinator
+    active_media = _active_media_service
     if password_work is not None:
         password_work.close_admission()
+    if active_media is not None:
+        active_media.close_admission()
     _application_started = False
     try:
         try:
@@ -439,6 +462,7 @@ async def on_shuntdown() -> None:
         recording_sessions.task_actions = None
         recording_sessions.session_action_runner = None
         recording_sessions.submission_manager = None
+        recording_sessions.active_media_service = None
         recording_retention.manager = None
         room_upload_policies.manager = None
         room_upload_policies.category_catalog = None
@@ -458,11 +482,16 @@ async def on_shuntdown() -> None:
                 await _bili_account_runtime.close()
     finally:
         try:
-            if password_work is not None:
-                await password_work.shutdown()
+            if active_media is not None:
+                await active_media.shutdown()
         finally:
-            _password_work_coordinator = None
-            _admin_auth_store.close()
+            try:
+                if password_work is not None:
+                    await password_work.shutdown()
+            finally:
+                _active_media_service = None
+                _password_work_coordinator = None
+                _admin_auth_store.close()
 
 
 tasks.app = app

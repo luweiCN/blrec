@@ -1710,3 +1710,30 @@ async def test_listener_persists_recorder_and_postprocessor_lifecycle(
     listener.close()
     assert recorder.listeners == []
     assert postprocessor.listeners == []
+
+
+@pytest.mark.asyncio
+async def test_active_part_for_session_returns_only_the_latest_unfinished_part(
+    database: BiliUploadDatabase,
+) -> None:
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, '/rec/p1.flv', record_start_time=901)
+    await journal.video_completed(run_id, '/rec/p1.flv')
+    await journal.video_postprocessed(run_id, '/rec/p1.flv', '/rec/p1.mp4')
+    await journal.video_created(run_id, '/rec/p2.flv', record_start_time=902)
+    await journal.video_completed(run_id, '/rec/p2.flv')
+    await journal.video_created(run_id, '/rec/p3.flv', record_start_time=903)
+    session_id = (await journal.list_sessions())[0].id
+
+    active = await journal.active_part_for_session(session_id)
+
+    assert active is not None
+    assert active.part_index == 3
+    assert active.artifact_state == 'recording'
+
+    await journal.video_completed(run_id, '/rec/p3.flv')
+    await journal.video_postprocessed(run_id, '/rec/p3.flv', '/rec/p3.mp4')
+    await journal.video_postprocessed(run_id, '/rec/p2.flv', '/rec/p2.mp4')
+
+    assert await journal.active_part_for_session(session_id) is None

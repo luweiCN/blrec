@@ -1,3 +1,4 @@
+import os
 import re
 import secrets
 import time
@@ -10,7 +11,6 @@ from typing import (
     Iterator,
     List,
     Literal,
-    Mapping,
     Optional,
     Tuple,
     Union,
@@ -21,6 +21,7 @@ from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
 from starlette.responses import StreamingResponse
 
+from blrec.bili_upload.active_media import ActiveMediaBusy, ActiveMediaService
 from blrec.bili_upload.journal import (
     DanmakuItemProgress,
     RecordingJournalBridge,
@@ -65,8 +66,9 @@ task_actions: Optional[UploadTaskActionManager] = None
 session_action_runner: Optional[Callable[..., Awaitable[str]]] = None
 submission_manager: Optional[SessionSubmissionManager] = None
 active_recording_metadata_provider: Optional[
-    Callable[[MediaResource], Optional[Mapping[str, Any]]]
+    Callable[[MediaResource], Optional[object]]
 ] = None
+active_media_service: Optional[ActiveMediaService] = None
 unavailable_reason: Optional[str] = 'Recording journal is not ready'
 
 _BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
@@ -1360,14 +1362,31 @@ async def create_recording_media_access(
         and resource.content_type == 'video/x-flv'
         and resource.size is not None
     ):
-        snapshot = FlvMediaSnapshot.frozen(resource.path, resource.size)
+        snapshot = FlvMediaSnapshot.frozen(
+            os.path.abspath(resource.path), resource.size
+        )
         if active_recording_metadata_provider is not None:
             metadata = active_recording_metadata_provider(resource)
-            if metadata is not None:
+            if metadata is not None and active_media_service is not None:
                 try:
-                    snapshot = FlvMediaSnapshot.create(
-                        resource.path, resource.size, metadata
+                    snapshot = await active_media_service.snapshot(
+                        part_id, resource.path, resource.size, metadata
                     )
+                except ActiveMediaBusy as error:
+                    audit(
+                        'media_access_failed',
+                        level='WARNING',
+                        request_id=request_id,
+                        part_id=part_id,
+                        elapsed_ms=int((time.monotonic() - started) * 1_000),
+                        error_code='active_media_busy',
+                        result='busy',
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail='活动视频快照暂时繁忙，请稍后重试',
+                        headers={'Retry-After': str(error.retry_after)},
+                    ) from None
                 except (OSError, EOFError, ValueError, AssertionError, RuntimeError):
                     pass
         snapshot_id = media_snapshot_store.add(part_id, expires_at, snapshot)
@@ -1418,7 +1437,9 @@ async def stream_recording_media(
     snapshot = None
     if media_snapshot is not None:
         snapshot = media_snapshot_store.get(part_id, media_snapshot)
-        if snapshot is None or snapshot.path != resource.path:
+        if snapshot is None or os.path.abspath(snapshot.path) != os.path.abspath(
+            resource.path
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail='播放快照已失效，请重新打开播放器',
