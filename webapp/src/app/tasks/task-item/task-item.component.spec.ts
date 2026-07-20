@@ -319,6 +319,49 @@ describe('TaskItemComponent', () => {
     expect(pending.observers.length).toBe(0);
   });
 
+  it('cancels a direct stop control when the row is destroyed', () => {
+    const pending = new Subject<never>();
+    taskManager.stopTask.and.returnValue(pending);
+    component.data = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        running_status: RunningStatus.WAITING,
+      },
+    };
+
+    component.stopTask();
+    expect(pending.observers.length).toBe(1);
+
+    fixture.destroy();
+
+    expect(pending.observers.length).toBe(0);
+  });
+
+  it('cancels a confirmed force stop when the row is destroyed', () => {
+    const pending = new Subject<never>();
+    taskManager.stopTask.and.returnValue(pending);
+    component.data = {
+      ...taskData,
+      task_status: {
+        ...taskData.task_status,
+        running_status: RunningStatus.RECORDING,
+      },
+    };
+
+    component.stopTask(true);
+    const modal = TestBed.inject(
+      NzModalService,
+    ) as jasmine.SpyObj<NzModalService>;
+    const confirmation = modal.confirm.calls.mostRecent().args[0]!;
+    (confirmation.nzOnOk as () => Promise<unknown>)();
+    expect(pending.observers.length).toBe(1);
+
+    fixture.destroy();
+
+    expect(pending.observers.length).toBe(0);
+  });
+
   it('opens投稿设置 before first enabling automatic submission', () => {
     expect(component.uploadPolicy).toBeNull();
 

@@ -226,11 +226,15 @@ export class TaskItemComponent implements OnChanges, OnDestroy {
           new Promise((resolve, reject) => {
             this.taskManager
               .stopTask(this.roomId, force)
+              .pipe(takeUntil(this.destroy$))
               .subscribe(resolve, reject);
           }),
       });
     } else {
-      this.taskManager.stopTask(this.roomId).subscribe();
+      this.taskManager
+        .stopTask(this.roomId)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe();
     }
   }
 

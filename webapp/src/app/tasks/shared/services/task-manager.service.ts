@@ -417,11 +417,10 @@ export class TaskManagerService {
   private observeControl(
     admission: TaskBatchActionResponse
   ): Observable<TaskBatchActionResponse> {
-    if (
-      !admission.operationId ||
-      admission.status === 'succeeded' ||
-      admission.status === 'failed'
-    ) {
+    if (admission.status === 'succeeded' || admission.status === 'failed') {
+      return this.refreshTaskDataAfterControl(admission);
+    }
+    if (!admission.operationId) {
       return of(admission);
     }
     return concat(
@@ -432,13 +431,23 @@ export class TaskManagerService {
           (result) =>
             result.status === 'succeeded' || result.status === 'failed'
         ),
-        concatMap((result) => {
-          return this.taskService.getAllTaskData().pipe(
-            tap((tasks) => this.taskDataRefreshSubject.next(tasks)),
-            map(() => result)
-          );
-        })
+        concatMap((result) => this.refreshTaskDataAfterControl(result))
       )
+    );
+  }
+
+  private refreshTaskDataAfterControl(
+    result: TaskBatchActionResponse
+  ): Observable<TaskBatchActionResponse> {
+    return this.taskService.getAllTaskData().pipe(
+      tap((tasks) => this.taskDataRefreshSubject.next(tasks)),
+      map(() => result),
+      catchError((error: HttpErrorResponse) => {
+        this.message.warning(
+          `任务操作已完成，但刷新任务状态失败：${error.message}`
+        );
+        return of(result);
+      })
     );
   }
 

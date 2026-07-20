@@ -1,10 +1,11 @@
 import { TestBed } from '@angular/core/testing';
+import { HttpErrorResponse } from '@angular/common/http';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { TaskService } from './task.service';
 import { TaskManagerService } from './task-manager.service';
 import { ControlOperationService } from 'src/app/core/services/control-operation.service';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { TaskData } from '../task.model';
 
 describe('TaskManagerService', () => {
@@ -13,6 +14,7 @@ describe('TaskManagerService', () => {
 
   beforeEach(() => {
     message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+      'error',
       'success',
       'warning',
     ]);
@@ -144,6 +146,77 @@ describe('TaskManagerService', () => {
     expect(snapshots).toEqual([refreshed]);
   });
 
+  it('refreshes task state when admission is already terminal', () => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    const refreshed = [{ room_info: { room_id: 100 } }] as TaskData[];
+    taskService.runBatchAction.and.returnValue(
+      of({
+        operationId: 'operation-1',
+        status: 'succeeded',
+        results: [batchResult(100, true, 'succeeded')],
+      })
+    );
+    taskService.getAllTaskData.and.returnValue(of(refreshed));
+    const snapshots: TaskData[][] = [];
+    service.taskDataRefresh$.subscribe((tasks) => snapshots.push(tasks));
+
+    service.runBatchAction('start', [100]).subscribe();
+
+    expect(taskService.getAllTaskData).toHaveBeenCalledTimes(1);
+    expect(snapshots).toEqual([refreshed]);
+    expect(operations.poll).not.toHaveBeenCalled();
+  });
+
+  it('preserves terminal success when the follow-up refresh fails', () => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    taskService.runBatchAction.and.returnValue(
+      of({
+        operationId: 'operation-1',
+        status: 'accepted',
+        results: [batchResult(100, true, 'queued')],
+      })
+    );
+    taskService.getAllTaskData.and.returnValue(
+      throwError(
+        () =>
+          new HttpErrorResponse({
+            status: 503,
+            statusText: 'Unavailable',
+            url: '/api/v1/tasks/data',
+          })
+      )
+    );
+    operations.poll.and.returnValue(
+      of(controlOperation('succeeded', [controlStep(100, 'succeeded')]))
+    );
+    const statuses: string[] = [];
+    let observedError: unknown;
+
+    service.runBatchAction('start', [100]).subscribe({
+      next: (response) => statuses.push(response.status ?? 'none'),
+      error: (error) => {
+        observedError = error;
+      },
+    });
+
+    expect(statuses).toEqual(['accepted', 'succeeded']);
+    expect(observedError).toBeUndefined();
+    expect(message.warning).toHaveBeenCalledOnceWith(
+      jasmine.stringMatching(/^任务操作已完成，但刷新任务状态失败：/)
+    );
+    expect(message.error).not.toHaveBeenCalled();
+  });
+
   it('reports batch admission once and terminal counts from real statuses', () => {
     const taskService = TestBed.inject(
       TaskService
@@ -200,7 +273,7 @@ describe('TaskManagerService', () => {
 function batchResult(
   roomId: number,
   accepted: boolean,
-  status: 'queued' | 'rejected'
+  status: 'queued' | 'rejected' | 'succeeded'
 ) {
   return {
     roomId,
@@ -231,7 +304,7 @@ function controlStep(
 }
 
 function controlOperation(
-  status: 'accepted' | 'running' | 'failed',
+  status: 'accepted' | 'running' | 'succeeded' | 'failed',
   steps: ReturnType<typeof controlStep>[]
 ) {
   return {
