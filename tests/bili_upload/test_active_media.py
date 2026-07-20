@@ -189,6 +189,91 @@ async def test_new_revision_replaces_the_shareable_snapshot_immediately(
 
 
 @pytest.mark.asyncio
+async def test_interleaved_revision_reuses_every_matching_in_flight_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+    calls = []
+
+    def build(path: str, source_size: int, metadata: Dict[str, Any]):
+        calls.append(source_size)
+        assert release.wait(5)
+        return FlvMediaSnapshot.frozen(path, source_size)
+
+    monkeypatch.setattr(FlvMediaSnapshot, 'create', build)
+    service = ActiveMediaService()
+    first_a = asyncio.create_task(
+        service.snapshot(1, str(tmp_path / 'active.flv'), 3, _metadata(1))
+    )
+    revision_b = asyncio.create_task(
+        service.snapshot(1, str(tmp_path / 'active.flv'), 4, _metadata(2))
+    )
+    try:
+        await _wait_until(lambda: len(calls) == 2)
+        second_a = asyncio.create_task(
+            service.snapshot(1, str(tmp_path / 'active.flv'), 3, _metadata(1))
+        )
+        await asyncio.sleep(0)
+        assert service.admitted_count == 2
+        assert service.in_flight_revision_count == 2
+        assert sorted(calls) == [3, 4]
+        release.set()
+        first, _second, duplicate = await asyncio.gather(first_a, revision_b, second_a)
+        assert duplicate is first
+    finally:
+        release.set()
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_full_capacity_still_accepts_a_waiter_for_an_older_in_flight_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+
+    def build(path: str, source_size: int, metadata: Dict[str, Any]):
+        assert release.wait(5)
+        return FlvMediaSnapshot.frozen(path, source_size)
+
+    monkeypatch.setattr(FlvMediaSnapshot, 'create', build)
+    service = ActiveMediaService()
+    first_a = asyncio.create_task(
+        service.snapshot(1, str(tmp_path / 'active.flv'), 3, _metadata(1))
+    )
+    requests = [
+        first_a,
+        asyncio.create_task(
+            service.snapshot(1, str(tmp_path / 'active.flv'), 4, _metadata(2))
+        ),
+        *[
+            asyncio.create_task(
+                service.snapshot(
+                    part_id,
+                    str(tmp_path / '{}.flv'.format(part_id)),
+                    part_id,
+                    _metadata(part_id),
+                )
+            )
+            for part_id in range(2, 10)
+        ],
+    ]
+    try:
+        await _wait_until(lambda: service.admitted_count == 10)
+        duplicate = asyncio.create_task(
+            service.snapshot(1, str(tmp_path / 'active.flv'), 3, _metadata(1))
+        )
+        await asyncio.sleep(0)
+        assert not duplicate.done()
+        assert service.admitted_count == 10
+        release.set()
+        results = await asyncio.gather(*requests)
+        assert await duplicate is results[0]
+    finally:
+        release.set()
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_cancelling_one_waiter_does_not_cancel_the_shared_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -293,6 +378,7 @@ async def test_active_media_has_two_workers_and_eight_waiting_slots(
     try:
         await _wait_until(lambda: service.admitted_count == 10)
         await _wait_until(lambda: calls == 2)
+        assert service.in_flight_revision_count == 10
         with pytest.raises(ActiveMediaBusy) as error:
             await service.snapshot(11, str(tmp_path / '11.flv'), 11, _metadata(11))
         assert error.value.retry_after == 1
@@ -340,6 +426,7 @@ async def test_completed_active_snapshots_retain_no_results_or_prefixes(
         await _wait_until(lambda: service.admitted_count == 0)
         assert calls == 200
         assert service.in_flight_source_count == 0
+        assert service.in_flight_revision_count == 0
         assert service.completed_cache_entries == 0
         assert service.completed_cache_prefix_bytes == 0
     finally:

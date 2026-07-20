@@ -30,7 +30,6 @@ class ActiveMediaMetadata:
 
 RevisionKey = Tuple[int, str, int, Hashable, Hashable]
 SourceKey = Tuple[int, str]
-InFlightValue = Tuple[RevisionKey, Future[FlvMediaSnapshot]]
 
 
 class ActiveMediaService:
@@ -43,7 +42,8 @@ class ActiveMediaService:
         )
         self._lock = threading.RLock()
         self._futures: Set[Future[FlvMediaSnapshot]] = set()
-        self._latest_by_source: Dict[SourceKey, InFlightValue] = {}
+        self._in_flight_by_revision: Dict[RevisionKey, Future[FlvMediaSnapshot]] = {}
+        self._latest_by_source: Dict[SourceKey, RevisionKey] = {}
         self._closed = False
 
     @property
@@ -55,6 +55,11 @@ class ActiveMediaService:
     def in_flight_source_count(self) -> int:
         with self._lock:
             return len(self._latest_by_source)
+
+    @property
+    def in_flight_revision_count(self) -> int:
+        with self._lock:
+            return len(self._in_flight_by_revision)
 
     @property
     def completed_cache_entries(self) -> int:
@@ -80,10 +85,8 @@ class ActiveMediaService:
         with self._lock:
             if self._closed:
                 raise RuntimeError('active media service is closed')
-            current = self._latest_by_source.get(source_key)
-            if current is not None and current[0] == revision_key:
-                future = current[1]
-            else:
+            future = self._in_flight_by_revision.get(revision_key)
+            if future is None:
                 if len(self._futures) >= self._max_admitted:
                     raise ActiveMediaBusy(retry_after=1)
                 future = self._executor.submit(
@@ -94,8 +97,11 @@ class ActiveMediaService:
                     recording_path,
                 )
                 self._futures.add(future)
-                self._latest_by_source[source_key] = (revision_key, future)
-                future.add_done_callback(partial(self._release, source_key))
+                self._in_flight_by_revision[revision_key] = future
+                self._latest_by_source[source_key] = revision_key
+                future.add_done_callback(
+                    partial(self._release, source_key, revision_key)
+                )
         return await asyncio.shield(asyncio.wrap_future(future))
 
     def close_admission(self) -> None:
@@ -155,9 +161,20 @@ class ActiveMediaService:
             return value
         return ('unhashable', id(value))
 
-    def _release(self, source_key: SourceKey, future: Future[FlvMediaSnapshot]) -> None:
+    def _release(
+        self,
+        source_key: SourceKey,
+        revision_key: RevisionKey,
+        future: Future[FlvMediaSnapshot],
+    ) -> None:
         with self._lock:
             self._futures.discard(future)
-            current = self._latest_by_source.get(source_key)
-            if current is not None and current[1] is future:
-                del self._latest_by_source[source_key]
+            if self._in_flight_by_revision.get(revision_key) is future:
+                del self._in_flight_by_revision[revision_key]
+            if self._latest_by_source.get(source_key) != revision_key:
+                return
+            for remaining_key in reversed(tuple(self._in_flight_by_revision)):
+                if remaining_key[:2] == source_key:
+                    self._latest_by_source[source_key] = remaining_key
+                    return
+            del self._latest_by_source[source_key]

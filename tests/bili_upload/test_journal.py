@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from typing import AsyncIterator, Dict, List, Mapping, Optional, Sequence, Tuple
 import pytest
 import pytest_asyncio
 
+import blrec.bili_upload.journal as journal_module
 from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.journal import RecordingJournalBridge, RecordingJournalListener
@@ -1714,7 +1716,7 @@ async def test_listener_persists_recorder_and_postprocessor_lifecycle(
 
 @pytest.mark.asyncio
 async def test_active_part_for_session_returns_only_the_latest_unfinished_part(
-    database: BiliUploadDatabase,
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     journal = RecordingJournalBridge(database, clock=lambda: 1_000)
     run_id = await journal.recording_started(100, live_start_time=900)
@@ -1725,12 +1727,30 @@ async def test_active_part_for_session_returns_only_the_latest_unfinished_part(
     await journal.video_completed(run_id, '/rec/p2.flv')
     await journal.video_created(run_id, '/rec/p3.flv', record_start_time=903)
     session_id = (await journal.list_sessions())[0].id
+    exists_calls = []
+
+    def forbidden_exists(path: str) -> bool:
+        exists_calls.append(path)
+        raise AssertionError('active part projection must not touch the filesystem')
+
+    monkeypatch.setattr(journal_module.os.path, 'exists', forbidden_exists)
+    heartbeats = []
+
+    async def heartbeat() -> None:
+        for index in range(5):
+            await asyncio.sleep(0)
+            heartbeats.append(index)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
 
     active = await journal.active_part_for_session(session_id)
+    await heartbeat_task
 
     assert active is not None
     assert active.part_index == 3
     assert active.artifact_state == 'recording'
+    assert exists_calls == []
+    assert heartbeats == [0, 1, 2, 3, 4]
 
     await journal.video_completed(run_id, '/rec/p3.flv')
     await journal.video_postprocessed(run_id, '/rec/p3.flv', '/rec/p3.mp4')

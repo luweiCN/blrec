@@ -77,6 +77,13 @@ class RecordingPart:
 
 
 @dataclass(frozen=True)
+class ActiveRecordingPart:
+    id: int
+    part_index: int
+    artifact_state: str
+
+
+@dataclass(frozen=True)
 class RecordingSession:
     id: int
     room_id: int
@@ -2098,19 +2105,23 @@ class RecordingJournalBridge:
         )
         return tuple(self._make_part(row) for row in rows)
 
-    async def active_part_for_session(self, session_id: int) -> Optional[RecordingPart]:
+    async def active_part_for_session(
+        self, session_id: int
+    ) -> Optional[ActiveRecordingPart]:
         row = await self._database.fetchone(
-            'SELECT id,session_id,run_id,part_index,source_path,final_path,'
-            'xml_path,record_start_time,record_end_time,record_duration_seconds,'
-            'file_size_bytes,danmaku_count,artifact_state,xml_completed,'
-            'error_message,upload_excluded_reason,media_index_state,media_index_error,'
-            'media_index_progress '
+            'SELECT id,part_index,artifact_state '
             'FROM recording_parts WHERE session_id=? '
             "AND artifact_state IN ('recording','postprocessing') "
             'ORDER BY part_index DESC LIMIT 1',
             (int(session_id),),
         )
-        return None if row is None else self._make_part(row)
+        if row is None:
+            return None
+        return ActiveRecordingPart(
+            id=int(row['id']),
+            part_index=int(row['part_index']),
+            artifact_state=str(row['artifact_state']),
+        )
 
     def _make_session_summary(
         self, row: sqlite3.Row, sampled_at: float
