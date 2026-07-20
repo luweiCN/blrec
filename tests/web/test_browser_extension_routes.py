@@ -16,6 +16,14 @@ from blrec.web.auth_store import AdminAuthStore
 from blrec.web.routers import browser_extension
 
 
+class Clock:
+    def __init__(self, value: int = 1_000_000) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return float(self.value)
+
+
 class FakeApplication:
     def __init__(self) -> None:
         self.collected = False
@@ -83,9 +91,14 @@ class FakeCatalog:
 def extension_client(
     tmp_path: Path,
 ) -> Iterator[
-    tuple[TestClient, FakeApplication, FakePolicyManager, AsyncMock, AdminAuthStore]
+    tuple[
+        TestClient, FakeApplication, FakePolicyManager, AsyncMock, AdminAuthStore, Clock
+    ]
 ]:
-    store = AdminAuthStore(str(tmp_path / 'auth.sqlite3'), admin_username='owner')
+    clock = Clock()
+    store = AdminAuthStore(
+        str(tmp_path / 'auth.sqlite3'), admin_username='owner', clock=clock
+    )
     store.open()
     store.initialize('owner', 'correct horse battery staple')
     security.configure(store)
@@ -106,7 +119,7 @@ def extension_client(
         return {'private': True}
 
     with TestClient(api) as client:
-        yield client, application, policies, highlights, store
+        yield client, application, policies, highlights, store, clock
 
     browser_extension.reset()
     security.reset()
@@ -125,7 +138,7 @@ def extension_headers(token: str) -> dict:
 
 
 def test_pair_and_room_status_map_to_the_three_button_states(extension_client) -> None:
-    client, application, _policies, _highlights, _store = extension_client
+    client, application, _policies, _highlights, _store, _clock = extension_client
     token = pair(client)
 
     missing = client.get(
@@ -150,7 +163,7 @@ def test_pair_and_room_status_map_to_the_three_button_states(extension_client) -
 def test_collect_is_idempotent_and_only_creates_policy_when_requested(
     extension_client,
 ) -> None:
-    client, application, policies, _highlights, _store = extension_client
+    client, application, policies, _highlights, _store, _clock = extension_client
     token = pair(client)
 
     collected = client.post(
@@ -180,7 +193,7 @@ def test_collect_is_idempotent_and_only_creates_policy_when_requested(
 def test_collect_preserves_existing_policy_fields_when_enabling_upload(
     extension_client,
 ) -> None:
-    client, application, policies, _highlights, _store = extension_client
+    client, application, policies, _highlights, _store, _clock = extension_client
     token = pair(client)
     application.collected = True
     from blrec.bili_upload.policies import default_room_upload_policy
@@ -208,7 +221,7 @@ def test_collect_preserves_existing_policy_fields_when_enabling_upload(
 def test_highlight_is_saved_independently_of_current_recording_state(
     extension_client,
 ) -> None:
-    client, application, _policies, highlights, _store = extension_client
+    client, application, _policies, highlights, _store, _clock = extension_client
     token = pair(client)
     application.collected = True
     application.running_status = RunningStatus.STOPPED
@@ -250,7 +263,7 @@ def test_highlight_is_saved_independently_of_current_recording_state(
 def test_extension_routes_reject_missing_malformed_and_revoked_tokens(
     extension_client,
 ) -> None:
-    client, _application, _policies, _highlights, store = extension_client
+    client, _application, _policies, _highlights, store, _clock = extension_client
     token = pair(client)
 
     assert client.get('/api/v1/browser-extension/rooms/100').status_code == 401
@@ -273,4 +286,45 @@ def test_extension_routes_reject_missing_malformed_and_revoked_tokens(
     assert (
         client.get('/api/v1/settings', headers=extension_headers(token)).status_code
         == 401
+    )
+
+
+def test_extension_activity_is_persisted_at_most_once_per_interval(
+    extension_client,
+) -> None:
+    client, _application, _policies, _highlights, store, clock = extension_client
+    token = pair(client)
+    connection = store._connection
+    assert connection is not None
+    before_changes = connection.total_changes
+    before_audits = int(
+        connection.execute(
+            "SELECT count(*) FROM auth_audit WHERE event='extension_token_used'"
+        ).fetchone()[0]
+    )
+
+    for _ in range(2):
+        response = client.get(
+            '/api/v1/browser-extension/rooms/100', headers=extension_headers(token)
+        )
+        assert response.status_code == 200
+    assert connection.total_changes == before_changes
+    assert (
+        connection.execute(
+            "SELECT count(*) FROM auth_audit WHERE event='extension_token_used'"
+        ).fetchone()[0]
+        == before_audits
+    )
+
+    clock.value += 60
+    response = client.get(
+        '/api/v1/browser-extension/rooms/100', headers=extension_headers(token)
+    )
+    assert response.status_code == 200
+    assert connection.total_changes == before_changes + 2
+    assert (
+        connection.execute(
+            "SELECT count(*) FROM auth_audit WHERE event='extension_token_used'"
+        ).fetchone()[0]
+        == before_audits + 1
     )

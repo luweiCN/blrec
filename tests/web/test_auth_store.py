@@ -33,6 +33,16 @@ def store(tmp_path: Path, clock: Clock) -> AdminAuthStore:
     )
 
 
+@pytest.mark.parametrize('interval', [0, -1])
+def test_activity_write_interval_must_be_positive(
+    tmp_path: Path, interval: int
+) -> None:
+    with pytest.raises(ValueError, match='activity write interval must be positive'):
+        AdminAuthStore(
+            str(tmp_path / 'auth.sqlite3'), activity_write_interval_seconds=interval
+        )
+
+
 def test_setup_hashes_password_and_creates_private_database(tmp_path: Path) -> None:
     clock = Clock()
     auth = store(tmp_path, clock)
@@ -75,6 +85,31 @@ def test_session_database_stores_only_token_hashes(tmp_path: Path) -> None:
     assert session.csrf_token == credentials.csrf_token
     assert auth.verify_csrf(credentials.session_token, credentials.csrf_token)
     assert not auth.verify_csrf(credentials.session_token, 'wrong')
+    auth.close()
+
+
+def test_session_activity_is_persisted_at_most_once_per_interval(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    auth = store(tmp_path, clock)
+    auth.open()
+    credentials = auth.initialize('owner', 'correct horse battery staple')
+    connection = auth._connection
+    assert connection is not None
+    before = connection.total_changes
+
+    assert auth.authenticate_session(credentials.session_token) is not None
+    assert auth.authenticate_session(credentials.session_token) is not None
+    assert connection.total_changes == before
+
+    clock.value += 59
+    assert auth.authenticate_session(credentials.session_token) is not None
+    assert connection.total_changes == before
+
+    clock.value += 1
+    assert auth.authenticate_session(credentials.session_token) is not None
+    assert connection.total_changes == before + 1
     auth.close()
 
 
@@ -231,7 +266,7 @@ def test_extension_pairing_stores_only_a_hash_and_supports_revocation(
     assert credentials.token not in '|'.join(str(value) for value in row)
     assert len(str(row['token_hash'])) == 64
 
-    clock.value += 30
+    clock.value += 60
     used = auth.authenticate_extension(credentials.token)
     assert used is not None
     assert used.last_used_at == clock.value

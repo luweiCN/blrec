@@ -72,6 +72,7 @@ class AdminAuthStore:
         clock: Callable[[], float] = time.time,
         session_ttl_seconds: int = 30 * 24 * 3600,
         session_refresh_window_seconds: int = 7 * 24 * 3600,
+        activity_write_interval_seconds: int = 60,
         max_failed_attempts: int = 5,
         failure_window_seconds: int = 5 * 60,
         lockout_seconds: int = 15 * 60,
@@ -80,6 +81,8 @@ class AdminAuthStore:
             raise ValueError('session TTL must be positive')
         if not 0 < session_refresh_window_seconds < session_ttl_seconds:
             raise ValueError('session refresh window must be within the TTL')
+        if activity_write_interval_seconds <= 0:
+            raise ValueError('activity write interval must be positive')
         if max_failed_attempts <= 0:
             raise ValueError('max failed attempts must be positive')
         if failure_window_seconds <= 0 or lockout_seconds <= 0:
@@ -90,6 +93,7 @@ class AdminAuthStore:
         self._clock = clock
         self._session_ttl_seconds = session_ttl_seconds
         self._session_refresh_window_seconds = session_refresh_window_seconds
+        self._activity_write_interval_seconds = activity_write_interval_seconds
         self._max_failed_attempts = max_failed_attempts
         self._failure_window_seconds = failure_window_seconds
         self._lockout_seconds = lockout_seconds
@@ -243,7 +247,8 @@ class AdminAuthStore:
         now = int(self._clock())
         with self._lock, connection:
             row = connection.execute(
-                'SELECT expires_at FROM admin_sessions WHERE token_hash=?',
+                'SELECT csrf_hash,last_seen_at,expires_at '
+                'FROM admin_sessions WHERE token_hash=?',
                 (token_hash,),
             ).fetchone()
             if row is None:
@@ -254,17 +259,26 @@ class AdminAuthStore:
                     'DELETE FROM admin_sessions WHERE token_hash=?', (token_hash,)
                 )
                 return None
-            if expires_at - now <= self._session_refresh_window_seconds:
-                expires_at = now + self._session_ttl_seconds
             csrf_token = self._csrf_token(session_token)
             csrf_hash = self._token_hash(csrf_token)
-            updated = connection.execute(
-                'UPDATE admin_sessions SET last_seen_at=?,expires_at=? '
-                'WHERE token_hash=? AND csrf_hash=?',
-                (now, expires_at, token_hash, csrf_hash),
-            )
-            if updated.rowcount != 1:
+            if not secrets.compare_digest(str(row['csrf_hash']), csrf_hash):
                 return None
+            should_refresh_expiry = (
+                expires_at - now <= self._session_refresh_window_seconds
+            )
+            should_touch_activity = (
+                now - int(row['last_seen_at']) >= self._activity_write_interval_seconds
+            )
+            if should_refresh_expiry or should_touch_activity:
+                if should_refresh_expiry:
+                    expires_at = now + self._session_ttl_seconds
+                updated = connection.execute(
+                    'UPDATE admin_sessions SET last_seen_at=?,expires_at=? '
+                    'WHERE token_hash=? AND csrf_hash=?',
+                    (now, expires_at, token_hash, csrf_hash),
+                )
+                if updated.rowcount != 1:
+                    return None
             return SessionCredentials(session_token, csrf_token, expires_at)
 
     def verify_csrf(self, session_token: str, csrf_token: str) -> bool:
@@ -336,6 +350,14 @@ class AdminAuthStore:
             ).fetchone()
             if row is None or row['revoked_at'] is not None:
                 return None
+            last_used_at = int(row['last_used_at'])
+            if now - last_used_at < self._activity_write_interval_seconds:
+                return ExtensionIdentity(
+                    token_id=int(row['id']),
+                    created_at=int(row['created_at']),
+                    last_used_at=last_used_at,
+                    revoked_at=None,
+                )
             updated = connection.execute(
                 'UPDATE extension_tokens SET last_used_at=? '
                 'WHERE id=? AND revoked_at IS NULL',
