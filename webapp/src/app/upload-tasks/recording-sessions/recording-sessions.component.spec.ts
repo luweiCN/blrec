@@ -52,6 +52,10 @@ import {
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightService } from '../shared/highlight.service';
 import { RecordingSessionsComponent } from './recording-sessions.component';
+import {
+  RecordingSessionRowComponent,
+  RecordingSessionRowAction,
+} from './recording-session-row.component';
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 
 @Component({ selector: 'app-task-edit-dialog', template: '' })
@@ -124,6 +128,41 @@ function realtimeUploadJob(
   };
 }
 
+function realtimeUploadJobFor(
+  session: RecordingSessionSummary,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const job = session.uploadJob;
+  if (!job) {
+    throw new Error('expected a summary upload job');
+  }
+  return realtimeUploadJob({
+    jobId: job.id,
+    sessionId: session.id,
+    state: job.state,
+    submitState: job.submitState,
+    preuploadFinalized: job.preuploadFinalized,
+    displayState: job.displayState,
+    aid: job.aid,
+    bvid: job.bvid,
+    confirmedBytes: job.confirmedBytes,
+    totalBytes: job.totalBytes,
+    percent: job.percent,
+    bytesPerSecond: job.bytesPerSecond,
+    etaSeconds: job.etaSeconds,
+    currentPartIndex: job.currentPartIndex,
+    confirmedPartCount: job.confirmedPartCount,
+    discoveredPartCount: job.discoveredPartCount,
+    ...overrides,
+  });
+}
+
+function isOnPush(component: unknown): boolean {
+  const definition = Reflect.get(component as object, 'ɵcmp') as
+    { readonly onPush?: boolean } | undefined;
+  return definition?.onPush === true;
+}
+
 describe('RecordingSessionsComponent', () => {
   let fixture: ComponentFixture<RecordingSessionsComponent>;
   let service: jasmine.SpyObj<RecordingSessionService>;
@@ -191,143 +230,143 @@ describe('RecordingSessionsComponent', () => {
     service.retryFailedJobs.and.returnValue(of({ results: [] }));
     service.previewRetryFailedJobs.and.returnValue(of({ items: [] }));
     detailSession = {
-            id: 1,
-            roomId: 100,
-            broadcastSessionKey: '100:900',
-            liveStartTime: 900,
-            state: 'closed',
-            startedAt: 900,
-            endedAt: 1_000,
-            title: '今晚挑战通关',
-            coverUrl: 'https://example.invalid/cover.jpg',
-            coverPath: '/rec/cover.jpg',
-            anchorUid: 42,
-            anchorName: '主播名',
-            areaId: 1,
-            areaName: '单机游戏',
-            parentAreaId: 2,
-            parentAreaName: '游戏',
-            liveEndTime: 1_000,
-            partCount: 1,
-            danmakuCount: 321,
-            totalFileSizeBytes: 1_048_576,
-            recordDurationSeconds: 59,
-            uploadIntent: 'none',
-            uploadDecision: 'follow_room',
-            submissionInherited: true,
-            uploadResolutionState: 'job_created',
-            uploadResolutionError: null,
-            uploadSuppressed: false,
-            deletionState: 'none',
-            deletionError: null,
-            sourceKind: 'live',
-            highlightClipId: null,
-            displayState: 'waiting_review',
-            availableActions: ['delete_local'],
-            uploadJob: {
-              id: 9,
-              accountId: 7,
-              accountUid: 42,
-              accountDisplayName: '投稿账号',
-              state: 'waiting_review',
-              submitState: 'confirmed',
-              preuploadFinalized: true,
-              displayState: 'standard',
-              commentBranchState: 'pending',
-              danmakuBranchState: 'pending',
-              aid: 123,
-              bvid: 'BV1test',
-              reviewReason: '等待 B 站审核',
-              attempt: 2,
-              nextAttemptAt: 1_100,
-              createdAt: 1_001,
-              updatedAt: 1_050,
-              danmakuTotal: 1,
-              danmakuConfirmed: 0,
-              danmakuPending: 0,
-              danmakuUnknown: 1,
-              danmakuFailed: 0,
-              repairState: 'idle',
-              repairMessage: null,
-              repairError: null,
-              canRetry: false,
-              canRepair: false,
-              canSkip: false,
-              canRepost: false,
-              canDelete: true,
-              operatorPaused: false,
-              scheduledPublishAt: null,
-              collectionBranchState: 'disabled',
-              collectionError: null,
-              submissionVerificationState: 'partial',
-              submissionVerifiedAt: 1_040,
-              submissionVerification: {
-                state: 'partial',
-                checked: ['title'],
-                missing: ['up_selection_reply'],
-                mismatches: [],
-                differences: {},
-                unverifiable: ['cover', 'collection'],
-                error: null,
-              },
-              commentError: null,
-              danmakuError: null,
-              canPause: false,
-              canResume: false,
-              canEdit: false,
-              confirmedBytes: 4,
-              totalBytes: 8,
-              percent: 50,
-              bytesPerSecond: 2,
-              etaSeconds: 2,
-              currentPartIndex: 1,
-              confirmedPartCount: 1,
-              discoveredPartCount: 1,
-              unknownDanmakuItems: [
-                {
-                  id: 11,
-                  partIndex: 1,
-                  progressMs: 12_000,
-                  content: '需要确认的弹幕',
-                  errorMessage: '远端结果未知',
-                },
-              ],
-              parts: [
-                {
-                  id: 10,
-                  partIndex: 1,
-                  uploadState: 'confirmed',
-                  danmakuImportState: 'pending',
-                  remoteFilename: 'remote-p1',
-                  cid: null,
-                  transcodeState: 'unknown',
-                  transcodeFailCode: null,
-                  transcodeFailDesc: null,
-                  confirmedBytes: 4,
-                  totalBytes: 8,
-                },
-              ],
-            },
-            parts: [
-              {
-                id: 2,
-                runId: 'run-1',
-                partIndex: 1,
-                sourcePath: '/rec/p1.flv',
-                finalPath: '/rec/p1.mp4',
-                xmlPath: '/rec/p1.xml',
-                recordStartTime: 901,
-                recordEndTime: 960,
-                recordDurationSeconds: 59,
-                fileSizeBytes: 1_048_576,
-                danmakuCount: 321,
-                artifactState: 'ready',
-                xmlCompleted: true,
-                sourceExists: false,
-                finalExists: true,
-                errorMessage: null,
-              },
-            ],
+      id: 1,
+      roomId: 100,
+      broadcastSessionKey: '100:900',
+      liveStartTime: 900,
+      state: 'closed',
+      startedAt: 900,
+      endedAt: 1_000,
+      title: '今晚挑战通关',
+      coverUrl: 'https://example.invalid/cover.jpg',
+      coverPath: '/rec/cover.jpg',
+      anchorUid: 42,
+      anchorName: '主播名',
+      areaId: 1,
+      areaName: '单机游戏',
+      parentAreaId: 2,
+      parentAreaName: '游戏',
+      liveEndTime: 1_000,
+      partCount: 1,
+      danmakuCount: 321,
+      totalFileSizeBytes: 1_048_576,
+      recordDurationSeconds: 59,
+      uploadIntent: 'none',
+      uploadDecision: 'follow_room',
+      submissionInherited: true,
+      uploadResolutionState: 'job_created',
+      uploadResolutionError: null,
+      uploadSuppressed: false,
+      deletionState: 'none',
+      deletionError: null,
+      sourceKind: 'live',
+      highlightClipId: null,
+      displayState: 'waiting_review',
+      availableActions: ['delete_local'],
+      uploadJob: {
+        id: 9,
+        accountId: 7,
+        accountUid: 42,
+        accountDisplayName: '投稿账号',
+        state: 'waiting_review',
+        submitState: 'confirmed',
+        preuploadFinalized: true,
+        displayState: 'standard',
+        commentBranchState: 'pending',
+        danmakuBranchState: 'pending',
+        aid: 123,
+        bvid: 'BV1test',
+        reviewReason: '等待 B 站审核',
+        attempt: 2,
+        nextAttemptAt: 1_100,
+        createdAt: 1_001,
+        updatedAt: 1_050,
+        danmakuTotal: 1,
+        danmakuConfirmed: 0,
+        danmakuPending: 0,
+        danmakuUnknown: 1,
+        danmakuFailed: 0,
+        repairState: 'idle',
+        repairMessage: null,
+        repairError: null,
+        canRetry: false,
+        canRepair: false,
+        canSkip: false,
+        canRepost: false,
+        canDelete: true,
+        operatorPaused: false,
+        scheduledPublishAt: null,
+        collectionBranchState: 'disabled',
+        collectionError: null,
+        submissionVerificationState: 'partial',
+        submissionVerifiedAt: 1_040,
+        submissionVerification: {
+          state: 'partial',
+          checked: ['title'],
+          missing: ['up_selection_reply'],
+          mismatches: [],
+          differences: {},
+          unverifiable: ['cover', 'collection'],
+          error: null,
+        },
+        commentError: null,
+        danmakuError: null,
+        canPause: false,
+        canResume: false,
+        canEdit: false,
+        confirmedBytes: 4,
+        totalBytes: 8,
+        percent: 50,
+        bytesPerSecond: 2,
+        etaSeconds: 2,
+        currentPartIndex: 1,
+        confirmedPartCount: 1,
+        discoveredPartCount: 1,
+        unknownDanmakuItems: [
+          {
+            id: 11,
+            partIndex: 1,
+            progressMs: 12_000,
+            content: '需要确认的弹幕',
+            errorMessage: '远端结果未知',
+          },
+        ],
+        parts: [
+          {
+            id: 10,
+            partIndex: 1,
+            uploadState: 'confirmed',
+            danmakuImportState: 'pending',
+            remoteFilename: 'remote-p1',
+            cid: null,
+            transcodeState: 'unknown',
+            transcodeFailCode: null,
+            transcodeFailDesc: null,
+            confirmedBytes: 4,
+            totalBytes: 8,
+          },
+        ],
+      },
+      parts: [
+        {
+          id: 2,
+          runId: 'run-1',
+          partIndex: 1,
+          sourcePath: '/rec/p1.flv',
+          finalPath: '/rec/p1.mp4',
+          xmlPath: '/rec/p1.xml',
+          recordStartTime: 901,
+          recordEndTime: 960,
+          recordDurationSeconds: 59,
+          fileSizeBytes: 1_048_576,
+          danmakuCount: 321,
+          artifactState: 'ready',
+          xmlCompleted: true,
+          sourceExists: false,
+          finalExists: true,
+          errorMessage: null,
+        },
+      ],
     };
     const {
       broadcastSessionKey: _broadcastSessionKey,
@@ -351,6 +390,7 @@ describe('RecordingSessionsComponent', () => {
     await TestBed.configureTestingModule({
       declarations: [
         RecordingSessionsComponent,
+        RecordingSessionRowComponent,
         TaskEditDialogStubComponent,
         UploadPolicyDialogStubComponent,
       ],
@@ -461,27 +501,83 @@ describe('RecordingSessionsComponent', () => {
     ).not.toBeNull();
   });
 
-  it('shows the derived upload intent while a recording is active', () => {
+  it('uses OnPush for the parent and delegates six cells to native row hosts', () => {
     fixture.detectChanges();
-    const session = {
-      ...fixture.componentInstance.sessions[0],
+
+    expect(isOnPush(RecordingSessionsComponent)).toBeTrue();
+    const rows = fixture.nativeElement.querySelectorAll(
+      'tbody > tr[app-recording-session-row]',
+    ) as NodeListOf<HTMLTableRowElement>;
+    expect(rows.length).toBe(1);
+    expect(rows[0].children.length).toBe(6);
+    expect(fixture.componentInstance.trackSession(99, summarySession)).toBe(
+      summarySession.id,
+    );
+  });
+
+  it('routes closed row events through the parent using current summaries', () => {
+    const openSession: RecordingSessionSummary = {
+      ...summarySession,
       state: 'open',
       displayState: 'recording',
-      uploadJob: null,
-    } as RecordingSession;
+      availableActions: [
+        'edit_submission',
+        'edit_task',
+        'retry_failed',
+        'delete_local',
+      ],
+    };
+    service.listSessions.and.returnValue(
+      of({ degradedReason: null, total: 1, sessions: [openSession] }),
+    );
+    fixture.componentInstance.scope = 'recordings';
+    fixture.detectChanges();
 
+    const rowDebug = fixture.debugElement.query(
+      By.directive(RecordingSessionRowComponent),
+    );
+    expect(rowDebug).not.toBeNull();
+    if (!rowDebug) {
+      return;
+    }
+    const row = rowDebug.componentInstance as RecordingSessionRowComponent;
+    const emit = (action: RecordingSessionRowAction): void => {
+      row.rowAction.emit(action);
+    };
+
+    emit({ type: 'selected', sessionId: openSession.id, selected: true });
     expect(
-      fixture.componentInstance.displayStateDetail({
-        ...session,
-        uploadIntent: 'auto',
-      }),
-    ).toBe('本场结束后上传');
-    expect(
-      fixture.componentInstance.displayStateDetail({
-        ...session,
-        uploadIntent: 'skip',
-      }),
-    ).toBe('本场不上传');
+      fixture.componentInstance.isSessionSelected(openSession.id),
+    ).toBeTrue();
+
+    emit({ type: 'details', sessionId: openSession.id });
+    expect(service.getSession).toHaveBeenCalledOnceWith(openSession.id);
+    expect(fixture.componentInstance.detailVisible).toBeTrue();
+
+    emit({ type: 'edit-submission', sessionId: openSession.id });
+    expect(fixture.componentInstance.submissionSession).toBe(openSession);
+
+    emit({
+      type: 'session-action',
+      sessionId: openSession.id,
+      action: 'retry_failed',
+    });
+    expect(fixture.componentInstance.uploadAction).toBe('retry_failed');
+    expect(fixture.componentInstance.uploadActionSessionIds).toEqual([
+      openSession.id,
+    ]);
+
+    emit({ type: 'edit-task', jobId: openSession.uploadJob!.id });
+    expect(fixture.componentInstance.taskEditVisible).toBeTrue();
+    expect(fixture.componentInstance.taskEditJobIds).toEqual([
+      openSession.uploadJob!.id,
+    ]);
+
+    emit({ type: 'cut-current', sessionId: openSession.id });
+    expect(taskManager.canCutStream).toHaveBeenCalledOnceWith(
+      openSession.roomId,
+    );
+    expect(taskManager.cutStream).toHaveBeenCalledOnceWith(openSession.roomId);
   });
 
   it('shows preupload phases instead of generic internal job states', () => {
@@ -594,6 +690,7 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain('高光');
@@ -617,6 +714,7 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
     fixture.detectChanges();
 
     const trigger = fixture.nativeElement.querySelector(
@@ -760,6 +858,7 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
 
     fixture.detectChanges();
 
@@ -1019,13 +1118,15 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
 
     fixture.detectChanges();
 
     expect(fixture.componentInstance.pageSessionIds).toEqual([1]);
-    expect(
-      fixture.componentInstance.hasAction(session.id, 'set_upload'),
-    ).toBeTrue();
+    const row = fixture.debugElement.query(
+      By.directive(RecordingSessionRowComponent),
+    ).componentInstance as RecordingSessionRowComponent;
+    expect(row.hasAction('set_upload')).toBeTrue();
     expect(
       fixture.nativeElement.querySelector('[data-testid="session-select"]'),
     ).not.toBeNull();
@@ -1244,6 +1345,119 @@ describe('RecordingSessionsComponent', () => {
     expect(service.listSessions).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves the ready view when an SSE snapshot has no scalar changes', () => {
+    fixture.detectChanges();
+    const beforeView = fixture.componentInstance.view;
+    if (beforeView.state !== 'ready') {
+      throw new Error('expected a ready upload-task view');
+    }
+    const beforeResponse = beforeView.response;
+    const beforeSessions = beforeResponse.sessions;
+    const beforeSession = beforeSessions[0];
+    const beforeJob = beforeSession.uploadJob;
+    const markForCheck = spyOn(
+      fixture.componentInstance['changeDetector'],
+      'markForCheck',
+    );
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: { jobs: [realtimeUploadJobFor(beforeSession)] },
+    });
+
+    expect(fixture.componentInstance.view).toBe(beforeView);
+    expect(fixture.componentInstance.view.state).toBe('ready');
+    if (fixture.componentInstance.view.state !== 'ready') {
+      return;
+    }
+    expect(fixture.componentInstance.view.response).toBe(beforeResponse);
+    expect(fixture.componentInstance.view.response.sessions).toBe(
+      beforeSessions,
+    );
+    expect(fixture.componentInstance.sessions[0]).toBe(beforeSession);
+    expect(fixture.componentInstance.sessions[0].uploadJob).toBe(beforeJob);
+    expect(markForCheck).not.toHaveBeenCalled();
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses 19 row inputs and instances for one pure SSE progress change', () => {
+    const sessions = Array.from({ length: 20 }, (_, index) => ({
+      ...summarySession,
+      id: index + 1,
+      roomId: 100 + index,
+      title: `场次 ${index + 1}`,
+      uploadJob: {
+        ...summarySession.uploadJob!,
+        id: 1000 + index,
+        state: 'uploading' as const,
+        percent: index,
+      },
+    }));
+    service.listSessions.and.returnValue(
+      of({ degradedReason: null, total: sessions.length, sessions }),
+    );
+    fixture.detectChanges();
+
+    const baseline = sessions.map((session) => realtimeUploadJobFor(session));
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: { jobs: baseline },
+    });
+    fixture.detectChanges();
+
+    const beforeRefs = [...fixture.componentInstance.sessions];
+    const beforeRows = fixture.debugElement.queryAll(
+      By.directive(RecordingSessionRowComponent),
+    );
+    expect(beforeRows.length).toBe(20);
+    const nativeRows = fixture.nativeElement.querySelectorAll(
+      'tbody > tr[app-recording-session-row]',
+    ) as NodeListOf<HTMLTableRowElement>;
+    expect(nativeRows.length).toBe(20);
+    expect(
+      Array.from(nativeRows).every(
+        (nativeRow) => nativeRow.children.length === 6,
+      ),
+    ).toBeTrue();
+    const beforeInstances = beforeRows.map(
+      (row) => row.componentInstance as RecordingSessionRowComponent,
+    );
+    const changedIndex = 7;
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: {
+        jobs: baseline.map((job, index) =>
+          index === changedIndex ? { ...job, percent: 99 } : job,
+        ),
+      },
+    });
+    fixture.detectChanges();
+
+    const afterRefs = fixture.componentInstance.sessions;
+    const afterRows = fixture.debugElement.queryAll(
+      By.directive(RecordingSessionRowComponent),
+    );
+    const afterInstances = afterRows.map(
+      (row) => row.componentInstance as RecordingSessionRowComponent,
+    );
+    expect(
+      afterRefs
+        .map((session, index) => session !== beforeRefs[index])
+        .filter(Boolean),
+    ).toHaveSize(1);
+    expect(afterRefs[changedIndex]).not.toBe(beforeRefs[changedIndex]);
+    expect(afterRefs[changedIndex].uploadJob?.percent).toBe(99);
+    beforeRefs.forEach((session, index) => {
+      if (index !== changedIndex) {
+        expect(afterRefs[index]).toBe(session);
+      }
+    });
+    expect(afterInstances).toEqual(beforeInstances);
+    expect(afterRows[changedIndex].nativeElement.textContent).toContain('99%');
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+  });
+
   it('skips the bootstrap resync and reloads for the next resync', () => {
     fixture.detectChanges();
     expect(service.listSessions).toHaveBeenCalledTimes(1);
@@ -1316,6 +1530,7 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
 
     realtimeEvents.next({
       type: 'upload_progress',
@@ -1360,6 +1575,7 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain(
@@ -1392,6 +1608,7 @@ describe('RecordingSessionsComponent', () => {
         ],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
     const progress = realtimeUploadJob({
       preuploadFinalized: false,
       displayState: 'preuploaded_waiting',
@@ -1453,6 +1670,7 @@ describe('RecordingSessionsComponent', () => {
         sessions: [{ ...session, state: 'open' }],
       },
     };
+    fixture.componentInstance['changeDetector'].markForCheck();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain('1 个已发现分 P');

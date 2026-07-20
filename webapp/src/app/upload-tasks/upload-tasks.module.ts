@@ -30,6 +30,7 @@ import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { UploadPolicyDialogModule } from '../tasks/upload-policy-dialog/upload-policy-dialog.module';
 import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
+import { RecordingSessionRowComponent } from './recording-sessions/recording-session-row.component';
 import { HighlightEditorComponent } from './highlight-editor/highlight-editor.component';
 import { PartVideoDialogComponent } from './part-video-dialog/part-video-dialog.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
@@ -41,6 +42,7 @@ import { ClipLibraryComponent } from './clip-library/clip-library.component';
   declarations: [
     UploadTasksComponent,
     RecordingSessionsComponent,
+    RecordingSessionRowComponent,
     PartVideoDialogComponent,
     TaskEditDialogComponent,
     HighlightEditorComponent,

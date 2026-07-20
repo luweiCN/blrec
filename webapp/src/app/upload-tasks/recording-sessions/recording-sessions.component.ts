@@ -1,5 +1,6 @@
 import { Clipboard } from '@angular/cdk/clipboard';
 import {
+  ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
   Input,
@@ -25,7 +26,6 @@ import {
   RecordingPart,
   RecordingSessionAction,
   RecordingSessionDetail,
-  RecordingSessionDisplayState,
   RecordingSessionFilters,
   RecordingSessionSummary,
   RecordingSessionState,
@@ -45,6 +45,7 @@ import { RecordingSessionService } from '../shared/recording-session.service';
 import { HighlightService } from '../shared/highlight.service';
 import { RealtimeService } from '../../core/services/realtime.service';
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
+import { RecordingSessionRowAction } from './recording-session-row.component';
 
 interface RealtimeUploadJobProgress {
   readonly jobId: number;
@@ -79,6 +80,7 @@ type RecordingListResult =
   selector: 'app-recording-sessions',
   templateUrl: './recording-sessions.component.html',
   styleUrls: ['./recording-sessions.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class RecordingSessionsComponent implements OnInit, OnDestroy {
   @Input() scope: RecordingSessionScope = 'uploads';
@@ -404,6 +406,45 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     this.changeDetector.markForCheck();
   }
 
+  handleRowAction(action: RecordingSessionRowAction): void {
+    switch (action.type) {
+      case 'selected':
+        this.setSessionSelected(action.sessionId, action.selected);
+        return;
+      case 'details': {
+        const session = this.sessionById(action.sessionId);
+        if (session) {
+          this.openDetails(session);
+        }
+        return;
+      }
+      case 'cut-current': {
+        const session = this.sessionById(action.sessionId);
+        if (session) {
+          this.cutCurrentFile(session);
+        }
+        return;
+      }
+      case 'edit-submission': {
+        const session = this.sessionById(action.sessionId);
+        if (session) {
+          this.openSubmissionSettings(session);
+        }
+        return;
+      }
+      case 'session-action':
+        this.openSessionAction(action.action, [action.sessionId]);
+        return;
+      case 'edit-task':
+        this.openTaskEdit([action.jobId]);
+        return;
+      default: {
+        const exhaustiveAction: never = action;
+        return exhaustiveAction;
+      }
+    }
+  }
+
   setAllPageSessionsSelected(selected: boolean): void {
     for (const sessionId of this.pageSessionIds) {
       if (selected) {
@@ -528,18 +569,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       delete_local:
         '只删除本系统中的任务记录及该场次归属的本地录像、弹幕文件；绝不会删除或修改 B 站上的稿件。',
     }[this.uploadAction ?? 'retry_failed'];
-  }
-
-  hasAction(sessionId: number, action: RecordingSessionAction): boolean {
-    const session = this.sessions.find((item) => item.id === sessionId);
-    return session?.availableActions.includes(action) ?? false;
-  }
-
-  hasMoreActions(session: RecordingSessionSummary): boolean {
-    return (
-      this.canCutCurrentFile(session) ||
-      session.availableActions.some((action) => action !== 'delete_local')
-    );
   }
 
   canCutCurrentFile(session: RecordingSessionSummary): boolean {
@@ -740,54 +769,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       manual_review: 'processing',
       skipped: 'default',
     }[state];
-  }
-
-  displayStateLabel(state: RecordingSessionDisplayState): string {
-    return {
-      recording: '录制中',
-      pending_upload: '待上传',
-      uploading: '上传处理中',
-      waiting_review: '等待审核',
-      completed: '审核通过',
-      paused: '已暂停',
-      deleting: '正在删除',
-      delete_failed: '删除失败',
-      not_uploading: '不上传',
-      needs_attention: '处理异常',
-    }[state];
-  }
-
-  displayStateColor(state: RecordingSessionDisplayState): string {
-    return {
-      recording: 'processing',
-      pending_upload: 'blue',
-      uploading: 'processing',
-      waiting_review: 'gold',
-      completed: 'success',
-      paused: 'warning',
-      deleting: 'processing',
-      delete_failed: 'error',
-      not_uploading: 'default',
-      needs_attention: 'error',
-    }[state];
-  }
-
-  displayStateDetail(session: RecordingSessionSummary): string {
-    if (session.displayState === 'recording') {
-      return ['auto', 'upload'].includes(session.uploadIntent)
-        ? '本场结束后上传'
-        : '本场不上传';
-    }
-    if (session.displayState === 'pending_upload' && !session.uploadJob) {
-      return '正在准备上传任务';
-    }
-    if (session.displayState === 'not_uploading') {
-      return '保留本地录像';
-    }
-    if (session.displayState === 'delete_failed') {
-      return session.deletionError ?? '删除未完成，可以重新尝试';
-    }
-    return '';
   }
 
   artifactStateLabel(state: RecordingArtifactState): string {
@@ -1144,13 +1125,6 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       : `${this.formatBytes(bytesPerSecond)}/s`;
   }
 
-  preuploadPartDetail(job: UploadJobSummary): string | null {
-    if (job.preuploadFinalized) {
-      return null;
-    }
-    return `已预上传 ${job.confirmedPartCount} / ${job.discoveredPartCount} 个已封口分 P`;
-  }
-
   recordingPartCountLabel(session: RecordingSessionSummary): string {
     return session.state === 'open'
       ? `${session.partCount} 个已发现分 P`
@@ -1176,6 +1150,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   trackPart(_index: number, part: RecordingPart): number {
     return part.id;
+  }
+
+  private sessionById(sessionId: number): RecordingSessionSummary | null {
+    return this.sessions.find((session) => session.id === sessionId) ?? null;
   }
 
   private applyListResponse(response: RecordingSessionsResponse): void {
@@ -1242,6 +1220,24 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       const job = session.uploadJob;
       const update = job ? byJobId.get(job.id) : undefined;
       if (!job || !update) {
+        return session;
+      }
+      const jobChanged =
+        job.state !== update.state ||
+        job.submitState !== update.submitState ||
+        job.preuploadFinalized !== update.preuploadFinalized ||
+        job.displayState !== update.displayState ||
+        job.aid !== update.aid ||
+        job.bvid !== update.bvid ||
+        job.confirmedBytes !== update.confirmedBytes ||
+        job.totalBytes !== update.totalBytes ||
+        job.percent !== update.percent ||
+        job.bytesPerSecond !== update.bytesPerSecond ||
+        job.etaSeconds !== update.etaSeconds ||
+        job.currentPartIndex !== update.currentPartIndex ||
+        job.confirmedPartCount !== update.confirmedPartCount ||
+        job.discoveredPartCount !== update.discoveredPartCount;
+      if (!jobChanged) {
         return session;
       }
       changed = true;

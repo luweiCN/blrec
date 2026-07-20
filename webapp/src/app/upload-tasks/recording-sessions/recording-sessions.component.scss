@@ -109,60 +109,10 @@
   }
 }
 
-.session-cell {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 12px;
-}
-
-.session-thumbnail {
-  flex: none;
-  width: 72px;
-  aspect-ratio: 16 / 9;
-  border-radius: 4px;
-  background: #f5f5f5;
-  object-fit: cover;
-}
-
-.session-cell-text {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-
-  strong {
-    overflow: hidden;
-    color: #262626;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  span {
-    overflow: hidden;
-    color: #8c8c8c;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
 .secondary-text {
   margin-top: 4px;
   color: #8c8c8c;
   white-space: nowrap;
-}
-
-.danmaku-table-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 8px;
-  margin-top: 6px;
-  color: #595959;
-  font-size: 12px;
-}
-
-.status-error {
-  color: #cf1322;
 }
 
 .pagination-bar {

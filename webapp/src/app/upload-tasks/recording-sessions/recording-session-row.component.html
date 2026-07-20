@@ -1,0 +1,234 @@
+<td class="identity-column">
+  <label
+    nz-checkbox
+    data-testid="session-select"
+    [attr.aria-label]="'选择场次 ' + session.id"
+    [ngModel]="selected"
+    (ngModelChange)="selectionChanged($event)"
+  ></label>
+</td>
+<td>
+  <div class="session-cell">
+    <img
+      *ngIf="session.coverUrl"
+      class="session-thumbnail"
+      [src]="session.coverUrl"
+      [alt]="coverAlt()"
+      loading="lazy"
+      referrerpolicy="no-referrer"
+    />
+    <div class="session-cell-text">
+      <nz-tag *ngIf="session.sourceKind === 'highlight'" nzColor="orange">
+        高光
+      </nz-tag>
+      <ng-container *ngIf="archiveUrl() as url; else plainTitle">
+        <a
+          class="archive-title"
+          data-testid="archive-link"
+          [href]="url"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <strong>{{ session.title || "未记录直播标题" }}</strong>
+        </a>
+      </ng-container>
+      <ng-template #plainTitle>
+        <strong>{{ session.title || "未记录直播标题" }}</strong>
+      </ng-template>
+      <span>
+        {{ session.anchorName || "未知主播" }} · 房间 {{ session.roomId }}
+      </span>
+      <span>{{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}</span>
+    </div>
+  </div>
+</td>
+<td class="recording-column">
+  <div>{{ recordingPartCountLabel() }}</div>
+  <div class="secondary-text">
+    {{ formatDuration(session.recordDurationSeconds) }} ·
+    {{ formatBytes(session.totalFileSizeBytes) }}
+  </div>
+  <div class="secondary-text">采集 {{ session.danmakuCount }} 条弹幕</div>
+</td>
+<td class="progress-column">
+  <ng-container *ngIf="session.uploadJob as statusJob; else sessionStatus">
+    <nz-tag [nzColor]="uploadDisplayStateColor(statusJob)">
+      {{ uploadDisplayStateLabel(statusJob) }}
+    </nz-tag>
+  </ng-container>
+  <ng-template #sessionStatus>
+    <nz-tag [nzColor]="displayStateColor(session.displayState)">
+      {{ displayStateLabel(session.displayState) }}
+    </nz-tag>
+  </ng-template>
+  <div
+    class="secondary-text"
+    *ngIf="!session.uploadJob && displayStateDetail() as detail"
+  >
+    {{ detail }}
+  </div>
+  <div
+    class="secondary-text"
+    *ngIf="
+      session.uploadJob && preuploadPartDetail(session.uploadJob) as detail
+    "
+  >
+    {{ detail }}
+  </div>
+  <div class="secondary-text" *ngIf="session.uploadJob as job">
+    <ng-container *ngIf="job.totalBytes > 0 && job.state === 'uploading'">
+      <nz-progress
+        [nzPercent]="job.percent"
+        [nzShowInfo]="false"
+        nzSize="small"
+        style="display: block; width: 118px"
+      ></nz-progress>
+      <span>
+        {{ job.percent | number: "1.0-1" }}% ·
+        {{ formatRate(job.bytesPerSecond) }}
+      </span>
+    </ng-container>
+  </div>
+  <div
+    *ngIf="session.uploadJob as job"
+    class="danmaku-table-summary"
+    data-testid="danmaku-summary"
+  >
+    <span>采集 {{ session.danmakuCount }} 条</span>
+    <span *ngIf="job.danmakuTotal > 0">
+      已回灌 {{ job.danmakuConfirmed }} / {{ job.danmakuTotal }}
+    </span>
+    <span *ngIf="job.danmakuPending > 0">待处理 {{ job.danmakuPending }}</span>
+    <span *ngIf="job.danmakuFailed > 0" class="status-error">
+      失败 {{ job.danmakuFailed }}
+    </span>
+  </div>
+</td>
+<td class="submission-column">
+  <ng-container *ngIf="session.uploadJob as job; else noAccount">
+    <div>{{ job.accountDisplayName }}</div>
+    <div class="secondary-text" *ngIf="job.scheduledPublishAt">
+      定时 {{ job.scheduledPublishAt * 1000 | date: "MM-dd HH:mm" }}
+    </div>
+    <div
+      class="secondary-text"
+      *ngIf="job.collectionBranchState !== 'disabled'"
+    >
+      合集：{{ collectionBranchLabel(job.collectionBranchState) }}
+    </div>
+  </ng-container>
+  <ng-template #noAccount>—</ng-template>
+</td>
+<td class="actions-column">
+  <button nz-button nzType="link" type="button" (click)="showDetails()">
+    详情
+  </button>
+  <button
+    nz-button
+    nzType="link"
+    nzDanger
+    type="button"
+    data-testid="delete-session"
+    (click)="runSessionAction('delete_local')"
+  >
+    删除
+  </button>
+  <button
+    *ngIf="hasMoreActions()"
+    nz-button
+    nzType="text"
+    type="button"
+    nz-dropdown
+    nzPlacement="bottomRight"
+    nzOverlayClassName="action-dropdown-overlay"
+    [nzDropdownMenu]="sessionActions"
+    data-testid="session-actions-trigger"
+    aria-label="更多场次操作"
+  >
+    <i nz-icon nzType="more"></i>
+  </button>
+  <nz-dropdown-menu #sessionActions="nzDropdownMenu">
+    <ul nz-menu>
+      <li
+        *ngIf="canCutCurrentFile()"
+        nz-menu-item
+        data-testid="cut-current-recording"
+        [nzDisabled]="cutting"
+        (click)="cutCurrent()"
+      >
+        {{ cutting ? "正在切割…" : "切割当前文件" }}
+      </li>
+      <li
+        *ngIf="hasAction('set_upload')"
+        nz-menu-item
+        (click)="runSessionAction('set_upload')"
+      >
+        本场上传
+      </li>
+      <li
+        *ngIf="hasAction('set_skip')"
+        nz-menu-item
+        (click)="runSessionAction('set_skip')"
+      >
+        本场不上传
+      </li>
+      <li
+        *ngIf="hasAction('edit_submission')"
+        nz-menu-item
+        data-testid="edit-submission-settings"
+        (click)="editSubmission()"
+      >
+        投稿设置
+      </li>
+      <li
+        *ngIf="hasAction('retry_failed')"
+        nz-menu-item
+        (click)="runSessionAction('retry_failed')"
+      >
+        重试上传
+      </li>
+      <li
+        *ngIf="hasAction('pause_upload')"
+        nz-menu-item
+        (click)="runSessionAction('pause_upload')"
+      >
+        暂停上传
+      </li>
+      <li
+        *ngIf="hasAction('resume_upload')"
+        nz-menu-item
+        (click)="runSessionAction('resume_upload')"
+      >
+        继续上传
+      </li>
+      <li
+        *ngIf="hasAction('edit_task') && session.uploadJob"
+        nz-menu-item
+        (click)="editTask(session.uploadJob.id)"
+      >
+        修改任务
+      </li>
+      <li
+        *ngIf="hasAction('repair_transcode')"
+        nz-menu-item
+        (click)="runSessionAction('repair_transcode')"
+      >
+        修复转码
+      </li>
+      <li
+        *ngIf="hasAction('backfill_danmaku')"
+        nz-menu-item
+        (click)="runSessionAction('backfill_danmaku')"
+      >
+        回灌弹幕
+      </li>
+      <li
+        *ngIf="hasAction('repost_as_new')"
+        nz-menu-item
+        (click)="runSessionAction('repost_as_new')"
+      >
+        重新投稿
+      </li>
+    </ul>
+  </nz-dropdown-menu>
+</td>
