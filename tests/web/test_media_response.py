@@ -1,0 +1,380 @@
+import asyncio
+import re
+import threading
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, Iterator, List, Tuple
+
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+
+from blrec.web import media_response
+from blrec.web.media_response import (
+    MediaCandidate,
+    VirtualMediaSnapshot,
+    build_media_response,
+    open_media_resource,
+)
+
+
+@contextmanager
+def _media_client(
+    path: Path, *, active: bool = False, download_name: str = ''
+) -> Iterator[TestClient]:
+    app = FastAPI()
+
+    @app.get('/media/{media_id}')
+    async def stream(request: Request, media_id: int):
+        resource = await open_media_resource(
+            (
+                MediaCandidate(
+                    path=str(path),
+                    content_type='video/mp4',
+                    artifact_key='test-media:{}'.format(media_id),
+                    active=active,
+                ),
+            )
+        )
+        return build_media_response(
+            request,
+            resource,
+            request.headers.get('range'),
+            request.headers.get('if-none-match'),
+            request.headers.get('if-range'),
+            download_name or None,
+        )
+
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
+def media_file(tmp_path: Path) -> Path:
+    path = tmp_path / 'private-recording-identity.mp4'
+    path.write_bytes(b'0123456789')
+    return path
+
+
+@pytest.mark.asyncio
+async def test_open_media_resource_runs_realpath_open_and_fstat_once_in_worker(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event_loop_thread = threading.get_ident()
+    calls: List[Tuple[str, int]] = []
+    real_realpath = media_response.os.path.realpath
+    real_open = open
+    real_fstat = media_response.os.fstat
+
+    def recording_realpath(value: str) -> str:
+        calls.append(('realpath', threading.get_ident()))
+        return real_realpath(value)
+
+    def recording_open(value: str, mode: str):
+        calls.append(('open', threading.get_ident()))
+        return real_open(value, mode)
+
+    def recording_fstat(fd: int):
+        calls.append(('fstat', threading.get_ident()))
+        return real_fstat(fd)
+
+    def forbidden_stat(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError('path stat must not run')
+
+    monkeypatch.setattr(media_response.os.path, 'realpath', recording_realpath)
+    monkeypatch.setattr(media_response, 'open', recording_open, raising=False)
+    monkeypatch.setattr(media_response.os, 'fstat', recording_fstat)
+    monkeypatch.setattr(media_response.os, 'stat', forbidden_stat)
+    monkeypatch.setattr(Path, 'stat', forbidden_stat)
+
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    try:
+        assert resource.size == 10
+        assert [name for name, _thread in calls] == ['realpath', 'open', 'fstat']
+        assert all(thread != event_loop_thread for _name, thread in calls)
+    finally:
+        resource.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_open_closes_a_resource_finished_by_the_worker(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    opened = []
+    real_open = open
+
+    def blocking_open(value: str, mode: str):
+        entered.set()
+        release.wait()
+        file = real_open(value, mode)
+        opened.append(file)
+        returned.set()
+        return file
+
+    monkeypatch.setattr(media_response, 'open', blocking_open, raising=False)
+    task = asyncio.create_task(
+        open_media_resource(
+            (
+                MediaCandidate(
+                    path=str(media_file),
+                    content_type='video/mp4',
+                    artifact_key='recording-part:7:final',
+                ),
+            )
+        )
+    )
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, entered.wait)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await loop.run_in_executor(None, returned.wait)
+    for _attempt in range(100):
+        if opened[0].closed:
+            break
+        await asyncio.sleep(0)
+
+    assert opened[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_active_snapshot_accepts_the_same_symlink_candidate(
+    media_file: Path, tmp_path: Path
+) -> None:
+    symlink = tmp_path / 'recording-link.mp4'
+    symlink.symlink_to(media_file)
+
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(symlink),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:source',
+                active=True,
+            ),
+        ),
+        snapshot=VirtualMediaSnapshot(path=str(symlink), source_size=10),
+    )
+    try:
+        assert resource.size == 10
+        assert resource.etag is None
+        assert resource.cache_control == 'no-store'
+    finally:
+        resource.close()
+
+
+def test_completed_media_has_opaque_strong_etag_and_private_cache(
+    media_file: Path,
+) -> None:
+    with _media_client(media_file) as client:
+        response = client.get('/media/7')
+
+    assert response.status_code == 200
+    assert response.content == b'0123456789'
+    assert response.headers['cache-control'] == 'private, max-age=3600'
+    assert re.fullmatch(r'"[0-9a-f]{64}"', response.headers['etag'])
+    assert media_file.name not in response.headers['etag']
+    assert str(media_file) not in response.headers['etag']
+
+
+def test_completed_media_replacement_gets_a_new_etag(media_file: Path) -> None:
+    replacement = media_file.with_name('replacement.mp4')
+    replacement.write_bytes(b'abcdefghij')
+    with _media_client(media_file) as client:
+        first = client.get('/media/7')
+        replacement.replace(media_file)
+        second = client.get('/media/7')
+
+    assert first.headers['etag'] != second.headers['etag']
+    assert second.content == b'abcdefghij'
+
+
+@pytest.mark.parametrize(
+    ('value', 'expected_range', 'expected_body'),
+    (
+        ('bytes=2-4', 'bytes 2-4/10', b'234'),
+        ('bytes=7-', 'bytes 7-9/10', b'789'),
+        ('bytes=-3', 'bytes 7-9/10', b'789'),
+    ),
+)
+def test_completed_media_keeps_prefix_open_and_suffix_ranges(
+    media_file: Path, value: str, expected_range: str, expected_body: bytes
+) -> None:
+    with _media_client(media_file) as client:
+        response = client.get('/media/7', headers={'Range': value})
+
+    assert response.status_code == 206
+    assert response.headers['content-range'] == expected_range
+    assert response.content == expected_body
+
+
+@pytest.mark.parametrize(
+    'value', ('bytes=20-30', 'bytes=4-2', 'bytes=0-1,4-5', 'items=0-1')
+)
+def test_completed_media_rejects_invalid_ranges(media_file: Path, value: str) -> None:
+    with _media_client(media_file) as client:
+        response = client.get('/media/7', headers={'Range': value})
+
+    assert response.status_code == 416
+    assert response.headers['content-range'] == 'bytes */10'
+    assert response.content == b''
+
+
+def test_if_none_match_takes_precedence_over_range(media_file: Path) -> None:
+    with _media_client(media_file) as client:
+        etag = client.get('/media/7').headers['etag']
+        response = client.get(
+            '/media/7', headers={'If-None-Match': etag, 'Range': 'bytes=2-4'}
+        )
+
+    assert response.status_code == 304
+    assert response.content == b''
+    assert response.headers['etag'] == etag
+    assert response.headers['cache-control'] == 'private, max-age=3600'
+    assert 'content-range' not in response.headers
+
+
+def test_if_range_requires_the_current_strong_etag(media_file: Path) -> None:
+    with _media_client(media_file) as client:
+        etag = client.get('/media/7').headers['etag']
+        matched = client.get(
+            '/media/7', headers={'Range': 'bytes=2-4', 'If-Range': etag}
+        )
+        weak = client.get(
+            '/media/7', headers={'Range': 'bytes=2-4', 'If-Range': 'W/' + etag}
+        )
+        stale = client.get(
+            '/media/7', headers={'Range': 'bytes=2-4', 'If-Range': '"stale"'}
+        )
+
+    assert matched.status_code == 206
+    assert matched.content == b'234'
+    assert weak.status_code == 200
+    assert weak.content == b'0123456789'
+    assert stale.status_code == 200
+    assert stale.content == b'0123456789'
+
+
+def test_active_media_is_never_conditional_cached(media_file: Path) -> None:
+    with _media_client(media_file, active=True) as client:
+        response = client.get(
+            '/media/7', headers={'If-None-Match': '*', 'Range': 'bytes=2-4'}
+        )
+
+    assert response.status_code == 206
+    assert response.content == b'234'
+    assert response.headers['cache-control'] == 'no-store'
+    assert 'etag' not in response.headers
+
+
+def test_download_uses_utf8_filename(media_file: Path) -> None:
+    with _media_client(media_file, download_name='第一段高光.mp4') as client:
+        response = client.get('/media/7')
+
+    assert response.headers['content-disposition'] == (
+        "attachment; filename*=UTF-8''"
+        '%E7%AC%AC%E4%B8%80%E6%AE%B5%E9%AB%98%E5%85%89.mp4'
+    )
+
+
+@pytest.mark.asyncio
+async def test_disconnect_closes_file_and_audits_only_safe_stream_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_path = tmp_path / 'must-not-log-private-path-token.mp4'
+    secret_path.write_bytes(b'x' * (128 * 1024))
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        media_response, 'audit', lambda event, **fields: events.append((event, fields))
+    )
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'media_token=must-not-log-query-token',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(secret_path),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    response = build_media_response(request, resource, None, None, None, None)
+
+    first = await response.body_iterator.__anext__()
+    assert first
+    assert resource.file.closed is False
+    assert response.background is not None
+    await response.background()
+    await response.body_iterator.aclose()
+
+    assert resource.file.closed is True
+    assert len(events) == 1
+    event, fields = events[0]
+    assert event == 'media_stream'
+    assert set(fields) == {
+        'route',
+        'status',
+        'first_byte_ms',
+        'bytes',
+        'range',
+        'reason',
+    }
+    assert fields['route'] == '/media/{media_id}'
+    assert fields['status'] == 200
+    assert fields['first_byte_ms'] is not None
+    assert fields['bytes'] == len(first)
+    assert fields['range'] == 'full'
+    assert fields['reason'] == 'disconnect'
+    assert 'must-not-log' not in str(events)
+
+
+@pytest.mark.asyncio
+async def test_opened_resource_can_be_closed_after_conditional_short_circuit(
+    media_file: Path,
+) -> None:
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+
+    response = build_media_response(request, resource, None, resource.etag, None, None)
+
+    assert response.status_code == 304
+    assert resource.file.closed is True

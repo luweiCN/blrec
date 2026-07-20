@@ -27,6 +27,8 @@ from blrec.bili_upload.recording_content import (
     RecordingContentCursorStale,
     RecordingContentNotFound,
     RecordingContentUnavailable,
+    RecordingMediaCandidate,
+    RecordingMediaDescriptor,
 )
 from blrec.bili_upload.session_submission import SessionSubmissionView
 from blrec.bili_upload.task_actions import UploadTaskActionRejected
@@ -211,8 +213,31 @@ class FakeJournal:
 
 
 class FakeContentReader:
-    def __init__(self, media_path: Path) -> None:
+    def __init__(self, media_path: Path, *, recording: bool = True) -> None:
         self.media_path = media_path
+        self.recording = recording
+
+    async def media_descriptor(self, part_id: int) -> RecordingMediaDescriptor:
+        if part_id == 404:
+            raise RecordingContentNotFound('录制分 P 不存在')
+        if part_id == 409:
+            raise RecordingContentUnavailable('该分 P 的本地视频不可用')
+        return RecordingMediaDescriptor(
+            part_id=part_id,
+            room_id=100,
+            part_index=1,
+            candidates=(
+                RecordingMediaCandidate(
+                    path=str(self.media_path),
+                    content_type='video/x-flv',
+                    recording=self.recording,
+                    artifact_key='recording-part:{}:source'.format(part_id),
+                ),
+            ),
+            bvid=None,
+            remote_available=False,
+            index_state='pending',
+        )
 
     async def media(self, part_id: int) -> MediaResource:
         if part_id == 404:
@@ -854,6 +879,51 @@ def test_media_range_returns_the_requested_slice(client: TestClient) -> None:
     assert response.headers['content-range'] == 'bytes 2-4/10'
     assert response.headers['content-length'] == '3'
     assert response.content == b'234'
+
+
+def test_completed_media_supports_etag_and_conditional_range(
+    client: TestClient,
+) -> None:
+    current = recording_sessions.content_reader
+    assert isinstance(current, FakeContentReader)
+    recording_sessions.content_reader = FakeContentReader(
+        current.media_path, recording=False
+    )
+
+    initial = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={'x-api-key': 'test-api-key'},
+    )
+    etag = initial.headers['etag']
+    not_modified = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={
+            'x-api-key': 'test-api-key',
+            'If-None-Match': etag,
+            'Range': 'bytes=2-4',
+        },
+    )
+    matched_range = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={'x-api-key': 'test-api-key', 'If-Range': etag, 'Range': 'bytes=2-4'},
+    )
+    stale_range = client.get(
+        '/api/v1/recording-sessions/parts/2/media',
+        headers={
+            'x-api-key': 'test-api-key',
+            'If-Range': '"stale"',
+            'Range': 'bytes=2-4',
+        },
+    )
+
+    assert initial.status_code == 200
+    assert initial.headers['cache-control'] == 'private, max-age=3600'
+    assert not_modified.status_code == 304
+    assert not_modified.content == b''
+    assert matched_range.status_code == 206
+    assert matched_range.content == b'234'
+    assert stale_range.status_code == 200
+    assert stale_range.content == b'0123456789'
 
 
 @pytest.mark.parametrize(

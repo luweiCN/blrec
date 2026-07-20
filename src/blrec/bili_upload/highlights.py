@@ -197,6 +197,15 @@ class HighlightClipSummary:
     deletion_error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class HighlightClipMediaResource:
+    clip_id: int
+    name: str
+    output_video_path: str
+    file_size_bytes: Optional[int]
+    expected_root: str
+
+
 def _source_fingerprint(
     source: ClipSource, *, stable_end_ms: Optional[int] = None
 ) -> Dict[str, object]:
@@ -1683,6 +1692,31 @@ class HighlightService:
         if not path.is_file() or path.stat().st_size <= 0:
             raise ValueError('highlight clip video is missing')
         return path
+
+    async def clip_media_resource(self, clip_id: int) -> HighlightClipMediaResource:
+        row = await self._database.fetchone(
+            'SELECT id,name,output_video_path,file_size_bytes,state '
+            'FROM highlight_clips WHERE id=?',
+            (int(clip_id),),
+        )
+        if row is None:
+            raise ValueError("unknown highlight clip '{}'".format(clip_id))
+        if str(row['state']) != 'ready' or row['output_video_path'] is None:
+            raise ValueError('highlight clip is not ready')
+        if self._clip_root is None:
+            raise ValueError('highlight clip root is not configured')
+        output_path = str(row['output_video_path'])
+        if Path(output_path).suffix.lower() != '.mp4':
+            raise ValueError('invalid highlight output path')
+        return HighlightClipMediaResource(
+            clip_id=int(row['id']),
+            name=str(row['name']),
+            output_video_path=output_path,
+            file_size_bytes=(
+                None if row['file_size_bytes'] is None else int(row['file_size_bytes'])
+            ),
+            expected_root=str(self._clip_root),
+        )
 
     async def retry_clip(self, clip_id: int) -> HighlightClip:
         clip = await self.get_clip(clip_id)

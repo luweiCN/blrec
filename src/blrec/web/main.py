@@ -309,7 +309,14 @@ api.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
-    expose_headers=['Accept-Ranges', 'Content-Length', 'Content-Range'],
+    expose_headers=[
+        'Accept-Ranges',
+        'Content-Length',
+        'Content-Range',
+        'ETag',
+        'Cache-Control',
+        'Content-Disposition',
+    ],
 )
 api.add_middleware(RouteRedirectMiddleware)
 

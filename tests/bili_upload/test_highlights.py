@@ -395,6 +395,38 @@ async def test_ready_clip_exposes_only_an_owned_existing_video(
 
 
 @pytest.mark.asyncio
+async def test_clip_media_resource_is_lightweight_and_does_not_stat(
+    database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip_root = tmp_path / 'clips'
+    clip_root.mkdir()
+    video = clip_root / '100' / 'highlight-1.mp4'
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,actual_start_ms,'
+        'actual_end_ms,output_video_path,file_size_bytes,state,created_at,updated_at) '
+        "VALUES(1,100,'片段名称',0,1000,0,1000,?,321,'ready',1,1)",
+        (str(video),),
+    )
+    service = HighlightService(database, clip_root=clip_root)
+    monkeypatch.setattr(
+        service,
+        '_owned_highlight_path',
+        lambda _value: (_ for _ in ()).throw(
+            AssertionError('clip media descriptor must not resolve or stat')
+        ),
+    )
+
+    resource = await service.clip_media_resource(1)
+
+    assert resource.clip_id == 1
+    assert resource.name == '片段名称'
+    assert resource.output_video_path == str(video)
+    assert resource.file_size_bytes == 321
+    assert resource.expected_root == str(clip_root.resolve())
+
+
+@pytest.mark.asyncio
 async def test_clip_library_accepts_a_dedicated_root(database, tmp_path: Path) -> None:
     clip_root = tmp_path / 'clips'
     video = clip_root / '100' / 'highlight-1.mp4'

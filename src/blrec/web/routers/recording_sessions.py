@@ -1,25 +1,12 @@
 import os
-import re
 import secrets
 import time
-from typing import (
-    Any,
-    Awaitable,
-    BinaryIO,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Literal,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
-from starlette.responses import StreamingResponse
+from starlette.responses import Response
 
 from blrec.bili_upload.active_media import ActiveMediaBusy, ActiveMediaService
 from blrec.bili_upload.journal import (
@@ -56,6 +43,13 @@ from blrec.bili_upload.task_actions import (
 )
 from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
+from blrec.web.media_response import (
+    MediaCandidate,
+    MediaResourceUnavailable,
+    VirtualMediaSnapshot,
+    build_media_response,
+    open_media_resource,
+)
 
 from .. import security
 from .bili_accounts import authenticated_manager_subject
@@ -72,13 +66,8 @@ active_recording_metadata_provider: Optional[
 active_media_service: Optional[ActiveMediaService] = None
 unavailable_reason: Optional[str] = 'Recording journal is not ready'
 
-_BYTE_RANGE = re.compile(r'bytes=(\d*)-(\d*)')
 _MEDIA_ACCESS_TTL_SECONDS = 2 * 60 * 60
 _MAX_MEDIA_SNAPSHOTS = 64
-
-
-class RangeNotSatisfiable(ValueError):
-    pass
 
 
 class ApiModel(BaseModel):
@@ -626,43 +615,6 @@ def _session_display(
     if upload_job.state in ('approved', 'completed'):
         return 'completed', actions
     return 'needs_attention', actions
-
-
-def parse_byte_range(value: str, size: int) -> Tuple[int, int]:
-    if size <= 0 or ',' in value:
-        raise RangeNotSatisfiable()
-    match = _BYTE_RANGE.fullmatch(value.strip())
-    if match is None:
-        raise RangeNotSatisfiable()
-    first, last = match.groups()
-    if not first:
-        if not last:
-            raise RangeNotSatisfiable()
-        suffix = int(last)
-        if suffix <= 0:
-            raise RangeNotSatisfiable()
-        return max(0, size - suffix), size - 1
-    start = int(first)
-    end = size - 1 if not last else min(int(last), size - 1)
-    if start >= size or end < start:
-        raise RangeNotSatisfiable()
-    return start, end
-
-
-def file_chunks(
-    file: BinaryIO, *, start: int, length: int, chunk_size: int = 64 * 1024
-) -> Iterator[bytes]:
-    try:
-        file.seek(start)
-        remaining = length
-        while remaining > 0:
-            chunk = file.read(min(chunk_size, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-    finally:
-        file.close()
 
 
 def _content_error(error: RuntimeError) -> HTTPException:
@@ -1422,70 +1374,60 @@ async def create_recording_media_access(
 @router.get('/parts/{part_id}/media')
 async def stream_recording_media(
     part_id: int,
+    request: Request,
     range_header: Optional[str] = Header(None, alias='Range'),
+    if_none_match: Optional[str] = Header(None, alias='If-None-Match'),
+    if_range: Optional[str] = Header(None, alias='If-Range'),
     media_snapshot: Optional[str] = Query(None),
     _subject: str = Depends(authenticated_media_subject),
     reader: RecordingContentReader = Depends(get_content_reader),
-) -> StreamingResponse:
+) -> Response:
     try:
-        resource = await reader.media(part_id)
+        descriptor = await reader.media_descriptor(part_id)
     except (RecordingContentNotFound, RecordingContentUnavailable) as error:
         raise _content_error(error) from None
-    if resource.path is None or resource.size is None or resource.content_type is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
-        )
     snapshot = None
     if media_snapshot is not None:
         snapshot = media_snapshot_store.get(part_id, media_snapshot)
-        if snapshot is None or os.path.abspath(snapshot.path) != os.path.abspath(
-            resource.path
-        ):
+        if snapshot is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail='播放快照已失效，请重新打开播放器',
             )
-        if resource.size < snapshot.source_size:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail='录制文件已发生变化，请重新打开播放器',
-            )
-    size = snapshot.size if snapshot is not None else resource.size
-    start, end = 0, size - 1
-    response_status = status.HTTP_200_OK
-    if range_header is not None:
-        try:
-            start, end = parse_byte_range(range_header, size)
-        except RangeNotSatisfiable:
-            raise HTTPException(
-                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-                detail='请求的视频范围不可用',
-                headers={'Content-Range': 'bytes */{}'.format(size)},
-            ) from None
-        response_status = status.HTTP_206_PARTIAL_CONTENT
-    length = max(0, end - start + 1)
-    headers = {
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-store',
-        'Content-Length': str(length),
-    }
-    if response_status == status.HTTP_206_PARTIAL_CONTENT:
-        headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)
-    if snapshot is not None:
-        chunks = snapshot.iter_range(start, length)
-    else:
-        try:
-            file = open(resource.path, 'rb')
-        except OSError:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail='该分 P 的本地视频不可用'
-            ) from None
-        chunks = file_chunks(file, start=start, length=length)
-    return StreamingResponse(
-        chunks,
-        status_code=response_status,
-        media_type=resource.content_type,
-        headers=headers,
+    virtual_snapshot = (
+        None
+        if snapshot is None
+        else VirtualMediaSnapshot(
+            path=snapshot.path,
+            source_size=snapshot.source_size,
+            source_tail_start=snapshot.source_tail_start,
+            prefix=snapshot.prefix,
+        )
+    )
+    try:
+        resource = await open_media_resource(
+            tuple(
+                MediaCandidate(
+                    path=candidate.path,
+                    content_type=candidate.content_type,
+                    artifact_key=candidate.artifact_key,
+                    active=candidate.recording,
+                )
+                for candidate in descriptor.candidates
+            ),
+            snapshot=virtual_snapshot,
+        )
+    except MediaResourceUnavailable:
+        detail = (
+            '播放快照已失效，请重新打开播放器'
+            if snapshot is not None
+            else '该分 P 的本地视频不可用'
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=detail
+        ) from None
+    return build_media_response(
+        request, resource, range_header, if_none_match, if_range, None
     )
 
 

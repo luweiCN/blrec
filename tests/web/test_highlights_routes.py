@@ -14,6 +14,7 @@ from blrec.bili_upload.highlight_cut import (
 )
 from blrec.bili_upload.highlights import (
     HighlightClip,
+    HighlightClipMediaResource,
     HighlightClipSource,
     HighlightClipSummary,
     HighlightInspectionBusy,
@@ -133,6 +134,7 @@ class FakeHighlightService:
         self.retry_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
         self.clip_video_path = AsyncMock()
+        self.clip_media_resource = AsyncMock()
         self.ensure_upload_session = AsyncMock(return_value=12)
         self.marker_counts = AsyncMock(
             return_value=(MarkerCount(1, 2), MarkerCount(2, 0))
@@ -179,11 +181,22 @@ def restore_router_state() -> Iterator[None]:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(tmp_path: Path) -> Iterator[TestClient]:
     api = FastAPI(dependencies=[Depends(security.authenticate)])
     api.include_router(highlights.router, prefix='/api/v1')
     security.api_key = 'test-api-key'
-    highlights.service = FakeHighlightService()  # type: ignore[assignment]
+    fake_service = FakeHighlightService()
+    video = tmp_path / 'highlight-3.mp4'
+    video.write_bytes(b'0123456789')
+    fake_service.clip_video_path.return_value = video
+    fake_service.clip_media_resource.return_value = HighlightClipMediaResource(
+        clip_id=3,
+        name='第一段高光',
+        output_video_path=str(video),
+        file_size_bytes=10,
+        expected_root=str(tmp_path.resolve()),
+    )
+    highlights.service = fake_service  # type: ignore[assignment]
     highlights.worker = AsyncMock()
     highlights.upload_task_creator = AsyncMock(return_value=17)
     highlights.clip_deleter = AsyncMock(return_value='deleted')
@@ -456,6 +469,13 @@ def test_ready_clip_supports_signed_byte_range_playback(
     service = highlights.service
     assert isinstance(service, FakeHighlightService)
     service.clip_video_path.return_value = video
+    service.clip_media_resource.return_value = HighlightClipMediaResource(
+        clip_id=3,
+        name='第一段高光',
+        output_video_path=str(video),
+        file_size_bytes=10,
+        expected_root=str(tmp_path.resolve()),
+    )
 
     access = client.post('/api/v1/highlights/clips/3/media-access', headers=auth())
 
@@ -484,3 +504,22 @@ def test_ready_clip_supports_signed_byte_range_playback(
         "attachment; filename*=UTF-8''"
         '%E7%AC%AC%E4%B8%80%E6%AE%B5%E9%AB%98%E5%85%89.mp4'
     )
+
+    etag = download.headers['etag']
+    not_modified = client.get(
+        '/api/v1/highlights/clips/3/media',
+        params={'media_token': payload['token'], 'media_expires': payload['expiresAt']},
+        headers={'If-None-Match': etag, 'Range': 'bytes=2-5'},
+    )
+    stale_range = client.get(
+        '/api/v1/highlights/clips/3/media',
+        params={'media_token': payload['token'], 'media_expires': payload['expiresAt']},
+        headers={'If-Range': '"stale"', 'Range': 'bytes=2-5'},
+    )
+
+    assert download.headers['cache-control'] == 'private, max-age=3600'
+    assert not_modified.status_code == 304
+    assert not_modified.content == b''
+    assert stale_range.status_code == 200
+    assert stale_range.content == b'0123456789'
+    service.get_clip.assert_not_awaited()

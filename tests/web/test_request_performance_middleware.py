@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Tuple
 import pytest
 from brotli_asgi import BrotliMiddleware
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from starlette.testclient import TestClient
 
@@ -237,3 +238,18 @@ def test_main_registers_performance_inside_security_and_compression() -> None:
     performance_index = middleware_classes.index(RequestPerformanceMiddleware)
     assert middleware_classes.index(SecurityHeadersMiddleware) < performance_index
     assert middleware_classes.index(BrotliMiddleware) < performance_index
+
+
+def test_main_exposes_media_cache_and_download_headers_to_cors() -> None:
+    middleware = next(
+        item for item in api.user_middleware if item.cls is CORSMiddleware
+    )
+
+    assert set(middleware.options['expose_headers']) >= {
+        'Accept-Ranges',
+        'Content-Length',
+        'Content-Range',
+        'ETag',
+        'Cache-Control',
+        'Content-Disposition',
+    }

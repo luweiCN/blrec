@@ -3,18 +3,18 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, List, Literal, Mapping, Optional, Union
-from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, Field, validator
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import Response
 
 from blrec.bili_upload.highlight_cut import ClipInspection, HighlightCutError
 from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.highlights import (
     HighlightClip,
+    HighlightClipMediaResource,
     HighlightClipSummary,
     HighlightConfirmationRequired,
     HighlightInspectionBusy,
@@ -29,10 +29,16 @@ from blrec.bili_upload.policies import InvalidRoomUploadPolicy
 from blrec.bili_upload.task_actions import UploadTaskActionRejected
 from blrec.bili_upload.upload import InvalidUploadPolicy
 from blrec.utils.string import camel_case
+from blrec.web.media_response import (
+    MediaCandidate,
+    MediaResourceUnavailable,
+    OpenedMediaResource,
+    build_media_response,
+    open_media_resource,
+)
 
 from .. import security
 from .bili_accounts import authenticated_manager_subject
-from .recording_sessions import RangeNotSatisfiable, file_chunks, parse_byte_range
 from .room_upload_policies import RoomUploadPolicyRequest
 
 service: Optional[HighlightService] = None
@@ -307,9 +313,11 @@ async def authenticated_clip_media_subject(
     return await authenticated_manager_subject(request, x_api_key)
 
 
-async def _clip_video_path(clip_id: int, highlight_service: HighlightService) -> Path:
+async def _clip_media_resource(
+    clip_id: int, highlight_service: HighlightService
+) -> HighlightClipMediaResource:
     try:
-        return await highlight_service.clip_video_path(clip_id)
+        return await highlight_service.clip_media_resource(clip_id)
     except ValueError as error:
         message = str(error)
         code = (
@@ -318,6 +326,24 @@ async def _clip_video_path(clip_id: int, highlight_service: HighlightService) ->
             else status.HTTP_409_CONFLICT
         )
         raise HTTPException(status_code=code, detail=message) from None
+
+
+async def _open_clip_media(resource: HighlightClipMediaResource) -> OpenedMediaResource:
+    try:
+        return await open_media_resource(
+            (
+                MediaCandidate(
+                    path=resource.output_video_path,
+                    content_type='video/mp4',
+                    artifact_key='highlight-clip:{}'.format(resource.clip_id),
+                ),
+            ),
+            expected_root=resource.expected_root,
+        )
+    except MediaResourceUnavailable:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='高光片段文件不可用'
+        ) from None
 
 
 def _marker_response(value: HighlightMarker) -> MarkerResponse:
@@ -680,70 +706,42 @@ async def create_clip_media_access(
     _subject: str = Depends(authenticated_manager_subject),
     highlight_service: HighlightService = Depends(get_service),
 ) -> ClipMediaAccessResponse:
-    path = await _clip_video_path(clip_id, highlight_service)
+    descriptor = await _clip_media_resource(clip_id, highlight_service)
+    resource = await _open_clip_media(descriptor)
+    try:
+        file_size_bytes = resource.size
+    finally:
+        resource.close()
     expires_at = int(time.time()) + _MEDIA_ACCESS_TTL_SECONDS
     return ClipMediaAccessResponse(
         token=security.media_access_token(-clip_id, expires_at),
         expires_at=expires_at,
-        file_size_bytes=path.stat().st_size,
+        file_size_bytes=file_size_bytes,
     )
 
 
 @router.get('/clips/{clip_id}/media')
 async def stream_clip_media(
     clip_id: int,
+    request: Request,
     range_header: Optional[str] = Header(None, alias='Range'),
+    if_none_match: Optional[str] = Header(None, alias='If-None-Match'),
+    if_range: Optional[str] = Header(None, alias='If-Range'),
     download: bool = Query(False),
     _subject: str = Depends(authenticated_clip_media_subject),
     highlight_service: HighlightService = Depends(get_service),
-) -> StreamingResponse:
-    path = await _clip_video_path(clip_id, highlight_service)
-    try:
-        size = path.stat().st_size
-    except OSError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail='高光片段文件不可用'
-        ) from None
-    start, end = 0, size - 1
-    response_status = status.HTTP_200_OK
-    if range_header is not None:
-        try:
-            start, end = parse_byte_range(range_header, size)
-        except RangeNotSatisfiable:
-            raise HTTPException(
-                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-                detail='请求的视频范围不可用',
-                headers={'Content-Range': 'bytes */{}'.format(size)},
-            ) from None
-        response_status = status.HTTP_206_PARTIAL_CONTENT
-    length = end - start + 1
-    headers = {
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-store',
-        'Content-Length': str(length),
-    }
+) -> Response:
+    descriptor = await _clip_media_resource(clip_id, highlight_service)
+    resource = await _open_clip_media(descriptor)
+    download_name = None
     if download:
-        clip = await highlight_service.get_clip(clip_id)
-        extension = path.suffix or '.mp4'
-        filename = clip.name.strip()
+        extension = Path(descriptor.output_video_path).suffix or '.mp4'
+        filename = descriptor.name.strip()
         if not filename.lower().endswith(extension.lower()):
             filename += extension
-        headers['Content-Disposition'] = "attachment; filename*=UTF-8''{}".format(
-            quote(filename, safe='')
-        )
-    if response_status == status.HTTP_206_PARTIAL_CONTENT:
-        headers['Content-Range'] = 'bytes {}-{}/{}'.format(start, end, size)
-    try:
-        file = open(path, 'rb')
-    except OSError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail='高光片段文件不可用'
-        ) from None
-    return StreamingResponse(
-        file_chunks(file, start=start, length=length),
-        status_code=response_status,
-        media_type='video/mp4',
-        headers=headers,
+        download_name = filename
+    return build_media_response(
+        request, resource, range_header, if_none_match, if_range, download_name
     )
 
 

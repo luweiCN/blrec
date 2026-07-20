@@ -30,6 +30,8 @@ __all__ = (
     'DanmakuPage',
     'FlvMediaSnapshot',
     'MediaResource',
+    'RecordingMediaCandidate',
+    'RecordingMediaDescriptor',
     'RecordingContentInvalid',
     'RecordingContentCursorStale',
     'RecordingContentNotFound',
@@ -65,6 +67,25 @@ class MediaResource:
     bvid: Optional[str]
     remote_available: bool
     playback_mode: Literal['seekable', 'sequential', 'active_snapshot']
+    index_state: str
+
+
+@dataclass(frozen=True)
+class RecordingMediaCandidate:
+    path: str
+    content_type: str
+    recording: bool
+    artifact_key: str
+
+
+@dataclass(frozen=True)
+class RecordingMediaDescriptor:
+    part_id: int
+    room_id: int
+    part_index: int
+    candidates: Tuple[RecordingMediaCandidate, ...]
+    bvid: Optional[str]
+    remote_available: bool
     index_state: str
 
 
@@ -278,6 +299,55 @@ class RecordingContentReader:
         self._danmaku_reserved_bytes = 0
         self._danmaku_streams: OrderedDict[Tuple[int, int, int], _DanmakuStream] = (
             OrderedDict()
+        )
+
+    async def media_descriptor(self, part_id: int) -> RecordingMediaDescriptor:
+        row = await self._database.fetchone(
+            'SELECT session.room_id,part.part_index,part.source_path,part.final_path,'
+            'part.artifact_state,part.media_index_state,'
+            'job.state AS job_state,job.bvid '
+            'FROM recording_parts part '
+            'JOIN recording_sessions session ON session.id=part.session_id '
+            'LEFT JOIN upload_jobs job ON job.session_id=part.session_id '
+            'WHERE part.id=?',
+            (int(part_id),),
+        )
+        if row is None:
+            raise RecordingContentNotFound('录制分 P 不存在')
+        artifact_state = str(row['artifact_state'])
+        paths = []
+        if row['final_path'] is not None:
+            paths.append((str(row['final_path']), False, 'final'))
+        source_path = str(row['source_path'])
+        if not paths or paths[0][0] != source_path:
+            paths.append(
+                (
+                    source_path,
+                    artifact_state in ('recording', 'postprocessing'),
+                    'source',
+                )
+            )
+        candidates = tuple(
+            RecordingMediaCandidate(
+                path=path,
+                content_type=self._MEDIA_TYPES.get(
+                    Path(path).suffix.lower(), 'application/octet-stream'
+                ),
+                recording=recording,
+                artifact_key='recording-part:{}:{}'.format(part_id, role),
+            )
+            for path, recording, role in paths
+        )
+        job_state = None if row['job_state'] is None else str(row['job_state'])
+        bvid = None if row['bvid'] is None else str(row['bvid'])
+        return RecordingMediaDescriptor(
+            part_id=int(part_id),
+            room_id=int(row['room_id']),
+            part_index=int(row['part_index']),
+            candidates=candidates,
+            bvid=bvid,
+            remote_available=bool(bvid and job_state in ('approved', 'completed')),
+            index_state=str(row['media_index_state']),
         )
 
     async def media(self, part_id: int) -> MediaResource:

@@ -84,6 +84,41 @@ async def test_media_prefers_existing_final_file(
 
 
 @pytest.mark.asyncio
+async def test_media_descriptor_keeps_final_first_without_touching_filesystem(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'part.flv'
+    final = tmp_path / 'part.mp4'
+    part_id = await _seed_part(database, source, final)
+
+    def forbidden_size(_path: str) -> Optional[int]:
+        raise AssertionError('media descriptor must not stat files')
+
+    monkeypatch.setattr(
+        RecordingContentReader, '_regular_file_size', staticmethod(forbidden_size)
+    )
+
+    descriptor = await RecordingContentReader(database).media_descriptor(part_id)
+
+    assert descriptor.part_id == part_id
+    assert descriptor.room_id == 100
+    assert descriptor.part_index == 1
+    assert descriptor.index_state == 'pending'
+    assert [candidate.path for candidate in descriptor.candidates] == [
+        str(final),
+        str(source),
+    ]
+    assert [candidate.content_type for candidate in descriptor.candidates] == [
+        'video/mp4',
+        'video/x-flv',
+    ]
+    assert [candidate.recording for candidate in descriptor.candidates] == [
+        False,
+        False,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_media_falls_back_to_growing_source_file(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
