@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
+import threading
 import time
 from typing import Any, Callable, Optional, Tuple
 
@@ -39,9 +42,24 @@ async def _run_connection_pump(
     event_count = 0
     byte_count = 0
     accepted_at = time.monotonic()
+    ingress_lock = threading.Lock()
+    admitted_count = 0
+    ingress_closed = False
+    overflow_scheduled = False
+
+    def stop_ingress() -> None:
+        nonlocal ingress_closed
+        with ingress_lock:
+            ingress_closed = True
+
+    def release_admission() -> None:
+        nonlocal admitted_count
+        with ingress_lock:
+            admitted_count = max(0, admitted_count - 1)
 
     def finish(reason: str, code: int) -> None:
         if not finished.done():
+            stop_ingress()
             finished.set_result((reason, code))
 
     async def send_items() -> None:
@@ -71,18 +89,47 @@ async def _run_connection_pump(
                 byte_count += len(text.encode('utf8'))
             finally:
                 queue.task_done()
+                release_admission()
+
+    async def watch_disconnect() -> None:
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get('type') == 'websocket.disconnect':
+                    raw_code = message.get('code', 1001)
+                    finish(
+                        'client_disconnect',
+                        int(raw_code) if isinstance(raw_code, int) else 1001,
+                    )
+                    return
+        except (WebSocketDisconnect, ConnectionClosed) as error:
+            raw_code = getattr(error, 'code', 1001)
+            finish(
+                'client_disconnect',
+                int(raw_code) if isinstance(raw_code, int) else 1001,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error(
+                'Websocket receive failed on {}: {}', route, type(error).__name__
+            )
+            finish('receive_error', 1011)
 
     sender = asyncio.create_task(send_items())
+    receiver = asyncio.create_task(watch_disconnect())
 
     def enqueue(item: Any) -> None:
         nonlocal first_event_at, peak_backlog
         if finished.done():
+            release_admission()
             return
         if first_event_at is None:
             first_event_at = time.monotonic()
         try:
             queue.put_nowait(item)
         except asyncio.QueueFull:
+            release_admission()
             peak_backlog = queue.maxsize
             finish('overflow', 1013)
             sender.cancel()
@@ -90,11 +137,32 @@ async def _run_connection_pump(
             peak_backlog = max(peak_backlog, queue.qsize())
 
     def on_item(item: Any) -> None:
+        nonlocal admitted_count, overflow_scheduled
+        admitted = False
+        schedule_overflow = False
+        with ingress_lock:
+            if ingress_closed or overflow_scheduled:
+                return
+            if admitted_count >= queue.maxsize:
+                if not overflow_scheduled:
+                    overflow_scheduled = True
+                    schedule_overflow = True
+            else:
+                admitted_count += 1
+                admitted = True
+        if schedule_overflow:
+            try:
+                loop.call_soon_threadsafe(finish, 'overflow', 1013)
+            except RuntimeError:
+                stop_ingress()
+            return
+        if not admitted:
+            return
         try:
             loop.call_soon_threadsafe(enqueue, item)
         except RuntimeError:
             # The event loop can close before a producer thread observes disposal.
-            return
+            release_admission()
 
     cancelled = False
     reason = 'server_shutdown'
@@ -111,10 +179,20 @@ async def _run_connection_pump(
         reason = 'subscription_error'
         close_code = 1011
     finally:
+        stop_ingress()
         if subscription is not None:
-            subscription.dispose()
+            try:
+                subscription.dispose()
+            except Exception as error:
+                logger.error(
+                    'Websocket subscription dispose failed on {}: {}',
+                    route,
+                    type(error).__name__,
+                )
         if not sender.done():
             sender.cancel()
+        if not receiver.done():
+            receiver.cancel()
         try:
             await sender
         except asyncio.CancelledError:
@@ -123,9 +201,18 @@ async def _run_connection_pump(
             logger.error(
                 'Websocket sender stopped on {}: {}', route, type(error).__name__
             )
+        try:
+            await receiver
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            logger.error(
+                'Websocket receiver stopped on {}: {}', route, type(error).__name__
+            )
         if reason in {
             'overflow',
             'send_error',
+            'receive_error',
             'subscription_error',
             'server_shutdown',
         }:
