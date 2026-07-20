@@ -44,6 +44,10 @@ class UploadTaskActionRejected(ValueError):
     pass
 
 
+class _RepairDeletionRequested(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class UploadTaskActionPreview:
     job_id: int
@@ -1006,6 +1010,58 @@ class UploadTaskActionManager:
         now = int(self._clock())
 
         def recover(connection: sqlite3.Connection) -> None:
+            interrupted = connection.execute(
+                'SELECT job.id,job.repair_state,session.deletion_state,'
+                'session.cancellation_generation '
+                'FROM upload_jobs job JOIN recording_sessions session '
+                'ON session.id=job.session_id WHERE job.repair_state IN '
+                "('checking','reuploading','editing')"
+            ).fetchall()
+            for row in interrupted:
+                job_id = int(row['id'])
+                editing = str(row['repair_state']) == 'editing'
+                deleting = str(row['deletion_state']) != 'none'
+                generation_row = connection.execute(
+                    'SELECT source_generation FROM owner_handoff_outcomes '
+                    "WHERE owner_kind='repair' AND owner_id=? "
+                    "AND side_effect_key LIKE 'lease:%' "
+                    'ORDER BY id DESC LIMIT 1',
+                    (job_id,),
+                ).fetchone()
+                source_generation = (
+                    int(row['cancellation_generation'])
+                    if generation_row is None
+                    else int(generation_row['source_generation'])
+                )
+                if editing:
+                    connection.execute(
+                        'INSERT INTO owner_handoff_outcomes('
+                        'owner_kind,owner_id,side_effect_key,source_generation,'
+                        'outcome_state,outcome_json,acknowledged_at) '
+                        "VALUES('repair',?,'archive_edit',?,"
+                        "'unknown_terminal','{}',?) "
+                        'ON CONFLICT(owner_kind,owner_id,side_effect_key,'
+                        'source_generation) DO UPDATE SET '
+                        "outcome_state='unknown_terminal',outcome_json='{}',"
+                        'acknowledged_at=excluded.acknowledged_at',
+                        (job_id, source_generation, now),
+                    )
+                lease_outcome = 'unknown_terminal' if editing else 'cancelled_local'
+                connection.execute(
+                    'UPDATE owner_handoff_outcomes SET outcome_state=?,'
+                    "outcome_json='{}',acknowledged_at=? "
+                    "WHERE owner_kind='repair' AND owner_id=? "
+                    "AND side_effect_key LIKE 'lease:%' "
+                    "AND outcome_state='in_flight'",
+                    (lease_outcome, now, job_id),
+                )
+                if deleting:
+                    connection.execute(
+                        "UPDATE upload_jobs SET state='paused',"
+                        "repair_state='failed',repair_message=NULL,repair_error=?,"
+                        'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
+                        ('任务正在删除', now, job_id),
+                    )
             connection.execute(
                 "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
                 'repair_error=NULL,lease_owner=NULL,lease_until=NULL,updated_at=? '
@@ -1046,7 +1102,8 @@ class UploadTaskActionManager:
 
         def claim(connection: sqlite3.Connection) -> Optional[LeaseClaim]:
             row = connection.execute(
-                'SELECT job.id,job.repair_attempt FROM upload_jobs job '
+                'SELECT job.id,job.repair_attempt,'
+                'session.cancellation_generation FROM upload_jobs job '
                 'JOIN recording_sessions session ON session.id=job.session_id '
                 "WHERE job.repair_state='queued' AND job.operator_paused=0 "
                 "AND session.deletion_state='none' "
@@ -1080,10 +1137,28 @@ class UploadTaskActionManager:
             if updated.rowcount != 1:
                 return None
             claimed = connection.execute(
-                'SELECT lease_generation,repair_attempt FROM upload_jobs WHERE id=?',
+                'SELECT job.lease_generation,job.repair_attempt,'
+                'session.cancellation_generation FROM upload_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'WHERE job.id=?',
                 (job_id,),
             ).fetchone()
             assert claimed is not None
+            source_generation = int(claimed['cancellation_generation'])
+            connection.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('repair',?,?,?,'in_flight','{}',NULL) "
+                'ON CONFLICT(owner_kind,owner_id,side_effect_key,'
+                'source_generation) DO UPDATE SET '
+                "outcome_state='in_flight',outcome_json='{}',acknowledged_at=NULL",
+                (
+                    job_id,
+                    'lease:{}'.format(int(claimed['lease_generation'])),
+                    source_generation,
+                ),
+            )
             return LeaseClaim(
                 table='upload_jobs',
                 id=job_id,
@@ -1091,11 +1166,13 @@ class UploadTaskActionManager:
                 lease_generation=int(claimed['lease_generation']),
                 lease_until=lease_until,
                 attempt=int(claimed['repair_attempt']),
+                cancellation_generation=source_generation,
             )
 
         return await self._database.write(claim)
 
     async def _process_repair(self, claim: LeaseClaim) -> None:
+        edit_started = False
         try:
             job = await self._load_repair_job(claim)
             audit(
@@ -1153,16 +1230,23 @@ class UploadTaskActionManager:
                 payload = await self._edit_payload_builder(
                     job.id, healthy_cids, cover_url
                 )
-                await self._set_repair_stage(
-                    claim, 'editing', '正在更新原稿件的异常分 P'
-                )
-                await self._assert_active_repair(claim)
-                await self._protocol.edit_archive(bundle, payload)
+                await self._begin_archive_edit(claim)
+                edit_started = True
+                await self._call_archive_edit(bundle, payload)
                 await self._finish_repair(claim, failed, healthy_cids, repair_modes)
         except DefinitelyNotSent:
+            if edit_started:
+                active = await self._settle_edit_failure(
+                    claim, outcome_state='confirmed_failure'
+                )
+                if not active:
+                    return
             await self._fail_repair(claim, '稿件编辑请求未发出，可以重新尝试')
         except RemoteOutcomeUnknown:
-            await self._unknown_repair(claim)
+            if edit_started:
+                await self._unknown_repair(claim)
+            else:
+                await self._fail_repair(claim, '远端查询中断，可以重新尝试')
         except (AccountNotFound, AccountPaused, CredentialVersionChanged):
             await self._fail_repair(claim, '投稿账号在修复期间发生变化')
         except (CredentialNotFound, InvalidCredentialBundle, InvalidCredentialKey):
@@ -1172,14 +1256,33 @@ class UploadTaskActionManager:
         except UposUploadPaused as error:
             await self._fail_repair(claim, str(error))
         except BiliApiError as error:
+            if edit_started:
+                active = await self._settle_edit_failure(
+                    claim, outcome_state='confirmed_failure'
+                )
+                if not active:
+                    return
             await self._fail_repair(
                 claim, 'B 站接口拒绝转码修复请求（{}）'.format(error.code)
             )
         except LeaseLost:
+            await self._cancel_deleted_claim(claim)
+        except _RepairDeletionRequested:
             return
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self._interrupt_repair(claim, edit_started=edit_started)
+            )
+            raise
         except (ProtocolContractError, OSError, ValueError) as error:
+            if edit_started:
+                await self._unknown_repair(claim)
+                return
             await self._fail_repair(claim, str(error))
         except Exception as error:
+            if edit_started:
+                await self._unknown_repair(claim)
+                return
             await self._fail_repair(claim, str(error) or '转码修复失败')
 
     async def _load_repair_job(self, claim: LeaseClaim) -> _RepairJob:
@@ -1191,8 +1294,15 @@ class UploadTaskActionManager:
             'JOIN recording_sessions session ON session.id=job.session_id '
             'WHERE job.id=? AND job.lease_owner=? AND job.lease_generation=? '
             "AND job.lease_until>? AND job.repair_state='checking' "
-            "AND job.operator_paused=0 AND session.deletion_state='none'",
-            (claim.id, claim.lease_owner, claim.lease_generation, now),
+            "AND job.operator_paused=0 AND session.deletion_state='none' "
+            'AND session.cancellation_generation=?',
+            (
+                claim.id,
+                claim.lease_owner,
+                claim.lease_generation,
+                now,
+                self._repair_source_generation(claim),
+            ),
         )
         if row is None:
             raise LeaseLost('转码修复任务租约已失效')
@@ -1207,6 +1317,227 @@ class UploadTaskActionManager:
             aid=aid,
             bvid=bvid,
         )
+
+    @staticmethod
+    def _repair_source_generation(claim: LeaseClaim) -> int:
+        if claim.cancellation_generation is None:
+            raise LeaseLost('转码修复任务缺少删除代次')
+        return int(claim.cancellation_generation)
+
+    @staticmethod
+    def _repair_lease_key(claim: LeaseClaim) -> str:
+        return 'lease:{}'.format(claim.lease_generation)
+
+    def _repair_owner_active(
+        self, connection: sqlite3.Connection, claim: LeaseClaim
+    ) -> bool:
+        row = connection.execute(
+            'SELECT session.cancellation_generation,session.deletion_state '
+            'FROM upload_jobs job JOIN recording_sessions session '
+            'ON session.id=job.session_id WHERE job.id=? '
+            'AND job.lease_owner=? AND job.lease_generation=?',
+            (claim.id, claim.lease_owner, claim.lease_generation),
+        ).fetchone()
+        if row is None:
+            raise LeaseLost('转码修复任务租约已失效')
+        return (
+            int(row['cancellation_generation']) == self._repair_source_generation(claim)
+            and str(row['deletion_state']) == 'none'
+        )
+
+    def _ack_repair_intent(
+        self,
+        connection: sqlite3.Connection,
+        claim: LeaseClaim,
+        *,
+        side_effect_key: str,
+        outcome_state: str,
+        now: int,
+    ) -> None:
+        cursor = connection.execute(
+            'UPDATE owner_handoff_outcomes SET outcome_state=?,'
+            "outcome_json='{}',acknowledged_at=? "
+            "WHERE owner_kind='repair' AND owner_id=? AND side_effect_key=? "
+            "AND source_generation=? AND outcome_state='in_flight'",
+            (
+                outcome_state,
+                now,
+                claim.id,
+                side_effect_key,
+                self._repair_source_generation(claim),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise LeaseLost('转码修复交接记录已失效')
+
+    def _release_deleted_claim(
+        self, connection: sqlite3.Connection, claim: LeaseClaim, *, now: int
+    ) -> None:
+        self._ack_repair_intent(
+            connection,
+            claim,
+            side_effect_key=self._repair_lease_key(claim),
+            outcome_state='cancelled_local',
+            now=now,
+        )
+        cursor = connection.execute(
+            "UPDATE upload_jobs SET state='paused',repair_state='failed',"
+            "repair_message=NULL,repair_error='任务正在删除',"
+            "review_reason='任务正在删除',lease_owner=NULL,lease_until=NULL,"
+            'updated_at=? WHERE id=? AND lease_owner=? AND lease_generation=?',
+            (now, claim.id, claim.lease_owner, claim.lease_generation),
+        )
+        if cursor.rowcount != 1:
+            raise LeaseLost('转码修复任务租约已失效')
+
+    async def _cancel_deleted_claim(self, claim: LeaseClaim) -> None:
+        now = int(self._clock())
+
+        def cancel(connection: sqlite3.Connection) -> None:
+            try:
+                active = self._repair_owner_active(connection, claim)
+            except LeaseLost:
+                return
+            if active:
+                return
+            self._release_deleted_claim(connection, claim, now=now)
+
+        await self._database.write(cancel)
+
+    async def _interrupt_repair(self, claim: LeaseClaim, *, edit_started: bool) -> None:
+        now = int(self._clock())
+
+        def interrupt(connection: sqlite3.Connection) -> None:
+            try:
+                active = self._repair_owner_active(connection, claim)
+            except LeaseLost:
+                return
+            if not active:
+                if edit_started:
+                    self._ack_repair_intent(
+                        connection,
+                        claim,
+                        side_effect_key='archive_edit',
+                        outcome_state='unknown_terminal',
+                        now=now,
+                    )
+                self._release_deleted_claim(connection, claim, now=now)
+                return
+            if edit_started:
+                self._ack_repair_intent(
+                    connection,
+                    claim,
+                    side_effect_key='archive_edit',
+                    outcome_state='unknown_terminal',
+                    now=now,
+                )
+                self._ack_repair_intent(
+                    connection,
+                    claim,
+                    side_effect_key=self._repair_lease_key(claim),
+                    outcome_state='unknown_terminal',
+                    now=now,
+                )
+                connection.execute(
+                    "UPDATE upload_jobs SET state='paused',"
+                    "repair_state='unknown_outcome',repair_message=NULL,"
+                    'repair_error=?,review_reason=?,lease_owner=NULL,'
+                    'lease_until=NULL,updated_at=? WHERE id=?',
+                    (
+                        '稿件编辑结果未知，请先到创作中心核对',
+                        '转码修复的稿件编辑结果未知，需要远端核对',
+                        now,
+                        claim.id,
+                    ),
+                )
+                return
+            connection.execute(
+                "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
+                'repair_error=NULL,lease_owner=NULL,lease_until=NULL,updated_at=? '
+                'WHERE id=?',
+                ('转码修复中断，已重新排队', now, claim.id),
+            )
+            connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+                'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+                (
+                    claim.id,
+                    self._repair_lease_key(claim),
+                    self._repair_source_generation(claim),
+                ),
+            )
+
+        await self._database.write(interrupt)
+
+    async def _begin_archive_edit(self, claim: LeaseClaim) -> None:
+        now = int(self._clock())
+
+        def begin(connection: sqlite3.Connection) -> bool:
+            if not self._repair_owner_active(connection, claim):
+                self._release_deleted_claim(connection, claim, now=now)
+                return False
+            cursor = connection.execute(
+                "UPDATE upload_jobs SET repair_state='editing',repair_message=?,"
+                'updated_at=? WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    '正在更新原稿件的异常分 P',
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('转码修复任务租约已失效')
+            connection.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('repair',?,'archive_edit',?,'in_flight','{}',NULL) "
+                'ON CONFLICT(owner_kind,owner_id,side_effect_key,'
+                'source_generation) DO UPDATE SET '
+                "outcome_state='in_flight',outcome_json='{}',acknowledged_at=NULL",
+                (claim.id, self._repair_source_generation(claim)),
+            )
+            return True
+
+        if not await self._database.write(begin):
+            raise _RepairDeletionRequested()
+
+    async def _call_archive_edit(
+        self, bundle: CredentialBundle, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        request = asyncio.ensure_future(self._protocol.edit_archive(bundle, payload))
+        try:
+            return await asyncio.shield(request)
+        except asyncio.CancelledError:
+            return await request
+
+    async def _settle_edit_failure(
+        self, claim: LeaseClaim, *, outcome_state: str
+    ) -> bool:
+        now = int(self._clock())
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            if self._repair_owner_active(connection, claim):
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+                    "AND owner_id=? AND side_effect_key='archive_edit' "
+                    'AND source_generation=?',
+                    (claim.id, self._repair_source_generation(claim)),
+                )
+                return True
+            self._ack_repair_intent(
+                connection,
+                claim,
+                side_effect_key='archive_edit',
+                outcome_state=outcome_state,
+                now=now,
+            )
+            self._release_deleted_claim(connection, claim, now=now)
+            return False
+
+        return await self._database.write(settle)
 
     async def _inspect_remote(
         self, job: _RepairJob, response: Mapping[str, Any]
@@ -1397,7 +1728,8 @@ class UploadTaskActionManager:
                     raise ProtocolContractError('待重新封装的分 P 不存在')
                 old_temp_path = self._text(row['repair_temp_path'])
                 if old_temp_path:
-                    self._remuxer.remove(old_temp_path)
+                    await self._remove_remux_path(old_temp_path)
+                    await self._assert_active_repair(claim)
                 original_path = str(
                     row['repair_original_path']
                     or row['final_path']
@@ -1409,12 +1741,16 @@ class UploadTaskActionManager:
                 if original_identity is None:
                     raise ProtocolContractError('待重新封装的分 P 缺少文件身份记录')
                 loop = asyncio.get_running_loop()
-                artifact = await loop.run_in_executor(
+                remux_future = loop.run_in_executor(
                     None,
                     lambda path=original_path, current_id=part_id: (
                         self._remuxer.remux(path, part_id=current_id)
                     ),
                 )
+                try:
+                    artifact = await asyncio.shield(remux_future)
+                except asyncio.CancelledError:
+                    artifact = await remux_future
 
                 def store(connection: sqlite3.Connection) -> None:
                     self._require_claim(connection, claim)
@@ -1438,7 +1774,7 @@ class UploadTaskActionManager:
                 try:
                     await self._database.write(store)
                 except BaseException:
-                    self._remuxer.remove(artifact.path)
+                    await self._remove_remux_path(artifact.path)
                     raise
                 prepared.append(part_id)
             return tuple(prepared)
@@ -1453,35 +1789,47 @@ class UploadTaskActionManager:
         if not part_ids:
             return
 
-        def restore(connection: sqlite3.Connection) -> List[str]:
-            self._require_claim(connection, claim)
+        def load(connection: sqlite3.Connection) -> List[sqlite3.Row]:
             placeholders = ','.join('?' for _ in part_ids)
-            rows = connection.execute(
+            return connection.execute(
                 'SELECT id,repair_temp_path,repair_original_path,'
                 'repair_original_identity FROM upload_parts WHERE job_id=? '
                 'AND id IN ({})'.format(placeholders),
                 (claim.id, *part_ids),
             ).fetchall()
-            paths: List[str] = []
+
+        rows = await self._database.read(load)
+        temporary_paths = tuple(
+            str(row['repair_temp_path']) for row in rows if row['repair_temp_path']
+        )
+        for path in temporary_paths:
+            await self._remove_remux_path(path)
+
+        def restore(connection: sqlite3.Connection) -> None:
+            if not self._repair_owner_active(connection, claim):
+                return
             for row in rows:
                 original_path = self._text(row['repair_original_path'])
                 original_identity = self._text(row['repair_original_identity'])
                 if original_path is None or original_identity is None:
                     continue
-                temporary_path = self._text(row['repair_temp_path'])
-                if temporary_path:
-                    paths.append(temporary_path)
                 connection.execute(
                     'UPDATE upload_parts SET final_path=?,file_identity=?,'
                     'repair_temp_path=NULL,repair_original_path=NULL,'
                     'repair_original_identity=NULL WHERE id=? AND job_id=?',
                     (original_path, original_identity, int(row['id']), claim.id),
                 )
-            return paths
 
-        temporary_paths = await self._database.write(restore)
-        for path in temporary_paths:
-            self._remuxer.remove(path)
+        await self._database.write(restore)
+
+    async def _remove_remux_path(self, path: str) -> None:
+        removal = asyncio.get_running_loop().run_in_executor(
+            None, self._remuxer.remove, path
+        )
+        try:
+            await asyncio.shield(removal)
+        except asyncio.CancelledError:
+            await removal
 
     async def _verify_local_files(
         self, claim: LeaseClaim, failed: List[_RemotePart]
@@ -1546,28 +1894,6 @@ class UploadTaskActionManager:
 
         await self._database.write(prepare)
 
-    async def _set_repair_stage(
-        self, claim: LeaseClaim, state: str, message: str
-    ) -> None:
-        updated = await self._database.execute(
-            'UPDATE upload_jobs SET repair_state=?,repair_message=?,updated_at=? '
-            'WHERE id=? AND lease_owner=? AND lease_generation=? '
-            'AND operator_paused=0 AND EXISTS('
-            'SELECT 1 FROM recording_sessions session '
-            'WHERE session.id=upload_jobs.session_id '
-            "AND session.deletion_state='none')",
-            (
-                state,
-                message,
-                int(self._clock()),
-                claim.id,
-                claim.lease_owner,
-                claim.lease_generation,
-            ),
-        )
-        if updated != 1:
-            raise LeaseLost('转码修复任务租约已失效')
-
     async def _finish_noop(self, claim: LeaseClaim, message: str) -> None:
         await self._finish(
             claim,
@@ -1594,8 +1920,17 @@ class UploadTaskActionManager:
     ) -> None:
         now = int(self._clock())
 
-        def finish(connection: sqlite3.Connection) -> None:
-            self._require_claim(connection, claim)
+        def finish(connection: sqlite3.Connection) -> bool:
+            if not self._repair_owner_active(connection, claim):
+                self._ack_repair_intent(
+                    connection,
+                    claim,
+                    side_effect_key='archive_edit',
+                    outcome_state='confirmed_success',
+                    now=now,
+                )
+                self._release_deleted_claim(connection, claim, now=now)
+                return False
             for part_id, cid in healthy_cids.items():
                 connection.execute(
                     "UPDATE upload_parts SET cid=?,transcode_state='ready' "
@@ -1623,15 +1958,32 @@ class UploadTaskActionManager:
                 )
             else:
                 message = '已重传 {} 个异常分 P，等待 B 站重新审核'.format(len(failed))
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE upload_jobs SET state='waiting_review',"
                 "repair_state='waiting_review',repair_message=?,repair_error=NULL,"
                 'repair_completed_at=?,review_reason=?,approved_at=NULL,'
-                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
-                (message, now, message, now, claim.id),
+                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? '
+                'AND lease_owner=? AND lease_generation=?',
+                (
+                    message,
+                    now,
+                    message,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise LeaseLost('转码修复任务租约已失效')
+            connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+                'AND owner_id=? AND source_generation=?',
+                (claim.id, self._repair_source_generation(claim)),
+            )
+            return True
 
-        await self._database.write(finish)
+        active = await self._database.write(finish)
         audit(
             'transcode_repair_submitted',
             job_id=claim.id,
@@ -1639,7 +1991,7 @@ class UploadTaskActionManager:
             remux_parts=sum(
                 1 for part in failed if repair_modes[part.local_id] == 'remux'
             ),
-            result='waiting_review',
+            result='waiting_review' if active else 'deleted_local_only',
         )
 
     @staticmethod
@@ -1676,22 +2028,53 @@ class UploadTaskActionManager:
         )
 
     async def _unknown_repair(self, claim: LeaseClaim) -> None:
-        await self._finish(
-            claim,
-            {
-                'state': 'paused',
-                'repair_state': 'unknown_outcome',
-                'repair_message': None,
-                'repair_error': '稿件编辑结果未知，请先到创作中心核对',
-                'review_reason': '转码修复的稿件编辑结果未知，需要远端核对',
-                'repair_completed_at': int(self._clock()),
-            },
-        )
+        now = int(self._clock())
+
+        def unknown(connection: sqlite3.Connection) -> bool:
+            active = self._repair_owner_active(connection, claim)
+            self._ack_repair_intent(
+                connection,
+                claim,
+                side_effect_key='archive_edit',
+                outcome_state='unknown_terminal',
+                now=now,
+            )
+            if not active:
+                self._release_deleted_claim(connection, claim, now=now)
+                return False
+            self._ack_repair_intent(
+                connection,
+                claim,
+                side_effect_key=self._repair_lease_key(claim),
+                outcome_state='unknown_terminal',
+                now=now,
+            )
+            cursor = connection.execute(
+                "UPDATE upload_jobs SET state='paused',"
+                "repair_state='unknown_outcome',repair_message=NULL,"
+                'repair_error=?,review_reason=?,repair_completed_at=?,'
+                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? '
+                'AND lease_owner=? AND lease_generation=?',
+                (
+                    '稿件编辑结果未知，请先到创作中心核对',
+                    '转码修复的稿件编辑结果未知，需要远端核对',
+                    now,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('转码修复任务租约已失效')
+            return True
+
+        active = await self._database.write(unknown)
         audit(
             'transcode_repair_unknown',
             level='WARNING',
             job_id=claim.id,
-            result='unknown_outcome',
+            result='unknown_outcome' if active else 'unknown_terminal',
         )
 
     async def _finish(self, claim: LeaseClaim, values: Mapping[str, Any]) -> None:
@@ -1705,25 +2088,38 @@ class UploadTaskActionManager:
         }
         if not values or not set(values) <= allowed:
             raise ValueError('invalid repair update')
-        assignments = ['{}=?'.format(column) for column in values]
-        assignments.extend(('lease_owner=NULL', 'lease_until=NULL', 'updated_at=?'))
-        parameters: List[Any] = list(values.values())
-        parameters.append(int(self._clock()))
-        parameters.extend((claim.id, claim.lease_owner, claim.lease_generation))
-        updated = await self._database.execute(
-            'UPDATE upload_jobs SET {} WHERE id=? AND lease_owner=? '
-            'AND lease_generation=? AND operator_paused=0 AND EXISTS('
-            'SELECT 1 FROM recording_sessions session '
-            'WHERE session.id=upload_jobs.session_id '
-            "AND session.deletion_state='none')".format(','.join(assignments)),
-            parameters,
-        )
-        if updated != 1:
-            state = await self._database.scalar(
-                'SELECT repair_state FROM upload_jobs WHERE id=?', (claim.id,)
+        now = int(self._clock())
+
+        def finish(connection: sqlite3.Connection) -> bool:
+            if not self._repair_owner_active(connection, claim):
+                self._release_deleted_claim(connection, claim, now=now)
+                return False
+            assignments = ['{}=?'.format(column) for column in values]
+            assignments.extend(('lease_owner=NULL', 'lease_until=NULL', 'updated_at=?'))
+            parameters: List[Any] = list(values.values())
+            parameters.append(now)
+            parameters.extend((claim.id, claim.lease_owner, claim.lease_generation))
+            cursor = connection.execute(
+                'UPDATE upload_jobs SET {} WHERE id=? AND lease_owner=? '
+                'AND lease_generation=? AND operator_paused=0'.format(
+                    ','.join(assignments)
+                ),
+                parameters,
             )
-            if state not in ('failed', 'unknown_outcome'):
+            if cursor.rowcount != 1:
                 raise LeaseLost('转码修复任务租约已失效')
+            connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+                'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+                (
+                    claim.id,
+                    self._repair_lease_key(claim),
+                    self._repair_source_generation(claim),
+                ),
+            )
+            return True
+
+        await self._database.write(finish)
 
     @staticmethod
     def _require_claim(connection: sqlite3.Connection, claim: LeaseClaim) -> None:
@@ -1732,8 +2128,14 @@ class UploadTaskActionManager:
             'JOIN recording_sessions session ON session.id=job.session_id '
             'WHERE job.id=? AND job.lease_owner=? '
             'AND job.lease_generation=? AND job.operator_paused=0 '
-            "AND session.deletion_state='none'",
-            (claim.id, claim.lease_owner, claim.lease_generation),
+            "AND session.deletion_state='none' "
+            'AND session.cancellation_generation=?',
+            (
+                claim.id,
+                claim.lease_owner,
+                claim.lease_generation,
+                UploadTaskActionManager._repair_source_generation(claim),
+            ),
         ).fetchone()
         if row is None:
             raise LeaseLost('转码修复任务租约已失效')
@@ -1746,8 +2148,15 @@ class UploadTaskActionManager:
             'WHERE job.id=? AND job.lease_owner=? '
             'AND job.lease_generation=? AND job.lease_until>? '
             "AND job.repair_state IN ('checking','reuploading','editing') "
-            "AND job.operator_paused=0 AND session.deletion_state='none'",
-            (claim.id, claim.lease_owner, claim.lease_generation, now),
+            "AND job.operator_paused=0 AND session.deletion_state='none' "
+            'AND session.cancellation_generation=?',
+            (
+                claim.id,
+                claim.lease_owner,
+                claim.lease_generation,
+                now,
+                self._repair_source_generation(claim),
+            ),
         )
         if row is None:
             raise LeaseLost('转码修复任务租约已失效')

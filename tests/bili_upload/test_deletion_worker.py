@@ -797,6 +797,53 @@ async def test_worker_waits_for_remote_handoff_after_upload_lease_release(
 
 
 @pytest.mark.asyncio
+async def test_worker_waits_for_repair_edit_handoff_after_repair_lease_release(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        paths = await _seed_session(database, tmp_path)
+        await database.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'account',X'00',1,'k','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'repair_state,created_at,updated_at) '
+            "VALUES(9,1,1,'{}','paused','confirmed','unknown_outcome',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('repair',9,'archive_edit',0,'in_flight','{}',NULL)"
+        )
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        await worker.request_session(1, manager_subject='manager')
+
+        assert await worker.run_once() == ('session', 1)
+        assert paths[0].exists()
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 1
+
+        await database.execute(
+            "UPDATE owner_handoff_outcomes SET outcome_state='unknown_terminal',"
+            "acknowledged_at=10 WHERE owner_kind='repair' AND owner_id=9 "
+            "AND side_effect_key='archive_edit'"
+        )
+        assert await worker.run_once() == ('session', 1)
+        assert not paths[0].exists()
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_remote_result_is_acknowledged_before_local_rows_are_deleted(
     tmp_path: Path,
 ) -> None:

@@ -415,8 +415,9 @@ class LocalDeletionWorker:
                 "WHERE outcome.outcome_state='in_flight' AND (("
                 "outcome.owner_kind='upload' AND outcome.owner_id=?) OR ("
                 "outcome.owner_kind='upos' AND outcome.owner_id IN("
-                'SELECT id FROM upload_parts WHERE job_id=?)))',
-                (job_id, job_id),
+                'SELECT id FROM upload_parts WHERE job_id=?)) OR ('
+                "outcome.owner_kind='repair' AND outcome.owner_id=?))",
+                (job_id, job_id, job_id),
             ).fetchone()[0]
             if int(remote_handoffs):
                 blockers.append('remote_handoff')

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -9,6 +11,7 @@ import pytest
 from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim, LeaseLost
 from blrec.bili_upload.deletion_worker import LocalDeletionWorker
+from blrec.bili_upload.errors import RemoteOutcomeUnknown
 from blrec.bili_upload.task_actions import (
     UploadTaskActionManager,
     UploadTaskActionRejected,
@@ -72,6 +75,42 @@ class FakeRemuxer:
     @staticmethod
     def remove(path: str) -> None:
         Path(path).unlink(missing_ok=True)
+
+
+class BlockingRemuxer(FakeRemuxer):
+    def __init__(self, directory: Path) -> None:
+        super().__init__(directory)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def remux(self, source_path: str, *, part_id: int) -> RemuxedArtifact:
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError('test remux barrier timed out')
+        return super().remux(source_path, part_id=part_id)
+
+
+class BlockingEditProtocol(FakeProtocol):
+    def __init__(self, archive: Mapping[str, Any]) -> None:
+        super().__init__(archive)
+        self.edit_started = asyncio.Event()
+        self.edit_release = asyncio.Event()
+
+    async def edit_archive(
+        self, _bundle: Any, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        self.edit_calls.append(payload)
+        self.edit_started.set()
+        await self.edit_release.wait()
+        return {'code': 0, 'data': {'aid': 303, 'bvid': 'BVfixture'}}
+
+
+class UnknownEditProtocol(FakeProtocol):
+    async def edit_archive(
+        self, _bundle: Any, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        self.edit_calls.append(payload)
+        raise RemoteOutcomeUnknown('response lost')
 
 
 class LeaseStealingProtocol(FakeProtocol):
@@ -614,6 +653,279 @@ async def test_repair_recovery_distinguishes_safe_resume_from_unknown_edit(
             'lease_owner': None,
             'lease_until': None,
         }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('interrupted_state', 'expected_outcome'),
+    (('reuploading', 'cancelled_local'), ('editing', 'unknown_terminal')),
+)
+async def test_repair_recovery_terminally_acknowledges_the_interrupted_owner(
+    tmp_path: Path, interrupted_state: str, expected_outcome: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        await database.execute(
+            'UPDATE upload_jobs SET repair_state=?,lease_owner=?,lease_generation=4,'
+            'lease_until=? WHERE id=9',
+            (interrupted_state, 'stale-worker', 2_000),
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('repair',9,'lease:4',0,'in_flight','{}',NULL)"
+        )
+        if interrupted_state == 'editing':
+            await database.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('repair',9,'archive_edit',0,'in_flight','{}',NULL)"
+            )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        await manager.recover_interrupted()
+
+        outcomes = await database.fetchall(
+            'SELECT side_effect_key,outcome_state,acknowledged_at '
+            "FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+            'AND owner_id=9 ORDER BY side_effect_key'
+        )
+        expected = [
+            {
+                'side_effect_key': 'lease:4',
+                'outcome_state': expected_outcome,
+                'acknowledged_at': 1000,
+            }
+        ]
+        if interrupted_state == 'editing':
+            expected.insert(
+                0,
+                {
+                    'side_effect_key': 'archive_edit',
+                    'outcome_state': 'unknown_terminal',
+                    'acknowledged_at': 1000,
+                },
+            )
+        assert [dict(row) for row in outcomes] == expected
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_claim_captures_session_generation_and_journals_owner(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+        await manager.request_transcode_repair(9, manager_subject='manager')
+
+        claim = await manager._claim_repair()
+
+        assert claim is not None
+        assert claim.cancellation_generation == 0
+        outcome = await database.fetchone(
+            'SELECT owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,acknowledged_at FROM owner_handoff_outcomes '
+            "WHERE owner_kind='repair' AND owner_id=9"
+        )
+        assert outcome is not None
+        assert dict(outcome) == {
+            'owner_kind': 'repair',
+            'owner_id': 9,
+            'side_effect_key': 'lease:1',
+            'source_generation': 0,
+            'outcome_state': 'in_flight',
+            'acknowledged_at': None,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_deletion_during_remux_drains_and_removes_artifact_before_ack(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        await database.execute(
+            "UPDATE upload_parts SET repair_stage='original_waiting_review',"
+            'repair_original_attempts=1 WHERE id=12'
+        )
+        remuxer = BlockingRemuxer(tmp_path)
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response(second_state='failed')),
+            tmp_path,
+            remuxer=remuxer,
+        )
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        repair = asyncio.create_task(manager.run_once())
+        started = await asyncio.get_running_loop().run_in_executor(
+            None, remuxer.started.wait, 2
+        )
+        assert started
+
+        await manager.delete_session(1, manager_subject='manager')
+        worker = manager._deletion_worker
+        assert worker is not None
+        assert await worker.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 1
+
+        remuxer.release.set()
+        assert await asyncio.wait_for(repair, timeout=2) == 9
+
+        assert not (tmp_path / 'remux-12.mp4').exists()
+        owner = await database.fetchone(
+            'SELECT outcome_state,acknowledged_at FROM owner_handoff_outcomes '
+            "WHERE owner_kind='repair' AND owner_id=9 "
+            "AND side_effect_key='lease:1'"
+        )
+        assert owner is not None
+        assert dict(owner) == {
+            'outcome_state': 'cancelled_local',
+            'acknowledged_at': 1000,
+        }
+        job = await database.fetchone(
+            'SELECT repair_state,lease_owner FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {'repair_state': 'failed', 'lease_owner': None}
+
+        assert await worker.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        remuxer.release.set()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_deletion_during_archive_edit_records_remote_handoff_before_release(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        protocol = BlockingEditProtocol(archive_response(second_state='failed'))
+        manager, _, _ = make_manager(database, protocol, tmp_path)
+        await manager.request_transcode_repair(9, manager_subject='manager')
+        repair = asyncio.create_task(manager.run_once())
+        await asyncio.wait_for(protocol.edit_started.wait(), timeout=2)
+
+        intent = await database.fetchone(
+            'SELECT source_generation,outcome_state,acknowledged_at '
+            'FROM owner_handoff_outcomes '
+            "WHERE owner_kind='repair' AND owner_id=9 "
+            "AND side_effect_key='archive_edit'"
+        )
+        assert intent is not None
+        assert dict(intent) == {
+            'source_generation': 0,
+            'outcome_state': 'in_flight',
+            'acknowledged_at': None,
+        }
+        await manager.delete_session(1, manager_subject='manager')
+        worker = manager._deletion_worker
+        assert worker is not None
+        assert await worker.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 1
+
+        protocol.edit_release.set()
+        assert await asyncio.wait_for(repair, timeout=2) == 9
+
+        outcomes = await database.fetchall(
+            'SELECT side_effect_key,outcome_state,outcome_json,acknowledged_at '
+            "FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+            'AND owner_id=9 ORDER BY side_effect_key'
+        )
+        assert [dict(row) for row in outcomes] == [
+            {
+                'side_effect_key': 'archive_edit',
+                'outcome_state': 'confirmed_success',
+                'outcome_json': '{}',
+                'acknowledged_at': 1000,
+            },
+            {
+                'side_effect_key': 'lease:1',
+                'outcome_state': 'cancelled_local',
+                'outcome_json': '{}',
+                'acknowledged_at': 1000,
+            },
+        ]
+        job = await database.fetchone(
+            'SELECT state,repair_state,lease_owner FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'repair_state': 'failed',
+            'lease_owner': None,
+        }
+        assert await worker.run_once() == ('session', 1)
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        protocol.edit_release.set()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_archive_edit_is_terminal_and_never_blindly_requeued(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path)
+        protocol = UnknownEditProtocol(archive_response(second_state='failed'))
+        manager, _, _ = make_manager(database, protocol, tmp_path)
+        await manager.request_transcode_repair(9, manager_subject='manager')
+
+        assert await manager.run_once() == 9
+        await manager.recover_interrupted()
+        assert await manager.run_once() is None
+
+        outcomes = await database.fetchall(
+            'SELECT side_effect_key,outcome_state,acknowledged_at '
+            "FROM owner_handoff_outcomes WHERE owner_kind='repair' "
+            'AND owner_id=9 ORDER BY side_effect_key'
+        )
+        assert [dict(row) for row in outcomes] == [
+            {
+                'side_effect_key': 'archive_edit',
+                'outcome_state': 'unknown_terminal',
+                'acknowledged_at': 1000,
+            },
+            {
+                'side_effect_key': 'lease:1',
+                'outcome_state': 'unknown_terminal',
+                'acknowledged_at': 1000,
+            },
+        ]
+        job = await database.fetchone(
+            'SELECT state,repair_state,lease_owner FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'repair_state': 'unknown_outcome',
+            'lease_owner': None,
+        }
+        assert len(protocol.edit_calls) == 1
     finally:
         await database.close()
 
