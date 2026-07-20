@@ -62,7 +62,7 @@ class RateLimitedUploader(FakeUploader):
     async def upload_part(self, part_id: int, *, bundle: Any, claim: LeaseClaim) -> str:
         if self.rate_limited:
             self.rate_limited = False
-            raise BiliApiError(406, operation='preupload')
+            raise BiliApiError(406, operation='preupload', retry_after_seconds=240)
         return await super().upload_part(part_id, bundle=bundle, claim=claim)
 
 
@@ -847,13 +847,14 @@ async def test_preupload_rate_limit_waits_and_retries_without_pausing(
 
         assert await worker.run_once() == 1
         waiting = await database.fetchone(
-            'SELECT state,submit_state,next_attempt_at,review_reason '
+            'SELECT state,submit_state,next_attempt_at,review_reason,lease_owner '
             'FROM upload_jobs WHERE id=1'
         )
         assert waiting is not None
         assert waiting['state'] == 'uploading'
         assert waiting['submit_state'] == 'prepared'
-        assert int(waiting['next_attempt_at']) > 1000
+        assert int(waiting['next_attempt_at']) == 1240
+        assert waiting['lease_owner'] is None
         assert '自动重试' in str(waiting['review_reason'])
         assert protocol.submit_calls == []
 

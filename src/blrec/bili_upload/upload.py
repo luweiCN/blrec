@@ -2379,7 +2379,14 @@ class UploadCoordinator:
             return
         except BiliApiError as error:
             if error.code in (406, 408, 425, 429):
-                delay = min(15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4)))
+                computed_delay = min(
+                    15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4))
+                )
+                delay = (
+                    computed_delay
+                    if error.retry_after_seconds is None
+                    else max(1, min(900, int(error.retry_after_seconds)))
+                )
                 values = {
                     'state': 'submitting' if submit_started else 'uploading',
                     'submit_state': 'prepared',

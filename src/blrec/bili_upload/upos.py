@@ -5,12 +5,13 @@ import hashlib
 import json
 import math
 import os
+import random
 import sqlite3
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, replace
 from functools import partial
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Tuple
 
 from blrec.logging.audit import audit
 
@@ -179,13 +180,15 @@ class UposUploader:
         max_chunk_attempts: int = 3,
         clock: Callable[[], float] = time.time,
         stop_requested: Callable[[], bool] = lambda: False,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[float, float], float] = random.uniform,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError('chunk size must be positive')
         if concurrency < 1 or concurrency > 3:
             raise ValueError('chunk concurrency must be between 1 and 3')
-        if max_chunk_attempts < 1:
-            raise ValueError('chunk attempts must be positive')
+        if max_chunk_attempts < 1 or max_chunk_attempts > 3:
+            raise ValueError('chunk attempts must be between 1 and 3')
         self._database = database
         self._protocol = protocol
         self._chunk_size = chunk_size
@@ -193,6 +196,8 @@ class UposUploader:
         self._max_chunk_attempts = max_chunk_attempts
         self._clock = clock
         self._stop_requested = stop_requested
+        self._sleeper = sleeper
+        self._jitter = jitter
         self._progress_milestones: Dict[int, int] = {}
         self._preupload_admission = _PreuploadAdmissionWindow(clock)
 
@@ -300,33 +305,49 @@ class UposUploader:
             )
             raise UposUploadDeferred(retry_after, 'admission window')
         await self._update_part(part_id, claim, {'upload_state': 'preupload'})
-        try:
-            prepared = await self._protocol.preupload(
-                bundle,
-                {
-                    'r': 'upos',
-                    'profile': 'ugcupos/bup',
-                    'ssl': 0,
-                    'version': '2.8.12',
-                    'build': 2081200,
-                    'name': os.path.basename(identity.canonical_path),
-                    'size': identity.size,
-                },
-            )
-        except BiliApiError as error:
-            if error.code not in (406, 429):
-                raise
-            retry_after = self._preupload_admission.rate_limited()
-            await self._update_part(part_id, claim, {'upload_state': 'prepared'})
-            audit(
-                'upload_preupload_rate_limited',
-                level='WARNING',
-                job_id=claim.id,
-                part_id=part_id,
-                error_code=error.code,
-                retry_after_seconds=retry_after,
-            )
-            raise UposUploadDeferred(retry_after, 'rate limited') from None
+        params = {
+            'r': 'upos',
+            'profile': 'ugcupos/bup',
+            'ssl': 0,
+            'version': '2.8.12',
+            'build': 2081200,
+            'name': os.path.basename(identity.canonical_path),
+            'size': identity.size,
+        }
+        for attempt in range(1, self._max_chunk_attempts + 1):
+            try:
+                prepared = await self._protocol.preupload(bundle, params)
+                break
+            except BiliApiError as error:
+                if error.http_status is not None and 500 <= error.http_status <= 599:
+                    if attempt < self._max_chunk_attempts:
+                        continue
+                    retry_after = self._bounded_retry_after(error, 30)
+                    reason = 'service unavailable'
+                    event = 'upload_preupload_deferred'
+                elif error.code in (406, 408, 425, 429):
+                    retry_after = self._bounded_retry_after(
+                        error,
+                        (
+                            self._preupload_admission.rate_limited()
+                            if error.code in (406, 429)
+                            else 30
+                        ),
+                    )
+                    reason = 'rate limited'
+                    event = 'upload_preupload_rate_limited'
+                else:
+                    raise
+                await self._update_part(part_id, claim, {'upload_state': 'prepared'})
+                audit(
+                    event,
+                    level='WARNING',
+                    job_id=claim.id,
+                    part_id=part_id,
+                    error_code=error.code,
+                    retry_after_seconds=retry_after,
+                )
+                raise UposUploadDeferred(retry_after, reason) from None
         self._preupload_admission.succeeded()
         exported = self._protocol.export_upos_session(prepared.session)
         session_json = self._encode_session(exported, renewal_count)
@@ -405,6 +426,10 @@ class UposUploader:
         while attempt < self._max_chunk_attempts:
             if self._stop_requested():
                 raise UposUploadStopped('UPOS upload stopped at a chunk boundary')
+            if attempt:
+                upper = float(min(attempt, 2))
+                delay = max(0.0, min(upper, self._jitter(0.0, upper)))
+                await self._sleeper(delay)
             await self._verify_identity(part_id, identity, claim)
             body = await self._read_chunk(
                 identity.canonical_path, chunk.offset, chunk.size
@@ -446,11 +471,32 @@ class UposUploader:
                     raise UposUploadStopped('local deletion requested') from None
                 if error.code in (401, 403):
                     raise _SessionExpired() from None
+                if error.http_status is not None and 500 <= error.http_status <= 599:
+                    if attempt < self._max_chunk_attempts:
+                        await self._update_chunk(
+                            part_id,
+                            chunk.chunk_no,
+                            claim,
+                            session_json,
+                            state='prepared',
+                            attempt=attempt,
+                        )
+                        continue
+                    await self._defer_chunk(
+                        part_id,
+                        chunk.chunk_no,
+                        claim,
+                        session_json,
+                        reason='UPOS chunk service is temporarily unavailable',
+                        retry_after_seconds=self._bounded_retry_after(error, 30),
+                    )
                 if error.code in (406, 408, 425, 429):
                     retry_after = (
-                        self._preupload_admission.rate_limited()
+                        self._bounded_retry_after(
+                            error, self._preupload_admission.rate_limited()
+                        )
                         if error.code in (406, 429)
-                        else 30
+                        else self._bounded_retry_after(error, 30)
                     )
                     await self._defer_chunk(
                         part_id,
@@ -624,10 +670,13 @@ class UposUploader:
             if error.code in (401, 403):
                 raise _SessionExpired() from None
             if error.code in (406, 408, 425, 429):
-                delay = (
-                    self._preupload_admission.rate_limited()
-                    if error.code in (406, 429)
-                    else 60
+                delay = self._bounded_retry_after(
+                    error,
+                    (
+                        self._preupload_admission.rate_limited()
+                        if error.code in (406, 429)
+                        else 60
+                    ),
                 )
                 audit(
                     'upload_completion_deferred',
@@ -702,6 +751,13 @@ class UposUploader:
             reason=reason,
         )
         raise UposUploadDeferred(retry_after_seconds, reason)
+
+    @staticmethod
+    def _bounded_retry_after(error: BiliApiError, default: int) -> int:
+        value = error.retry_after_seconds
+        if value is None:
+            return default
+        return max(1, min(900, int(value)))
 
     async def _verify_identity(
         self, part_id: int, expected: FileIdentity, claim: LeaseClaim

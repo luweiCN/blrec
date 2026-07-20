@@ -52,10 +52,13 @@ class FakeProtocol:
         self.max_active_chunks = 0
         self.chunk_delay = 0.0
         self.preupload_error: Optional[BaseException] = None
+        self.preupload_errors: List[BaseException] = []
         self.chunk_errors: List[BaseException] = []
 
     async def preupload(self, _bundle: Any, params: Mapping[str, Any]) -> Any:
         self.preupload_calls.append(params)
+        if self.preupload_errors:
+            raise self.preupload_errors.pop(0)
         if self.preupload_error is not None:
             error, self.preupload_error = self.preupload_error, None
             raise error
@@ -385,6 +388,92 @@ async def test_preupload_406_defers_without_pausing_job(tmp_path: Path) -> None:
         assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
             'ready'
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_http_503_retries_at_most_three_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.preupload_errors = [
+            BiliApiError(503, operation='preupload_init', http_status=503),
+            BiliApiError(503, operation='preupload_init', http_status=503),
+        ]
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+
+        await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert len(protocol.preupload_calls) == 3
+        assert await database.scalar(
+            'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+        ) == ('confirmed')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_http_503_exhaustion_defers_with_server_delay(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.preupload_errors = [
+            BiliApiError(
+                503,
+                operation='preupload_init',
+                retry_after_seconds=240,
+                http_status=503,
+            )
+            for _ in range(3)
+        ]
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+
+        with pytest.raises(UposUploadDeferred) as raised:
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert raised.value.retry_after_seconds == 240
+        assert len(protocol.preupload_calls) == 3
+        assert await database.scalar(
+            'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+        ) == ('prepared')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_preupload_business_503_is_not_retried_as_http_failure(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.preupload_error = BiliApiError(503, operation='preupload')
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+
+        with pytest.raises(BiliApiError):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert len(protocol.preupload_calls) == 1
     finally:
         await database.close()
 
@@ -756,6 +845,81 @@ async def test_transient_chunk_failures_defer_and_resume_without_pausing(
             == 'confirmed'
         )
         assert protocol.chunk_calls == [0, 0, 0, 0]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_chunk_safe_retries_use_bounded_jittered_spacing(tmp_path: Path) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    delays: List[float] = []
+
+    async def sleeper(delay: float) -> None:
+        delays.append(delay)
+
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.chunk_errors = [
+            BiliApiError(500, operation='upload_chunk', http_status=500),
+            BiliApiError(500, operation='upload_chunk', http_status=500),
+        ]
+        uploader = UposUploader(
+            database,
+            protocol,
+            chunk_size=4,
+            concurrency=1,
+            sleeper=sleeper,
+            jitter=lambda low, high: high,
+        )
+
+        await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert protocol.chunk_calls == [0, 0, 0]
+        assert delays == [1.0, 2.0]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_chunk_http_503_exhaustion_defers_with_server_delay(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.chunk_errors = [
+            BiliApiError(
+                503, operation='upload_chunk', retry_after_seconds=240, http_status=503
+            )
+            for _ in range(3)
+        ]
+        uploader = UposUploader(
+            database,
+            protocol,
+            chunk_size=4,
+            concurrency=1,
+            sleeper=lambda _delay: asyncio.sleep(0),
+            jitter=lambda _low, high: high,
+        )
+
+        with pytest.raises(UposUploadDeferred) as raised:
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert raised.value.retry_after_seconds == 240
+        assert protocol.chunk_calls == [0, 0, 0]
+        assert await database.scalar(
+            'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+        ) == ('uploading')
     finally:
         await database.close()
 

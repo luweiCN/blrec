@@ -1,5 +1,7 @@
 import asyncio
 import json
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
@@ -19,6 +21,7 @@ from blrec.bili_upload.protocol import (
     ProtocolRequest,
     ProtocolResponse,
     TransportFailure,
+    protocol_request_deadline,
 )
 from blrec.bili_upload.signing import (
     PROTOCOL_MATRIX,
@@ -517,8 +520,10 @@ async def test_non_idempotent_transport_failures_preserve_send_boundary(
 class StaticResponseTransport:
     def __init__(self, response: ProtocolResponse) -> None:
         self.response = response
+        self.calls = 0
 
     async def send(self, request: ProtocolRequest) -> ProtocolResponse:
+        self.calls += 1
         return self.response
 
 
@@ -533,6 +538,194 @@ async def test_http_client_error_retains_the_safe_operation_name() -> None:
 
     assert error.value.code == 412
     assert error.value.operation == 'web_nav'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('value', 'expected'),
+    [
+        ('240', 240),
+        ('0', None),
+        ('-1', None),
+        ('invalid secret-value', None),
+        ('1200', 900),
+        (format_datetime(datetime.fromtimestamp(340, timezone.utc)), 240),
+    ],
+)
+async def test_retry_after_is_sanitized_and_bounded(value: str, expected: Any) -> None:
+    client = protocol_client(
+        StaticResponseTransport(
+            ProtocolResponse(status=429, headers={'Retry-After': value}, body=b'')
+        )
+    )
+
+    with pytest.raises(BiliApiError) as raised:
+        await client.web_nav(credential_fixture())
+
+    assert raised.value.retry_after_seconds == expected
+    assert value not in repr(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_http_5xx_uses_idempotency_taxonomy() -> None:
+    response = ProtocolResponse(
+        status=503, headers={'Retry-After': '240'}, body=b'upstream-secret'
+    )
+
+    retryable_transport = StaticResponseTransport(response)
+    with pytest.raises(BiliApiError) as retryable:
+        await protocol_client(retryable_transport).web_nav(credential_fixture())
+    assert retryable.value.code == 503
+    assert retryable.value.http_status == 503
+    assert retryable.value.retry_after_seconds == 240
+    assert retryable_transport.calls == 1
+
+    unknown_transport = StaticResponseTransport(response)
+    with pytest.raises(RemoteOutcomeUnknown):
+        await protocol_client(unknown_transport).submit_archive(
+            credential_fixture(), {'videos': []}
+        )
+    assert unknown_transport.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_json_business_503_is_not_misclassified_as_http_5xx() -> None:
+    transport = StaticResponseTransport(
+        ProtocolResponse(
+            status=200,
+            headers={'Retry-After': '240'},
+            body=b'{"code":503,"message":"busy"}',
+        )
+    )
+
+    with pytest.raises(BiliApiError) as raised:
+        await protocol_client(transport).submit_archive(
+            credential_fixture(), {'videos': []}
+        )
+
+    assert raised.value.code == 503
+    assert raised.value.http_status is None
+    assert raised.value.retry_after_seconds is None
+    assert transport.calls == 1
+
+
+def test_transport_has_explicit_phase_timeouts() -> None:
+    transport = AiohttpProtocolTransport(timeout_seconds=30)
+
+    assert transport._timeout.total == 30
+    assert transport._timeout.connect == 5
+    assert transport._timeout.sock_connect == 5
+    assert transport._timeout.sock_read == 20
+
+
+@pytest.mark.asyncio
+async def test_protocol_deadline_reduces_each_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: Dict[str, Any] = {}
+
+    class Response:
+        status = 200
+        headers: Mapping[str, str] = {}
+
+        async def read(self) -> bytes:
+            return b'{}'
+
+    class RequestContext:
+        async def __aenter__(self) -> Response:
+            return Response()
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class Session:
+        def request(self, *_args: Any, **kwargs: Any) -> RequestContext:
+            captured.update(kwargs)
+            return RequestContext()
+
+    transport = AiohttpProtocolTransport(timeout_seconds=30)
+
+    async def get_session(*_args: Any) -> Session:
+        return Session()
+
+    monkeypatch.setattr(transport, '_get_session', get_session)
+    request = ProtocolRequest(
+        operation='fixture',
+        method='GET',
+        url='https://example.invalid/deadline',
+        headers={},
+    )
+
+    with protocol_request_deadline(0.01):
+        await transport.send(request)
+
+    timeout = captured['timeout']
+    assert 0 < timeout.total <= 0.01
+    assert 0 < timeout.connect <= timeout.total
+    assert 0 < timeout.sock_connect <= timeout.total
+    assert 0 < timeout.sock_read <= timeout.total
+
+
+@pytest.mark.asyncio
+async def test_expired_protocol_deadline_fails_before_opening_request() -> None:
+    transport = AiohttpProtocolTransport(timeout_seconds=30)
+    request = ProtocolRequest(
+        operation='fixture',
+        method='GET',
+        url='https://example.invalid/never-opened',
+        headers={},
+    )
+
+    try:
+        with protocol_request_deadline(0.001):
+            await asyncio.sleep(0.01)
+            with pytest.raises(TransportFailure) as raised:
+                await transport.send(request)
+        assert raised.value.headers_sent is False
+        assert transport._session is None
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_protocol_deadline_classifies_timeout_after_headers() -> None:
+    handlers = []
+
+    async def hold_response(reader: Any, writer: Any) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            handlers.append(task)
+        try:
+            await reader.readuntil(b'\r\n\r\n')
+            await asyncio.sleep(0.1)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(hold_response, '127.0.0.1', 0)
+    port = server.sockets[0].getsockname()[1]
+    transport = AiohttpProtocolTransport(timeout_seconds=30)
+    request = ProtocolRequest(
+        operation='fixture',
+        method='POST',
+        url='http://127.0.0.1:{}/fixture'.format(port),
+        headers={},
+        form=(('value', 'redacted'),),
+    )
+
+    try:
+        with protocol_request_deadline(0.01):
+            with pytest.raises(TransportFailure) as raised:
+                await transport.send(request)
+        assert raised.value.headers_sent is True
+    finally:
+        await transport.close()
+        server.close()
+        await server.wait_closed()
+        for task in handlers:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
 
 
 @pytest.mark.asyncio

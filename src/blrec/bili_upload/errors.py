@@ -38,11 +38,15 @@ class BiliApiError(RuntimeError):
         *,
         operation: Optional[str] = None,
         details: Optional[Mapping[str, Any]] = None,
+        retry_after_seconds: Optional[int] = None,
+        http_status: Optional[int] = None,
     ) -> None:
         self.code = code
         self.public_message = public_message
         self.operation = operation
         self.details = {} if details is None else dict(details)
+        self.retry_after_seconds = retry_after_seconds
+        self.http_status = http_status
         super().__init__('Bilibili API error {}'.format(code))
 
     def __repr__(self) -> str:

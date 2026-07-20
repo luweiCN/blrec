@@ -5,8 +5,23 @@ import posixpath
 import secrets
 import socket
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from math import ceil
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -32,11 +47,28 @@ __all__ = (
     'ProtocolResponse',
     'TransportFailure',
     'UposSession',
+    'protocol_request_deadline',
 )
 
 
 Headers = Mapping[str, str]
 Parameters = Tuple[Tuple[str, str], ...]
+_REQUEST_DEADLINE: ContextVar[Optional[float]] = ContextVar(
+    'bili_protocol_request_deadline', default=None
+)
+
+
+@contextmanager
+def protocol_request_deadline(seconds: float) -> Iterator[None]:
+    deadline = time.monotonic() + max(0.0, seconds)
+    current = _REQUEST_DEADLINE.get()
+    if current is not None:
+        deadline = min(current, deadline)
+    token = _REQUEST_DEADLINE.set(deadline)
+    try:
+        yield
+    finally:
+        _REQUEST_DEADLINE.reset(token)
 
 
 @dataclass(frozen=True, repr=False)
@@ -101,7 +133,14 @@ class AiohttpProtocolTransport:
         timeout_seconds: float = 30,
         route_manager: Optional[NetworkRouteManager] = None,
     ) -> None:
-        self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        if timeout_seconds <= 0:
+            raise ValueError('protocol timeout must be positive')
+        self._timeout = aiohttp.ClientTimeout(
+            total=timeout_seconds,
+            connect=min(5, timeout_seconds),
+            sock_connect=min(5, timeout_seconds),
+            sock_read=min(20, timeout_seconds),
+        )
         self._session: Optional[aiohttp.ClientSession] = None
         self._route_manager = route_manager
         self._sessions: Dict[
@@ -115,6 +154,9 @@ class AiohttpProtocolTransport:
         return 'bili_api'
 
     async def send(self, request: ProtocolRequest) -> ProtocolResponse:
+        # Reject an already-expired operation before opening a session. Recompute
+        # below so session/route setup time is also charged to the same deadline.
+        self._request_timeout()
         purpose = self.purpose_for_operation(request.operation)
         selection = (
             None
@@ -124,12 +166,13 @@ class AiohttpProtocolTransport:
         session = await self._get_session(
             purpose, None if selection is None else selection.source_address
         )
+        request_timeout = self._request_timeout()
         trace_context = {'headers_sent': False}
         kwargs: Dict[str, Any] = {
             'headers': dict(request.headers),
             'params': list(request.query),
             'allow_redirects': False,
-            'timeout': self._timeout,
+            'timeout': request_timeout,
             'trace_request_ctx': trace_context,
         }
         if request.form:
@@ -141,6 +184,7 @@ class AiohttpProtocolTransport:
                     kwargs['data'] = self._route_manager.upload_limiter.stream(
                         selection.interface_name, request.body
                     )
+
                 else:
                     self._route_manager.traffic_meter.record(
                         selection.interface_name, purpose, 'up', len(request.body)
@@ -174,6 +218,21 @@ class AiohttpProtocolTransport:
                     self._route_manager.report_success(
                         purpose, selection.interface_name
                     )
+
+    def _request_timeout(self) -> aiohttp.ClientTimeout:
+        deadline = _REQUEST_DEADLINE.get()
+        if deadline is None:
+            return self._timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TransportFailure(headers_sent=False)
+        total = min(float(self._timeout.total or remaining), remaining)
+        return aiohttp.ClientTimeout(
+            total=total,
+            connect=min(float(self._timeout.connect or total), total),
+            sock_connect=min(float(self._timeout.sock_connect or total), total),
+            sock_read=min(float(self._timeout.sock_read or total), total),
+        )
 
     async def close(self) -> None:
         sessions = list(self._sessions.values())
@@ -724,10 +783,23 @@ class BiliProtocolClient:
 
         if 300 <= response.status < 400:
             raise ProtocolContractError('redirect response is not allowed')
+        retry_after = self._retry_after_seconds(response.headers)
         if response.status >= 500:
+            if idempotent:
+                raise BiliApiError(
+                    response.status,
+                    operation=request.operation,
+                    retry_after_seconds=retry_after,
+                    http_status=response.status,
+                )
             raise RemoteOutcomeUnknown(request.operation)
         if response.status >= 400:
-            raise BiliApiError(response.status, operation=request.operation)
+            raise BiliApiError(
+                response.status,
+                operation=request.operation,
+                retry_after_seconds=retry_after,
+                http_status=response.status,
+            )
         if allow_unstructured_success and not response.body.strip():
             return {}
         try:
@@ -753,6 +825,27 @@ class BiliProtocolClient:
         if 'OK' in payload and payload['OK'] != 1:
             raise ProtocolContractError('UPOS operation failed')
         return payload
+
+    def _retry_after_seconds(self, headers: Headers) -> Optional[int]:
+        raw = next(
+            (value for name, value in headers.items() if name.lower() == 'retry-after'),
+            None,
+        )
+        if raw is None:
+            return None
+        try:
+            seconds = int(raw)
+        except (TypeError, ValueError):
+            try:
+                parsed = parsedate_to_datetime(raw)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                seconds = ceil(parsed.timestamp() - self._clock())
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if seconds <= 0:
+            return None
+        return min(900, seconds)
 
     def _url_for(self, operation: str) -> str:
         spec = PROTOCOL_MATRIX[operation]
