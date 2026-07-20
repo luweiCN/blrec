@@ -1,11 +1,13 @@
 import asyncio
+import ntpath
 import os
 import re
 import threading
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 from fastapi import FastAPI, Request
@@ -18,6 +20,80 @@ from blrec.web.media_response import (
     build_media_response,
     open_media_resource,
 )
+
+
+class FakeWindowsOpenApi:
+    def __init__(
+        self,
+        *,
+        attributes: Optional[Dict[str, int]] = None,
+        final_paths: Optional[Dict[str, str]] = None,
+        close_failures: Optional[Tuple[str, ...]] = None,
+    ) -> None:
+        self._attributes = {
+            self._key(path): value for path, value in (attributes or {}).items()
+        }
+        self._final_paths = {
+            self._key(path): value for path, value in (final_paths or {}).items()
+        }
+        self._next_handle = 1
+        self._paths: Dict[int, str] = {}
+        self._kinds: Dict[int, str] = {}
+        self._active: Dict[int, str] = {}
+        self._close_failures = {self._key(path) for path in (close_failures or ())}
+        self.open_calls: List[Tuple[str, str, Tuple[str, ...]]] = []
+        self.closed_paths: List[str] = []
+        self.close_attempts: List[str] = []
+
+    @staticmethod
+    def _key(path: str) -> str:
+        return ntpath.normcase(ntpath.normpath(path))
+
+    def _open(self, kind: str, path: str) -> int:
+        normalized = self._key(path)
+        self.open_calls.append((kind, normalized, tuple(self._active.values())))
+        handle = self._next_handle
+        self._next_handle += 1
+        self._paths[handle] = normalized
+        self._kinds[handle] = kind
+        self._active[handle] = normalized
+        return handle
+
+    def open_root(self, path: str) -> int:
+        return self._open('directory', path)
+
+    def open_directory(self, parent_handle: int, component: str) -> int:
+        return self._open(
+            'directory', ntpath.join(self._paths[parent_handle], component)
+        )
+
+    def open_file(self, parent_handle: int, component: str) -> int:
+        return self._open('file', ntpath.join(self._paths[parent_handle], component))
+
+    def attributes(self, handle: int) -> int:
+        path = self._paths[handle]
+        default = 0x10 if self._kinds[handle] == 'directory' else 0
+        return self._attributes.get(path, default)
+
+    def final_path(self, handle: int) -> str:
+        path = self._paths[handle]
+        return self._final_paths.get(path, path)
+
+    def adopt_file(self, handle: int):
+        del self._active[handle]
+        return BytesIO(b'windows-media')
+
+    def close_handle(self, handle: int) -> None:
+        path = self._active[handle]
+        self.close_attempts.append(path)
+        if path in self._close_failures:
+            raise OSError('simulated CloseHandle failure')
+        del self._active[handle]
+        self.closed_paths.append(path)
+
+    @property
+    def active_paths(self) -> Tuple[str, ...]:
+        return tuple(self._active.values())
 
 
 @contextmanager
@@ -290,6 +366,94 @@ async def test_active_snapshot_rejects_same_size_inode_replacement(
             ),
             snapshot=snapshot,
         )
+
+
+def test_windows_opener_pins_root_and_parents_until_file_handle_is_adopted() -> None:
+    api = FakeWindowsOpenApi()
+
+    file = media_response._open_windows_candidate_file(
+        r'C:\recordings\room\part.mp4', r'C:\recordings', api=api
+    )
+    try:
+        assert file.read() == b'windows-media'
+    finally:
+        file.close()
+
+    root = ntpath.normcase(r'C:\recordings')
+    parent = ntpath.normcase(r'C:\recordings\room')
+    target = ntpath.normcase(r'C:\recordings\room\part.mp4')
+    assert api.open_calls == [
+        ('directory', root, ()),
+        ('directory', parent, (root,)),
+        ('file', target, (root, parent)),
+    ]
+    assert api.closed_paths == [parent, root]
+    assert api.active_paths == ()
+
+
+@pytest.mark.parametrize(
+    'reparse_path', (r'C:\recordings\room', r'C:\recordings\room\part.mp4')
+)
+def test_windows_opener_rejects_parent_and_final_reparse_points(
+    reparse_path: str,
+) -> None:
+    api = FakeWindowsOpenApi(attributes={reparse_path: 0x410})
+
+    with pytest.raises(media_response.MediaResourceUnavailable):
+        media_response._open_windows_candidate_file(
+            r'C:\recordings\room\part.mp4', r'C:\recordings', api=api
+        )
+
+    assert api.active_paths == ()
+
+
+def test_windows_opener_rejects_handle_resolved_outside_trusted_root() -> None:
+    target = r'C:\recordings\room\part.mp4'
+    api = FakeWindowsOpenApi(final_paths={target: r'C:\outside\secret.mp4'})
+
+    with pytest.raises(media_response.MediaResourceUnavailable):
+        media_response._open_windows_candidate_file(target, r'C:\recordings', api=api)
+
+    assert api.active_paths == ()
+
+
+def test_windows_native_backend_allows_recorder_delete_sharing() -> None:
+    assert media_response._WindowsNativeFileApi._SHARE_ACCESS & 0x4
+
+
+def test_windows_close_failure_does_not_mask_security_rejection() -> None:
+    target = r'C:\recordings\room\part.mp4'
+    root = ntpath.normcase(r'C:\recordings')
+    parent = ntpath.normcase(r'C:\recordings\room')
+    api = FakeWindowsOpenApi(attributes={target: 0x400}, close_failures=(target,))
+
+    with pytest.raises(
+        media_response.MediaResourceUnavailable, match='media resource is unavailable'
+    ):
+        media_response._open_windows_candidate_file(target, root, api=api)
+
+    assert api.close_attempts == [ntpath.normcase(target), parent, root]
+
+
+def test_windows_branch_does_not_use_posix_dir_fd_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = BytesIO(b'native-windows-handle')
+    calls: List[Tuple[str, str]] = []
+
+    def native_open(path: str, root: str):
+        calls.append((path, root))
+        return sentinel
+
+    monkeypatch.setattr(media_response, '_IS_WINDOWS', True)
+    monkeypatch.setattr(media_response, '_open_windows_candidate_file', native_open)
+
+    result = media_response._open_candidate_file(
+        r'C:\recordings\part.mp4', r'C:\recordings'
+    )
+
+    assert result is sentinel
+    assert calls == [(r'C:\recordings\part.mp4', r'C:\recordings')]
 
 
 def test_completed_media_has_opaque_strong_etag_and_private_cache(
@@ -584,6 +748,108 @@ async def test_asgi_cancellation_closes_resource_and_audits_once(
 
     streaming = asyncio.create_task(response(request.scope, receive, send))
     await asyncio.wait_for(body_started.wait(), timeout=0.5)
+    streaming.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await streaming
+
+    assert resource.file.closed is True
+    assert len(events) == 1
+    assert events[0][1]['reason'] == 'disconnect'
+
+
+@pytest.mark.asyncio
+async def test_terminal_body_send_error_is_audited_as_error(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        media_response, 'audit', lambda event, **fields: events.append((event, fields))
+    )
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    response = build_media_response(request, resource, None, None, None, None)
+    never = asyncio.Event()
+
+    async def receive() -> Dict[str, str]:
+        await never.wait()
+        return {'type': 'http.disconnect'}
+
+    async def send(message: Dict[str, Any]) -> None:
+        if message['type'] == 'http.response.body' and not message.get(
+            'more_body', False
+        ):
+            raise RuntimeError('simulated terminal body failure')
+
+    with pytest.raises(BaseException) as raised:
+        await response(request.scope, receive, send)
+
+    assert 'simulated terminal body failure' in repr(raised.value)
+    assert resource.file.closed is True
+    assert len(events) == 1
+    assert events[0][1]['reason'] == 'error'
+
+
+@pytest.mark.asyncio
+async def test_terminal_body_cancellation_is_audited_as_disconnect(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        media_response, 'audit', lambda event, **fields: events.append((event, fields))
+    )
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    response = build_media_response(request, resource, None, None, None, None)
+    terminal_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def receive() -> Dict[str, str]:
+        await never.wait()
+        return {'type': 'http.disconnect'}
+
+    async def send(message: Dict[str, Any]) -> None:
+        if message['type'] == 'http.response.body' and not message.get(
+            'more_body', False
+        ):
+            terminal_started.set()
+            await never.wait()
+
+    streaming = asyncio.create_task(response(request.scope, receive, send))
+    await asyncio.wait_for(terminal_started.wait(), timeout=0.5)
     streaming.cancel()
     with pytest.raises(asyncio.CancelledError):
         await streaming
