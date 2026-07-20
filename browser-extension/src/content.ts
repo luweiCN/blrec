@@ -393,15 +393,26 @@ export class HighlightContentController {
         this.setDisabled(container, false);
         return;
       }
-      const resolvedRoomId = operation.result?.resolvedRoomId;
+      const result = operation.result;
       if (
-        typeof resolvedRoomId === 'number' &&
-        Number.isSafeInteger(resolvedRoomId) &&
-        resolvedRoomId > 0
+        !result ||
+        typeof result.resolvedRoomId !== 'number' ||
+        !Number.isSafeInteger(result.resolvedRoomId) ||
+        result.resolvedRoomId <= 0 ||
+        result.collected !== true ||
+        typeof result.upload !== 'boolean'
       ) {
-        this.roomId = resolvedRoomId;
+        this.toast('BLREC 返回的收录结果不完整', 'error');
+        this.setDisabled(container, false);
+        return;
       }
-      this.toast(upload ? '已收录并开启投稿' : '已收录', 'success');
+      if (result.upload !== upload) {
+        this.toast('BLREC 返回的投稿设置与请求不一致', 'error');
+        this.setDisabled(container, false);
+        return;
+      }
+      this.roomId = result.resolvedRoomId;
+      this.toast(result.upload ? '已收录并开启投稿' : '已收录', 'success');
       await this.refreshStatus();
       return;
     }
@@ -411,7 +422,11 @@ export class HighlightContentController {
 
   private controlOperation(value: unknown): {
     status: 'accepted' | 'running' | 'succeeded' | 'failed';
-    result: { resolvedRoomId?: number } | null;
+    result: {
+      resolvedRoomId?: number;
+      collected?: boolean;
+      upload?: boolean;
+    } | null;
     errorCode: string | null;
   } | null {
     if (
@@ -431,7 +446,11 @@ export class HighlightContentController {
       | 'failed';
     const result =
       'result' in value && typeof value.result === 'object'
-        ? (value.result as { resolvedRoomId?: number } | null)
+        ? (value.result as {
+            resolvedRoomId?: number;
+            collected?: boolean;
+            upload?: boolean;
+          } | null)
         : null;
     const errorCode =
       'errorCode' in value && typeof value.errorCode === 'string'

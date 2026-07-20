@@ -88,16 +88,14 @@ class RecordTaskManager:
         assert settings_list is not None
 
         desired_absent_room_ids = desired_absent_room_ids or set()
-        for persisted_settings in settings_list:
-            settings = persisted_settings
-            apply_desired_state = True
-            if persisted_settings.room_id in desired_absent_room_ids:
-                settings = persisted_settings.copy(deep=True)
-                settings.enable_monitor = False
-                settings.enable_recorder = False
-                apply_desired_state = False
+        for settings in settings_list:
+            if settings.room_id in desired_absent_room_ids:
+                logger.info(
+                    'Skipping task {} while its removal is pending', settings.room_id
+                )
+                continue
             try:
-                await self.add_task(settings, apply_desired_state=apply_desired_state)
+                await self.add_task(settings)
             except Exception as e:
                 submit_exception(e)
 

@@ -152,6 +152,7 @@ class ControlOperationJournal:
         target_key: str,
         steps: Sequence[ControlStepInput],
         result: Optional[Mapping[str, Any]] = None,
+        reuse_succeeded_step_keys: Sequence[str] = (),
     ) -> ControlOperationSnapshot:
         if not self._admitting or self._closed:
             raise ControlJournalClosed('control journal admission is closed')
@@ -162,6 +163,9 @@ class ControlOperationJournal:
         keys = [step.key for step in steps]
         if any(not key for key in keys) or len(set(keys)) != len(keys):
             raise ValueError('control step keys must be non-empty and unique')
+        reusable_keys = tuple(dict.fromkeys(reuse_succeeded_step_keys))
+        if any(key not in keys for key in reusable_keys):
+            raise ValueError('reusable control steps must exist in the new operation')
         return await self._run(
             self._admit_sync,
             lane,
@@ -169,6 +173,7 @@ class ControlOperationJournal:
             target_key,
             tuple(steps),
             dict(result) if result is not None else None,
+            reusable_keys,
         )
 
     async def get(self, operation_id: str) -> Optional[ControlOperationSnapshot]:
@@ -194,9 +199,17 @@ class ControlOperationJournal:
         result: Optional[Mapping[str, Any]] = None,
         error_code: Optional[str] = None,
         operation_result: Optional[Mapping[str, Any]] = None,
+        append_steps: Sequence[ControlStepInput] = (),
     ) -> bool:
         if status == 'failed' and not error_code:
             raise ValueError('failed control step requires an error code')
+        if append_steps and status != 'succeeded':
+            raise ValueError('control steps can only be appended after success')
+        append_keys = [step.key for step in append_steps]
+        if any(not key for key in append_keys) or len(set(append_keys)) != len(
+            append_keys
+        ):
+            raise ValueError('appended control step keys must be non-empty and unique')
         return await self._run(
             self._finish_step_sync,
             claim,
@@ -204,6 +217,16 @@ class ControlOperationJournal:
             dict(result) if result is not None else None,
             error_code,
             dict(operation_result) if operation_result is not None else None,
+            tuple(append_steps),
+        )
+
+    async def fail_step_and_dependents(
+        self, claim: ClaimedControlStep, *, error_code: str, dependent_error_code: str
+    ) -> bool:
+        if not error_code or not dependent_error_code:
+            raise ValueError('failed control steps require error codes')
+        return await self._run(
+            self._fail_step_and_dependents_sync, claim, error_code, dependent_error_code
         )
 
     async def fail_queued_steps(self, operation_id: str, *, error_code: str) -> int:
@@ -310,10 +333,30 @@ class ControlOperationJournal:
                 "UPDATE control_operations SET status='accepted' "
                 "WHERE status='running'"
             )
+            now = float(self._clock())
+            blocked_membership_operations = connection.execute(
+                'SELECT DISTINCT operation.id FROM control_operations operation '
+                'JOIN control_operation_steps step '
+                'ON step.operation_id=operation.id '
+                "WHERE operation.lane='room-membership' "
+                "AND step.status IN ('failed','rejected') "
+                'AND EXISTS(SELECT 1 FROM control_operation_steps queued '
+                'WHERE queued.operation_id=operation.id '
+                "AND queued.status='queued')"
+            ).fetchall()
+            for row in blocked_membership_operations:
+                operation_id = str(row['id'])
+                connection.execute(
+                    "UPDATE control_operation_steps SET status='failed',"
+                    'result_json=NULL,error_code=\'DEPENDENCY_FAILED\',updated_at=? '
+                    "WHERE operation_id=? AND status='queued'",
+                    (now, operation_id),
+                )
+                self._refresh_operation_sync(connection, operation_id, now)
             connection.execute(
                 "DELETE FROM control_operations WHERE status IN ('succeeded','failed') "
                 'AND updated_at<?',
-                (float(self._clock()) - self.TERMINAL_RETENTION_SECONDS,),
+                (now - self.TERMINAL_RETENTION_SECONDS,),
             )
             connection.execute('COMMIT')
             result = connection.execute('PRAGMA quick_check').fetchone()
@@ -341,6 +384,7 @@ class ControlOperationJournal:
         target_key: str,
         steps: Sequence[ControlStepInput],
         result: Optional[Mapping[str, Any]],
+        reuse_succeeded_step_keys: Sequence[str],
     ) -> ControlOperationSnapshot:
         connection = self._require_connection()
         now = float(self._clock())
@@ -378,6 +422,28 @@ class ControlOperationJournal:
             attempt = int(attempt_row[0])
             generation = int(generation_row[0])
             operation_id = uuid.uuid4().hex
+            reused_steps: Dict[str, sqlite3.Row] = {}
+            admitted_result = dict(result or {})
+            if reuse_succeeded_step_keys:
+                previous = connection.execute(
+                    'SELECT id FROM control_operations '
+                    'WHERE lane=? AND kind=? AND target_key=? AND status=\'failed\' '
+                    'ORDER BY attempt DESC LIMIT 1',
+                    (lane, kind, target_key),
+                ).fetchone()
+                if previous is not None:
+                    placeholders = ','.join('?' for _ in reuse_succeeded_step_keys)
+                    rows = connection.execute(
+                        'SELECT key,result_json FROM control_operation_steps '
+                        'WHERE operation_id=? AND status=\'succeeded\' '
+                        'AND key IN ({})'.format(placeholders),
+                        (str(previous['id']), *reuse_succeeded_step_keys),
+                    ).fetchall()
+                    reused_steps = {str(row['key']): row for row in rows}
+                    for row in rows:
+                        reused_result = self._decode(row['result_json'])
+                        if reused_result is not None:
+                            admitted_result.update(reused_result)
             connection.execute(
                 'INSERT INTO control_operations('
                 'id,lane,kind,target_key,attempt,generation,status,'
@@ -390,7 +456,7 @@ class ControlOperationJournal:
                     target_key,
                     attempt,
                     generation,
-                    self._encode(result),
+                    self._encode(admitted_result),
                     now,
                     now,
                 ),
@@ -404,9 +470,13 @@ class ControlOperationJournal:
                         operation_id,
                         step.key,
                         generation,
-                        step.status,
-                        self._encode(step.result),
-                        step.error_code,
+                        'succeeded' if step.key in reused_steps else step.status,
+                        (
+                            reused_steps[step.key]['result_json']
+                            if step.key in reused_steps
+                            else self._encode(step.result)
+                        ),
+                        None if step.key in reused_steps else step.error_code,
                         now,
                     )
                     for step in steps
@@ -468,6 +538,10 @@ class ControlOperationJournal:
                 'JOIN control_operations operation ON operation.id=step.operation_id '
                 "WHERE operation.lane=? AND step.status='queued' "
                 "AND operation.status IN ('accepted','running') "
+                "AND NOT (operation.lane='room-membership' AND EXISTS("
+                'SELECT 1 FROM control_operation_steps blocked '
+                'WHERE blocked.operation_id=step.operation_id '
+                "AND blocked.status IN ('failed','rejected'))) "
                 'ORDER BY step.generation,step.rowid LIMIT 1',
                 (lane,),
             ).fetchone()
@@ -511,6 +585,7 @@ class ControlOperationJournal:
         result: Optional[Mapping[str, Any]],
         error_code: Optional[str],
         operation_result: Optional[Mapping[str, Any]],
+        append_steps: Sequence[ControlStepInput],
     ) -> bool:
         connection = self._require_connection()
         now = float(self._clock())
@@ -533,6 +608,24 @@ class ControlOperationJournal:
             if cursor.rowcount != 1:
                 connection.execute('ROLLBACK')
                 return False
+            if append_steps:
+                connection.executemany(
+                    'INSERT INTO control_operation_steps('
+                    'operation_id,key,generation,status,result_json,error_code,'
+                    'updated_at) VALUES(?,?,?,?,?,?,?)',
+                    [
+                        (
+                            claim.operation_id,
+                            step.key,
+                            claim.generation,
+                            step.status,
+                            self._encode(step.result),
+                            step.error_code,
+                            now,
+                        )
+                        for step in append_steps
+                    ],
+                )
             self._refresh_operation_sync(connection, claim.operation_id, now)
             if operation_result:
                 row = connection.execute(
@@ -547,6 +640,35 @@ class ControlOperationJournal:
                     'WHERE id=?',
                     (self._encode(merged), now, claim.operation_id),
                 )
+            connection.execute('COMMIT')
+            return True
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
+
+    def _fail_step_and_dependents_sync(
+        self, claim: ClaimedControlStep, error_code: str, dependent_error_code: str
+    ) -> bool:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            cursor = connection.execute(
+                "UPDATE control_operation_steps SET status='failed',"
+                'result_json=NULL,error_code=?,updated_at=? '
+                "WHERE operation_id=? AND key=? AND generation=? AND status='running'",
+                (error_code, now, claim.operation_id, claim.key, claim.generation),
+            )
+            if cursor.rowcount != 1:
+                connection.execute('ROLLBACK')
+                return False
+            connection.execute(
+                "UPDATE control_operation_steps SET status='failed',"
+                'result_json=NULL,error_code=?,updated_at=? '
+                "WHERE operation_id=? AND status='queued'",
+                (dependent_error_code, now, claim.operation_id),
+            )
+            self._refresh_operation_sync(connection, claim.operation_id, now)
             connection.execute('COMMIT')
             return True
         except BaseException:

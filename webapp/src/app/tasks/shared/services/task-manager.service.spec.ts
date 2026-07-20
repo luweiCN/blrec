@@ -1,4 +1,4 @@
-import { TestBed } from '@angular/core/testing';
+import { fakeAsync, flushMicrotasks, TestBed } from '@angular/core/testing';
 import { HttpErrorResponse } from '@angular/common/http';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
@@ -8,8 +8,12 @@ import {
   TaskManagerService,
 } from './task-manager.service';
 import { ControlOperationService } from 'src/app/core/services/control-operation.service';
-import { of, throwError } from 'rxjs';
-import { TaskData } from '../task.model';
+import { of, Subject, throwError } from 'rxjs';
+import {
+  RoomMembershipAdmission,
+  TaskBatchActionResponse,
+  TaskData,
+} from '../task.model';
 
 describe('TaskManagerService', () => {
   let service: TaskManagerService;
@@ -325,6 +329,111 @@ describe('TaskManagerService', () => {
       jasmine.stringMatching(/^成功 1 个，失败 2 个：/)
     );
   });
+
+  it('maps batch deletion from teardown steps without counting metadata steps', () => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    taskService.runBatchAction.and.returnValue(
+      of({
+        operationId: 'membership-operation-1',
+        status: 'accepted',
+        results: [
+          batchResult(100, true, 'queued'),
+          batchResult(200, true, 'queued'),
+        ],
+      })
+    );
+    taskService.getAllTaskData.and.returnValue(of([]));
+    operations.poll.and.returnValue(
+      of(
+        membershipDeleteOperation('accepted', 'queued'),
+        membershipDeleteOperation('succeeded', 'succeeded')
+      )
+    );
+    const responses: TaskBatchActionResponse[] = [];
+
+    service
+      .runBatchAction('delete', [100, 200])
+      .subscribe((response) => responses.push(response));
+
+    expect(responses[1].results.map((result) => result.roomId)).toEqual([
+      100, 200,
+    ]);
+    expect(responses[1].results.every((result) => result.status === 'succeeded'))
+      .toBeTrue();
+    expect(responses.map((response) => response.status)).toEqual([
+      'accepted',
+      'succeeded',
+    ]);
+  });
+
+  it('admits every room before polling any membership operation', fakeAsync(() => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    const first = new Subject<RoomMembershipAdmission>();
+    const second = new Subject<RoomMembershipAdmission>();
+    taskService.addTask.and.callFake((roomId) =>
+      roomId === 100 ? first : second
+    );
+    taskService.getAllTaskData.and.returnValue(of([]));
+    operations.poll.and.callFake((operationId) =>
+      of(membershipAddOperation(operationId, Number(operationId.slice(-3))))
+    );
+    const results: AddTaskResultMessage[] = [];
+
+    service.addTasks([100, 200]).subscribe((result) => results.push(result));
+    expect(taskService.addTask.calls.allArgs()).toEqual([[100]]);
+    first.next(membershipAdmission('membership-100', 100));
+    flushMicrotasks();
+
+    expect(taskService.addTask.calls.allArgs()).toEqual([[100], [200]]);
+    expect(operations.poll).not.toHaveBeenCalled();
+    second.next(membershipAdmission('membership-200', 200));
+    flushMicrotasks();
+
+    expect(operations.poll.calls.allArgs()).toEqual([
+      ['membership-100'],
+      ['membership-200'],
+    ]);
+    expect(results.map((result) => result.type)).toEqual([
+      'info',
+      'info',
+      'success',
+      'success',
+    ]);
+  }));
+
+  it('continues admitting confirmed rooms after the observer unsubscribes', fakeAsync(() => {
+    const taskService = TestBed.inject(
+      TaskService
+    ) as jasmine.SpyObj<TaskService>;
+    const operations = TestBed.inject(
+      ControlOperationService
+    ) as jasmine.SpyObj<ControlOperationService>;
+    const first = new Subject<RoomMembershipAdmission>();
+    const second = new Subject<RoomMembershipAdmission>();
+    taskService.addTask.and.callFake((roomId) =>
+      roomId === 100 ? first : second
+    );
+
+    const subscription = service.addTasks([100, 200]).subscribe();
+    subscription.unsubscribe();
+    first.next(membershipAdmission('membership-100', 100));
+    flushMicrotasks();
+    second.next(membershipAdmission('membership-200', 200));
+    flushMicrotasks();
+
+    expect(taskService.addTask.calls.allArgs()).toEqual([[100], [200]]);
+    expect(operations.poll).not.toHaveBeenCalled();
+  }));
 });
 
 function batchResult(
@@ -377,5 +486,76 @@ function controlOperation(
     createdAt: 1,
     updatedAt: 2,
     steps,
+  } as const;
+}
+
+function membershipStep(
+  key: string,
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+) {
+  return {
+    key,
+    generation: 1,
+    status,
+    result: null,
+    errorCode: status === 'failed' ? 'TASK_TEARDOWN_FAILED' : null,
+  } as const;
+}
+
+function membershipAdmission(
+  operationId: string,
+  roomId: number
+): RoomMembershipAdmission {
+  return {
+    operationId,
+    status: 'accepted',
+    requestedRoomId: roomId,
+  };
+}
+
+function membershipAddOperation(operationId: string, roomId: number) {
+  return {
+    id: operationId,
+    lane: 'room-membership',
+    kind: 'add',
+    targetKey: String(roomId),
+    attempt: 1,
+    generation: 1,
+    status: 'succeeded',
+    result: {
+      requestedRoomId: roomId,
+      resolvedRoomId: roomId,
+      collected: true,
+      upload: false,
+    },
+    errorCode: null,
+    createdAt: 1,
+    updatedAt: 2,
+    steps: [],
+  } as const;
+}
+
+function membershipDeleteOperation(
+  status: 'accepted' | 'succeeded',
+  stepStatus: 'queued' | 'succeeded'
+) {
+  return {
+    id: 'membership-operation-1',
+    lane: 'room-membership',
+    kind: 'remove',
+    targetKey: '100,200',
+    attempt: 1,
+    generation: 1,
+    status,
+    result: { roomIds: [100, 200], collected: false },
+    errorCode: null,
+    createdAt: 1,
+    updatedAt: 2,
+    steps: [
+      membershipStep('desired-absent', stepStatus),
+      membershipStep('teardown:100', stepStatus),
+      membershipStep('teardown:200', stepStatus),
+      membershipStep('settings', stepStatus),
+    ],
   } as const;
 }

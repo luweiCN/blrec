@@ -72,6 +72,7 @@ class RoomMembershipReconciler:
             target_key=str(room_id),
             result={'requestedRoomId': room_id, 'upload': False},
             steps=('resolve', 'add', 'desired-state'),
+            reuse_succeeded_step_keys=('resolve',),
         )
         self.wake()
         return operation
@@ -91,6 +92,7 @@ class RoomMembershipReconciler:
                 'upload': False,
             },
             steps=tuple(steps),
+            reuse_succeeded_step_keys=('resolve',),
         )
         self.wake()
         return operation
@@ -107,6 +109,15 @@ class RoomMembershipReconciler:
             if remove_all
             else ','.join(str(room_id) for room_id in sorted(normalized))
         )
+        steps = (
+            ('scope',)
+            if remove_all
+            else tuple(
+                ['desired-absent']
+                + ['teardown:{}'.format(room_id) for room_id in normalized]
+                + ['settings']
+            )
+        )
         operation = await self._admit(
             kind=kind,
             target_key=target_key,
@@ -115,13 +126,10 @@ class RoomMembershipReconciler:
                 'roomIds': list(normalized),
                 'upload': False,
             },
-            steps=tuple(
-                ['desired-absent']
-                + ['teardown:{}'.format(room_id) for room_id in normalized]
-                + ['settings']
-            ),
+            steps=steps,
         )
-        self._desired_absent_room_ids.update(normalized)
+        if not remove_all:
+            self._desired_absent_room_ids.update(normalized)
         self.wake()
         return operation
 
@@ -139,6 +147,12 @@ class RoomMembershipReconciler:
                 room_ids.update(
                     int(room_id) for room_id in value if isinstance(room_id, int)
                 )
+            scope_completed = any(
+                step.key == 'scope' and step.status == 'succeeded'
+                for step in operation.steps
+            )
+            if operation.kind == 'remove_all' and not scope_completed:
+                room_ids.update(self._all_membership_room_ids())
         self._desired_absent_room_ids.update(room_ids)
         return room_ids
 
@@ -173,6 +187,7 @@ class RoomMembershipReconciler:
         target_key: str,
         result: Dict[str, object],
         steps: Sequence[str],
+        reuse_succeeded_step_keys: Sequence[str] = (),
     ) -> ControlOperationSnapshot:
         async with self._submission_lock:
             if not self._accepting:
@@ -183,6 +198,7 @@ class RoomMembershipReconciler:
                 target_key=target_key,
                 result=result,
                 steps=[ControlStepInput(key=key) for key in steps],
+                reuse_succeeded_step_keys=reuse_succeeded_step_keys,
             )
         return operation
 
@@ -216,6 +232,26 @@ class RoomMembershipReconciler:
         if operation is None:
             return
         try:
+            if claim.key == 'scope':
+                room_ids = self._all_membership_room_ids()
+                append_steps = tuple(
+                    [ControlStepInput(key='desired-absent')]
+                    + [
+                        ControlStepInput(key='teardown:{}'.format(room_id))
+                        for room_id in room_ids
+                    ]
+                    + [ControlStepInput(key='settings')]
+                )
+                completed = await self._journal.finish_step(
+                    claim,
+                    status='succeeded',
+                    result={'roomIds': list(room_ids)},
+                    operation_result={'roomIds': list(room_ids), 'collected': False},
+                    append_steps=append_steps,
+                )
+                if completed:
+                    self._desired_absent_room_ids.update(room_ids)
+                return
             step_result, operation_result = await self._apply_step(operation, claim)
         except Exception as error:
             error_code = self._error_code(claim.key)
@@ -233,11 +269,8 @@ class RoomMembershipReconciler:
                 step=claim.key,
                 error_code=error_code,
             )
-            await self._journal.finish_step(
-                claim, status='failed', error_code=error_code
-            )
-            await self._journal.fail_queued_steps(
-                claim.operation_id, error_code='DEPENDENCY_FAILED'
+            await self._journal.fail_step_and_dependents(
+                claim, error_code=error_code, dependent_error_code='DEPENDENCY_FAILED'
             )
             return
         await self._journal.finish_step(
@@ -336,6 +369,13 @@ class RoomMembershipReconciler:
             raise ValueError('room membership operation has no removal rooms')
         return room_ids
 
+    def _all_membership_room_ids(self) -> Sequence[int]:
+        settings = self._settings_manager.get_settings({'tasks'}).tasks
+        assert settings is not None
+        room_ids = set(self._task_manager.get_all_task_room_ids())
+        room_ids.update(task.room_id for task in settings)
+        return tuple(sorted(room_ids))
+
     @staticmethod
     def _error_code(step: str) -> str:
         if step == 'resolve':
@@ -350,4 +390,6 @@ class RoomMembershipReconciler:
             return 'TASK_TEARDOWN_FAILED'
         if step == 'settings':
             return 'SETTINGS_PERSIST_FAILED'
+        if step == 'scope':
+            return 'MEMBERSHIP_SCOPE_FAILED'
         return 'ROOM_MEMBERSHIP_FAILED'

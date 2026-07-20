@@ -20,7 +20,7 @@ describe('AddTaskDialogComponent', () => {
           provide: TaskManagerService,
           useValue: jasmine.createSpyObj<TaskManagerService>(
             'TaskManagerService',
-            ['addTask']
+            ['addTasks']
           ),
         },
       ],
@@ -47,7 +47,7 @@ describe('AddTaskDialogComponent', () => {
     const taskManager = TestBed.inject(
       TaskManagerService
     ) as jasmine.SpyObj<TaskManagerService>;
-    taskManager.addTask.and.returnValue(pending);
+    taskManager.addTasks.and.returnValue(pending);
     component.inputControl.setValue('100');
 
     component.handleConfirm();
@@ -64,7 +64,7 @@ describe('AddTaskDialogComponent', () => {
     const taskManager = TestBed.inject(
       TaskManagerService
     ) as jasmine.SpyObj<TaskManagerService>;
-    taskManager.addTask.and.returnValue(
+    taskManager.addTasks.and.returnValue(
       of(
         {
           type: 'info',
@@ -82,5 +82,17 @@ describe('AddTaskDialogComponent', () => {
     component.handleConfirm();
 
     expect(component.visible).toBeFalse();
+  });
+
+  it('submits the complete deduplicated room batch in one call', () => {
+    const taskManager = TestBed.inject(
+      TaskManagerService
+    ) as jasmine.SpyObj<TaskManagerService>;
+    taskManager.addTasks.and.returnValue(of());
+    component.inputControl.setValue('100 200 100');
+
+    component.handleConfirm();
+
+    expect(taskManager.addTasks).toHaveBeenCalledOnceWith([100, 200]);
   });
 });

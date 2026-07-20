@@ -273,7 +273,7 @@ def test_add_and_remove_routes_return_membership_admissions(client: TestClient) 
     assert removed_all.json()['requestedRoomId'] is None
     app = tasks.app
     assert isinstance(app, FakeApplication)
-    assert app.calls == [('add', 6), ('remove', 1), ('remove_all', 2)]
+    assert app.calls == [('add', 6), ('remove', 1), ('remove_all', 0)]
 
 
 def test_batch_delete_returns_one_durable_operation(client: TestClient) -> None:

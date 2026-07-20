@@ -281,3 +281,105 @@ async def test_reopen_prunes_only_expired_terminal_operations(tmp_path: Path) ->
         assert await reopened.get(pending.id) is not None
     finally:
         await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_step_and_dependents_commit_in_one_durable_transaction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'control.sqlite3'
+    journal = ControlOperationJournal(path)
+    await journal.open()
+    operation = await journal.admit(
+        lane='room-membership',
+        kind='collect',
+        target_key='100:1',
+        steps=[
+            ControlStepInput(key='add'),
+            ControlStepInput(key='desired-state'),
+            ControlStepInput(key='policy'),
+        ],
+    )
+    claim = await journal.claim_next('room-membership')
+    assert claim is not None and claim.key == 'add'
+
+    assert await journal.fail_step_and_dependents(
+        claim, error_code='TASK_ADD_FAILED', dependent_error_code='DEPENDENCY_FAILED'
+    )
+    await journal.close()
+
+    reopened = ControlOperationJournal(path)
+    await reopened.open()
+    try:
+        failed = await reopened.get(operation.id)
+        assert failed is not None and failed.status == 'failed'
+        assert [(step.key, step.status, step.error_code) for step in failed.steps] == [
+            ('add', 'failed', 'TASK_ADD_FAILED'),
+            ('desired-state', 'failed', 'DEPENDENCY_FAILED'),
+            ('policy', 'failed', 'DEPENDENCY_FAILED'),
+        ]
+        assert await reopened.claim_next('room-membership') is None
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_reopen_terminalizes_a_legacy_split_membership_failure(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'control.sqlite3'
+    journal = ControlOperationJournal(path)
+    await journal.open()
+    operation = await journal.admit(
+        lane='room-membership',
+        kind='add',
+        target_key='100',
+        steps=[ControlStepInput(key='add'), ControlStepInput(key='desired-state')],
+    )
+    claim = await journal.claim_next('room-membership')
+    assert claim is not None
+    await journal.finish_step(claim, status='failed', error_code='TASK_ADD_FAILED')
+    await journal.close()
+
+    reopened = ControlOperationJournal(path)
+    await reopened.open()
+    try:
+        failed = await reopened.get(operation.id)
+        assert failed is not None and failed.status == 'failed'
+        assert [(step.status, step.error_code) for step in failed.steps] == [
+            ('failed', 'TASK_ADD_FAILED'),
+            ('failed', 'DEPENDENCY_FAILED'),
+        ]
+        assert await reopened.claim_next('room-membership') is None
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_reopen_still_prunes_expired_terminal_membership_operations(
+    tmp_path: Path,
+) -> None:
+    now = [1.0]
+    path = tmp_path / 'control.sqlite3'
+    journal = ControlOperationJournal(path, clock=lambda: now[0])
+    await journal.open()
+    operation = await journal.admit(
+        lane='room-membership',
+        kind='add',
+        target_key='100',
+        steps=[ControlStepInput(key='add')],
+    )
+    claim = await journal.claim_next('room-membership')
+    assert claim is not None
+    await journal.fail_step_and_dependents(
+        claim, error_code='TASK_ADD_FAILED', dependent_error_code='DEPENDENCY_FAILED'
+    )
+    await journal.close()
+
+    now[0] += 31 * 24 * 60 * 60
+    reopened = ControlOperationJournal(path, clock=lambda: now[0])
+    await reopened.open()
+    try:
+        assert await reopened.get(operation.id) is None
+    finally:
+        await reopened.close()

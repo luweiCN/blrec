@@ -14,8 +14,8 @@ import {
   Validators,
 } from '@angular/forms';
 
-import { from, Subject } from 'rxjs';
-import { concatMap, takeUntil, tap } from 'rxjs/operators';
+import { Subject } from 'rxjs';
+import { takeUntil, tap } from 'rxjs/operators';
 
 import {
   TaskManagerService,
@@ -92,16 +92,16 @@ export class AddTaskDialogComponent implements OnDestroy {
     this.pending = true;
     const inputValue = this.inputControl.value.trim() as string;
 
-    let roomIds: Iterable<number>;
+    let roomIds: readonly number[];
     if (inputValue.startsWith('http')) {
       roomIds = [parseInt(ROOM_URL_PATTERN.exec(inputValue)![1])];
     } else {
-      roomIds = new Set(inputValue.split(/\s+/).map((s) => parseInt(s)));
+      roomIds = [...new Set(inputValue.split(/\s+/).map((s) => parseInt(s)))];
     }
 
-    from(roomIds)
+    this.taskManager
+      .addTasks(roomIds)
       .pipe(
-        concatMap((roomId) => this.taskManager.addTask(roomId)),
         tap((resultMessage) => {
           this.resultMessages.push(resultMessage);
           if (resultMessage.type === 'info') {

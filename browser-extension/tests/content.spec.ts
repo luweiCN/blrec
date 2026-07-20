@@ -182,6 +182,108 @@ describe('Bilibili live controls', () => {
     await vi.waitFor(() => expect(statusRoomIds).toEqual([6, 3582149]));
   });
 
+  it('rejects a succeeded membership result that omits collected', async () => {
+    const setup = makeController({ collected: false, recording: false });
+    setup.sendMessage.mockImplementation(async (message) => {
+      if (message.type === 'ROOM_STATUS') {
+        return { ok: true, data: { collected: false, recording: false } };
+      }
+      if (message.type === 'COLLECT') {
+        return {
+          ok: true,
+          data: {
+            operationId: 'operation-1',
+            status: 'accepted',
+            requestedRoomId: 100,
+          },
+        };
+      }
+      return {
+        ok: true,
+        data: {
+          id: 'operation-1',
+          status: 'succeeded',
+          result: { resolvedRoomId: 100, upload: false },
+          errorCode: null,
+        },
+      };
+    });
+    const controller = new HighlightContentController({
+      document,
+      location: locationAt('/100'),
+      sendMessage: setup.sendMessage,
+      waitForOperationPoll: () => Promise.resolve(),
+      createObserver: (callback) => new FakeObserver(callback),
+      scheduleRefresh: () => () => undefined,
+    });
+    await controller.start();
+
+    document
+      .querySelector<HTMLButtonElement>('.blrec-highlight-actions button')!
+      .click();
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('.blrec-highlight-toast')?.textContent).toBe(
+        'BLREC 返回的收录结果不完整'
+      )
+    );
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        '.blrec-highlight-actions button'
+      )?.disabled
+    ).toBe(false);
+  });
+
+  it('rejects a terminal upload result that differs from the requested action', async () => {
+    const setup = makeController({ collected: false, recording: false });
+    setup.sendMessage.mockImplementation(async (message) => {
+      if (message.type === 'ROOM_STATUS') {
+        return { ok: true, data: { collected: false, recording: false } };
+      }
+      if (message.type === 'COLLECT') {
+        return {
+          ok: true,
+          data: {
+            operationId: 'operation-1',
+            status: 'accepted',
+            requestedRoomId: 100,
+          },
+        };
+      }
+      return {
+        ok: true,
+        data: {
+          id: 'operation-1',
+          status: 'succeeded',
+          result: { resolvedRoomId: 100, collected: true, upload: false },
+          errorCode: null,
+        },
+      };
+    });
+    const controller = new HighlightContentController({
+      document,
+      location: locationAt('/100'),
+      sendMessage: setup.sendMessage,
+      waitForOperationPoll: () => Promise.resolve(),
+      createObserver: (callback) => new FakeObserver(callback),
+      scheduleRefresh: () => () => undefined,
+    });
+    await controller.start();
+
+    const buttons = document.querySelectorAll<HTMLButtonElement>(
+      '.blrec-highlight-actions button'
+    );
+    buttons[1].click();
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('.blrec-highlight-toast')?.textContent).toBe(
+        'BLREC 返回的投稿设置与请求不一致'
+      )
+    );
+    expect(buttons[0].disabled).toBe(false);
+    expect(buttons[1].disabled).toBe(false);
+  });
+
   it('stops client polling on destroy without cancelling the durable operation', async () => {
     let releasePoll: (() => void) | undefined;
     const waitForOperationPoll = vi.fn(

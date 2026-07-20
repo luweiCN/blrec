@@ -452,9 +452,7 @@ async def add_task(room_id: int) -> RoomMembershipAdmissionResponse:
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def remove_all_tasks() -> RoomMembershipAdmissionResponse:
-    operation = await _submit_membership_remove(
-        list(app.get_all_task_room_ids()), remove_all=True
-    )
+    operation = await _submit_membership_remove([], remove_all=True)
     return _membership_admission(operation)
 
 

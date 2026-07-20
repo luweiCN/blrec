@@ -1,12 +1,13 @@
 import importlib
 from types import SimpleNamespace
 from typing import Dict, Sequence, Tuple
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from blrec.bili.live_status import StatusSnapshot
 from blrec.bili.live_status_coordinator import LiveStatusCoordinator
+from blrec.setting.models import TaskSettings
 
 
 class FakeLive:
@@ -145,3 +146,20 @@ async def test_add_task_cleans_batch_monitor_when_recorder_start_fails(
     assert controller.closed
     assert task._live.deinitialized
     assert not manager.has_task(1001)
+
+
+@pytest.mark.asyncio
+async def test_load_all_tasks_skips_rooms_with_pending_removal() -> None:
+    settings_manager = Mock()
+    settings_manager.get_settings.return_value = SimpleNamespace(
+        tasks=[TaskSettings(room_id=100), TaskSettings(room_id=200)]
+    )
+    task_manager_module = importlib.import_module('blrec.task.task_manager')
+    manager = task_manager_module.RecordTaskManager(settings_manager)
+    manager.add_task = AsyncMock()  # type: ignore[method-assign]
+
+    await manager.load_all_tasks({100})
+
+    manager.add_task.assert_awaited_once()  # type: ignore[attr-defined]
+    loaded_settings = manager.add_task.await_args.args[0]  # type: ignore[attr-defined]
+    assert loaded_settings.room_id == 200

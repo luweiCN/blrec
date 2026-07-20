@@ -9,7 +9,7 @@ import {
   switchMap,
   tap,
 } from 'rxjs/operators';
-import { concat, Observable, of, Subject } from 'rxjs';
+import { concat, firstValueFrom, from, Observable, of, Subject } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { TaskService } from './task.service';
@@ -26,6 +26,12 @@ import type { ControlOperation } from 'src/app/core/services/control-operation.s
 export interface AddTaskResultMessage {
   type: 'success' | 'info' | 'warning' | 'error';
   message: string;
+}
+
+interface AddTaskAdmissionOutcome {
+  readonly roomId: number;
+  readonly admission?: RoomMembershipAdmission;
+  readonly error?: AddTaskResultMessage;
 }
 
 @Injectable({
@@ -52,7 +58,9 @@ export class TaskManagerService {
     roomIds: readonly number[]
   ): Observable<TaskBatchActionResponse> {
     return this.taskService.runBatchAction(action, roomIds).pipe(
-      switchMap((admission) => this.observeControl(admission)),
+      switchMap((admission) =>
+        this.observeControl(admission, action === 'delete')
+      ),
       tap(
         (response) => {
           if (response.status === 'running') {
@@ -176,6 +184,59 @@ export class TaskManagerService {
       tap((resultMessage) => {
         this.message[resultMessage.type](resultMessage.message);
       })
+    );
+  }
+
+  addTasks(roomIds: readonly number[]): Observable<AddTaskResultMessage> {
+    const admissions = this.admitTasks([...new Set(roomIds)]);
+    return from(admissions).pipe(
+      switchMap((outcomes) => {
+        const accepted = outcomes.filter(
+          (
+            outcome
+          ): outcome is AddTaskAdmissionOutcome & {
+            readonly admission: RoomMembershipAdmission;
+          } => outcome.admission !== undefined
+        );
+        return concat(
+          from(outcomes).pipe(
+            map(
+              (outcome) =>
+                outcome.error ??
+                ({
+                  type: 'info',
+                  message: `${outcome.roomId}: 添加任务已提交`,
+                } as AddTaskResultMessage)
+            )
+          ),
+          from(accepted).pipe(
+            concatMap(({ roomId, admission }) =>
+              this.observeMembership(admission).pipe(
+                map((operation) => {
+                  const resolvedRoomId = operation.result?.['resolvedRoomId'];
+                  if (operation.status === 'failed') {
+                    return {
+                      type: 'error',
+                      message: `${roomId}: ${this.membershipErrorMessage(
+                        operation.errorCode
+                      )}`,
+                    } as AddTaskResultMessage;
+                  }
+                  return {
+                    type: 'success',
+                    message: `${
+                      typeof resolvedRoomId === 'number'
+                        ? resolvedRoomId
+                        : roomId
+                    }: 成功添加任务`,
+                  } as AddTaskResultMessage;
+                })
+              )
+            )
+          )
+        );
+      }),
+      tap((result) => this.message[result.type](result.message))
     );
   }
 
@@ -472,7 +533,8 @@ export class TaskManagerService {
   }
 
   private observeControl(
-    admission: TaskBatchActionResponse
+    admission: TaskBatchActionResponse,
+    membershipDelete: boolean = false
   ): Observable<TaskBatchActionResponse> {
     if (admission.status === 'succeeded' || admission.status === 'failed') {
       return this.refreshTaskDataAfterControl(admission);
@@ -483,7 +545,11 @@ export class TaskManagerService {
     return concat(
       of(admission),
       this.controlOperations.poll(admission.operationId).pipe(
-        map((operation) => this.operationResult(admission, operation)),
+        map((operation) =>
+          membershipDelete
+            ? this.membershipDeleteResult(admission, operation)
+            : this.operationResult(admission, operation)
+        ),
         filter(
           (result) =>
             result.status === 'succeeded' || result.status === 'failed'
@@ -610,5 +676,96 @@ export class TaskManagerService {
         };
       }),
     };
+  }
+
+  private membershipDeleteResult(
+    admission: TaskBatchActionResponse,
+    operation: ControlOperation
+  ): TaskBatchActionResponse {
+    if (operation.status === 'accepted' || operation.status === 'running') {
+      return {
+        operationId: operation.id,
+        status: operation.status,
+        results: admission.results,
+      };
+    }
+    const teardownByRoom = new Map<number, ControlOperation['steps'][number]>();
+    for (const step of operation.steps) {
+      const match = /^teardown:(\d+)$/.exec(step.key);
+      if (match) {
+        teardownByRoom.set(Number(match[1]), step);
+      }
+    }
+    let incomplete = false;
+    const results = admission.results.map((admitted) => {
+      if (!admitted.accepted) {
+        return admitted;
+      }
+      const step = teardownByRoom.get(admitted.roomId);
+      if (operation.status === 'failed') {
+        return {
+          ...admitted,
+          status: 'failed' as const,
+          operationId: operation.id,
+          errorCode: step?.errorCode ?? operation.errorCode,
+          message: operation.errorCode ?? '删除任务失败',
+        };
+      }
+      if (!step || step.status !== 'succeeded') {
+        incomplete = true;
+        return {
+          ...admitted,
+          status: 'failed' as const,
+          operationId: operation.id,
+          errorCode: 'ROOM_MEMBERSHIP_RESULT_INCOMPLETE',
+          message: '删除结果不完整',
+        };
+      }
+      return {
+        ...admitted,
+        status: 'succeeded' as const,
+        operationId: operation.id,
+        errorCode: null,
+        message: '操作已完成',
+      };
+    });
+    return {
+      operationId: operation.id,
+      status: incomplete ? 'failed' : operation.status,
+      results,
+    };
+  }
+
+  private async admitTasks(
+    roomIds: readonly number[]
+  ): Promise<AddTaskAdmissionOutcome[]> {
+    const outcomes: AddTaskAdmissionOutcome[] = [];
+    for (const roomId of roomIds) {
+      try {
+        outcomes.push({
+          roomId,
+          admission: await firstValueFrom(this.taskService.addTask(roomId)),
+        });
+      } catch (error) {
+        outcomes.push({
+          roomId,
+          error: this.addTaskError(error as HttpErrorResponse),
+        });
+      }
+    }
+    return outcomes;
+  }
+
+  private addTaskError(error: HttpErrorResponse): AddTaskResultMessage {
+    if (error.status === 409) {
+      return { type: 'error', message: '任务已存在，不能重复添加。' };
+    }
+    if (error.status === 403) {
+      return { type: 'warning', message: '任务数量超过限制，不能添加任务。' };
+    }
+    if (error.status === 404) {
+      return { type: 'error', message: '直播间不存在' };
+    }
+    return { type: 'error', message: `添加任务出错: ${error.message}` };
   }
 }
