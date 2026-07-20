@@ -271,23 +271,22 @@ class AdminAuthStore:
                 if retry_after is not None:
                     raise AuthenticationRateLimited(retry_after)
                 raise AuthenticationFailed('invalid credentials')
+            updated = connection.execute(
+                'UPDATE admin SET password_hash=?,updated_at=? '
+                'WHERE id=1 AND password_hash=? AND updated_at=?',
+                (
+                    verification.replacement_hash or ticket.encoded_hash,
+                    now,
+                    ticket.encoded_hash,
+                    ticket.observed_updated_at,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise AuthenticationFailed('invalid credentials')
             connection.execute(
                 'DELETE FROM login_failures WHERE client_key=?',
                 (ticket.rate_limit_key,),
             )
-            if verification.replacement_hash is not None:
-                updated = connection.execute(
-                    'UPDATE admin SET password_hash=?,updated_at=? '
-                    'WHERE id=1 AND password_hash=? AND updated_at=?',
-                    (
-                        verification.replacement_hash,
-                        now,
-                        ticket.encoded_hash,
-                        ticket.observed_updated_at,
-                    ),
-                )
-                if updated.rowcount != 1:
-                    raise AuthenticationFailed('invalid credentials')
             self._audit(connection, 'login_succeeded', now)
             return self._create_session(connection, now)
 

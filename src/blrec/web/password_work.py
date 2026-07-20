@@ -41,12 +41,16 @@ class PasswordWorkCoordinator:
                 raise PasswordWorkSaturated(retry_after=1)
             future = self._executor.submit(work)
             self._futures.add(future)
-            future.add_done_callback(self._release)
+        future.add_done_callback(self._release)
         return await asyncio.wrap_future(future)
 
-    async def shutdown(self) -> None:
+    def close_admission(self) -> None:
         with self._lock:
             self._closed = True
+
+    async def shutdown(self) -> None:
+        self.close_admission()
+        with self._lock:
             futures = tuple(self._futures)
         if futures:
             await asyncio.gather(

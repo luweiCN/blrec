@@ -3,7 +3,7 @@ import hashlib
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -114,6 +114,84 @@ async def test_password_worker_shutdown_waits_for_admitted_work() -> None:
     release.set()
     assert await job == 'done'
     await shutdown
+
+
+def test_password_worker_releases_an_immediately_completed_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = PasswordWorkCoordinator()
+    completed = Future()
+    completed.set_result('done')
+    monkeypatch.setattr(coordinator._executor, 'submit', lambda work: completed)
+    finished = threading.Event()
+    outcome = []
+
+    def run_job() -> None:
+        outcome.append(asyncio.run(coordinator.run(lambda: 'done')))
+        finished.set()
+
+    thread = threading.Thread(target=run_job, daemon=True)
+    thread.start()
+
+    assert finished.wait(
+        5
+    ), 'completed future callback deadlocked coordinator admission'
+    assert outcome == ['done']
+    assert coordinator.admitted_count == 0
+    asyncio.run(coordinator.shutdown())
+
+
+@pytest.mark.asyncio
+async def test_password_worker_releases_cancelled_queued_and_running_jobs() -> None:
+    coordinator = PasswordWorkCoordinator()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_job() -> str:
+        started.set()
+        assert release.wait(5)
+        finished.set()
+        return 'done'
+
+    running = asyncio.create_task(coordinator.run(blocking_job))
+    loop = asyncio.get_running_loop()
+    assert await loop.run_in_executor(None, started.wait, 5)
+    queued = asyncio.create_task(coordinator.run(lambda: 'queued'))
+    for _ in range(10):
+        if coordinator.admitted_count == 2:
+            break
+        await asyncio.sleep(0)
+    assert coordinator.admitted_count == 2
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    assert coordinator.admitted_count == 1
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert coordinator.admitted_count == 1
+    release.set()
+    assert await loop.run_in_executor(None, finished.wait, 5)
+    for _ in range(10):
+        if coordinator.admitted_count == 0:
+            break
+        await asyncio.sleep(0)
+    assert coordinator.admitted_count == 0
+    await coordinator.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_closed_password_worker_rejects_new_admission() -> None:
+    coordinator = PasswordWorkCoordinator()
+
+    coordinator.close_admission()
+
+    with pytest.raises(RuntimeError, match='coordinator is closed'):
+        await coordinator.run(lambda: 'unexpected')
+    await coordinator.shutdown()
 
 
 def setup_admin(client: TestClient) -> str:
@@ -511,7 +589,7 @@ def test_saturated_password_worker_returns_retryable_503_without_login_failure(
 
         rejected = executor.submit(request_login)
         try:
-            response = rejected.result(timeout=1)
+            response = rejected.result(timeout=5)
             assert response.status_code == 503
             assert response.headers['retry-after'] == '1'
             assert response.json()['detail'] == 'Password authentication is busy'

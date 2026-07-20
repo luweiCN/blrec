@@ -39,3 +39,113 @@ async def test_realtime_highlight_snapshot_uses_runtime_worker(monkeypatch) -> N
         {'id': 3, 'state': 'processing'}
     ]
     progress.assert_awaited_once_with()
+
+
+class PasswordWorkProbe:
+    def __init__(self, events) -> None:
+        self.events = events
+
+    def close_admission(self) -> None:
+        self.events.append('password.close_admission')
+
+    async def shutdown(self) -> None:
+        self.events.append('password.shutdown')
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_always_closes_password_work_and_auth_store(
+    monkeypatch,
+) -> None:
+    events = []
+    password_work = PasswordWorkProbe(events)
+
+    async def fail_start() -> None:
+        events.append('runtime.start')
+        raise RuntimeError('startup failed')
+
+    async def fail_close() -> None:
+        events.append('runtime.close')
+        raise RuntimeError('runtime close failed')
+
+    monkeypatch.setattr(
+        web_main,
+        '_admin_auth_store',
+        SimpleNamespace(
+            open=lambda: events.append('store.open'),
+            close=lambda: events.append('store.close'),
+        ),
+    )
+    monkeypatch.setattr(web_main, 'PasswordWorkCoordinator', lambda: password_work)
+    monkeypatch.setattr(
+        web_main,
+        '_bili_account_runtime',
+        SimpleNamespace(start=fail_start, close=fail_close),
+    )
+    monkeypatch.setattr(
+        web_main._realtime_sampler,
+        'stop',
+        AsyncMock(side_effect=lambda: events.append('realtime.stop')),
+    )
+    monkeypatch.setattr(web_main.security, 'configure', lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_main.auth, 'configure', lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        web_main.security, 'reset', lambda: events.append('security.reset')
+    )
+    monkeypatch.setattr(web_main.auth, 'reset', lambda: events.append('auth.reset'))
+    monkeypatch.setattr(web_main.browser_extension, 'reset', lambda: None)
+
+    with pytest.raises(RuntimeError, match='runtime close failed'):
+        await web_main.on_startup()
+
+    assert 'password.close_admission' in events
+    assert 'auth.reset' in events
+    assert 'security.reset' in events
+    assert events.index('password.shutdown') > events.index('runtime.close')
+    assert events.index('store.close') > events.index('password.shutdown')
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_password_admission_before_application_cleanup(
+    monkeypatch,
+) -> None:
+    events = []
+    password_work = PasswordWorkProbe(events)
+
+    async def realtime_stop() -> None:
+        events.append('realtime.stop')
+
+    async def app_exit() -> None:
+        events.append('app.exit')
+
+    async def runtime_close() -> None:
+        events.append('runtime.close')
+
+    monkeypatch.setattr(web_main, '_password_work_coordinator', password_work)
+    monkeypatch.setattr(
+        web_main,
+        '_admin_auth_store',
+        SimpleNamespace(close=lambda: events.append('store.close')),
+    )
+    monkeypatch.setattr(web_main._realtime_sampler, 'stop', realtime_stop)
+    monkeypatch.setattr(web_main, 'app', SimpleNamespace(exit=app_exit))
+    monkeypatch.setattr(
+        web_main,
+        '_settings',
+        SimpleNamespace(dump=lambda: events.append('settings.dump')),
+    )
+    monkeypatch.setattr(
+        web_main, '_bili_account_runtime', SimpleNamespace(close=runtime_close)
+    )
+    monkeypatch.setattr(web_main.browser_extension, 'reset', lambda: None)
+    monkeypatch.setattr(
+        web_main.security, 'reset', lambda: events.append('security.reset')
+    )
+    monkeypatch.setattr(web_main.auth, 'reset', lambda: events.append('auth.reset'))
+
+    await web_main.on_shuntdown()
+
+    assert events.index('password.close_admission') < events.index('realtime.stop')
+    assert events.index('auth.reset') < events.index('realtime.stop')
+    assert events.index('security.reset') < events.index('realtime.stop')
+    assert events.index('password.shutdown') > events.index('runtime.close')
+    assert events.index('store.close') > events.index('password.shutdown')

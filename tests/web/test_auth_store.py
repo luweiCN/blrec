@@ -230,27 +230,57 @@ def test_password_verification_does_not_hold_the_session_store_lock(
         return bool(original_verify(hasher, encoded_hash, password))
 
     monkeypatch.setattr(PasswordHasher, 'verify', blocking_verify)
-    session_checked = threading.Event()
-
-    def authenticate() -> None:
-        assert auth.authenticate_session(credentials.session_token) is not None
-        session_checked.set()
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         login = executor.submit(
             auth.login, 'owner', 'correct horse battery staple', client_key='192.0.2.30'
         )
         assert verify_started.wait(5)
-        session = executor.submit(authenticate)
         try:
-            assert session_checked.wait(
-                1
-            ), 'session auth waited for password verification'
+            lock_available = auth._lock.acquire(blocking=False)
+            assert lock_available, 'password verification still owns the store lock'
+            auth._lock.release()
+            assert auth.authenticate_session(credentials.session_token) is not None
         finally:
             release_verify.set()
         login.result(timeout=5)
-        session.result(timeout=5)
 
+    auth.close()
+
+
+def test_password_replacement_hash_does_not_hold_the_session_store_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    auth = store(tmp_path, clock)
+    auth.open()
+    credentials = auth.initialize('owner', 'correct horse battery staple')
+    hash_started = threading.Event()
+    release_hash = threading.Event()
+    original_hash = PasswordHasher.hash
+
+    def blocking_hash(hasher: PasswordHasher, password: str) -> str:
+        hash_started.set()
+        assert release_hash.wait(5)
+        return str(original_hash(hasher, password))
+
+    monkeypatch.setattr(PasswordHasher, 'hash', blocking_hash)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        change = executor.submit(
+            auth.change_password,
+            'correct horse battery staple',
+            'new correct horse battery staple',
+        )
+        assert hash_started.wait(5)
+        try:
+            lock_available = auth._lock.acquire(blocking=False)
+            assert lock_available, 'replacement hash still owns the store lock'
+            auth._lock.release()
+            assert auth.authenticate_session(credentials.session_token) is not None
+        finally:
+            release_hash.set()
+        change.result(timeout=5)
+
+    assert auth.authenticate_session(credentials.session_token) is None
     auth.close()
 
 
@@ -275,6 +305,49 @@ def test_login_commit_rejects_a_password_changed_after_verification(
         != ''
     )
     auth.close()
+
+
+def test_login_commit_cannot_create_a_session_after_concurrent_password_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    login_store = store(tmp_path, clock)
+    reset_store = store(tmp_path, clock)
+    login_store.open()
+    reset_store.open()
+    login_store.initialize('owner', 'correct horse battery staple')
+    ticket = login_store.prepare_login('owner', client_key='192.0.2.32')
+    verification = login_store.check_login_password(
+        ticket, 'correct horse battery staple'
+    )
+    password_selected = threading.Event()
+    continue_login = threading.Event()
+    original_matches = login_store._login_ticket_matches
+
+    def block_after_password_select(ticket_value, row) -> bool:
+        password_selected.set()
+        assert continue_login.wait(5)
+        return original_matches(ticket_value, row)
+
+    monkeypatch.setattr(
+        login_store, '_login_ticket_matches', block_after_password_select
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        login = executor.submit(login_store.commit_login, ticket, verification)
+        assert password_selected.wait(5)
+        try:
+            reset_store.reset_password('new correct horse battery staple')
+        finally:
+            continue_login.set()
+        with pytest.raises(AuthenticationFailed):
+            login.result(timeout=5)
+
+    connection = reset_store._connection
+    assert connection is not None
+    assert connection.execute('SELECT COUNT(*) FROM admin_sessions').fetchone()[0] == 0
+    login_store.close()
+    reset_store.close()
 
 
 def test_bootstrap_rate_limit_is_persistent_and_separate_from_login(

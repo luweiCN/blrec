@@ -328,14 +328,16 @@ async def on_startup() -> None:
     _admin_auth_store.open()
     password_work = PasswordWorkCoordinator()
     _password_work_coordinator = password_work
-    security.configure(_admin_auth_store, bootstrap_api_key=_env_settings.api_key or '')
-    auth.configure(
-        _admin_auth_store,
-        password_work=password_work,
-        bootstrap_api_key=_env_settings.api_key or '',
-    )
     application_launched = False
     try:
+        security.configure(
+            _admin_auth_store, bootstrap_api_key=_env_settings.api_key or ''
+        )
+        auth.configure(
+            _admin_auth_store,
+            password_work=password_work,
+            bootstrap_api_key=_env_settings.api_key or '',
+        )
         browser_extension.application = app
         await _bili_account_runtime.start()
         bili_accounts.manager = _bili_account_runtime.manager
@@ -380,8 +382,57 @@ async def on_startup() -> None:
         await app.refresh_managed_cookie()
         _realtime_sampler.start()
     except BaseException:
-        await _realtime_sampler.stop()
+        password_work.close_admission()
         _application_started = False
+        try:
+            try:
+                auth.reset()
+            finally:
+                security.reset()
+            bili_accounts.manager = None
+            recording_sessions.journal = None
+            recording_sessions.content_reader = None
+            recording_sessions.task_actions = None
+            recording_sessions.session_action_runner = None
+            recording_sessions.submission_manager = None
+            recording_retention.manager = None
+            room_upload_policies.manager = None
+            room_upload_policies.category_catalog = None
+            upload_covers.library = None
+            bili_collections.manager = None
+            highlights.service = None
+            highlights.worker = None
+            highlights.upload_task_creator = None
+            highlights.clip_deleter = None
+            browser_extension.reset()
+            await _realtime_sampler.stop()
+            if application_launched:
+                await app.exit()
+        finally:
+            try:
+                await _bili_account_runtime.close()
+            finally:
+                try:
+                    await password_work.shutdown()
+                finally:
+                    _password_work_coordinator = None
+                    _admin_auth_store.close()
+        raise
+
+
+@api.on_event('shutdown')
+async def on_shuntdown() -> None:
+    global _application_started, _password_work_coordinator
+    password_work = _password_work_coordinator
+    if password_work is not None:
+        password_work.close_admission()
+    _application_started = False
+    try:
+        try:
+            auth.reset()
+        finally:
+            security.reset()
+        await _realtime_sampler.stop()
         bili_accounts.manager = None
         recording_sessions.journal = None
         recording_sessions.content_reader = None
@@ -399,53 +450,19 @@ async def on_startup() -> None:
         highlights.clip_deleter = None
         browser_extension.reset()
         try:
-            if application_launched:
-                await app.exit()
-        finally:
-            await _bili_account_runtime.close()
-        security.reset()
-        auth.reset()
-        await password_work.shutdown()
-        _password_work_coordinator = None
-        raise
-
-
-@api.on_event('shutdown')
-async def on_shuntdown() -> None:
-    global _application_started, _password_work_coordinator
-    await _realtime_sampler.stop()
-    _application_started = False
-    bili_accounts.manager = None
-    recording_sessions.journal = None
-    recording_sessions.content_reader = None
-    recording_sessions.task_actions = None
-    recording_sessions.session_action_runner = None
-    recording_sessions.submission_manager = None
-    recording_retention.manager = None
-    room_upload_policies.manager = None
-    room_upload_policies.category_catalog = None
-    upload_covers.library = None
-    bili_collections.manager = None
-    highlights.service = None
-    highlights.worker = None
-    highlights.upload_task_creator = None
-    highlights.clip_deleter = None
-    browser_extension.reset()
-    try:
-        await app.exit()
-    finally:
-        try:
-            _settings.dump()
+            await app.exit()
         finally:
             try:
-                await _bili_account_runtime.close()
+                _settings.dump()
             finally:
-                security.reset()
-                auth.reset()
-                if _password_work_coordinator is not None:
-                    await _password_work_coordinator.shutdown()
-                    _password_work_coordinator = None
-                _admin_auth_store.close()
+                await _bili_account_runtime.close()
+    finally:
+        try:
+            if password_work is not None:
+                await password_work.shutdown()
+        finally:
+            _password_work_coordinator = None
+            _admin_auth_store.close()
 
 
 tasks.app = app
