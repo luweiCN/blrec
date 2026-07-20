@@ -1,24 +1,37 @@
+from __future__ import annotations
+
 import asyncio
 import smtplib
 import ssl
+import time
 from abc import ABC, abstractmethod
 from email.message import EmailMessage
 from http.client import HTTPException
-from typing import Any, Dict, Final, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Final, Optional, TypedDict, cast
 from urllib.parse import urljoin
 
 import aiohttp
 
-from ..setting.typing import (
-    BarkMessageType,
-    EmailMessageType,
-    MessageType,
-    PushdeerMessageType,
-    PushplusMessageType,
-    ServerchanMessageType,
-    TelegramMessageType,
-)
 from ..utils.patterns import Singleton
+
+if TYPE_CHECKING:
+    from ..setting.typing import (
+        BarkMessageType,
+        EmailMessageType,
+        MessageType,
+        PushdeerMessageType,
+        PushplusMessageType,
+        ServerchanMessageType,
+        TelegramMessageType,
+    )
+else:
+    BarkMessageType = str
+    EmailMessageType = str
+    MessageType = str
+    PushdeerMessageType = str
+    PushplusMessageType = str
+    ServerchanMessageType = str
+    TelegramMessageType = str
 
 __all__ = (
     'MessagingProvider',
@@ -34,6 +47,28 @@ __all__ = (
 class MessagingProvider(Singleton, ABC):
     def __init__(self) -> None:
         super().__init__()
+        self._session: Optional[Any] = None
+        self._attempt_timeout_seconds = 10.0
+        self._monotonic: Callable[[], float] = time.monotonic
+
+    def bind_session(
+        self,
+        session: Optional[Any],
+        *,
+        attempt_timeout_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._session = session
+        self._attempt_timeout_seconds = attempt_timeout_seconds
+        self._monotonic = monotonic
+
+    def _require_session(self) -> Any:
+        if self._session is None:
+            raise RuntimeError('notification transport is not started')
+        return self._session
+
+    def _request_timeout(self) -> aiohttp.ClientTimeout:
+        return aiohttp.ClientTimeout(total=self._attempt_timeout_seconds)
 
     @abstractmethod
     async def send_message(
@@ -62,13 +97,15 @@ class EmailService(MessagingProvider):
         self, subject: str, content: str, msg_type: MessageType
     ) -> None:
         self._check_parameters()
+        deadline_at = self._monotonic() + self._attempt_timeout_seconds
         await asyncio.get_running_loop().run_in_executor(
-            None, self._send_email, subject, content, msg_type
+            None, self.send_with_deadline, subject, content, msg_type, deadline_at
         )
 
-    def _send_email(
-        self, subject: str, content: str, msg_type: EmailMessageType
+    def send_with_deadline(
+        self, subject: str, content: str, msg_type: EmailMessageType, deadline_at: float
     ) -> None:
+        self._check_parameters()
         msg = EmailMessage()
         msg['Subject'] = subject
         msg['From'] = self.src_addr
@@ -77,17 +114,43 @@ class EmailService(MessagingProvider):
         msg.set_content(content, subtype=subtype, charset='utf-8')
 
         try:
-            with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port) as smtp:
-                # smtp.set_debuglevel(1)
-                smtp.login(self.src_addr, self.auth_code)
-                smtp.send_message(msg, self.src_addr, self.dst_addr)
+            smtp_ssl = smtplib.SMTP_SSL(
+                self.smtp_host,
+                self.smtp_port,
+                timeout=self._remaining_timeout(deadline_at),
+            )
         except ssl.SSLError:
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as smtp:
-                # smtp.set_debuglevel(1)
+            smtp = smtplib.SMTP(
+                self.smtp_host,
+                self.smtp_port,
+                timeout=self._remaining_timeout(deadline_at),
+            )
+            with smtp:
+                self._set_phase_timeout(smtp, deadline_at)
                 context = ssl.create_default_context()
                 smtp.starttls(context=context)
+                self._set_phase_timeout(smtp, deadline_at)
                 smtp.login(self.src_addr, self.auth_code)
+                self._set_phase_timeout(smtp, deadline_at)
                 smtp.send_message(msg, self.src_addr, self.dst_addr)
+        else:
+            with smtp_ssl as smtp:
+                self._set_phase_timeout(smtp, deadline_at)
+                smtp.login(self.src_addr, self.auth_code)
+                self._set_phase_timeout(smtp, deadline_at)
+                smtp.send_message(msg, self.src_addr, self.dst_addr)
+
+    def _remaining_timeout(self, deadline_at: float) -> float:
+        remaining = deadline_at - self._monotonic()
+        if remaining <= 0:
+            raise TimeoutError('notification delivery deadline exceeded')
+        return min(self._attempt_timeout_seconds, remaining)
+
+    def _set_phase_timeout(self, smtp: Any, deadline_at: float) -> None:
+        remaining = self._remaining_timeout(deadline_at)
+        sock = getattr(smtp, 'sock', None)
+        if sock is not None:
+            sock.settimeout(remaining)
 
     def _check_parameters(self) -> None:
         if not self.src_addr:
@@ -119,9 +182,9 @@ class Serverchan(MessagingProvider):
         url = f'https://sctapi.ftqq.com/{self.sendkey}.send'
         payload = {'text': title, 'desp': content}
 
-        async with aiohttp.ClientSession(raise_for_status=True) as session:
-            async with session.post(url, data=payload):
-                pass
+        session = self._require_session()
+        async with session.post(url, data=payload, timeout=self._request_timeout()):
+            pass
 
 
 class PushdeerResponse(TypedDict):
@@ -159,11 +222,13 @@ class Pushdeer(MessagingProvider):
             'desp': content,
             'type': msg_type,
         }
-        async with aiohttp.ClientSession(raise_for_status=True) as session:
-            async with session.post(url, json=payload) as res:
-                response = cast(PushdeerResponse, await res.json())
-                if response['code'] != 0:
-                    raise HTTPException(response['code'], response['error'])
+        session = self._require_session()
+        async with session.post(
+            url, json=payload, timeout=self._request_timeout()
+        ) as res:
+            response = cast(PushdeerResponse, await res.json())
+            if response['code'] != 0:
+                raise HTTPException(response['code'], response['error'])
 
 
 class PushplusResponse(TypedDict):
@@ -173,7 +238,7 @@ class PushplusResponse(TypedDict):
 
 
 class Pushplus(MessagingProvider):
-    url = 'http://www.pushplus.plus/send'
+    url = 'https://www.pushplus.plus/send'
 
     def __init__(self, token: str = '', topic: str = '') -> None:
         super().__init__()
@@ -201,11 +266,13 @@ class Pushplus(MessagingProvider):
             'template': msg_type,
         }
 
-        async with aiohttp.ClientSession(raise_for_status=True) as session:
-            async with session.post(self.url, json=payload) as res:
-                response = cast(PushplusResponse, await res.json())
-                if response['code'] != 200:
-                    raise HTTPException(response['code'], response['msg'])
+        session = self._require_session()
+        async with session.post(
+            self.url, json=payload, timeout=self._request_timeout()
+        ) as res:
+            response = cast(PushplusResponse, await res.json())
+            if response['code'] != 200:
+                raise HTTPException(response['code'], response['msg'])
 
 
 class TelegramResponse(TypedDict):
@@ -245,14 +312,15 @@ class Telegram(MessagingProvider):
             'disable_web_page_preview': True,
         }
 
-        async with aiohttp.ClientSession(raise_for_status=True) as session:
-            async with session.post(url, json=payload) as res:
-                response = cast(TelegramResponse, await res.json())
-                if not response['ok']:
-                    raise HTTPException(
-                        response['result']['error_code'],
-                        response['result']['description'],
-                    )
+        session = self._require_session()
+        async with session.post(
+            url, json=payload, timeout=self._request_timeout()
+        ) as res:
+            response = cast(TelegramResponse, await res.json())
+            if not response['ok']:
+                raise HTTPException(
+                    response['result']['error_code'], response['result']['description']
+                )
 
 
 class BarkResponse(TypedDict):
@@ -295,8 +363,10 @@ class Bark(MessagingProvider):
             "icon": "https://raw.githubusercontent.com/acgnhiki/blrec/master/webapp/src/assets/icons/icon-72x72.png",  # noqa
             "group": "blrec",
         }
-        async with aiohttp.ClientSession(raise_for_status=True) as session:
-            async with session.post(url, json=payload) as res:
-                response = cast(BarkResponse, await res.json())
-                if response['code'] != 200:
-                    raise HTTPException(response['message'])
+        session = self._require_session()
+        async with session.post(
+            url, json=payload, timeout=self._request_timeout()
+        ) as res:
+            response = cast(BarkResponse, await res.json())
+            if response['code'] != 200:
+                raise HTTPException(response['message'])

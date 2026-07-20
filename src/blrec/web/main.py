@@ -26,6 +26,7 @@ from blrec.bili_upload.runtime import BiliAccountRuntime
 from blrec.control.operations import ControlOperationJournal
 from blrec.exception import ExistsError, ForbiddenError, NotFoundError
 from blrec.networking.manager import NetworkRouteManager
+from blrec.notification.dispatcher import NotificationDispatcher
 from blrec.notification.providers import (
     Bark,
     EmailService,
@@ -92,6 +93,16 @@ _control_operation_journal = ControlOperationJournal(
 )
 _network_route_manager = NetworkRouteManager(lambda: _settings.network)
 
+_notification_providers = {
+    'email': EmailService.get_instance(),
+    'serverchan': Serverchan.get_instance(),
+    'pushdeer': Pushdeer.get_instance(),
+    'pushplus': Pushplus.get_instance(),
+    'telegram': Telegram.get_instance(),
+    'bark': Bark.get_instance(),
+}
+_notification_dispatcher = NotificationDispatcher(_notification_providers)
+
 
 def _notification_channel_enabled(channel: str) -> bool:
     setting_name = '{}_notification'.format(channel)
@@ -142,12 +153,8 @@ _bili_account_runtime = BiliAccountRuntime(
     network_route_manager=_network_route_manager,
     operational_settings_provider=lambda: _settings.operational_notifications,
     notification_senders={
-        'email': EmailService.get_instance(),
-        'serverchan': Serverchan.get_instance(),
-        'pushdeer': Pushdeer.get_instance(),
-        'pushplus': Pushplus.get_instance(),
-        'telegram': Telegram.get_instance(),
-        'bark': Bark.get_instance(),
+        channel: _notification_dispatcher.channel(channel)
+        for channel in _notification_providers
     },
     notification_channel_enabled=_notification_channel_enabled,
 )
@@ -160,6 +167,7 @@ app = Application(
     network_route_manager=_network_route_manager,
     control_operation_journal=_control_operation_journal,
     room_upload_policy_enabler=_enable_collect_upload_policy,
+    notification_dispatcher=_notification_dispatcher,
 )
 
 
@@ -378,6 +386,7 @@ async def on_startup() -> None:
             bootstrap_api_key=_env_settings.api_key or '',
         )
         browser_extension.application = app
+        await _notification_dispatcher.start()
         await _bili_account_runtime.start()
         bili_accounts.manager = _bili_account_runtime.manager
         bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
@@ -455,15 +464,18 @@ async def on_startup() -> None:
                 await _bili_account_runtime.close()
             finally:
                 try:
-                    await active_media.shutdown()
+                    await _notification_dispatcher.close(drain_timeout_seconds=15)
                 finally:
                     try:
-                        await password_work.shutdown()
+                        await active_media.shutdown()
                     finally:
-                        _active_media_service = None
-                        _password_work_coordinator = None
-                        _admin_auth_store.close()
-                        await _control_operation_journal.close()
+                        try:
+                            await password_work.shutdown()
+                        finally:
+                            _active_media_service = None
+                            _password_work_coordinator = None
+                            _admin_auth_store.close()
+                            await _control_operation_journal.close()
         raise
 
 
@@ -506,7 +518,10 @@ async def on_shuntdown() -> None:
             try:
                 _settings.dump()
             finally:
-                await _bili_account_runtime.close()
+                try:
+                    await _bili_account_runtime.close()
+                finally:
+                    await _notification_dispatcher.close(drain_timeout_seconds=15)
     finally:
         try:
             if active_media is not None:

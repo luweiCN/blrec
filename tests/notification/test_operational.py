@@ -20,11 +20,17 @@ class FakeSender:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.calls: List[Tuple[str, str, str]] = []
+        self.keys = []
 
-    async def send_message(self, title: str, content: str, message_type: str) -> None:
+    def enqueue(
+        self, title: str, content: str, message_type: str, *, coalesce_key=None
+    ) -> bool:
         self.calls.append((title, content, message_type))
-        if self.fail:
-            raise RuntimeError('channel unavailable')
+        self.keys.append(coalesce_key)
+        return not self.fail
+
+    async def send_message(self, *_args, **_kwargs) -> None:
+        raise AssertionError('operational notification bypassed dispatcher')
 
 
 def configured_settings() -> OperationalNotificationSettings:
@@ -86,6 +92,10 @@ async def test_operational_notifications_send_problem_and_recovery_once(
         assert [call[0] for call in email.calls] == ['投稿账号失效', '投稿账号恢复']
         assert email.calls[0][2] == 'html'
         assert len(pushdeer.calls) == 2
+        assert email.keys == [
+            ('account_unavailable', 'account:1', 'email'),
+            ('account_unavailable', 'account:1', 'email'),
+        ]
     finally:
         await database.close()
 

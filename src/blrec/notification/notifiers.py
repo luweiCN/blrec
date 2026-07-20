@@ -1,20 +1,13 @@
-import asyncio
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Final, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Final, Optional, Tuple
 
 import attr
 import humanize
 from liquid import Environment
 from liquid.filter import math_filter
 from pkg_resources import resource_string
-from tenacity import (
-    AsyncRetrying,
-    retry_if_exception,
-    stop_after_delay,
-    wait_exponential,
-)
 
 from ..event import (
     Error,
@@ -26,7 +19,6 @@ from ..event import (
 )
 from ..event.typing import Event
 from ..exception import ExceptionCenter, format_exception
-from ..setting.typing import MessageType
 from ..utils.mixins import SwitchableMixin
 from .providers import (
     Bark,
@@ -37,6 +29,12 @@ from .providers import (
     Serverchan,
     Telegram,
 )
+
+if TYPE_CHECKING:
+    from ..setting.typing import MessageType
+    from .dispatcher import NotificationDispatcher
+else:
+    MessageType = str
 
 __all__ = (
     'Notifier',
@@ -182,6 +180,13 @@ ERROR_MESSAGE_TITLE: Final[str] = '出错了~'
 
 class MessageNotifier(Notifier, ABC):
     provider: MessagingProvider
+    channel: str
+
+    def __init__(
+        self, *, dispatcher: Optional['NotificationDispatcher'] = None, **kwargs: Any
+    ) -> None:
+        self._dispatcher = dispatcher
+        super().__init__(**kwargs)
 
     def _notify_live_began(self, event: LiveBeganEvent) -> None:
         title, content = self._make_began_message(event)
@@ -252,26 +257,14 @@ class MessageNotifier(Notifier, ABC):
         return title, content
 
     def _send_message(self, title: str, content: str, msg_type: MessageType) -> None:
-        asyncio.create_task(self._send_message_async(title, content, msg_type))
-
-    async def _send_message_async(
-        self, title: str, content: str, msg_type: MessageType
-    ) -> None:
-        try:
-            async for attempt in AsyncRetrying(
-                reraise=True,
-                stop=stop_after_delay(300),
-                wait=wait_exponential(multiplier=0.1, max=10),
-                retry=retry_if_exception(lambda e: not isinstance(e, ValueError)),
-            ):
-                with attempt:
-                    await self.provider.send_message(title, content, msg_type)
-        except Exception as e:
+        dispatcher = self._dispatcher
+        if dispatcher is None:
             logger.warning(
-                'Failed to send a message via {}: {}'.format(
-                    self.provider.__class__.__name__, repr(e)
-                )
+                'Notification dispatcher unavailable channel={}', self.channel
             )
+            return
+        if not dispatcher.enqueue(self.channel, title, content, msg_type):
+            logger.warning('Notification queue rejected channel={}', self.channel)
 
     def _get_began_message_title(self) -> str:
         return self.began_message_title or BEGAN_MESSAGE_TITLE
@@ -336,6 +329,7 @@ class MessageNotifier(Notifier, ABC):
 
 class EmailNotifier(MessageNotifier):
     provider = EmailService.get_instance()
+    channel = 'email'
 
     def _do_enable(self) -> None:
         super()._do_enable()
@@ -348,6 +342,7 @@ class EmailNotifier(MessageNotifier):
 
 class ServerchanNotifier(MessageNotifier):
     provider = Serverchan.get_instance()
+    channel = 'serverchan'
 
     def _do_enable(self) -> None:
         super()._do_enable()
@@ -360,6 +355,7 @@ class ServerchanNotifier(MessageNotifier):
 
 class PushdeerNotifier(MessageNotifier):
     provider = Pushdeer.get_instance()
+    channel = 'pushdeer'
 
     def _do_enable(self) -> None:
         super()._do_enable()
@@ -372,6 +368,7 @@ class PushdeerNotifier(MessageNotifier):
 
 class PushplusNotifier(MessageNotifier):
     provider = Pushplus.get_instance()
+    channel = 'pushplus'
 
     def _do_enable(self) -> None:
         super()._do_enable()
@@ -384,6 +381,7 @@ class PushplusNotifier(MessageNotifier):
 
 class TelegramNotifier(MessageNotifier):
     provider = Telegram.get_instance()
+    channel = 'telegram'
 
     def _do_enable(self) -> None:
         super()._do_enable()
@@ -408,6 +406,7 @@ class TelegramNotifier(MessageNotifier):
 
 class BarkNotifier(MessageNotifier):
     provider = Bark.get_instance()
+    channel = 'bark'
 
     def _do_enable(self) -> None:
         super()._do_enable()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import time
 from typing import (
@@ -13,8 +12,6 @@ from typing import (
     Sequence,
     Tuple,
 )
-
-from loguru import logger
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.setting.models import (
@@ -31,7 +28,14 @@ __all__ = ('OperationalHealthScanner', 'OperationalNotificationCenter')
 
 
 class _MessageSender(Protocol):
-    async def send_message(self, title: str, content: str, message_type: str) -> None:
+    def enqueue(
+        self,
+        title: str,
+        content: str,
+        message_type: str,
+        *,
+        coalesce_key: Tuple[str, ...],
+    ) -> bool:
         pass
 
 
@@ -107,33 +111,28 @@ class OperationalNotificationCenter:
         route = self._settings_provider().route_for(event)
         if healthy and not route.notify_recovery:
             return True
-        await self._dispatch(route.targets, title[:200], detail[:2000])
+        self._dispatch(event, object_key, route.targets, title[:200], detail[:2000])
         return True
 
-    async def _dispatch(
-        self, targets: Sequence[OperationalNotificationTarget], title: str, detail: str
+    def _dispatch(
+        self,
+        event: OperationalEventCode,
+        object_key: str,
+        targets: Sequence[OperationalNotificationTarget],
+        title: str,
+        detail: str,
     ) -> None:
-        coroutines = []
-        names = []
         for target in targets:
             channel = str(target.channel)
             sender = self._senders.get(channel)
             if sender is None or not self._channel_enabled(channel):
                 continue
-            names.append(channel)
-            coroutines.append(
-                sender.send_message(title, detail, str(target.message_type))
+            sender.enqueue(
+                title,
+                detail,
+                str(target.message_type),
+                coalesce_key=(str(event), object_key, channel),
             )
-        if not coroutines:
-            return
-        results = await asyncio.gather(*coroutines, return_exceptions=True)
-        for channel, result in zip(names, results):
-            if isinstance(result, BaseException):
-                logger.warning(
-                    'Operational notification via {} failed: {}'.format(
-                        channel, repr(result)
-                    )
-                )
 
 
 class OperationalHealthScanner:

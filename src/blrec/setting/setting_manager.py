@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Iterable, Optional, Set, Tuple, cast
 from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
 from ..logging.audit import audit
-from ..notification import (
+from ..notification.notifiers import Notifier
+from ..notification.providers import (
     Bark,
     EmailService,
-    Notifier,
     Pushdeer,
     Pushplus,
     Serverchan,

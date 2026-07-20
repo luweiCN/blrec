@@ -5,6 +5,7 @@ import pytest
 
 import blrec.application as application_module
 from blrec.application import Application
+from blrec.setting import Settings
 
 
 class _Emitter:
@@ -185,6 +186,22 @@ def test_cookie_validation_routed_client_is_pool_owned() -> None:
     assert app._get_bili_validation_session() is client
     assert app._bili_validation_session is None
     assert pool.calls == [('bili_api', True, None)]
+
+
+def test_application_notifiers_share_injected_dispatcher() -> None:
+    dispatcher = object()
+    app = Application(Settings(), notification_dispatcher=dispatcher)
+
+    app._setup_notifiers()
+    try:
+        assert app._email_notifier._dispatcher is dispatcher
+        assert app._serverchan_notifier._dispatcher is dispatcher
+        assert app._pushdeer_notifier._dispatcher is dispatcher
+        assert app._pushplus_notifier._dispatcher is dispatcher
+        assert app._telegram_notifier._dispatcher is dispatcher
+        assert app._bark_notifier._dispatcher is dispatcher
+    finally:
+        app._destroy_notifiers()
 
 
 @pytest.mark.asyncio

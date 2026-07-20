@@ -63,6 +63,20 @@ class ActiveMediaProbe:
         self.events.append('active_media.shutdown')
 
 
+class NotificationDispatcherProbe:
+    def __init__(self, events) -> None:
+        self.events = events
+        self.close_calls = 0
+
+    async def start(self) -> None:
+        self.events.append('notifications.start')
+
+    async def close(self, *, drain_timeout_seconds=15) -> None:
+        assert drain_timeout_seconds == 15
+        self.close_calls += 1
+        self.events.append('notifications.close')
+
+
 @pytest.mark.asyncio
 async def test_startup_failure_always_closes_password_work_and_auth_store(
     monkeypatch,
@@ -70,6 +84,7 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     events = []
     password_work = PasswordWorkProbe(events)
     active_media = ActiveMediaProbe(events)
+    dispatcher = NotificationDispatcherProbe(events)
 
     async def fail_start() -> None:
         events.append('runtime.start')
@@ -89,6 +104,7 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     )
     monkeypatch.setattr(web_main, 'PasswordWorkCoordinator', lambda: password_work)
     monkeypatch.setattr(web_main, 'ActiveMediaService', lambda: active_media)
+    monkeypatch.setattr(web_main, '_notification_dispatcher', dispatcher)
     monkeypatch.setattr(
         web_main,
         '_bili_account_runtime',
@@ -114,6 +130,9 @@ async def test_startup_failure_always_closes_password_work_and_auth_store(
     assert 'active_media.close_admission' in events
     assert 'auth.reset' in events
     assert 'security.reset' in events
+    assert events.index('notifications.start') < events.index('runtime.start')
+    assert events.index('notifications.close') > events.index('runtime.close')
+    assert dispatcher.close_calls == 1
     assert events.index('password.shutdown') > events.index('runtime.close')
     assert events.index('active_media.shutdown') > events.index('runtime.close')
     assert events.index('store.close') > events.index('password.shutdown')
@@ -126,6 +145,7 @@ async def test_shutdown_stops_password_admission_before_application_cleanup(
     events = []
     password_work = PasswordWorkProbe(events)
     active_media = ActiveMediaProbe(events)
+    dispatcher = NotificationDispatcherProbe(events)
 
     async def realtime_stop() -> None:
         events.append('realtime.stop')
@@ -138,6 +158,7 @@ async def test_shutdown_stops_password_admission_before_application_cleanup(
 
     monkeypatch.setattr(web_main, '_password_work_coordinator', password_work)
     monkeypatch.setattr(web_main, '_active_media_service', active_media)
+    monkeypatch.setattr(web_main, '_notification_dispatcher', dispatcher)
     monkeypatch.setattr(
         web_main,
         '_admin_auth_store',
@@ -167,4 +188,5 @@ async def test_shutdown_stops_password_admission_before_application_cleanup(
     assert events.index('security.reset') < events.index('realtime.stop')
     assert events.index('password.shutdown') > events.index('runtime.close')
     assert events.index('active_media.shutdown') > events.index('runtime.close')
+    assert events.index('notifications.close') > events.index('runtime.close')
     assert events.index('store.close') > events.index('password.shutdown')

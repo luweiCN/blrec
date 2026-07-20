@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .flv.operators import StreamProfile
     from .networking.aiohttp_session import AiohttpSessionPool
     from .networking.manager import NetworkRouteManager
+    from .notification.dispatcher import NotificationDispatcher
     from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 
 
@@ -110,6 +111,7 @@ class Application:
         control_operation_journal: Optional[ControlOperationJournal] = None,
         room_upload_policy_enabler: Optional[Callable[[int], Awaitable[None]]] = None,
         validation_timeout_seconds: float = 10,
+        notification_dispatcher: Optional[NotificationDispatcher] = None,
     ) -> None:
         if not 0 < validation_timeout_seconds <= 10:
             raise ValueError('validation_timeout_seconds must be in (0, 10]')
@@ -122,6 +124,7 @@ class Application:
         self._network_session_pool: Optional[AiohttpSessionPool] = None
         self._bili_validation_session: Optional[Any] = None
         self._validation_timeout_seconds = validation_timeout_seconds
+        self._notification_dispatcher = notification_dispatcher
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
         self._recording_journal_provider = recording_journal_provider
@@ -702,12 +705,13 @@ class Application:
             TelegramNotifier,
         )
 
-        self._email_notifier = EmailNotifier()
-        self._serverchan_notifier = ServerchanNotifier()
-        self._pushdeer_notifier = PushdeerNotifier()
-        self._pushplus_notifier = PushplusNotifier()
-        self._telegram_notifier = TelegramNotifier()
-        self._bark_notifier = BarkNotifier()
+        dispatcher = self._notification_dispatcher
+        self._email_notifier = EmailNotifier(dispatcher=dispatcher)
+        self._serverchan_notifier = ServerchanNotifier(dispatcher=dispatcher)
+        self._pushdeer_notifier = PushdeerNotifier(dispatcher=dispatcher)
+        self._pushplus_notifier = PushplusNotifier(dispatcher=dispatcher)
+        self._telegram_notifier = TelegramNotifier(dispatcher=dispatcher)
+        self._bark_notifier = BarkNotifier(dispatcher=dispatcher)
         self._settings_manager.apply_email_notification_settings()
         self._settings_manager.apply_serverchan_notification_settings()
         self._settings_manager.apply_pushdeer_notification_settings()
