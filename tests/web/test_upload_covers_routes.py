@@ -128,3 +128,38 @@ def test_upload_returns_retryable_503_when_cover_worker_is_saturated(
     assert response.status_code == 503
     assert response.headers['retry-after'] == '1'
     assert response.json() == {'detail': 'Cover processing is busy'}
+
+
+@pytest.mark.parametrize('conflict', ('outside', 'missing'))
+def test_upload_maps_stored_cover_conflicts_to_safe_409(
+    client: TestClient, conflict: str, tmp_path: Path
+) -> None:
+    previous = upload_covers.library
+    assert previous is not None
+
+    class RecordedConflictLibrary:
+        async def add(self, content: bytes, filename: str) -> None:
+            asset = await previous.add(content, filename)
+            if conflict == 'outside':
+                await previous._database.execute(
+                    'UPDATE cover_assets SET storage_path=? WHERE id=?',
+                    (str(tmp_path / 'outside.png'), asset.id),
+                )
+            else:
+                opened = await previous.open(asset.id)
+                opened.path.unlink()
+            await previous.add(content, filename)
+
+    upload_covers.library = RecordedConflictLibrary()  # type: ignore[assignment]
+    try:
+        response = client.post(
+            '/api/v1/upload-covers',
+            params={'filename': 'cover.png'},
+            headers=headers(),
+            content=png(),
+        )
+    finally:
+        upload_covers.library = previous
+
+    assert response.status_code == 409
+    assert response.json() == {'detail': 'Stored cover is unavailable'}

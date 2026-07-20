@@ -362,6 +362,50 @@ async def test_runtime_close_stops_cover_admission_and_drains_admitted_work(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_runtime_close_calls_share_cover_drain_before_database_close(
+    tmp_path: Path,
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+    )
+    drain_started = asyncio.Event()
+    release_drain = asyncio.Event()
+    database_close_started = asyncio.Event()
+    database_close_calls = 0
+
+    class BlockingCoverLibrary:
+        def close_admission(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            drain_started.set()
+            await release_drain.wait()
+
+    class ObservedDatabase:
+        async def close(self) -> None:
+            nonlocal database_close_calls
+            database_close_calls += 1
+            database_close_started.set()
+
+    runtime._cover_library = BlockingCoverLibrary()  # type: ignore[assignment]
+    runtime._database = ObservedDatabase()  # type: ignore[assignment]
+    first_close = asyncio.create_task(runtime.close())
+    await asyncio.wait_for(drain_started.wait(), timeout=5)
+    second_close = asyncio.create_task(runtime.close())
+    await asyncio.sleep(0)
+
+    assert not first_close.done()
+    assert not second_close.done()
+    assert not database_close_started.is_set()
+
+    release_drain.set()
+    await asyncio.gather(first_close, second_close)
+    assert database_close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_stopping_upload_worker_keeps_stop_event_visible_until_exit(
     tmp_path: Path,
 ) -> None:

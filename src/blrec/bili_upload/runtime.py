@@ -140,6 +140,7 @@ class BiliAccountRuntime:
         self._deletion_task: Optional[asyncio.Task[Any]] = None
         self._deletion_stop_event: Optional[asyncio.Event] = None
         self._session_action_lock = asyncio.Lock()
+        self._close_task: Optional[asyncio.Task[None]] = None
         self._unavailable_reason: Optional[str] = (
             'Bilibili account management is not ready'
         )
@@ -637,6 +638,13 @@ class BiliAccountRuntime:
         raise UploadTaskActionRejected('不支持的场次操作')
 
     async def close(self) -> None:
+        close_task = self._close_task
+        if close_task is None:
+            close_task = asyncio.create_task(self._close_once())
+            self._close_task = close_task
+        await asyncio.shield(close_task)
+
+    async def _close_once(self) -> None:
         cover_library, self._cover_library = self._cover_library, None
         if cover_library is not None:
             cover_library.close_admission()

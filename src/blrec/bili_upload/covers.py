@@ -5,6 +5,7 @@ import hashlib
 import os
 import stat
 import struct
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -163,6 +164,7 @@ class _CoverInspection:
 @dataclass
 class _DigestWork:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    state_lock: threading.Lock = field(default_factory=threading.Lock)
     consumers: int = 0
     created_file: bool = False
 
@@ -201,15 +203,18 @@ class CoverLibrary:
         if digest_work is None:
             digest_work = _DigestWork()
             self._digest_work[digest] = digest_work
-        digest_work.consumers += 1
+        with digest_work.state_lock:
+            digest_work.consumers += 1
         try:
             async with digest_work.lock:
                 return await self._add_by_digest(
                     content, filename, inspection, digest_work
                 )
         finally:
-            digest_work.consumers -= 1
-            if digest_work.consumers == 0:
+            with digest_work.state_lock:
+                digest_work.consumers -= 1
+                unused = digest_work.consumers == 0
+            if unused:
                 self._digest_work.pop(digest, None)
 
     async def _add_by_digest(
@@ -235,7 +240,8 @@ class CoverLibrary:
             partial(self._store_file, path, content, digest)
         )
         if created:
-            digest_work.created_file = True
+            with digest_work.state_lock:
+                digest_work.created_file = True
         now = int(self._clock())
         try:
             await self._database.execute(
@@ -263,14 +269,16 @@ class CoverLibrary:
         if stored is None:
             await self._cleanup_failed_insert(path, digest, digest_work)
             raise StoredCoverUnavailable('stored cover metadata is unavailable')
-        digest_work.created_file = False
+        with digest_work.state_lock:
+            digest_work.created_file = False
         return self._view(stored)
 
     async def _cleanup_failed_insert(
         self, path: Path, digest: str, digest_work: _DigestWork
     ) -> None:
-        if not digest_work.created_file or digest_work.consumers > 1:
-            return
+        with digest_work.state_lock:
+            if not digest_work.created_file or digest_work.consumers > 1:
+                return
         try:
             referenced = await self._database.scalar(
                 'SELECT 1 FROM cover_assets WHERE sha256=? OR storage_path=?',
@@ -279,13 +287,15 @@ class CoverLibrary:
         except Exception:
             return
         if referenced is not None:
-            digest_work.created_file = False
+            with digest_work.state_lock:
+                digest_work.created_file = False
             return
         try:
-            await self._work.offload(partial(self._cleanup_file, path, digest))
+            await self._work.offload(
+                partial(self._cleanup_file_if_unshared, path, digest, digest_work)
+            )
         except (InvalidCover, OSError, StoredCoverUnavailable):
             return
-        digest_work.created_file = False
 
     @classmethod
     def _inspect_content(cls, content: bytes) -> _CoverInspection:
@@ -359,20 +369,46 @@ class CoverLibrary:
         self._root.mkdir(parents=True, mode=0o700, exist_ok=True)
         os.chmod(self._root, 0o700)
         try:
-            descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+            os.lstat(str(path))
+        except FileNotFoundError:
+            pass
+        else:
             self._verify_file(path, digest)
-            os.chmod(path, 0o600)
             return False
+
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix='.cover-', suffix='.tmp', dir=str(self._root)
+        )
+        temporary_path = Path(temporary_name)
         try:
             with os.fdopen(descriptor, 'wb') as output:
+                descriptor = -1
+                os.fchmod(output.fileno(), 0o600)
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
-        except BaseException:
+            try:
+                os.link(str(temporary_path), str(path))
+            except FileExistsError:
+                self._verify_file(path, digest)
+                return False
+            self._fsync_directory(self._root)
+            return True
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary_path.unlink(missing_ok=True)
+
+    @classmethod
+    def _cleanup_file_if_unshared(
+        cls, path: Path, digest: str, digest_work: _DigestWork
+    ) -> None:
+        cls._verify_file(path, digest)
+        with digest_work.state_lock:
+            if not digest_work.created_file or digest_work.consumers > 1:
+                return
             path.unlink(missing_ok=True)
-            raise
-        return True
+            digest_work.created_file = False
 
     @classmethod
     def _cleanup_file(cls, path: Path, digest: str) -> None:
@@ -400,8 +436,18 @@ class CoverLibrary:
                 if not chunk:
                     break
                 hasher.update(chunk)
-        if hasher.hexdigest() != digest:
-            raise InvalidCover('stored cover file does not match its hash')
+            if hasher.hexdigest() != digest:
+                raise InvalidCover('stored cover file does not match its hash')
+            os.fchmod(source.fileno(), 0o600)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+        descriptor = os.open(str(path), flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _safe_filename(filename: str, extension: str) -> str:

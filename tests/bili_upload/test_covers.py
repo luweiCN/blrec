@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import os
+import stat
 import struct
 import threading
 from functools import partial
@@ -299,6 +301,63 @@ async def test_database_failure_keeps_file_for_waiting_digest_consumer(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_rechecks_waiting_consumer_after_database_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    cleanup_query_started = asyncio.Event()
+    release_cleanup_query = asyncio.Event()
+    insert_calls = 0
+    store_results = []
+    original_execute = database.execute
+    original_scalar = database.scalar
+    original_store = CoverLibrary._store_file
+
+    async def fail_first_insert(sql: str, parameters: Any = ()) -> int:
+        nonlocal insert_calls
+        if sql.startswith('INSERT INTO cover_assets'):
+            insert_calls += 1
+            if insert_calls == 1:
+                raise RuntimeError('database insert failed')
+        return await original_execute(sql, parameters)
+
+    async def block_cleanup_query(sql: str, parameters: Any = ()) -> Any:
+        if sql.startswith('SELECT 1 FROM cover_assets'):
+            cleanup_query_started.set()
+            await release_cleanup_query.wait()
+            return None
+        return await original_scalar(sql, parameters)
+
+    def observed_store(
+        cover_library: CoverLibrary, path: Path, content: bytes, digest: str
+    ) -> bool:
+        created = original_store(cover_library, path, content, digest)
+        store_results.append(created)
+        return created
+
+    monkeypatch.setattr(database, 'execute', fail_first_insert)
+    monkeypatch.setattr(database, 'scalar', block_cleanup_query)
+    monkeypatch.setattr(CoverLibrary, '_store_file', observed_store)
+    first = asyncio.create_task(library.add(png(), 'first.png'))
+    await asyncio.wait_for(cleanup_query_started.wait(), timeout=5)
+    second = asyncio.create_task(library.add(png(), 'second.png'))
+    digest = hashlib.sha256(png()).hexdigest()
+    await asyncio.wait_for(wait_for_digest_consumers(library, digest, 2), timeout=5)
+    release_cleanup_query.set()
+
+    with pytest.raises(RuntimeError, match='database insert failed'):
+        await first
+    stored = await second
+
+    assert stored.id == 1
+    assert store_results == [True, False]
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_database_error_after_commit_does_not_delete_referenced_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -367,19 +426,21 @@ async def test_database_failure_cleans_new_cover_file_off_event_loop(
     library = CoverLibrary(database, tmp_path / 'covers')
     cleanup_threads = []
     original_execute = database.execute
-    original_cleanup = CoverLibrary._cleanup_file
+    original_cleanup = CoverLibrary._cleanup_file_if_unshared
 
     async def fail_insert(sql: str, parameters: Any = ()) -> int:
         if sql.startswith('INSERT INTO cover_assets'):
             raise RuntimeError('database insert failed')
         return await original_execute(sql, parameters)
 
-    def observed_cleanup(path: Path, digest: str) -> None:
+    def observed_cleanup(path: Path, digest: str, digest_work: Any) -> None:
         cleanup_threads.append(threading.get_ident())
-        original_cleanup(path, digest)
+        original_cleanup(path, digest, digest_work)
 
     monkeypatch.setattr(database, 'execute', fail_insert)
-    monkeypatch.setattr(CoverLibrary, '_cleanup_file', staticmethod(observed_cleanup))
+    monkeypatch.setattr(
+        CoverLibrary, '_cleanup_file_if_unshared', staticmethod(observed_cleanup)
+    )
     with pytest.raises(RuntimeError, match='database insert failed'):
         await library.add(png(), 'cover.png')
 
@@ -407,6 +468,65 @@ async def test_cover_library_recovers_complete_orphan_metadata(tmp_path: Path) -
     assert asset.filename == 'recovered.png'
     assert await database.scalar('SELECT COUNT(*) FROM cover_assets') == 1
     assert orphan.read_bytes() == png()
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cover_store_does_not_publish_final_path_before_file_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    loop = asyncio.get_running_loop()
+    file_fsync_started = asyncio.Event()
+    release_file_fsync = threading.Event()
+    original_fsync = os.fsync
+    blocked = False
+
+    def blocking_fsync(descriptor: int) -> None:
+        nonlocal blocked
+        if stat.S_ISREG(os.fstat(descriptor).st_mode) and not blocked:
+            blocked = True
+            loop.call_soon_threadsafe(file_fsync_started.set)
+            assert release_file_fsync.wait(5)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(os, 'fsync', blocking_fsync)
+    addition = asyncio.create_task(library.add(png(), 'cover.png'))
+    digest = hashlib.sha256(png()).hexdigest()
+    final_path = tmp_path / 'covers' / '{}.png'.format(digest)
+    try:
+        await asyncio.wait_for(file_fsync_started.wait(), timeout=5)
+        assert not final_path.exists()
+    finally:
+        release_file_fsync.set()
+
+    await addition
+    assert final_path.read_bytes() == png()
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cover_store_cleans_temporary_file_when_atomic_publish_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+
+    def fail_publish(_source: Any, _destination: Any) -> None:
+        raise OSError('atomic publish interrupted')
+
+    monkeypatch.setattr(os, 'link', fail_publish)
+    with pytest.raises(OSError, match='atomic publish interrupted'):
+        await library.add(png(), 'cover.png')
+
+    root = tmp_path / 'covers'
+    assert list(root.iterdir()) == []
+    assert await database.scalar('SELECT COUNT(*) FROM cover_assets') == 0
     await library.shutdown()
     await database.close()
 

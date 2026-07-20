@@ -98,6 +98,10 @@ async def add_upload_cover(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from None
+    except StoredCoverUnavailable:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail='Stored cover is unavailable'
+        ) from None
     return response(asset)
 
 
