@@ -3,6 +3,7 @@ from typing import Any, List
 
 import pytest
 
+import blrec.application as application_module
 from blrec.application import Application
 
 
@@ -51,6 +52,26 @@ class _TaskManager:
 class _FailingJournal:
     async def open(self) -> None:
         raise RuntimeError('control journal failed')
+
+
+class _SecretFailingCloseEmitter(_Emitter):
+    async def close(self, *, drain_timeout_seconds: float = 5) -> None:
+        await super().close(drain_timeout_seconds=drain_timeout_seconds)
+        raise OSError('https://secret.invalid/hook payload-secret')
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.errors: List[str] = []
+
+    def info(self, _message: str, *_args: object) -> None:
+        return None
+
+    def debug(self, _message: str, *_args: object) -> None:
+        return None
+
+    def error(self, message: str, *args: object) -> None:
+        self.errors.append(message.format(*args))
 
 
 @pytest.mark.asyncio
@@ -120,6 +141,40 @@ async def test_failed_webhook_close_keeps_emitter_for_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exit_keeps_failed_webhook_close_for_later_retry() -> None:
+    calls: List[str] = []
+    app = object.__new__(Application)
+    emitter = _FailingCloseEmitter(calls)
+    app._task_manager = _TaskManager(calls)
+    app._webhook_emitter = emitter
+    app._live_status_coordinator = None
+    app._live_status_session = None
+    app._network_session_pool = None
+    app._destroy_notifiers = lambda: calls.append('application.destroy_notifiers')
+    app._destroy_exception_handler = lambda: calls.append(
+        'application.destroy_exception_handler'
+    )
+
+    with pytest.raises(OSError, match='session close failed'):
+        await app._exit()
+
+    assert app._webhook_emitter is emitter
+    assert calls == [
+        'webhook.disable',
+        'webhook.close',
+        'tasks.stop',
+        'tasks.destroy',
+        'application.destroy_notifiers',
+        'application.destroy_exception_handler',
+    ]
+
+    await app._teardown_webhooks()
+
+    assert not hasattr(app, '_webhook_emitter')
+    assert emitter._close_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_launch_failure_after_webhook_start_still_closes_session() -> None:
     calls: List[str] = []
     app = object.__new__(Application)
@@ -138,6 +193,30 @@ async def test_launch_failure_after_webhook_start_still_closes_session() -> None
         'webhook.disable',
         'webhook.close',
     ]
+
+
+@pytest.mark.asyncio
+async def test_launch_cleanup_log_redacts_webhook_error_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+    recording_logger = _RecordingLogger()
+    monkeypatch.setattr(application_module, 'logger', recording_logger)
+    app = object.__new__(Application)
+    app._setup_logger = lambda: None
+    app._setup_live_status_monitor = _noop
+    app._setup = lambda: setattr(
+        app, '_webhook_emitter', _SecretFailingCloseEmitter(calls)
+    )
+    app._control_operation_journal = _FailingJournal()
+    app._teardown_live_status_monitor_after_failure = _noop
+
+    with pytest.raises(RuntimeError, match='control journal failed'):
+        await app.launch()
+
+    assert recording_logger.errors == ['Webhook teardown after launch failure: OSError']
+    assert 'secret.invalid' not in recording_logger.errors[0]
+    assert 'payload-secret' not in recording_logger.errors[0]
 
 
 async def _noop(*_args: Any, **_kwargs: Any) -> None:

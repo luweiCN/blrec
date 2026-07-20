@@ -206,7 +206,8 @@ class Application:
                 raise cleanup_error from error
             except BaseException as cleanup_error:
                 logger.error(
-                    'Webhook teardown after launch failure: {!r}', cleanup_error
+                    'Webhook teardown after launch failure: {}',
+                    type(cleanup_error).__name__,
                 )
             await self._teardown_live_status_monitor_after_failure(error)
             raise
@@ -690,8 +691,6 @@ class Application:
 
     def _destroy(self) -> None:
         self._destroy_notifiers()
-        if hasattr(self, '_webhook_emitter'):
-            self._destroy_webhooks()
         self._destroy_exception_handler()
 
     def _destroy_notifiers(self) -> None:
