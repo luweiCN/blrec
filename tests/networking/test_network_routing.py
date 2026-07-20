@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from dataclasses import replace
 from typing import Any, Dict, List, Tuple
 from unittest.mock import Mock
 
@@ -219,6 +220,154 @@ async def test_concurrent_refreshes_share_interface_discovery(force: bool) -> No
     await asyncio.gather(first, second)
 
     assert len(provider_calls) == 2
+
+
+def test_concurrent_refreshes_work_when_manager_created_before_event_loop() -> None:
+    provider_calls: List[None] = []
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+
+    def provider() -> Dict[str, NetworkInterface]:
+        provider_calls.append(None)
+        if len(provider_calls) > 1:
+            refresh_started.set()
+            release_refresh.wait(timeout=1)
+        return _interfaces()
+
+    clock = Clock()
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(),
+        interface_provider=provider,
+        interface_cache_ttl_seconds=10,
+        clock=clock,
+    )
+    clock.value += 11
+
+    async def refresh_concurrently() -> None:
+        first = asyncio.create_task(manager.refresh_interfaces())
+        for _ in range(100):
+            if refresh_started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert refresh_started.is_set()
+        second = asyncio.create_task(manager.refresh_interfaces())
+        await asyncio.sleep(0)
+        release_refresh.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(refresh_concurrently())
+
+    assert len(provider_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failed_refreshes_share_discovery_and_allow_retry() -> None:
+    failure = OSError('interface discovery failed')
+    provider_calls: List[None] = []
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    fail_refresh = threading.Event()
+    fail_refresh.set()
+    refreshed_interfaces = _interfaces()
+    refreshed_interfaces['lan1'] = replace(
+        refreshed_interfaces['lan1'], address='192.168.1.20'
+    )
+
+    def provider() -> Dict[str, NetworkInterface]:
+        provider_calls.append(None)
+        if len(provider_calls) == 1:
+            return _interfaces()
+        if fail_refresh.is_set():
+            refresh_started.set()
+            release_refresh.wait(timeout=1)
+            raise failure
+        return refreshed_interfaces
+
+    clock = Clock()
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(),
+        interface_provider=provider,
+        interface_cache_ttl_seconds=10,
+        clock=clock,
+    )
+    clock.value += 11
+
+    refreshes = [asyncio.create_task(manager.refresh_interfaces())]
+    for _ in range(100):
+        if refresh_started.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert refresh_started.is_set()
+    refreshes.extend(
+        asyncio.create_task(manager.refresh_interfaces()) for _ in range(2)
+    )
+    await asyncio.sleep(0)
+    release_refresh.set()
+
+    results = await asyncio.gather(*refreshes, return_exceptions=True)
+
+    assert all(result is failure for result in results)
+    assert len(provider_calls) == 2
+    assert manager.interfaces()['lan1'].address == '192.168.1.10'
+
+    fail_refresh.clear()
+    await manager.refresh_interfaces()
+
+    assert len(provider_calls) == 3
+    assert manager.interfaces()['lan1'].address == '192.168.1.20'
+
+
+@pytest.mark.asyncio
+async def test_cancelled_refresh_waiter_does_not_cancel_interface_discovery() -> None:
+    provider_calls: List[None] = []
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    refresh_finished = threading.Event()
+    refreshed_interfaces = _interfaces()
+    refreshed_interfaces['lan1'] = replace(
+        refreshed_interfaces['lan1'], address='192.168.1.20'
+    )
+
+    def provider() -> Dict[str, NetworkInterface]:
+        provider_calls.append(None)
+        if len(provider_calls) == 1:
+            return _interfaces()
+        refresh_started.set()
+        release_refresh.wait(timeout=1)
+        refresh_finished.set()
+        return refreshed_interfaces
+
+    clock = Clock()
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(),
+        interface_provider=provider,
+        interface_cache_ttl_seconds=10,
+        clock=clock,
+    )
+    clock.value += 11
+
+    waiter = asyncio.create_task(manager.refresh_interfaces())
+    for _ in range(100):
+        if refresh_started.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert refresh_started.is_set()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release_refresh.set()
+
+    for _ in range(100):
+        if (
+            refresh_finished.is_set()
+            and manager.interfaces()['lan1'].address == '192.168.1.20'
+        ):
+            break
+        await asyncio.sleep(0.001)
+
+    assert refresh_finished.is_set()
+    assert len(provider_calls) == 2
+    assert manager.interfaces()['lan1'].address == '192.168.1.20'
 
 
 def test_interfaces_apply_current_settings_without_rediscovery() -> None:

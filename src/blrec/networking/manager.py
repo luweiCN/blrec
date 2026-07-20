@@ -94,8 +94,7 @@ class NetworkRouteManager:
         self._lock = RLock()
         self._interface_cache = dict(self._interface_provider())
         self._interfaces_refreshed_at = self._clock()
-        self._interface_cache_generation = 0
-        self._interface_refresh_lock = asyncio.Lock()
+        self._interface_refresh_task: Optional[asyncio.Task[None]] = None
         self._failure_threshold = failure_threshold
         self._fallback_cooldown_seconds = fallback_cooldown_seconds
         self._probes: Dict[str, NetworkProbe] = {}
@@ -131,29 +130,29 @@ class NetworkRouteManager:
 
     async def refresh_interfaces(self, force: bool = False) -> None:
         with self._lock:
-            generation = self._interface_cache_generation
-            if (
-                not force
-                and self._clock() - self._interfaces_refreshed_at
-                < self._interface_cache_ttl_seconds
-            ):
-                return
-        async with self._interface_refresh_lock:
-            with self._lock:
-                if generation != self._interface_cache_generation:
-                    return
+            task = self._interface_refresh_task
+            if task is None:
                 if (
                     not force
                     and self._clock() - self._interfaces_refreshed_at
                     < self._interface_cache_ttl_seconds
                 ):
                     return
+                task = asyncio.create_task(self._refresh_interface_cache())
+                self._interface_refresh_task = task
+        await asyncio.shield(task)
+
+    async def _refresh_interface_cache(self) -> None:
+        try:
             loop = asyncio.get_running_loop()
             interfaces = await loop.run_in_executor(None, self._interface_provider)
             with self._lock:
                 self._interface_cache = dict(interfaces)
                 self._interfaces_refreshed_at = self._clock()
-                self._interface_cache_generation += 1
+        finally:
+            with self._lock:
+                if self._interface_refresh_task is asyncio.current_task():
+                    self._interface_refresh_task = None
 
     def set_settings_persister(
         self, persister: Callable[['NetworkSettings'], Awaitable[None]]
