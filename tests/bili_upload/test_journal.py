@@ -847,7 +847,7 @@ async def test_late_recording_events_handoff_owned_paths_without_reviving_sessio
         'xml_path': str(xml),
         'xml_completed': 0,
     }
-    assert len(outcomes) == 6
+    assert len(outcomes) == 5
     assert {str(row['outcome_state']) for row in outcomes} == {'cancelled_local'}
     assert {int(row['source_generation']) for row in outcomes} == {0}
     assert (
@@ -970,6 +970,46 @@ async def test_deletion_waits_for_postprocessor_after_run_becomes_terminal(
 
 
 @pytest.mark.asyncio
+async def test_deletion_intent_before_video_completed_still_blocks_for_postprocessor(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    source = tmp_path / 'late-completed.flv'
+    final = tmp_path / 'late-completed.mp4'
+    source.write_bytes(b'source')
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    session = await journal.session_for_run(run_id)
+    deletion = LocalDeletionWorker(
+        database,
+        recording_root=tmp_path,
+        clip_root=tmp_path / 'clips',
+        clock=lambda: 1_001,
+    )
+    await deletion.request_session(session.id, manager_subject='manager')
+
+    await journal.video_completed(run_id, str(source))
+    await journal.recording_finished(run_id)
+
+    assert (
+        await database.scalar(
+            'SELECT artifact_state FROM recording_parts WHERE session_id=?',
+            (session.id,),
+        )
+        == 'postprocessing'
+    )
+    assert await deletion.run_once() == ('session', session.id)
+    assert source.exists()
+    assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 1
+
+    final.write_bytes(b'final')
+    await journal.video_postprocessed(run_id, str(source), str(final))
+    assert await deletion.run_once() == ('session', session.id)
+    assert not source.exists()
+    assert not final.exists()
+
+
+@pytest.mark.asyncio
 async def test_startup_recovery_releases_deleted_session_postprocessor_blocker(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:
@@ -1016,6 +1056,62 @@ async def test_startup_recovery_releases_deleted_session_postprocessor_blocker(
     )
     assert await deletion.run_once() == ('session', session.id)
     assert not source.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('recoverable', (True, False))
+async def test_startup_recovery_owns_derived_mp4_when_source_was_removed(
+    database: BiliUploadDatabase, tmp_path: Path, recoverable: bool
+) -> None:
+    source = tmp_path / 'remuxed.flv'
+    final = tmp_path / 'remuxed.mp4'
+    source.write_bytes(b'source')
+
+    def probe(path: str) -> Optional[RecoveredArtifact]:
+        candidate = Path(path)
+        if not candidate.is_file():
+            return None
+        if not recoverable:
+            return None
+        return RecoveredArtifact(path, candidate.stat().st_size, 1)
+
+    journal = RecordingJournalBridge(
+        database, clock=lambda: 1_000, artifact_probe=probe
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(source), record_start_time=901)
+    await journal.video_completed(run_id, str(source))
+    session = await journal.session_for_run(run_id)
+    deletion = LocalDeletionWorker(
+        database,
+        recording_root=tmp_path,
+        clip_root=tmp_path / 'clips',
+        clock=lambda: 1_001,
+    )
+    await deletion.request_session(session.id, manager_subject='manager')
+    await journal.recording_finished(run_id)
+    final.write_bytes(b'remuxed')
+    source.unlink()
+
+    restarted = RecordingJournalBridge(
+        database, clock=lambda: 1_002, artifact_probe=probe
+    )
+    await restarted.reconcile_open_sessions()
+
+    part = await database.fetchone(
+        'SELECT artifact_state,source_path,final_path '
+        'FROM recording_parts WHERE session_id=?',
+        (session.id,),
+    )
+    assert part is not None
+    assert dict(part) == {
+        'artifact_state': 'failed',
+        'source_path': str(source),
+        'final_path': str(final),
+    }
+    assert await deletion.run_once() == ('session', session.id)
+    assert not final.exists()
+    assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
 
 
 @pytest.mark.asyncio

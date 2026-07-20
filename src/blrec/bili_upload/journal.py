@@ -309,6 +309,7 @@ class _ArtifactRecoveryDecision:
     artifact: Optional[RecoveredArtifact]
     any_path_exists: bool
     used_source: bool
+    existing_path: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -574,6 +575,10 @@ class RecordingJournalBridge:
                 final_path = (
                     None if part['final_path'] is None else str(part['final_path'])
                 )
+                if deleting and final_path is None:
+                    final_path = self._derived_postprocess_path(
+                        str(part['source_path'])
+                    )
                 decision = await loop.run_in_executor(
                     None, self._recover_artifact, str(part['source_path']), final_path
                 )
@@ -666,9 +671,21 @@ class RecordingJournalBridge:
                         )
                         connection.execute(
                             'UPDATE recording_parts SET artifact_state=?,'
-                            'final_path=NULL,file_size_bytes=NULL,'
+                            'final_path=?,file_size_bytes=NULL,'
                             'error_message=?,updated_at=? WHERE id=?',
-                            (state, message, now, int(part['id'])),
+                            (
+                                state,
+                                (
+                                    decision.existing_path
+                                    if deleting
+                                    and decision.existing_path
+                                    != str(part['source_path'])
+                                    else None
+                                ),
+                                message,
+                                now,
+                                int(part['id']),
+                            ),
                         )
 
                     if deleting:
@@ -786,19 +803,37 @@ class RecordingJournalBridge:
         if not final_path or source_path != final_path:
             candidates.append((source_path, True))
         any_path_exists = False
+        existing_path: Optional[str] = None
         for path, used_source in candidates:
-            any_path_exists = any_path_exists or os.path.exists(path)
+            if not os.path.exists(path):
+                continue
+            any_path_exists = True
+            if existing_path is None:
+                existing_path = path
             try:
                 artifact = self._artifact_probe(path)
             except Exception:
                 artifact = None
             if artifact is not None:
                 return _ArtifactRecoveryDecision(
-                    artifact=artifact, any_path_exists=True, used_source=used_source
+                    artifact=artifact,
+                    any_path_exists=True,
+                    used_source=used_source,
+                    existing_path=path,
                 )
         return _ArtifactRecoveryDecision(
-            artifact=None, any_path_exists=any_path_exists, used_source=True
+            artifact=None,
+            any_path_exists=any_path_exists,
+            used_source=True,
+            existing_path=existing_path,
         )
+
+    @staticmethod
+    def _derived_postprocess_path(source_path: str) -> Optional[str]:
+        stem, extension = os.path.splitext(source_path)
+        if extension.lower() not in ('.flv', '.m4s'):
+            return None
+        return '{}.mp4'.format(stem)
 
     async def video_created(
         self,
@@ -905,7 +940,7 @@ class RecordingJournalBridge:
                 'MAX(0,?-record_start_time),error_message=?,updated_at=? '
                 'WHERE run_id=? AND source_path=?',
                 (
-                    'failed' if owner.cancelled else 'postprocessing',
+                    'postprocessing',
                     now,
                     now,
                     now,
@@ -918,15 +953,6 @@ class RecordingJournalBridge:
             if cursor.rowcount != 1:
                 raise JournalConsistencyError(
                     "unknown recording part '{}'".format(path)
-                )
-            if owner.cancelled:
-                self._record_local_handoff(
-                    connection,
-                    owner=owner,
-                    run_id=run_id,
-                    event_type='video_completed',
-                    event_id=journal_id,
-                    now=now,
                 )
             self._insert_event(
                 connection,
