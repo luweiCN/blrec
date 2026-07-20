@@ -48,6 +48,23 @@ class BlockingProtocol(FakeProtocol):
             self.in_flight -= 1
 
 
+class VersionedProtocol(FakeProtocol):
+    def __init__(self, response: Mapping[str, Any]) -> None:
+        super().__init__(response)
+        self.first_started = asyncio.Event()
+        self.first_release = asyncio.Event()
+        self.second_started = asyncio.Event()
+
+    async def archive_pre(self, bundle: Any) -> Mapping[str, Any]:
+        self.calls.append(bundle)
+        if len(self.calls) == 1:
+            self.first_started.set()
+            await self.first_release.wait()
+        else:
+            self.second_started.set()
+        return self.response
+
+
 def category_response(*, child_id: int = 17) -> Mapping[str, Any]:
     return {
         'code': 0,
@@ -239,6 +256,49 @@ async def test_catalog_refreshes_after_credential_change(tmp_path: Path) -> None
         assert refreshed.credential_version == 4
         assert refreshed.categories[0].children[0].id == 171
         assert len(protocol.calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('switch_primary', (False, True))
+async def test_catalog_refresh_uses_resolved_account_generation(
+    tmp_path: Path, switch_primary: bool
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = VersionedProtocol(category_response())
+
+        async def load_bundle(account_id: int) -> Any:
+            return 'bundle-{}'.format(account_id)
+
+        catalog = UploadCategoryCatalog(
+            database, protocol, bundle_loader=load_bundle, clock=lambda: 1000
+        )
+        old = asyncio.create_task(catalog.list('primary', None, force_refresh=True))
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+        if switch_primary:
+            await database.execute("UPDATE bili_accounts SET state='active' WHERE id=2")
+            await database.execute(
+                'UPDATE bili_account_selection SET primary_account_id=2 WHERE id=1'
+            )
+        else:
+            await database.execute(
+                'UPDATE bili_accounts SET credential_version=4 WHERE id=1'
+            )
+
+        new = asyncio.create_task(catalog.list('primary', None, force_refresh=True))
+        protocol.first_release.set()
+        old_result = await old
+        await asyncio.wait_for(protocol.second_started.wait(), timeout=1)
+        new_result = await new
+
+        assert new_result.account_id == (2 if switch_primary else 1)
+        assert new_result.credential_version == (3 if switch_primary else 4)
+        assert len(protocol.calls) == 2
+        assert old_result.credential_version == 3
     finally:
         await database.close()
 

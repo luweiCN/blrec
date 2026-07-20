@@ -130,6 +130,44 @@ class BlockingListProtocol(FakeProtocol):
             self.in_flight -= 1
 
 
+class VersionedListProtocol(FakeProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = asyncio.Event()
+        self.first_release = asyncio.Event()
+        self.second_started = asyncio.Event()
+
+    async def list_collections(self, bundle: Any) -> Mapping[str, Any]:
+        self.list_calls.append(bundle)
+        if len(self.list_calls) == 1:
+            self.first_started.set()
+            await self.first_release.wait()
+        else:
+            self.second_started.set()
+        return response(include_created=self.include_created)
+
+
+class PreCreateListProtocol(FakeProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = asyncio.Event()
+        self.first_release = asyncio.Event()
+        self.create_finished = asyncio.Event()
+
+    async def list_collections(self, bundle: Any) -> Mapping[str, Any]:
+        self.list_calls.append(bundle)
+        snapshot = response(include_created=self.include_created)
+        if len(self.list_calls) == 1:
+            self.first_started.set()
+            await self.first_release.wait()
+        return snapshot
+
+    async def create_collection(self, bundle: Any, **values: Any) -> Mapping[str, Any]:
+        result = await super().create_collection(bundle, **values)
+        self.create_finished.set()
+        return result
+
+
 @pytest.mark.asyncio
 async def test_collection_list_is_scoped_to_the_resolved_account(
     tmp_path: Path,
@@ -213,6 +251,44 @@ async def test_collection_cache_expires_and_is_scoped_to_credential_version(
         assert first == cached
         assert expired.account_id == credential_changed.account_id == 1
         assert protocol.list_calls == ['bundle-1', 'bundle-1', 'bundle-1']
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('switch_primary', (False, True))
+async def test_collection_refresh_uses_resolved_account_generation(
+    tmp_path: Path, switch_primary: bool
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = VersionedListProtocol()
+        catalog = manager(database, protocol, FakeCoverResolver())
+        mode = 'primary' if switch_primary else 'fixed'
+        account_id = None if switch_primary else 1
+        old = asyncio.create_task(catalog.list(mode, account_id, force_refresh=True))
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+        if switch_primary:
+            await database.execute(
+                'UPDATE bili_account_selection SET primary_account_id=2 WHERE id=1'
+            )
+        else:
+            await database.execute(
+                'UPDATE bili_accounts SET credential_version=2 WHERE id=1'
+            )
+
+        new = asyncio.create_task(catalog.list(mode, account_id, force_refresh=True))
+        try:
+            await asyncio.wait_for(protocol.second_started.wait(), timeout=1)
+            new_result = await new
+        finally:
+            protocol.first_release.set()
+            await asyncio.gather(old, new, return_exceptions=True)
+
+        assert new_result.account_id == (2 if switch_primary else 1)
+        assert len(protocol.list_calls) == 2
     finally:
         await database.close()
 
@@ -316,6 +392,40 @@ async def test_collection_create_uploads_cover_and_refreshes_new_default_section
 
 
 @pytest.mark.asyncio
+async def test_collection_create_starts_a_new_refresh_after_an_older_list(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = PreCreateListProtocol()
+        catalog = manager(database, protocol, FakeCoverResolver())
+        old_list = asyncio.create_task(catalog.list('fixed', 1, force_refresh=True))
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+
+        creation = asyncio.create_task(
+            catalog.create(
+                'fixed', 1, title='新合集', description='新简介', cover_asset_id=7
+            )
+        )
+        await asyncio.wait_for(protocol.create_finished.wait(), timeout=1)
+        protocol.first_release.set()
+        await old_list
+        created = await creation
+
+        assert len(protocol.create_calls) == 1
+        assert len(protocol.list_calls) == 2
+        assert created.collection.id == 20
+        assert created.collection.sections[0].id == 21
+        cached = await catalog.list('fixed', 1)
+        assert [item.id for item in cached.collections] == [10, 20]
+        assert len(protocol.list_calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_collection_unknown_create_invalidates_without_reconciliation(
     tmp_path: Path,
 ) -> None:
@@ -338,6 +448,35 @@ async def test_collection_unknown_create_invalidates_without_reconciliation(
         assert len(protocol.list_calls) == 1
         protocol.create_error = None
         await catalog.list('fixed', 1)
+        assert len(protocol.list_calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_collection_unknown_create_prevents_an_older_list_reinstalling_cache(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = PreCreateListProtocol()
+        protocol.create_error = RemoteOutcomeUnknown('create_collection')
+        catalog = manager(database, protocol, FakeCoverResolver())
+        old_list = asyncio.create_task(catalog.list('fixed', 1, force_refresh=True))
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+
+        with pytest.raises(CollectionUnavailable, match='unknown'):
+            await catalog.create(
+                'fixed', 1, title='结果未知', description='', cover_asset_id=7
+            )
+        protocol.first_release.set()
+        await old_list
+
+        protocol.create_error = None
+        await catalog.list('fixed', 1)
+        assert len(protocol.create_calls) == 1
         assert len(protocol.list_calls) == 2
     finally:
         await database.close()

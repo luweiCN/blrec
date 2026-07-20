@@ -71,6 +71,12 @@ class _CatalogEntry:
     stale_until: float
 
 
+@dataclass
+class _RefreshGeneration:
+    task: asyncio.Task[CollectionCatalogView]
+    completed_at: Optional[float] = None
+
+
 class CollectionManager:
     def __init__(
         self,
@@ -87,12 +93,9 @@ class CollectionManager:
         self._bundle_loader = bundle_loader
         self._clock = clock
         self._catalogs: Dict[Tuple[int, int], _CatalogEntry] = {}
-        self._list_tasks: Dict[
-            Tuple[str, Optional[int], bool], asyncio.Task[CollectionCatalogView]
-        ] = {}
-        self._refresh_tasks: Dict[
-            Tuple[int, int], asyncio.Task[CollectionCatalogView]
-        ] = {}
+        self._refresh_tasks: Dict[Tuple[int, int], _RefreshGeneration] = {}
+        self._completed_refreshes: Dict[Tuple[int, int], _RefreshGeneration] = {}
+        self._cache_epochs: Dict[Tuple[int, int], int] = {}
 
     async def list(
         self,
@@ -101,27 +104,12 @@ class CollectionManager:
         *,
         force_refresh: bool = False,
     ) -> CollectionCatalogView:
-        request_key = (account_mode, account_id, force_refresh)
-        task = self._list_tasks.get(request_key)
-        if task is None:
-            task = asyncio.create_task(
-                self._list(account_mode, account_id, force_refresh=force_refresh)
-            )
-            self._list_tasks[request_key] = task
-
-            def clear_list_task(
-                completed: asyncio.Future[CollectionCatalogView],
-            ) -> None:
-                self._clear_list_task(request_key, completed)
-
-            task.add_done_callback(clear_list_task)
-        return await asyncio.shield(task)
-
-    async def _list(
-        self, account_mode: str, account_id: Optional[int], *, force_refresh: bool
-    ) -> CollectionCatalogView:
+        requested_at = time.monotonic()
         account = await self._resolve_account(account_mode, account_id)
         key = (account.id, account.credential_version)
+        task = self._refresh_for_request(key, requested_at)
+        if task is not None:
+            return await asyncio.shield(task)
         current = self._catalogs.get(key)
         if (
             not force_refresh
@@ -129,37 +117,46 @@ class CollectionManager:
             and self._clock() < current.fresh_until
         ):
             return current.catalog
-        return await self._refresh_catalog(key, account, stale=current)
+        task = self._start_refresh(key, account, stale=current)
+        return await asyncio.shield(task)
 
-    def _clear_list_task(
-        self,
-        key: Tuple[str, Optional[int], bool],
-        task: asyncio.Future[CollectionCatalogView],
-    ) -> None:
-        if self._list_tasks.get(key) is task:
-            self._list_tasks.pop(key, None)
-        if not task.cancelled():
-            task.exception()
+    def _refresh_for_request(
+        self, key: Tuple[int, int], requested_at: float
+    ) -> Optional[asyncio.Task[CollectionCatalogView]]:
+        completed = self._completed_refreshes.get(key)
+        if (
+            completed is not None
+            and completed.completed_at is not None
+            and requested_at <= completed.completed_at
+        ):
+            return completed.task
+        active = self._refresh_tasks.get(key)
+        return None if active is None else active.task
 
-    async def _refresh_catalog(
+    def _start_refresh(
         self,
         key: Tuple[int, int],
         account: _ResolvedAccount,
         *,
         stale: Optional[_CatalogEntry],
-    ) -> CollectionCatalogView:
-        task = self._refresh_tasks.get(key)
-        if task is None:
-            task = asyncio.create_task(self._load_catalog(key, account, stale=stale))
-            self._refresh_tasks[key] = task
+    ) -> asyncio.Task[CollectionCatalogView]:
+        epoch = self._cache_epochs.get(key, 0)
+        task = asyncio.create_task(
+            self._load_catalog(key, account, stale=stale, cache_epoch=epoch)
+        )
+        generation = _RefreshGeneration(task=task)
+        self._refresh_tasks[key] = generation
 
-            def clear_refresh_task(
-                completed: asyncio.Future[CollectionCatalogView],
-            ) -> None:
-                self._clear_refresh_task(key, completed)
+        def finish_refresh(completed: asyncio.Future[CollectionCatalogView]) -> None:
+            generation.completed_at = time.monotonic()
+            if self._refresh_tasks.get(key) is generation:
+                self._refresh_tasks.pop(key, None)
+                self._completed_refreshes[key] = generation
+            if not completed.cancelled():
+                completed.exception()
 
-            task.add_done_callback(clear_refresh_task)
-        return await asyncio.shield(task)
+        task.add_done_callback(finish_refresh)
+        return task
 
     async def _load_catalog(
         self,
@@ -167,6 +164,7 @@ class CollectionManager:
         account: _ResolvedAccount,
         *,
         stale: Optional[_CatalogEntry],
+        cache_epoch: int,
     ) -> CollectionCatalogView:
         try:
             bundle = await self._bundle_loader(account.id)
@@ -178,18 +176,11 @@ class CollectionManager:
             raise CollectionUnavailable('collections are unavailable') from None
         catalog = CollectionCatalogView(account_id=account.id, collections=collections)
         now = self._clock()
-        self._catalogs[key] = _CatalogEntry(
-            catalog=catalog, fresh_until=now + 60, stale_until=now + 15 * 60
-        )
+        if self._cache_epochs.get(key, 0) == cache_epoch:
+            self._catalogs[key] = _CatalogEntry(
+                catalog=catalog, fresh_until=now + 60, stale_until=now + 15 * 60
+            )
         return catalog
-
-    def _clear_refresh_task(
-        self, key: Tuple[int, int], task: asyncio.Future[CollectionCatalogView]
-    ) -> None:
-        if self._refresh_tasks.get(key) is task:
-            self._refresh_tasks.pop(key, None)
-        if not task.cancelled():
-            task.exception()
 
     async def create(
         self,
@@ -226,6 +217,9 @@ class CollectionManager:
             )
         except RemoteOutcomeUnknown:
             self._catalogs.pop(key, None)
+            self._cache_epochs[key] = self._cache_epochs.get(key, 0) + 1
+            self._refresh_tasks.pop(key, None)
+            self._completed_refreshes.pop(key, None)
             raise CollectionUnavailable(
                 'collection creation result is unknown; refresh before trying again'
             ) from None
@@ -235,9 +229,19 @@ class CollectionManager:
         if type(collection_id) is not int or collection_id <= 0:
             raise CollectionUnavailable('collection creation response is incomplete')
 
+        previous = self._refresh_tasks.get(key)
+        if previous is not None:
+            try:
+                await asyncio.shield(previous.task)
+            except asyncio.CancelledError:
+                if not previous.task.cancelled():
+                    raise
+            except Exception:
+                pass
         stale = self._catalogs.pop(key, None)
         try:
-            catalog = await self._refresh_catalog(key, account, stale=stale)
+            task = self._start_refresh(key, account, stale=stale)
+            catalog = await asyncio.shield(task)
             collections = catalog.collections
         except CollectionUnavailable:
             collections = ()

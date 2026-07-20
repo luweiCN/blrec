@@ -600,6 +600,35 @@ describe('UploadPolicyDialogComponent', () => {
     expect(component.newCollectionVisible).toBeFalse();
   });
 
+  it('keeps a created collection when an older list response arrives later', () => {
+    const pendingList = new Subject<BiliCollectionCatalog>();
+    const createdCollection = {
+      id: 9,
+      title: '主播录播合集',
+      description: '直播录像',
+      coverUrl: '',
+      state: 0,
+      rejectReason: '',
+      selectable: true,
+      sections: [{ id: 91, title: '正片' }],
+    };
+    policyService.collections.and.returnValue(pendingList.asObservable());
+    policyService.createCollection.and.returnValue(
+      of({ accountId: 7, collection: createdCollection }),
+    );
+    create();
+    component.openCreateCollection();
+    component.newCollectionTitle = createdCollection.title;
+    component.newCollectionCoverAssetId = 3;
+
+    component.createCollection();
+    pendingList.next(collectionCatalog);
+    pendingList.complete();
+
+    expect(component.collections).toContain(createdCollection);
+    expect(component.collectionLoading).toBeFalse();
+  });
+
   it('forces collection refresh only from the manual refresh action', () => {
     create();
     policyService.collections.calls.reset();

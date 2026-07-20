@@ -537,6 +537,8 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: (result) => {
+          this.collectionLoadGeneration += 1;
+          this.collectionLoading = false;
           this.newCollectionVisible = false;
           const existing =
             this.collectionCatalog?.accountId === result.accountId

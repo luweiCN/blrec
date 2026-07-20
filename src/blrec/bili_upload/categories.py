@@ -57,6 +57,12 @@ class _ResolvedAccount:
     credential_version: int
 
 
+@dataclass
+class _RefreshGeneration:
+    task: asyncio.Task[UploadCategoryCatalogView]
+    completed_at: Optional[float] = None
+
+
 class UploadCategoryCatalog:
     def __init__(
         self,
@@ -75,12 +81,8 @@ class UploadCategoryCatalog:
         self._clock = clock
         self._ttl_seconds = ttl_seconds
         self._locks: Dict[int, asyncio.Lock] = {}
-        self._list_tasks: Dict[
-            Tuple[str, Optional[int], bool], asyncio.Task[UploadCategoryCatalogView]
-        ] = {}
-        self._refresh_tasks: Dict[
-            Tuple[int, int], asyncio.Task[UploadCategoryCatalogView]
-        ] = {}
+        self._refresh_tasks: Dict[Tuple[int, int], _RefreshGeneration] = {}
+        self._completed_refreshes: Dict[Tuple[int, int], _RefreshGeneration] = {}
 
     async def list(
         self,
@@ -89,30 +91,12 @@ class UploadCategoryCatalog:
         *,
         force_refresh: bool = False,
     ) -> UploadCategoryCatalogView:
-        request_key = (account_mode, account_id, force_refresh)
-        task = self._list_tasks.get(request_key)
-        if task is None:
-            task = asyncio.create_task(
-                self._list(account_mode, account_id, force_refresh=force_refresh)
-            )
-            self._list_tasks[request_key] = task
-
-            def clear_list_task(
-                completed: asyncio.Future[UploadCategoryCatalogView],
-            ) -> None:
-                self._clear_list_task(request_key, completed)
-
-            task.add_done_callback(clear_list_task)
-        return await asyncio.shield(task)
-
-    async def _list(
-        self, account_mode: str, account_id: Optional[int], *, force_refresh: bool
-    ) -> UploadCategoryCatalogView:
+        requested_at = time.monotonic()
         account = await self._resolve_account(account_mode, account_id)
         cached = await self._cached(account.id)
         now = int(self._clock())
         key = (account.id, account.credential_version)
-        task = self._refresh_tasks.get(key)
+        task = self._refresh_for_request(key, requested_at)
         if task is not None:
             return await asyncio.shield(task)
         if not force_refresh and self._is_fresh(cached, account, now):
@@ -125,7 +109,7 @@ class UploadCategoryCatalog:
             cached = await self._cached(account.id)
             now = int(self._clock())
             key = (account.id, account.credential_version)
-            task = self._refresh_tasks.get(key)
+            task = self._refresh_for_request(key, requested_at)
             if (
                 task is None
                 and not force_refresh
@@ -134,27 +118,45 @@ class UploadCategoryCatalog:
                 assert cached is not None
                 return cached
             if task is None:
-                task = asyncio.create_task(self._refresh(account, cached, now))
-                self._refresh_tasks[key] = task
+                task = self._start_refresh(key, account, cached, now)
+            return await asyncio.shield(task)
 
-                def clear_refresh_task(
-                    completed: asyncio.Future[UploadCategoryCatalogView],
-                ) -> None:
-                    self._clear_refresh_task(key, completed)
+    def _refresh_for_request(
+        self, key: Tuple[int, int], requested_at: float
+    ) -> Optional[asyncio.Task[UploadCategoryCatalogView]]:
+        completed = self._completed_refreshes.get(key)
+        if (
+            completed is not None
+            and completed.completed_at is not None
+            and requested_at <= completed.completed_at
+        ):
+            return completed.task
+        active = self._refresh_tasks.get(key)
+        return None if active is None else active.task
 
-                task.add_done_callback(clear_refresh_task)
-        assert task is not None
-        return await asyncio.shield(task)
-
-    def _clear_list_task(
+    def _start_refresh(
         self,
-        key: Tuple[str, Optional[int], bool],
-        task: asyncio.Future[UploadCategoryCatalogView],
-    ) -> None:
-        if self._list_tasks.get(key) is task:
-            self._list_tasks.pop(key, None)
-        if not task.cancelled():
-            task.exception()
+        key: Tuple[int, int],
+        account: _ResolvedAccount,
+        cached: Optional[UploadCategoryCatalogView],
+        now: int,
+    ) -> asyncio.Task[UploadCategoryCatalogView]:
+        task = asyncio.create_task(self._refresh(account, cached, now))
+        generation = _RefreshGeneration(task=task)
+        self._refresh_tasks[key] = generation
+
+        def finish_refresh(
+            completed: asyncio.Future[UploadCategoryCatalogView],
+        ) -> None:
+            generation.completed_at = time.monotonic()
+            if self._refresh_tasks.get(key) is generation:
+                self._refresh_tasks.pop(key, None)
+                self._completed_refreshes[key] = generation
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finish_refresh)
+        return task
 
     async def _refresh(
         self,
@@ -199,10 +201,19 @@ class UploadCategoryCatalog:
         await self._database.execute(
             'INSERT INTO upload_category_cache('
             'account_id,credential_version,payload_json,fetched_at) '
-            'VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET '
+            'SELECT ?,?,?,? WHERE EXISTS('
+            'SELECT 1 FROM bili_accounts WHERE id=? AND credential_version=?'
+            ') ON CONFLICT(account_id) DO UPDATE SET '
             'credential_version=excluded.credential_version,'
             'payload_json=excluded.payload_json,fetched_at=excluded.fetched_at',
-            (account.id, account.credential_version, payload_json, now),
+            (
+                account.id,
+                account.credential_version,
+                payload_json,
+                now,
+                account.id,
+                account.credential_version,
+            ),
         )
         return UploadCategoryCatalogView(
             account_id=account.id,
@@ -213,14 +224,6 @@ class UploadCategoryCatalog:
             creation_statements=creation_statements,
             creation_statement_tip=creation_statement_tip,
         )
-
-    def _clear_refresh_task(
-        self, key: Tuple[int, int], task: asyncio.Future[UploadCategoryCatalogView]
-    ) -> None:
-        if self._refresh_tasks.get(key) is task:
-            self._refresh_tasks.pop(key, None)
-        if not task.cancelled():
-            task.exception()
 
     async def _resolve_account(
         self, account_mode: str, account_id: Optional[int]
