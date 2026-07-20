@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -20,7 +21,9 @@ from typing_extensions import Protocol
 
 from blrec.logging.audit import audit
 
+from .archive_reads import ArchiveReadService
 from .database import BiliUploadDatabase
+from .errors import ProtocolContractError
 from .submission_verifier import SubmissionVerification, verify_submission
 
 __all__ = ('PostReviewBranch', 'ReviewWatcher')
@@ -41,6 +44,7 @@ class _WaitingJob:
     account_id: int
     account_uid: int
     account_state: str
+    credential_version: int
     aid: Optional[int]
     bvid: Optional[str]
     comment_branch_state: str
@@ -58,6 +62,13 @@ class _VerifiedPart:
     fail_desc: Optional[str]
 
 
+@dataclass(frozen=True)
+class _ReviewDecision:
+    job: _WaitingJob
+    archives: Tuple[Mapping[str, Any], ...]
+    detail: Optional[Mapping[str, Any]]
+
+
 class ReviewWatcher:
     # Bilibili uses -50 for a completed archive that is only visible to its owner.
     APPROVED_STATES = frozenset((-50, 0, 1))
@@ -71,21 +82,28 @@ class ReviewWatcher:
         protocol: Any,
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
+        archive_reader: Optional[ArchiveReadService] = None,
         comment_branch: PostReviewBranch,
         danmaku_branch: PostReviewBranch,
         collection_branch: PostReviewBranch,
         poll_interval_seconds: int = 900,
+        read_timeout_seconds: float = 60,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if poll_interval_seconds <= 0:
             raise ValueError('review poll interval must be positive')
+        if read_timeout_seconds <= 0:
+            raise ValueError('archive read timeout must be positive')
         self._database = database
-        self._protocol = protocol
         self._bundle_loader = bundle_loader
+        self._archive_reader = archive_reader or ArchiveReadService(
+            protocol, clock=clock
+        )
         self._comment_branch = comment_branch
         self._danmaku_branch = danmaku_branch
         self._collection_branch = collection_branch
         self._poll_interval_seconds = poll_interval_seconds
+        self._read_timeout_seconds = read_timeout_seconds
         self._clock = clock
         self._next_poll_at: Dict[int, int] = {}
 
@@ -104,12 +122,14 @@ class ReviewWatcher:
         return recovered
 
     async def run_once(self) -> int:
+        changed = await self.recover_approved_pending_branches()
         rows = await self._database.fetchall(
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
             'job.comment_branch_state,job.danmaku_branch_state,'
             'job.collection_branch_state,'
             'job.policy_snapshot_json,job.scheduled_publish_at,'
-            'account.uid AS account_uid,account.state AS account_state '
+            'account.uid AS account_uid,account.state AS account_state,'
+            'account.credential_version '
             'FROM upload_jobs job JOIN bili_accounts account '
             'ON account.id=job.account_id '
             "WHERE job.state='waiting_review' ORDER BY job.account_id,job.id"
@@ -120,7 +140,6 @@ class ReviewWatcher:
             grouped.setdefault(job.account_id, []).append(job)
 
         now = int(self._clock())
-        changed = 0
         for account_id, jobs in grouped.items():
             if now < self._next_poll_at.get(account_id, 0):
                 continue
@@ -132,35 +151,107 @@ class ReviewWatcher:
                 continue
             bundle = await self._bundle_loader(account_id)
             try:
-                archives = await self._load_archives(bundle, jobs)
+                decisions = await asyncio.wait_for(
+                    self._read_account_decisions(
+                        bundle, account_id, jobs[0].credential_version, jobs
+                    ),
+                    timeout=self._read_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                audit(
+                    'upload_review_cycle_timed_out',
+                    level='WARNING',
+                    account_scope='redacted',
+                )
+                continue
             except _ReviewMismatch as error:
                 for job in jobs:
                     if await self._pause(job, str(error)):
                         changed += 1
                 continue
-            for job in jobs:
-                if await self._process_job(job, archives, bundle):
+            for decision in decisions:
+                if await self._process_job(decision):
                     changed += 1
         return changed
 
+    async def recover_approved_pending_branches(self) -> int:
+        rows = await self._database.fetchall(
+            'SELECT job.id,job.account_id,job.aid,job.bvid,'
+            'job.comment_branch_state,job.danmaku_branch_state,'
+            'job.collection_branch_state,job.policy_snapshot_json,'
+            'job.scheduled_publish_at,account.uid AS account_uid,'
+            'account.state AS account_state,account.credential_version '
+            'FROM upload_jobs job JOIN bili_accounts account '
+            'ON account.id=job.account_id '
+            "WHERE job.state='approved' AND ("
+            "job.comment_branch_state='pending' OR "
+            "job.danmaku_branch_state='pending' OR "
+            "job.collection_branch_state='pending') ORDER BY job.id"
+        )
+        for row in rows:
+            await self._create_branches(self._job(row))
+        return len(rows)
+
+    async def _read_account_decisions(
+        self,
+        bundle: Any,
+        account_id: int,
+        credential_version: int,
+        jobs: Sequence[_WaitingJob],
+    ) -> Tuple[_ReviewDecision, ...]:
+        archives = await self._load_archives(
+            bundle,
+            account_id=account_id,
+            credential_version=credential_version,
+            jobs=jobs,
+        )
+        decisions = []
+        for job in jobs:
+            detail = None
+            matches = [entry for entry in archives if self._matches(job, entry)]
+            if len(matches) == 1:
+                archive = self._archive(matches[0])
+                if (
+                    job.aid is not None
+                    and job.bvid is not None
+                    and self._positive_int(archive.get('aid')) == job.aid
+                    and self._text(archive.get('bvid')) == job.bvid
+                    and archive.get('state') in self.APPROVED_STATES
+                ):
+                    detail = await self._archive_reader.detail(
+                        bundle,
+                        account_id=account_id,
+                        credential_version=credential_version,
+                        bvid=job.bvid,
+                    )
+            decisions.append(_ReviewDecision(job, archives, detail))
+        return tuple(decisions)
+
     async def _load_archives(
-        self, bundle: Any, jobs: Sequence[_WaitingJob]
-    ) -> List[Mapping[str, Any]]:
+        self,
+        bundle: Any,
+        *,
+        account_id: int,
+        credential_version: int,
+        jobs: Sequence[_WaitingJob],
+    ) -> Tuple[Mapping[str, Any], ...]:
         archives: List[Mapping[str, Any]] = []
         unresolved = {
             job.id for job in jobs if job.aid is not None or job.bvid is not None
         }
         seen_pages = set()
         for page_number in range(1, self.MAX_ARCHIVE_PAGES + 1):
-            response = await self._protocol.list_archives(
-                bundle,
-                {
-                    'status': 'is_pubing,pubed,not_pubed',
-                    'pn': page_number,
-                    'ps': self.ARCHIVE_PAGE_SIZE,
-                },
-            )
-            page = self._archives(response)
+            try:
+                page = await self._archive_reader.list_page(
+                    bundle,
+                    account_id=account_id,
+                    credential_version=credential_version,
+                    status='is_pubing,pubed,not_pubed',
+                    page_number=page_number,
+                    page_size=self.ARCHIVE_PAGE_SIZE,
+                )
+            except ProtocolContractError as error:
+                raise _ReviewMismatch('审核接口响应结构不符合预期') from error
             archives.extend(page)
             unresolved.difference_update(
                 job.id
@@ -180,11 +271,11 @@ class ReviewWatcher:
             if page_identity in seen_pages:
                 break
             seen_pages.add(page_identity)
-        return archives
+        return tuple(archives)
 
-    async def _process_job(
-        self, job: _WaitingJob, archives: Sequence[Mapping[str, Any]], bundle: Any
-    ) -> bool:
+    async def _process_job(self, decision: _ReviewDecision) -> bool:
+        job = decision.job
+        archives = decision.archives
         if job.aid is None or job.bvid is None:
             return await self._pause(job, '上传任务缺少 AID/BVID，无法同步审核状态')
         matches = [entry for entry in archives if self._matches(job, entry)]
@@ -220,10 +311,9 @@ class ReviewWatcher:
             return False
 
         try:
-            detail = await self._protocol.archive_view(
-                bundle,
-                {'topic_grey': 1, 'bvid': job.bvid, 't': int(self._clock() * 1000)},
-            )
+            detail = decision.detail
+            if detail is None:
+                raise _ReviewMismatch('稿件详情接口响应结构不符合预期')
             await self._verify_submission(job, detail)
             verified_parts = await self._verified_parts(job, detail)
         except _ReviewMismatch as error:
@@ -729,18 +819,6 @@ class ReviewWatcher:
         )
 
     @classmethod
-    def _archives(cls, response: Mapping[str, Any]) -> List[Mapping[str, Any]]:
-        data = response.get('data')
-        if not isinstance(data, Mapping):
-            raise _ReviewMismatch('审核接口响应结构不符合预期')
-        entries = data.get('arc_audits')
-        if not isinstance(entries, list) or not all(
-            isinstance(entry, Mapping) for entry in entries
-        ):
-            raise _ReviewMismatch('审核接口响应结构不符合预期')
-        return list(entries)
-
-    @classmethod
     def _matches(cls, job: _WaitingJob, entry: Mapping[str, Any]) -> bool:
         archive = cls._archive(entry)
         aid = cls._positive_int(archive.get('aid'))
@@ -781,6 +859,7 @@ class ReviewWatcher:
             account_id=int(row['account_id']),
             account_uid=int(row['account_uid']),
             account_state=str(row['account_state']),
+            credential_version=int(row['credential_version']),
             aid=None if row['aid'] is None else int(row['aid']),
             bvid=None if row['bvid'] is None else str(row['bvid']),
             comment_branch_state=str(row['comment_branch_state']),

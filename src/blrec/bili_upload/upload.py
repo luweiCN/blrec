@@ -19,6 +19,7 @@ from .accounts import (
     AccountWriteGate,
     CredentialVersionChanged,
 )
+from .archive_reads import ArchiveReadService
 from .artifact_recovery import RecoveredArtifact, probe_recording_artifact
 from .covers import (
     CoverAssetNotFound,
@@ -66,6 +67,10 @@ class _UploadDeletionRequested(RuntimeError):
 
 
 class _UploadCoverOutcomeUnknown(RuntimeError):
+    pass
+
+
+class _ArchiveCandidateLimit(RuntimeError):
     pass
 
 
@@ -134,9 +139,13 @@ class UploadCoordinator:
         artifact_probe: Callable[[str], Optional[RecoveredArtifact]] = (
             probe_recording_artifact
         ),
+        archive_reader: Optional[ArchiveReadService] = None,
+        read_timeout_seconds: float = 60,
     ) -> None:
         if stability_seconds < 0:
             raise ValueError('file stability window must not be negative')
+        if read_timeout_seconds <= 0:
+            raise ValueError('archive read timeout must be positive')
         self._database = database
         self._protocol = protocol
         self._uploader = uploader
@@ -148,6 +157,10 @@ class UploadCoordinator:
         self._clock = clock
         self._stop_requested = stop_requested
         self._artifact_probe = artifact_probe
+        self._archive_reader = archive_reader or ArchiveReadService(
+            protocol, clock=clock
+        )
+        self._read_timeout_seconds = read_timeout_seconds
         self._artifact_probe_next_at: Dict[int, int] = {}
         self._run_lock = asyncio.Lock()
         self._liquid = Environment()
@@ -3267,10 +3280,33 @@ class UploadCoordinator:
             await self._pause_job(claim, '投稿账号不可用，无法核对投稿结果')
             return
         try:
+            expected_title, expected_filenames = (
+                await self._submission_reconciliation_identity(job)
+            )
+            credential_version = int(account['credential_version'])
             gate = self._account_gates.for_account(job.account_id)
-            async with gate.hold(int(account['credential_version'])):
+            async with gate.hold(credential_version):
                 bundle = await self._bundle_loader(job.account_id)
-                matches = await self._find_remote_submission(job, bundle)
+                matches = await asyncio.wait_for(
+                    self._find_remote_submission(
+                        bundle,
+                        account_id=job.account_id,
+                        credential_version=credential_version,
+                        expected_title=expected_title,
+                        expected_filenames=expected_filenames,
+                    ),
+                    timeout=self._read_timeout_seconds,
+                )
+        except asyncio.TimeoutError:
+            await self._mark_unknown_submission(
+                claim, reason='远端稿件查询超时，将继续自动核对'
+            )
+            return
+        except _ArchiveCandidateLimit:
+            await self._mark_unknown_submission(
+                claim, reason='近期同名稿件过多，无法安全确认投稿结果'
+            )
+            return
         except (AccountNotFound, AccountPaused, CredentialVersionChanged):
             await self._pause_job(claim, '投稿账号在核对期间发生变化')
             return
@@ -3316,9 +3352,9 @@ class UploadCoordinator:
             claim, reason='近期稿件中暂未找到匹配项，继续核对且不会盲目重复投稿'
         )
 
-    async def _find_remote_submission(
-        self, job: _Job, bundle: Any
-    ) -> List[Tuple[int, str]]:
+    async def _submission_reconciliation_identity(
+        self, job: _Job
+    ) -> Tuple[str, Tuple[str, ...]]:
         try:
             snapshot = json.loads(job.policy_snapshot_json)
         except json.JSONDecodeError:
@@ -3336,32 +3372,56 @@ class UploadCoordinator:
         expected_filenames = tuple(str(row['remote_filename'] or '') for row in rows)
         if not expected_filenames or any(not name for name in expected_filenames):
             raise ProtocolContractError('upload part is incomplete')
+        return expected_title, expected_filenames
 
+    async def _find_remote_submission(
+        self,
+        bundle: Any,
+        *,
+        account_id: int,
+        credential_version: int,
+        expected_title: str,
+        expected_filenames: Tuple[str, ...],
+    ) -> List[Tuple[int, str]]:
         candidates: List[Tuple[int, str]] = []
+        candidate_bvids = set()
+        seen_pages = set()
         for page_number in range(1, 21):
-            response = await self._protocol.list_archives(
+            entries = await self._archive_reader.list_page(
                 bundle,
-                {'status': 'is_pubing,pubed,not_pubed', 'pn': page_number, 'ps': 50},
+                account_id=account_id,
+                credential_version=credential_version,
+                status='is_pubing,pubed,not_pubed',
+                page_number=page_number,
+                page_size=50,
             )
-            entries = self._archive_entries(response)
             for entry in entries:
                 archive = self._archive(entry)
                 if archive.get('title') != expected_title:
                     continue
                 identity = self._archive_identity(archive)
-                if identity is not None:
-                    candidates.append(identity)
+                if identity is None or identity[1] in candidate_bvids:
+                    continue
+                if len(candidates) >= 10:
+                    raise _ArchiveCandidateLimit()
+                candidate_bvids.add(identity[1])
+                candidates.append(identity)
             if len(entries) < 50:
                 break
+            page_identity = tuple(
+                self._archive_identity(self._archive(entry)) for entry in entries
+            )
+            if page_identity in seen_pages:
+                break
+            seen_pages.add(page_identity)
 
         matches: List[Tuple[int, str]] = []
-        seen = set()
         for aid, bvid in candidates:
-            if bvid in seen:
-                continue
-            seen.add(bvid)
-            detail = await self._protocol.archive_view(
-                bundle, {'topic_grey': 1, 'bvid': bvid, 't': int(self._clock() * 1000)}
+            detail = await self._archive_reader.detail(
+                bundle,
+                account_id=account_id,
+                credential_version=credential_version,
+                bvid=bvid,
             )
             data = detail.get('data')
             if not isinstance(data, Mapping):
@@ -3378,16 +3438,6 @@ class UploadCoordinator:
             if filenames == expected_filenames:
                 matches.append((aid, bvid))
         return matches
-
-    @staticmethod
-    def _archive_entries(response: Mapping[str, Any]) -> List[Mapping[str, Any]]:
-        data = response.get('data')
-        entries = data.get('arc_audits') if isinstance(data, Mapping) else None
-        if not isinstance(entries, list) or not all(
-            isinstance(entry, Mapping) for entry in entries
-        ):
-            raise ProtocolContractError('archive list response is invalid')
-        return list(entries)
 
     @staticmethod
     def _archive(value: Mapping[str, Any]) -> Mapping[str, Any]:

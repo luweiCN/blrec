@@ -17,6 +17,7 @@ from blrec.notification.operational import (
 from blrec.setting.models import BiliUploadSettings, OperationalNotificationSettings
 
 from .accounts import AccountManager, AccountWriteGate
+from .archive_reads import ArchiveReadService
 from .categories import (
     InvalidUploadCategoryRequest,
     UploadCategoryCatalog,
@@ -118,6 +119,7 @@ class BiliAccountRuntime:
         self._cover_resolver: Optional[CoverResolver] = None
         self._collection_manager: Optional[CollectionManager] = None
         self._collection_publisher: Optional[CollectionPublisher] = None
+        self._archive_reader: Optional[ArchiveReadService] = None
         self._review_watcher: Optional[ReviewWatcher] = None
         self._comment_planner: Optional[CommentPlanner] = None
         self._comment_publisher: Optional[CommentPublisher] = None
@@ -312,6 +314,8 @@ class BiliAccountRuntime:
             keys[key_id] = self._credential_key
             cipher = CredentialCipher(keys, current_key_id=key_id)
             protocol = self._provided_protocol or self._create_protocol()
+            archive_reader = ArchiveReadService(protocol)
+            self._archive_reader = archive_reader
             store = CredentialStore(database)
             write_gates = AccountWriteGate(database)
             manager = AccountManager(
@@ -358,6 +362,7 @@ class BiliAccountRuntime:
                 bundle_loader=load_bundle,
                 account_gates=write_gates,
                 cover_resolver=cover_resolver,
+                archive_reader=archive_reader,
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
             )
@@ -418,12 +423,14 @@ class BiliAccountRuntime:
                 database,
                 protocol,
                 bundle_loader=load_bundle,
+                archive_reader=archive_reader,
                 comment_branch=comment_planner,
                 danmaku_branch=danmaku_importer,
                 collection_branch=collection_publisher,
                 clock=self._clock,
             )
             await review_watcher.recover_legacy_page_order_pauses()
+            await review_watcher.recover_approved_pending_branches()
             retention_manager = (
                 None
                 if self._recording_root is None
@@ -681,6 +688,9 @@ class BiliAccountRuntime:
         await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
+        archive_reader, self._archive_reader = self._archive_reader, None
+        if archive_reader is not None:
+            await archive_reader.close()
         if cover_library is not None:
             await cover_library.shutdown()
         refresh_task, self._refresh_task = self._refresh_task, None
@@ -962,6 +972,9 @@ class BiliAccountRuntime:
         await self._stop_media_index_worker()
         await self._stop_highlight_worker()
         await self._stop_upload_worker()
+        archive_reader, self._archive_reader = self._archive_reader, None
+        if archive_reader is not None:
+            await archive_reader.close()
         self._coordinator = None
         self._policy_manager = None
         self._session_submission_manager = None

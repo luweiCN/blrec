@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import pytest
 
 from blrec.bili_upload.accounts import AccountWriteGate
+from blrec.bili_upload.archive_reads import ArchiveReadService
 from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim
 from blrec.bili_upload.deletion_worker import LocalDeletionWorker
@@ -269,6 +270,8 @@ def coordinator(
     account_ids: Tuple[int, ...] = (1,),
     artifact_probe=None,
     stop_requested=lambda: False,
+    archive_reader: Optional[ArchiveReadService] = None,
+    read_timeout_seconds: float = 60,
 ) -> UploadCoordinator:
     async def load_bundle(account_id: int) -> Any:
         assert account_id in account_ids
@@ -284,6 +287,8 @@ def coordinator(
         worker_id='test-worker',
         clock=clock,
         stop_requested=stop_requested,
+        archive_reader=archive_reader or ArchiveReadService(protocol),
+        read_timeout_seconds=read_timeout_seconds,
         artifact_probe=artifact_probe
         or (lambda path: RecoveredArtifact(path, os.path.getsize(path), 120)),
     )
@@ -2509,6 +2514,218 @@ async def test_restart_during_submit_reconciles_without_blind_retry(
             == 'unknown_outcome'
         )
     finally:
+        await database.close()
+
+
+async def prepare_unknown_submission(
+    database: BiliUploadDatabase, worker: UploadCoordinator
+) -> None:
+    await worker.create_ready_jobs()
+    await database.execute(
+        "UPDATE upload_parts SET upload_state='confirmed',"
+        "remote_filename='remote-' || id WHERE job_id=1"
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET state='submitting',submit_state='unknown_outcome',"
+        'upload_completed_at=1,next_attempt_at=0 WHERE id=1'
+    )
+
+
+@pytest.mark.asyncio
+async def test_submission_reconciliation_timeout_never_resubmits(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    blocked = asyncio.Event()
+
+    class BlockingArchiveProtocol(FakeProtocol):
+        async def list_archives(
+            self, bundle: Any, params: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            del bundle, params
+            self.list_archive_calls += 1
+            await blocked.wait()
+            return {'code': 0, 'data': {'arc_audits': []}}
+
+    protocol = BlockingArchiveProtocol()
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_ready_session(database, tmp_path)
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            archive_reader=reader,
+            read_timeout_seconds=0.01,
+        )
+        await prepare_unknown_submission(database, worker)
+
+        assert await worker.run_once() == 1
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,lease_owner FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'submitting',
+            'submit_state': 'unknown_outcome',
+            'lease_owner': None,
+        }
+        assert protocol.submit_calls == []
+    finally:
+        blocked.set()
+        await reader.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_reconciliation_stops_when_candidate_eleven_appears(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    protocol = FakeProtocol()
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol.archive_entries = [
+            {
+                'Archive': {
+                    'aid': 1_000 + index,
+                    'bvid': 'BVcandidate{}'.format(index),
+                    'title': '测试直播 录播',
+                }
+            }
+            for index in range(11)
+        ]
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            archive_reader=reader,
+        )
+        await prepare_unknown_submission(database, worker)
+
+        assert await worker.run_once() == 1
+
+        assert protocol.submit_calls == []
+        assert protocol.archive_view_calls == []
+        assert (
+            await database.scalar('SELECT submit_state FROM upload_jobs WHERE id=1')
+            == 'unknown_outcome'
+        )
+    finally:
+        await reader.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_candidate_details_remain_sequential_and_bounded(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class TrackingDetailProtocol(FakeProtocol):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_details = 0
+            self.max_active_details = 0
+
+        async def archive_view(
+            self, bundle: Any, params: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            del bundle
+            bvid = str(params['bvid'])
+            self.archive_view_calls.append(bvid)
+            self.active_details += 1
+            self.max_active_details = max(self.max_active_details, self.active_details)
+            try:
+                await asyncio.sleep(0)
+                return self.archive_details[bvid]
+            finally:
+                self.active_details -= 1
+
+    protocol = TrackingDetailProtocol()
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_ready_session(database, tmp_path)
+        for index in range(10):
+            bvid = 'BVcandidate{}'.format(index)
+            protocol.archive_entries.append(
+                {
+                    'Archive': {
+                        'aid': 1_000 + index,
+                        'bvid': bvid,
+                        'title': '测试直播 录播',
+                    }
+                }
+            )
+            protocol.archive_details[bvid] = {
+                'code': 0,
+                'data': {
+                    'archive': {'aid': 1_000 + index, 'bvid': bvid},
+                    'videos': [{'filename': 'not-the-uploaded-file'}],
+                },
+            }
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            archive_reader=reader,
+        )
+        await prepare_unknown_submission(database, worker)
+
+        assert await worker.run_once() == 1
+
+        assert len(protocol.archive_view_calls) == 10
+        assert protocol.max_active_details == 1
+        assert protocol.submit_calls == []
+    finally:
+        await reader.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_reconciliation_stops_on_repeated_page_identity(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    protocol = FakeProtocol()
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol.archive_entries = [
+            {
+                'Archive': {
+                    'aid': 1_000 + index,
+                    'bvid': 'BVfill{}'.format(index),
+                    'title': 'unrelated',
+                }
+            }
+            for index in range(50)
+        ]
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            archive_reader=reader,
+        )
+        await prepare_unknown_submission(database, worker)
+
+        assert await worker.run_once() == 1
+
+        assert protocol.list_archive_calls == 2
+        assert protocol.archive_view_calls == []
+        assert protocol.submit_calls == []
+    finally:
+        await reader.close()
         await database.close()
 
 

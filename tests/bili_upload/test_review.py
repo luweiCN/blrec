@@ -1,9 +1,11 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Set
 
 import pytest
 
+from blrec.bili_upload.archive_reads import ArchiveReadService
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.review import ReviewWatcher
 
@@ -1163,4 +1165,243 @@ async def test_review_stops_when_the_remote_repeats_a_full_page(tmp_path: Path) 
         assert await review.run_once() == 0
         assert [call[1]['pn'] for call in protocol.calls] == [1, 2]
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_page_timeout_does_not_block_the_next_account(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    blocked = asyncio.Event()
+    comments = FakeBranch()
+
+    class BlockingAccountProtocol(FakeProtocol):
+        async def list_archives(
+            self, bundle: object, params: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            account_id = int(bundle)
+            self.calls.append((account_id, dict(params)))
+            if account_id == 1:
+                await blocked.wait()
+            return self.responses[account_id]
+
+    protocol = BlockingAccountProtocol(
+        {
+            1: {'code': 0, 'data': {'arc_audits': []}},
+            2: archive_response(aid=305, bvid='BVthird'),
+        },
+        {'BVthird': archive_detail([video('p1', 3051, 1)], aid=305, bvid='BVthird')},
+    )
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        await seed_waiting_job(
+            database,
+            job_id=3,
+            account_id=2,
+            account_uid=84,
+            aid=305,
+            bvid='BVthird',
+            filenames=('p1',),
+        )
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            archive_reader=reader,
+            comment_branch=comments,
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            read_timeout_seconds=0.01,
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 1
+
+        states = await database.fetchall(
+            'SELECT id,state,submission_verification_state '
+            'FROM upload_jobs ORDER BY id'
+        )
+        assert [dict(row) for row in states] == [
+            {
+                'id': 1,
+                'state': 'waiting_review',
+                'submission_verification_state': 'pending',
+            },
+            {'id': 3, 'state': 'approved', 'submission_verification_state': 'failed'},
+        ]
+        assert comments.calls == [3]
+        assert [call[0] for call in protocol.calls] == [1, 2]
+    finally:
+        blocked.set()
+        await reader.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_detail_timeout_starts_no_local_transition(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    blocked = asyncio.Event()
+    comments = FakeBranch()
+
+    class BlockingDetailProtocol(FakeProtocol):
+        async def archive_view(
+            self, bundle: object, params: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            self.detail_calls.append((int(bundle), dict(params)))
+            await blocked.wait()
+            return self.details[str(params['bvid'])]
+
+    protocol = BlockingDetailProtocol(
+        {1: archive_response()}, {'BVfixture': archive_detail([video('p1', 101, 1)])}
+    )
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            archive_reader=reader,
+            comment_branch=comments,
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            read_timeout_seconds=0.01,
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 0
+
+        row = await database.fetchone(
+            'SELECT state,submission_verification_state,comment_branch_state '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'waiting_review',
+            'submission_verification_state': 'pending',
+            'comment_branch_state': 'pending',
+        }
+        assert comments.calls == []
+    finally:
+        blocked.set()
+        await reader.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_reads_at_most_twenty_archive_pages(tmp_path: Path) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+
+    class EndlessPagingProtocol(FakeProtocol):
+        async def list_archives(
+            self, bundle: object, params: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            account_id = int(bundle)
+            page_number = int(params['pn'])
+            self.calls.append((account_id, dict(params)))
+            return archive_page(
+                [
+                    archive_entry(
+                        page_number * 1_000 + index,
+                        'BV{}-{}'.format(page_number, index),
+                    )
+                    for index in range(50)
+                ]
+            )
+
+    protocol = EndlessPagingProtocol({1: archive_page([])})
+    reader = ArchiveReadService(protocol)
+    try:
+        await seed_waiting_job(database, filenames=('p1',))
+        review = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            archive_reader=reader,
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        assert await review.run_once() == 0
+        assert len(protocol.calls) == 20
+    finally:
+        await reader.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_approved_pending_branches_recover_once_without_resubmission(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    protocol = FakeProtocol(
+        {1: archive_response()}, {'BVfixture': archive_detail([video('p1', 101, 1)])}
+    )
+    protocol.submit_calls = []
+
+    class StatefulBranch(FakeBranch):
+        def __init__(self, column: str) -> None:
+            super().__init__()
+            self._column = column
+
+        async def create(self, job_id: int) -> None:
+            self.calls.append(job_id)
+            await database.execute(
+                "UPDATE upload_jobs SET {}='completed' WHERE id=?".format(self._column),
+                (job_id,),
+            )
+
+    first_reader = ArchiveReadService(protocol)
+    second_reader = ArchiveReadService(protocol)
+    try:
+        await seed_waiting_job(database, filenames=('p1',), collection_state='pending')
+        first = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            archive_reader=first_reader,
+            comment_branch=FakeBranch(),
+            danmaku_branch=FakeBranch(),
+            collection_branch=FakeBranch(),
+            clock=Clock(),
+        )
+
+        async def crash_before_branches(_job: Any) -> None:
+            raise RuntimeError('process interrupted after approval')
+
+        first._create_branches = crash_before_branches  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match='interrupted after approval'):
+            await first.run_once()
+        assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
+            'approved'
+        )
+
+        comment = StatefulBranch('comment_branch_state')
+        danmaku = StatefulBranch('danmaku_branch_state')
+        collection = StatefulBranch('collection_branch_state')
+        rebuilt = ReviewWatcher(
+            database,
+            protocol,
+            bundle_loader=lambda account_id: async_value(account_id),
+            archive_reader=second_reader,
+            comment_branch=comment,
+            danmaku_branch=danmaku,
+            collection_branch=collection,
+            clock=Clock(),
+        )
+
+        assert await rebuilt.run_once() == 1
+        assert await rebuilt.recover_approved_pending_branches() == 0
+        assert comment.calls == [1]
+        assert danmaku.calls == [1]
+        assert collection.calls == [1]
+        assert protocol.submit_calls == []
+        assert len(protocol.calls) == 1
+    finally:
+        await first_reader.close()
+        await second_reader.close()
         await database.close()
