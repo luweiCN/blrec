@@ -129,7 +129,27 @@ class HighlightClip:
     source_anchor_name: str = ''
     source_title: str = ''
     duration_ms: int = 0
-    file_size_bytes: int = 0
+    file_size_bytes: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class HighlightClipSummary:
+    id: int
+    room_id: int
+    source_session_id: Optional[int]
+    name: str
+    state: str
+    error_message: Optional[str]
+    created_at: int
+    updated_at: int
+    source_anchor_name: str
+    source_title: str
+    duration_ms: int
+    file_size_bytes: Optional[int]
+    upload_job_id: Optional[int]
+    upload_state: Optional[str]
+    upload_percent: Optional[float]
+    upload_bvid: Optional[str]
 
 
 class HighlightService:
@@ -140,13 +160,43 @@ class HighlightService:
         'FROM highlight_clips clip '
         'LEFT JOIN upload_jobs job ON job.session_id=clip.upload_session_id '
     )
-    _CLIP_LIBRARY_SELECT = (
-        'SELECT clip.*,job.id AS upload_job_id,job.state AS upload_state,'
-        'job.bvid AS upload_bvid,source.anchor_name AS source_anchor_name,'
-        'source.title AS source_title '
-        'FROM highlight_clips clip '
+    _CLIP_SUMMARY_SELECT = (
+        'WITH selected_clips AS ('
+        'SELECT id FROM highlight_clips '
+        "WHERE state!='cancelled' "
+        'ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?),'
+        'selected_jobs AS ('
+        'SELECT job.id FROM selected_clips selected '
+        'CROSS JOIN highlight_clips clip ON clip.id=selected.id '
+        'CROSS JOIN upload_jobs job ON job.session_id=clip.upload_session_id),'
+        'upload_summary AS ('
+        'SELECT part.job_id,COALESCE(SUM(chunk.size),0) AS total_bytes,'
+        "COALESCE(SUM(CASE WHEN chunk.state='confirmed' "
+        'THEN chunk.size ELSE 0 END),0) AS confirmed_bytes '
+        'FROM selected_jobs selected '
+        'CROSS JOIN upload_parts part ON part.job_id=selected.id '
+        'LEFT JOIN upload_chunks chunk ON chunk.part_id=part.id '
+        'GROUP BY part.job_id) '
+        'SELECT clip.id,clip.room_id,clip.source_session_id,clip.name,clip.state,'
+        'clip.error_message,clip.created_at,clip.updated_at,'
+        "COALESCE(source.anchor_name,'') AS source_anchor_name,"
+        "COALESCE(source.title,'') AS source_title,"
+        'MAX(0,COALESCE(NULLIF(clip.actual_end_ms,0),clip.requested_end_ms)-'
+        'COALESCE(NULLIF(clip.actual_start_ms,0),clip.requested_start_ms)) '
+        'AS duration_ms,clip.file_size_bytes,'
+        'job.id AS upload_job_id,job.state AS upload_state,'
+        'CASE WHEN job.id IS NULL THEN NULL '
+        "WHEN job.state IN ('approved','completed') THEN 100.0 "
+        'WHEN COALESCE(progress.total_bytes,0)<=0 THEN 0.0 '
+        'ELSE ROUND(MIN(100.0,progress.confirmed_bytes*100.0/'
+        'progress.total_bytes),2) END AS upload_percent,'
+        'job.bvid AS upload_bvid '
+        'FROM selected_clips selected '
+        'CROSS JOIN highlight_clips clip ON clip.id=selected.id '
         'LEFT JOIN upload_jobs job ON job.session_id=clip.upload_session_id '
+        'LEFT JOIN upload_summary progress ON progress.job_id=job.id '
         'LEFT JOIN recording_sessions source ON source.id=clip.source_session_id '
+        'ORDER BY clip.created_at DESC,clip.id DESC'
     )
 
     def __init__(
@@ -715,9 +765,9 @@ class HighlightService:
         )
         return tuple(self._apply_upload_progress(clip, progress) for clip in clips)
 
-    async def list_all_clips(
+    async def list_clip_summaries(
         self, *, limit: int, offset: int
-    ) -> Tuple[int, Tuple[HighlightClip, ...]]:
+    ) -> Tuple[int, Tuple[HighlightClipSummary, ...]]:
         if limit < 1 or limit > 100:
             raise ValueError('clip list limit must be between 1 and 100')
         if offset < 0:
@@ -727,31 +777,8 @@ class HighlightService:
                 "SELECT COUNT(*) FROM highlight_clips WHERE state!='cancelled'"
             )
         )
-        rows = await self._database.fetchall(
-            self._CLIP_LIBRARY_SELECT + "WHERE clip.state!='cancelled' "
-            'ORDER BY clip.created_at DESC,clip.id DESC LIMIT ? OFFSET ?',
-            (limit, offset),
-        )
-        clips = tuple(self._clip_from_row(row) for row in rows)
-        progress = await self._upload_progress(
-            tuple(
-                clip.upload_job_id for clip in clips if clip.upload_job_id is not None
-            )
-        )
-        clips = tuple(self._apply_upload_progress(clip, progress) for clip in clips)
-
-        async def with_size(clip: HighlightClip) -> HighlightClip:
-            if clip.output_video_path is None:
-                return clip
-            try:
-                size = await asyncio.get_running_loop().run_in_executor(
-                    None, os.path.getsize, clip.output_video_path
-                )
-            except OSError:
-                size = 0
-            return replace(clip, file_size_bytes=max(0, int(size)))
-
-        return total, tuple(await asyncio.gather(*(with_size(clip) for clip in clips)))
+        rows = await self._database.fetchall(self._CLIP_SUMMARY_SELECT, (limit, offset))
+        return total, tuple(self._clip_summary_from_row(row) for row in rows)
 
     async def _upload_progress(self, job_ids: Tuple[int, ...]) -> Dict[int, float]:
         if not job_ids:
@@ -803,7 +830,8 @@ class HighlightService:
             raise ValueError('only a failed highlight clip can be retried')
         updated = await self._database.execute(
             "UPDATE highlight_clips SET state='queued',error_message=NULL,"
-            'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,updated_at=? '
+            'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,'
+            'file_size_bytes=NULL,updated_at=? '
             "WHERE id=? AND state='failed'",
             (int(self._clock()), clip_id),
         )
@@ -823,7 +851,8 @@ class HighlightService:
         if clip.state in ('queued', 'processing'):
             updated = await self._database.execute(
                 "UPDATE highlight_clips SET state='cancelled',lease_owner=NULL,"
-                'lease_until=NULL,next_attempt_at=0,updated_at=? WHERE id=? '
+                'lease_until=NULL,next_attempt_at=0,file_size_bytes=NULL,'
+                'updated_at=? WHERE id=? '
                 "AND state IN ('queued','processing')",
                 (int(self._clock()), clip_id),
             )
@@ -879,7 +908,8 @@ class HighlightService:
                     )
             updated = connection.execute(
                 "UPDATE highlight_clips SET state='cancelled',lease_owner=NULL,"
-                'lease_until=NULL,next_attempt_at=0,updated_at=? WHERE id=?',
+                'lease_until=NULL,next_attempt_at=0,file_size_bytes=NULL,'
+                'updated_at=? WHERE id=?',
                 (now, clip_id),
             )
             if updated.rowcount != 1:
@@ -1511,6 +1541,43 @@ class HighlightService:
         )
 
     @staticmethod
+    def _clip_summary_from_row(row: sqlite3.Row) -> HighlightClipSummary:
+        return HighlightClipSummary(
+            id=int(row['id']),
+            room_id=int(row['room_id']),
+            source_session_id=(
+                None
+                if row['source_session_id'] is None
+                else int(row['source_session_id'])
+            ),
+            name=str(row['name']),
+            state=str(row['state']),
+            error_message=(
+                None if row['error_message'] is None else str(row['error_message'])
+            ),
+            created_at=int(row['created_at']),
+            updated_at=int(row['updated_at']),
+            source_anchor_name=str(row['source_anchor_name']),
+            source_title=str(row['source_title']),
+            duration_ms=max(0, int(row['duration_ms'])),
+            file_size_bytes=(
+                None if row['file_size_bytes'] is None else int(row['file_size_bytes'])
+            ),
+            upload_job_id=(
+                None if row['upload_job_id'] is None else int(row['upload_job_id'])
+            ),
+            upload_state=(
+                None if row['upload_state'] is None else str(row['upload_state'])
+            ),
+            upload_percent=(
+                None if row['upload_percent'] is None else float(row['upload_percent'])
+            ),
+            upload_bvid=(
+                None if row['upload_bvid'] is None else str(row['upload_bvid'])
+            ),
+        )
+
+    @staticmethod
     def _clip_from_row(
         row: sqlite3.Row, sources: Tuple[HighlightClipSource, ...] = ()
     ) -> HighlightClip:
@@ -1592,5 +1659,10 @@ class HighlightService:
                     (row['actual_end_ms'] or row['requested_end_ms'])
                     - (row['actual_start_ms'] or row['requested_start_ms'])
                 ),
+            ),
+            file_size_bytes=(
+                None
+                if 'file_size_bytes' not in row.keys() or row['file_size_bytes'] is None
+                else int(row['file_size_bytes'])
             ),
         )

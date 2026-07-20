@@ -169,6 +169,7 @@ describe('HighlightEditorComponent', () => {
     createdAt: 1,
     updatedAt: 1,
     sources: [],
+    fileSizeBytes: null,
   };
 
   beforeEach(async () => {

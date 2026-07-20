@@ -4,31 +4,22 @@ import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { of } from 'rxjs';
 
-import { HighlightClip } from '../shared/highlight.model';
+import {
+  HighlightClip,
+  HighlightClipSummary,
+} from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
 import { ClipLibraryComponent } from './clip-library.component';
 
-const clip: HighlightClip = {
+const clip: HighlightClipSummary = {
   id: 3,
-  markerId: null,
   roomId: 100,
   sourceSessionId: 9,
-  uploadSessionId: null,
   name: '五杀高光',
-  requestedStartMs: 20_000,
-  requestedEndMs: 70_000,
-  actualStartMs: 18_000,
-  actualEndMs: 70_000,
-  outputVideoPath: '/clips/100/highlight-3.mp4',
-  outputXmlPath: '/clips/100/highlight-3.xml',
   state: 'ready',
-  confirmationRequired: false,
-  confirmed: false,
   errorMessage: null,
-  attempt: 1,
   createdAt: 1_100,
   updatedAt: 1_100,
-  sources: [],
   uploadJobId: null,
   uploadState: null,
   uploadPercent: null,
@@ -37,6 +28,22 @@ const clip: HighlightClip = {
   sourceTitle: '排位赛',
   durationMs: 52_000,
   fileSizeBytes: 1_048_576,
+};
+
+const fullClip: HighlightClip = {
+  ...clip,
+  markerId: null,
+  uploadSessionId: null,
+  requestedStartMs: 20_000,
+  requestedEndMs: 70_000,
+  actualStartMs: 18_000,
+  actualEndMs: 70_000,
+  outputVideoPath: '/clips/100/highlight-3.mp4',
+  outputXmlPath: '/clips/100/highlight-3.xml',
+  confirmationRequired: false,
+  confirmed: false,
+  attempt: 1,
+  sources: [],
 };
 
 describe('ClipLibraryComponent', () => {
@@ -59,7 +66,7 @@ describe('ClipLibraryComponent', () => {
     );
     service.mediaUrl.and.returnValue('/api/clip.mp4');
     service.downloadUrl.and.returnValue('/api/clip.mp4?download=1');
-    service.retryClip.and.returnValue(of(clip));
+    service.retryClip.and.returnValue(of(fullClip));
     service.deleteClip.and.returnValue(of(void 0));
     service.createUploadTask.and.returnValue(of({ jobId: 17 }));
 
@@ -106,5 +113,16 @@ describe('ClipLibraryComponent', () => {
 
     fixture.componentInstance.submitUpload({} as never);
     expect(service.createUploadTask).toHaveBeenCalledOnceWith(3, {} as never);
+  });
+
+  it('shows a not-indexed label for a legacy clip without a persisted size', () => {
+    service.listAllClips.and.returnValue(
+      of({ total: 1, items: [{ ...clip, fileSizeBytes: null }] }),
+    );
+
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('大小待索引');
+    expect(fixture.nativeElement.textContent).not.toContain('0 B');
   });
 });

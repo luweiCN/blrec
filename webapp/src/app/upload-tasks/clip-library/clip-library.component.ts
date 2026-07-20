@@ -10,7 +10,7 @@ import { NzModalService } from 'ng-zorro-antd/modal';
 import { finalize } from 'rxjs/operators';
 
 import { RoomUploadPolicyRequest } from '../../tasks/upload-policy-dialog/room-upload-policy.model';
-import { HighlightClip } from '../shared/highlight.model';
+import { HighlightClipSummary } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
 
 type ClipLibraryView =
@@ -18,7 +18,7 @@ type ClipLibraryView =
   | {
       readonly state: 'ready';
       readonly total: number;
-      readonly clips: readonly HighlightClip[];
+      readonly clips: readonly HighlightClipSummary[];
     }
   | { readonly state: 'error'; readonly message: string };
 
@@ -34,10 +34,10 @@ export class ClipLibraryComponent implements OnInit {
   pageSize = 20;
   readonly pageSizeOptions = [20, 50, 100];
   query = '';
-  previewClip: HighlightClip | null = null;
+  previewClip: HighlightClipSummary | null = null;
   previewUrl: string | null = null;
   previewLoading = false;
-  uploadClip: HighlightClip | null = null;
+  uploadClip: HighlightClipSummary | null = null;
   uploadSubmitting = false;
 
   constructor(
@@ -51,7 +51,7 @@ export class ClipLibraryComponent implements OnInit {
     this.load();
   }
 
-  get clips(): readonly HighlightClip[] {
+  get clips(): readonly HighlightClipSummary[] {
     if (this.view.state !== 'ready') {
       return [];
     }
@@ -104,7 +104,7 @@ export class ClipLibraryComponent implements OnInit {
     this.load();
   }
 
-  openPreview(clip: HighlightClip): void {
+  openPreview(clip: HighlightClipSummary): void {
     this.previewClip = clip;
     this.previewUrl = null;
     this.previewLoading = true;
@@ -135,7 +135,7 @@ export class ClipLibraryComponent implements OnInit {
     this.changeDetector.markForCheck();
   }
 
-  download(clip: HighlightClip): void {
+  download(clip: HighlightClipSummary): void {
     this.highlights.createMediaAccess(clip.id).subscribe({
       next: (access) => {
         const anchor = document.createElement('a');
@@ -152,7 +152,7 @@ export class ClipLibraryComponent implements OnInit {
     });
   }
 
-  openUpload(clip: HighlightClip): void {
+  openUpload(clip: HighlightClipSummary): void {
     this.uploadClip = clip;
     this.changeDetector.markForCheck();
   }
@@ -190,7 +190,7 @@ export class ClipLibraryComponent implements OnInit {
       });
   }
 
-  retry(clip: HighlightClip): void {
+  retry(clip: HighlightClipSummary): void {
     this.highlights.retryClip(clip.id).subscribe({
       next: () => {
         this.message.success('片段已重新排队生成');
@@ -202,7 +202,7 @@ export class ClipLibraryComponent implements OnInit {
     });
   }
 
-  delete(clip: HighlightClip): void {
+  delete(clip: HighlightClipSummary): void {
     this.modal.confirm({
       nzTitle: `删除片段“${clip.name}”？`,
       nzContent: '将删除片段视频、弹幕文件和本地记录，不会删除 B 站稿件。',
@@ -224,7 +224,7 @@ export class ClipLibraryComponent implements OnInit {
     });
   }
 
-  stateLabel(clip: HighlightClip): string {
+  stateLabel(clip: HighlightClipSummary): string {
     return {
       queued: '等待生成',
       processing: '正在生成',
@@ -234,7 +234,7 @@ export class ClipLibraryComponent implements OnInit {
     }[clip.state];
   }
 
-  stateColor(clip: HighlightClip): string {
+  stateColor(clip: HighlightClipSummary): string {
     return {
       queued: 'default',
       processing: 'processing',
@@ -244,8 +244,8 @@ export class ClipLibraryComponent implements OnInit {
     }[clip.state];
   }
 
-  uploadLabel(clip: HighlightClip): string {
-    if (clip.uploadJobId === null || clip.uploadJobId === undefined) {
+  uploadLabel(clip: HighlightClipSummary): string {
+    if (clip.uploadJobId === null) {
       return '未创建任务';
     }
     return {
@@ -261,14 +261,14 @@ export class ClipLibraryComponent implements OnInit {
     }[clip.uploadState ?? ''] ?? '处理中';
   }
 
-  archiveUrl(clip: HighlightClip): string | null {
+  archiveUrl(clip: HighlightClipSummary): string | null {
     return clip.uploadBvid
       ? `https://www.bilibili.com/video/${clip.uploadBvid}`
       : null;
   }
 
-  formatDuration(milliseconds: number | undefined): string {
-    const seconds = Math.max(0, Math.round((milliseconds ?? 0) / 1_000));
+  formatDuration(milliseconds: number): string {
+    const seconds = Math.max(0, Math.round(milliseconds / 1_000));
     if (seconds < 60) {
       return `${seconds} 秒`;
     }
@@ -277,8 +277,11 @@ export class ClipLibraryComponent implements OnInit {
     return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
   }
 
-  formatBytes(bytes: number | undefined): string {
-    const size = Math.max(0, bytes ?? 0);
+  formatBytes(bytes: number | null): string {
+    if (bytes === null) {
+      return '大小待索引';
+    }
+    const size = Math.max(0, bytes);
     if (size < 1_024) {
       return `${size} B`;
     }

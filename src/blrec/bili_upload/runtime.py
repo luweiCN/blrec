@@ -268,6 +268,7 @@ class BiliAccountRuntime:
                 database, lossless_clipper, highlight_danmaku_clipper, clock=self._clock
             )
             await highlight_worker.recover_interrupted()
+            await highlight_worker.backfill_file_sizes(limit=100)
             media_index_worker = MediaIndexWorker(database, clock=self._clock)
             await media_index_worker.recover_interrupted()
             key_id = hashlib.sha256(self._credential_key).hexdigest()

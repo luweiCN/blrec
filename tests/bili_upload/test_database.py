@@ -75,7 +75,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 23
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 24
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -235,6 +235,27 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'baseline_delay_ms',
             'effective_rewind_ms',
         } <= marker_columns
+        clip_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(highlight_clips)')
+        }
+        assert 'file_size_bytes' in clip_columns
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,state,'
+            'file_size_bytes,created_at,updated_at) '
+            "VALUES(99,99,'size check',0,1000,'ready',NULL,1,1)"
+        )
+        assert (
+            await database.scalar(
+                'SELECT file_size_bytes FROM highlight_clips WHERE id=99'
+            )
+            is None
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'UPDATE highlight_clips SET file_size_bytes=-1 WHERE id=99'
+            )
 
         indexes = {
             row['name']
@@ -398,7 +419,55 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 23
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 24
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 24):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,'
+            'output_video_path,state,created_at,updated_at) '
+            "VALUES(7,100,'旧片段',0,1000,'/clips/legacy.mp4','ready',1,2)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        row = await database.fetchone(
+            'SELECT name,output_video_path,file_size_bytes '
+            'FROM highlight_clips WHERE id=7'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'name': '旧片段',
+            'output_video_path': '/clips/legacy.mp4',
+            'file_size_bytes': None,
+        }
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 24
     finally:
         await database.close()
 

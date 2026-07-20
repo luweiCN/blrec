@@ -104,12 +104,31 @@ export interface HighlightClip {
   readonly sourceAnchorName?: string;
   readonly sourceTitle?: string;
   readonly durationMs?: number;
-  readonly fileSizeBytes?: number;
+  readonly fileSizeBytes: number | null;
+}
+
+export interface HighlightClipSummary {
+  readonly id: number;
+  readonly roomId: number;
+  readonly sourceSessionId: number | null;
+  readonly name: string;
+  readonly state: HighlightClipState;
+  readonly errorMessage: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly sourceAnchorName: string;
+  readonly sourceTitle: string;
+  readonly durationMs: number;
+  readonly fileSizeBytes: number | null;
+  readonly uploadJobId: number | null;
+  readonly uploadState: string | null;
+  readonly uploadPercent: number | null;
+  readonly uploadBvid: string | null;
 }
 
 export interface HighlightClipList {
   readonly total: number;
-  readonly items: readonly HighlightClip[];
+  readonly items: readonly HighlightClipSummary[];
 }
 
 export interface CreateHighlightClipRequest {

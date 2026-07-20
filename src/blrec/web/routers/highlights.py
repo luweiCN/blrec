@@ -14,6 +14,7 @@ from blrec.bili_upload.highlight_cut import ClipInspection, HighlightCutError
 from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.highlights import (
     HighlightClip,
+    HighlightClipSummary,
     HighlightConfirmationRequired,
     HighlightMarker,
     HighlightRangeUnavailable,
@@ -193,12 +194,31 @@ class ClipResponse(ApiModel):
     source_anchor_name: str = ''
     source_title: str = ''
     duration_ms: int = 0
-    file_size_bytes: int = 0
+    file_size_bytes: Optional[int] = None
+
+
+class ClipSummaryResponse(ApiModel):
+    id: int
+    room_id: int
+    source_session_id: Optional[int]
+    name: str
+    state: str
+    error_message: Optional[str]
+    created_at: int
+    updated_at: int
+    source_anchor_name: str
+    source_title: str
+    duration_ms: int
+    file_size_bytes: Optional[int]
+    upload_job_id: Optional[int]
+    upload_state: Optional[str]
+    upload_percent: Optional[float]
+    upload_bvid: Optional[str]
 
 
 class ClipListResponse(ApiModel):
     total: int
-    items: List[ClipResponse]
+    items: List[ClipSummaryResponse]
 
 
 class UploadTaskResponse(ApiModel):
@@ -369,6 +389,10 @@ def _clip_response(value: HighlightClip) -> ClipResponse:
     )
 
 
+def _clip_summary_response(value: HighlightClipSummary) -> ClipSummaryResponse:
+    return ClipSummaryResponse(**value.__dict__)
+
+
 def _not_found(error: ValueError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
 
@@ -536,9 +560,11 @@ async def list_all_clips(
     _subject: str = Depends(authenticated_manager_subject),
     highlight_service: HighlightService = Depends(get_service),
 ) -> ClipListResponse:
-    total, values = await highlight_service.list_all_clips(limit=limit, offset=offset)
+    total, values = await highlight_service.list_clip_summaries(
+        limit=limit, offset=offset
+    )
     return ClipListResponse(
-        total=total, items=[_clip_response(value) for value in values]
+        total=total, items=[_clip_summary_response(value) for value in values]
     )
 
 

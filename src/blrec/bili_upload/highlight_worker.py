@@ -94,7 +94,11 @@ class HighlightWorker:
             claim.id,
             claim.lease_owner,
             claim.lease_generation,
-            {'state': 'processing', 'updated_at': int(self._clock())},
+            {
+                'state': 'processing',
+                'file_size_bytes': None,
+                'updated_at': int(self._clock()),
+            },
         )
         try:
             work = await self._load_work(claim)
@@ -134,7 +138,8 @@ class HighlightWorker:
                 if artifact is not None and artifact.size_bytes > 0:
                     await self._database.execute(
                         "UPDATE highlight_clips SET state='ready',error_message=NULL,"
-                        'output_xml_path=?,lease_owner=NULL,lease_until=NULL,'
+                        'output_xml_path=?,file_size_bytes=?,lease_owner=NULL,'
+                        'lease_until=NULL,'
                         'next_attempt_at=0,updated_at=? WHERE id=? '
                         "AND state='processing'",
                         (
@@ -143,6 +148,7 @@ class HighlightWorker:
                                 if xml_path is not None and os.path.isfile(xml_path)
                                 else None
                             ),
+                            artifact.size_bytes,
                             int(self._clock()),
                             clip_id,
                         ),
@@ -163,7 +169,8 @@ class HighlightWorker:
                 await self._database.execute(
                     "UPDATE highlight_clips SET state='queued',"
                     "error_message='程序重启后自动重新处理',lease_owner=NULL,"
-                    'lease_until=NULL,next_attempt_at=0,updated_at=? WHERE id=? '
+                    'lease_until=NULL,next_attempt_at=0,file_size_bytes=NULL,'
+                    'updated_at=? WHERE id=? '
                     "AND state='processing'",
                     (int(self._clock()), clip_id),
                 )
@@ -171,6 +178,60 @@ class HighlightWorker:
             elif partial_existed:
                 recovered += 1
         return recovered
+
+    async def backfill_file_sizes(self, limit: int = 100) -> int:
+        bounded_limit = min(100, max(0, int(limit)))
+        if bounded_limit == 0:
+            return 0
+        rows = await self._database.fetchall(
+            'SELECT id,output_video_path FROM highlight_clips '
+            "WHERE state='ready' AND file_size_bytes IS NULL "
+            'AND output_video_path IS NOT NULL ORDER BY id LIMIT ?',
+            (bounded_limit,),
+        )
+        candidates = tuple(
+            (int(row['id']), str(row['output_video_path'])) for row in rows
+        )
+
+        def measure() -> Tuple[Tuple[int, Optional[int], Optional[str]], ...]:
+            results: List[Tuple[int, Optional[int], Optional[str]]] = []
+            for clip_id, path in candidates:
+                try:
+                    size = max(0, int(os.path.getsize(path)))
+                except (OSError, ValueError) as error:
+                    results.append((clip_id, None, type(error).__name__))
+                else:
+                    results.append((clip_id, size, None))
+            return tuple(results)
+
+        measured = await asyncio.get_running_loop().run_in_executor(None, measure)
+        successes: List[Tuple[int, int]] = []
+        for clip_id, size, error_type in measured:
+            if size is None:
+                audit(
+                    'highlight_clip_size_backfill_skipped',
+                    level='WARNING',
+                    clip_id=clip_id,
+                    error_type=error_type,
+                    result='unknown',
+                )
+            else:
+                successes.append((clip_id, size))
+        if not successes:
+            return 0
+
+        def update_sizes(connection: sqlite3.Connection) -> int:
+            updated = 0
+            for clip_id, size in successes:
+                cursor = connection.execute(
+                    'UPDATE highlight_clips SET file_size_bytes=? '
+                    'WHERE id=? AND file_size_bytes IS NULL',
+                    (size, clip_id),
+                )
+                updated += cursor.rowcount
+            return updated
+
+        return await self._database.write(update_sizes)
 
     async def progress(self) -> Tuple[Mapping[str, object], ...]:
         cutoff = int(self._clock()) - 300
@@ -327,7 +388,8 @@ class HighlightWorker:
         def complete(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 "UPDATE highlight_clips SET state='ready',actual_start_ms=?,"
-                'actual_end_ms=?,output_xml_path=?,error_message=NULL,'
+                'actual_end_ms=?,output_xml_path=?,file_size_bytes=?,'
+                'error_message=NULL,'
                 'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,updated_at=? '
                 'WHERE id=? AND lease_owner=? AND lease_generation=? '
                 "AND state='processing'",
@@ -335,6 +397,7 @@ class HighlightWorker:
                     result.inspection.actual_start_ms,
                     result.inspection.actual_end_ms,
                     result.output_xml_path,
+                    result.artifact.size_bytes,
                     now,
                     claim.id,
                     claim.lease_owner,
@@ -411,7 +474,8 @@ class HighlightWorker:
         state = 'queued' if transient else 'failed'
         await self._database.execute(
             'UPDATE highlight_clips SET state=?,error_message=?,lease_owner=NULL,'
-            'lease_until=NULL,next_attempt_at=?,updated_at=? WHERE id=? '
+            'lease_until=NULL,next_attempt_at=?,file_size_bytes=NULL,updated_at=? '
+            'WHERE id=? '
             'AND lease_owner=? AND lease_generation=?',
             (
                 state,

@@ -15,6 +15,7 @@ from blrec.bili_upload.highlight_cut import (
 from blrec.bili_upload.highlights import (
     HighlightClip,
     HighlightClipSource,
+    HighlightClipSummary,
     HighlightMarker,
     HighlightRangeUnavailable,
     HighlightTimeline,
@@ -80,6 +81,27 @@ def clip() -> HighlightClip:
     )
 
 
+def clip_summary() -> HighlightClipSummary:
+    return HighlightClipSummary(
+        id=3,
+        room_id=100,
+        source_session_id=9,
+        name='第一段高光',
+        state='queued',
+        error_message=None,
+        created_at=1_100,
+        updated_at=1_100,
+        source_anchor_name='主播',
+        source_title='测试直播',
+        duration_ms=52_000,
+        file_size_bytes=None,
+        upload_job_id=None,
+        upload_state=None,
+        upload_percent=None,
+        upload_bvid=None,
+    )
+
+
 @dataclass(frozen=True)
 class MarkerCount:
     part_id: int
@@ -94,7 +116,7 @@ class FakeHighlightService:
         self.inspect_clip = AsyncMock(return_value=inspection())
         self.create_clip = AsyncMock(return_value=clip())
         self.list_clips = AsyncMock(return_value=(clip(),))
-        self.list_all_clips = AsyncMock(return_value=(1, (clip(),)))
+        self.list_clip_summaries = AsyncMock(return_value=(1, (clip_summary(),)))
         self.get_clip = AsyncMock(return_value=clip())
         self.retry_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
@@ -167,10 +189,28 @@ def test_global_clip_library_route_is_paginated(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()['total'] == 1
-    assert response.json()['items'][0]['name'] == '第一段高光'
+    item = response.json()['items'][0]
+    assert item == {
+        'id': 3,
+        'roomId': 100,
+        'sourceSessionId': 9,
+        'name': '第一段高光',
+        'state': 'queued',
+        'errorMessage': None,
+        'createdAt': 1_100,
+        'updatedAt': 1_100,
+        'sourceAnchorName': '主播',
+        'sourceTitle': '测试直播',
+        'durationMs': 52_000,
+        'fileSizeBytes': None,
+        'uploadJobId': None,
+        'uploadState': None,
+        'uploadPercent': None,
+        'uploadBvid': None,
+    }
     service = highlights.service
     assert service is not None
-    service.list_all_clips.assert_awaited_once_with(limit=20, offset=0)
+    service.list_clip_summaries.assert_awaited_once_with(limit=20, offset=0)
 
 
 def upload_settings() -> dict:
@@ -298,6 +338,8 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     assert created.json()['state'] == 'queued'
     fetched = client.get('/api/v1/highlights/clips/3', headers=auth())
     assert fetched.status_code == 200
+    assert fetched.json()['outputVideoPath'].endswith('highlight-3.mp4')
+    assert fetched.json()['sources'][0]['partId'] == 1
 
     retried = client.post('/api/v1/highlights/clips/3/retry', headers=auth())
     assert retried.status_code == 200
@@ -308,6 +350,8 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     listed = client.get('/api/v1/highlights/sessions/9/clips', headers=auth())
     assert listed.status_code == 200
     assert listed.json()[0]['name'] == '第一段高光'
+    assert listed.json()[0]['outputVideoPath'].endswith('highlight-3.mp4')
+    assert listed.json()[0]['sources'][0]['partId'] == 1
 
     prepared = client.post('/api/v1/highlights/clips/3/upload-session', headers=auth())
     assert prepared.status_code == 201

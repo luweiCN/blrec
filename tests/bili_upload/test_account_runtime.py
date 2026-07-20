@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.policies import default_room_upload_policy
 from blrec.bili_upload.runtime import BiliAccountRuntime
@@ -87,6 +88,43 @@ async def test_runtime_starts_without_api_key(tmp_path: Path) -> None:
         assert runtime.manager is not None
         assert runtime.unavailable_reason is None
         assert (tmp_path / 'blrec.sqlite3').exists()
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_backfills_highlight_sizes_after_recovery_before_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = []
+
+    async def recover(_worker: HighlightWorker) -> int:
+        events.append(('recover', None))
+        return 0
+
+    async def backfill(_worker: HighlightWorker, limit: int = 100) -> int:
+        events.append(('backfill', limit))
+        return 0
+
+    async def run_once(_worker: HighlightWorker):
+        events.append(('run_once', None))
+        return None
+
+    monkeypatch.setattr(HighlightWorker, 'recover_interrupted', recover)
+    monkeypatch.setattr(HighlightWorker, 'backfill_file_sizes', backfill)
+    monkeypatch.setattr(HighlightWorker, 'run_once', run_once)
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key=None,
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+    )
+
+    try:
+        assert await runtime.start()
+        await asyncio.sleep(0)
+        assert events[:3] == [('recover', None), ('backfill', 100), ('run_once', None)]
+        assert events.count(('backfill', 100)) == 1
     finally:
         await runtime.close()
 

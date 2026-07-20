@@ -1,3 +1,6 @@
+import os
+import re
+import sqlite3
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -7,6 +10,7 @@ from loguru import logger
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.highlights import HighlightService
+from blrec.request_metrics import request_metrics_scope
 
 
 @pytest_asyncio.fixture
@@ -533,8 +537,8 @@ async def test_failed_clip_can_be_queued_for_retry(database, tmp_path: Path) -> 
     await database.execute(
         'INSERT INTO highlight_clips('
         'id,room_id,name,requested_start_ms,requested_end_ms,state,error_message,'
-        'next_attempt_at,created_at,updated_at) '
-        "VALUES(1,100,'失败片段',0,1000,'failed','ffprobe failed',99,1,1)"
+        'next_attempt_at,file_size_bytes,created_at,updated_at) '
+        "VALUES(1,100,'失败片段',0,1000,'failed','ffprobe failed',99,123,1,1)"
     )
     service = HighlightService(database, recording_root=tmp_path)
 
@@ -542,6 +546,7 @@ async def test_failed_clip_can_be_queued_for_retry(database, tmp_path: Path) -> 
 
     assert clip.state == 'queued'
     assert clip.error_message is None
+    assert clip.file_size_bytes is None
     assert (
         await database.scalar('SELECT next_attempt_at FROM highlight_clips WHERE id=1')
         == 0
@@ -615,13 +620,16 @@ async def test_global_clip_library_is_newest_first_and_includes_source_metadata(
     await database.execute(
         'INSERT INTO highlight_clips('
         'id,room_id,source_session_id,name,requested_start_ms,requested_end_ms,'
-        'actual_start_ms,actual_end_ms,output_video_path,state,created_at,updated_at) '
-        "VALUES(1,100,1,'第一段',0,10000,0,10000,?,'ready',1,1),"
-        "(2,200,2,'第二段',5000,20000,5000,20000,?,'ready',2,2)",
+        'actual_start_ms,actual_end_ms,output_video_path,state,file_size_bytes,'
+        'created_at,updated_at) '
+        "VALUES(1,100,1,'第一段',0,10000,0,10000,?,'ready',10,1,1),"
+        "(2,200,2,'第二段',5000,20000,5000,20000,?,'ready',20,2,2)",
         (str(first), str(second)),
     )
 
-    total, clips = await HighlightService(database).list_all_clips(limit=20, offset=0)
+    total, clips = await HighlightService(database).list_clip_summaries(
+        limit=20, offset=0
+    )
 
     assert total == 2
     assert [clip.name for clip in clips] == ['第二段', '第一段']
@@ -629,6 +637,164 @@ async def test_global_clip_library_is_newest_first_and_includes_source_metadata(
     assert clips[0].source_title == '第二场'
     assert clips[0].duration_ms == 15_000
     assert clips[0].file_size_bytes == 20
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('limit', (20, 100))
+async def test_clip_summary_page_uses_two_database_calls_and_no_file_io(
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch, limit: int
+) -> None:
+    def seed(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,anchor_name,'
+            'source_kind) '
+            "VALUES(1,100,'source','closed',1,'直播标题','主播','live')"
+        )
+        connection.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('source-run',1,'finished',1,2)"
+        )
+        connection.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,created_at,updated_at) '
+            "VALUES(1,1,'source-run',1,'/rec/source.flv',1,'ready',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,1000,'投稿账号',X'00',1,'test','active',1,1)"
+        )
+        for clip_id in range(1, 521):
+            upload_session_id = None
+            if clip_id in (1, 520):
+                upload_session_id = 1_000 + clip_id
+                connection.execute(
+                    'INSERT INTO recording_sessions('
+                    'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+                    "VALUES(?,100,?,'closed',?,'highlight')",
+                    (upload_session_id, 'highlight:{}'.format(clip_id), clip_id),
+                )
+                connection.execute(
+                    'INSERT INTO upload_jobs('
+                    'id,session_id,account_id,policy_snapshot_json,state,'
+                    'submit_state,created_at,updated_at) '
+                    "VALUES(?,?,1,'{}','uploading','prepared',?,?)",
+                    (clip_id, upload_session_id, clip_id, clip_id),
+                )
+                connection.execute(
+                    'INSERT INTO upload_parts('
+                    'id,job_id,part_index,source_path,artifact_state) '
+                    "VALUES(?,?,1,?,'ready')",
+                    (clip_id, clip_id, '/clips/{}.mp4'.format(clip_id)),
+                )
+                connection.executemany(
+                    'INSERT INTO upload_chunks('
+                    'part_id,chunk_no,offset,size,state,attempt) '
+                    'VALUES(?,?,?,?,?,0)',
+                    (
+                        (clip_id, 0, 0, 25, 'confirmed'),
+                        (clip_id, 1, 25, 75, 'prepared'),
+                    ),
+                )
+            connection.execute(
+                'INSERT INTO highlight_clips('
+                'id,room_id,source_session_id,upload_session_id,name,'
+                'requested_start_ms,requested_end_ms,actual_start_ms,actual_end_ms,'
+                'output_video_path,state,file_size_bytes,created_at,updated_at) '
+                "VALUES(?,100,1,?,?,0,1000,0,1000,?,'ready',?,?,?)",
+                (
+                    clip_id,
+                    upload_session_id,
+                    '片段 {}'.format(clip_id),
+                    '/clips/{}.mp4'.format(clip_id),
+                    None if clip_id == 519 else clip_id * 10,
+                    clip_id,
+                    clip_id,
+                ),
+            )
+        connection.execute(
+            'INSERT INTO highlight_clip_sources('
+            'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms,'
+            'actual_start_ms,actual_end_ms) VALUES(520,1,1,0,1000,0,1000)'
+        )
+
+    await database.write(seed)
+    calls = {'scalar': 0, 'fetchall': 0}
+    original_scalar = database.scalar
+    original_fetchall = database.fetchall
+
+    async def counted_scalar(sql, parameters=()):
+        calls['scalar'] += 1
+        return await original_scalar(sql, parameters)
+
+    async def counted_fetchall(sql, parameters=()):
+        calls['fetchall'] += 1
+        return await original_fetchall(sql, parameters)
+
+    filesystem_calls = []
+
+    def unexpected_file_io(*args, **kwargs):
+        filesystem_calls.append((args, kwargs))
+        raise AssertionError('clip summary must not inspect files')
+
+    monkeypatch.setattr(database, 'scalar', counted_scalar)
+    monkeypatch.setattr(database, 'fetchall', counted_fetchall)
+    with request_metrics_scope() as metrics:
+        with monkeypatch.context() as file_patch:
+            file_patch.setattr(os.path, 'getsize', unexpected_file_io)
+            file_patch.setattr(Path, 'stat', unexpected_file_io)
+            file_patch.setattr(Path, 'lstat', unexpected_file_io)
+            total, summaries = await HighlightService(database).list_clip_summaries(
+                limit=limit, offset=0
+            )
+
+    assert total == 520
+    assert len(summaries) == limit
+    assert [summary.id for summary in summaries] == list(range(520, 520 - limit, -1))
+    assert calls == {'scalar': 1, 'fetchall': 1}
+    assert metrics.database_calls == 2
+    assert filesystem_calls == []
+    assert summaries[0].source_anchor_name == '主播'
+    assert summaries[0].source_title == '直播标题'
+    assert summaries[0].duration_ms == 1000
+    assert summaries[0].file_size_bytes == 5200
+    assert summaries[0].upload_percent == 25.0
+    assert summaries[1].file_size_bytes is None
+    assert not hasattr(summaries[0], 'output_video_path')
+    assert not hasattr(summaries[0], 'sources')
+
+    detail = await HighlightService(database).get_clip(summaries[0].id)
+    assert detail.output_video_path == '/clips/520.mp4'
+    assert detail.file_size_bytes == 5_200
+    assert detail.sources
+
+
+@pytest.mark.asyncio
+async def test_clip_summary_query_bounds_child_aggregation_to_selected_jobs(
+    database: BiliUploadDatabase,
+) -> None:
+    plan = await database.fetchall(
+        'EXPLAIN QUERY PLAN ' + HighlightService._CLIP_SUMMARY_SELECT, (20, 0)
+    )
+    details = [str(row['detail']) for row in plan]
+
+    assert any('selected_clips' in detail for detail in details)
+    assert any(
+        re.search(
+            r'SEARCH(?: TABLE)? (?:upload_parts AS )?part ' r'.*\(job_id=\?\)', detail
+        )
+        for detail in details
+    )
+    assert any(
+        re.search(
+            r'SEARCH(?: TABLE)? (?:upload_chunks AS )?chunk ' r'.*\(part_id=\?\)',
+            detail,
+        )
+        for detail in details
+    )
 
 
 @pytest.mark.asyncio

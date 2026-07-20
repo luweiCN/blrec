@@ -1,8 +1,12 @@
+import os
+import sqlite3
+import threading
 from pathlib import Path
 from typing import AsyncIterator, Sequence
 
 import pytest
 import pytest_asyncio
+from loguru import logger
 
 from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase
@@ -288,7 +292,8 @@ async def test_worker_completes_video_and_danmaku_atomically(
 
     row = await database.fetchone(
         'SELECT state,actual_start_ms,actual_end_ms,output_video_path,'
-        'output_xml_path,lease_owner,lease_until FROM highlight_clips WHERE id=?',
+        'output_xml_path,file_size_bytes,lease_owner,lease_until '
+        'FROM highlight_clips WHERE id=?',
         (clip.id,),
     )
     assert row is not None
@@ -297,6 +302,7 @@ async def test_worker_completes_video_and_danmaku_atomically(
     assert row['actual_end_ms'] == 70_000
     assert row['lease_owner'] is None
     assert row['lease_until'] is None
+    assert row['file_size_bytes'] == len(b'clipped-video')
     assert Path(str(row['output_video_path'])).read_bytes() == b'clipped-video'
     assert Path(str(row['output_xml_path'])).exists()
     assert len(clipper.cut_calls) == 1
@@ -357,6 +363,9 @@ async def test_worker_retries_incomplete_ffprobe_metadata_for_growing_recording(
         confirm_keyframe=False,
         active_durations_ms={1: 120_000},
     )
+    await database.execute(
+        'UPDATE highlight_clips SET file_size_bytes=999 WHERE id=?', (clip.id,)
+    )
     failing = FakeClipper()
     failing.inspect = lambda *args, **kwargs: (_ for _ in ()).throw(
         HighlightCutError('ffprobe 返回了无效的视频流信息')
@@ -368,13 +377,15 @@ async def test_worker_retries_incomplete_ffprobe_metadata_for_growing_recording(
     assert await worker.run_once() == clip.id
 
     row = await database.fetchone(
-        'SELECT state,next_attempt_at,error_message FROM highlight_clips WHERE id=?',
+        'SELECT state,next_attempt_at,error_message,file_size_bytes '
+        'FROM highlight_clips WHERE id=?',
         (clip.id,),
     )
     assert row is not None
     assert row['state'] == 'queued'
     assert row['next_attempt_at'] > 1_000
     assert '无效的视频流信息' in row['error_message']
+    assert row['file_size_bytes'] is None
 
 
 @pytest.mark.asyncio
@@ -482,7 +493,7 @@ async def test_worker_recovers_stale_partial_and_valid_final_output(
     partial.write_bytes(b'incomplete')
     await database.execute(
         "UPDATE highlight_clips SET state='processing',lease_owner='old',"
-        'lease_until=1 WHERE id=?',
+        'lease_until=1,file_size_bytes=999 WHERE id=?',
         (clip.id,),
     )
     worker = HighlightWorker(
@@ -500,12 +511,11 @@ async def test_worker_recovers_stale_partial_and_valid_final_output(
 
     assert await worker.recover_interrupted() == 1
     assert not partial.exists()
-    assert (
-        await database.scalar(
-            'SELECT state FROM highlight_clips WHERE id=?', (clip.id,)
-        )
-        == 'queued'
+    reset = await database.fetchone(
+        'SELECT state,file_size_bytes FROM highlight_clips WHERE id=?', (clip.id,)
     )
+    assert reset is not None
+    assert dict(reset) == {'state': 'queued', 'file_size_bytes': None}
 
     final = Path(clip.output_video_path)
     final.write_bytes(b'complete')
@@ -515,13 +525,88 @@ async def test_worker_recovers_stale_partial_and_valid_final_output(
         (clip.id,),
     )
     assert await worker.recover_interrupted() == 1
+    recovered = await database.fetchone(
+        'SELECT state,file_size_bytes FROM highlight_clips WHERE id=?', (clip.id,)
+    )
+    assert recovered is not None
+    assert dict(recovered) == {'state': 'ready', 'file_size_bytes': len(b'complete')}
+    assert clipper.cut_calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_file_sizes_is_bounded_and_runs_in_executor(
+    database: BiliUploadDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def seed(connection: sqlite3.Connection) -> None:
+        for clip_id in range(1, 121):
+            connection.execute(
+                'INSERT INTO highlight_clips('
+                'id,room_id,name,requested_start_ms,requested_end_ms,'
+                'output_video_path,state,file_size_bytes,created_at,updated_at) '
+                "VALUES(?,100,?,0,1000,?,'ready',?,?,?)",
+                (
+                    clip_id,
+                    '片段 {}'.format(clip_id),
+                    '/clips/clip-{}.mp4'.format(clip_id),
+                    10 if clip_id == 1 else None,
+                    clip_id,
+                    clip_id,
+                ),
+            )
+
+    await database.write(seed)
+    caller_thread = threading.get_ident()
+    checked_ids = []
+    worker_threads = []
+
+    def fake_getsize(path: str) -> int:
+        clip_id = int(Path(path).stem.split('-')[-1])
+        checked_ids.append(clip_id)
+        worker_threads.append(threading.get_ident())
+        if clip_id == 50:
+            raise FileNotFoundError(path)
+        if clip_id == 51:
+            raise ValueError('invalid legacy path')
+        return clip_id * 10
+
+    monkeypatch.setattr(os.path, 'getsize', fake_getsize)
+    worker = HighlightWorker(
+        database, FakeClipper(), FakeDanmakuClipper(), worker_id='worker'
+    )
+
+    assert await worker.backfill_file_sizes(limit=0) == 0
+    assert checked_ids == []
+
+    messages = []
+    sink = logger.add(messages.append, format='{message}')
+    try:
+        updated = await worker.backfill_file_sizes(limit=1_000)
+    finally:
+        logger.remove(sink)
+
+    assert updated == 98
+    assert checked_ids == list(range(2, 102))
+    assert worker_threads and all(value != caller_thread for value in worker_threads)
+    assert any('highlight_clip_size_backfill_skipped' in str(item) for item in messages)
+    assert all('/clips/clip-50.mp4' not in str(item) for item in messages)
+    assert (
+        await database.scalar('SELECT file_size_bytes FROM highlight_clips WHERE id=2')
+        == 20
+    )
+    assert (
+        await database.scalar('SELECT file_size_bytes FROM highlight_clips WHERE id=50')
+        is None
+    )
+    assert (
+        await database.scalar('SELECT file_size_bytes FROM highlight_clips WHERE id=51')
+        is None
+    )
     assert (
         await database.scalar(
-            'SELECT state FROM highlight_clips WHERE id=?', (clip.id,)
+            'SELECT file_size_bytes FROM highlight_clips WHERE id=102'
         )
-        == 'ready'
+        is None
     )
-    assert clipper.cut_calls == []
 
 
 @pytest.mark.asyncio
@@ -541,14 +626,16 @@ async def test_delete_clip_cancels_pending_and_removes_only_ready_outputs(
         confirm_keyframe=False,
         active_durations_ms={1: 120_000},
     )
+    await database.execute(
+        'UPDATE highlight_clips SET file_size_bytes=999 WHERE id=?', (clip.id,)
+    )
 
     assert await service.delete_clip(clip.id) == 'cancelled'
-    assert (
-        await database.scalar(
-            'SELECT state FROM highlight_clips WHERE id=?', (clip.id,)
-        )
-        == 'cancelled'
+    cancelled = await database.fetchone(
+        'SELECT state,file_size_bytes FROM highlight_clips WHERE id=?', (clip.id,)
     )
+    assert cancelled is not None
+    assert dict(cancelled) == {'state': 'cancelled', 'file_size_bytes': None}
 
     assert clip.output_video_path is not None
     assert clip.output_xml_path is not None
@@ -556,7 +643,8 @@ async def test_delete_clip_cancels_pending_and_removes_only_ready_outputs(
     Path(clip.output_video_path).write_bytes(b'output')
     Path(clip.output_xml_path).write_text('<i/>', encoding='utf8')
     await database.execute(
-        "UPDATE highlight_clips SET state='ready' WHERE id=?", (clip.id,)
+        "UPDATE highlight_clips SET state='ready',file_size_bytes=6 WHERE id=?",
+        (clip.id,),
     )
     upload_session_id = await service.ensure_upload_session(clip.id)
 
@@ -601,7 +689,8 @@ async def test_delete_clip_cancels_local_upload_job_and_removes_files(
     Path(clip.output_video_path).write_bytes(b'output')
     Path(clip.output_xml_path).write_text('<i/>', encoding='utf8')
     await database.execute(
-        "UPDATE highlight_clips SET state='ready' WHERE id=?", (clip.id,)
+        "UPDATE highlight_clips SET state='ready',file_size_bytes=6 WHERE id=?",
+        (clip.id,),
     )
     upload_session_id = await service.ensure_upload_session(clip.id)
     await database.execute(
@@ -653,7 +742,8 @@ async def test_delete_clip_keeps_retryable_database_record_when_unlink_fails(
     Path(clip.output_video_path).parent.mkdir(parents=True, exist_ok=True)
     Path(clip.output_video_path).write_bytes(b'output')
     await database.execute(
-        "UPDATE highlight_clips SET state='ready' WHERE id=?", (clip.id,)
+        "UPDATE highlight_clips SET state='ready',file_size_bytes=6 WHERE id=?",
+        (clip.id,),
     )
     upload_session_id = await service.ensure_upload_session(clip.id)
 
@@ -666,9 +756,9 @@ async def test_delete_clip_keeps_retryable_database_record_when_unlink_fails(
 
     assert (
         await database.scalar(
-            'SELECT state FROM highlight_clips WHERE id=?', (clip.id,)
+            'SELECT file_size_bytes FROM highlight_clips WHERE id=?', (clip.id,)
         )
-        == 'cancelled'
+        is None
     )
     assert (
         await database.scalar(

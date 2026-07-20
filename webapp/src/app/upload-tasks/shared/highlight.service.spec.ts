@@ -6,6 +6,7 @@ import { TestBed } from '@angular/core/testing';
 
 import { UrlService } from 'src/app/core/services/url.service';
 import { RoomUploadPolicyRequest } from 'src/app/tasks/upload-policy-dialog/room-upload-policy.model';
+import { HighlightClipSummary } from './highlight.model';
 import { HighlightService } from './highlight.service';
 
 describe('HighlightService', () => {
@@ -132,12 +133,40 @@ describe('HighlightService', () => {
   });
 
   it('loads the global clip library with pagination', () => {
-    service.listAllClips(20, 40).subscribe();
+    let item: HighlightClipSummary | undefined;
+    service.listAllClips(20, 40).subscribe((response) => {
+      item = response.items[0];
+    });
 
     const request = http.expectOne(
       '/api/v1/highlights/clips?limit=20&offset=40',
     );
     expect(request.request.method).toBe('GET');
+    request.flush({
+      total: 1,
+      items: [
+        {
+          id: 3,
+          roomId: 100,
+          sourceSessionId: 9,
+          name: '五杀高光',
+          state: 'ready',
+          errorMessage: null,
+          createdAt: 1_100,
+          updatedAt: 1_100,
+          sourceAnchorName: '主播名',
+          sourceTitle: '排位赛',
+          durationMs: 52_000,
+          fileSizeBytes: null,
+          uploadJobId: null,
+          uploadState: null,
+          uploadPercent: null,
+          uploadBvid: null,
+        },
+      ],
+    });
+    expect(item?.fileSizeBytes).toBeNull();
+    expect('outputVideoPath' in (item as object)).toBeFalse();
   });
 
   it('updates and deletes independent marker metadata', () => {
