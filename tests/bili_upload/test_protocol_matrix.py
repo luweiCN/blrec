@@ -609,8 +609,9 @@ async def test_json_business_503_is_not_misclassified_as_http_5xx() -> None:
     assert transport.calls == 1
 
 
-def test_transport_has_explicit_phase_timeouts() -> None:
-    transport = AiohttpProtocolTransport(timeout_seconds=30)
+@pytest.mark.parametrize('requested_total', (30, 60))
+def test_transport_has_explicit_phase_timeouts(requested_total: float) -> None:
+    transport = AiohttpProtocolTransport(timeout_seconds=requested_total)
 
     assert transport._timeout.total == 30
     assert transport._timeout.connect == 5

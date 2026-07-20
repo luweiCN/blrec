@@ -135,6 +135,7 @@ class AiohttpProtocolTransport:
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError('protocol timeout must be positive')
+        timeout_seconds = min(30.0, timeout_seconds)
         self._timeout = aiohttp.ClientTimeout(
             total=timeout_seconds,
             connect=min(5, timeout_seconds),
