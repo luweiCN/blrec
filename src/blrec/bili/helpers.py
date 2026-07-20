@@ -40,21 +40,14 @@ async def ensure_room_id(room_id: int, session: Optional[Any] = None) -> int:
         return result['room_id']
 
 
-async def get_nav(cookie: str) -> ResponseData:
-    async with aiohttp.ClientSession(
-        connector=connector,
-        connector_owner=False,
-        raise_for_status=True,
-        trust_env=True,
-        timeout=timeout,
-    ) as session:
-        headers = {
-            'Origin': 'https://passport.bilibili.com',
-            'Referer': 'https://passport.bilibili.com/account/security',
-            'Cookie': cookie,
-        }
-        api = WebApi(session, headers)
-        return await api.get_nav()
+async def get_nav(cookie: str, session: Any) -> ResponseData:
+    headers = {
+        'Origin': 'https://passport.bilibili.com',
+        'Referer': 'https://passport.bilibili.com/account/security',
+        'Cookie': cookie,
+    }
+    api = WebApi(session, headers)
+    return await api.get_nav(raise_for_status=True)
 
 
 def get_quality_name(qn: QualityNumber) -> str:

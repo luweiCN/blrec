@@ -109,7 +109,10 @@ class Application:
         network_route_manager: Optional[NetworkRouteManager] = None,
         control_operation_journal: Optional[ControlOperationJournal] = None,
         room_upload_policy_enabler: Optional[Callable[[int], Awaitable[None]]] = None,
+        validation_timeout_seconds: float = 10,
     ) -> None:
+        if not 0 < validation_timeout_seconds <= 10:
+            raise ValueError('validation_timeout_seconds must be in (0, 10]')
         self._settings = settings
         self._out_dir = settings.output.out_dir
         self._settings_manager = SettingsManager(self, settings)
@@ -117,6 +120,8 @@ class Application:
         self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
         self._network_route_manager = network_route_manager
         self._network_session_pool: Optional[AiohttpSessionPool] = None
+        self._bili_validation_session: Optional[Any] = None
+        self._validation_timeout_seconds = validation_timeout_seconds
         self._managed_cookie_provider = managed_cookie_provider
         self._auth_failure_reporter = auth_failure_reporter
         self._recording_journal_provider = recording_journal_provider
@@ -258,6 +263,7 @@ class Application:
         )
         await _collect_teardown_error(self._task_manager.destroy_all_tasks(), errors)
         await _collect_teardown_error(self._teardown_live_status_monitor(), errors)
+        await _collect_teardown_error(self._teardown_bili_validation_session(), errors)
         await _collect_teardown_error(self._teardown_network_sessions(), errors)
         try:
             self._destroy()
@@ -518,6 +524,14 @@ class Application:
             raise RuntimeError('update metadata client is not ready')
         return await client.get_latest_version_string(project_name)
 
+    async def validate_bili_cookie(self, cookie: str) -> Any:
+        from .bili.helpers import get_nav
+
+        return await asyncio.wait_for(
+            get_nav(cookie, self._get_bili_validation_session()),
+            timeout=self._validation_timeout_seconds,
+        )
+
     async def _load_tasks_and_controls(self) -> None:
         membership = self._room_membership_reconciler
         desired_absent = (
@@ -633,6 +647,31 @@ class Application:
 
             self._network_session_pool = AiohttpSessionPool(self._network_route_manager)
         return self._network_session_pool
+
+    def _get_bili_validation_session(self) -> Any:
+        network_pool = self._ensure_network_session_pool()
+        if network_pool is not None:
+            return network_pool.client('bili_api', anonymous=True)
+
+        session = self._bili_validation_session
+        if session is None or getattr(session, 'closed', False):
+            from .bili.net import connector, timeout
+
+            session = aiohttp.ClientSession(
+                connector=connector,
+                connector_owner=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=timeout,
+                trust_env=False,
+            )
+            self._bili_validation_session = session
+        return session
+
+    async def _teardown_bili_validation_session(self) -> None:
+        session = getattr(self, '_bili_validation_session', None)
+        self._bili_validation_session = None
+        if session is not None:
+            await session.close()
 
     async def _teardown_network_sessions(self) -> None:
         pool = getattr(self, '_network_session_pool', None)

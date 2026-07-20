@@ -65,6 +65,28 @@ class _TaskManager:
         self._calls.append('tasks.destroy')
 
 
+class _ValidationSession:
+    def __init__(self) -> None:
+        self.closed = False
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+class _ValidationPool:
+    def __init__(self, client: object) -> None:
+        self._client = client
+        self.calls = []
+
+    def client(
+        self, purpose: str, *, anonymous: bool = False, affinity_key: object = None
+    ) -> object:
+        self.calls.append((purpose, anonymous, affinity_key))
+        return self._client
+
+
 class _FailingJournal:
     async def open(self) -> None:
         raise RuntimeError('control journal failed')
@@ -138,6 +160,31 @@ async def test_launch_and_exit_own_update_metadata_client() -> None:
 
     assert calls[-2:] == ['update.get', 'update.close']
     assert not hasattr(app, '_update_metadata_client')
+
+
+@pytest.mark.asyncio
+async def test_cookie_validation_fallback_session_is_closed_and_forgotten() -> None:
+    app = object.__new__(Application)
+    session = _ValidationSession()
+    app._bili_validation_session = session
+
+    await app._teardown_bili_validation_session()
+    await app._teardown_bili_validation_session()
+
+    assert session.close_calls == 1
+    assert app._bili_validation_session is None
+
+
+def test_cookie_validation_routed_client_is_pool_owned() -> None:
+    client = object()
+    pool = _ValidationPool(client)
+    app = object.__new__(Application)
+    app._bili_validation_session = None
+    app._ensure_network_session_pool = lambda: pool
+
+    assert app._get_bili_validation_session() is client
+    assert app._bili_validation_session is None
+    assert pool.calls == [('bili_api', True, None)]
 
 
 @pytest.mark.asyncio

@@ -70,6 +70,11 @@ class BaseApi(ABC):
 
     @retry(reraise=True, stop=stop_after_delay(5), wait=wait_exponential(0.1))
     async def _get_json_res(self, url: str, *args: Any, **kwds: Any) -> JsonResponse:
+        return await self._get_json_res_once(url, *args, **kwds)
+
+    async def _get_json_res_once(
+        self, url: str, *args: Any, **kwds: Any
+    ) -> JsonResponse:
         should_check_response = kwds.pop('check_response', True)
         kwds = {'timeout': self.timeout, 'headers': self.headers, **kwds}
         request_headers = kwds['headers']
@@ -351,9 +356,18 @@ class WebApi(BaseApi):
         )
         return json_res['data']
 
-    async def get_nav(self) -> ResponseData:
+    async def get_nav(self, *, raise_for_status: bool = False) -> ResponseData:
         path = '/x/web-interface/nav'
-        json_res = await self._get_json(self.base_api_urls, path, check_response=False)
+        if raise_for_status:
+            json_res = await self._get_json_res_once(
+                self.base_api_urls[0] + path,
+                check_response=False,
+                raise_for_status=True,
+            )
+        else:
+            json_res = await self._get_json(
+                self.base_api_urls, path, check_response=False
+            )
         return json_res
 
     async def _update_wbi_key(self) -> None:
