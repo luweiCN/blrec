@@ -20,6 +20,7 @@ __all__ = (
     'ControlLaneSaturated',
     'ControlOperationJournal',
     'ControlOperationSnapshot',
+    'ControlRevisionSnapshot',
     'ControlStepInput',
     'ControlStepSnapshot',
 )
@@ -81,6 +82,17 @@ class ClaimedControlStep:
     kind: str
     key: str
     generation: int
+
+
+@dataclass(frozen=True)
+class ControlRevisionSnapshot:
+    lane: str
+    target_key: str
+    kind: str
+    action: str
+    desired_revision: int
+    applied_revision: int
+    operation_id: Optional[str]
 
 
 class ControlOperationJournal:
@@ -178,6 +190,40 @@ class ControlOperationJournal:
 
     async def get(self, operation_id: str) -> Optional[ControlOperationSnapshot]:
         return await self._run(self._get_sync, operation_id)
+
+    async def submit_revision(
+        self, *, lane: str, kind: str, target_key: str, action: str
+    ) -> ControlOperationSnapshot:
+        if not self._admitting or self._closed:
+            raise ControlJournalClosed('control journal admission is closed')
+        if not lane or not kind or not target_key or not action:
+            raise ValueError('revision operation fields must not be empty')
+        return await self._run(
+            self._submit_revision_sync, lane, kind, target_key, action
+        )
+
+    async def get_revision(
+        self, lane: str, target_key: str
+    ) -> Optional[ControlRevisionSnapshot]:
+        return await self._run(self._get_revision_sync, lane, target_key)
+
+    async def recover_revision_gaps(
+        self, *, lane: str, kind: str
+    ) -> Sequence[ControlOperationSnapshot]:
+        operation_ids = await self._run(self._recover_revision_gaps_sync, lane, kind)
+        snapshots = []
+        for operation_id in operation_ids:
+            snapshot = await self.get(operation_id)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return tuple(snapshots)
+
+    async def finish_revision_step(
+        self, claim: ClaimedControlStep, *, applied_revision: int
+    ) -> bool:
+        if applied_revision <= 0:
+            raise ValueError('applied revision must be positive')
+        return await self._run(self._finish_revision_step_sync, claim, applied_revision)
 
     async def list_nonterminal(self, lane: str) -> Sequence[ControlOperationSnapshot]:
         operation_ids = await self._run(self._list_nonterminal_ids_sync, lane)
@@ -322,6 +368,21 @@ class ControlOperationJournal:
                 );
                 CREATE INDEX IF NOT EXISTS control_step_status
                 ON control_operation_steps(status,generation,operation_id,key);
+
+                CREATE TABLE IF NOT EXISTS control_revisions(
+                    lane TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    desired_revision INTEGER NOT NULL CHECK(desired_revision>=0),
+                    applied_revision INTEGER NOT NULL CHECK(applied_revision>=0),
+                    operation_id TEXT REFERENCES control_operations(id)
+                        ON DELETE SET NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(lane,target_key)
+                );
+                CREATE INDEX IF NOT EXISTS control_revision_gap
+                ON control_revisions(lane,desired_revision,applied_revision);
                 """
             )
             connection.execute('BEGIN IMMEDIATE')
@@ -490,6 +551,261 @@ class ControlOperationJournal:
         snapshot = self._get_sync(operation_id)
         assert snapshot is not None
         return snapshot
+
+    def _submit_revision_sync(
+        self, lane: str, kind: str, target_key: str, action: str
+    ) -> ControlOperationSnapshot:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            existing = connection.execute(
+                'SELECT id FROM control_operations '
+                'WHERE lane=? AND kind=? AND target_key=? '
+                "AND status IN ('accepted','running')",
+                (lane, kind, target_key),
+            ).fetchone()
+            revision_row = connection.execute(
+                'SELECT desired_revision,applied_revision FROM control_revisions '
+                'WHERE lane=? AND target_key=?',
+                (lane, target_key),
+            ).fetchone()
+            desired_revision = (
+                1 if revision_row is None else int(revision_row['desired_revision']) + 1
+            )
+            applied_revision = (
+                0 if revision_row is None else int(revision_row['applied_revision'])
+            )
+            if existing is None:
+                operation_id = self._insert_revision_operation_sync(
+                    connection,
+                    lane=lane,
+                    kind=kind,
+                    target_key=target_key,
+                    desired_revision=desired_revision,
+                    now=now,
+                )
+            else:
+                operation_id = str(existing['id'])
+                row = connection.execute(
+                    'SELECT result_json FROM control_operations WHERE id=?',
+                    (operation_id,),
+                ).fetchone()
+                result = dict(self._decode(row['result_json']) or {})
+                result['desiredRevision'] = desired_revision
+                connection.execute(
+                    'UPDATE control_operations SET result_json=?,updated_at=? '
+                    'WHERE id=?',
+                    (self._encode(result), now, operation_id),
+                )
+            connection.execute(
+                'INSERT INTO control_revisions('
+                'lane,target_key,kind,action,desired_revision,applied_revision,'
+                'operation_id,updated_at) VALUES(?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(lane,target_key) DO UPDATE SET '
+                'kind=excluded.kind,action=excluded.action,'
+                'desired_revision=excluded.desired_revision,'
+                'operation_id=excluded.operation_id,updated_at=excluded.updated_at',
+                (
+                    lane,
+                    target_key,
+                    kind,
+                    action,
+                    desired_revision,
+                    applied_revision,
+                    operation_id,
+                    now,
+                ),
+            )
+            connection.execute('COMMIT')
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
+        snapshot = self._get_sync(operation_id)
+        assert snapshot is not None
+        return snapshot
+
+    def _insert_revision_operation_sync(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        lane: str,
+        kind: str,
+        target_key: str,
+        desired_revision: int,
+        now: float,
+    ) -> str:
+        count = int(
+            connection.execute(
+                'SELECT COUNT(*) FROM control_operations WHERE lane=? '
+                "AND status IN ('accepted','running')",
+                (lane,),
+            ).fetchone()[0]
+        )
+        if count >= self._max_nonterminal_per_lane:
+            raise ControlLaneSaturated(lane)
+        attempt = int(
+            connection.execute(
+                'SELECT COALESCE(MAX(attempt),0)+1 FROM control_operations '
+                'WHERE lane=? AND kind=? AND target_key=?',
+                (lane, kind, target_key),
+            ).fetchone()[0]
+        )
+        generation = int(
+            connection.execute(
+                'SELECT COALESCE(MAX(generation),0)+1 FROM control_operations '
+                'WHERE lane=?',
+                (lane,),
+            ).fetchone()[0]
+        )
+        operation_id = uuid.uuid4().hex
+        connection.execute(
+            'INSERT INTO control_operations('
+            'id,lane,kind,target_key,attempt,generation,status,result_json,'
+            'created_at,updated_at) VALUES(?,?,?,?,?,?,\'accepted\',?,?,?)',
+            (
+                operation_id,
+                lane,
+                kind,
+                target_key,
+                attempt,
+                generation,
+                self._encode({'desiredRevision': desired_revision}),
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            'INSERT INTO control_operation_steps('
+            'operation_id,key,generation,status,result_json,error_code,updated_at'
+            ') VALUES(?,?,?,\'queued\',NULL,NULL,?)',
+            (operation_id, target_key, generation, now),
+        )
+        return operation_id
+
+    def _get_revision_sync(
+        self, lane: str, target_key: str
+    ) -> Optional[ControlRevisionSnapshot]:
+        row = (
+            self._require_connection()
+            .execute(
+                'SELECT * FROM control_revisions WHERE lane=? AND target_key=?',
+                (lane, target_key),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return ControlRevisionSnapshot(
+            lane=str(row['lane']),
+            target_key=str(row['target_key']),
+            kind=str(row['kind']),
+            action=str(row['action']),
+            desired_revision=int(row['desired_revision']),
+            applied_revision=int(row['applied_revision']),
+            operation_id=(
+                None if row['operation_id'] is None else str(row['operation_id'])
+            ),
+        )
+
+    def _recover_revision_gaps_sync(self, lane: str, kind: str) -> Sequence[str]:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            rows = connection.execute(
+                'SELECT target_key,desired_revision,operation_id '
+                'FROM control_revisions WHERE lane=? '
+                'AND desired_revision>applied_revision ORDER BY target_key',
+                (lane,),
+            ).fetchall()
+            operation_ids = []
+            for row in rows:
+                target_key = str(row['target_key'])
+                active = connection.execute(
+                    'SELECT id FROM control_operations '
+                    'WHERE lane=? AND kind=? AND target_key=? '
+                    "AND status IN ('accepted','running')",
+                    (lane, kind, target_key),
+                ).fetchone()
+                if active is None:
+                    operation_id = self._insert_revision_operation_sync(
+                        connection,
+                        lane=lane,
+                        kind=kind,
+                        target_key=target_key,
+                        desired_revision=int(row['desired_revision']),
+                        now=now,
+                    )
+                    connection.execute(
+                        'UPDATE control_revisions SET operation_id=?,updated_at=? '
+                        'WHERE lane=? AND target_key=?',
+                        (operation_id, now, lane, target_key),
+                    )
+                else:
+                    operation_id = str(active['id'])
+                operation_ids.append(operation_id)
+            connection.execute('COMMIT')
+            return tuple(operation_ids)
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
+
+    def _finish_revision_step_sync(
+        self, claim: ClaimedControlStep, applied_revision: int
+    ) -> bool:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            revision = connection.execute(
+                'SELECT desired_revision,applied_revision,operation_id '
+                'FROM control_revisions WHERE lane=? AND target_key=?',
+                (claim.lane, claim.key),
+            ).fetchone()
+            if revision is None or revision['operation_id'] != claim.operation_id:
+                connection.execute('ROLLBACK')
+                return False
+            cursor = connection.execute(
+                'UPDATE control_revisions SET applied_revision=?,updated_at=? '
+                'WHERE lane=? AND target_key=? AND applied_revision<?',
+                (applied_revision, now, claim.lane, claim.key, applied_revision),
+            )
+            current_applied = max(
+                int(revision['applied_revision']),
+                (
+                    applied_revision
+                    if cursor.rowcount
+                    else int(revision['applied_revision'])
+                ),
+            )
+            desired = int(revision['desired_revision'])
+            terminal = current_applied >= desired
+            step_status = 'succeeded' if terminal else 'queued'
+            cursor = connection.execute(
+                'UPDATE control_operation_steps SET status=?,result_json=?,'
+                'error_code=NULL,updated_at=? WHERE operation_id=? AND key=? '
+                "AND generation=? AND status='running'",
+                (
+                    step_status,
+                    self._encode(
+                        {'appliedRevision': current_applied, 'desiredRevision': desired}
+                    ),
+                    now,
+                    claim.operation_id,
+                    claim.key,
+                    claim.generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.execute('ROLLBACK')
+                return False
+            self._refresh_operation_sync(connection, claim.operation_id, now)
+            connection.execute('COMMIT')
+            return terminal
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
 
     def _get_sync(self, operation_id: str) -> Optional[ControlOperationSnapshot]:
         connection = self._require_connection()

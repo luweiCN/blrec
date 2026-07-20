@@ -2,7 +2,7 @@ import signal
 from typing import Any, Dict
 
 import attr
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
 
 from ...application import Application
 from ..schemas import ResponseMessage
@@ -22,10 +22,13 @@ async def get_app_info() -> Dict[str, Any]:
     return attr.asdict(app.info)
 
 
-@router.post('/restart', response_model=ResponseMessage)
-async def restart_app() -> ResponseMessage:
-    await app.restart()
-    return ResponseMessage(message='Application has been restarted')
+@router.post(
+    '/restart', response_model=ResponseMessage, status_code=status.HTTP_202_ACCEPTED
+)
+async def restart_app(response: Response) -> ResponseMessage:
+    operation = await app.submit_restart()
+    response.headers['X-BLREC-Operation-ID'] = operation.id
+    return ResponseMessage(message='Application restart accepted')
 
 
 @router.post('/exit', status_code=status.HTTP_204_NO_CONTENT)

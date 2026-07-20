@@ -15,6 +15,110 @@ from blrec.control.operations import (
 
 
 @pytest.mark.asyncio
+async def test_revision_operation_chases_a_new_desired_revision(tmp_path: Path) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    try:
+        first = await journal.submit_revision(
+            lane='settings-apply',
+            kind='apply',
+            target_key='settings:header',
+            action='apply',
+        )
+        claim = await journal.claim_next('settings-apply')
+        assert claim is not None
+        revision = await journal.get_revision('settings-apply', 'settings:header')
+        assert revision is not None and revision.desired_revision == 1
+
+        second = await journal.submit_revision(
+            lane='settings-apply',
+            kind='apply',
+            target_key='settings:header',
+            action='apply',
+        )
+        assert second.id == first.id
+        assert not await journal.finish_revision_step(claim, applied_revision=1)
+
+        pending = await journal.get(first.id)
+        assert pending is not None and pending.status == 'accepted'
+        second_claim = await journal.claim_next('settings-apply')
+        assert second_claim is not None
+        revision = await journal.get_revision('settings-apply', 'settings:header')
+        assert revision is not None and revision.desired_revision == 2
+        assert await journal.finish_revision_step(second_claim, applied_revision=2)
+
+        complete = await journal.get(first.id)
+        assert complete is not None and complete.status == 'succeeded'
+        revision = await journal.get_revision('settings-apply', 'settings:header')
+        assert revision is not None and revision.applied_revision == 2
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_revision_gap_is_recovered_after_restart(tmp_path: Path) -> None:
+    path = tmp_path / 'control.sqlite3'
+    journal = ControlOperationJournal(path)
+    await journal.open()
+    operation = await journal.submit_revision(
+        lane='settings-apply',
+        kind='apply',
+        target_key='settings:live_monitor',
+        action='apply',
+    )
+    claim = await journal.claim_next('settings-apply')
+    assert claim is not None
+    await journal.close()
+
+    reopened = ControlOperationJournal(path)
+    await reopened.open()
+    try:
+        recovered = await reopened.recover_revision_gaps(
+            lane='settings-apply', kind='apply'
+        )
+        assert [item.id for item in recovered] == [operation.id]
+        recovered_claim = await reopened.claim_next('settings-apply')
+        assert recovered_claim is not None
+        revision = await reopened.get_revision(
+            'settings-apply', 'settings:live_monitor'
+        )
+        assert revision is not None and revision.desired_revision == 1
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_revision_attempt_keeps_gap_for_recovery(tmp_path: Path) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    try:
+        first = await journal.submit_revision(
+            lane='settings-apply',
+            kind='apply',
+            target_key='settings:logging',
+            action='apply',
+        )
+        claim = await journal.claim_next('settings-apply')
+        assert claim is not None
+        await journal.finish_step(
+            claim, status='failed', error_code='SETTINGS_APPLY_FAILED'
+        )
+
+        recovered = await journal.recover_revision_gaps(
+            lane='settings-apply', kind='apply'
+        )
+
+        assert len(recovered) == 1
+        assert recovered[0].id != first.id
+        revision = await journal.get_revision('settings-apply', 'settings:logging')
+        assert revision is not None
+        assert revision.desired_revision == 1
+        assert revision.applied_revision == 0
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_journal_is_private_durable_and_uses_full_delete_mode(
     tmp_path: Path,
 ) -> None:

@@ -37,6 +37,14 @@ from blrec.notification.providers import (
 )
 from blrec.path.helpers import create_file, file_exists
 from blrec.setting import EnvSettings, Settings, SettingsIn
+from blrec.setting.file_work import (
+    SettingsApplyReconciler,
+    SettingsDirectoryError,
+    SettingsFileWorkCoordinator,
+    SettingsFileWorkSaturated,
+    validate_directory_sync,
+)
+from blrec.setting.models import DEFAULT_LOG_DIR, DEFAULT_OUT_DIR
 from blrec.web.middlewares.base_herf import BaseHrefMiddleware
 from blrec.web.middlewares.request_performance import RequestPerformanceMiddleware
 from blrec.web.middlewares.route_redirect import RouteRedirectMiddleware
@@ -78,6 +86,15 @@ _env_settings.settings_file = _path
 
 _settings = Settings.load(_env_settings.settings_file)
 _settings.update_from_env_settings(_env_settings)
+for _directory, _default_directory in (
+    (_settings.output.out_dir, os.path.normpath(os.path.expanduser(DEFAULT_OUT_DIR))),
+    (_settings.logging.log_dir, os.path.normpath(os.path.expanduser(DEFAULT_LOG_DIR))),
+):
+    if _directory == _default_directory:
+        os.makedirs(_directory, exist_ok=True)
+    _directory_code, _directory_message = validate_directory_sync(_directory)
+    if _directory_code:
+        raise SettingsDirectoryError(_directory, _directory_code, _directory_message)
 _auth_database_path = os.environ.get(
     'BLREC_AUTH_DATABASE', os.path.join(os.path.dirname(_path), 'auth.sqlite3')
 )
@@ -87,6 +104,8 @@ _admin_auth_store = AdminAuthStore(
 _admin_auth_store.open()
 _password_work_coordinator: Optional[PasswordWorkCoordinator] = None
 _active_media_service: Optional[ActiveMediaService] = None
+_settings_file_work: Optional[SettingsFileWorkCoordinator] = None
+_settings_apply_reconciler: Optional[SettingsApplyReconciler] = None
 _application_started = False
 _control_operation_journal = ControlOperationJournal(
     Path(_path).with_name('control.sqlite3')
@@ -324,6 +343,7 @@ api.add_middleware(
         'ETag',
         'Cache-Control',
         'Content-Disposition',
+        'X-BLREC-Operation-ID',
     ],
 )
 api.add_middleware(RouteRedirectMiddleware)
@@ -367,15 +387,59 @@ async def validation_error_handler(
     )
 
 
+@api.exception_handler(SettingsFileWorkSaturated)
+async def settings_file_work_saturated_handler(
+    request: Request, exc: SettingsFileWorkSaturated
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={'Retry-After': str(exc.retry_after)},
+        content=dict(
+            ResponseMessage(
+                code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                message='settings file work is saturated',
+            )
+        ),
+    )
+
+
+@api.exception_handler(SettingsDirectoryError)
+async def settings_directory_error_handler(
+    request: Request, exc: SettingsDirectoryError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_406_NOT_ACCEPTABLE,
+        content=dict(ResponseMessage(code=exc.code, message=exc.message)),
+    )
+
+
 @api.on_event('startup')
 async def on_startup() -> None:
     global _active_media_service, _application_started, _password_work_coordinator
+    global _settings_apply_reconciler, _settings_file_work
     _admin_auth_store.open()
     password_work = PasswordWorkCoordinator()
     active_media = ActiveMediaService()
+    settings_file_work = SettingsFileWorkCoordinator()
+
+    async def apply_settings_target(target_key: str, action: str) -> None:
+        await app.apply_settings_target(target_key, action)
+
+    settings_apply = SettingsApplyReconciler(
+        _control_operation_journal, apply_settings_target
+    )
     _password_work_coordinator = password_work
     _active_media_service = active_media
+    _settings_file_work = settings_file_work
+    _settings_apply_reconciler = settings_apply
+    set_file_work = getattr(app, 'set_settings_file_work', None)
+    if set_file_work is not None:
+        set_file_work(settings_file_work)
+    set_apply = getattr(app, 'set_settings_apply_reconciler', None)
+    if set_apply is not None:
+        set_apply(settings_apply)
     application_launch_entered = False
+    settings_apply_started = False
     try:
         security.configure(
             _admin_auth_store, bootstrap_api_key=_env_settings.api_key or ''
@@ -427,10 +491,19 @@ async def on_startup() -> None:
         browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
         application_launch_entered = True
         await app.launch()
+        await settings_apply.recover()
+        settings_apply.start()
+        settings_apply_started = True
         _application_started = True
         await app.refresh_managed_cookie()
         _realtime_sampler.start()
     except BaseException:
+        settings_apply.close_admission()
+        close_settings = getattr(app, 'close_settings_mutation_admission', None)
+        if close_settings is not None:
+            await close_settings()
+        else:
+            settings_file_work.close_admission()
         password_work.close_admission()
         active_media.close_admission()
         _application_started = False
@@ -457,6 +530,9 @@ async def on_startup() -> None:
             highlights.clip_deleter = None
             browser_extension.reset()
             await _realtime_sampler.stop()
+            if settings_apply_started:
+                await settings_apply.shutdown()
+            await settings_file_work.shutdown()
             if application_launch_entered:
                 await app.exit()
         finally:
@@ -474,6 +550,8 @@ async def on_startup() -> None:
                         finally:
                             _active_media_service = None
                             _password_work_coordinator = None
+                            _settings_apply_reconciler = None
+                            _settings_file_work = None
                             _admin_auth_store.close()
                             await _control_operation_journal.close()
         raise
@@ -482,12 +560,22 @@ async def on_startup() -> None:
 @api.on_event('shutdown')
 async def on_shuntdown() -> None:
     global _active_media_service, _application_started, _password_work_coordinator
+    global _settings_apply_reconciler, _settings_file_work
     password_work = _password_work_coordinator
     active_media = _active_media_service
+    settings_apply = _settings_apply_reconciler
+    settings_file_work = _settings_file_work
     if password_work is not None:
         password_work.close_admission()
     if active_media is not None:
         active_media.close_admission()
+    if settings_apply is not None:
+        settings_apply.close_admission()
+    close_settings = getattr(app, 'close_settings_mutation_admission', None)
+    if close_settings is not None:
+        await close_settings()
+    elif settings_file_work is not None:
+        settings_file_work.close_admission()
     _application_started = False
     try:
         try:
@@ -513,15 +601,16 @@ async def on_shuntdown() -> None:
         highlights.clip_deleter = None
         browser_extension.reset()
         try:
+            if settings_apply is not None:
+                await settings_apply.shutdown()
+            if settings_file_work is not None:
+                await settings_file_work.shutdown()
             await app.exit()
         finally:
             try:
-                _settings.dump()
+                await _bili_account_runtime.close()
             finally:
-                try:
-                    await _bili_account_runtime.close()
-                finally:
-                    await _notification_dispatcher.close(drain_timeout_seconds=15)
+                await _notification_dispatcher.close(drain_timeout_seconds=15)
     finally:
         try:
             if active_media is not None:
@@ -533,6 +622,8 @@ async def on_shuntdown() -> None:
             finally:
                 _active_media_service = None
                 _password_work_coordinator = None
+                _settings_apply_reconciler = None
+                _settings_file_work = None
                 _admin_auth_store.close()
                 await _control_operation_journal.close()
 

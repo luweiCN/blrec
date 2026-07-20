@@ -275,6 +275,44 @@ async def test_application_forwards_current_live_suppression() -> None:
 
 
 @pytest.mark.asyncio
+async def test_settings_shutdown_drains_membership_before_task_state() -> None:
+    events: List[str] = []
+
+    class Reconciler:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close_admission(self) -> None:
+            events.append('{}.close'.format(self.name))
+
+        async def shutdown(self) -> None:
+            events.append('{}.shutdown'.format(self.name))
+
+    class Manager:
+        def stop_mutation_admission(self) -> None:
+            events.append('settings.close')
+
+        async def close_mutation_admission(self) -> None:
+            events.append('settings.drain')
+
+    app = object.__new__(Application)
+    app._settings_manager = Manager()
+    app._room_membership_reconciler = Reconciler('membership')
+    app._task_control_reconciler = Reconciler('task')
+
+    await app.close_settings_mutation_admission()
+
+    assert events == [
+        'settings.close',
+        'membership.close',
+        'membership.shutdown',
+        'task.close',
+        'task.shutdown',
+        'settings.drain',
+    ]
+
+
+@pytest.mark.asyncio
 async def test_application_stops_coordinator_after_tasks() -> None:
     calls: List[str] = []
     app = object.__new__(Application)

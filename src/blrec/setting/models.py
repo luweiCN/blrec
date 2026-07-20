@@ -534,9 +534,7 @@ class OutputOptions(BaseModel):
 
 
 def out_dir_factory() -> str:
-    path = os.path.normpath(os.path.expanduser(DEFAULT_OUT_DIR))
-    os.makedirs(path, exist_ok=True)
-    return path
+    return os.path.normpath(os.path.expanduser(DEFAULT_OUT_DIR))
 
 
 class OutputSettings(OutputOptions):
@@ -550,9 +548,9 @@ class OutputSettings(OutputOptions):
 
     @validator('out_dir')
     def _validate_dir(cls, path: str) -> str:
-        if not os.path.isdir(os.path.expanduser(path)):
-            raise ValueError(f"'{path}' not a directory")
-        return path
+        if not path:
+            raise ValueError('output directory must not be empty')
+        return os.path.normpath(os.path.expanduser(path))
 
 
 class TaskOptions(BaseModel):
@@ -594,9 +592,7 @@ class TaskSettings(TaskOptions):
 
 
 def log_dir_factory() -> str:
-    path = os.path.normpath(os.path.expanduser(DEFAULT_LOG_DIR))
-    os.makedirs(path, exist_ok=True)
-    return path
+    return os.path.normpath(os.path.expanduser(DEFAULT_LOG_DIR))
 
 
 class LoggingSettings(BaseModel):
@@ -606,9 +602,9 @@ class LoggingSettings(BaseModel):
 
     @validator('log_dir')
     def _validate_dir(cls, path: str) -> str:
-        if not os.path.isdir(os.path.expanduser(path)):
-            raise ValueError(f"'{path}' not a directory")
-        return path
+        if not path:
+            raise ValueError('log directory must not be empty')
+        return os.path.normpath(os.path.expanduser(path))
 
 
 class SpaceSettings(BaseModel):

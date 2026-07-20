@@ -1,9 +1,7 @@
-import errno
-import os
-
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException
 
 from ...application import Application
+from ...setting.file_work import SettingsFileWorkSaturated
 from ..schemas import ResponseMessage
 
 app: Application = None  # type: ignore  # bypass flake8 F821
@@ -14,12 +12,15 @@ router = APIRouter(prefix='/api/v1/validation', tags=['validation'])
 @router.post('/dir', response_model=ResponseMessage)
 async def validate_dir(path: str = Body(..., embed=True)) -> ResponseMessage:
     """Check if the path is a directory and grants the read, write permissions"""
-    if not os.path.isdir(path):
-        return ResponseMessage(code=errno.ENOTDIR, message='not a directory')
-    elif not os.access(path, os.F_OK | os.R_OK | os.W_OK):
-        return ResponseMessage(code=errno.EACCES, message='no permissions')
-    else:
-        return ResponseMessage(code=0, message='ok')
+    try:
+        code, message = await app.validate_directory(path)
+    except SettingsFileWorkSaturated as error:
+        raise HTTPException(
+            status_code=503,
+            detail='settings file work is saturated',
+            headers={'Retry-After': str(error.retry_after)},
+        ) from error
+    return ResponseMessage(code=code, message=message)
 
 
 @router.post('/cookie', response_model=ResponseMessage)

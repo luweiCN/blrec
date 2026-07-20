@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Iterable, Optional, Set, Tuple, cast
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Iterable, Optional, Sequence, Set, Tuple, cast
 
 from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
@@ -16,6 +17,7 @@ from ..notification.providers import (
     Telegram,
 )
 from ..webhook import WebHook
+from .file_work import SettingsFileWorkCoordinator
 from .helpers import shadow_settings, update_settings
 from .models import (
     DanmakuOptions,
@@ -36,13 +38,48 @@ from .typing import KeySetOfSettings
 
 if TYPE_CHECKING:
     from ..application import Application
+    from .file_work import SettingsApplyReconciler
 
 
 class SettingsManager:
-    def __init__(self, app: Application, settings: Settings) -> None:
+    def __init__(
+        self,
+        app: Application,
+        settings: Settings,
+        *,
+        file_work: Optional[SettingsFileWorkCoordinator] = None,
+    ) -> None:
         self._app = app
         self._settings = settings
-        self._task_desired_state_lock = asyncio.Lock()
+        self._file_work = file_work
+        self._apply_reconciler: Optional[SettingsApplyReconciler] = None
+        self._mutation_lock = asyncio.Lock()
+        self._task_desired_state_lock = self._mutation_lock
+        self._accepting_mutations = True
+        self._dump_override: ContextVar[Optional[Tuple[Settings, Tuple[str, ...]]]] = (
+            ContextVar('settings_dump_override', default=None)
+        )
+
+    def set_apply_reconciler(self, reconciler: SettingsApplyReconciler) -> None:
+        self._apply_reconciler = reconciler
+
+    def set_file_work(self, file_work: SettingsFileWorkCoordinator) -> None:
+        self._file_work = file_work
+        self._accepting_mutations = True
+
+    def stop_mutation_admission(self) -> None:
+        self._accepting_mutations = False
+
+    async def close_mutation_admission(self) -> None:
+        self.stop_mutation_admission()
+        async with self._mutation_lock:
+            pass
+        if self._file_work is not None:
+            self._file_work.close_admission()
+
+    @property
+    def file_work(self) -> Optional[SettingsFileWorkCoordinator]:
+        return self._file_work
 
     def get_settings(
         self,
@@ -52,48 +89,80 @@ class SettingsManager:
         return SettingsOut(**self._settings.dict(include=include, exclude=exclude))
 
     async def change_settings(self, settings: SettingsIn) -> SettingsOut:
-        changed = False
+        result, _operations = await self.change_settings_with_operations(settings)
+        return result
+
+    async def change_settings_with_operations(
+        self, settings: SettingsIn
+    ) -> Tuple[SettingsOut, Sequence[str]]:
         changed_sections = []
-        live_monitor = settings.live_monitor
-        mode_changed = (
-            'live_monitor' in settings.__fields_set__
-            and live_monitor is not None
-            and 'mode' in live_monitor.__fields_set__
-            and live_monitor.mode != self._settings.live_monitor.mode
-        )
-        if mode_changed and self._app.has_recording_task():
-            raise ForbiddenError(
-                'Cannot change live monitor mode while a task is recording'
+        operation_ids = []
+        mode_changed = False
+        async with self._mutation_lock:
+            if not self._accepting_mutations:
+                raise RuntimeError('settings mutation admission is closed')
+            live_monitor = settings.live_monitor
+            mode_changed = (
+                'live_monitor' in settings.__fields_set__
+                and live_monitor is not None
+                and 'mode' in live_monitor.__fields_set__
+                and live_monitor.mode != self._settings.live_monitor.mode
             )
+            if mode_changed and self._app.has_recording_task():
+                raise ForbiddenError(
+                    'Cannot change live monitor mode while a task is recording'
+                )
+            candidate = self._settings.copy(deep=True)
+            self._copy_settings_path(candidate)
+            for name in sorted(settings.__fields_set__):
+                src_sub_settings = getattr(settings, name)
+                dst_sub_settings = getattr(candidate, name)
+                if isinstance(src_sub_settings, list):
+                    assert isinstance(dst_sub_settings, list)
+                    setattr(candidate, name, src_sub_settings)
+                else:
+                    update_settings(src_sub_settings, dst_sub_settings)
+                if getattr(candidate, name) != getattr(self._settings, name):
+                    changed_sections.append(name)
+            if changed_sections:
+                validate_paths = tuple(
+                    path
+                    for name, path in (
+                        ('output', candidate.output.out_dir),
+                        ('logging', candidate.logging.log_dir),
+                    )
+                    if name in changed_sections
+                )
+                await self._dump_candidate(candidate, validate_paths=validate_paths)
+                for name in changed_sections:
+                    setattr(self._settings, name, getattr(candidate, name))
+                if self._apply_reconciler is not None:
+                    for name in changed_sections:
+                        operation = await self._apply_reconciler.submit(
+                            'settings:{}'.format(name),
+                            (
+                                'restart'
+                                if name == 'live_monitor' and mode_changed
+                                else 'apply'
+                            ),
+                        )
+                        operation_ids.append(operation.id)
 
-        for name in settings.__fields_set__:
-            src_sub_settings = getattr(settings, name)
-            dst_sub_settings = getattr(self._settings, name)
-
-            if src_sub_settings == dst_sub_settings:
-                continue
-
-            if isinstance(src_sub_settings, list):
-                assert isinstance(dst_sub_settings, list)
-                setattr(self._settings, name, src_sub_settings)
-            else:
-                update_settings(src_sub_settings, dst_sub_settings)
-            changed = True
-            changed_sections.append(name)
-
-            func = getattr(self, f'apply_{name}_settings')
-            if asyncio.iscoroutinefunction(func):
-                await func()
-            else:
-                func()
-
-        if changed:
-            await self.dump_settings()
+        if changed_sections:
             audit('application_settings_updated', sections=sorted(changed_sections))
-        if mode_changed:
-            await self._app.restart()
-
-        return self.get_settings(cast(KeySetOfSettings, settings.__fields_set__))
+            if self._apply_reconciler is None:
+                for name in changed_sections:
+                    func = getattr(self, f'apply_{name}_settings')
+                    if asyncio.iscoroutinefunction(func):
+                        await func()
+                    else:
+                        func()
+                if mode_changed:
+                    await self._app.restart()
+        return (
+            self.get_settings(cast(KeySetOfSettings, settings.__fields_set__)),
+            tuple(operation_ids),
+        )
 
     async def apply_live_monitor_settings(self) -> None:
         coordinator = getattr(self._app, '_live_status_coordinator', None)
@@ -118,50 +187,98 @@ class SettingsManager:
     async def change_task_options(
         self, room_id: int, options: TaskOptions
     ) -> TaskOptions:
-        settings = self.find_task_settings(room_id)
-        assert settings is not None
+        result, _operations = await self.change_task_options_with_operations(
+            room_id, options
+        )
+        return result
 
-        changed = False
+    async def change_task_options_with_operations(
+        self, room_id: int, options: TaskOptions
+    ) -> Tuple[TaskOptions, Sequence[str]]:
+        changed_sections = []
+        operation_ids = []
+        async with self._mutation_lock:
+            if not self._accepting_mutations:
+                raise RuntimeError('settings mutation admission is closed')
+            candidate = self._settings.copy(deep=True)
+            self._copy_settings_path(candidate)
+            candidate_settings = self._find_task_settings(candidate, room_id)
+            if candidate_settings is None:
+                raise NotFoundError(f'task settings of room {room_id} not found')
+            for name in sorted(options.__fields_set__):
+                src_opts = getattr(options, name)
+                dst_opts = getattr(candidate_settings, name)
+                update_settings(src_opts, dst_opts)
+                live_settings = self.find_task_settings(room_id)
+                assert live_settings is not None
+                if getattr(candidate_settings, name) != getattr(live_settings, name):
+                    changed_sections.append(name)
+            if changed_sections:
+                await self._dump_candidate(candidate)
+                live_settings = self.find_task_settings(room_id)
+                assert live_settings is not None
+                for name in changed_sections:
+                    setattr(live_settings, name, getattr(candidate_settings, name))
+                if self._apply_reconciler is not None:
+                    for name in changed_sections:
+                        operation = await self._apply_reconciler.submit(
+                            'task-settings:{}:{}'.format(room_id, name), 'apply'
+                        )
+                        operation_ids.append(operation.id)
 
-        for name in options.__fields_set__:
-            src_opts = getattr(options, name)
-            dst_opts = getattr(settings, name)
-
-            if src_opts == dst_opts:
-                continue
-
-            update_settings(src_opts, dst_opts)
-            changed = True
-
-            func = getattr(self, f'apply_task_{name}_settings')
-            if asyncio.iscoroutinefunction(func):
-                await func(room_id, dst_opts)
-            else:
-                func(room_id, dst_opts)
-
-        if changed:
-            await self.dump_settings()
-
-        return TaskOptions.from_settings(settings)
+        live_settings = self.find_task_settings(room_id)
+        assert live_settings is not None
+        if self._apply_reconciler is None:
+            for name in changed_sections:
+                func = getattr(self, f'apply_task_{name}_settings')
+                value = getattr(live_settings, name)
+                if asyncio.iscoroutinefunction(func):
+                    await func(room_id, value)
+                else:
+                    func(room_id, value)
+        return TaskOptions.from_settings(live_settings), tuple(operation_ids)
 
     async def dump_settings(self) -> None:
+        override = self._dump_override.get()
+        settings, validate_paths = (
+            (self._settings, ()) if override is None else override
+        )
+        if self._file_work is not None:
+            await self._file_work.atomic_dump(settings, validate_paths=validate_paths)
+            return
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._settings.dump)
+        await loop.run_in_executor(None, settings.dump)
+
+    async def _dump_candidate(
+        self, settings: Settings, *, validate_paths: Tuple[str, ...] = ()
+    ) -> None:
+        token = self._dump_override.set((settings, validate_paths))
+        try:
+            await self.dump_settings()
+        finally:
+            self._dump_override.reset(token)
+
+    def _copy_settings_path(self, candidate: Settings) -> None:
+        try:
+            candidate._path = self._settings._path
+        except AttributeError:
+            pass
 
     def has_task_settings(self, room_id: int) -> bool:
         return self.find_task_settings(room_id) is not None
 
     def find_task_settings(self, room_id: int) -> Optional[TaskSettings]:
-        for settings in self._settings.tasks:
+        return self._find_task_settings(self._settings, room_id)
+
+    @staticmethod
+    def _find_task_settings(root: Settings, room_id: int) -> Optional[TaskSettings]:
+        for settings in root.tasks:
             if settings.room_id == room_id:
                 return settings
         return None
 
     async def add_task_settings(self, room_id: int) -> TaskSettings:
-        settings = TaskSettings(room_id=room_id)
-        self._settings.tasks = [*self._settings.tasks, settings]
-        await self.dump_settings()
-        return settings.copy(deep=True)
+        return await self.ensure_task_settings(room_id)
 
     async def ensure_task_settings(self, room_id: int) -> TaskSettings:
         """Create one task setting durably, or return the existing setting."""
@@ -182,15 +299,14 @@ class SettingsManager:
             return settings.copy(deep=True)
 
     async def remove_task_settings(self, room_id: int) -> None:
-        settings = self.find_task_settings(room_id)
-        if settings is None:
+        removed = await self.remove_task_settings_batch((room_id,))
+        if room_id not in removed:
             raise NotFoundError(f"The room {room_id} is not existed")
-        self._settings.tasks.remove(settings)
-        await self.dump_settings()
 
     async def remove_all_task_settings(self) -> None:
-        self._settings.tasks.clear()
-        await self.dump_settings()
+        await self.remove_task_settings_batch(
+            settings.room_id for settings in tuple(self._settings.tasks)
+        )
 
     async def remove_task_settings_batch(self, room_ids: Iterable[int]) -> Set[int]:
         """Remove a membership batch with at most one settings-file write."""

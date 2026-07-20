@@ -4,7 +4,17 @@ import asyncio
 import os
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import aiohttp
 import attr
@@ -29,6 +39,7 @@ if TYPE_CHECKING:
     from .networking.aiohttp_session import AiohttpSessionPool
     from .networking.manager import NetworkRouteManager
     from .notification.dispatcher import NotificationDispatcher
+    from .setting.file_work import SettingsApplyReconciler, SettingsFileWorkCoordinator
     from .task import DanmakuFileDetail, TaskData, TaskParam, VideoFileDetail
 
 
@@ -112,12 +123,15 @@ class Application:
         room_upload_policy_enabler: Optional[Callable[[int], Awaitable[None]]] = None,
         validation_timeout_seconds: float = 10,
         notification_dispatcher: Optional[NotificationDispatcher] = None,
+        settings_file_work: Optional[SettingsFileWorkCoordinator] = None,
     ) -> None:
         if not 0 < validation_timeout_seconds <= 10:
             raise ValueError('validation_timeout_seconds must be in (0, 10]')
         self._settings = settings
         self._out_dir = settings.output.out_dir
-        self._settings_manager = SettingsManager(self, settings)
+        self._settings_manager = SettingsManager(
+            self, settings, file_work=settings_file_work
+        )
         self._live_status_session: Optional[Any] = None
         self._live_status_coordinator: Optional[LiveStatusCoordinator] = None
         self._network_route_manager = network_route_manager
@@ -133,6 +147,34 @@ class Application:
         self._room_upload_policy_enabler = room_upload_policy_enabler
         self._task_control_reconciler: Optional[Any] = None
         self._room_membership_reconciler: Optional[Any] = None
+        self._settings_apply_reconciler: Optional[SettingsApplyReconciler] = None
+
+    def set_settings_apply_reconciler(
+        self, reconciler: SettingsApplyReconciler
+    ) -> None:
+        self._settings_apply_reconciler = reconciler
+        self._settings_manager.set_apply_reconciler(reconciler)
+
+    def set_settings_file_work(self, coordinator: SettingsFileWorkCoordinator) -> None:
+        self._settings_manager.set_file_work(coordinator)
+
+    async def close_settings_mutation_admission(self) -> None:
+        errors: List[BaseException] = []
+        self._settings_manager.stop_mutation_admission()
+        membership = getattr(self, '_room_membership_reconciler', None)
+        reconciler = getattr(self, '_task_control_reconciler', None)
+        if membership is not None:
+            membership.close_admission()
+        self._room_membership_reconciler = None
+        if membership is not None:
+            await _collect_teardown_error(membership.shutdown(), errors)
+        if reconciler is not None:
+            reconciler.close_admission()
+        self._task_control_reconciler = None
+        if reconciler is not None:
+            await _collect_teardown_error(reconciler.shutdown(), errors)
+        await self._settings_manager.close_mutation_admission()
+        _raise_teardown_errors(errors)
 
     @property
     def info(self) -> AppInfo:
@@ -290,6 +332,12 @@ class Application:
         await self.exit()
         await self.launch()
         logger.info('Restarted Application')
+
+    async def submit_restart(self) -> ControlOperationSnapshot:
+        reconciler = self._settings_apply_reconciler
+        if reconciler is None:
+            raise RuntimeError('settings apply service is not ready')
+        return await reconciler.submit('application:restart', 'restart')
 
     def has_task(self, room_id: int) -> bool:
         return self._task_manager.has_task(room_id)
@@ -521,6 +569,11 @@ class Application:
     async def change_settings(self, settings: SettingsIn) -> SettingsOut:
         return await self._settings_manager.change_settings(settings)
 
+    async def change_settings_with_operations(
+        self, settings: SettingsIn
+    ) -> Tuple[SettingsOut, Sequence[str]]:
+        return await self._settings_manager.change_settings_with_operations(settings)
+
     def get_task_options(self, room_id: int) -> TaskOptions:
         return self._settings_manager.get_task_options(room_id)
 
@@ -528,6 +581,41 @@ class Application:
         self, room_id: int, options: TaskOptions
     ) -> TaskOptions:
         return await self._settings_manager.change_task_options(room_id, options)
+
+    async def change_task_options_with_operations(
+        self, room_id: int, options: TaskOptions
+    ) -> Tuple[TaskOptions, Sequence[str]]:
+        return await self._settings_manager.change_task_options_with_operations(
+            room_id, options
+        )
+
+    async def apply_settings_target(self, target_key: str, action: str) -> None:
+        if action == 'restart':
+            await self.restart()
+            return
+        loading = getattr(self, '_loading_task', None)
+        if loading is not None and loading is not asyncio.current_task():
+            await asyncio.shield(loading)
+        if target_key.startswith('settings:'):
+            section = target_key.split(':', 1)[1]
+            function = getattr(self._settings_manager, f'apply_{section}_settings')
+            if asyncio.iscoroutinefunction(function):
+                await function()
+            else:
+                function()
+            return
+        prefix, room_id, section = target_key.split(':', 2)
+        if prefix != 'task-settings':
+            raise ValueError('unsupported settings apply target')
+        task_settings = self._settings_manager.find_task_settings(int(room_id))
+        if task_settings is None:
+            raise RuntimeError('task settings no longer exist')
+        function = getattr(self._settings_manager, f'apply_task_{section}_settings')
+        value = getattr(task_settings, section)
+        if asyncio.iscoroutinefunction(function):
+            await function(int(room_id), value)
+        else:
+            function(int(room_id), value)
 
     async def refresh_managed_cookie(self) -> None:
         await self._task_manager.refresh_managed_cookie()
@@ -545,6 +633,12 @@ class Application:
             get_nav(cookie, self._get_bili_validation_session()),
             timeout=self._validation_timeout_seconds,
         )
+
+    async def validate_directory(self, path: str) -> Tuple[int, str]:
+        file_work = self._settings_manager.file_work
+        if file_work is None:
+            raise RuntimeError('settings file work is not ready')
+        return await file_work.validate_directory(path)
 
     async def _load_tasks_and_controls(self) -> None:
         membership = self._room_membership_reconciler
