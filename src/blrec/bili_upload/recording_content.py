@@ -273,8 +273,9 @@ class RecordingContentReader:
 
     def __init__(self, database: BiliUploadDatabase) -> None:
         self._database = database
-        self._danmaku_cache_lock = threading.Lock()
+        self._danmaku_cache_lock = threading.RLock()
         self._danmaku_closed = False
+        self._danmaku_reserved_bytes = 0
         self._danmaku_streams: OrderedDict[Tuple[int, int, int], _DanmakuStream] = (
             OrderedDict()
         )
@@ -589,8 +590,9 @@ class RecordingContentReader:
                     del parent[0]
                 return item, remaining_bytes
             if stream.parser_events_consumed:
-                stream.unreleased_input_bytes = min(
-                    stream.unreleased_input_bytes, self._DANMAKU_READ_BYTES
+                self._release_danmaku_input(
+                    stream,
+                    max(0, stream.unreleased_input_bytes - self._DANMAKU_READ_BYTES),
                 )
                 stream.parser_events_consumed = False
             available = stream.observed_size - stream.read_offset
@@ -600,19 +602,24 @@ class RecordingContentReader:
             ):
                 raise RecordingContentCursorStale('danmaku cursor stale')
             if available > 0 and remaining_bytes > 0:
-                chunk = stream.file.read(
-                    min(
-                        self._DANMAKU_READ_BYTES,
-                        remaining_bytes,
-                        available,
-                        self._DANMAKU_PENDING_BYTES - stream.unreleased_input_bytes,
-                    )
+                requested = min(
+                    self._DANMAKU_READ_BYTES,
+                    remaining_bytes,
+                    available,
+                    self._DANMAKU_PENDING_BYTES - stream.unreleased_input_bytes,
                 )
+                reserved = self._reserve_danmaku_input(stream, requested)
+                try:
+                    chunk = stream.file.read(reserved)
+                except OSError:
+                    self._release_danmaku_input(stream, reserved)
+                    raise
+                if len(chunk) < reserved:
+                    self._release_danmaku_input(stream, reserved - len(chunk))
                 if not chunk:
                     return None, remaining_bytes
                 stream.read_offset += len(chunk)
                 remaining_bytes -= len(chunk)
-                stream.unreleased_input_bytes += len(chunk)
                 if len(stream.prefix) < self._DANMAKU_PREFIX_BYTES:
                     remaining = self._DANMAKU_PREFIX_BYTES - len(stream.prefix)
                     stream.prefix.extend(chunk[:remaining])
@@ -628,6 +635,47 @@ class RecordingContentReader:
                 stream.parser_closed = True
                 continue
             return None, remaining_bytes
+
+    def _reserve_danmaku_input(self, stream: _DanmakuStream, requested: int) -> int:
+        if requested <= 0:
+            raise RecordingContentCursorStale('danmaku cursor stale')
+        with self._danmaku_cache_lock:
+            if (
+                stream.closed
+                or self._danmaku_streams.get(stream.identity) is not stream
+            ):
+                raise RecordingContentCursorStale('danmaku cursor stale')
+            self._evict_for_danmaku_input_locked(stream.identity, requested)
+            if self._danmaku_reserved_bytes + requested > self._DANMAKU_PENDING_BYTES:
+                raise RecordingContentCursorStale('danmaku cursor stale')
+            stream.unreleased_input_bytes += requested
+            self._danmaku_reserved_bytes += requested
+            return requested
+
+    def _release_danmaku_input(self, stream: _DanmakuStream, released: int) -> None:
+        if released <= 0:
+            return
+        with self._danmaku_cache_lock:
+            actual = min(released, stream.unreleased_input_bytes)
+            stream.unreleased_input_bytes -= actual
+            self._danmaku_reserved_bytes = max(0, self._danmaku_reserved_bytes - actual)
+
+    def _evict_for_danmaku_input_locked(
+        self, current_key: Tuple[int, int, int], requested: int
+    ) -> None:
+        if self._danmaku_reserved_bytes + requested <= self._DANMAKU_PENDING_BYTES:
+            return
+        for key, stream in tuple(self._danmaku_streams.items()):
+            if key == current_key or not stream.lock.acquire(False):
+                continue
+            try:
+                if self._danmaku_streams.get(key) is stream:
+                    self._danmaku_streams.pop(key, None)
+                    self._close_danmaku_stream(stream)
+            finally:
+                stream.lock.release()
+            if self._danmaku_reserved_bytes + requested <= self._DANMAKU_PENDING_BYTES:
+                return
 
     def _discard_danmaku_stream(
         self, key: Tuple[int, int, int], stream: _DanmakuStream
@@ -697,21 +745,14 @@ class RecordingContentReader:
                 return
 
     def _cached_danmaku_bytes(self) -> int:
-        return sum(
-            stream.unreleased_input_bytes
-            + (
-                len(stream.pending.content.encode('utf8'))
-                if stream.pending is not None
-                else 0
-            )
-            for stream in self._danmaku_streams.values()
-        )
+        return self._danmaku_reserved_bytes
 
-    @staticmethod
-    def _close_danmaku_stream(stream: _DanmakuStream) -> None:
-        if stream.closed:
-            return
-        stream.closed = True
+    def _close_danmaku_stream(self, stream: _DanmakuStream) -> None:
+        with self._danmaku_cache_lock:
+            if stream.closed:
+                return
+            stream.closed = True
+            self._release_danmaku_input(stream, stream.unreleased_input_bytes)
         stream.file.close()
 
     @staticmethod

@@ -4,7 +4,7 @@ import os
 import threading
 from io import BytesIO
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, Tuple
 
 import pytest
 import pytest_asyncio
@@ -48,6 +48,20 @@ async def _seed_part(
     await journal.video_completed(run_id, str(source))
     await journal.video_postprocessed(run_id, str(source), str(final))
     return (await journal.parts_for_run(run_id))[0].id
+
+
+async def _seed_active_xml_part(
+    database: BiliUploadDatabase, tmp_path: Path, name: str, body: str
+) -> Tuple[int, Path]:
+    source = tmp_path / '{}.flv'.format(name)
+    part_id = await _seed_part(database, source)
+    xml = tmp_path / '{}.xml'.format(name)
+    xml.write_text(body, encoding='utf8')
+    await database.execute(
+        'UPDATE recording_parts SET xml_path=?,xml_completed=0 WHERE id=?',
+        (str(xml), part_id),
+    )
+    return part_id, xml
 
 
 @pytest.mark.asyncio
@@ -609,6 +623,98 @@ async def test_danmaku_cache_evicts_and_closes_the_oldest_of_three_streams(
     assert len(reader._danmaku_streams) == 2
     with pytest.raises(RecordingContentCursorStale):
         await reader.danmaku(part_ids[0], cursor=first_page.next_cursor or 0, limit=10)
+
+
+@pytest.mark.asyncio
+async def test_danmaku_reserves_global_input_budget_before_feeding_second_handle(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = '<i><metadata>{}'.format('x' * (200 * 1024))
+    first_id, _first_xml = await _seed_active_xml_part(
+        database, tmp_path, 'first-budget', body
+    )
+    second_id, _second_xml = await _seed_active_xml_part(
+        database, tmp_path, 'second-budget', body
+    )
+    reader = RecordingContentReader(database)
+    next_danmaku = reader._next_danmaku
+    peak_bytes = 0
+
+    def measure_peak(*args, **kwargs):
+        nonlocal peak_bytes
+        result = next_danmaku(*args, **kwargs)
+        peak_bytes = max(
+            peak_bytes,
+            sum(
+                stream.unreleased_input_bytes
+                for stream in reader._danmaku_streams.values()
+            ),
+        )
+        return result
+
+    monkeypatch.setattr(reader, '_next_danmaku', measure_peak)
+
+    await reader.danmaku(first_id, cursor=0, limit=1)
+    first_stream = next(iter(reader._danmaku_streams.values()))
+    await reader.danmaku(second_id, cursor=0, limit=1)
+
+    assert peak_bytes <= RecordingContentReader._DANMAKU_PENDING_BYTES
+    assert first_stream.file.closed is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_danmaku_handles_never_exceed_global_input_budget(
+    database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = '<i><metadata>{}'.format('x' * (180 * 1024))
+    first_id, _first_xml = await _seed_active_xml_part(
+        database, tmp_path, 'first-concurrent', body
+    )
+    second_id, _second_xml = await _seed_active_xml_part(
+        database, tmp_path, 'second-concurrent', body
+    )
+    reader = RecordingContentReader(database)
+    reserve = reader._reserve_danmaku_input
+    rounds = threading.Barrier(2)
+    counts = {}
+    peak_bytes = 0
+    state_lock = threading.Lock()
+    opened = []
+    new_stream = reader._new_danmaku_stream
+
+    def capture_stream(*args, **kwargs):
+        stream = new_stream(*args, **kwargs)
+        with state_lock:
+            opened.append(stream)
+        return stream
+
+    def reserve_in_lockstep(stream, requested):
+        nonlocal peak_bytes
+        with state_lock:
+            count = counts.get(stream.identity, 0)
+            counts[stream.identity] = count + 1
+        if count < 3:
+            rounds.wait(timeout=2)
+        reserved = reserve(stream, requested)
+        with state_lock:
+            peak_bytes = max(peak_bytes, reader._danmaku_reserved_bytes)
+        return reserved
+
+    monkeypatch.setattr(reader, '_new_danmaku_stream', capture_stream)
+    monkeypatch.setattr(reader, '_reserve_danmaku_input', reserve_in_lockstep)
+
+    results = await asyncio.gather(
+        reader.danmaku(first_id, cursor=0, limit=1),
+        reader.danmaku(second_id, cursor=0, limit=1),
+        return_exceptions=True,
+    )
+
+    assert any(isinstance(result, RecordingContentCursorStale) for result in results)
+    assert peak_bytes <= RecordingContentReader._DANMAKU_PENDING_BYTES
+    reader.close()
+    assert reader._danmaku_reserved_bytes == 0
+    assert len(opened) == 2
+    assert all(stream.file.closed for stream in opened)
 
 
 @pytest.mark.asyncio
