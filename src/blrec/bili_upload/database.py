@@ -55,6 +55,7 @@ class LeaseClaim:
     lease_generation: int
     lease_until: int
     attempt: int
+    cancellation_generation: Optional[int] = None
 
 
 _T = TypeVar('_T')
@@ -311,6 +312,33 @@ class BiliUploadDatabase:
                 (row_id,),
             ).fetchone()
             assert claimed is not None
+            cancellation_generation: Optional[int] = None
+            if table == 'upload_jobs':
+                owner = connection.execute(
+                    'SELECT session.cancellation_generation '
+                    'FROM upload_jobs job JOIN recording_sessions session '
+                    'ON session.id=job.session_id WHERE job.id=?',
+                    (row_id,),
+                ).fetchone()
+                if owner is None:
+                    connection.execute('ROLLBACK')
+                    return None
+                cancellation_generation = int(owner['cancellation_generation'])
+                connection.execute(
+                    'INSERT INTO owner_handoff_outcomes('
+                    'owner_kind,owner_id,side_effect_key,source_generation,'
+                    'outcome_state,outcome_json,acknowledged_at) '
+                    "VALUES('upload',?,?,?,'in_flight','{}',NULL) "
+                    'ON CONFLICT('
+                    'owner_kind,owner_id,side_effect_key,source_generation) '
+                    "DO UPDATE SET outcome_state='in_flight',outcome_json='{}',"
+                    'acknowledged_at=NULL',
+                    (
+                        row_id,
+                        'lease:{}'.format(int(claimed['lease_generation'])),
+                        cancellation_generation,
+                    ),
+                )
             connection.execute('COMMIT')
         except BaseException:
             if connection.in_transaction:
@@ -324,6 +352,7 @@ class BiliUploadDatabase:
             lease_generation=int(claimed['lease_generation']),
             lease_until=int(claimed['lease_until']),
             attempt=int(claimed['attempt']),
+            cancellation_generation=cancellation_generation,
         )
 
     @staticmethod

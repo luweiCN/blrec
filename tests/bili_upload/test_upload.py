@@ -12,6 +12,7 @@ import pytest
 from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim
+from blrec.bili_upload.deletion_worker import LocalDeletionWorker
 from blrec.bili_upload.errors import BiliApiError, RemoteOutcomeUnknown
 from blrec.bili_upload.highlights import HighlightService
 from blrec.bili_upload.policies import (
@@ -2033,6 +2034,393 @@ async def test_lost_submit_response_is_reconciled_before_any_retry(
         }
         assert len(protocol.submit_calls) == 1
         assert protocol.archive_view_calls == ['BVfixture']
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_submit_hands_success_to_deletion_generation(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    release_response = asyncio.Event()
+    request_started = asyncio.Event()
+
+    class BlockingSubmitProtocol(FakeProtocol):
+        async def submit_archive(
+            self, bundle: Any, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            self.submit_calls.append(payload)
+            request_started.set()
+            await release_response.wait()
+            return {'code': 0, 'data': {'aid': 303, 'bvid': 'BVfixture'}}
+
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        protocol = BlockingSubmitProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+        process = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        intents = await database.fetchall(
+            'SELECT owner_kind,side_effect_key,source_generation,outcome_state '
+            'FROM owner_handoff_outcomes ORDER BY side_effect_key'
+        )
+        assert [dict(row) for row in intents] == [
+            {
+                'owner_kind': 'upload',
+                'side_effect_key': 'archive_submit',
+                'source_generation': 0,
+                'outcome_state': 'in_flight',
+            },
+            {
+                'owner_kind': 'upload',
+                'side_effect_key': 'lease:1',
+                'source_generation': 0,
+                'outcome_state': 'in_flight',
+            },
+        ]
+
+        deletion = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        assert await deletion.request_session(1, manager_subject='manager') == 1
+        release_response.set()
+        assert await asyncio.wait_for(process, timeout=1) == 1
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,lease_owner FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'submit_state': 'prepared',
+            'lease_owner': None,
+        }
+        outcome = await database.fetchone(
+            "SELECT outcome_state,outcome_json,acknowledged_at "
+            "FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+            "AND owner_id=1 AND side_effect_key='archive_submit' "
+            'AND source_generation=0'
+        )
+        assert outcome is not None
+        assert outcome['outcome_state'] == 'confirmed_success'
+        assert json.loads(str(outcome['outcome_json'])) == {
+            'aid': 303,
+            'bvid': 'BVfixture',
+        }
+        assert outcome['acknowledged_at'] is not None
+        assert len(protocol.submit_calls) == 1
+        assert await deletion.run_once() == ('session', 1)
+        assert all(not path.exists() for path in paths)
+        assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upload' AND owner_id=1 "
+                "AND side_effect_key='archive_submit' "
+                "AND outcome_state='confirmed_success'"
+            )
+            == 1
+        )
+    finally:
+        release_response.set()
+        if 'process' in locals():
+            await asyncio.gather(process, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_response_handoff_uses_original_generation_after_repeated_delete(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    response_received = asyncio.Event()
+    release_commit = asyncio.Event()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        original_complete = worker._complete_archive_submission
+
+        async def complete_after_barrier(
+            claim: LeaseClaim, *, aid: int, bvid: str
+        ) -> bool:
+            response_received.set()
+            await release_commit.wait()
+            return await original_complete(claim, aid=aid, bvid=bvid)
+
+        worker._complete_archive_submission = complete_after_barrier  # type: ignore
+        await worker.create_ready_jobs()
+        process = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(response_received.wait(), timeout=1)
+        deletion = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        assert await deletion.request_session(1, manager_subject='manager') == 1
+        assert await deletion.request_session(1, manager_subject='manager') == 2
+        release_commit.set()
+
+        assert await asyncio.wait_for(process, timeout=1) == 1
+        outcome = await database.fetchone(
+            "SELECT source_generation,outcome_state,outcome_json "
+            "FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+            "AND owner_id=1 AND side_effect_key='archive_submit'"
+        )
+        assert outcome is not None
+        assert outcome['source_generation'] == 0
+        assert outcome['outcome_state'] == 'confirmed_success'
+        assert json.loads(str(outcome['outcome_json'])) == {
+            'aid': 303,
+            'bvid': 'BVfixture',
+        }
+        assert (
+            await database.scalar(
+                'SELECT cancellation_generation FROM recording_sessions WHERE id=1'
+            )
+            == 2
+        )
+        assert len(protocol.submit_calls) == 1
+    finally:
+        release_commit.set()
+        if 'process' in locals():
+            await asyncio.gather(process, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('remote_error', 'expected_outcome'),
+    (
+        (BiliApiError(400, operation='submit_archive'), 'confirmed_failure'),
+        (RemoteOutcomeUnknown('submit_archive'), 'unknown_terminal'),
+    ),
+)
+async def test_archive_failure_after_deletion_is_terminal_handoff(
+    tmp_path: Path, remote_error: BaseException, expected_outcome: str
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    class BlockingFailureProtocol(FakeProtocol):
+        async def submit_archive(
+            self, bundle: Any, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            del bundle
+            self.submit_calls.append(payload)
+            request_started.set()
+            await release_response.wait()
+            raise remote_error
+
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = BlockingFailureProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+        process = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        deletion = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        await deletion.request_session(1, manager_subject='manager')
+        release_response.set()
+
+        assert await asyncio.wait_for(process, timeout=1) == 1
+        outcome = await database.fetchone(
+            "SELECT outcome_state,acknowledged_at FROM owner_handoff_outcomes "
+            "WHERE owner_kind='upload' AND owner_id=1 "
+            "AND side_effect_key='archive_submit' AND source_generation=0"
+        )
+        assert outcome is not None
+        assert outcome['outcome_state'] == expected_outcome
+        assert outcome['acknowledged_at'] is not None
+        assert len(protocol.submit_calls) == 1
+        assert (
+            await database.scalar('SELECT lease_owner FROM upload_jobs WHERE id=1')
+            is None
+        )
+    finally:
+        release_response.set()
+        if 'process' in locals():
+            await asyncio.gather(process, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_never_repeats_in_flight_upos_completion(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+        await database.execute(
+            "UPDATE upload_jobs SET state='uploading',lease_owner='upload-dead',"
+            'lease_generation=3,lease_until=9999 WHERE id=1'
+        )
+        await database.execute(
+            "UPDATE upload_parts SET upload_state='completing',"
+            "upload_session_json='{}' WHERE id=1"
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('upload',1,'lease:3',0,'in_flight','{}',NULL)"
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('upos',1,'complete',0,'in_flight','{}',NULL)"
+        )
+
+        assert await worker.recover_interrupted() == 1
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,lease_owner,review_reason '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'submit_state': 'prepared',
+            'lease_owner': None,
+            'review_reason': 'UPOS 分 P 完成结果无法确认，已停止自动重试',
+        }
+        assert (
+            await database.scalar('SELECT upload_state FROM upload_parts WHERE id=1')
+            == 'unknown_outcome'
+        )
+        outcomes = await database.fetchall(
+            'SELECT owner_kind,side_effect_key,outcome_state,acknowledged_at '
+            'FROM owner_handoff_outcomes ORDER BY owner_kind'
+        )
+        assert [
+            (row['owner_kind'], row['side_effect_key'], row['outcome_state'])
+            for row in outcomes
+        ] == [
+            ('upload', 'lease:3', 'unknown_terminal'),
+            ('upos', 'complete', 'unknown_terminal'),
+        ]
+        assert all(row['acknowledged_at'] is not None for row in outcomes)
+        assert protocol.submit_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_preserves_confirmed_remote_handoff(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET state='uploading',lease_owner='upload-dead',"
+            'lease_generation=3,lease_until=9999 WHERE id=1'
+        )
+        await database.execute(
+            "UPDATE upload_parts SET upload_state='completing',"
+            "upload_session_json='{}' WHERE id=1"
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('upload',1,'lease:3',0,'in_flight','{}',NULL)"
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('upos',1,'complete',0,'confirmed_success',"
+            "'{\"remote_filename\":\"remote-video\"}',900)"
+        )
+
+        assert await worker.recover_interrupted() == 1
+
+        outcome = await database.fetchone(
+            "SELECT outcome_state,outcome_json,acknowledged_at "
+            "FROM owner_handoff_outcomes WHERE owner_kind='upos' "
+            "AND owner_id=1 AND side_effect_key='complete'"
+        )
+        assert outcome is not None
+        assert dict(outcome) == {
+            'outcome_state': 'confirmed_success',
+            'outcome_json': '{"remote_filename":"remote-video"}',
+            'acknowledged_at': 900,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_deletion_after_parts_prevents_archive_submission(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class DeletingUploader(FakeUploader):
+        async def upload_part(
+            self, part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            remote = await super().upload_part(part_id, bundle=bundle, claim=claim)
+            if len(self.calls) == 2:
+                await self._database.execute(
+                    "UPDATE recording_sessions SET deletion_state='requested',"
+                    'cancellation_generation=1 WHERE id=1'
+                )
+            return remote
+
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, DeletingUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+
+        assert protocol.submit_calls == []
+        job = await database.fetchone(
+            'SELECT state,submit_state,lease_owner FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'submit_state': 'prepared',
+            'lease_owner': None,
+        }
+        claim_outcome = await database.fetchone(
+            "SELECT outcome_state,acknowledged_at FROM owner_handoff_outcomes "
+            "WHERE owner_kind='upload' AND owner_id=1 "
+            "AND side_effect_key='lease:1' AND source_generation=0"
+        )
+        assert claim_outcome is not None
+        assert claim_outcome['outcome_state'] == 'cancelled_local'
+        assert claim_outcome['acknowledged_at'] is not None
     finally:
         await database.close()
 

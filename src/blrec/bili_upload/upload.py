@@ -61,6 +61,10 @@ class InvalidUploadPolicy(RuntimeError):
     pass
 
 
+class _UploadDeletionRequested(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class _CandidatePart:
     id: int
@@ -86,12 +90,14 @@ class _SnapshotPart:
 @dataclass(frozen=True)
 class _Job:
     id: int
+    session_id: int
     account_id: int
     policy_snapshot_json: str
     state: str
     submit_state: str
     upload_completed_at: Optional[int]
     preupload_finalized: bool
+    cancellation_generation: int
 
 
 @dataclass(frozen=True)
@@ -1377,16 +1383,199 @@ class UploadCoordinator:
                 job_id=claim.id,
                 attempt=claim.attempt,
             )
-            await self._process(claim)
+            try:
+                await self._process(claim)
+            except asyncio.CancelledError:
+                await asyncio.shield(self.recover_interrupted())
+                raise
+            except _UploadDeletionRequested:
+                audit(
+                    'upload_job_cancelled',
+                    job_id=claim.id,
+                    reason='local_deletion_requested',
+                    result='cancelled_local',
+                )
+            except Exception:
+                await self.recover_interrupted()
+                raise
             return claim.id
+
+    async def recover_interrupted(self) -> int:
+        now = int(self._clock())
+
+        def recover(connection: sqlite3.Connection) -> int:
+            rows = connection.execute(
+                'SELECT job.id,job.state,job.submit_state,job.lease_owner,'
+                'job.lease_generation,session.cancellation_generation,'
+                'session.deletion_state FROM upload_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                "WHERE job.submit_state='in_flight' "
+                "OR job.lease_owner LIKE 'upload-%' "
+                'OR (job.lease_owner IS NOT NULL '
+                'AND EXISTS(SELECT 1 FROM owner_handoff_outcomes outcome '
+                "WHERE outcome.owner_kind='upload' AND outcome.owner_id=job.id "
+                "AND outcome.side_effect_key='lease:' || job.lease_generation)) "
+                'ORDER BY job.id'
+            ).fetchall()
+            recovered = 0
+            for row in rows:
+                job_id = int(row['id'])
+                lease_generation = int(row['lease_generation'])
+                current_generation = int(row['cancellation_generation'])
+                claim_key = 'lease:{}'.format(lease_generation)
+                claim_intent = connection.execute(
+                    'SELECT source_generation FROM owner_handoff_outcomes '
+                    "WHERE owner_kind='upload' AND owner_id=? "
+                    'AND side_effect_key=? ORDER BY id DESC LIMIT 1',
+                    (job_id, claim_key),
+                ).fetchone()
+                source_generation = (
+                    int(claim_intent['source_generation'])
+                    if claim_intent is not None
+                    else max(
+                        0,
+                        current_generation - int(str(row['deletion_state']) != 'none'),
+                    )
+                )
+                completing = connection.execute(
+                    "SELECT id FROM upload_parts WHERE job_id=? "
+                    "AND upload_state='completing'",
+                    (job_id,),
+                ).fetchall()
+                for part in completing:
+                    part_id = int(part['id'])
+                    connection.execute(
+                        "UPDATE upload_parts SET upload_state='unknown_outcome' "
+                        'WHERE id=?',
+                        (part_id,),
+                    )
+                    self._recover_remote_intent_in_transaction(
+                        connection,
+                        owner_kind='upos',
+                        owner_id=part_id,
+                        side_effect_key='complete',
+                        source_generation=source_generation,
+                        now=now,
+                    )
+                chunks = connection.execute(
+                    'SELECT chunk.part_id,chunk.chunk_no FROM upload_chunks chunk '
+                    'JOIN upload_parts part ON part.id=chunk.part_id '
+                    "WHERE part.job_id=? AND chunk.state='in_flight'",
+                    (job_id,),
+                ).fetchall()
+                for chunk in chunks:
+                    part_id = int(chunk['part_id'])
+                    chunk_no = int(chunk['chunk_no'])
+                    connection.execute(
+                        "UPDATE upload_chunks SET state='prepared' "
+                        'WHERE part_id=? AND chunk_no=?',
+                        (part_id, chunk_no),
+                    )
+                    self._recover_remote_intent_in_transaction(
+                        connection,
+                        owner_kind='upos',
+                        owner_id=part_id,
+                        side_effect_key='chunk:{}'.format(chunk_no),
+                        source_generation=source_generation,
+                        now=now,
+                    )
+                submitting = str(row['submit_state']) == 'in_flight'
+                if submitting:
+                    self._recover_remote_intent_in_transaction(
+                        connection,
+                        owner_kind='upload',
+                        owner_id=job_id,
+                        side_effect_key='archive_submit',
+                        source_generation=source_generation,
+                        now=now,
+                    )
+                self._recover_remote_intent_in_transaction(
+                    connection,
+                    owner_kind='upload',
+                    owner_id=job_id,
+                    side_effect_key=claim_key,
+                    source_generation=source_generation,
+                    now=now,
+                )
+                deleting = str(row['deletion_state']) != 'none'
+                reason: Optional[str]
+                if deleting:
+                    state = 'paused'
+                    submit_state = 'prepared'
+                    reason = '任务正在删除'
+                    next_attempt_at = 0
+                    operator_paused = 1
+                elif completing:
+                    state = 'paused'
+                    submit_state = 'prepared'
+                    reason = 'UPOS 分 P 完成结果无法确认，已停止自动重试'
+                    next_attempt_at = 0
+                    operator_paused = 1
+                elif submitting:
+                    state = 'submitting'
+                    submit_state = 'unknown_outcome'
+                    reason = '投稿结果暂未确认，系统将先查询远端稿件（60 秒后核对）'
+                    next_attempt_at = now + 60
+                    operator_paused = 0
+                else:
+                    state = str(row['state'])
+                    submit_state = str(row['submit_state'])
+                    reason = None
+                    next_attempt_at = 0
+                    operator_paused = 0
+                connection.execute(
+                    'UPDATE upload_jobs SET state=?,submit_state=?,review_reason=?,'
+                    'next_attempt_at=?,operator_paused=?,lease_owner=NULL,'
+                    'lease_until=NULL,updated_at=? WHERE id=?',
+                    (
+                        state,
+                        submit_state,
+                        reason,
+                        next_attempt_at,
+                        operator_paused,
+                        now,
+                        job_id,
+                    ),
+                )
+                recovered += 1
+            return recovered
+
+        recovered = await self._database.write(recover)
+        if recovered:
+            audit('upload_owners_recovered', count=recovered, result='terminal_handoff')
+        return recovered
+
+    @staticmethod
+    def _recover_remote_intent_in_transaction(
+        connection: sqlite3.Connection,
+        *,
+        owner_kind: str,
+        owner_id: int,
+        side_effect_key: str,
+        source_generation: int,
+        now: int,
+    ) -> None:
+        connection.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES(?,?,?,?,'unknown_terminal','{}',?) "
+            'ON CONFLICT(owner_kind,owner_id,side_effect_key,source_generation) '
+            "DO UPDATE SET outcome_state='unknown_terminal',outcome_json='{}',"
+            'acknowledged_at=excluded.acknowledged_at '
+            "WHERE owner_handoff_outcomes.outcome_state='in_flight'",
+            (owner_kind, owner_id, side_effect_key, source_generation, now),
+        )
 
     async def build_edit_payload(
         self, job_id: int, healthy_cids: Mapping[int, int], cover_url: Optional[str]
     ) -> Mapping[str, Any]:
         row = await self._database.fetchone(
-            'SELECT id,account_id,policy_snapshot_json,state,submit_state,'
-            'upload_completed_at,preupload_finalized,aid '
-            'FROM upload_jobs WHERE id=?',
+            'SELECT job.id,job.session_id,job.account_id,job.policy_snapshot_json,'
+            'job.state,job.submit_state,job.upload_completed_at,'
+            'job.preupload_finalized,job.aid,session.cancellation_generation '
+            'FROM upload_jobs job JOIN recording_sessions session '
+            'ON session.id=job.session_id WHERE job.id=?',
             (job_id,),
         )
         if row is None:
@@ -1396,6 +1585,7 @@ class UploadCoordinator:
             raise ProtocolContractError('upload job has no confirmed AID')
         job = _Job(
             id=int(row['id']),
+            session_id=int(row['session_id']),
             account_id=int(row['account_id']),
             policy_snapshot_json=str(row['policy_snapshot_json']),
             state=str(row['state']),
@@ -1406,6 +1596,7 @@ class UploadCoordinator:
                 else int(row['upload_completed_at'])
             ),
             preupload_finalized=bool(row['preupload_finalized']),
+            cancellation_generation=int(row['cancellation_generation']),
         )
         if cover_url is not None and (
             not isinstance(cover_url, str) or not cover_url.startswith('https://')
@@ -1988,27 +2179,13 @@ class UploadCoordinator:
                     raise UposUploadStopped('upload stopped before archive submission')
                 scheduled_publish_at = payload.get('dtime')
                 now = int(self._clock())
-                await self._update_job(
+                await self._begin_archive_submission(
                     claim,
-                    {
-                        'state': 'submitting',
-                        'submit_state': 'in_flight',
-                        'scheduled_publish_at': scheduled_publish_at,
-                        'upload_completed_at': job.upload_completed_at or now,
-                        'updated_at': now,
-                    },
+                    scheduled_publish_at=scheduled_publish_at,
+                    upload_completed_at=job.upload_completed_at or now,
                 )
                 if self._stop_requested():
-                    await self._update_job(
-                        claim,
-                        {
-                            'state': 'submitting',
-                            'submit_state': 'prepared',
-                            'review_reason': None,
-                            'updated_at': int(self._clock()),
-                        },
-                        release=True,
-                    )
+                    await self._settle_archive_not_sent(claim)
                     audit(
                         'upload_archive_submission_stopped',
                         job_id=job.id,
@@ -2027,13 +2204,25 @@ class UploadCoordinator:
                     publish_dynamic=not bool(payload.get('no_disturbance')),
                     scheduled_publish_at=scheduled_publish_at,
                 )
-                response = await self._protocol.submit_archive(bundle, payload)
+                try:
+                    response = await self._protocol.submit_archive(bundle, payload)
+                except asyncio.CancelledError:
+                    await asyncio.shield(
+                        self._settle_unknown_archive_submission(
+                            claim, reason='投稿请求在进程停止时无法确认结果'
+                        )
+                    )
+                    raise
         except DefinitelyNotSent:
+            if submit_started and not await self._settle_archive_failure(
+                claim, outcome_state='cancelled_local', outcome={}
+            ):
+                return
             await self._retry_not_sent(claim, submit_started=submit_started)
             return
         except RemoteOutcomeUnknown:
             if submit_started:
-                await self._mark_unknown_submission(
+                await self._settle_unknown_archive_submission(
                     claim, reason='投稿结果暂未确认，系统将先查询远端稿件'
                 )
             else:
@@ -2081,6 +2270,12 @@ class UploadCoordinator:
             await self._pause_job(claim, '投稿封面无法读取或上传')
             return
         except BiliApiError as error:
+            if submit_started and not await self._settle_archive_failure(
+                claim,
+                outcome_state='confirmed_failure',
+                outcome={'error_code': error.code},
+            ):
+                return
             if error.code in (406, 408, 425, 429):
                 delay = min(15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4)))
                 await self._update_job(
@@ -2121,7 +2316,7 @@ class UploadCoordinator:
             return
         except ProtocolContractError:
             if submit_started:
-                await self._mark_unknown_submission(
+                await self._settle_unknown_archive_submission(
                     claim, reason='投稿响应无法确认，系统将先查询远端稿件'
                 )
             else:
@@ -2129,23 +2324,12 @@ class UploadCoordinator:
             return
         aid, bvid = self._submission_identity(response)
         if aid is None or bvid is None:
-            await self._mark_unknown_submission(
+            await self._settle_unknown_archive_submission(
                 claim, reason='投稿响应缺少稿件编号，系统将先查询远端稿件'
             )
             return
-        await self._update_job(
-            claim,
-            {
-                'state': 'waiting_review',
-                'submit_state': 'confirmed',
-                'aid': aid,
-                'bvid': bvid,
-                'submitted_at': int(self._clock()),
-                'review_reason': None,
-                'updated_at': int(self._clock()),
-            },
-            release=True,
-        )
+        if not await self._complete_archive_submission(claim, aid=aid, bvid=bvid):
+            return
         audit(
             'upload_archive_submitted',
             job_id=job.id,
@@ -2322,15 +2506,26 @@ class UploadCoordinator:
 
     async def _load_job(self, claim: LeaseClaim) -> _Job:
         row = await self._database.fetchone(
-            'SELECT id,account_id,policy_snapshot_json,state,submit_state,'
-            'upload_completed_at,preupload_finalized '
-            'FROM upload_jobs WHERE id=? AND lease_owner=? AND lease_generation=?',
+            'SELECT job.id,job.session_id,job.account_id,job.policy_snapshot_json,'
+            'job.state,job.submit_state,job.upload_completed_at,'
+            'job.preupload_finalized,session.cancellation_generation,'
+            'session.deletion_state FROM upload_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            'WHERE job.id=? AND job.lease_owner=? AND job.lease_generation=?',
             (claim.id, claim.lease_owner, claim.lease_generation),
         )
         if row is None:
             raise LeaseLost('upload job lease was lost')
+        source_generation = self._source_generation(claim)
+        if (
+            int(row['cancellation_generation']) != source_generation
+            or str(row['deletion_state']) != 'none'
+        ):
+            await self._cancel_claim(claim)
+            raise _UploadDeletionRequested()
         return _Job(
             id=int(row['id']),
+            session_id=int(row['session_id']),
             account_id=int(row['account_id']),
             policy_snapshot_json=str(row['policy_snapshot_json']),
             state=str(row['state']),
@@ -2341,7 +2536,311 @@ class UploadCoordinator:
                 else int(row['upload_completed_at'])
             ),
             preupload_finalized=bool(row['preupload_finalized']),
+            cancellation_generation=source_generation,
         )
+
+    @staticmethod
+    def _source_generation(claim: LeaseClaim) -> int:
+        if claim.cancellation_generation is None:
+            raise LeaseLost('upload job claim has no cancellation generation')
+        return int(claim.cancellation_generation)
+
+    @staticmethod
+    def _lease_side_effect_key(claim: LeaseClaim) -> str:
+        return 'lease:{}'.format(claim.lease_generation)
+
+    def _owner_is_active(
+        self, connection: sqlite3.Connection, claim: LeaseClaim
+    ) -> bool:
+        row = connection.execute(
+            'SELECT session.cancellation_generation,session.deletion_state '
+            'FROM upload_jobs job JOIN recording_sessions session '
+            'ON session.id=job.session_id WHERE job.id=? '
+            'AND job.lease_owner=? AND job.lease_generation=?',
+            (claim.id, claim.lease_owner, claim.lease_generation),
+        ).fetchone()
+        if row is None:
+            raise LeaseLost('upload job lease was lost')
+        return (
+            int(row['cancellation_generation']) == self._source_generation(claim)
+            and str(row['deletion_state']) == 'none'
+        )
+
+    def _ack_claim_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        claim: LeaseClaim,
+        *,
+        outcome_state: str,
+        now: int,
+    ) -> None:
+        cursor = connection.execute(
+            'UPDATE owner_handoff_outcomes SET outcome_state=?,acknowledged_at=? '
+            "WHERE owner_kind='upload' AND owner_id=? AND side_effect_key=? "
+            "AND source_generation=? AND outcome_state='in_flight'",
+            (
+                outcome_state,
+                now,
+                claim.id,
+                self._lease_side_effect_key(claim),
+                self._source_generation(claim),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise LeaseLost('upload owner handoff intent was lost')
+
+    def _release_cancelled_claim_in_transaction(
+        self, connection: sqlite3.Connection, claim: LeaseClaim, now: int
+    ) -> None:
+        self._ack_claim_in_transaction(
+            connection, claim, outcome_state='cancelled_local', now=now
+        )
+        cursor = connection.execute(
+            "UPDATE upload_jobs SET state='paused',operator_paused=1,"
+            "operator_resume_state=NULL,submit_state=CASE "
+            "WHEN submit_state='in_flight' THEN 'prepared' ELSE submit_state END,"
+            "review_reason='任务正在删除',lease_owner=NULL,lease_until=NULL,"
+            'updated_at=? WHERE id=? AND lease_owner=? AND lease_generation=?',
+            (now, claim.id, claim.lease_owner, claim.lease_generation),
+        )
+        if cursor.rowcount != 1:
+            raise LeaseLost('upload job lease was lost')
+
+    async def _cancel_claim(self, claim: LeaseClaim) -> None:
+        now = int(self._clock())
+        await self._database.write(
+            lambda connection: self._release_cancelled_claim_in_transaction(
+                connection, claim, now
+            )
+        )
+
+    async def _begin_archive_submission(
+        self, claim: LeaseClaim, *, scheduled_publish_at: Any, upload_completed_at: int
+    ) -> None:
+        now = int(self._clock())
+
+        def begin(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(connection, claim, now)
+                return False
+            cursor = connection.execute(
+                "UPDATE upload_jobs SET state='submitting',"
+                "submit_state='in_flight',scheduled_publish_at=?,"
+                'upload_completed_at=?,updated_at=? '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    scheduled_publish_at,
+                    upload_completed_at,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            connection.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('upload',?,'archive_submit',?,'in_flight','{}',NULL) "
+                'ON CONFLICT('
+                'owner_kind,owner_id,side_effect_key,source_generation) '
+                "DO UPDATE SET outcome_state='in_flight',outcome_json='{}',"
+                'acknowledged_at=NULL',
+                (claim.id, self._source_generation(claim)),
+            )
+            return True
+
+        if not await self._database.write(begin):
+            raise _UploadDeletionRequested()
+
+    async def _settle_archive_not_sent(self, claim: LeaseClaim) -> None:
+        now = int(self._clock())
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            active = self._owner_is_active(connection, claim)
+            if active:
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                    "AND owner_id=? AND side_effect_key='archive_submit' "
+                    'AND source_generation=?',
+                    (claim.id, self._source_generation(claim)),
+                )
+                cursor = connection.execute(
+                    "UPDATE upload_jobs SET state='submitting',"
+                    "submit_state='prepared',review_reason=NULL,lease_owner=NULL,"
+                    'lease_until=NULL,updated_at=? WHERE id=? AND lease_owner=? '
+                    'AND lease_generation=?',
+                    (now, claim.id, claim.lease_owner, claim.lease_generation),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLost('upload job lease was lost')
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                    'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+                    (
+                        claim.id,
+                        self._lease_side_effect_key(claim),
+                        self._source_generation(claim),
+                    ),
+                )
+                return True
+            self._settle_archive_handoff_in_transaction(
+                connection, claim, outcome_state='cancelled_local', outcome={}, now=now
+            )
+            return False
+
+        if not await self._database.write(settle):
+            raise _UploadDeletionRequested()
+
+    async def _settle_archive_failure(
+        self, claim: LeaseClaim, *, outcome_state: str, outcome: Mapping[str, Any]
+    ) -> bool:
+        now = int(self._clock())
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            if self._owner_is_active(connection, claim):
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                    "AND owner_id=? AND side_effect_key='archive_submit' "
+                    'AND source_generation=?',
+                    (claim.id, self._source_generation(claim)),
+                )
+                return True
+            self._settle_archive_handoff_in_transaction(
+                connection, claim, outcome_state=outcome_state, outcome=outcome, now=now
+            )
+            return False
+
+        return await self._database.write(settle)
+
+    async def _settle_unknown_archive_submission(
+        self, claim: LeaseClaim, *, reason: str
+    ) -> None:
+        now = int(self._clock())
+        delay = min(15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4)))
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._settle_archive_handoff_in_transaction(
+                    connection,
+                    claim,
+                    outcome_state='unknown_terminal',
+                    outcome={},
+                    now=now,
+                )
+                return False
+            connection.execute(
+                'UPDATE owner_handoff_outcomes SET '
+                "outcome_state='unknown_terminal',outcome_json='{}',"
+                'acknowledged_at=? WHERE owner_kind=\'upload\' AND owner_id=? '
+                "AND side_effect_key='archive_submit' AND source_generation=? "
+                "AND outcome_state='in_flight'",
+                (now, claim.id, self._source_generation(claim)),
+            )
+            self._ack_claim_in_transaction(
+                connection, claim, outcome_state='unknown_terminal', now=now
+            )
+            cursor = connection.execute(
+                "UPDATE upload_jobs SET state='submitting',"
+                "submit_state='unknown_outcome',review_reason=?,next_attempt_at=?,"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? '
+                'AND lease_owner=? AND lease_generation=?',
+                (
+                    '{}（{} 秒后核对）'.format(reason, delay),
+                    now + delay,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            return True
+
+        active = await self._database.write(settle)
+        audit(
+            'upload_submission_reconciliation_scheduled',
+            level='WARNING',
+            job_id=claim.id,
+            delay_seconds=delay,
+            reason=reason,
+            result='scheduled' if active else 'unknown_terminal',
+        )
+
+    async def _complete_archive_submission(
+        self, claim: LeaseClaim, *, aid: int, bvid: str
+    ) -> bool:
+        now = int(self._clock())
+
+        def complete(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._settle_archive_handoff_in_transaction(
+                    connection,
+                    claim,
+                    outcome_state='confirmed_success',
+                    outcome={'aid': aid, 'bvid': bvid},
+                    now=now,
+                )
+                return False
+            cursor = connection.execute(
+                "UPDATE upload_jobs SET state='waiting_review',"
+                "submit_state='confirmed',aid=?,bvid=?,submitted_at=?,"
+                'review_reason=NULL,lease_owner=NULL,lease_until=NULL,updated_at=? '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    aid,
+                    bvid,
+                    now,
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                'AND owner_id=? AND side_effect_key IN (?,\'archive_submit\') '
+                'AND source_generation=?',
+                (
+                    claim.id,
+                    self._lease_side_effect_key(claim),
+                    self._source_generation(claim),
+                ),
+            )
+            return True
+
+        return await self._database.write(complete)
+
+    def _settle_archive_handoff_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        claim: LeaseClaim,
+        *,
+        outcome_state: str,
+        outcome: Mapping[str, Any],
+        now: int,
+    ) -> None:
+        cursor = connection.execute(
+            'UPDATE owner_handoff_outcomes SET outcome_state=?,outcome_json=?,'
+            'acknowledged_at=? WHERE owner_kind=\'upload\' AND owner_id=? '
+            "AND side_effect_key='archive_submit' AND source_generation=? "
+            "AND outcome_state='in_flight'",
+            (
+                outcome_state,
+                json.dumps(outcome, separators=(',', ':'), sort_keys=True),
+                now,
+                claim.id,
+                self._source_generation(claim),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise LeaseLost('archive submission handoff intent was lost')
+        self._release_cancelled_claim_in_transaction(connection, claim, now)
 
     async def _retry_not_sent(self, claim: LeaseClaim, *, submit_started: bool) -> None:
         delay = min(300, 2 ** min(claim.attempt, 8))
@@ -2604,18 +3103,38 @@ class UploadCoordinator:
         }
         if not values or not set(values) <= allowed:
             raise ValueError('invalid upload job update')
-        assignments = ['{}=?'.format(column) for column in values]
-        parameters: List[Any] = list(values.values())
-        if release:
-            assignments.extend(('lease_owner=NULL', 'lease_until=NULL'))
-        parameters.extend((claim.id, claim.lease_owner, claim.lease_generation))
-        updated = await self._database.execute(
-            'UPDATE upload_jobs SET {} WHERE id=? AND lease_owner=? '
-            'AND lease_generation=?'.format(','.join(assignments)),
-            parameters,
-        )
-        if updated != 1:
-            raise LeaseLost('upload job lease was lost')
+        now = int(self._clock())
+
+        def update(connection: sqlite3.Connection) -> bool:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(connection, claim, now)
+                return False
+            assignments = ['{}=?'.format(column) for column in values]
+            parameters: List[Any] = list(values.values())
+            if release:
+                assignments.extend(('lease_owner=NULL', 'lease_until=NULL'))
+            parameters.extend((claim.id, claim.lease_owner, claim.lease_generation))
+            cursor = connection.execute(
+                'UPDATE upload_jobs SET {} WHERE id=? AND lease_owner=? '
+                'AND lease_generation=?'.format(','.join(assignments)),
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            if release:
+                connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                    'AND owner_id=? AND side_effect_key=? AND source_generation=?',
+                    (
+                        claim.id,
+                        self._lease_side_effect_key(claim),
+                        self._source_generation(claim),
+                    ),
+                )
+            return True
+
+        if not await self._database.write(update):
+            raise _UploadDeletionRequested()
 
     @staticmethod
     def _submission_identity(

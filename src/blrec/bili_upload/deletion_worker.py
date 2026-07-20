@@ -410,6 +410,16 @@ class LocalDeletionWorker:
             ).fetchone()[0]
             if in_flight_chunks:
                 blockers.append('upos')
+            remote_handoffs = connection.execute(
+                'SELECT COUNT(*) FROM owner_handoff_outcomes outcome '
+                "WHERE outcome.outcome_state='in_flight' AND (("
+                "outcome.owner_kind='upload' AND outcome.owner_id=?) OR ("
+                "outcome.owner_kind='upos' AND outcome.owner_id IN("
+                'SELECT id FROM upload_parts WHERE job_id=?)))',
+                (job_id, job_id),
+            ).fetchone()[0]
+            if int(remote_handoffs):
+                blockers.append('remote_handoff')
             comment = connection.execute(
                 'SELECT COUNT(*) FROM comment_items WHERE job_id=? '
                 'AND lease_owner IS NOT NULL',
@@ -476,7 +486,11 @@ class LocalDeletionWorker:
         if job is None:
             return
         job_id = int(job['id'])
-        if str(job['submit_state']) == 'unknown_outcome':
+        if str(
+            job['submit_state']
+        ) == 'unknown_outcome' and not self._has_terminal_handoff(
+            connection, 'upload', job_id, 'archive_submit'
+        ):
             self._record_terminal_handoff(
                 connection,
                 owner_kind='upload',
@@ -491,14 +505,16 @@ class LocalDeletionWorker:
             (job_id,),
         ).fetchall()
         for part in unknown_parts:
-            self._record_terminal_handoff(
-                connection,
-                owner_kind='upos',
-                owner_id=int(part['id']),
-                side_effect_key='complete',
-                source_generation=generation - 1,
-                now=now,
-            )
+            part_id = int(part['id'])
+            if not self._has_terminal_handoff(connection, 'upos', part_id, 'complete'):
+                self._record_terminal_handoff(
+                    connection,
+                    owner_kind='upos',
+                    owner_id=part_id,
+                    side_effect_key='complete',
+                    source_generation=generation - 1,
+                    now=now,
+                )
         unknown_comments = connection.execute(
             "SELECT id FROM comment_items WHERE job_id=? "
             "AND state='unknown_outcome'",
@@ -543,6 +559,23 @@ class LocalDeletionWorker:
             "('pending','publishing') THEN 'paused' ELSE danmaku_branch_state END,"
             'updated_at=? WHERE id=?',
             (now, job_id),
+        )
+
+    @staticmethod
+    def _has_terminal_handoff(
+        connection: sqlite3.Connection,
+        owner_kind: str,
+        owner_id: int,
+        side_effect_key: str,
+    ) -> bool:
+        return (
+            connection.execute(
+                'SELECT 1 FROM owner_handoff_outcomes WHERE owner_kind=? '
+                'AND owner_id=? AND side_effect_key=? '
+                "AND outcome_state!='in_flight' LIMIT 1",
+                (owner_kind, owner_id, side_effect_key),
+            ).fetchone()
+            is not None
         )
 
     @staticmethod

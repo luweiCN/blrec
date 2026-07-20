@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -381,7 +382,7 @@ async def test_preupload_406_defers_without_pausing_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_complete_result_is_deferred_and_completed_on_retry(
+async def test_unknown_complete_result_is_terminal_and_never_retried(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / 'part.flv'
@@ -395,22 +396,288 @@ async def test_unknown_complete_result_is_deferred_and_completed_on_retry(
         protocol.complete_error = RemoteOutcomeUnknown('complete_upload')
         uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
 
-        with pytest.raises(UposUploadDeferred, match='deferred'):
+        with pytest.raises(UposUploadPaused, match='outcome'):
             await uploader.upload_part(part_id, bundle=object(), claim=claim)
         protocol.complete_error = None
-        await uploader.upload_part(part_id, bundle=object(), claim=claim)
+        with pytest.raises(UposUploadPaused, match='outcome'):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
 
-        assert protocol.complete_calls == 2
+        assert protocol.complete_calls == 1
         assert (
             await database.scalar(
                 'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
             )
-            == 'confirmed'
+            == 'unknown_outcome'
         )
+        outcome = await database.fetchone(
+            "SELECT outcome_state,outcome_json,acknowledged_at "
+            "FROM owner_handoff_outcomes "
+            "WHERE owner_kind='upos' AND owner_id=? "
+            "AND side_effect_key='complete' AND source_generation=0",
+            (part_id,),
+        )
+        assert outcome is not None
+        assert dict(outcome) == {
+            'outcome_state': 'unknown_terminal',
+            'outcome_json': '{}',
+            'acknowledged_at': outcome['acknowledged_at'],
+        }
+        assert outcome['acknowledged_at'] is not None
         assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
             'ready'
         )
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_chunk_success_after_deletion_is_handed_off_without_new_chunk(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcdefgh')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    class BlockingChunkProtocol(FakeProtocol):
+        async def upload_chunk(
+            self,
+            session: FakeSession,
+            *,
+            chunk_no: int,
+            chunks: int,
+            start: int,
+            total: int,
+            body: bytes,
+        ) -> Mapping[str, Any]:
+            del session, chunks, start, total, body
+            self.chunk_calls.append(chunk_no)
+            request_started.set()
+            await release_response.wait()
+            return {'etag': 'etag-{}'.format(chunk_no)}
+
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = BlockingChunkProtocol()
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+        task = asyncio.create_task(
+            uploader.upload_part(part_id, bundle=object(), claim=claim)
+        )
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        release_response.set()
+
+        with pytest.raises(UposUploadStopped, match='deletion'):
+            await asyncio.wait_for(task, timeout=1)
+        assert protocol.chunk_calls == [0]
+        outcome = await database.fetchone(
+            "SELECT outcome_state,outcome_json,acknowledged_at "
+            "FROM owner_handoff_outcomes WHERE owner_kind='upos' "
+            "AND owner_id=? AND side_effect_key='chunk:0' "
+            'AND source_generation=0',
+            (part_id,),
+        )
+        assert outcome is not None
+        assert outcome['outcome_state'] == 'confirmed_success'
+        assert json.loads(str(outcome['outcome_json'])) == {'etag': 'etag-0'}
+        assert outcome['acknowledged_at'] is not None
+    finally:
+        release_response.set()
+        if 'task' in locals():
+            await asyncio.gather(task, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_completion_success_after_deletion_is_terminal_handoff(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    class BlockingCompletionProtocol(FakeProtocol):
+        async def complete_upload(
+            self, session: FakeSession, *, parts: Sequence[Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            del session, parts
+            self.complete_calls += 1
+            request_started.set()
+            await release_response.wait()
+            return {'OK': 1}
+
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = BlockingCompletionProtocol()
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+        task = asyncio.create_task(
+            uploader.upload_part(part_id, bundle=object(), claim=claim)
+        )
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        release_response.set()
+
+        with pytest.raises(UposUploadStopped, match='deletion'):
+            await asyncio.wait_for(task, timeout=1)
+        assert protocol.complete_calls == 1
+        outcome = await database.fetchone(
+            "SELECT outcome_state,outcome_json,acknowledged_at "
+            "FROM owner_handoff_outcomes "
+            "WHERE owner_kind='upos' AND owner_id=? "
+            "AND side_effect_key='complete' AND source_generation=0",
+            (part_id,),
+        )
+        assert outcome is not None
+        assert outcome['outcome_state'] == 'confirmed_success'
+        assert json.loads(str(outcome['outcome_json'])) == {
+            'remote_filename': 'remote-video'
+        }
+        assert outcome['acknowledged_at'] is not None
+        assert (
+            await database.scalar(
+                'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+            )
+            == 'completing'
+        )
+    finally:
+        release_response.set()
+        if 'task' in locals():
+            await asyncio.gather(task, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_deletion_before_completion_prevents_remote_completion(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    before_completion = asyncio.Event()
+    release_completion = asyncio.Event()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+        original_complete = uploader._complete
+
+        async def complete_after_barrier(*args: Any, **kwargs: Any) -> str:
+            before_completion.set()
+            await release_completion.wait()
+            return await original_complete(*args, **kwargs)
+
+        uploader._complete = complete_after_barrier  # type: ignore
+        task = asyncio.create_task(
+            uploader.upload_part(part_id, bundle=object(), claim=claim)
+        )
+        await asyncio.wait_for(before_completion.wait(), timeout=1)
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        release_completion.set()
+
+        with pytest.raises(UposUploadStopped, match='deletion'):
+            await asyncio.wait_for(task, timeout=1)
+        assert protocol.complete_calls == 0
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upos' AND side_effect_key='complete'"
+            )
+            == 0
+        )
+    finally:
+        release_completion.set()
+        if 'task' in locals():
+            await asyncio.gather(task, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_chunks_all_acknowledge_deletion_before_owner_returns(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcdefgh')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    both_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class SplitChunkProtocol(FakeProtocol):
+        async def upload_chunk(
+            self,
+            session: FakeSession,
+            *,
+            chunk_no: int,
+            chunks: int,
+            start: int,
+            total: int,
+            body: bytes,
+        ) -> Mapping[str, Any]:
+            del session, chunks, start, total, body
+            self.chunk_calls.append(chunk_no)
+            if len(self.chunk_calls) == 2:
+                both_started.set()
+            if chunk_no == 0:
+                await release_first.wait()
+                return {'etag': 'etag-0'}
+            await asyncio.Future()
+            raise AssertionError('unreachable')
+
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = SplitChunkProtocol()
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=2)
+        task = asyncio.create_task(
+            uploader.upload_part(part_id, bundle=object(), claim=claim)
+        )
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        await database.execute(
+            "UPDATE recording_sessions SET deletion_state='requested',"
+            'cancellation_generation=1 WHERE id=1'
+        )
+        release_first.set()
+
+        with pytest.raises(UposUploadStopped, match='deletion'):
+            await asyncio.wait_for(task, timeout=1)
+        outcomes = await database.fetchall(
+            "SELECT side_effect_key,outcome_state FROM owner_handoff_outcomes "
+            "WHERE owner_kind='upos' AND owner_id=? ORDER BY side_effect_key",
+            (part_id,),
+        )
+        assert [(row['side_effect_key'], row['outcome_state']) for row in outcomes] == [
+            ('chunk:0', 'confirmed_success'),
+            ('chunk:1', 'unknown_terminal'),
+        ]
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE outcome_state='in_flight'"
+            )
+            == 1
+        )
+    finally:
+        release_first.set()
+        if 'task' in locals():
+            await asyncio.gather(task, return_exceptions=True)
         await database.close()
 
 

@@ -469,6 +469,16 @@ async def test_clip_deletion_waits_for_bound_upload_owners_and_branches(
             'WHERE id=? AND lease_owner=? AND lease_generation=?',
             (claim.id, claim.lease_owner, claim.lease_generation),
         )
+        await database.execute(
+            "UPDATE owner_handoff_outcomes SET outcome_state='cancelled_local',"
+            'acknowledged_at=200 WHERE owner_kind=\'upload\' AND owner_id=? '
+            'AND side_effect_key=? AND source_generation=?',
+            (
+                claim.id,
+                'lease:{}'.format(claim.lease_generation),
+                claim.cancellation_generation,
+            ),
+        )
         assert await worker.run_once() == ('clip', 7)
         assert output.exists()
         assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 1
@@ -729,6 +739,59 @@ async def test_worker_does_not_clear_an_owned_upload_lease(tmp_path: Path) -> No
             == 'owner'
         )
         assert await database.scalar('SELECT COUNT(*) FROM local_deletion_items') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_waits_for_remote_handoff_after_upload_lease_release(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        paths = await _seed_session(database, tmp_path)
+        await database.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'account',X'00',1,'k','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'created_at,updated_at) '
+            "VALUES(9,1,1,'{}','paused','prepared',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,final_path,artifact_state,'
+            "upload_state) VALUES(10,9,1,?,?,'ready','completing')",
+            (str(paths[0]), str(paths[0])),
+        )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) '
+            "VALUES('upos',10,'complete',0,'in_flight','{}',NULL)"
+        )
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        await worker.request_session(1, manager_subject='manager')
+
+        assert await worker.run_once() == ('session', 1)
+        assert paths[0].exists()
+        assert await database.scalar('SELECT COUNT(*) FROM local_deletion_items') == 0
+
+        await database.execute(
+            "UPDATE owner_handoff_outcomes SET outcome_state='unknown_terminal',"
+            "acknowledged_at=10 WHERE owner_kind='upos' AND owner_id=10 "
+            "AND side_effect_key='complete'"
+        )
+        assert await worker.run_once() == ('session', 1)
+        assert not paths[0].exists()
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
     finally:
         await database.close()
 

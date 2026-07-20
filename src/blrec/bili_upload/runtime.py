@@ -361,6 +361,7 @@ class BiliAccountRuntime:
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
             )
+            await coordinator.recover_interrupted()
             task_actions = UploadTaskActionManager(
                 database,
                 protocol,
