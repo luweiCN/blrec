@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import threading
 from contextlib import contextmanager
@@ -64,16 +65,16 @@ async def test_open_media_resource_runs_realpath_open_and_fstat_once_in_worker(
     event_loop_thread = threading.get_ident()
     calls: List[Tuple[str, int]] = []
     real_realpath = media_response.os.path.realpath
-    real_open = open
+    real_open = media_response.os.open
     real_fstat = media_response.os.fstat
 
     def recording_realpath(value: str) -> str:
         calls.append(('realpath', threading.get_ident()))
         return real_realpath(value)
 
-    def recording_open(value: str, mode: str):
-        calls.append(('open', threading.get_ident()))
-        return real_open(value, mode)
+    def recording_open(value: str, flags: int, *args: Any, **kwargs: Any):
+        calls.append(('os.open', threading.get_ident()))
+        return real_open(value, flags, *args, **kwargs)
 
     def recording_fstat(fd: int):
         calls.append(('fstat', threading.get_ident()))
@@ -83,7 +84,7 @@ async def test_open_media_resource_runs_realpath_open_and_fstat_once_in_worker(
         raise AssertionError('path stat must not run')
 
     monkeypatch.setattr(media_response.os.path, 'realpath', recording_realpath)
-    monkeypatch.setattr(media_response, 'open', recording_open, raising=False)
+    monkeypatch.setattr(media_response.os, 'open', recording_open)
     monkeypatch.setattr(media_response.os, 'fstat', recording_fstat)
     monkeypatch.setattr(media_response.os, 'stat', forbidden_stat)
     monkeypatch.setattr(Path, 'stat', forbidden_stat)
@@ -99,7 +100,7 @@ async def test_open_media_resource_runs_realpath_open_and_fstat_once_in_worker(
     )
     try:
         assert resource.size == 10
-        assert [name for name, _thread in calls] == ['realpath', 'open', 'fstat']
+        assert [name for name, _thread in calls] == ['realpath', 'os.open', 'fstat']
         assert all(thread != event_loop_thread for _name, thread in calls)
     finally:
         resource.close()
@@ -113,17 +114,17 @@ async def test_cancelled_open_closes_a_resource_finished_by_the_worker(
     release = threading.Event()
     returned = threading.Event()
     opened = []
-    real_open = open
+    real_open = media_response._open_candidate_file
 
-    def blocking_open(value: str, mode: str):
+    def blocking_open(value: str, expected_root: Any):
         entered.set()
         release.wait()
-        file = real_open(value, mode)
+        file = real_open(value, expected_root)
         opened.append(file)
         returned.set()
         return file
 
-    monkeypatch.setattr(media_response, 'open', blocking_open, raising=False)
+    monkeypatch.setattr(media_response, '_open_candidate_file', blocking_open)
     task = asyncio.create_task(
         open_media_resource(
             (
@@ -157,6 +158,7 @@ async def test_active_snapshot_accepts_the_same_symlink_candidate(
 ) -> None:
     symlink = tmp_path / 'recording-link.mp4'
     symlink.symlink_to(media_file)
+    identity = os.stat(media_file)
 
     resource = await open_media_resource(
         (
@@ -167,7 +169,12 @@ async def test_active_snapshot_accepts_the_same_symlink_candidate(
                 active=True,
             ),
         ),
-        snapshot=VirtualMediaSnapshot(path=str(symlink), source_size=10),
+        snapshot=VirtualMediaSnapshot(
+            path=str(symlink),
+            source_size=10,
+            source_device=int(identity.st_dev),
+            source_inode=int(identity.st_ino),
+        ),
     )
     try:
         assert resource.size == 10
@@ -175,6 +182,114 @@ async def test_active_snapshot_accepts_the_same_symlink_candidate(
         assert resource.cache_control == 'no-store'
     finally:
         resource.close()
+
+
+@pytest.mark.asyncio
+async def test_root_check_cannot_be_bypassed_by_final_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / 'recordings'
+    root.mkdir()
+    candidate = root / 'part.mp4'
+    candidate.write_bytes(b'inside')
+    outside = tmp_path / 'outside.mp4'
+    outside.write_bytes(b'outside-secret')
+    real_realpath = media_response.os.path.realpath
+    swapped = False
+
+    def swap_after_resolution(value: str) -> str:
+        nonlocal swapped
+        resolved = real_realpath(value)
+        if os.path.abspath(value) == os.path.abspath(candidate) and not swapped:
+            candidate.unlink()
+            candidate.symlink_to(outside)
+            swapped = True
+        return resolved
+
+    monkeypatch.setattr(media_response.os.path, 'realpath', swap_after_resolution)
+
+    with pytest.raises(media_response.MediaResourceUnavailable):
+        await open_media_resource(
+            (
+                MediaCandidate(
+                    path=str(candidate),
+                    content_type='video/mp4',
+                    artifact_key='recording-part:7:final',
+                ),
+            ),
+            expected_root=str(root),
+        )
+
+
+@pytest.mark.asyncio
+async def test_root_check_cannot_be_bypassed_by_parent_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / 'recordings'
+    parent = root / 'room'
+    parent.mkdir(parents=True)
+    candidate = parent / 'part.mp4'
+    candidate.write_bytes(b'inside')
+    outside_parent = tmp_path / 'outside-room'
+    outside_parent.mkdir()
+    (outside_parent / 'part.mp4').write_bytes(b'outside-secret')
+    moved_parent = root / 'room-original'
+    real_realpath = media_response.os.path.realpath
+    swapped = False
+
+    def swap_parent_after_resolution(value: str) -> str:
+        nonlocal swapped
+        resolved = real_realpath(value)
+        if os.path.abspath(value) == os.path.abspath(candidate) and not swapped:
+            parent.rename(moved_parent)
+            parent.symlink_to(outside_parent, target_is_directory=True)
+            swapped = True
+        return resolved
+
+    monkeypatch.setattr(
+        media_response.os.path, 'realpath', swap_parent_after_resolution
+    )
+
+    with pytest.raises(media_response.MediaResourceUnavailable):
+        await open_media_resource(
+            (
+                MediaCandidate(
+                    path=str(candidate),
+                    content_type='video/mp4',
+                    artifact_key='recording-part:7:final',
+                ),
+            ),
+            expected_root=str(root),
+        )
+
+
+@pytest.mark.asyncio
+async def test_active_snapshot_rejects_same_size_inode_replacement(
+    media_file: Path,
+) -> None:
+    original = os.stat(media_file)
+    snapshot = VirtualMediaSnapshot(
+        path=str(media_file),
+        source_size=10,
+        source_device=int(original.st_dev),
+        source_inode=int(original.st_ino),
+    )
+    replacement = media_file.with_name('replacement.mp4')
+    replacement.write_bytes(b'abcdefghij')
+    replacement.replace(media_file)
+
+    with pytest.raises(media_response.MediaResourceUnavailable):
+        await open_media_resource(
+            (
+                MediaCandidate(
+                    path=str(media_file),
+                    content_type='video/mp4',
+                    artifact_key='recording-part:7:source',
+                    active=True,
+                ),
+            ),
+            snapshot=snapshot,
+        )
 
 
 def test_completed_media_has_opaque_strong_etag_and_private_cache(
@@ -377,4 +492,138 @@ async def test_opened_resource_can_be_closed_after_conditional_short_circuit(
     response = build_media_response(request, resource, None, resource.etag, None, None)
 
     assert response.status_code == 304
+    assert resource.file.closed is True
+
+
+@pytest.mark.asyncio
+async def test_asgi_send_error_closes_resource_and_audits_once(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        media_response, 'audit', lambda event, **fields: events.append((event, fields))
+    )
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    response = build_media_response(request, resource, None, None, None, None)
+    never = asyncio.Event()
+
+    async def receive() -> Dict[str, str]:
+        await never.wait()
+        return {'type': 'http.disconnect'}
+
+    async def send(message: Dict[str, Any]) -> None:
+        if message['type'] == 'http.response.body':
+            raise RuntimeError('simulated send failure')
+
+    with pytest.raises(BaseException) as raised:
+        await response(request.scope, receive, send)
+
+    assert 'simulated send failure' in repr(raised.value)
+    assert resource.file.closed is True
+    assert len(events) == 1
+    assert events[0][1]['reason'] == 'error'
+
+
+@pytest.mark.asyncio
+async def test_asgi_cancellation_closes_resource_and_audits_once(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        media_response, 'audit', lambda event, **fields: events.append((event, fields))
+    )
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+    response = build_media_response(request, resource, None, None, None, None)
+    body_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def receive() -> Dict[str, str]:
+        await never.wait()
+        return {'type': 'http.disconnect'}
+
+    async def send(message: Dict[str, Any]) -> None:
+        if message['type'] == 'http.response.body':
+            body_started.set()
+            await never.wait()
+
+    streaming = asyncio.create_task(response(request.scope, receive, send))
+    await asyncio.wait_for(body_started.wait(), timeout=0.5)
+    streaming.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await streaming
+
+    assert resource.file.closed is True
+    assert len(events) == 1
+    assert events[0][1]['reason'] == 'disconnect'
+
+
+@pytest.mark.asyncio
+async def test_response_construction_failure_closes_resource(
+    media_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'GET',
+            'path': '/media/7',
+            'query_string': b'',
+            'headers': [],
+            'route': SimpleNamespace(path='/media/{media_id}'),
+        }
+    )
+    resource = await open_media_resource(
+        (
+            MediaCandidate(
+                path=str(media_file),
+                content_type='video/mp4',
+                artifact_key='recording-part:7:final',
+            ),
+        )
+    )
+
+    class BrokenResponse:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError('simulated constructor failure')
+
+    monkeypatch.setattr(media_response, '_MediaStreamingResponse', BrokenResponse)
+
+    with pytest.raises(RuntimeError, match='simulated constructor failure'):
+        build_media_response(request, resource, None, None, None, None)
+
     assert resource.file.closed is True

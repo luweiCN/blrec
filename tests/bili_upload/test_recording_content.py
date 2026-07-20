@@ -91,19 +91,24 @@ async def test_media_descriptor_keeps_final_first_without_touching_filesystem(
     final = tmp_path / 'part.mp4'
     part_id = await _seed_part(database, source, final)
 
-    def forbidden_size(_path: str) -> Optional[int]:
+    def forbidden_identity(_path: str) -> Optional[Tuple[int, int, int]]:
         raise AssertionError('media descriptor must not stat files')
 
     monkeypatch.setattr(
-        RecordingContentReader, '_regular_file_size', staticmethod(forbidden_size)
+        RecordingContentReader,
+        '_regular_file_identity',
+        staticmethod(forbidden_identity),
     )
 
-    descriptor = await RecordingContentReader(database).media_descriptor(part_id)
+    descriptor = await RecordingContentReader(
+        database, recording_root=tmp_path
+    ).media_descriptor(part_id)
 
     assert descriptor.part_id == part_id
     assert descriptor.room_id == 100
     assert descriptor.part_index == 1
     assert descriptor.index_state == 'pending'
+    assert descriptor.expected_root == str(tmp_path.resolve())
     assert [candidate.path for candidate in descriptor.candidates] == [
         str(final),
         str(source),

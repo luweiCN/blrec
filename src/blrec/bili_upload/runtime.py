@@ -268,7 +268,12 @@ class BiliAccountRuntime:
         try:
             await database.open()
             journal = RecordingJournalBridge(database, clock=self._clock)
-            content_reader = RecordingContentReader(database)
+            content_reader = RecordingContentReader(
+                database,
+                recording_root=(
+                    None if self._recording_root is None else Path(self._recording_root)
+                ),
+            )
             await journal.reconcile_open_sessions()
             lossless_clipper = LosslessClipper()
             highlight_danmaku_clipper = HighlightDanmakuClipper()

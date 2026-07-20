@@ -68,6 +68,8 @@ class MediaResource:
     remote_available: bool
     playback_mode: Literal['seekable', 'sequential', 'active_snapshot']
     index_state: str
+    source_device: Optional[int] = None
+    source_inode: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,7 @@ class RecordingMediaDescriptor:
     bvid: Optional[str]
     remote_available: bool
     index_state: str
+    expected_root: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,8 @@ class FlvMediaSnapshot:
     source_tail_start: int
     prefix: bytes
     duration_ms: Optional[int]
+    source_device: Optional[int] = None
+    source_inode: Optional[int] = None
 
     @property
     def size(self) -> int:
@@ -146,6 +151,7 @@ class FlvMediaSnapshot:
         cls, path: str, source_size: int, current_metadata: Mapping[str, Any]
     ) -> FlvMediaSnapshot:
         with open(path, 'rb') as file:
+            file_stat = os.fstat(file.fileno())
             reader = FlvReader(file)
             header = reader.read_header()
             header_end = file.tell()
@@ -231,10 +237,19 @@ class FlvMediaSnapshot:
             source_tail_start=source_tail_start,
             prefix=prefix,
             duration_ms=int(round(duration_seconds * 1_000)),
+            source_device=int(file_stat.st_dev),
+            source_inode=int(file_stat.st_ino),
         )
 
     @classmethod
-    def frozen(cls, path: str, source_size: int) -> FlvMediaSnapshot:
+    def frozen(
+        cls,
+        path: str,
+        source_size: int,
+        *,
+        source_device: Optional[int] = None,
+        source_inode: Optional[int] = None,
+    ) -> FlvMediaSnapshot:
         if source_size < 0:
             raise ValueError('snapshot size must not be negative')
         return cls(
@@ -243,6 +258,8 @@ class FlvMediaSnapshot:
             source_tail_start=0,
             prefix=b'',
             duration_ms=None,
+            source_device=source_device,
+            source_inode=source_inode,
         )
 
     @staticmethod
@@ -292,8 +309,13 @@ class RecordingContentReader:
     _DANMAKU_READ_BYTES = 64 * 1024
     _DANMAKU_PREFIX_BYTES = 4_096
 
-    def __init__(self, database: BiliUploadDatabase) -> None:
+    def __init__(
+        self, database: BiliUploadDatabase, *, recording_root: Optional[Path] = None
+    ) -> None:
         self._database = database
+        self._recording_root = (
+            None if recording_root is None else str(recording_root.resolve())
+        )
         self._danmaku_cache_lock = threading.RLock()
         self._danmaku_closed = False
         self._danmaku_reserved_bytes = 0
@@ -348,6 +370,7 @@ class RecordingContentReader:
             bvid=bvid,
             remote_available=bool(bvid and job_state in ('approved', 'completed')),
             index_state=str(row['media_index_state']),
+            expected_root=self._recording_root,
         )
 
     async def media(self, part_id: int) -> MediaResource:
@@ -414,13 +437,15 @@ class RecordingContentReader:
             )
         resolved_path: Optional[str] = None
         resolved_size: Optional[int] = None
+        resolved_device: Optional[int] = None
+        resolved_inode: Optional[int] = None
         recording = False
         for path, is_recording in candidates:
-            snapshot_size = cls._regular_file_size(path)
-            if snapshot_size is None:
+            identity = cls._regular_file_identity(path)
+            if identity is None:
                 continue
             resolved_path = path
-            resolved_size = snapshot_size
+            resolved_size, resolved_device, resolved_inode = identity
             recording = is_recording
             break
         job_state = None if row['job_state'] is None else str(row['job_state'])
@@ -456,17 +481,19 @@ class RecordingContentReader:
             remote_available=remote_available,
             playback_mode=playback_mode,
             index_state=index_state,
+            source_device=resolved_device,
+            source_inode=resolved_inode,
         )
 
     @staticmethod
-    def _regular_file_size(path: str) -> Optional[int]:
+    def _regular_file_identity(path: str) -> Optional[Tuple[int, int, int]]:
         try:
             result = os.stat(path)
         except OSError:
             return None
         if not stat.S_ISREG(result.st_mode):
             return None
-        return int(result.st_size)
+        return int(result.st_size), int(result.st_dev), int(result.st_ino)
 
     def _parse_danmaku(
         self, part_id: int, path: str, finalized: bool, cursor: int, limit: int

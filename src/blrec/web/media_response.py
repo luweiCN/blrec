@@ -8,12 +8,13 @@ import stat
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import BinaryIO, Iterator, Optional, Sequence, Tuple
+from typing import BinaryIO, Iterator, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from blrec.logging.audit import audit
 
@@ -46,6 +47,8 @@ class MediaCandidate:
 class VirtualMediaSnapshot:
     path: str
     source_size: int
+    source_device: int
+    source_inode: int
     source_tail_start: int = 0
     prefix: bytes = b''
 
@@ -108,22 +111,11 @@ def _open_media_resource_sync(
     snapshot: Optional[VirtualMediaSnapshot],
     opened_at: float,
 ) -> OpenedMediaResource:
-    normalized_root = (
-        None
-        if expected_root is None
-        else os.path.normcase(os.path.abspath(expected_root))
-    )
     for candidate in candidates:
         file: Optional[BinaryIO] = None
         try:
             candidate_path = os.path.normcase(os.path.abspath(candidate.path))
-            real_path = os.path.realpath(candidate.path)
-            normalized_path = os.path.normcase(os.path.abspath(real_path))
-            if normalized_root is not None and not _is_within_root(
-                normalized_path, normalized_root
-            ):
-                raise MediaResourceUnavailable('media resource is outside its root')
-            file = open(real_path, 'rb')
+            file = _open_candidate_file(candidate.path, expected_root)
             file_stat = os.fstat(file.fileno())
             if not stat.S_ISREG(file_stat.st_mode) or int(file_stat.st_size) <= 0:
                 file.close()
@@ -134,7 +126,11 @@ def _open_media_resource_sync(
                     file.close()
                     raise MediaResourceUnavailable('media snapshot identity changed')
                 if (
-                    snapshot.source_tail_start < 0
+                    int(file_stat.st_dev) != snapshot.source_device
+                    or int(file_stat.st_ino) != snapshot.source_inode
+                    or snapshot.source_device < 0
+                    or snapshot.source_inode < 0
+                    or snapshot.source_tail_start < 0
                     or snapshot.source_size < snapshot.source_tail_start
                     or int(file_stat.st_size) < snapshot.source_size
                 ):
@@ -176,6 +172,58 @@ def _open_media_resource_sync(
             if file is not None and not file.closed:
                 file.close()
     raise MediaResourceUnavailable('media resource is unavailable')
+
+
+def _open_candidate_file(path: str, expected_root: Optional[str]) -> BinaryIO:
+    read_flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0)
+    nofollow = getattr(os, 'O_NOFOLLOW', 0)
+    if expected_root is None:
+        resolved = os.path.realpath(path)
+        descriptor = os.open(resolved, read_flags | nofollow)
+        return _fdopen(descriptor)
+
+    resolved_root = os.path.realpath(expected_root)
+    root_descriptor = os.open(
+        resolved_root, read_flags | getattr(os, 'O_DIRECTORY', 0) | nofollow
+    )
+    current_descriptor = root_descriptor
+    try:
+        root_stat = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise MediaResourceUnavailable('media root is unavailable')
+        resolved_path = os.path.realpath(path)
+        normalized_root = os.path.normcase(os.path.abspath(resolved_root))
+        normalized_path = os.path.normcase(os.path.abspath(resolved_path))
+        if not _is_within_root(normalized_path, normalized_root):
+            raise MediaResourceUnavailable('media resource is outside its root')
+        relative = os.path.relpath(resolved_path, resolved_root)
+        components = tuple(part for part in relative.split(os.sep) if part)
+        if not components or any(part in ('.', '..') for part in components):
+            raise MediaResourceUnavailable('media resource is unavailable')
+        directory_flags = read_flags | getattr(os, 'O_DIRECTORY', 0) | nofollow
+        for component in components[:-1]:
+            next_descriptor = os.open(
+                component, directory_flags, dir_fd=current_descriptor
+            )
+            if current_descriptor != root_descriptor:
+                os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        descriptor = os.open(
+            components[-1], read_flags | nofollow, dir_fd=current_descriptor
+        )
+        return _fdopen(descriptor)
+    finally:
+        if current_descriptor != root_descriptor:
+            os.close(current_descriptor)
+        os.close(root_descriptor)
+
+
+def _fdopen(descriptor: int) -> BinaryIO:
+    try:
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _is_within_root(path: str, root: str) -> bool:
@@ -250,13 +298,18 @@ def build_media_response(
         length=length,
         range_kind=range_kind,
     )
-    return StreamingResponse(
-        iter(stream),
-        status_code=response_status,
-        media_type=resource.content_type,
-        headers=headers,
-        background=BackgroundTask(stream.finish, 'disconnect'),
-    )
+    try:
+        return _MediaStreamingResponse(
+            iter(stream),
+            media_stream=stream,
+            status_code=response_status,
+            media_type=resource.content_type,
+            headers=headers,
+            background=BackgroundTask(stream.finish, 'disconnect'),
+        )
+    except BaseException:
+        stream.finish('error')
+        raise
 
 
 def _normalized_route(request: Request) -> str:
@@ -379,6 +432,39 @@ class _MediaStream:
                     range=self._range_kind,
                     reason=reason,
                 )
+
+
+class _MediaStreamingResponse(StreamingResponse):
+    def __init__(
+        self,
+        content: Iterator[bytes],
+        *,
+        media_stream: _MediaStream,
+        status_code: int,
+        media_type: str,
+        headers: Mapping[str, str],
+        background: BackgroundTask,
+    ) -> None:
+        self._media_stream = media_stream
+        super().__init__(
+            content,
+            status_code=status_code,
+            media_type=media_type,
+            headers=headers,
+            background=background,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        except asyncio.CancelledError:
+            self._media_stream.finish('disconnect')
+            raise
+        except BaseException:
+            self._media_stream.finish('error')
+            raise
+        finally:
+            self._media_stream.finish('disconnect')
 
 
 def _audit_terminal(route: str, status: int, range_kind: str, reason: str) -> None:

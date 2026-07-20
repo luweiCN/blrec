@@ -1316,7 +1316,10 @@ async def create_recording_media_access(
         and resource.size is not None
     ):
         snapshot = FlvMediaSnapshot.frozen(
-            os.path.abspath(resource.path), resource.size
+            os.path.abspath(resource.path),
+            resource.size,
+            source_device=resource.source_device,
+            source_inode=resource.source_inode,
         )
         if active_recording_metadata_provider is not None:
             metadata = active_recording_metadata_provider(resource)
@@ -1400,6 +1403,12 @@ async def stream_recording_media(
         else VirtualMediaSnapshot(
             path=snapshot.path,
             source_size=snapshot.source_size,
+            source_device=(
+                -1 if snapshot.source_device is None else snapshot.source_device
+            ),
+            source_inode=(
+                -1 if snapshot.source_inode is None else snapshot.source_inode
+            ),
             source_tail_start=snapshot.source_tail_start,
             prefix=snapshot.prefix,
         )
@@ -1415,6 +1424,7 @@ async def stream_recording_media(
                 )
                 for candidate in descriptor.candidates
             ),
+            expected_root=descriptor.expected_root,
             snapshot=virtual_snapshot,
         )
     except MediaResourceUnavailable:

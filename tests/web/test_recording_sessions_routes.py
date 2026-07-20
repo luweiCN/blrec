@@ -244,6 +244,7 @@ class FakeContentReader:
             raise RecordingContentNotFound('录制分 P 不存在')
         if part_id == 409:
             raise RecordingContentUnavailable('该分 P 的本地视频不可用')
+        media_stat = self.media_path.stat()
         return MediaResource(
             path=str(self.media_path),
             size=10,
@@ -255,6 +256,8 @@ class FakeContentReader:
             remote_available=False,
             playback_mode='active_snapshot',
             index_state='pending',
+            source_device=media_stat.st_dev,
+            source_inode=media_stat.st_ino,
         )
 
     async def danmaku(self, part_id: int, *, cursor: int, limit: int) -> DanmakuPage:
@@ -1013,6 +1016,7 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
     class SnapshotContentReader(FakeContentReader):
         async def media(self, part_id: int) -> MediaResource:
             assert part_id == 2
+            media_stat = media.stat()
             return MediaResource(
                 path=str(media),
                 size=media.stat().st_size,
@@ -1024,6 +1028,8 @@ def test_media_access_builds_a_seekable_snapshot_for_a_growing_flv(
                 remote_available=False,
                 playback_mode='active_snapshot',
                 index_state='pending',
+                source_device=media_stat.st_dev,
+                source_inode=media_stat.st_ino,
             )
 
     recording_sessions.content_reader = SnapshotContentReader(media)
@@ -1085,6 +1091,7 @@ def test_media_access_freezes_a_growing_flv_when_index_creation_fails(
     class GrowingContentReader(FakeContentReader):
         async def media(self, part_id: int) -> MediaResource:
             assert part_id == 2
+            media_stat = media.stat()
             return MediaResource(
                 path=str(media),
                 size=media.stat().st_size,
@@ -1096,6 +1103,8 @@ def test_media_access_freezes_a_growing_flv_when_index_creation_fails(
                 remote_available=False,
                 playback_mode='active_snapshot',
                 index_state='pending',
+                source_device=media_stat.st_dev,
+                source_inode=media_stat.st_ino,
             )
 
     recording_sessions.content_reader = GrowingContentReader(media)
