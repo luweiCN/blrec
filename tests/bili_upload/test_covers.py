@@ -4,6 +4,7 @@ import os
 import stat
 import struct
 import threading
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -358,6 +359,89 @@ async def test_cleanup_rechecks_waiting_consumer_after_database_query(
 
 
 @pytest.mark.asyncio
+async def test_slow_cleanup_does_not_block_loop_or_rewrite_for_waiting_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    library = CoverLibrary(database, tmp_path / 'covers')
+    loop = asyncio.get_running_loop()
+    digest = hashlib.sha256(png()).hexdigest()
+    final_path = tmp_path / 'covers' / '{}.png'.format(digest)
+    unlink_started = asyncio.Event()
+    release_unlink = threading.Event()
+    second_inspection_started = asyncio.Event()
+    release_second_inspection = threading.Event()
+    heartbeat = asyncio.Event()
+    insert_calls = 0
+    inspection_calls = 0
+    store_results = []
+    original_execute = database.execute
+    original_inspect = CoverLibrary._inspect_content
+    original_store = CoverLibrary._store_file
+    original_unlink = Path.unlink
+
+    async def fail_first_insert(sql: str, parameters: Any = ()) -> int:
+        nonlocal insert_calls
+        if sql.startswith('INSERT INTO cover_assets'):
+            insert_calls += 1
+            if insert_calls == 1:
+                raise RuntimeError('database insert failed')
+        return await original_execute(sql, parameters)
+
+    def observed_inspection(content: bytes) -> Any:
+        nonlocal inspection_calls
+        inspection_calls += 1
+        if inspection_calls == 2:
+            loop.call_soon_threadsafe(second_inspection_started.set)
+            assert release_second_inspection.wait(5)
+        return original_inspect(content)
+
+    def observed_store(
+        cover_library: CoverLibrary, path: Path, content: bytes, digest: str
+    ) -> bool:
+        created = original_store(cover_library, path, content, digest)
+        store_results.append(created)
+        return created
+
+    def slow_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == final_path and not unlink_started.is_set():
+            loop.call_soon_threadsafe(unlink_started.set)
+            assert release_unlink.wait(5)
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(database, 'execute', fail_first_insert)
+    monkeypatch.setattr(
+        CoverLibrary, '_inspect_content', staticmethod(observed_inspection)
+    )
+    monkeypatch.setattr(CoverLibrary, '_store_file', observed_store)
+    monkeypatch.setattr(Path, 'unlink', slow_unlink)
+    first = asyncio.create_task(library.add(png(), 'first.png'))
+    await asyncio.wait_for(unlink_started.wait(), timeout=5)
+    release_timer = threading.Timer(0.25, release_unlink.set)
+    release_timer.start()
+    second = asyncio.create_task(library.add(png(), 'second.png'))
+    await asyncio.wait_for(second_inspection_started.wait(), timeout=5)
+    started = time.monotonic()
+    loop.call_later(0.01, heartbeat.set)
+    release_second_inspection.set()
+    try:
+        await asyncio.wait_for(heartbeat.wait(), timeout=1)
+    finally:
+        release_unlink.set()
+        release_timer.cancel()
+
+    assert time.monotonic() - started < 0.1
+    with pytest.raises(RuntimeError, match='database insert failed'):
+        await first
+    stored = await second
+    assert stored.id == 1
+    assert store_results == [True, False]
+    await library.shutdown()
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_database_error_after_commit_does_not_delete_referenced_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -426,21 +510,19 @@ async def test_database_failure_cleans_new_cover_file_off_event_loop(
     library = CoverLibrary(database, tmp_path / 'covers')
     cleanup_threads = []
     original_execute = database.execute
-    original_cleanup = CoverLibrary._cleanup_file_if_unshared
+    original_cleanup = CoverLibrary._cleanup_file
 
     async def fail_insert(sql: str, parameters: Any = ()) -> int:
         if sql.startswith('INSERT INTO cover_assets'):
             raise RuntimeError('database insert failed')
         return await original_execute(sql, parameters)
 
-    def observed_cleanup(path: Path, digest: str, digest_work: Any) -> None:
+    def observed_cleanup(path: Path, digest: str) -> None:
         cleanup_threads.append(threading.get_ident())
-        original_cleanup(path, digest, digest_work)
+        original_cleanup(path, digest)
 
     monkeypatch.setattr(database, 'execute', fail_insert)
-    monkeypatch.setattr(
-        CoverLibrary, '_cleanup_file_if_unshared', staticmethod(observed_cleanup)
-    )
+    monkeypatch.setattr(CoverLibrary, '_cleanup_file', staticmethod(observed_cleanup))
     with pytest.raises(RuntimeError, match='database insert failed'):
         await library.add(png(), 'cover.png')
 

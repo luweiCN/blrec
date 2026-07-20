@@ -406,6 +406,32 @@ async def test_concurrent_runtime_close_calls_share_cover_drain_before_database_
 
 
 @pytest.mark.asyncio
+async def test_runtime_closes_each_successive_start_generation(tmp_path: Path) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+    )
+
+    assert await runtime.start()
+    first_library = runtime.cover_library
+    assert first_library is not None
+    await runtime.close()
+    assert first_library._work._executor_closed is True
+
+    assert await runtime.start()
+    second_library = runtime.cover_library
+    assert second_library is not None
+    assert second_library is not first_library
+    await asyncio.gather(runtime.close(), runtime.close())
+
+    assert second_library._work._executor_closed is True
+    assert runtime.manager is None
+    assert runtime._database is None
+
+
+@pytest.mark.asyncio
 async def test_stopping_upload_worker_keeps_stop_event_visible_until_exit(
     tmp_path: Path,
 ) -> None:

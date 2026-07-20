@@ -140,7 +140,10 @@ class BiliAccountRuntime:
         self._deletion_task: Optional[asyncio.Task[Any]] = None
         self._deletion_stop_event: Optional[asyncio.Event] = None
         self._session_action_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._lifecycle_generation = 0
         self._close_task: Optional[asyncio.Task[None]] = None
+        self._close_generation: Optional[int] = None
         self._unavailable_reason: Optional[str] = (
             'Bilibili account management is not ready'
         )
@@ -238,6 +241,13 @@ class BiliAccountRuntime:
         return self._unavailable_reason
 
     async def start(self) -> bool:
+        async with self._lifecycle_lock:
+            close_task = self._close_task
+            if close_task is not None:
+                await asyncio.shield(close_task)
+            return await self._start_once()
+
+    async def _start_once(self) -> bool:
         if self._manager is not None:
             return True
         try:
@@ -473,6 +483,9 @@ class BiliAccountRuntime:
         await self._start_highlight_worker()
         await self._start_media_index_worker()
         await self._start_deletion_worker()
+        self._lifecycle_generation += 1
+        self._close_task = None
+        self._close_generation = None
         return True
 
     async def primary_cookie_header(self, url: str) -> Optional[str]:
@@ -638,10 +651,13 @@ class BiliAccountRuntime:
         raise UploadTaskActionRejected('不支持的场次操作')
 
     async def close(self) -> None:
-        close_task = self._close_task
-        if close_task is None:
-            close_task = asyncio.create_task(self._close_once())
-            self._close_task = close_task
+        async with self._lifecycle_lock:
+            generation = self._lifecycle_generation
+            close_task = self._close_task
+            if close_task is None or self._close_generation != generation:
+                close_task = asyncio.create_task(self._close_once())
+                self._close_task = close_task
+                self._close_generation = generation
         await asyncio.shield(close_task)
 
     async def _close_once(self) -> None:

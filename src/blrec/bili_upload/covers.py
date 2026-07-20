@@ -8,6 +8,7 @@ import struct
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
@@ -164,7 +165,6 @@ class _CoverInspection:
 @dataclass
 class _DigestWork:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    state_lock: threading.Lock = field(default_factory=threading.Lock)
     consumers: int = 0
     created_file: bool = False
 
@@ -186,6 +186,7 @@ class CoverLibrary:
         self._clock = clock
         self._work = CoverWorkCoordinator(max_workers=2, max_waiting=8)
         self._digest_work: Dict[str, _DigestWork] = {}
+        self._digest_state_lock = asyncio.Lock()
 
     async def add(self, content: bytes, filename: str) -> CoverAssetView:
         return await self._work.run(lambda: self._add_admitted(content, filename))
@@ -199,11 +200,11 @@ class CoverLibrary:
     async def _add_admitted(self, content: bytes, filename: str) -> CoverAssetView:
         inspection = await self._work.offload(partial(self._inspect_content, content))
         digest = inspection.digest
-        digest_work = self._digest_work.get(digest)
-        if digest_work is None:
-            digest_work = _DigestWork()
-            self._digest_work[digest] = digest_work
-        with digest_work.state_lock:
+        async with self._digest_state_lock:
+            digest_work = self._digest_work.get(digest)
+            if digest_work is None:
+                digest_work = _DigestWork()
+                self._digest_work[digest] = digest_work
             digest_work.consumers += 1
         try:
             async with digest_work.lock:
@@ -211,11 +212,11 @@ class CoverLibrary:
                     content, filename, inspection, digest_work
                 )
         finally:
-            with digest_work.state_lock:
+            async with self._digest_state_lock:
                 digest_work.consumers -= 1
                 unused = digest_work.consumers == 0
-            if unused:
-                self._digest_work.pop(digest, None)
+                if unused and self._digest_work.get(digest) is digest_work:
+                    self._digest_work.pop(digest, None)
 
     async def _add_by_digest(
         self,
@@ -240,7 +241,7 @@ class CoverLibrary:
             partial(self._store_file, path, content, digest)
         )
         if created:
-            with digest_work.state_lock:
+            async with self._digest_state_lock:
                 digest_work.created_file = True
         now = int(self._clock())
         try:
@@ -269,14 +270,14 @@ class CoverLibrary:
         if stored is None:
             await self._cleanup_failed_insert(path, digest, digest_work)
             raise StoredCoverUnavailable('stored cover metadata is unavailable')
-        with digest_work.state_lock:
+        async with self._digest_state_lock:
             digest_work.created_file = False
         return self._view(stored)
 
     async def _cleanup_failed_insert(
         self, path: Path, digest: str, digest_work: _DigestWork
     ) -> None:
-        with digest_work.state_lock:
+        async with self._digest_state_lock:
             if not digest_work.created_file or digest_work.consumers > 1:
                 return
         try:
@@ -287,15 +288,36 @@ class CoverLibrary:
         except Exception:
             return
         if referenced is not None:
-            with digest_work.state_lock:
+            async with self._digest_state_lock:
                 digest_work.created_file = False
             return
+        cleanup_link: Optional[Path] = None
         try:
-            await self._work.offload(
-                partial(self._cleanup_file_if_unshared, path, digest, digest_work)
+            cleanup_link = await self._work.offload(
+                partial(self._create_cleanup_link, path, digest)
             )
+            async with self._digest_state_lock:
+                if not digest_work.created_file or digest_work.consumers > 1:
+                    return
+            await self._work.offload(partial(self._cleanup_file, path, digest))
+            async with self._digest_state_lock:
+                restore = digest_work.created_file and digest_work.consumers > 1
+                if not restore:
+                    digest_work.created_file = False
+            if restore:
+                await self._work.offload(
+                    partial(self._restore_cleanup_link, cleanup_link, path, digest)
+                )
         except (InvalidCover, OSError, StoredCoverUnavailable):
             return
+        finally:
+            if cleanup_link is not None:
+                try:
+                    await self._work.offload(
+                        partial(self._discard_cleanup_link, cleanup_link)
+                    )
+                except OSError:
+                    pass
 
     @classmethod
     def _inspect_content(cls, content: bytes) -> _CoverInspection:
@@ -400,23 +422,43 @@ class CoverLibrary:
             temporary_path.unlink(missing_ok=True)
 
     @classmethod
-    def _cleanup_file_if_unshared(
-        cls, path: Path, digest: str, digest_work: _DigestWork
-    ) -> None:
-        cls._verify_file(path, digest)
-        with digest_work.state_lock:
-            if not digest_work.created_file or digest_work.consumers > 1:
-                return
-            path.unlink(missing_ok=True)
-            digest_work.created_file = False
-
-    @classmethod
     def _cleanup_file(cls, path: Path, digest: str) -> None:
         try:
             cls._verify_file(path, digest)
         except FileNotFoundError:
             return
         path.unlink(missing_ok=True)
+
+    @classmethod
+    def _create_cleanup_link(cls, path: Path, digest: str) -> Path:
+        cls._verify_file(path, digest)
+        for _attempt in range(8):
+            cleanup_link = path.with_name(
+                '.{}-{}.cleanup'.format(path.name, uuid.uuid4().hex)
+            )
+            try:
+                os.link(str(path), str(cleanup_link))
+            except FileExistsError:
+                continue
+            cls._fsync_directory(path.parent)
+            return cleanup_link
+        raise OSError('could not reserve a cover cleanup link')
+
+    @classmethod
+    def _restore_cleanup_link(cls, cleanup_link: Path, path: Path, digest: str) -> None:
+        try:
+            os.link(str(cleanup_link), str(path))
+        except FileExistsError:
+            cls._verify_file(path, digest)
+        cls._fsync_directory(path.parent)
+
+    @classmethod
+    def _discard_cleanup_link(cls, cleanup_link: Path) -> None:
+        try:
+            cleanup_link.unlink()
+        except FileNotFoundError:
+            return
+        cls._fsync_directory(cleanup_link.parent)
 
     @staticmethod
     def _verify_file(path: Path, digest: str) -> None:
