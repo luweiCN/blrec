@@ -171,6 +171,7 @@ class Application:
         try:
             self._setup()
             await self._start_webhooks()
+            await self._start_update_metadata()
             if self._control_operation_journal is not None:
                 from .task.control_reconciler import TaskControlReconciler
                 from .task.membership_reconciler import RoomMembershipReconciler
@@ -200,6 +201,15 @@ class Application:
             self._loading_task.add_done_callback(exception_callback)
             self._loading_task.add_done_callback(callback)
         except BaseException as error:
+            try:
+                await self._teardown_update_metadata()
+            except asyncio.CancelledError as cleanup_error:
+                raise cleanup_error from error
+            except BaseException as cleanup_error:
+                logger.error(
+                    'Update metadata teardown after launch failure: {}',
+                    type(cleanup_error).__name__,
+                )
             try:
                 await self._teardown_webhooks()
             except asyncio.CancelledError as cleanup_error:
@@ -233,6 +243,7 @@ class Application:
                     await self._loading_task
             except BaseException as error:
                 errors.append(error)
+        await _collect_teardown_error(self._teardown_update_metadata(), errors)
         await _collect_teardown_error(self._teardown_webhooks(), errors)
         membership = getattr(self, '_room_membership_reconciler', None)
         self._room_membership_reconciler = None
@@ -501,6 +512,12 @@ class Application:
     async def refresh_managed_cookie(self) -> None:
         await self._task_manager.refresh_managed_cookie()
 
+    async def get_latest_version_string(self, project_name: str) -> Optional[str]:
+        client = getattr(self, '_update_metadata_client', None)
+        if client is None:
+            raise RuntimeError('update metadata client is not ready')
+        return await client.get_latest_version_string(project_name)
+
     async def _load_tasks_and_controls(self) -> None:
         membership = self._room_membership_reconciler
         desired_absent = (
@@ -627,6 +644,7 @@ class Application:
         self._setup_exception_handler()
         self._setup_notifiers()
         self._setup_webhooks()
+        self._setup_update_metadata()
 
     def _setup_logger(self) -> None:
         self._settings_manager.apply_logging_settings()
@@ -688,6 +706,24 @@ class Application:
             if getattr(self, '_webhook_emitter', None) is emitter:
                 del self._webhook_emitter
         _raise_teardown_errors(errors)
+
+    def _setup_update_metadata(self) -> None:
+        from .update.helpers import UpdateMetadataClient
+
+        self._update_metadata_client = UpdateMetadataClient()
+
+    async def _start_update_metadata(self) -> None:
+        client = getattr(self, '_update_metadata_client', None)
+        if client is not None:
+            await client.start()
+
+    async def _teardown_update_metadata(self) -> None:
+        client = getattr(self, '_update_metadata_client', None)
+        if client is None:
+            return
+        await client.close()
+        if getattr(self, '_update_metadata_client', None) is client:
+            del self._update_metadata_client
 
     def _destroy(self) -> None:
         self._destroy_notifiers()

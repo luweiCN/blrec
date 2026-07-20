@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, List
+from typing import Any, List, Optional
 
 import pytest
 
@@ -35,6 +35,22 @@ class _FailingCloseEmitter(_Emitter):
         self._close_calls += 1
         if self._close_calls == 1:
             raise OSError('session close failed')
+
+
+class _UpdateClient:
+    def __init__(self, calls: List[str], value: Optional[str] = '4.0.0') -> None:
+        self._calls = calls
+        self._value = value
+
+    async def start(self) -> None:
+        self._calls.append('update.start')
+
+    async def close(self) -> None:
+        self._calls.append('update.close')
+
+    async def get_latest_version_string(self, _project_name: str) -> Optional[str]:
+        self._calls.append('update.get')
+        return self._value
 
 
 class _TaskManager:
@@ -95,11 +111,42 @@ async def test_launch_starts_webhook_session_before_subscribing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_launch_and_exit_own_update_metadata_client() -> None:
+    calls: List[str] = []
+    app = object.__new__(Application)
+    app._setup_logger = lambda: None
+    app._setup_live_status_monitor = _noop
+
+    def setup() -> None:
+        app._webhook_emitter = _Emitter(calls)
+        app._update_metadata_client = _UpdateClient(calls)
+
+    app._setup = setup
+    app._control_operation_journal = None
+
+    async def load() -> None:
+        return None
+
+    app._load_tasks_and_controls = load
+    await app.launch()
+    await asyncio.sleep(0)
+
+    assert calls[:3] == ['webhook.start', 'webhook.enable', 'update.start']
+    assert await app.get_latest_version_string('blrec') == '4.0.0'
+
+    await app._teardown_update_metadata()
+
+    assert calls[-2:] == ['update.get', 'update.close']
+    assert not hasattr(app, '_update_metadata_client')
+
+
+@pytest.mark.asyncio
 async def test_exit_disables_webhooks_before_drain_and_deletes_emitter() -> None:
     calls: List[str] = []
     app = object.__new__(Application)
     app._task_manager = _TaskManager(calls)
     app._webhook_emitter = _Emitter(calls)
+    app._update_metadata_client = _UpdateClient(calls)
     app._live_status_coordinator = None
     app._live_status_session = None
     app._network_session_pool = None
@@ -108,6 +155,7 @@ async def test_exit_disables_webhooks_before_drain_and_deletes_emitter() -> None
     await app._exit()
 
     assert calls == [
+        'update.close',
         'webhook.disable',
         'webhook.close',
         'tasks.stop',
@@ -115,6 +163,7 @@ async def test_exit_disables_webhooks_before_drain_and_deletes_emitter() -> None
         'application.destroy',
     ]
     assert not hasattr(app, '_webhook_emitter')
+    assert not hasattr(app, '_update_metadata_client')
 
 
 @pytest.mark.asyncio
