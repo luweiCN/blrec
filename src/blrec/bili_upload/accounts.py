@@ -5,7 +5,7 @@ import hashlib
 import secrets
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -32,11 +32,13 @@ from .credentials import CredentialStore
 from .crypto import CookieRecord, CredentialBundle, CredentialCipher
 from .database import BiliUploadDatabase
 from .errors import (
+    AccountWriteBusy,
     BiliApiError,
     DefinitelyNotSent,
     ProtocolContractError,
     RemoteOutcomeUnknown,
 )
+from .protocol import protocol_request_deadline
 from .signing import WebSessionBuilder
 
 __all__ = (
@@ -140,8 +142,22 @@ class _PerAccountGate:
         self._lock = lock
 
     @asynccontextmanager
-    async def hold(self, expected_credential_version: int) -> AsyncIterator[None]:
-        async with self._lock:
+    async def hold(
+        self,
+        expected_credential_version: int,
+        *,
+        wait_timeout_seconds: Optional[float] = None,
+    ) -> AsyncIterator[None]:
+        try:
+            if wait_timeout_seconds is None:
+                await self._lock.acquire()
+            else:
+                await asyncio.wait_for(
+                    self._lock.acquire(), timeout=max(0.0, wait_timeout_seconds)
+                )
+        except asyncio.TimeoutError:
+            raise AccountWriteBusy('account write is busy') from None
+        try:
             row = await self._database.fetchone(
                 'SELECT state,credential_version FROM bili_accounts WHERE id=?',
                 (self._account_id,),
@@ -153,6 +169,8 @@ class _PerAccountGate:
             if int(row['credential_version']) != expected_credential_version:
                 raise CredentialVersionChanged('credential version changed')
             yield
+        finally:
+            self._lock.release()
 
 
 class AccountWriteGate:
@@ -181,6 +199,7 @@ class AccountManager:
         database: BiliUploadDatabase,
         cipher: CredentialCipher,
         clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         qr_ttl_seconds: int = 180,
         poll_interval_seconds: float = 1,
@@ -192,6 +211,7 @@ class AccountManager:
         self._database = database
         self._cipher = cipher
         self._clock = clock
+        self._monotonic_clock = monotonic_clock
         self._sleeper = sleeper
         self._qr_ttl_seconds = qr_ttl_seconds
         self._poll_interval_seconds = poll_interval_seconds
@@ -520,40 +540,91 @@ class AccountManager:
             previous = await self._store.get(account_id=account_id, cipher=self._cipher)
             return await self._refresh_locked(account_id, row, previous)
 
-    async def check_account_renewal(self, account_id: int) -> RenewalCheckResult:
-        async with self._auth_failure_lock:
-            return await self._check_account_renewal(account_id)
+    async def check_account_renewal(
+        self,
+        account_id: int,
+        *,
+        admission_timeout_seconds: Optional[float] = None,
+        operation_timeout_seconds: Optional[float] = None,
+    ) -> RenewalCheckResult:
+        admission_deadline = (
+            None
+            if admission_timeout_seconds is None
+            else self._monotonic_clock() + max(0.0, admission_timeout_seconds)
+        )
+        try:
+            if admission_deadline is None:
+                await self._auth_failure_lock.acquire()
+            else:
+                await asyncio.wait_for(
+                    self._auth_failure_lock.acquire(),
+                    timeout=max(0.0, admission_deadline - self._monotonic_clock()),
+                )
+        except asyncio.TimeoutError:
+            raise AccountWriteBusy('account write is busy') from None
+        try:
+            return await self._check_account_renewal(
+                account_id,
+                gate_admission_deadline=admission_deadline,
+                operation_timeout_seconds=operation_timeout_seconds,
+            )
+        finally:
+            self._auth_failure_lock.release()
 
-    async def _check_account_renewal(self, account_id: int) -> RenewalCheckResult:
+    async def _check_account_renewal(
+        self,
+        account_id: int,
+        *,
+        gate_admission_deadline: Optional[float] = None,
+        operation_timeout_seconds: Optional[float] = None,
+    ) -> RenewalCheckResult:
         row = await self._account_row(account_id)
         version = int(row['credential_version'])
         gate = self._write_gates.for_account(account_id)
-        async with gate.hold(version):
-            bundle = await self._store.get(account_id=account_id, cipher=self._cipher)
-            try:
-                identity = await self._validate_identity_with_retry(bundle)
-            except AccountIdentityMismatch:
-                await self._mark_credential_invalid(account_id)
-                raise
-            except BiliApiError as error:
-                if error.code == -101:
-                    await self._mark_credential_invalid(account_id)
-                raise
-            due = bundle.expires_at - int(self._clock()) < self._REFRESH_WINDOW_SECONDS
-            if due or identity.refresh_requested:
-                refreshed_version = await self._refresh_locked(account_id, row, bundle)
-                return RenewalCheckResult(
-                    credential_version=refreshed_version, refreshed=True
-                )
-            await self._store.update_metadata(
-                account_id=account_id,
-                account_uid=bundle.mid,
-                display_name=identity.display_name,
-                avatar_url=identity.avatar_url,
-                credential_expires_at=bundle.expires_at,
-                now=int(self._clock()),
+        gate_timeout = (
+            None
+            if gate_admission_deadline is None
+            else max(0.0, gate_admission_deadline - self._monotonic_clock())
+        )
+        async with gate.hold(version, wait_timeout_seconds=gate_timeout):
+            deadline = (
+                nullcontext()
+                if operation_timeout_seconds is None
+                else protocol_request_deadline(operation_timeout_seconds)
             )
-            return RenewalCheckResult(credential_version=version, refreshed=False)
+            with deadline:
+                bundle = await self._store.get(
+                    account_id=account_id, cipher=self._cipher
+                )
+                try:
+                    identity = await self._validate_identity_with_retry(bundle)
+                except AccountIdentityMismatch:
+                    await self._mark_credential_invalid(account_id)
+                    raise
+                except BiliApiError as error:
+                    if error.code == -101:
+                        await self._mark_credential_invalid(account_id)
+                    raise
+                due = (
+                    bundle.expires_at - int(self._clock())
+                    < self._REFRESH_WINDOW_SECONDS
+                )
+                if due or identity.refresh_requested:
+                    refreshed_version = await self._refresh_locked(
+                        account_id, row, bundle
+                    )
+                    return RenewalCheckResult(
+                        credential_version=refreshed_version, refreshed=True
+                    )
+                await self._store.update_metadata(
+                    account_id=account_id,
+                    account_uid=bundle.mid,
+                    display_name=identity.display_name,
+                    avatar_url=identity.avatar_url,
+                    credential_expires_at=bundle.expires_at,
+                    now=int(self._clock()),
+                )
+                return RenewalCheckResult(credential_version=version, refreshed=False)
 
     async def refresh_due_accounts(self) -> List[int]:
         now = int(self._clock())

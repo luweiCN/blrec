@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
 from unittest.mock import AsyncMock, Mock
@@ -21,6 +23,7 @@ from blrec.bili_upload.credentials import CredentialStore
 from blrec.bili_upload.crypto import CookieRecord, CredentialBundle, CredentialCipher
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import (
+    AccountWriteBusy,
     BiliApiError,
     DefinitelyNotSent,
     RemoteOutcomeUnknown,
@@ -35,6 +38,17 @@ class FakeClock:
         return float(self.value)
 
     def advance(self, seconds: int) -> None:
+        self.value += seconds
+
+
+class FakeMonotonic:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
         self.value += seconds
 
 
@@ -272,6 +286,8 @@ async def components(
     clock: FakeClock,
     *,
     on_primary_credential_changed: Optional[Any] = None,
+    write_gates: Optional[AccountWriteGate] = None,
+    monotonic_clock: Optional[Any] = None,
 ):
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
@@ -284,6 +300,8 @@ async def components(
         cipher=cipher,
         clock=clock,
         sleeper=never_wake,
+        write_gates=write_gates,
+        monotonic_clock=monotonic_clock or time.monotonic,
         on_primary_credential_changed=on_primary_credential_changed,
     )
     return database, store, cipher, manager
@@ -1592,6 +1610,113 @@ async def test_account_gate_serializes_writes_and_rechecks_version(
         with pytest.raises(AccountPaused):
             async with gate.hold(1):
                 pass
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_account_gate_times_out_without_skipping_post_acquire_checks(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, _cipher, manager = await components(tmp_path, protocol, clock)
+    gate = AccountWriteGate(database).for_account(1)
+    try:
+        await seed_account(store, _cipher, expires_at=clock.value + 1000)
+
+        async with gate.hold(1):
+            started = time.monotonic()
+            with pytest.raises(AccountWriteBusy, match='busy'):
+                async with gate.hold(1, wait_timeout_seconds=0.01):
+                    pass
+            assert time.monotonic() - started < 0.1
+
+        with pytest.raises(CredentialVersionChanged):
+            async with gate.hold(2, wait_timeout_seconds=0.01):
+                pass
+    finally:
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_ui_renewal_uses_one_admission_budget_while_background_waits(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    monotonic = FakeMonotonic()
+    protocol = ScriptedProtocol()
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    write_gates = AccountWriteGate(database)
+    store = CredentialStore(database)
+    cipher = CredentialCipher({'current': b'k' * 32}, current_key_id='current')
+    manager = AccountManager(
+        protocol,
+        store,
+        database=database,
+        cipher=cipher,
+        clock=clock,
+        sleeper=never_wake,
+        write_gates=write_gates,
+        monotonic_clock=monotonic,
+    )
+    gate = write_gates.for_account(1)
+    try:
+        await seed_account(store, cipher, expires_at=clock.value + 73 * 3600)
+        async with gate.hold(1):
+            await manager._auth_failure_lock.acquire()
+            ui = asyncio.create_task(
+                manager.check_account_renewal(
+                    1, admission_timeout_seconds=0.25, operation_timeout_seconds=60
+                )
+            )
+            await asyncio.sleep(0)
+            monotonic.advance(0.20)
+            manager._auth_failure_lock.release()
+            started = time.monotonic()
+            with pytest.raises(AccountWriteBusy):
+                await ui
+            assert time.monotonic() - started < 0.15
+
+            background = asyncio.create_task(manager.check_account_renewal(1))
+            await asyncio.sleep(0)
+            assert not background.done()
+
+        result = await asyncio.wait_for(background, timeout=1)
+        assert result.refreshed is False
+    finally:
+        if manager._auth_failure_lock.locked():
+            manager._auth_failure_lock.release()
+        await manager.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_renewal_check_installs_one_operation_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock()
+    protocol = ScriptedProtocol()
+    database, store, _cipher, manager = await components(tmp_path, protocol, clock)
+    deadlines = []
+
+    @contextmanager
+    def capture_deadline(seconds: float):
+        deadlines.append(seconds)
+        yield
+
+    monkeypatch.setattr(accounts_module, 'protocol_request_deadline', capture_deadline)
+    try:
+        await seed_account(store, _cipher, expires_at=clock.value + 73 * 3600)
+
+        await manager.check_account_renewal(
+            1, admission_timeout_seconds=0.25, operation_timeout_seconds=0.01
+        )
+
+        assert deadlines == [0.01]
     finally:
         await manager.close()
         await database.close()

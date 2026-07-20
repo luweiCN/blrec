@@ -1,16 +1,19 @@
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 import pytest
 
+import blrec.bili_upload.collections as collections_module
+from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.collections import (
     CollectionManager,
     CollectionUnavailable,
     InvalidCollectionRequest,
 )
 from blrec.bili_upload.database import BiliUploadDatabase
-from blrec.bili_upload.errors import RemoteOutcomeUnknown
+from blrec.bili_upload.errors import AccountWriteBusy, RemoteOutcomeUnknown
 
 
 def response(*, include_created: bool = False) -> Mapping[str, Any]:
@@ -99,12 +102,18 @@ def manager(
     resolver: FakeCoverResolver,
     *,
     clock: Callable[[], float] = lambda: 1000,
+    account_gates: Optional[AccountWriteGate] = None,
 ) -> CollectionManager:
     async def load_bundle(account_id: int) -> str:
         return 'bundle-{}'.format(account_id)
 
     return CollectionManager(
-        database, protocol, resolver, bundle_loader=load_bundle, clock=clock
+        database,
+        protocol,
+        resolver,
+        bundle_loader=load_bundle,
+        account_gates=account_gates or AccountWriteGate(database),
+        clock=clock,
     )
 
 
@@ -161,6 +170,79 @@ class PreCreateListProtocol(FakeProtocol):
             self.first_started.set()
             await self.first_release.wait()
         return snapshot
+
+    async def create_collection(self, bundle: Any, **values: Any) -> Mapping[str, Any]:
+        result = await super().create_collection(bundle, **values)
+        self.create_finished.set()
+        return result
+
+
+class BlockingWriteProtocol(FakeProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = asyncio.Event()
+        self.other_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+        self.entered_bundles = []
+        self.active_by_bundle = {}
+        self.max_active_by_bundle = {}
+        self.active_total = 0
+        self.max_active_total = 0
+
+    async def create_collection(self, bundle: Any, **values: Any) -> Mapping[str, Any]:
+        self.entered_bundles.append(bundle)
+        self.active_by_bundle[bundle] = self.active_by_bundle.get(bundle, 0) + 1
+        self.max_active_by_bundle[bundle] = max(
+            self.max_active_by_bundle.get(bundle, 0), self.active_by_bundle[bundle]
+        )
+        self.active_total += 1
+        self.max_active_total = max(self.max_active_total, self.active_total)
+        try:
+            if bundle == 'bundle-1' and self.entered_bundles.count(bundle) == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            if bundle == 'bundle-2':
+                self.other_started.set()
+            return await super().create_collection(bundle, **values)
+        finally:
+            self.active_by_bundle[bundle] -= 1
+            self.active_total -= 1
+
+
+class PostCreateRaceProtocol(FakeProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = asyncio.Event()
+        self.first_release = asyncio.Event()
+        self.third_started = asyncio.Event()
+        self.release_stale = asyncio.Event()
+        self.create_finished = asyncio.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def list_collections(self, bundle: Any) -> Mapping[str, Any]:
+        self.list_calls.append(bundle)
+        call = len(self.list_calls)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if call == 1:
+                self.first_started.set()
+                await self.first_release.wait()
+                return response(include_created=False)
+            if call == 2:
+                for _index in range(100):
+                    if self.third_started.is_set():
+                        await self.release_stale.wait()
+                        return response(include_created=False)
+                    await asyncio.sleep(0)
+                return response(include_created=True)
+            if call == 3:
+                self.third_started.set()
+                return response(include_created=True)
+            raise AssertionError('unexpected collection list call')
+        finally:
+            self.in_flight -= 1
 
     async def create_collection(self, bundle: Any, **values: Any) -> Mapping[str, Any]:
         result = await super().create_collection(bundle, **values)
@@ -392,6 +474,108 @@ async def test_collection_create_uploads_cover_and_refreshes_new_default_section
 
 
 @pytest.mark.asyncio
+async def test_collection_create_uses_timed_account_gate_admission(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        gates = AccountWriteGate(database)
+        protocol = FakeProtocol()
+        resolver = FakeCoverResolver()
+        catalog = manager(database, protocol, resolver, account_gates=gates)
+
+        async with gates.for_account(1).hold(1):
+            with pytest.raises(AccountWriteBusy, match='busy'):
+                await catalog.create(
+                    'fixed',
+                    1,
+                    title='新合集',
+                    description='',
+                    cover_asset_id=7,
+                    admission_timeout_seconds=0.01,
+                    operation_timeout_seconds=60,
+                )
+
+        assert resolver.calls == []
+        assert protocol.create_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_collection_create_serializes_one_account_but_not_another(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        gates = AccountWriteGate(database)
+        protocol = BlockingWriteProtocol()
+        catalog = manager(database, protocol, FakeCoverResolver(), account_gates=gates)
+        first = asyncio.create_task(
+            catalog.create(
+                'fixed', 1, title='账号一 A', description='', cover_asset_id=7
+            )
+        )
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+        second = asyncio.create_task(
+            catalog.create(
+                'fixed', 1, title='账号一 B', description='', cover_asset_id=7
+            )
+        )
+        other = asyncio.create_task(
+            catalog.create('fixed', 2, title='账号二', description='', cover_asset_id=7)
+        )
+
+        await asyncio.wait_for(protocol.other_started.wait(), timeout=1)
+        await other
+        assert protocol.entered_bundles.count('bundle-1') == 1
+        assert protocol.max_active_total == 2
+        protocol.release_first.set()
+        await asyncio.gather(first, second)
+
+        assert protocol.entered_bundles.count('bundle-1') == 2
+        assert protocol.max_active_by_bundle['bundle-1'] == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_collection_create_installs_one_operation_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    deadlines = []
+
+    @contextmanager
+    def capture_deadline(seconds: float):
+        deadlines.append(seconds)
+        yield
+
+    monkeypatch.setattr(
+        collections_module, 'protocol_request_deadline', capture_deadline
+    )
+    try:
+        await seed_accounts(database)
+        await manager(database, FakeProtocol(), FakeCoverResolver()).create(
+            'fixed',
+            1,
+            title='新合集',
+            description='',
+            cover_asset_id=7,
+            operation_timeout_seconds=0.01,
+        )
+
+        assert deadlines == [0.01]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_collection_create_starts_a_new_refresh_after_an_older_list(
     tmp_path: Path,
 ) -> None:
@@ -422,6 +606,56 @@ async def test_collection_create_starts_a_new_refresh_after_an_older_list(
         assert [item.id for item in cached.collections] == [10, 20]
         assert len(protocol.list_calls) == 2
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_post_create_generation_cannot_be_overwritten_by_an_older_force(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_accounts(database)
+        protocol = PostCreateRaceProtocol()
+        catalog = manager(database, protocol, FakeCoverResolver())
+        old_list = asyncio.create_task(catalog.list('fixed', 1, force_refresh=True))
+        await asyncio.wait_for(protocol.first_started.wait(), timeout=1)
+        first_refresh = catalog._refresh_tasks[(1, 1)].task
+        original_resolve = catalog._resolve_account
+        resolved_account = await original_resolve('fixed', 1)
+
+        async def immediate_resolve(mode: str, account_id: int) -> Any:
+            return resolved_account
+
+        catalog._resolve_account = immediate_resolve
+        forced_tasks = []
+
+        def start_forced_list(_completed: Any) -> None:
+            forced_tasks.append(
+                asyncio.create_task(catalog.list('fixed', 1, force_refresh=True))
+            )
+
+        first_refresh.add_done_callback(start_forced_list)
+        creation = asyncio.create_task(
+            catalog.create('fixed', 1, title='新合集', description='', cover_asset_id=7)
+        )
+        await asyncio.wait_for(protocol.create_finished.wait(), timeout=1)
+        await asyncio.sleep(0)
+        protocol.first_release.set()
+        created = await asyncio.wait_for(creation, timeout=1)
+        protocol.release_stale.set()
+        await asyncio.wait_for(old_list, timeout=1)
+        await asyncio.wait_for(forced_tasks[0], timeout=1)
+
+        cached = await catalog.list('fixed', 1)
+        assert created.collection.sections[0].id == 21
+        assert [item.id for item in cached.collections] == [10, 20]
+        assert len(protocol.list_calls) == 2
+        assert protocol.max_in_flight == 1
+    finally:
+        protocol.first_release.set()
+        protocol.release_stale.set()
         await database.close()
 
 

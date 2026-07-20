@@ -7,8 +7,10 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from blrec.logging.audit import audit
 
+from .accounts import AccountWriteGate
 from .database import BiliUploadDatabase
 from .errors import BiliApiError, RemoteOutcomeUnknown
+from .protocol import protocol_request_deadline
 
 __all__ = ('CollectionPublisher',)
 
@@ -20,6 +22,7 @@ class _InvalidCollectionJob(RuntimeError):
 @dataclass(frozen=True)
 class _CollectionJob:
     account_id: int
+    credential_version: int
     aid: int
     cid: int
     section_id: int
@@ -33,11 +36,15 @@ class CollectionPublisher:
         protocol: Any,
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
+        account_gates: AccountWriteGate,
+        operation_timeout_seconds: float = 60.0,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._database = database
         self._protocol = protocol
         self._bundle_loader = bundle_loader
+        self._account_gates = account_gates
+        self._operation_timeout_seconds = operation_timeout_seconds
         self._clock = clock
 
     async def recover_interrupted(self) -> int:
@@ -77,14 +84,17 @@ class CollectionPublisher:
 
         try:
             job = await self._load(job_id)
-            bundle = await self._bundle_loader(job.account_id)
-            await self._protocol.add_collection_episode(
-                bundle,
-                section_id=job.section_id,
-                aid=job.aid,
-                cid=job.cid,
-                title=job.title,
-            )
+            gate = self._account_gates.for_account(job.account_id)
+            async with gate.hold(job.credential_version):
+                with protocol_request_deadline(self._operation_timeout_seconds):
+                    bundle = await self._bundle_loader(job.account_id)
+                    await self._protocol.add_collection_episode(
+                        bundle,
+                        section_id=job.section_id,
+                        aid=job.aid,
+                        cid=job.cid,
+                        title=job.title,
+                    )
         except Exception as error:
             await self._fail(job_id, self._public_error(error))
             raise
@@ -107,10 +117,12 @@ class CollectionPublisher:
 
     async def _load(self, job_id: int) -> _CollectionJob:
         row = await self._database.fetchone(
-            'SELECT job.account_id,job.aid,job.policy_snapshot_json,part.cid '
+            'SELECT job.account_id,job.aid,job.policy_snapshot_json,part.cid,'
+            'account.state AS account_state,account.credential_version '
             'FROM upload_jobs job LEFT JOIN upload_parts part '
             'ON part.id=(SELECT first_part.id FROM upload_parts first_part '
             'WHERE first_part.job_id=job.id ORDER BY first_part.part_index LIMIT 1) '
+            'JOIN bili_accounts account ON account.id=job.account_id '
             'WHERE job.id=?',
             (job_id,),
         )
@@ -122,7 +134,10 @@ class CollectionPublisher:
             raise _InvalidCollectionJob('upload policy snapshot is invalid') from None
         if not isinstance(snapshot, Mapping) or snapshot.get('format_version') != 4:
             raise _InvalidCollectionJob('upload policy snapshot is invalid')
+        if str(row['account_state']) != 'active':
+            raise _InvalidCollectionJob('upload account is not active')
         account_id = self._positive_int(row['account_id'])
+        credential_version = self._positive_int(row['credential_version'])
         aid = self._positive_int(row['aid'])
         cid = self._positive_int(row['cid'])
         season_id = self._positive_int(snapshot.get('collection_season_id'))
@@ -130,6 +145,7 @@ class CollectionPublisher:
         title = snapshot.get('title')
         if (
             account_id is None
+            or credential_version is None
             or snapshot.get('account_id') != account_id
             or aid is None
             or cid is None
@@ -139,7 +155,9 @@ class CollectionPublisher:
             or not title.strip()
         ):
             raise _InvalidCollectionJob('collection job is incomplete')
-        return _CollectionJob(account_id, aid, cid, section_id, title.strip())
+        return _CollectionJob(
+            account_id, credential_version, aid, cid, section_id, title.strip()
+        )
 
     async def _fail(self, job_id: int, message: str) -> None:
         updated = await self._database.execute(

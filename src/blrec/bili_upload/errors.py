@@ -1,11 +1,16 @@
 from typing import Any, Mapping, Optional
 
 __all__ = (
+    'AccountWriteBusy',
     'BiliApiError',
     'DefinitelyNotSent',
     'ProtocolContractError',
     'RemoteOutcomeUnknown',
 )
+
+
+class AccountWriteBusy(RuntimeError):
+    pass
 
 
 class ProtocolContractError(RuntimeError):

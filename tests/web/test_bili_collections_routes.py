@@ -13,6 +13,7 @@ from blrec.bili_upload.collections import (
     CollectionView,
     InvalidCollectionRequest,
 )
+from blrec.bili_upload.errors import AccountWriteBusy
 from blrec.web import security
 from blrec.web.routers import bili_collections
 
@@ -35,6 +36,7 @@ class FakeManager:
     request: Optional[tuple] = None
     invalid: bool = False
     unavailable: bool = False
+    busy: bool = False
 
     async def list(
         self,
@@ -55,6 +57,8 @@ class FakeManager:
             raise InvalidCollectionRequest('invalid request')
         if self.unavailable:
             raise CollectionUnavailable('collections unavailable')
+        if self.busy:
+            raise AccountWriteBusy('account write is busy')
         self.request = ('create', account_mode, account_id, values)
         return CollectionCreationView(account_id=7, collection=collection())
 
@@ -137,8 +141,35 @@ def test_create_collection_forwards_cover_asset(
         'create',
         'primary',
         None,
-        {'title': '新合集', 'description': '简介', 'cover_asset_id': 8},
+        {
+            'title': '新合集',
+            'description': '简介',
+            'cover_asset_id': 8,
+            'admission_timeout_seconds': 0.25,
+            'operation_timeout_seconds': 60,
+        },
     )
+
+
+def test_create_collection_maps_busy_admission_to_retryable_conflict(
+    client: TestClient, manager: FakeManager
+) -> None:
+    manager.busy = True
+
+    response = client.post(
+        '/api/v1/bili-collections',
+        headers=headers(),
+        json={
+            'accountMode': 'primary',
+            'accountId': None,
+            'title': '新合集',
+            'description': '',
+            'coverAssetId': 8,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == '账号正在执行其他写操作，请稍后重试'
 
 
 @pytest.mark.parametrize(

@@ -5,9 +5,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
+from .accounts import AccountWriteGate
 from .covers import CoverAssetNotFound, CoverResolver, StoredCoverUnavailable
 from .database import BiliUploadDatabase
 from .errors import RemoteOutcomeUnknown
+from .protocol import protocol_request_deadline
 
 __all__ = (
     'CollectionCatalogView',
@@ -85,17 +87,20 @@ class CollectionManager:
         cover_resolver: CoverResolver,
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
+        account_gates: AccountWriteGate,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._database = database
         self._protocol = protocol
         self._cover_resolver = cover_resolver
         self._bundle_loader = bundle_loader
+        self._account_gates = account_gates
         self._clock = clock
         self._catalogs: Dict[Tuple[int, int], _CatalogEntry] = {}
         self._refresh_tasks: Dict[Tuple[int, int], _RefreshGeneration] = {}
         self._completed_refreshes: Dict[Tuple[int, int], _RefreshGeneration] = {}
         self._cache_epochs: Dict[Tuple[int, int], int] = {}
+        self._generation_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
 
     async def list(
         self,
@@ -107,18 +112,21 @@ class CollectionManager:
         requested_at = time.monotonic()
         account = await self._resolve_account(account_mode, account_id)
         key = (account.id, account.credential_version)
-        task = self._refresh_for_request(key, requested_at)
-        if task is not None:
-            return await asyncio.shield(task)
-        current = self._catalogs.get(key)
-        if (
-            not force_refresh
-            and current is not None
-            and self._clock() < current.fresh_until
-        ):
-            return current.catalog
-        task = self._start_refresh(key, account, stale=current)
+        async with self._generation_lock(key):
+            task = self._refresh_for_request(key, requested_at)
+            if task is None:
+                current = self._catalogs.get(key)
+                if (
+                    not force_refresh
+                    and current is not None
+                    and self._clock() < current.fresh_until
+                ):
+                    return current.catalog
+                task = self._start_refresh(key, account, stale=current)
         return await asyncio.shield(task)
+
+    def _generation_lock(self, key: Tuple[int, int]) -> asyncio.Lock:
+        return self._generation_locks.setdefault(key, asyncio.Lock())
 
     def _refresh_for_request(
         self, key: Tuple[int, int], requested_at: float
@@ -190,6 +198,8 @@ class CollectionManager:
         title: str,
         description: str,
         cover_asset_id: int,
+        admission_timeout_seconds: Optional[float] = None,
+        operation_timeout_seconds: float = 60.0,
     ) -> CollectionCreationView:
         title = title.strip()
         description = description.strip()
@@ -200,6 +210,26 @@ class CollectionManager:
         if type(cover_asset_id) is not int or cover_asset_id <= 0:
             raise InvalidCollectionRequest('collection cover is required')
         account = await self._resolve_account(account_mode, account_id)
+        gate = self._account_gates.for_account(account.id)
+        async with gate.hold(
+            account.credential_version, wait_timeout_seconds=admission_timeout_seconds
+        ):
+            with protocol_request_deadline(operation_timeout_seconds):
+                return await self._create_locked(
+                    account,
+                    title=title,
+                    description=description,
+                    cover_asset_id=cover_asset_id,
+                )
+
+    async def _create_locked(
+        self,
+        account: _ResolvedAccount,
+        *,
+        title: str,
+        description: str,
+        cover_asset_id: int,
+    ) -> CollectionCreationView:
         key = (account.id, account.credential_version)
         try:
             cover_url = await self._cover_resolver.remote_url(
@@ -216,10 +246,7 @@ class CollectionManager:
                 bundle, title=title, description=description, cover_url=cover_url
             )
         except RemoteOutcomeUnknown:
-            self._catalogs.pop(key, None)
-            self._cache_epochs[key] = self._cache_epochs.get(key, 0) + 1
-            self._refresh_tasks.pop(key, None)
-            self._completed_refreshes.pop(key, None)
+            self._supersede_catalog_generation(key)
             raise CollectionUnavailable(
                 'collection creation result is unknown; refresh before trying again'
             ) from None
@@ -229,18 +256,19 @@ class CollectionManager:
         if type(collection_id) is not int or collection_id <= 0:
             raise CollectionUnavailable('collection creation response is incomplete')
 
-        previous = self._refresh_tasks.get(key)
-        if previous is not None:
-            try:
-                await asyncio.shield(previous.task)
-            except asyncio.CancelledError:
-                if not previous.task.cancelled():
-                    raise
-            except Exception:
-                pass
-        stale = self._catalogs.pop(key, None)
-        try:
+        async with self._generation_lock(key):
+            previous = self._refresh_tasks.get(key)
+            if previous is not None:
+                try:
+                    await asyncio.shield(previous.task)
+                except asyncio.CancelledError:
+                    if not previous.task.cancelled():
+                        raise
+                except Exception:
+                    pass
+            stale = self._supersede_catalog_generation(key)
             task = self._start_refresh(key, account, stale=stale)
+        try:
             catalog = await asyncio.shield(task)
             collections = catalog.collections
         except CollectionUnavailable:
@@ -265,6 +293,15 @@ class CollectionManager:
                 sections=(),
             )
         return CollectionCreationView(account_id=account.id, collection=created)
+
+    def _supersede_catalog_generation(
+        self, key: Tuple[int, int]
+    ) -> Optional[_CatalogEntry]:
+        stale = self._catalogs.pop(key, None)
+        self._cache_epochs[key] = self._cache_epochs.get(key, 0) + 1
+        self._refresh_tasks.pop(key, None)
+        self._completed_refreshes.pop(key, None)
+        return stale
 
     async def _resolve_account(
         self, account_mode: str, account_id: Optional[int]

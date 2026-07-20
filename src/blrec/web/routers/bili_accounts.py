@@ -23,7 +23,11 @@ from blrec.bili_upload.accounts import (
     QrSessionNotFound,
     QrSessionView,
 )
-from blrec.bili_upload.errors import DefinitelyNotSent, RemoteOutcomeUnknown
+from blrec.bili_upload.errors import (
+    AccountWriteBusy,
+    DefinitelyNotSent,
+    RemoteOutcomeUnknown,
+)
 from blrec.utils.string import camel_case
 
 from .. import security
@@ -250,7 +254,14 @@ async def refresh_account(
     account_manager: AccountManager = Depends(get_account_manager),
 ) -> RefreshResponse:
     try:
-        result = await account_manager.check_account_renewal(account_id)
+        result = await account_manager.check_account_renewal(
+            account_id, admission_timeout_seconds=0.25, operation_timeout_seconds=60
+        )
+    except AccountWriteBusy:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='账号正在执行其他写操作，请稍后重试',
+        ) from None
     except AccountNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail='Bilibili account not found'

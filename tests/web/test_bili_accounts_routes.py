@@ -20,6 +20,7 @@ from blrec.bili_upload.accounts import (
     QrSessionNotFound,
     QrSessionView,
 )
+from blrec.bili_upload.errors import AccountWriteBusy
 from blrec.web import security
 from blrec.web.routers import bili_accounts
 
@@ -39,6 +40,8 @@ class FakeAccountManager:
     status_calls: int = 0
     last_removal_command: Optional[AccountRemovalCommand] = None
     removal_error: Optional[Exception] = None
+    renewal_busy: bool = False
+    renewal_request: Optional[tuple] = None
 
     async def create_qr(self, *, manager_subject: str) -> QrSessionView:
         self.create_calls += 1
@@ -119,9 +122,22 @@ class FakeAccountManager:
             raise self.removal_error
         return AccountRemovalResult(account_id)
 
-    async def check_account_renewal(self, account_id: int) -> FakeRenewalCheckResult:
+    async def check_account_renewal(
+        self,
+        account_id: int,
+        *,
+        admission_timeout_seconds: Optional[float] = None,
+        operation_timeout_seconds: Optional[float] = None,
+    ) -> FakeRenewalCheckResult:
+        self.renewal_request = (
+            account_id,
+            admission_timeout_seconds,
+            operation_timeout_seconds,
+        )
         if self.missing_account:
             raise AccountNotFound('Bilibili account not found')
+        if self.renewal_busy:
+            raise AccountWriteBusy('account write is busy')
         return FakeRenewalCheckResult(credential_version=4, refreshed=True)
 
 
@@ -257,11 +273,25 @@ def test_missing_qr_session_returns_404(
     assert response.status_code == 404
 
 
-def test_manual_refresh_returns_new_credential_version(client: TestClient) -> None:
+def test_manual_refresh_returns_new_credential_version(
+    client: TestClient, manager: FakeAccountManager
+) -> None:
     response = client.post('/api/v1/bili-accounts/7/refresh', headers=auth_headers())
 
     assert response.status_code == 200
     assert response.json() == {'credentialVersion': 4, 'refreshed': True}
+    assert manager.renewal_request == (7, 0.25, 60)
+
+
+def test_manual_refresh_maps_busy_admission_to_retryable_conflict(
+    client: TestClient, manager: FakeAccountManager
+) -> None:
+    manager.renewal_busy = True
+
+    response = client.post('/api/v1/bili-accounts/7/refresh', headers=auth_headers())
+
+    assert response.status_code == 409
+    assert response.json()['detail'] == '账号正在执行其他写操作，请稍后重试'
 
 
 def test_select_primary_account_returns_redacted_account(client: TestClient) -> None:

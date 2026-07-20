@@ -1,9 +1,13 @@
+import asyncio
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import blrec.bili_upload.collection_publish as collection_publish_module
+from blrec.bili_upload.accounts import AccountWriteGate, CredentialVersionChanged
 from blrec.bili_upload.collection_publish import CollectionPublisher
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import BiliApiError, RemoteOutcomeUnknown
@@ -77,7 +81,11 @@ async def test_publisher_adds_the_approved_archive_using_its_first_cid(
     try:
         await seed_job(database)
         publisher = CollectionPublisher(
-            database, protocol, bundle_loader=async_value, clock=lambda: 1000
+            database,
+            protocol,
+            bundle_loader=async_value,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
         )
 
         await publisher.create(1)
@@ -126,7 +134,11 @@ async def test_publisher_keeps_collection_failure_separate_from_archive_state(
     try:
         await seed_job(database)
         publisher = CollectionPublisher(
-            database, FakeProtocol(error), bundle_loader=async_value, clock=lambda: 1000
+            database,
+            FakeProtocol(error),
+            bundle_loader=async_value,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
         )
 
         with pytest.raises(type(error)):
@@ -155,7 +167,11 @@ async def test_recovery_marks_an_interrupted_collection_request_as_uncertain(
     try:
         await seed_job(database, branch_state='running')
         publisher = CollectionPublisher(
-            database, FakeProtocol(), bundle_loader=async_value, clock=lambda: 1000
+            database,
+            FakeProtocol(),
+            bundle_loader=async_value,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
         )
 
         assert await publisher.recover_interrupted() == 1
@@ -169,5 +185,84 @@ async def test_recovery_marks_an_interrupted_collection_request_as_uncertain(
             'collection_branch_state': 'failed',
             'collection_error': '上次加入合集时程序中断，请先在 B 站确认后再重试',
         }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publisher_waits_for_account_gate_and_rechecks_credentials(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database)
+        protocol = FakeProtocol()
+        gates = AccountWriteGate(database)
+        publisher = CollectionPublisher(
+            database,
+            protocol,
+            bundle_loader=async_value,
+            account_gates=gates,
+            clock=lambda: 1000,
+        )
+        gate = gates.for_account(1)
+
+        async with gate.hold(1):
+            task = asyncio.create_task(publisher.create(1))
+            lock = gates._locks[1]
+            for _index in range(100):
+                if task.done() or lock._waiters:
+                    break
+                await asyncio.sleep(0)
+            assert not task.done()
+            assert protocol.calls == []
+            await database.execute(
+                'UPDATE bili_accounts SET credential_version=2 WHERE id=1'
+            )
+
+        with pytest.raises(CredentialVersionChanged):
+            await task
+        assert protocol.calls == []
+        assert (
+            await database.scalar(
+                'SELECT collection_branch_state FROM upload_jobs WHERE id=1'
+            )
+            == 'failed'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publisher_installs_one_operation_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    deadlines = []
+
+    @contextmanager
+    def capture_deadline(seconds: float):
+        deadlines.append(seconds)
+        yield
+
+    monkeypatch.setattr(
+        collection_publish_module, 'protocol_request_deadline', capture_deadline
+    )
+    try:
+        await seed_job(database)
+        publisher = CollectionPublisher(
+            database,
+            FakeProtocol(),
+            bundle_loader=async_value,
+            account_gates=AccountWriteGate(database),
+            operation_timeout_seconds=0.01,
+            clock=lambda: 1000,
+        )
+
+        await publisher.create(1)
+
+        assert deadlines == [0.01]
     finally:
         await database.close()

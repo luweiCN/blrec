@@ -394,10 +394,18 @@ class BiliAccountRuntime:
                 database, protocol, bundle_loader=load_bundle, clock=self._clock
             )
             collection_manager = CollectionManager(
-                database, protocol, cover_resolver, bundle_loader=load_bundle
+                database,
+                protocol,
+                cover_resolver,
+                bundle_loader=load_bundle,
+                account_gates=write_gates,
             )
             collection_publisher = CollectionPublisher(
-                database, protocol, bundle_loader=load_bundle, clock=self._clock
+                database,
+                protocol,
+                bundle_loader=load_bundle,
+                account_gates=write_gates,
+                clock=self._clock,
             )
             await collection_publisher.recover_interrupted()
             comment_planner = CommentPlanner(database, clock=self._clock)

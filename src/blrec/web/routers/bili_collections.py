@@ -11,6 +11,7 @@ from blrec.bili_upload.collections import (
     CollectionUnavailable,
     InvalidCollectionRequest,
 )
+from blrec.bili_upload.errors import AccountWriteBusy
 from blrec.utils.string import camel_case
 
 from .bili_accounts import authenticated_manager_subject
@@ -108,7 +109,14 @@ async def create_bili_collection(
             title=payload.title,
             description=payload.description,
             cover_asset_id=payload.cover_asset_id,
+            admission_timeout_seconds=0.25,
+            operation_timeout_seconds=60,
         )
+    except AccountWriteBusy:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='账号正在执行其他写操作，请稍后重试',
+        ) from None
     except InvalidCollectionRequest as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
