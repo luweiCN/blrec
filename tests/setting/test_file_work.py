@@ -12,10 +12,10 @@ from blrec.setting.file_work import (
     SettingsFileWorkSaturated,
     validate_directory_sync,
 )
-from blrec.setting.models import Settings
 from blrec.setting.models import (
     LoggingSettings,
     OutputSettings,
+    Settings,
     SettingsIn,
     TaskOptions,
 )
@@ -133,6 +133,94 @@ async def test_atomic_dump_leaves_a_complete_new_file_when_directory_fsync_fails
 
 
 @pytest.mark.asyncio
+async def test_cancelled_atomic_dump_waits_until_replace_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / 'settings.toml'
+    original = Settings()
+    original._path = str(path)
+    original.dump()
+    candidate = original.copy(deep=True)
+    candidate._path = str(path)
+    candidate.live_monitor.batch_size = 17
+    coordinator = SettingsFileWorkCoordinator()
+    replace_entered = Event()
+    replace_release = Event()
+    real_replace = os.replace
+
+    def blocked_replace(source: str, target: str) -> None:
+        replace_entered.set()
+        replace_release.wait()
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, 'replace', blocked_replace)
+    task = asyncio.create_task(coordinator.atomic_dump(candidate))
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, replace_entered.wait),
+            timeout=1,
+        )
+        task.cancel()
+        await asyncio.sleep(0)
+
+        assert not task.done()
+
+        replace_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        replace_release.set()
+        await coordinator.shutdown()
+
+    assert Settings.load(str(path)).live_monitor.batch_size == 17
+
+
+@pytest.mark.asyncio
+async def test_cancelled_atomic_dump_waits_until_directory_fsync_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import blrec.setting.file_work as file_work
+
+    path = tmp_path / 'settings.toml'
+    original = Settings()
+    original._path = str(path)
+    original.dump()
+    candidate = original.copy(deep=True)
+    candidate._path = str(path)
+    candidate.live_monitor.batch_size = 17
+    coordinator = SettingsFileWorkCoordinator()
+    fsync_entered = Event()
+    fsync_release = Event()
+    real_fsync_directory = file_work._fsync_directory
+
+    def blocked_fsync_directory(directory: Path) -> None:
+        fsync_entered.set()
+        fsync_release.wait()
+        real_fsync_directory(directory)
+
+    monkeypatch.setattr(file_work, '_fsync_directory', blocked_fsync_directory)
+    task = asyncio.create_task(coordinator.atomic_dump(candidate))
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, fsync_entered.wait),
+            timeout=1,
+        )
+        task.cancel()
+        await asyncio.sleep(0)
+
+        assert not task.done()
+
+        fsync_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        fsync_release.set()
+        await coordinator.shutdown()
+
+    assert Settings.load(str(path)).live_monitor.batch_size == 17
+
+
+@pytest.mark.asyncio
 async def test_file_work_bounds_two_active_and_eight_waiting() -> None:
     coordinator = SettingsFileWorkCoordinator(max_active=2, max_waiting=8)
     release = Event()
@@ -247,5 +335,119 @@ async def test_settings_apply_reconciler_reloads_revision_until_caught_up(
         assert applied == [('settings:header', 'apply'), ('settings:header', 'apply')]
     finally:
         release.set()
+        await reconciler.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_apply_reconciler_recovers_reserved_work_after_capacity_frees(
+    tmp_path: Path,
+) -> None:
+    from blrec.control.operations import ControlOperationJournal, ControlStepInput
+    from blrec.setting.file_work import SettingsApplyReconciler
+
+    journal = ControlOperationJournal(
+        tmp_path / 'control.sqlite3', max_nonterminal_per_lane=1
+    )
+    await journal.open()
+    await journal.admit(
+        lane='settings-apply',
+        kind='blocker',
+        target_key='blocker',
+        steps=[ControlStepInput(key='blocker')],
+    )
+    applied = []
+
+    async def apply(target_key: str, action: str) -> None:
+        applied.append((target_key, action))
+
+    reconciler = SettingsApplyReconciler(journal, apply)
+
+    async def persist() -> None:
+        return None
+
+    try:
+        operations = await reconciler.commit_revisions(
+            (('settings:header', 'apply'), ('settings:live_monitor', 'apply')), persist
+        )
+        assert operations == ()
+
+        reconciler.start()
+        await asyncio.wait_for(reconciler.wait_idle(), timeout=1)
+
+        assert applied == [
+            ('settings:header', 'apply'),
+            ('settings:live_monitor', 'apply'),
+        ]
+    finally:
+        await reconciler.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_apply_reconciler_does_not_apply_a_reserved_revision_early(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from blrec.control.operations import ControlOperationJournal
+    from blrec.setting.file_work import SettingsApplyReconciler
+
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    current_value = {'value': 'old'}
+    applied = []
+    first_apply_finished = asyncio.Event()
+
+    async def apply(_target_key: str, _action: str) -> None:
+        applied.append(current_value['value'])
+        first_apply_finished.set()
+
+    reconciler = SettingsApplyReconciler(journal, apply)
+    await reconciler.submit('settings:header', 'apply')
+    original_get_revision = journal.get_revision
+    get_revision_entered = asyncio.Event()
+    allow_get_revision = asyncio.Event()
+    first_get_revision = True
+
+    async def blocked_get_revision(lane: str, target_key: str):
+        nonlocal first_get_revision
+        if first_get_revision:
+            first_get_revision = False
+            get_revision_entered.set()
+            await allow_get_revision.wait()
+        return await original_get_revision(lane, target_key)
+
+    monkeypatch.setattr(journal, 'get_revision', blocked_get_revision)
+    commit_entered = asyncio.Event()
+    allow_commit = asyncio.Event()
+
+    async def commit() -> None:
+        commit_entered.set()
+        await allow_commit.wait()
+        current_value['value'] = 'new'
+
+    commit_task = None
+    reconciler.start()
+    try:
+        await asyncio.wait_for(get_revision_entered.wait(), timeout=1)
+        commit_task = asyncio.create_task(
+            reconciler.commit_revisions((('settings:header', 'apply'),), commit)
+        )
+        try:
+            await asyncio.wait_for(commit_entered.wait(), timeout=0.05)
+        except asyncio.TimeoutError:
+            pass
+        allow_get_revision.set()
+        await asyncio.wait_for(commit_entered.wait(), timeout=1)
+        await asyncio.wait_for(first_apply_finished.wait(), timeout=1)
+        allow_commit.set()
+        await commit_task
+        await asyncio.wait_for(reconciler.wait_idle(), timeout=1)
+
+        assert applied == ['old', 'new']
+    finally:
+        allow_get_revision.set()
+        allow_commit.set()
+        if commit_task is not None:
+            await asyncio.gather(commit_task, return_exceptions=True)
         await reconciler.shutdown()
         await journal.close()

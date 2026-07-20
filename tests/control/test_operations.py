@@ -119,6 +119,96 @@ async def test_failed_revision_attempt_keeps_gap_for_recovery(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_unassigned_gap_recovery_does_not_retry_a_failed_apply(
+    tmp_path: Path,
+) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    try:
+        operation = await journal.submit_revision(
+            lane='settings-apply',
+            kind='apply',
+            target_key='settings:logging',
+            action='apply',
+        )
+        claim = await journal.claim_next('settings-apply')
+        assert claim is not None
+        await journal.finish_step(
+            claim, status='failed', error_code='SETTINGS_APPLY_FAILED'
+        )
+
+        recovered = await journal.recover_revision_gaps(
+            lane='settings-apply', kind='apply', unassigned_only=True
+        )
+
+        assert recovered == ()
+        assert await journal.get(operation.id) is not None
+        assert await journal.claim_next('settings-apply') is None
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_reserved_revisions_survive_lane_saturation_and_recover_in_order(
+    tmp_path: Path,
+) -> None:
+    journal = ControlOperationJournal(
+        tmp_path / 'control.sqlite3', max_nonterminal_per_lane=1
+    )
+    await journal.open()
+    try:
+        blocker = await journal.admit(
+            lane='settings-apply',
+            kind='blocker',
+            target_key='blocker',
+            steps=[ControlStepInput(key='blocker')],
+        )
+
+        reserved = await journal.reserve_revisions(
+            lane='settings-apply',
+            kind='apply',
+            revisions=(
+                ('settings:header', 'apply'),
+                ('settings:live_monitor', 'apply'),
+            ),
+        )
+
+        assert [item.desired_revision for item in reserved] == [1, 1]
+        assert [item.operation_id for item in reserved] == [None, None]
+        assert (
+            await journal.recover_revision_gaps(lane='settings-apply', kind='apply')
+            == ()
+        )
+
+        blocker_claim = await journal.claim_next('settings-apply')
+        assert blocker_claim is not None
+        assert blocker_claim.operation_id == blocker.id
+        await journal.finish_step(blocker_claim, status='succeeded')
+
+        recovered = await journal.recover_revision_gaps(
+            lane='settings-apply', kind='apply'
+        )
+        assert len(recovered) == 1
+        first_claim = await journal.claim_next('settings-apply')
+        assert first_claim is not None
+        first_revision = await journal.get_revision('settings-apply', first_claim.key)
+        assert first_revision is not None
+        assert await journal.finish_revision_step(
+            first_claim, applied_revision=first_revision.desired_revision
+        )
+
+        recovered = await journal.recover_revision_gaps(
+            lane='settings-apply', kind='apply'
+        )
+        assert len(recovered) == 1
+        second_claim = await journal.claim_next('settings-apply')
+        assert second_claim is not None
+        assert second_claim.key != first_claim.key
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_journal_is_private_durable_and_uses_full_delete_mode(
     tmp_path: Path,
 ) -> None:

@@ -1,12 +1,16 @@
 import asyncio
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from blrec.setting.file_work import SettingsDirectoryError, SettingsFileWorkCoordinator
-from blrec.setting.file_work import SettingsApplyReconciler
+from blrec.setting.file_work import (
+    SettingsApplyReconciler,
+    SettingsDirectoryError,
+    SettingsFileWorkCoordinator,
+)
 from blrec.setting.models import LiveMonitorSettings, Settings, SettingsIn, TaskOptions
 from blrec.setting.setting_manager import SettingsManager
 
@@ -28,6 +32,31 @@ class FakeApplyReconciler:
 
     async def submit(self, target_key: str, action: str) -> SimpleNamespace:
         self.calls.append((target_key, action))
+        return SimpleNamespace(id='operation-{}'.format(len(self.calls)))
+
+    async def commit_revisions(self, revisions, commit):
+        await commit()
+        return tuple(
+            [await self.submit(target_key, action) for target_key, action in revisions]
+        )
+
+    async def retry(self, _target_keys):
+        return ()
+
+
+class BlockingSecondApplyReconciler(FakeApplyReconciler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.completed = []
+        self.second_entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def submit(self, target_key: str, action: str) -> SimpleNamespace:
+        self.calls.append((target_key, action))
+        if len(self.calls) == 2:
+            self.second_entered.set()
+            await self.release.wait()
+        self.completed.append((target_key, action))
         return SimpleNamespace(id='operation-{}'.format(len(self.calls)))
 
 
@@ -70,7 +99,9 @@ async def test_noop_patch_does_not_dump_or_submit_apply(tmp_path: Path) -> None:
     coordinator = SettingsFileWorkCoordinator()
     reconciler = FakeApplyReconciler()
     manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+        FakeSettingsApplication(),
+        settings,
+        file_work=coordinator,  # type: ignore[arg-type]
     )
     manager.set_apply_reconciler(reconciler)  # type: ignore[arg-type]
     coordinator.atomic_dump = AsyncMock()  # type: ignore[method-assign]
@@ -173,6 +204,269 @@ async def test_global_and_task_patches_share_one_mutation_order(tmp_path: Path) 
     assert writes == 2
     assert settings.live_monitor.batch_size == 17
     assert settings.tasks[0].recorder.read_timeout == 5
+
+
+@pytest.mark.asyncio
+async def test_cancelled_persisted_patch_finishes_before_a_second_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import blrec.setting.file_work as file_work
+
+    path = tmp_path / 'settings.toml'
+    settings = Settings()
+    settings._path = str(path)
+    settings.dump()
+    coordinator = SettingsFileWorkCoordinator()
+    reconciler = FakeApplyReconciler()
+    manager = SettingsManager(
+        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    )
+    manager.set_apply_reconciler(reconciler)  # type: ignore[arg-type]
+    first_replace_entered = Event()
+    first_replace_release = Event()
+    replace_lock = Lock()
+    replace_calls = 0
+    real_replace = file_work.os.replace
+
+    def block_first_replace(source: str, target: str) -> None:
+        nonlocal replace_calls
+        with replace_lock:
+            replace_calls += 1
+            call = replace_calls
+        if call == 1:
+            first_replace_entered.set()
+            first_replace_release.wait()
+        real_replace(source, target)
+
+    monkeypatch.setattr(file_work.os, 'replace', block_first_replace)
+    original_atomic_dump = coordinator.atomic_dump
+    second_dump_entered = asyncio.Event()
+    dump_calls = 0
+
+    async def tracked_atomic_dump(candidate: Settings, **kwargs) -> None:
+        nonlocal dump_calls
+        dump_calls += 1
+        if dump_calls == 2:
+            second_dump_entered.set()
+        await original_atomic_dump(candidate, **kwargs)
+
+    coordinator.atomic_dump = tracked_atomic_dump  # type: ignore[method-assign]
+    first = asyncio.create_task(
+        manager.change_settings_with_operations(
+            SettingsIn.parse_obj({'liveMonitor': {'batchSize': 17}})
+        )
+    )
+    second = None
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None, first_replace_entered.wait
+            ),
+            timeout=1,
+        )
+        first.cancel()
+        await asyncio.sleep(0)
+        second = asyncio.create_task(
+            manager.change_settings_with_operations(
+                SettingsIn.parse_obj({'liveMonitor': {'batchSize': 19}})
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert not first.done()
+        assert not second_dump_entered.is_set()
+
+        first_replace_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await second
+    finally:
+        first_replace_release.set()
+        await asyncio.gather(
+            first, *((second,) if second is not None else ()), return_exceptions=True
+        )
+        await coordinator.shutdown()
+
+    assert settings.live_monitor.batch_size == 19
+    assert Settings.load(str(path)).live_monitor.batch_size == 19
+    assert reconciler.calls == [
+        ('settings:live_monitor', 'apply'),
+        ('settings:live_monitor', 'apply'),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_multisection_patch_submits_every_revision(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'settings.toml'
+    settings = Settings()
+    settings._path = str(path)
+    settings.dump()
+    coordinator = SettingsFileWorkCoordinator()
+    reconciler = BlockingSecondApplyReconciler()
+    manager = SettingsManager(
+        FakeSettingsApplication(),
+        settings,
+        file_work=coordinator,  # type: ignore[arg-type]
+    )
+    manager.set_apply_reconciler(reconciler)  # type: ignore[arg-type]
+    patch = asyncio.create_task(
+        manager.change_settings_with_operations(
+            SettingsIn.parse_obj(
+                {
+                    'header': {'userAgent': 'cancel-safe-agent'},
+                    'liveMonitor': {'batchSize': 17},
+                }
+            )
+        )
+    )
+    try:
+        await asyncio.wait_for(reconciler.second_entered.wait(), timeout=1)
+        patch.cancel()
+        await asyncio.sleep(0)
+
+        assert not patch.done()
+
+        reconciler.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await patch
+    finally:
+        reconciler.release.set()
+        await asyncio.gather(patch, return_exceptions=True)
+        await coordinator.shutdown()
+
+    loaded = Settings.load(str(path))
+    assert loaded.header.user_agent == settings.header.user_agent == 'cancel-safe-agent'
+    assert loaded.live_monitor.batch_size == settings.live_monitor.batch_size == 17
+    assert reconciler.completed == [
+        ('settings:header', 'apply'),
+        ('settings:live_monitor', 'apply'),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admitted_task_state_write_keeps_file_and_memory_aligned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import blrec.setting.file_work as file_work
+
+    path = tmp_path / 'settings.toml'
+    settings = Settings(tasks=[{'roomId': 100}])
+    settings._path = str(path)
+    settings.dump()
+    coordinator = SettingsFileWorkCoordinator()
+    manager = SettingsManager(
+        FakeSettingsApplication(),
+        settings,
+        file_work=coordinator,  # type: ignore[arg-type]
+    )
+    replace_entered = Event()
+    replace_release = Event()
+    real_replace = file_work.os.replace
+
+    def blocked_replace(source: str, target: str) -> None:
+        replace_entered.set()
+        replace_release.wait()
+        real_replace(source, target)
+
+    monkeypatch.setattr(file_work.os, 'replace', blocked_replace)
+    write = asyncio.create_task(
+        manager.change_task_desired_states([100], enable_monitor=False)
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, replace_entered.wait),
+            timeout=1,
+        )
+        write.cancel()
+        await asyncio.sleep(0)
+
+        assert not write.done()
+
+        replace_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await write
+    finally:
+        replace_release.set()
+        await asyncio.gather(write, return_exceptions=True)
+        await coordinator.shutdown()
+
+    assert settings.tasks[0].enable_monitor is False
+    assert Settings.load(str(path)).tasks[0].enable_monitor is False
+
+
+@pytest.mark.asyncio
+async def test_revision_activation_failure_is_recovered_by_an_identical_patch(
+    tmp_path: Path,
+) -> None:
+    from blrec.control.operations import ControlOperationJournal
+
+    path = tmp_path / 'settings.toml'
+    settings = Settings()
+    settings._path = str(path)
+    settings.dump()
+    coordinator = SettingsFileWorkCoordinator()
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    applied = []
+
+    async def apply(target_key: str, action: str) -> None:
+        applied.append((target_key, action))
+
+    reconciler = SettingsApplyReconciler(journal, apply)
+    manager = SettingsManager(
+        FakeSettingsApplication(),
+        settings,
+        file_work=coordinator,  # type: ignore[arg-type]
+    )
+    manager.set_apply_reconciler(reconciler)
+    original_recover = journal.recover_revision_gaps
+    recover_calls = 0
+
+    async def fail_first_recovery(
+        *, lane: str, kind: str, unassigned_only: bool = False
+    ):
+        nonlocal recover_calls
+        recover_calls += 1
+        if recover_calls == 1:
+            raise OSError('control database temporarily unavailable')
+        return await original_recover(
+            lane=lane, kind=kind, unassigned_only=unassigned_only
+        )
+
+    journal.recover_revision_gaps = fail_first_recovery  # type: ignore[method-assign]
+    request = SettingsIn.parse_obj(
+        {'header': {'userAgent': 'recoverable-agent'}, 'liveMonitor': {'batchSize': 17}}
+    )
+    try:
+        with pytest.raises(OSError, match='temporarily unavailable'):
+            await manager.change_settings_with_operations(request)
+
+        assert settings.header.user_agent == 'recoverable-agent'
+        assert settings.live_monitor.batch_size == 17
+        assert Settings.load(str(path)).header.user_agent == 'recoverable-agent'
+        assert (
+            await journal.get_revision('settings-apply', 'settings:header')
+        ).operation_id is None
+        assert (
+            await journal.get_revision('settings-apply', 'settings:live_monitor')
+        ).operation_id is None
+
+        _result, operations = await manager.change_settings_with_operations(request)
+        assert len(operations) == 2
+
+        reconciler.start()
+        await asyncio.wait_for(reconciler.wait_idle(), timeout=1)
+        assert applied == [
+            ('settings:header', 'apply'),
+            ('settings:live_monitor', 'apply'),
+        ]
+    finally:
+        await reconciler.shutdown()
+        await coordinator.shutdown()
+        await journal.close()
 
 
 @pytest.mark.asyncio

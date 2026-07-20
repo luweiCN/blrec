@@ -8,7 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from threading import Lock
-from typing import Any, Awaitable, Callable, Optional, Set, Tuple, TypeVar
+from typing import Any, Awaitable, Callable, Optional, Sequence, Set, Tuple, TypeVar
 
 import toml
 
@@ -16,6 +16,7 @@ from ..control.operations import (
     ClaimedControlStep,
     ControlOperationJournal,
     ControlOperationSnapshot,
+    ControlRevisionSnapshot,
 )
 from .models import Settings
 
@@ -45,6 +46,18 @@ class SettingsDirectoryError(ValueError):
         self.path = path
         self.code = code
         self.message = message
+
+
+async def _drain_admitted_work(work: Awaitable[_T]) -> Tuple[_T, bool]:
+    task = asyncio.ensure_future(work)
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.done():
+                return task.result(), cancelled
 
 
 def validate_directory_sync(path: str) -> Tuple[int, str]:
@@ -85,7 +98,10 @@ class SettingsFileWorkCoordinator:
                 future = self._executor.submit(partial(function, *args))
                 self._futures.add(future)
             future.add_done_callback(self._discard_future)
-        return await asyncio.shield(asyncio.wrap_future(future))
+        result, cancelled = await _drain_admitted_work(asyncio.wrap_future(future))
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
     def _discard_future(self, future: Future[Any]) -> None:
         with self._futures_lock:
@@ -159,6 +175,50 @@ class SettingsApplyReconciler:
         self.wake()
         return operation
 
+    async def commit_revisions(
+        self,
+        revisions: Sequence[Tuple[str, str]],
+        commit: Callable[[], Awaitable[None]],
+    ) -> Tuple[ControlOperationSnapshot, ...]:
+        normalized = tuple(revisions)
+        reserved = False
+        try:
+            async with self._submission_lock:
+                if not self._accepting:
+                    raise RuntimeError('settings apply admission is closed')
+                await self._journal.reserve_revisions(
+                    lane=self.LANE, kind='apply', revisions=normalized
+                )
+                reserved = True
+                await commit()
+                recovered = await self._journal.recover_revision_gaps(
+                    lane=self.LANE, kind='apply'
+                )
+        finally:
+            if reserved:
+                self.wake()
+        target_keys = {target_key for target_key, _action in normalized}
+        return tuple(
+            operation for operation in recovered if operation.target_key in target_keys
+        )
+
+    async def retry(
+        self, target_keys: Sequence[str]
+    ) -> Tuple[ControlOperationSnapshot, ...]:
+        normalized = frozenset(target_keys)
+        if not normalized:
+            return ()
+        async with self._submission_lock:
+            if not self._accepting:
+                raise RuntimeError('settings apply admission is closed')
+            recovered = await self._journal.recover_revision_gaps(
+                lane=self.LANE, kind='apply'
+            )
+        self.wake()
+        return tuple(
+            operation for operation in recovered if operation.target_key in normalized
+        )
+
     async def recover(self) -> Tuple[ControlOperationSnapshot, ...]:
         recovered = tuple(
             await self._journal.recover_revision_gaps(lane=self.LANE, kind='apply')
@@ -194,7 +254,15 @@ class SettingsApplyReconciler:
     async def _run(self) -> None:
         while not self._stop_event.is_set():
             async with self._submission_lock:
+                await self._journal.recover_revision_gaps(
+                    lane=self.LANE, kind='apply', unassigned_only=True
+                )
                 claim = await self._journal.claim_next(self.LANE)
+                revision = (
+                    None
+                    if claim is None
+                    else await self._journal.get_revision(self.LANE, claim.key)
+                )
             if claim is None:
                 self._idle_event.set()
                 self._wake_event.clear()
@@ -212,10 +280,11 @@ class SettingsApplyReconciler:
                 self._idle_event.clear()
                 continue
             self._idle_event.clear()
-            await self._reconcile(claim)
+            await self._reconcile(claim, revision)
 
-    async def _reconcile(self, claim: ClaimedControlStep) -> None:
-        revision = await self._journal.get_revision(self.LANE, claim.key)
+    async def _reconcile(
+        self, claim: ClaimedControlStep, revision: Optional[ControlRevisionSnapshot]
+    ) -> None:
         if revision is None:
             await self._journal.finish_step(
                 claim, status='failed', error_code='SETTINGS_REVISION_MISSING'

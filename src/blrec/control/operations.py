@@ -10,7 +10,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
 
 from blrec.request_metrics import record_database_call
 
@@ -202,15 +212,34 @@ class ControlOperationJournal:
             self._submit_revision_sync, lane, kind, target_key, action
         )
 
+    async def reserve_revisions(
+        self, *, lane: str, kind: str, revisions: Sequence[Tuple[str, str]]
+    ) -> Sequence[ControlRevisionSnapshot]:
+        if not self._admitting or self._closed:
+            raise ControlJournalClosed('control journal admission is closed')
+        normalized = tuple(revisions)
+        target_keys = [target_key for target_key, _action in normalized]
+        if (
+            not lane
+            or not kind
+            or not normalized
+            or any(not target_key or not action for target_key, action in normalized)
+            or len(set(target_keys)) != len(target_keys)
+        ):
+            raise ValueError('reserved revision fields must be non-empty and unique')
+        return await self._run(self._reserve_revisions_sync, lane, kind, normalized)
+
     async def get_revision(
         self, lane: str, target_key: str
     ) -> Optional[ControlRevisionSnapshot]:
         return await self._run(self._get_revision_sync, lane, target_key)
 
     async def recover_revision_gaps(
-        self, *, lane: str, kind: str
+        self, *, lane: str, kind: str, unassigned_only: bool = False
     ) -> Sequence[ControlOperationSnapshot]:
-        operation_ids = await self._run(self._recover_revision_gaps_sync, lane, kind)
+        operation_ids = await self._run(
+            self._recover_revision_gaps_sync, lane, kind, unassigned_only
+        )
         snapshots = []
         for operation_id in operation_ids:
             snapshot = await self.get(operation_id)
@@ -625,6 +654,83 @@ class ControlOperationJournal:
         assert snapshot is not None
         return snapshot
 
+    def _reserve_revisions_sync(
+        self, lane: str, kind: str, revisions: Sequence[Tuple[str, str]]
+    ) -> Sequence[ControlRevisionSnapshot]:
+        connection = self._require_connection()
+        now = float(self._clock())
+        connection.execute('BEGIN IMMEDIATE')
+        snapshots = []
+        try:
+            for target_key, action in revisions:
+                existing = connection.execute(
+                    'SELECT id FROM control_operations '
+                    'WHERE lane=? AND kind=? AND target_key=? '
+                    "AND status IN ('accepted','running')",
+                    (lane, kind, target_key),
+                ).fetchone()
+                revision_row = connection.execute(
+                    'SELECT desired_revision,applied_revision '
+                    'FROM control_revisions WHERE lane=? AND target_key=?',
+                    (lane, target_key),
+                ).fetchone()
+                desired_revision = (
+                    1
+                    if revision_row is None
+                    else int(revision_row['desired_revision']) + 1
+                )
+                applied_revision = (
+                    0 if revision_row is None else int(revision_row['applied_revision'])
+                )
+                operation_id = None if existing is None else str(existing['id'])
+                if operation_id is not None:
+                    row = connection.execute(
+                        'SELECT result_json FROM control_operations WHERE id=?',
+                        (operation_id,),
+                    ).fetchone()
+                    result = dict(self._decode(row['result_json']) or {})
+                    result['desiredRevision'] = desired_revision
+                    connection.execute(
+                        'UPDATE control_operations SET result_json=?,updated_at=? '
+                        'WHERE id=?',
+                        (self._encode(result), now, operation_id),
+                    )
+                connection.execute(
+                    'INSERT INTO control_revisions('
+                    'lane,target_key,kind,action,desired_revision,applied_revision,'
+                    'operation_id,updated_at) VALUES(?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(lane,target_key) DO UPDATE SET '
+                    'kind=excluded.kind,action=excluded.action,'
+                    'desired_revision=excluded.desired_revision,'
+                    'operation_id=excluded.operation_id,updated_at=excluded.updated_at',
+                    (
+                        lane,
+                        target_key,
+                        kind,
+                        action,
+                        desired_revision,
+                        applied_revision,
+                        operation_id,
+                        now,
+                    ),
+                )
+                snapshots.append(
+                    ControlRevisionSnapshot(
+                        lane=lane,
+                        target_key=target_key,
+                        kind=kind,
+                        action=action,
+                        desired_revision=desired_revision,
+                        applied_revision=applied_revision,
+                        operation_id=operation_id,
+                    )
+                )
+            connection.execute('COMMIT')
+            return tuple(snapshots)
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
+
     def _insert_revision_operation_sync(
         self,
         connection: sqlite3.Connection,
@@ -708,16 +814,22 @@ class ControlOperationJournal:
             ),
         )
 
-    def _recover_revision_gaps_sync(self, lane: str, kind: str) -> Sequence[str]:
+    def _recover_revision_gaps_sync(
+        self, lane: str, kind: str, unassigned_only: bool
+    ) -> Sequence[str]:
         connection = self._require_connection()
         now = float(self._clock())
         connection.execute('BEGIN IMMEDIATE')
         try:
-            rows = connection.execute(
+            query = (
                 'SELECT target_key,desired_revision,operation_id '
                 'FROM control_revisions WHERE lane=? '
-                'AND desired_revision>applied_revision ORDER BY target_key',
-                (lane,),
+                'AND desired_revision>applied_revision'
+            )
+            if unassigned_only:
+                query += ' AND operation_id IS NULL'
+            rows = connection.execute(
+                query + ' ORDER BY target_key', (lane,)
             ).fetchall()
             operation_ids = []
             for row in rows:
@@ -729,14 +841,17 @@ class ControlOperationJournal:
                     (lane, kind, target_key),
                 ).fetchone()
                 if active is None:
-                    operation_id = self._insert_revision_operation_sync(
-                        connection,
-                        lane=lane,
-                        kind=kind,
-                        target_key=target_key,
-                        desired_revision=int(row['desired_revision']),
-                        now=now,
-                    )
+                    try:
+                        operation_id = self._insert_revision_operation_sync(
+                            connection,
+                            lane=lane,
+                            kind=kind,
+                            target_key=target_key,
+                            desired_revision=int(row['desired_revision']),
+                            now=now,
+                        )
+                    except ControlLaneSaturated:
+                        continue
                     connection.execute(
                         'UPDATE control_revisions SET operation_id=?,updated_at=? '
                         'WHERE lane=? AND target_key=?',

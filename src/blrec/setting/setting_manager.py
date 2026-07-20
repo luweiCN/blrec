@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Iterable, Optional, Sequence, Set, Tuple, cast
+from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Set, Tuple, cast
 
 from ..exception import ForbiddenError, NotFoundError
 from ..logging import configure_logger
@@ -17,7 +17,7 @@ from ..notification.providers import (
     Telegram,
 )
 from ..webhook import WebHook
-from .file_work import SettingsFileWorkCoordinator
+from .file_work import SettingsFileWorkCoordinator, _drain_admitted_work
 from .helpers import shadow_settings, update_settings
 from .models import (
     DanmakuOptions,
@@ -38,6 +38,7 @@ from .typing import KeySetOfSettings
 
 if TYPE_CHECKING:
     from ..application import Application
+    from ..control.operations import ControlOperationSnapshot
     from .file_work import SettingsApplyReconciler
 
 
@@ -96,7 +97,7 @@ class SettingsManager:
         self, settings: SettingsIn
     ) -> Tuple[SettingsOut, Sequence[str]]:
         changed_sections = []
-        operation_ids = []
+        operation_ids: List[str] = []
         mode_changed = False
         async with self._mutation_lock:
             if not self._accepting_mutations:
@@ -133,20 +134,52 @@ class SettingsManager:
                     )
                     if name in changed_sections
                 )
-                await self._dump_candidate(candidate, validate_paths=validate_paths)
-                for name in changed_sections:
-                    setattr(self._settings, name, getattr(candidate, name))
-                if self._apply_reconciler is not None:
+
+                target_actions = tuple(
+                    (
+                        'settings:{}'.format(name),
+                        (
+                            'restart'
+                            if name == 'live_monitor' and mode_changed
+                            else 'apply'
+                        ),
+                    )
+                    for name in changed_sections
+                )
+
+                async def commit() -> None:
+                    await self._dump_candidate(candidate, validate_paths=validate_paths)
                     for name in changed_sections:
-                        operation = await self._apply_reconciler.submit(
-                            'settings:{}'.format(name),
-                            (
-                                'restart'
-                                if name == 'live_monitor' and mode_changed
-                                else 'apply'
-                            ),
+                        setattr(self._settings, name, getattr(candidate, name))
+
+                async def commit_with_revisions() -> (
+                    Tuple[ControlOperationSnapshot, ...]
+                ):
+                    if self._apply_reconciler is not None:
+                        return await self._apply_reconciler.commit_revisions(
+                            target_actions, commit
                         )
-                        operation_ids.append(operation.id)
+                    await commit()
+                    return ()
+
+                committed_operations, cancelled = await _drain_admitted_work(
+                    commit_with_revisions()
+                )
+                operation_ids.extend(operation.id for operation in committed_operations)
+                if cancelled:
+                    raise asyncio.CancelledError
+            elif self._apply_reconciler is not None and settings.__fields_set__:
+                recovered, cancelled = await _drain_admitted_work(
+                    self._apply_reconciler.retry(
+                        tuple(
+                            'settings:{}'.format(name)
+                            for name in sorted(settings.__fields_set__)
+                        )
+                    )
+                )
+                operation_ids.extend(operation.id for operation in recovered)
+                if cancelled:
+                    raise asyncio.CancelledError
 
         if changed_sections:
             audit('application_settings_updated', sections=sorted(changed_sections))
@@ -196,7 +229,7 @@ class SettingsManager:
         self, room_id: int, options: TaskOptions
     ) -> Tuple[TaskOptions, Sequence[str]]:
         changed_sections = []
-        operation_ids = []
+        operation_ids: List[str] = []
         async with self._mutation_lock:
             if not self._accepting_mutations:
                 raise RuntimeError('settings mutation admission is closed')
@@ -214,17 +247,47 @@ class SettingsManager:
                 if getattr(candidate_settings, name) != getattr(live_settings, name):
                     changed_sections.append(name)
             if changed_sections:
-                await self._dump_candidate(candidate)
-                live_settings = self.find_task_settings(room_id)
-                assert live_settings is not None
-                for name in changed_sections:
-                    setattr(live_settings, name, getattr(candidate_settings, name))
-                if self._apply_reconciler is not None:
+
+                target_actions = tuple(
+                    ('task-settings:{}:{}'.format(room_id, name), 'apply')
+                    for name in changed_sections
+                )
+
+                async def commit() -> None:
+                    await self._dump_candidate(candidate)
+                    live_settings = self.find_task_settings(room_id)
+                    assert live_settings is not None
                     for name in changed_sections:
-                        operation = await self._apply_reconciler.submit(
-                            'task-settings:{}:{}'.format(room_id, name), 'apply'
+                        setattr(live_settings, name, getattr(candidate_settings, name))
+
+                async def commit_with_revisions() -> (
+                    Tuple[ControlOperationSnapshot, ...]
+                ):
+                    if self._apply_reconciler is not None:
+                        return await self._apply_reconciler.commit_revisions(
+                            target_actions, commit
                         )
-                        operation_ids.append(operation.id)
+                    await commit()
+                    return ()
+
+                committed_operations, cancelled = await _drain_admitted_work(
+                    commit_with_revisions()
+                )
+                operation_ids.extend(operation.id for operation in committed_operations)
+                if cancelled:
+                    raise asyncio.CancelledError
+            elif self._apply_reconciler is not None and options.__fields_set__:
+                recovered, cancelled = await _drain_admitted_work(
+                    self._apply_reconciler.retry(
+                        tuple(
+                            'task-settings:{}:{}'.format(room_id, name)
+                            for name in sorted(options.__fields_set__)
+                        )
+                    )
+                )
+                operation_ids.extend(operation.id for operation in recovered)
+                if cancelled:
+                    raise asyncio.CancelledError
 
         live_settings = self.find_task_settings(room_id)
         assert live_settings is not None
@@ -289,13 +352,19 @@ class SettingsManager:
                 return existing.copy(deep=True)
             settings = TaskSettings(room_id=room_id)
             self._settings.tasks = [*self._settings.tasks, settings]
-            try:
-                await self.dump_settings()
-            except BaseException:
-                self._settings.tasks = [
-                    item for item in self._settings.tasks if item is not settings
-                ]
-                raise
+
+            async def commit() -> None:
+                try:
+                    await self.dump_settings()
+                except BaseException:
+                    self._settings.tasks = [
+                        item for item in self._settings.tasks if item is not settings
+                    ]
+                    raise
+
+            _result, cancelled = await _drain_admitted_work(commit())
+            if cancelled:
+                raise asyncio.CancelledError
             return settings.copy(deep=True)
 
     async def remove_task_settings(self, room_id: int) -> None:
@@ -324,11 +393,17 @@ class SettingsManager:
             self._settings.tasks = [
                 settings for settings in previous if settings.room_id not in removed
             ]
-            try:
-                await self.dump_settings()
-            except BaseException:
-                self._settings.tasks = previous
-                raise
+
+            async def commit() -> None:
+                try:
+                    await self.dump_settings()
+                except BaseException:
+                    self._settings.tasks = previous
+                    raise
+
+            _result, cancelled = await _drain_admitted_work(commit())
+            if cancelled:
+                raise asyncio.CancelledError
             return removed
 
     def get_task_desired_state(self, room_id: int) -> Tuple[bool, bool]:
@@ -375,16 +450,22 @@ class SettingsManager:
                     changed.add(settings.room_id)
 
             if changed:
-                try:
-                    await self.dump_settings()
-                except BaseException:
-                    for settings in task_settings:
-                        previous_monitor, previous_recorder = previous_states[
-                            settings.room_id
-                        ]
-                        settings.enable_monitor = previous_monitor
-                        settings.enable_recorder = previous_recorder
-                    raise
+
+                async def commit() -> None:
+                    try:
+                        await self.dump_settings()
+                    except BaseException:
+                        for settings in task_settings:
+                            previous_monitor, previous_recorder = previous_states[
+                                settings.room_id
+                            ]
+                            settings.enable_monitor = previous_monitor
+                            settings.enable_recorder = previous_recorder
+                        raise
+
+                _result, cancelled = await _drain_admitted_work(commit())
+                if cancelled:
+                    raise asyncio.CancelledError
             return changed
 
     async def mark_task_enabled(self, room_id: int) -> None:
