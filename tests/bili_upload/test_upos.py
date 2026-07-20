@@ -10,7 +10,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim, LeaseLost
-from blrec.bili_upload.errors import BiliApiError, RemoteOutcomeUnknown
+from blrec.bili_upload.errors import (
+    BiliApiError,
+    DefinitelyNotSent,
+    RemoteOutcomeUnknown,
+)
 from blrec.bili_upload.upos import (
     FileIdentity,
     UposUploadDeferred,
@@ -847,6 +851,110 @@ async def test_graceful_stop_happens_before_next_chunk(tmp_path: Path) -> None:
                 'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
             )
             == 'uploading'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sibling_chunk_is_prepared_before_job_lease_can_release(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcdefgh')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    both_started = asyncio.Event()
+
+    class SplitProtocol(FakeProtocol):
+        async def upload_chunk(
+            self,
+            session: FakeSession,
+            *,
+            chunk_no: int,
+            chunks: int,
+            start: int,
+            total: int,
+            body: bytes,
+        ) -> Mapping[str, Any]:
+            del session, chunks, start, total, body
+            self.chunk_calls.append(chunk_no)
+            if len(self.chunk_calls) == 2:
+                both_started.set()
+            await both_started.wait()
+            if chunk_no == 0:
+                raise BiliApiError(408, operation='upload_chunk')
+            await asyncio.Future()
+            raise AssertionError('unreachable')
+
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = SplitProtocol()
+        uploader = UposUploader(
+            database, protocol, chunk_size=4, concurrency=2, clock=lambda: 1000
+        )
+
+        with pytest.raises(UposUploadDeferred):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        rows = await database.fetchall(
+            'SELECT chunk_no,state FROM upload_chunks ORDER BY chunk_no'
+        )
+        assert [(int(row['chunk_no']), str(row['state'])) for row in rows] == [
+            (0, 'prepared'),
+            (1, 'prepared'),
+        ]
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upos' AND outcome_state='in_flight'"
+            )
+            == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_completion_not_sent_state_is_atomic_before_followup_work(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'part.flv'
+    path.write_bytes(b'abcd')
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        part_id = await prepared_part(database, path)
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        protocol.complete_error = DefinitelyNotSent('complete_upload')
+        uploader = UposUploader(database, protocol, chunk_size=4, concurrency=1)
+        original_settle = uploader._settle_completion_failure
+
+        async def settle_then_crash(*args: Any, **kwargs: Any) -> bool:
+            await original_settle(*args, **kwargs)
+            raise RuntimeError('simulated crash after completion settlement')
+
+        uploader._settle_completion_failure = settle_then_crash  # type: ignore
+
+        with pytest.raises(RuntimeError, match='after completion settlement'):
+            await uploader.upload_part(part_id, bundle=object(), claim=claim)
+
+        assert (
+            await database.scalar(
+                'SELECT upload_state FROM upload_parts WHERE id=?', (part_id,)
+            )
+            == 'uploading'
+        )
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upos' AND owner_id=? "
+                "AND side_effect_key='complete'",
+                (part_id,),
+            )
+            == 0
         )
     finally:
         await database.close()

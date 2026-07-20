@@ -65,6 +65,10 @@ class _UploadDeletionRequested(RuntimeError):
     pass
 
 
+class _UploadCoverOutcomeUnknown(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class _CandidatePart:
     id: int
@@ -1437,6 +1441,25 @@ class UploadCoordinator:
                         current_generation - int(str(row['deletion_state']) != 'none'),
                     )
                 )
+                cover_intent = connection.execute(
+                    'SELECT outcome_state FROM owner_handoff_outcomes '
+                    "WHERE owner_kind='upload' AND owner_id=? "
+                    "AND side_effect_key='cover_upload' AND source_generation=?",
+                    (job_id, source_generation),
+                ).fetchone()
+                cover_in_flight = (
+                    cover_intent is not None
+                    and str(cover_intent['outcome_state']) == 'in_flight'
+                )
+                if cover_in_flight:
+                    self._recover_remote_intent_in_transaction(
+                        connection,
+                        owner_kind='upload',
+                        owner_id=job_id,
+                        side_effect_key='cover_upload',
+                        source_generation=source_generation,
+                        now=now,
+                    )
                 completing = connection.execute(
                     "SELECT id FROM upload_parts WHERE job_id=? "
                     "AND upload_state='completing'",
@@ -1509,6 +1532,12 @@ class UploadCoordinator:
                     state = 'paused'
                     submit_state = 'prepared'
                     reason = 'UPOS 分 P 完成结果无法确认，已停止自动重试'
+                    next_attempt_at = 0
+                    operator_paused = 1
+                elif cover_in_flight:
+                    state = 'paused'
+                    submit_state = 'prepared'
+                    reason = '投稿封面上传结果无法确认，已停止自动重试'
                     next_attempt_at = 0
                     operator_paused = 1
                 elif submitting:
@@ -2174,7 +2203,64 @@ class UploadCoordinator:
                     return
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
-                payload = await self._submit_payload(job)
+                cover_override: Optional[str] = None
+                if self._uses_cover_resolver(job):
+                    cover_override = await self._begin_cover_upload(claim)
+                    if cover_override is None:
+                        if self._stop_requested():
+                            if not await self._settle_cover_failure(
+                                claim, outcome_state='cancelled_local', outcome={}
+                            ):
+                                return
+                            raise UposUploadStopped(
+                                'upload stopped before cover upload'
+                            )
+                        try:
+                            cover_override = await self._resolve_job_cover(job)
+                        except asyncio.CancelledError:
+                            await asyncio.shield(
+                                self._settle_unknown_cover_upload(claim)
+                            )
+                            raise
+                        except DefinitelyNotSent:
+                            if not await self._settle_cover_failure(
+                                claim, outcome_state='cancelled_local', outcome={}
+                            ):
+                                return
+                            raise
+                        except RemoteOutcomeUnknown:
+                            await self._settle_unknown_cover_upload(claim)
+                            return
+                        except BiliApiError as error:
+                            if not await self._settle_cover_failure(
+                                claim,
+                                outcome_state='confirmed_failure',
+                                outcome={'error_code': error.code},
+                            ):
+                                return
+                            raise
+                        except (
+                            CoverAssetNotFound,
+                            CoverResolutionError,
+                            InvalidCover,
+                            ProtocolContractError,
+                            StoredCoverUnavailable,
+                        ):
+                            if not await self._settle_cover_failure(
+                                claim, outcome_state='cancelled_local', outcome={}
+                            ):
+                                return
+                            raise
+                        if not isinstance(cover_override, str) or not cover_override:
+                            await self._settle_unknown_cover_upload(claim)
+                            return
+                        if not await self._complete_cover_upload(claim, cover_override):
+                            return
+                    payload = await self._submit_payload(
+                        job, cover_override=cover_override
+                    )
+                else:
+                    payload = await self._submit_payload(job)
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
                 scheduled_publish_at = payload.get('dtime')
@@ -2214,11 +2300,30 @@ class UploadCoordinator:
                     )
                     raise
         except DefinitelyNotSent:
-            if submit_started and not await self._settle_archive_failure(
-                claim, outcome_state='cancelled_local', outcome={}
-            ):
+            if not submit_started:
+                await self._retry_not_sent(claim, submit_started=False)
                 return
-            await self._retry_not_sent(claim, submit_started=submit_started)
+            delay = min(300, 2 ** min(claim.attempt, 8))
+            active = await self._settle_archive_failure(
+                claim,
+                outcome_state='cancelled_local',
+                outcome={},
+                active_values={
+                    'state': 'submitting',
+                    'submit_state': 'prepared',
+                    'review_reason': '请求确认未发出，将自动重试',
+                    'next_attempt_at': int(self._clock()) + delay,
+                    'updated_at': int(self._clock()),
+                },
+            )
+            if active:
+                audit(
+                    'upload_job_retry_scheduled',
+                    level='WARNING',
+                    job_id=claim.id,
+                    stage='submission',
+                    delay_seconds=delay,
+                )
             return
         except RemoteOutcomeUnknown:
             if submit_started:
@@ -2255,6 +2360,9 @@ class UploadCoordinator:
         except UposUploadStopped:
             await self._release_lease(claim)
             return
+        except _UploadCoverOutcomeUnknown:
+            await self._pause_job(claim, '投稿封面上传结果无法确认，已停止自动重试')
+            return
         except (AccountNotFound, AccountPaused, CredentialVersionChanged):
             await self._pause_job(claim, '投稿账号在执行期间发生变化')
             return
@@ -2270,27 +2378,27 @@ class UploadCoordinator:
             await self._pause_job(claim, '投稿封面无法读取或上传')
             return
         except BiliApiError as error:
-            if submit_started and not await self._settle_archive_failure(
-                claim,
-                outcome_state='confirmed_failure',
-                outcome={'error_code': error.code},
-            ):
-                return
             if error.code in (406, 408, 425, 429):
                 delay = min(15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4)))
-                await self._update_job(
-                    claim,
-                    {
-                        'state': 'submitting' if submit_started else 'uploading',
-                        'submit_state': 'prepared',
-                        'review_reason': 'B 站暂时限制请求，系统将在 {} 秒后自动重试'.format(
-                            delay
-                        ),
-                        'next_attempt_at': int(self._clock()) + delay,
-                        'updated_at': int(self._clock()),
-                    },
-                    release=True,
-                )
+                values = {
+                    'state': 'submitting' if submit_started else 'uploading',
+                    'submit_state': 'prepared',
+                    'review_reason': 'B 站暂时限制请求，系统将在 {} 秒后自动重试'.format(
+                        delay
+                    ),
+                    'next_attempt_at': int(self._clock()) + delay,
+                    'updated_at': int(self._clock()),
+                }
+                active = True
+                if submit_started:
+                    active = await self._settle_archive_failure(
+                        claim,
+                        outcome_state='confirmed_failure',
+                        outcome={'error_code': error.code},
+                        active_values=values,
+                    )
+                else:
+                    await self._update_job(claim, values, release=True)
                 audit(
                     'upload_preupload_rate_limited',
                     level='WARNING',
@@ -2298,21 +2406,25 @@ class UploadCoordinator:
                     stage='submission' if submit_started else 'upload',
                     error_code=error.code,
                     delay_seconds=delay,
+                    result='scheduled' if active else 'cancelled_local',
                 )
                 return
             rejection_reason = await self._bili_rejection_reason(claim.id, error)
-            await self._update_job(
-                claim,
-                {
-                    'state': 'paused',
-                    'submit_state': (
-                        'failed_permanent' if submit_started else 'prepared'
-                    ),
-                    'review_reason': rejection_reason,
-                    'updated_at': int(self._clock()),
-                },
-                release=True,
-            )
+            values = {
+                'state': 'paused',
+                'submit_state': 'failed_permanent' if submit_started else 'prepared',
+                'review_reason': rejection_reason,
+                'updated_at': int(self._clock()),
+            }
+            if submit_started:
+                await self._settle_archive_failure(
+                    claim,
+                    outcome_state='confirmed_failure',
+                    outcome={'error_code': error.code},
+                    active_values=values,
+                )
+            else:
+                await self._update_job(claim, values, release=True)
             return
         except ProtocolContractError:
             if submit_started:
@@ -2504,6 +2616,23 @@ class UploadCoordinator:
             job.account_id, local_path=local_path, source_url=source_url
         )
 
+    @staticmethod
+    def _uses_cover_resolver(job: _Job) -> bool:
+        try:
+            snapshot = json.loads(job.policy_snapshot_json)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(snapshot, Mapping) and snapshot.get('format_version') == 4
+
+    async def _resolve_job_cover(self, job: _Job) -> str:
+        try:
+            snapshot = json.loads(job.policy_snapshot_json)
+        except json.JSONDecodeError:
+            raise ProtocolContractError('invalid upload policy snapshot') from None
+        if not isinstance(snapshot, Mapping) or snapshot.get('format_version') != 4:
+            raise ProtocolContractError('invalid upload policy snapshot')
+        return await self._resolve_cover(job, snapshot)
+
     async def _load_job(self, claim: LeaseClaim) -> _Job:
         row = await self._database.fetchone(
             'SELECT job.id,job.session_id,job.account_id,job.policy_snapshot_json,'
@@ -2614,6 +2743,167 @@ class UploadCoordinator:
             )
         )
 
+    async def _begin_cover_upload(self, claim: LeaseClaim) -> Optional[str]:
+        def begin(connection: sqlite3.Connection) -> Tuple[bool, Optional[str]]:
+            if not self._owner_is_active(connection, claim):
+                self._release_cancelled_claim_in_transaction(
+                    connection, claim, int(self._clock())
+                )
+                return False, None
+            previous = connection.execute(
+                'SELECT outcome_state,outcome_json FROM owner_handoff_outcomes '
+                "WHERE owner_kind='upload' AND owner_id=? "
+                "AND side_effect_key='cover_upload' AND source_generation=?",
+                (claim.id, self._source_generation(claim)),
+            ).fetchone()
+            if previous is not None:
+                state = str(previous['outcome_state'])
+                if state == 'confirmed_success':
+                    try:
+                        outcome = json.loads(str(previous['outcome_json']))
+                    except json.JSONDecodeError:
+                        raise _UploadCoverOutcomeUnknown() from None
+                    cover_url = (
+                        outcome.get('cover_url')
+                        if isinstance(outcome, Mapping)
+                        else None
+                    )
+                    if not isinstance(cover_url, str) or not cover_url.startswith(
+                        'https://'
+                    ):
+                        raise _UploadCoverOutcomeUnknown()
+                    return True, cover_url
+                if state in ('in_flight', 'unknown_terminal'):
+                    raise _UploadCoverOutcomeUnknown()
+            connection.execute(
+                'INSERT INTO owner_handoff_outcomes('
+                'owner_kind,owner_id,side_effect_key,source_generation,'
+                'outcome_state,outcome_json,acknowledged_at) '
+                "VALUES('upload',?,'cover_upload',?,'in_flight','{}',NULL) "
+                'ON CONFLICT('
+                'owner_kind,owner_id,side_effect_key,source_generation) '
+                "DO UPDATE SET outcome_state='in_flight',outcome_json='{}',"
+                'acknowledged_at=NULL',
+                (claim.id, self._source_generation(claim)),
+            )
+            return True, None
+
+        active, cover_url = await self._database.write(begin)
+        if not active:
+            raise _UploadDeletionRequested()
+        return cover_url
+
+    async def _complete_cover_upload(self, claim: LeaseClaim, cover_url: str) -> bool:
+        now = int(self._clock())
+
+        def complete(connection: sqlite3.Connection) -> bool:
+            active = self._owner_is_active(connection, claim)
+            cursor = connection.execute(
+                'UPDATE owner_handoff_outcomes SET '
+                "outcome_state='confirmed_success',outcome_json=?,"
+                'acknowledged_at=? WHERE owner_kind=\'upload\' AND owner_id=? '
+                "AND side_effect_key='cover_upload' AND source_generation=? "
+                "AND outcome_state='in_flight'",
+                (
+                    json.dumps(
+                        {'cover_url': cover_url}, separators=(',', ':'), sort_keys=True
+                    ),
+                    now,
+                    claim.id,
+                    self._source_generation(claim),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('cover upload handoff intent was lost')
+            if not active:
+                self._release_cancelled_claim_in_transaction(connection, claim, now)
+            return active
+
+        return await self._database.write(complete)
+
+    async def _settle_cover_failure(
+        self, claim: LeaseClaim, *, outcome_state: str, outcome: Mapping[str, Any]
+    ) -> bool:
+        now = int(self._clock())
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            if self._owner_is_active(connection, claim):
+                cursor = connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                    "AND owner_id=? AND side_effect_key='cover_upload' "
+                    "AND source_generation=? AND outcome_state='in_flight'",
+                    (claim.id, self._source_generation(claim)),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLost('cover upload handoff intent was lost')
+                return True
+            cursor = connection.execute(
+                'UPDATE owner_handoff_outcomes SET outcome_state=?,outcome_json=?,'
+                'acknowledged_at=? WHERE owner_kind=\'upload\' AND owner_id=? '
+                "AND side_effect_key='cover_upload' AND source_generation=? "
+                "AND outcome_state='in_flight'",
+                (
+                    outcome_state,
+                    json.dumps(outcome, separators=(',', ':'), sort_keys=True),
+                    now,
+                    claim.id,
+                    self._source_generation(claim),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('cover upload handoff intent was lost')
+            self._release_cancelled_claim_in_transaction(connection, claim, now)
+            return False
+
+        return await self._database.write(settle)
+
+    async def _settle_unknown_cover_upload(self, claim: LeaseClaim) -> bool:
+        now = int(self._clock())
+
+        def settle(connection: sqlite3.Connection) -> bool:
+            active = self._owner_is_active(connection, claim)
+            cursor = connection.execute(
+                'UPDATE owner_handoff_outcomes SET '
+                "outcome_state='unknown_terminal',outcome_json='{}',"
+                'acknowledged_at=? WHERE owner_kind=\'upload\' AND owner_id=? '
+                "AND side_effect_key='cover_upload' AND source_generation=? "
+                "AND outcome_state='in_flight'",
+                (now, claim.id, self._source_generation(claim)),
+            )
+            if cursor.rowcount != 1:
+                raise LeaseLost('cover upload handoff intent was lost')
+            if not active:
+                self._release_cancelled_claim_in_transaction(connection, claim, now)
+                return False
+            self._ack_claim_in_transaction(
+                connection, claim, outcome_state='unknown_terminal', now=now
+            )
+            job_cursor = connection.execute(
+                "UPDATE upload_jobs SET state='paused',submit_state='prepared',"
+                "operator_paused=1,operator_resume_state=NULL,review_reason=?,"
+                'next_attempt_at=0,lease_owner=NULL,lease_until=NULL,updated_at=? '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (
+                    '投稿封面上传结果无法确认，已停止自动重试',
+                    now,
+                    claim.id,
+                    claim.lease_owner,
+                    claim.lease_generation,
+                ),
+            )
+            if job_cursor.rowcount != 1:
+                raise LeaseLost('upload job lease was lost')
+            return True
+
+        active = await self._database.write(settle)
+        audit(
+            'upload_cover_unknown',
+            level='WARNING',
+            job_id=claim.id,
+            result='paused' if active else 'unknown_terminal',
+        )
+        return active
+
     async def _begin_archive_submission(
         self, claim: LeaseClaim, *, scheduled_publish_at: Any, upload_completed_at: int
     ) -> None:
@@ -2695,18 +2985,59 @@ class UploadCoordinator:
             raise _UploadDeletionRequested()
 
     async def _settle_archive_failure(
-        self, claim: LeaseClaim, *, outcome_state: str, outcome: Mapping[str, Any]
+        self,
+        claim: LeaseClaim,
+        *,
+        outcome_state: str,
+        outcome: Mapping[str, Any],
+        active_values: Mapping[str, Any],
     ) -> bool:
+        allowed = {
+            'next_attempt_at',
+            'review_reason',
+            'state',
+            'submit_state',
+            'updated_at',
+        }
+        if not active_values or not set(active_values) <= allowed:
+            raise ValueError('invalid archive failure update')
         now = int(self._clock())
 
         def settle(connection: sqlite3.Connection) -> bool:
             if self._owner_is_active(connection, claim):
-                connection.execute(
+                assignments = ['{}=?'.format(column) for column in active_values] + [
+                    'lease_owner=NULL',
+                    'lease_until=NULL',
+                ]
+                parameters: List[Any] = list(active_values.values())
+                parameters.extend((claim.id, claim.lease_owner, claim.lease_generation))
+                job_cursor = connection.execute(
+                    'UPDATE upload_jobs SET {} WHERE id=? AND lease_owner=? '
+                    'AND lease_generation=?'.format(','.join(assignments)),
+                    parameters,
+                )
+                if job_cursor.rowcount != 1:
+                    raise LeaseLost('upload job lease was lost')
+                archive_cursor = connection.execute(
                     "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
                     "AND owner_id=? AND side_effect_key='archive_submit' "
-                    'AND source_generation=?',
+                    "AND source_generation=? AND outcome_state='in_flight'",
                     (claim.id, self._source_generation(claim)),
                 )
+                if archive_cursor.rowcount != 1:
+                    raise LeaseLost('archive submission handoff intent was lost')
+                claim_cursor = connection.execute(
+                    "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+                    'AND owner_id=? AND side_effect_key=? AND source_generation=? '
+                    "AND outcome_state='in_flight'",
+                    (
+                        claim.id,
+                        self._lease_side_effect_key(claim),
+                        self._source_generation(claim),
+                    ),
+                )
+                if claim_cursor.rowcount != 1:
+                    raise LeaseLost('upload owner handoff intent was lost')
                 return True
             self._settle_archive_handoff_in_transaction(
                 connection, claim, outcome_state=outcome_state, outcome=outcome, now=now
@@ -2804,7 +3135,8 @@ class UploadCoordinator:
                 raise LeaseLost('upload job lease was lost')
             connection.execute(
                 "DELETE FROM owner_handoff_outcomes WHERE owner_kind='upload' "
-                'AND owner_id=? AND side_effect_key IN (?,\'archive_submit\') '
+                'AND owner_id=? '
+                "AND side_effect_key IN (?,'archive_submit','cover_upload') "
                 'AND source_generation=?',
                 (
                     claim.id,

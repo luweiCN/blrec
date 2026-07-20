@@ -593,14 +593,9 @@ class UposUploader:
                 session_json,
                 outcome_state='cancelled_local',
                 outcome={},
+                active_upload_state='uploading',
             ):
                 raise UposUploadStopped('local deletion requested') from None
-            await self._update_part(
-                part_id,
-                claim,
-                {'upload_state': 'uploading'},
-                expected_session_json=session_json,
-            )
             raise
         except RemoteOutcomeUnknown:
             active = await self._settle_unknown_completion(part_id, claim, session_json)
@@ -615,12 +610,17 @@ class UposUploader:
                 raise UposUploadStopped('local deletion requested') from None
             raise UposUploadPaused('UPOS completion outcome is unknown') from None
         except BiliApiError as error:
+            permanent_failure = error.code not in (401, 403, 406, 408, 425, 429)
             if not await self._settle_completion_failure(
                 part_id,
                 claim,
                 session_json,
                 outcome_state='confirmed_failure',
                 outcome={'error_code': error.code},
+                active_upload_state='failed' if permanent_failure else 'uploading',
+                pause_reason=(
+                    'UPOS completion was rejected' if permanent_failure else None
+                ),
             ):
                 raise UposUploadStopped('local deletion requested') from None
             if error.code in (401, 403):
@@ -630,12 +630,6 @@ class UposUploader:
                     self._preupload_admission.rate_limited()
                     if error.code in (406, 429)
                     else 60
-                )
-                await self._update_part(
-                    part_id,
-                    claim,
-                    {'upload_state': 'uploading'},
-                    expected_session_json=session_json,
                 )
                 audit(
                     'upload_completion_deferred',
@@ -648,11 +642,14 @@ class UposUploader:
                 raise UposUploadDeferred(
                     delay, 'UPOS completion temporarily rejected'
                 ) from None
-            await self._pause(
-                part_id,
-                claim,
-                reason='UPOS completion was rejected',
+            audit(
+                'upload_part_paused',
+                level='WARNING',
+                job_id=claim.id,
+                part_id=part_id,
                 upload_state='failed',
+                artifact_state=None,
+                reason='UPOS completion was rejected',
             )
             raise UposUploadPaused('UPOS completion was rejected') from None
         except ProtocolContractError:
@@ -1127,6 +1124,13 @@ class UposUploader:
         def settle(connection: sqlite3.Connection) -> bool:
             active = self._remote_owner_active(connection, part_id, claim)
             if active:
+                cursor = connection.execute(
+                    "UPDATE upload_chunks SET state='prepared' "
+                    'WHERE part_id=? AND chunk_no=?',
+                    (part_id, chunk_no),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLost('UPOS chunk journal was lost')
                 self._clear_remote_intent_in_transaction(
                     connection, part_id, self._chunk_side_effect_key(chunk_no), claim
                 )
@@ -1233,11 +1237,37 @@ class UposUploader:
         *,
         outcome_state: str,
         outcome: Mapping[str, Any],
+        active_upload_state: str,
+        pause_reason: Optional[str] = None,
     ) -> bool:
+        if active_upload_state not in ('uploading', 'failed'):
+            raise ValueError('invalid UPOS completion failure state')
         now = int(self._clock())
 
         def settle(connection: sqlite3.Connection) -> bool:
             if self._remote_owner_active(connection, part_id, claim, session_json):
+                cursor = connection.execute(
+                    'UPDATE upload_parts SET upload_state=? '
+                    'WHERE id=? AND upload_session_json=?',
+                    (active_upload_state, part_id, session_json),
+                )
+                if cursor.rowcount != 1:
+                    raise LeaseLost('UPOS part journal was lost')
+                if pause_reason is not None:
+                    job_cursor = connection.execute(
+                        "UPDATE upload_jobs SET state='paused',review_reason=?,"
+                        'updated_at=? WHERE id=? AND lease_owner=? '
+                        'AND lease_generation=?',
+                        (
+                            pause_reason,
+                            now,
+                            claim.id,
+                            claim.lease_owner,
+                            claim.lease_generation,
+                        ),
+                    )
+                    if job_cursor.rowcount != 1:
+                        raise LeaseLost('upload job lease was lost')
                 self._clear_remote_intent_in_transaction(
                     connection, part_id, 'complete', claim
                 )

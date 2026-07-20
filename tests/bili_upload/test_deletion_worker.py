@@ -388,11 +388,30 @@ async def test_clip_deletion_keeps_source_recording_and_removes_local_upload(
             "VALUES(9,9,1,?,?,?,'ready')",
             (str(output), str(output), str(xml)),
         )
+        await database.execute(
+            'INSERT INTO owner_handoff_outcomes('
+            'owner_kind,owner_id,side_effect_key,source_generation,'
+            'outcome_state,outcome_json,acknowledged_at) VALUES'
+            "('highlight',7,'ffmpeg_cut',0,'in_flight','{}',NULL),"
+            "('upload',9,'archive_submit',0,'cancelled_local','{}',3),"
+            "('upos',9,'complete',0,'cancelled_local','{}',3),"
+            "('recorder',2,'clip-run:finished:1',0,'cancelled_local','{}',3),"
+            "('media_index',2,'probe',0,'cancelled_local','{}',3),"
+            "('media_index',1,'probe',0,'cancelled_local','{}',3)"
+        )
         worker = LocalDeletionWorker(
             database, recording_root=recording_root, clip_root=clip_root
         )
 
         await worker.request_clip(7)
+        assert await worker.run_once() == ('clip', 7)
+        assert output.exists()
+        assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 1
+
+        await database.execute(
+            "UPDATE owner_handoff_outcomes SET outcome_state='confirmed_success',"
+            "acknowledged_at=3 WHERE owner_kind='highlight' AND owner_id=7"
+        )
         assert await worker.run_once() == ('clip', 7)
 
         assert source.exists()
@@ -400,6 +419,13 @@ async def test_clip_deletion_keeps_source_recording_and_removes_local_upload(
         assert not xml.exists()
         assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 0
         assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
+        handoffs = await database.fetchall(
+            'SELECT owner_kind,owner_id FROM owner_handoff_outcomes '
+            'ORDER BY owner_kind,owner_id'
+        )
+        assert [(str(row['owner_kind']), int(row['owner_id'])) for row in handoffs] == [
+            ('media_index', 1)
+        ]
         assert (
             await database.scalar(
                 "SELECT COUNT(*) FROM recording_sessions WHERE source_kind='highlight'"
@@ -792,6 +818,7 @@ async def test_worker_waits_for_remote_handoff_after_upload_lease_release(
         assert await worker.run_once() == ('session', 1)
         assert not paths[0].exists()
         assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+        assert await database.scalar('SELECT COUNT(*) FROM owner_handoff_outcomes') == 0
     finally:
         await database.close()
 
@@ -844,9 +871,7 @@ async def test_worker_waits_for_repair_edit_handoff_after_repair_lease_release(
 
 
 @pytest.mark.asyncio
-async def test_unknown_remote_result_is_acknowledged_before_local_rows_are_deleted(
-    tmp_path: Path,
-) -> None:
+async def test_unknown_remote_result_is_removed_with_local_rows(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
     await database.open()
     try:
@@ -877,18 +902,7 @@ async def test_unknown_remote_result_is_acknowledged_before_local_rows_are_delet
         await worker.request_session(1, manager_subject='manager')
         await worker.run_once()
 
-        outcome = await database.fetchone(
-            'SELECT owner_kind,owner_id,side_effect_key,outcome_state,'
-            'acknowledged_at FROM owner_handoff_outcomes'
-        )
-        assert outcome is not None
-        assert dict(outcome) == {
-            'owner_kind': 'upload',
-            'owner_id': 9,
-            'side_effect_key': 'archive_submit',
-            'outcome_state': 'unknown_terminal',
-            'acknowledged_at': 100,
-        }
+        assert await database.scalar('SELECT COUNT(*) FROM owner_handoff_outcomes') == 0
         assert await database.scalar('SELECT COUNT(*) FROM upload_jobs') == 0
     finally:
         await database.close()

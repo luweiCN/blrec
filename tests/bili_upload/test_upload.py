@@ -13,7 +13,11 @@ from blrec.bili_upload.accounts import AccountWriteGate
 from blrec.bili_upload.artifact_recovery import RecoveredArtifact
 from blrec.bili_upload.database import BiliUploadDatabase, LeaseClaim
 from blrec.bili_upload.deletion_worker import LocalDeletionWorker
-from blrec.bili_upload.errors import BiliApiError, RemoteOutcomeUnknown
+from blrec.bili_upload.errors import (
+    BiliApiError,
+    DefinitelyNotSent,
+    RemoteOutcomeUnknown,
+)
 from blrec.bili_upload.highlights import HighlightService
 from blrec.bili_upload.policies import (
     RoomUploadPolicyManager,
@@ -2079,6 +2083,12 @@ async def test_archive_submit_hands_success_to_deletion_generation(
             },
             {
                 'owner_kind': 'upload',
+                'side_effect_key': 'cover_upload',
+                'source_generation': 0,
+                'outcome_state': 'confirmed_success',
+            },
+            {
+                'owner_kind': 'upload',
                 'side_effect_key': 'lease:1',
                 'source_generation': 0,
                 'outcome_state': 'in_flight',
@@ -2125,7 +2135,7 @@ async def test_archive_submit_hands_success_to_deletion_generation(
                 "AND side_effect_key='archive_submit' "
                 "AND outcome_state='confirmed_success'"
             )
-            == 1
+            == 0
         )
     finally:
         release_response.set()
@@ -2531,6 +2541,194 @@ async def test_submit_rate_limit_is_retried_automatically(tmp_path: Path) -> Non
         assert (
             await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
             == 'waiting_review'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_deletion_after_parts_prevents_cover_upload(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class DeletingUploader(FakeUploader):
+        async def upload_part(
+            self, part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            remote = await super().upload_part(part_id, bundle=bundle, claim=claim)
+            if len(self.calls) == 2:
+                await self._database.execute(
+                    "UPDATE recording_sessions SET deletion_state='requested',"
+                    'cancellation_generation=1 WHERE id=1'
+                )
+            return remote
+
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        cover_resolver = FakeCoverResolver()
+        worker = coordinator(
+            database,
+            protocol,
+            DeletingUploader(database),
+            MutableClock(1000),
+            cover_resolver=cover_resolver,
+        )
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+
+        assert cover_resolver.live_calls == []
+        assert protocol.submit_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_cover_upload_is_terminal_and_not_blindly_retried(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class UnknownCoverResolver(FakeCoverResolver):
+        async def live_url(
+            self, account_id: int, *, local_path: Optional[str], source_url: str
+        ) -> str:
+            self.live_calls.append((account_id, local_path, source_url))
+            raise RemoteOutcomeUnknown('upload_cover')
+
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        cover_resolver = UnknownCoverResolver()
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            cover_resolver=cover_resolver,
+        )
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+        assert await worker.run_once() is None
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,operator_paused,lease_owner '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'submit_state': 'prepared',
+            'operator_paused': 1,
+            'lease_owner': None,
+        }
+        outcome = await database.fetchone(
+            "SELECT outcome_state,acknowledged_at "
+            "FROM owner_handoff_outcomes WHERE owner_kind='upload' "
+            "AND owner_id=1 AND side_effect_key='cover_upload'"
+        )
+        assert outcome is not None
+        assert outcome['outcome_state'] == 'unknown_terminal'
+        assert outcome['acknowledged_at'] is not None
+        assert len(cover_resolver.live_calls) == 1
+        assert protocol.submit_calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_cover_is_reused_after_crash_before_archive_submission(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        cover_resolver = FakeCoverResolver()
+        worker = coordinator(
+            database,
+            protocol,
+            FakeUploader(database),
+            MutableClock(1000),
+            cover_resolver=cover_resolver,
+        )
+        await worker.create_ready_jobs()
+        original_complete = worker._complete_cover_upload
+
+        async def complete_then_crash(*args: Any, **kwargs: Any) -> bool:
+            await original_complete(*args, **kwargs)
+            raise RuntimeError('simulated crash after cover response')
+
+        worker._complete_cover_upload = complete_then_crash  # type: ignore
+        with pytest.raises(RuntimeError, match='after cover response'):
+            await worker.run_once()
+
+        worker._complete_cover_upload = original_complete  # type: ignore
+        assert await worker.run_once() == 1
+        assert len(cover_resolver.live_calls) == 1
+        assert len(protocol.submit_calls) == 1
+        assert protocol.submit_calls[0]['cover'] == (
+            'https://archive.biliimg.com/live.jpg'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('remote_error', 'expected_state', 'expected_submit_state'),
+    (
+        (DefinitelyNotSent('submit_archive'), 'submitting', 'prepared'),
+        (BiliApiError(400, operation='submit_archive'), 'paused', 'failed_permanent'),
+    ),
+)
+async def test_archive_failure_state_is_atomic_before_followup_work(
+    tmp_path: Path,
+    remote_error: BaseException,
+    expected_state: str,
+    expected_submit_state: str,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = remote_error
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1000)
+        )
+        await worker.create_ready_jobs()
+        original_settle = worker._settle_archive_failure
+
+        async def settle_then_crash(*args: Any, **kwargs: Any) -> bool:
+            await original_settle(*args, **kwargs)
+            raise RuntimeError('simulated crash after archive settlement')
+
+        worker._settle_archive_failure = settle_then_crash  # type: ignore
+
+        with pytest.raises(RuntimeError, match='after archive settlement'):
+            await worker.run_once()
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,lease_owner FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': expected_state,
+            'submit_state': expected_submit_state,
+            'lease_owner': None,
+        }
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM owner_handoff_outcomes "
+                "WHERE owner_kind='upload' AND owner_id=1 "
+                "AND side_effect_key IN ('archive_submit','lease:1')"
+            )
+            == 0
         )
     finally:
         await database.close()

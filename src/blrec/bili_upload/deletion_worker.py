@@ -334,6 +334,14 @@ class LocalDeletionWorker:
             ).fetchone()
             if current is None:
                 return False
+            in_flight_handoff = connection.execute(
+                'SELECT 1 FROM owner_handoff_outcomes '
+                "WHERE owner_kind='highlight' AND owner_id=? "
+                "AND outcome_state='in_flight' LIMIT 1",
+                (clip_id,),
+            ).fetchone()
+            if in_flight_handoff is not None:
+                return False
             if current['lease_owner'] is not None:
                 return False
             upload_session_id = current['upload_session_id']
@@ -416,8 +424,14 @@ class LocalDeletionWorker:
                 "outcome.owner_kind='upload' AND outcome.owner_id=?) OR ("
                 "outcome.owner_kind='upos' AND outcome.owner_id IN("
                 'SELECT id FROM upload_parts WHERE job_id=?)) OR ('
-                "outcome.owner_kind='repair' AND outcome.owner_id=?))",
-                (job_id, job_id, job_id),
+                "outcome.owner_kind='repair' AND outcome.owner_id=?) OR ("
+                "outcome.owner_kind='comment' AND outcome.owner_id IN("
+                'SELECT id FROM comment_items WHERE job_id=?)) OR ('
+                "outcome.owner_kind='danmaku' AND outcome.owner_id IN("
+                'SELECT item.id FROM danmaku_items item '
+                'JOIN upload_parts part ON part.id=item.part_id '
+                'WHERE part.job_id=?)))',
+                (job_id, job_id, job_id, job_id, job_id),
             ).fetchone()[0]
             if int(remote_handoffs):
                 blockers.append('remote_handoff')
@@ -436,6 +450,16 @@ class LocalDeletionWorker:
             ).fetchone()[0]
             if int(danmaku):
                 blockers.append('danmaku')
+        local_handoffs = connection.execute(
+            'SELECT COUNT(*) FROM owner_handoff_outcomes outcome '
+            "WHERE outcome.outcome_state='in_flight' AND (("
+            "outcome.owner_kind='recorder' AND outcome.owner_id=?) OR ("
+            "outcome.owner_kind='media_index' AND outcome.owner_id IN("
+            'SELECT id FROM recording_parts WHERE session_id=?)))',
+            (session_id, session_id),
+        ).fetchone()[0]
+        if int(local_handoffs) and 'remote_handoff' not in blockers:
+            blockers.append('remote_handoff')
         media = connection.execute(
             'SELECT COUNT(*) FROM recording_parts WHERE session_id=? '
             "AND media_index_state='indexing' AND media_index_owner IS NOT NULL",
@@ -736,7 +760,7 @@ class LocalDeletionWorker:
             await self._finish_session(owner_id, generation)
 
     async def _finish_session(self, session_id: int, generation: int) -> None:
-        def finish(connection: sqlite3.Connection) -> None:
+        def finish(connection: sqlite3.Connection) -> bool:
             current = connection.execute(
                 'SELECT deletion_state,cancellation_generation '
                 'FROM recording_sessions WHERE id=?',
@@ -747,7 +771,9 @@ class LocalDeletionWorker:
                 or int(current['cancellation_generation']) != generation
                 or str(current['deletion_state']) != 'deleting'
             ):
-                return
+                return False
+            if self._session_blockers_in_transaction(connection, session_id):
+                return False
             job = connection.execute(
                 'SELECT id FROM upload_jobs WHERE session_id=?', (session_id,)
             ).fetchone()
@@ -761,6 +787,7 @@ class LocalDeletionWorker:
                 'SELECT id FROM recording_runs WHERE session_id=?)',
                 (session_id,),
             )
+            self._delete_session_handoffs(connection, session_id)
             connection.execute(
                 'DELETE FROM recording_parts WHERE session_id=?', (session_id,)
             )
@@ -781,15 +808,16 @@ class LocalDeletionWorker:
                 'AND owner_id=? AND cancellation_generation=?',
                 (session_id, generation),
             )
+            return True
 
-        await self._database.write(finish)
-        audit(
-            'local_deletion_completed',
-            owner_kind='session',
-            owner_id=session_id,
-            generation=generation,
-            result='deleted_local_only',
-        )
+        if await self._database.write(finish):
+            audit(
+                'local_deletion_completed',
+                owner_kind='session',
+                owner_id=session_id,
+                generation=generation,
+                result='deleted_local_only',
+            )
 
     async def _finish_clip(self, clip_id: int, generation: int) -> None:
         def finish(connection: sqlite3.Connection) -> bool:
@@ -804,6 +832,14 @@ class LocalDeletionWorker:
                 or str(current['deletion_state']) != 'deleting'
             ):
                 return False
+            in_flight_handoff = connection.execute(
+                'SELECT 1 FROM owner_handoff_outcomes '
+                "WHERE owner_kind='highlight' AND owner_id=? "
+                "AND outcome_state='in_flight' LIMIT 1",
+                (clip_id,),
+            ).fetchone()
+            if in_flight_handoff is not None:
+                return False
             session_id = current['upload_session_id']
             if session_id is not None:
                 if self._session_blockers_in_transaction(connection, int(session_id)):
@@ -816,6 +852,11 @@ class LocalDeletionWorker:
                     connection.execute(
                         'DELETE FROM upload_jobs WHERE id=?', (int(job['id']),)
                     )
+            connection.execute(
+                "DELETE FROM owner_handoff_outcomes WHERE owner_kind='highlight' "
+                'AND owner_id=?',
+                (clip_id,),
+            )
             connection.execute('DELETE FROM highlight_clips WHERE id=?', (clip_id,))
             if session_id is not None:
                 connection.execute(
@@ -823,6 +864,7 @@ class LocalDeletionWorker:
                     'SELECT id FROM recording_runs WHERE session_id=?)',
                     (int(session_id),),
                 )
+                self._delete_session_handoffs(connection, int(session_id))
                 connection.execute(
                     'DELETE FROM recording_parts WHERE session_id=?', (int(session_id),)
                 )
@@ -897,6 +939,19 @@ class LocalDeletionWorker:
     @staticmethod
     def _delete_job_children(connection: sqlite3.Connection, job_id: int) -> None:
         connection.execute(
+            'DELETE FROM owner_handoff_outcomes WHERE '
+            "(owner_kind IN ('upload','repair','collection') AND owner_id=?) OR "
+            "(owner_kind='upos' AND owner_id IN("
+            'SELECT id FROM upload_parts WHERE job_id=?)) OR '
+            "(owner_kind='comment' AND owner_id IN("
+            'SELECT id FROM comment_items WHERE job_id=?)) OR '
+            "(owner_kind='danmaku' AND owner_id IN("
+            'SELECT item.id FROM danmaku_items item '
+            'JOIN upload_parts part ON part.id=item.part_id '
+            'WHERE part.job_id=?))',
+            (job_id, job_id, job_id, job_id),
+        )
+        connection.execute(
             'DELETE FROM danmaku_items WHERE part_id IN('
             'SELECT id FROM upload_parts WHERE job_id=?)',
             (job_id,),
@@ -908,3 +963,15 @@ class LocalDeletionWorker:
         )
         connection.execute('DELETE FROM comment_items WHERE job_id=?', (job_id,))
         connection.execute('DELETE FROM upload_parts WHERE job_id=?', (job_id,))
+
+    @staticmethod
+    def _delete_session_handoffs(
+        connection: sqlite3.Connection, session_id: int
+    ) -> None:
+        connection.execute(
+            'DELETE FROM owner_handoff_outcomes WHERE '
+            "(owner_kind='recorder' AND owner_id=?) OR "
+            "(owner_kind='media_index' AND owner_id IN("
+            'SELECT id FROM recording_parts WHERE session_id=?))',
+            (session_id, session_id),
+        )
