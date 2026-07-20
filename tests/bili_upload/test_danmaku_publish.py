@@ -11,6 +11,7 @@ from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import (
     BiliApiError,
     DefinitelyNotSent,
+    ProtocolContractError,
     RemoteOutcomeUnknown,
 )
 
@@ -371,6 +372,31 @@ async def test_unknown_outcome_is_fenced_without_second_post(
 
 
 @pytest.mark.asyncio
+async def test_protocol_contract_error_is_fenced_without_second_post(
+    database: BiliUploadDatabase,
+) -> None:
+    await seed_job(database, 1, [0])
+    protocol = FakeProtocol()
+    protocol.results = [ProtocolContractError('invalid danmaku response')]
+    clock = FakeClock()
+    worker = publisher(database, protocol, clock)
+
+    await worker.run_once()
+    clock.advance(300)
+    await worker.run_once()
+
+    assert len(protocol.calls) == 1
+    row = await database.fetchone('SELECT state,error_message FROM danmaku_items')
+    assert dict(row) == {
+        'state': 'unknown_outcome',
+        'error_message': '弹幕接口响应异常，结果无法安全确认',
+    }
+    assert await database.scalar(
+        'SELECT danmaku_branch_state FROM upload_jobs WHERE id=1'
+    ) == ('paused')
+
+
+@pytest.mark.asyncio
 async def test_crash_interrupted_in_flight_item_is_fenced_before_network(
     database: BiliUploadDatabase,
 ) -> None:
@@ -416,7 +442,7 @@ async def test_startup_recovery_fences_every_interrupted_item(
     await database.execute(
         "UPDATE upload_jobs SET danmaku_branch_state='paused',review_reason=? "
         'WHERE id=1',
-        ('弹幕在进程中断前已发出，结果无法安全确认',),
+        ('原始暂停原因',),
     )
     protocol = FakeProtocol()
     worker = publisher(database, protocol, FakeClock())
@@ -435,6 +461,9 @@ async def test_startup_recovery_fences_every_interrupted_item(
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
         == 'paused'
     )
+    assert await database.scalar(
+        'SELECT review_reason FROM upload_jobs WHERE id=1'
+    ) == ('弹幕发送被中断，结果无法安全确认')
     await worker.run_once()
     assert protocol.calls == []
 
@@ -444,6 +473,7 @@ async def test_startup_recovery_keeps_legacy_unknown_item_fenced(
     database: BiliUploadDatabase,
 ) -> None:
     legacy_message = '弹幕在进程中断前已发出，结果无法安全确认'
+    original_review_reason = '原始的远端响应异常'
     await seed_job(database, 1, [0], states=['unknown_outcome'])
     await database.execute(
         'UPDATE danmaku_items SET error_message=?', (legacy_message,)
@@ -451,7 +481,7 @@ async def test_startup_recovery_keeps_legacy_unknown_item_fenced(
     await database.execute(
         "UPDATE upload_jobs SET danmaku_branch_state='paused',review_reason=? "
         'WHERE id=1',
-        (legacy_message,),
+        (original_review_reason,),
     )
 
     recovered = await publisher(
@@ -469,6 +499,9 @@ async def test_startup_recovery_keeps_legacy_unknown_item_fenced(
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
         == 'paused'
     )
+    assert await database.scalar(
+        'SELECT review_reason FROM upload_jobs WHERE id=1'
+    ) == (original_review_reason)
 
 
 @pytest.mark.asyncio

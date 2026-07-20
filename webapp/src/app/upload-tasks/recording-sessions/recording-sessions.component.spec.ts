@@ -1160,7 +1160,10 @@ describe('RecordingSessionsComponent', () => {
     );
     expect(document.body.textContent).not.toContain('视为已发送');
     expect(document.body.textContent).not.toContain('接受重复风险并重试');
-    expect(document.body.textContent).not.toContain('需要确认的弹幕');
+    expect(document.body.textContent).toContain('发送结果待确认 1 条');
+    expect(document.body.textContent).toContain('P1 · 12 秒');
+    expect(document.body.textContent).toContain('需要确认的弹幕');
+    expect(document.body.textContent).toContain('远端结果未知');
     expect(document.body.textContent).not.toContain('remote-p1');
     fixture.componentInstance.closeDetails();
     expect(fixture.componentInstance.detailVisible).toBeFalse();

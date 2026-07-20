@@ -391,6 +391,20 @@
           <span *ngIf="job.danmakuFailed > 0">
             失败 {{ job.danmakuFailed }}
           </span>
+          <span *ngIf="job.danmakuUnknown > 0">
+            发送结果待确认 {{ job.danmakuUnknown }} 条
+          </span>
+          <ul
+            class="danmaku-unknown-list"
+            *ngIf="job.unknownDanmakuItems.length > 0"
+          >
+            <li *ngFor="let item of job.unknownDanmakuItems">
+              P{{ item.partIndex }} ·
+              {{ item.progressMs / 1000 | number: "1.0-1" }} 秒 ·
+              {{ item.content }}
+              <span *ngIf="item.errorMessage">（{{ item.errorMessage }}）</span>
+            </li>
+          </ul>
         </div>
       </div>
       <ng-template #noJob>

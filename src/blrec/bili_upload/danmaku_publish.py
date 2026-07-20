@@ -146,7 +146,8 @@ class DanmakuPublisher:
 
         def recover(connection: sqlite3.Connection) -> List[sqlite3.Row]:
             rows = connection.execute(
-                'SELECT item.id,item.attempt,item.progress_ms,part.id AS part_id,'
+                'SELECT item.id,item.state AS item_state,item.attempt,'
+                'item.progress_ms,part.id AS part_id,'
                 'part.job_id,part.cid FROM danmaku_items item '
                 'JOIN upload_parts part ON part.id=item.part_id '
                 "WHERE item.state IN ('in_flight','unknown_outcome')"
@@ -165,13 +166,26 @@ class DanmakuPublisher:
                     (message, _DORMANT_UNTIL, int(row['id'])),
                 )
             job_ids = {int(row['job_id']) for row in rows}
+            interrupted_job_ids = {
+                int(row['job_id']) for row in rows if row['item_state'] == 'in_flight'
+            }
             for job_id in job_ids:
-                connection.execute(
-                    "UPDATE upload_jobs SET danmaku_branch_state='paused',"
-                    'review_reason=?,updated_at=? WHERE id=? AND state='
-                    "'approved' AND danmaku_branch_state IN ('publishing','paused')",
-                    (message, now, job_id),
-                )
+                if job_id in interrupted_job_ids:
+                    connection.execute(
+                        "UPDATE upload_jobs SET danmaku_branch_state='paused',"
+                        'review_reason=?,updated_at=? WHERE id=? AND state='
+                        "'approved' AND danmaku_branch_state IN "
+                        "('publishing','paused')",
+                        (message, now, job_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE upload_jobs SET danmaku_branch_state='paused',"
+                        'updated_at=? WHERE id=? AND state='
+                        "'approved' AND danmaku_branch_state IN "
+                        "('publishing','paused')",
+                        (now, job_id),
+                    )
             return rows
 
         recovered = await self._database.write(recover)

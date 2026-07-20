@@ -178,6 +178,17 @@
   margin-top: 8px;
 }
 
+.danmaku-unknown-list {
+  width: 100%;
+  margin: 0;
+  padding-left: 20px;
+  color: #8c5a00;
+
+  li {
+    overflow-wrap: anywhere;
+  }
+}
+
 .session-overview {
   display: flex;
   gap: 16px;
