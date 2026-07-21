@@ -275,3 +275,58 @@ async def test_deinit_cancels_owned_composite_refresh_before_closing_session() -
     with pytest.raises(asyncio.CancelledError):
         await updating
     assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_deinit_closes_refresh_admission_before_closing_session() -> None:
+    entered = asyncio.Event()
+    never = asyncio.Event()
+    web = InfoApi(entered=entered, release=never)
+    live = live_with_apis(web, InfoApi(error=RuntimeError('unused fallback')))
+    close_entered = asyncio.Event()
+    close_release = asyncio.Event()
+    close_calls = 0
+
+    async def close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_entered.set()
+        await close_release.wait()
+
+    live._owns_session = True
+    live._session = type('ClosableSession', (), {'close': staticmethod(close)})()
+    updating = asyncio.create_task(live.update_info(True))
+    closing = None
+    quiet_update = None
+    loud_update = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=0.5)
+        closing = asyncio.create_task(live.deinit())
+        await asyncio.wait_for(close_entered.wait(), timeout=0.5)
+
+        quiet_update = asyncio.create_task(live.update_info())
+        loud_update = asyncio.create_task(live.update_info(True))
+
+        assert await asyncio.wait_for(quiet_update, timeout=0.1) is False
+        with pytest.raises(RuntimeError, match='refresh is closed'):
+            await asyncio.wait_for(loud_update, timeout=0.1)
+        assert web.calls == 1
+
+        close_release.set()
+        await asyncio.wait_for(closing, timeout=0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await updating
+        assert live._info_refresh_task is None
+
+        await live.deinit()
+        assert close_calls == 1
+    finally:
+        close_release.set()
+        never.set()
+        for task in (updating, closing, quiet_update, loud_update):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (updating, closing, quiet_update, loud_update) if task),
+            return_exceptions=True,
+        )

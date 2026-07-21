@@ -103,6 +103,9 @@ class Live:
         self._info_timeout_seconds = info_timeout_seconds
         self._info_refresh_lock = asyncio.Lock()
         self._info_refresh_task: Optional['asyncio.Task[None]'] = None
+        self._info_refresh_closed = False
+        self._deinit_lock = asyncio.Lock()
+        self._deinitialized = False
         self._info_revision = 0
 
         self._room_info: RoomInfo
@@ -231,14 +234,21 @@ class Live:
                 self._no_flv_stream = not flv_formats
 
     async def deinit(self) -> None:
-        async with self._info_refresh_lock:
-            refresh_task = self._info_refresh_task
-        if refresh_task is not None and not refresh_task.done():
-            refresh_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await refresh_task
-        if self._owns_session:
-            await self._session.close()
+        async with self._deinit_lock:
+            if self._deinitialized:
+                return
+            async with self._info_refresh_lock:
+                self._info_refresh_closed = True
+                refresh_task = self._info_refresh_task
+            try:
+                if refresh_task is not None and not refresh_task.done():
+                    refresh_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await refresh_task
+            finally:
+                if self._owns_session:
+                    await self._session.close()
+                self._deinitialized = True
 
     def has_no_flv_streams(self) -> bool:
         return self._no_flv_stream
@@ -298,6 +308,8 @@ class Live:
 
     async def _refresh_info(self) -> None:
         async with self._info_refresh_lock:
+            if self._info_refresh_closed:
+                raise RuntimeError('live information refresh is closed')
             refresh_task = self._info_refresh_task
             if refresh_task is None or refresh_task.done():
                 refresh_task = asyncio.create_task(self._refresh_info_once())
