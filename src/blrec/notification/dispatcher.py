@@ -388,7 +388,7 @@ class NotificationDispatcher:
             if attempt_deadline - self._monotonic() <= 0:
                 raise asyncio.TimeoutError()
             future = cast(
-                asyncio.Future[Any],
+                'asyncio.Future[Any]',
                 loop.run_in_executor(
                     None,
                     send_with_deadline,

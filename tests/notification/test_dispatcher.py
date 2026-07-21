@@ -312,7 +312,9 @@ async def test_close_budget_does_not_wait_unbounded_for_smtp_executor() -> None:
     )
     await dispatcher.start()
     assert dispatcher.enqueue('email', 'title', 'body', 'text')
-    await asyncio.get_running_loop().run_in_executor(None, sender.started.wait)
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, sender.started.wait, 1
+    )
 
     started_at = time.monotonic()
     await dispatcher.close()
@@ -339,7 +341,9 @@ async def test_close_deadline_limits_late_smtp_attempts() -> None:
     await dispatcher.start()
     assert dispatcher.enqueue('email', 'first', 'body', 'text')
     assert dispatcher.enqueue('email', 'second', 'body', 'text')
-    await asyncio.get_running_loop().run_in_executor(None, sender.started.wait)
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, sender.started.wait, 1
+    )
 
     started_at = time.monotonic()
     await dispatcher.close()
@@ -359,7 +363,9 @@ async def test_restart_serializes_smtp_left_running_by_close_timeout() -> None:
     )
     await dispatcher.start()
     assert dispatcher.enqueue('email', 'old', 'body', 'text')
-    await asyncio.get_running_loop().run_in_executor(None, sender.started.wait)
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, sender.started.wait, 1
+    )
 
     await dispatcher.close()
     assert sender.active == 1
