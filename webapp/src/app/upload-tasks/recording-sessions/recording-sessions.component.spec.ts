@@ -8,7 +8,7 @@ import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { of, Subject, throwError } from 'rxjs';
+import { NEVER, of, Subject, throwError } from 'rxjs';
 import {
   CopyOutline,
   MoreOutline,
@@ -36,6 +36,10 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 import { NzProgressModule } from 'ng-zorro-antd/progress';
 
+import {
+  ControlOperation,
+  ControlOperationService,
+} from '../../core/services/control-operation.service';
 import {
   EVENT_SOURCE_FACTORY,
   EventSourceLike,
@@ -163,6 +167,29 @@ function isOnPush(component: unknown): boolean {
   return definition?.onPush === true;
 }
 
+function retryOperation(
+  status: 'running' | 'succeeded' | 'failed',
+  processed: number,
+  total: number,
+  succeeded: number,
+  rejected: number,
+): ControlOperation {
+  return {
+    id: 'upload-retry-1',
+    lane: 'upload-retry',
+    kind: 'retry-failed',
+    targetKey: 'upload-retry-1',
+    attempt: 1,
+    generation: 1,
+    status,
+    result: { processed, total, succeeded, rejected },
+    errorCode: null,
+    createdAt: 1,
+    updatedAt: 2,
+    steps: [],
+  };
+}
+
 describe('RecordingSessionsComponent', () => {
   let fixture: ComponentFixture<RecordingSessionsComponent>;
   let service: jasmine.SpyObj<RecordingSessionService>;
@@ -170,6 +197,7 @@ describe('RecordingSessionsComponent', () => {
   let message: jasmine.SpyObj<NzMessageService>;
   let taskManager: jasmine.SpyObj<TaskManagerService>;
   let highlights: jasmine.SpyObj<HighlightService>;
+  let controlOperations: jasmine.SpyObj<ControlOperationService>;
   let realtimeEvents: FakeRealtimeSource;
   let detailSession: RecordingSessionDetail;
   let summarySession: RecordingSessionSummary;
@@ -192,7 +220,18 @@ describe('RecordingSessionsComponent', () => {
       'error',
       'warning',
       'info',
+      'loading',
+      'remove',
     ]);
+    message.loading.and.returnValue({
+      messageId: 'retry-progress',
+      onClose: new Subject<boolean>(),
+    });
+    controlOperations = jasmine.createSpyObj<ControlOperationService>(
+      'ControlOperationService',
+      ['poll'],
+    );
+    controlOperations.poll.and.returnValue(NEVER);
     taskManager = jasmine.createSpyObj<TaskManagerService>(
       'TaskManagerService',
       ['canCutStream', 'cutStream'],
@@ -227,7 +266,9 @@ describe('RecordingSessionsComponent', () => {
     realtimeEvents = new FakeRealtimeSource();
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
-    service.retryFailedJobs.and.returnValue(of({ results: [] }));
+    service.retryFailedJobs.and.returnValue(
+      of({ operationId: 'upload-retry-1', status: 'accepted', total: 0 }),
+    );
     service.previewRetryFailedJobs.and.returnValue(of({ items: [] }));
     detailSession = {
       id: 1,
@@ -423,6 +464,7 @@ describe('RecordingSessionsComponent', () => {
         { provide: NzMessageService, useValue: message },
         { provide: TaskManagerService, useValue: taskManager },
         { provide: HighlightService, useValue: highlights },
+        { provide: ControlOperationService, useValue: controlOperations },
         RealtimeService,
         { provide: EVENT_SOURCE_FACTORY, useValue: () => realtimeEvents },
         {
@@ -446,6 +488,7 @@ describe('RecordingSessionsComponent', () => {
     spyOnProperty(TestBed.inject(Router), 'url', 'get').and.returnValue(
       '/upload-tasks',
     );
+    localStorage.removeItem('blrec-upload-retry-operation-id');
     fixture = TestBed.createComponent(RecordingSessionsComponent);
   });
 
@@ -990,7 +1033,7 @@ describe('RecordingSessionsComponent', () => {
     });
   });
 
-  it('previews every safe failed job before retrying', () => {
+  it('previews every safe failed job before starting its durable retry operation', () => {
     service.previewRetryFailedJobs.and.returnValue(
       of({
         items: [
@@ -1006,10 +1049,9 @@ describe('RecordingSessionsComponent', () => {
     );
     service.retryFailedJobs.and.returnValue(
       of({
-        results: [
-          { jobId: 9, accepted: true, message: '失败任务已重新排队' },
-          { jobId: 10, accepted: false, message: '本地视频不可用' },
-        ],
+        operationId: 'upload-retry-1',
+        status: 'accepted',
+        total: 2,
       }),
     );
     fixture.detectChanges();
@@ -1023,8 +1065,79 @@ describe('RecordingSessionsComponent', () => {
     fixture.componentInstance.submitRetryAllFailedJobs();
 
     expect(service.retryFailedJobs).toHaveBeenCalledTimes(1);
+    expect(controlOperations.poll).toHaveBeenCalledOnceWith('upload-retry-1');
+    expect(localStorage.getItem('blrec-upload-retry-operation-id')).toBe(
+      'upload-retry-1',
+    );
+  });
+
+  it('shows cumulative retry progress and reloads the list at terminal state', () => {
+    const operation = new Subject<ControlOperation>();
+    controlOperations.poll.and.returnValue(operation);
+    service.previewRetryFailedJobs.and.returnValue(
+      of({
+        items: [
+          {
+            jobId: 9,
+            roomId: 100,
+            title: '失败录像',
+            accountDisplayName: '投稿账号',
+            reason: '网络失败',
+          },
+        ],
+      }),
+    );
+    service.retryFailedJobs.and.returnValue(
+      of({ operationId: 'upload-retry-1', status: 'accepted', total: 201 }),
+    );
+    fixture.detectChanges();
+    service.listSessions.calls.reset();
+
+    fixture.componentInstance.retryAllFailedJobs();
+    fixture.componentInstance.submitRetryAllFailedJobs();
+    operation.next(retryOperation('running', 100, 201, 99, 1));
+
+    expect(fixture.componentInstance.retryProgress).toEqual({
+      processed: 100,
+      total: 201,
+      succeeded: 99,
+      rejected: 1,
+    });
+    expect(message.loading).toHaveBeenCalledWith(
+      '失败任务重试中：已处理 100/201，成功 99，跳过 1',
+      { nzDuration: 0 },
+    );
+
+    operation.next(retryOperation('failed', 201, 201, 199, 2));
+    operation.complete();
+
     expect(message.warning).toHaveBeenCalledWith(
-      '已重新排队 1 个任务，跳过 1 个：本地视频不可用',
+      '失败任务重试完成：已处理 201/201，成功 199，跳过 2',
+    );
+    expect(service.listSessions).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem('blrec-upload-retry-operation-id')).toBeNull();
+  });
+
+  it('only stops local polling on destroy and resumes a stored operation on re-entry', () => {
+    const operation = new Subject<ControlOperation>();
+    controlOperations.poll.and.returnValue(operation);
+    localStorage.setItem(
+      'blrec-upload-retry-operation-id',
+      'upload-retry-resume',
+    );
+
+    fixture.detectChanges();
+
+    expect(controlOperations.poll).toHaveBeenCalledOnceWith(
+      'upload-retry-resume',
+    );
+    expect(operation.observers.length).toBe(1);
+
+    fixture.destroy();
+
+    expect(operation.observers.length).toBe(0);
+    expect(localStorage.getItem('blrec-upload-retry-operation-id')).toBe(
+      'upload-retry-resume',
     );
   });
 

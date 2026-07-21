@@ -19,6 +19,10 @@ import {
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import {
+  ControlOperation,
+  ControlOperationService,
+} from '../../core/services/control-operation.service';
+import {
   CommentBranchState,
   DanmakuBranchState,
   DanmakuImportState,
@@ -36,6 +40,7 @@ import {
   UploadJobSummary,
   UploadJobDisplayState,
   UploadJobRetryPreviewItem,
+  UploadJobRetryProgress,
   UploadJobState,
   UploadSubmitState,
   UploadPartProgress,
@@ -46,6 +51,9 @@ import { HighlightService } from '../shared/highlight.service';
 import { RealtimeService } from '../../core/services/realtime.service';
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 import { RecordingSessionRowAction } from './recording-session-row.component';
+
+const RETRY_OPERATION_STORAGE_KEY = 'blrec-upload-retry-operation-id';
+const CONTROL_OPERATION_POLL_TIMEOUT = 'CONTROL_OPERATION_POLL_TIMEOUT';
 
 interface RealtimeUploadJobProgress {
   readonly jobId: number;
@@ -108,6 +116,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   retryPreviewLoading = false;
   retryPreviewVisible = false;
   retryPreviewItems: readonly UploadJobRetryPreviewItem[] = [];
+  retryProgress: UploadJobRetryProgress | null = null;
   taskEditVisible = false;
   taskEditJobIds: readonly number[] = [];
   submissionSession: RecordingSessionSummary | null = null;
@@ -116,9 +125,14 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   private realtimeSubscription?: Subscription;
   private listSubscription?: Subscription;
   private detailSubscription?: Subscription;
+  private retryAdmissionSubscription?: Subscription;
+  private retryOperationSubscription?: Subscription;
   private readonly listRequests = new Subject<RecordingListRequest>();
   private selectedSessionId: number | null = null;
   private realtimeUploadJobIds: Set<number> | null = null;
+  private retryOperationId: string | null = null;
+  private retryProgressMessageId: string | null = null;
+  private retryProgressMessage = '';
 
   readonly recordingStateOptions = [
     { label: '录制中', value: 'open' },
@@ -149,6 +163,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     private realtime: RealtimeService,
     private taskManager: TaskManagerService,
     private highlights: HighlightService,
+    private controlOperations: ControlOperationService,
   ) {}
 
   ngOnInit(): void {
@@ -197,12 +212,21 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         this.applyRealtimeUploadProgress(event.data);
       }
     });
+    if (this.isUploadScope) {
+      const operationId = this.readRetryOperationId();
+      if (operationId !== null) {
+        this.startRetryOperationPolling(operationId);
+      }
+    }
   }
 
   ngOnDestroy(): void {
     this.realtimeSubscription?.unsubscribe();
     this.listSubscription?.unsubscribe();
     this.detailSubscription?.unsubscribe();
+    this.retryAdmissionSubscription?.unsubscribe();
+    this.retryOperationSubscription?.unsubscribe();
+    this.removeRetryProgressMessage();
   }
 
   get sessions(): readonly RecordingSessionSummary[] {
@@ -306,6 +330,11 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     if (this.retryAllLoading || this.retryPreviewLoading) {
       return;
     }
+    const operationId = this.retryOperationId ?? this.readRetryOperationId();
+    if (operationId !== null) {
+      this.startRetryOperationPolling(operationId);
+      return;
+    }
     this.retryPreviewLoading = true;
     this.recordingSessions
       .previewRetryFailedJobs()
@@ -345,33 +374,22 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       return;
     }
     this.retryAllLoading = true;
-    this.recordingSessions
+    this.retryAdmissionSubscription?.unsubscribe();
+    this.retryAdmissionSubscription = this.recordingSessions
       .retryFailedJobs()
-      .pipe(
-        finalize(() => {
-          this.retryAllLoading = false;
-          this.changeDetector.markForCheck();
-        }),
-      )
       .subscribe({
-        next: (response) => {
-          const accepted = response.results.filter((result) => result.accepted);
-          const rejected = response.results.filter(
-            (result) => !result.accepted,
-          );
-          if (rejected.length > 0) {
-            this.message.warning(
-              `已重新排队 ${accepted.length} 个任务，跳过 ${rejected.length} 个：${rejected[0].message}`,
-            );
-          } else {
-            this.message.success(`已重新排队 ${accepted.length} 个失败任务`);
-          }
+        next: (admission) => {
           this.retryPreviewVisible = false;
           this.retryPreviewItems = [];
-          this.load();
+          this.startRetryOperationPolling(
+            admission.operationId,
+            admission.total,
+          );
         },
         error: (error: unknown) => {
+          this.retryAllLoading = false;
           this.message.error(`重试失败录像出错：${this.describeError(error)}`);
+          this.changeDetector.markForCheck();
         },
       });
   }
@@ -1173,6 +1191,165 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     ) {
       this.closeDetails();
     }
+  }
+
+  private startRetryOperationPolling(
+    operationId: string,
+    initialTotal = 0,
+  ): void {
+    this.retryOperationSubscription?.unsubscribe();
+    this.retryOperationId = operationId;
+    this.storeRetryOperationId(operationId);
+    this.retryAllLoading = true;
+    if (initialTotal > 0) {
+      this.updateRetryProgress({
+        processed: 0,
+        total: initialTotal,
+        succeeded: 0,
+        rejected: 0,
+      });
+    }
+    this.retryOperationSubscription = this.controlOperations
+      .poll(operationId)
+      .pipe(
+        finalize(() => {
+          this.retryAllLoading = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (operation) => this.applyRetryOperation(operation, initialTotal),
+        error: (error: unknown) => this.retryOperationPollingFailed(error),
+      });
+  }
+
+  private applyRetryOperation(
+    operation: ControlOperation,
+    initialTotal: number,
+  ): void {
+    const progress = this.retryProgressFrom(operation, initialTotal);
+    this.updateRetryProgress(progress);
+    if (operation.status !== 'succeeded' && operation.status !== 'failed') {
+      return;
+    }
+    if (operation.errorCode === CONTROL_OPERATION_POLL_TIMEOUT) {
+      this.removeRetryProgressMessage();
+      this.message.warning(
+        '重试进度读取超时，后台任务仍会继续；重新进入页面可继续查看',
+      );
+      return;
+    }
+
+    this.retryOperationId = null;
+    this.clearRetryOperationId();
+    this.removeRetryProgressMessage();
+    const summary =
+      `失败任务重试完成：已处理 ${progress.processed}/${progress.total}，` +
+      `成功 ${progress.succeeded}，跳过 ${progress.rejected}`;
+    if (progress.rejected > 0) {
+      this.message.warning(summary);
+    } else if (operation.status === 'failed') {
+      this.message.error(summary);
+    } else {
+      this.message.success(summary);
+    }
+    this.retryPreviewVisible = false;
+    this.retryPreviewItems = [];
+    this.load();
+    this.changeDetector.markForCheck();
+  }
+
+  private updateRetryProgress(progress: UploadJobRetryProgress): void {
+    this.retryProgress = progress;
+    const progressMessage =
+      `失败任务重试中：已处理 ${progress.processed}/${progress.total}，` +
+      `成功 ${progress.succeeded}，跳过 ${progress.rejected}`;
+    if (progressMessage !== this.retryProgressMessage) {
+      this.removeRetryProgressMessage();
+      this.retryProgressMessageId = this.message.loading(progressMessage, {
+        nzDuration: 0,
+      }).messageId;
+      this.retryProgressMessage = progressMessage;
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  private retryProgressFrom(
+    operation: ControlOperation,
+    initialTotal: number,
+  ): UploadJobRetryProgress {
+    return {
+      processed: this.retryProgressValue(operation, 'processed'),
+      total: this.retryProgressValue(operation, 'total', initialTotal),
+      succeeded: this.retryProgressValue(operation, 'succeeded'),
+      rejected: this.retryProgressValue(operation, 'rejected'),
+    };
+  }
+
+  private retryProgressValue(
+    operation: ControlOperation,
+    key: keyof UploadJobRetryProgress,
+    fallback = 0,
+  ): number {
+    const value = operation.result?.[key];
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? Math.trunc(value)
+      : fallback;
+  }
+
+  private retryOperationPollingFailed(error: unknown): void {
+    this.removeRetryProgressMessage();
+    if (this.httpStatus(error) === 404) {
+      this.retryOperationId = null;
+      this.clearRetryOperationId();
+      this.message.error('失败任务重试记录已不存在');
+    } else {
+      this.message.warning(
+        `暂时无法读取重试进度，后台任务仍会继续：${this.describeError(error)}`,
+      );
+    }
+    this.changeDetector.markForCheck();
+  }
+
+  private removeRetryProgressMessage(): void {
+    if (this.retryProgressMessageId !== null) {
+      this.message.remove(this.retryProgressMessageId);
+      this.retryProgressMessageId = null;
+    }
+    this.retryProgressMessage = '';
+  }
+
+  private readRetryOperationId(): string | null {
+    try {
+      const value = localStorage.getItem(RETRY_OPERATION_STORAGE_KEY)?.trim();
+      return value || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private storeRetryOperationId(operationId: string): void {
+    try {
+      localStorage.setItem(RETRY_OPERATION_STORAGE_KEY, operationId);
+    } catch {
+      return;
+    }
+  }
+
+  private clearRetryOperationId(): void {
+    try {
+      localStorage.removeItem(RETRY_OPERATION_STORAGE_KEY);
+    } catch {
+      return;
+    }
+  }
+
+  private httpStatus(error: unknown): number | null {
+    if (typeof error !== 'object' || error === null || !('status' in error)) {
+      return null;
+    }
+    const status = (error as { readonly status?: unknown }).status;
+    return typeof status === 'number' ? status : null;
   }
 
   private describeError(error: unknown): string {

@@ -10,6 +10,7 @@ import {
   RecordingDanmakuPage,
   RecordingMediaAccess,
   RecordingSessionDetail,
+  UploadJobRetryAdmission,
   UploadJobRetryPreviewResponse,
   RecordingSessionFilters,
   RecordingSessionsResponse,
@@ -89,9 +90,9 @@ export class RecordingSessionService {
     );
   }
 
-  retryFailedJobs(): Observable<UploadJobActionResponse> {
+  retryFailedJobs(): Observable<UploadJobRetryAdmission> {
     const path = '/api/v1/recording-sessions/upload-jobs/retry-failed';
-    return this.http.post<UploadJobActionResponse>(
+    return this.http.post<UploadJobRetryAdmission>(
       this.url.makeApiUrl(path),
       null,
     );

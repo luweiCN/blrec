@@ -1,3 +1,5 @@
+import type { ControlOperationStatus } from '../../core/services/control-operation.service';
+
 export const RECORDING_SESSION_STATES = [
   'open',
   'closed',
@@ -187,6 +189,19 @@ export interface UploadJobRetryPreviewItem {
 
 export interface UploadJobRetryPreviewResponse {
   readonly items: readonly UploadJobRetryPreviewItem[];
+}
+
+export interface UploadJobRetryAdmission {
+  readonly operationId: string;
+  readonly status: ControlOperationStatus;
+  readonly total: number;
+}
+
+export interface UploadJobRetryProgress {
+  readonly processed: number;
+  readonly total: number;
+  readonly succeeded: number;
+  readonly rejected: number;
 }
 
 export interface UploadPartProgress {

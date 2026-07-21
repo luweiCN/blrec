@@ -100,15 +100,23 @@ describe('RecordingSessionService', () => {
     request.flush({ results: [] });
   });
 
-  it('retries all server-selected failed upload jobs', () => {
-    service.retryFailedJobs().subscribe();
+  it('accepts a durable operation when retrying server-selected failed jobs', () => {
+    let operationId: string | undefined;
+    service.retryFailedJobs().subscribe((response) => {
+      operationId = response.operationId;
+    });
 
     const request = http.expectOne(
       '/api/v1/recording-sessions/upload-jobs/retry-failed',
     );
     expect(request.request.method).toBe('POST');
     expect(request.request.body).toBeNull();
-    request.flush({ results: [] });
+    request.flush({
+      operationId: 'upload-retry-1',
+      status: 'accepted',
+      total: 201,
+    });
+    expect(operationId).toBe('upload-retry-1');
   });
 
   it('creates a scoped media access URL and pages danmaku', () => {
