@@ -2,14 +2,26 @@ import asyncio
 import json
 import re
 import time
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, cast
+from contextlib import suppress
+from dataclasses import dataclass
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    cast,
+)
 
 import aiohttp
 from jsonpath import jsonpath
-from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
 
 from .api import BASE_HEADERS, AppApi, WebApi
 from .exceptions import (
+    ApiRequestError,
     LiveRoomEncrypted,
     LiveRoomHidden,
     LiveRoomLocked,
@@ -27,7 +39,7 @@ from .typing import ApiPlatform, QualityNumber, ResponseData, StreamCodec, Strea
 if TYPE_CHECKING:
     from blrec.networking.manager import NetworkRouteManager
 
-__all__ = ('Live',)
+__all__ = ('Live', 'LiveInfoSnapshot')
 
 from loguru import logger
 
@@ -35,6 +47,12 @@ _INFO_PATTERN = re.compile(
     rb'<script>\s*window\.__NEPTUNE_IS_MY_WAIFU__\s*=\s*(\{.*?\})\s*</script>'
 )
 _LIVE_STATUS_PATTERN = re.compile(rb'"live_status"\s*:\s*(\d)')
+
+
+@dataclass(frozen=True)
+class LiveInfoSnapshot:
+    room_info: RoomInfo
+    user_info: UserInfo
 
 
 class Live:
@@ -47,6 +65,7 @@ class Live:
         auth_failure_reporter: Optional[Callable[[str], Awaitable[None]]] = None,
         session: Optional[Any] = None,
         network_route_manager: Optional['NetworkRouteManager'] = None,
+        info_timeout_seconds: float = 10,
     ) -> None:
         self._logger = logger.bind(room_id=room_id)
 
@@ -80,6 +99,11 @@ class Live:
             room_id=room_id,
             auth_failure_reporter=auth_failure_reporter,
         )
+
+        self._info_timeout_seconds = info_timeout_seconds
+        self._info_refresh_lock = asyncio.Lock()
+        self._info_refresh_task: Optional['asyncio.Task[None]'] = None
+        self._info_revision = 0
 
         self._room_info: RoomInfo
         self._user_info: UserInfo
@@ -184,6 +208,10 @@ class Live:
     def room_info(self) -> RoomInfo:
         return self._room_info
 
+    @property
+    def info_revision(self) -> int:
+        return self._info_revision
+
     def replace_room_info(self, room_info: RoomInfo) -> None:
         self._room_info = room_info
         self._room_id = room_info.room_id
@@ -193,8 +221,7 @@ class Live:
         return self._user_info
 
     async def init(self) -> None:
-        self._room_info = await self.get_room_info()
-        self._user_info = await self.get_user_info(self._room_info.uid)
+        await self._refresh_info()
 
         self._no_flv_stream = False
         if self.is_living():
@@ -204,6 +231,12 @@ class Live:
                 self._no_flv_stream = not flv_formats
 
     async def deinit(self) -> None:
+        async with self._info_refresh_lock:
+            refresh_task = self._info_refresh_task
+        if refresh_task is not None and not refresh_task.done():
+            refresh_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await refresh_task
         if self._owns_session:
             await self._session.close()
 
@@ -236,61 +269,73 @@ class Live:
             return False
 
     async def update_info(self, raise_exception: bool = False) -> bool:
-        return all(
-            await asyncio.gather(
-                self.update_user_info(raise_exception=raise_exception),
-                self.update_room_info(raise_exception=raise_exception),
-            )
-        )
+        return await self._update_info('live', raise_exception)
 
     async def update_user_info(self, raise_exception: bool = False) -> bool:
-        try:
-            self._user_info = await self.get_user_info(self._room_info.uid)
-        except Exception as e:
-            self._logger.error(f'Failed to update user info: {repr(e)}')
-            if raise_exception:
-                raise
-            return False
-        else:
-            return True
+        return await self._update_info('user', raise_exception)
 
     async def update_room_info(self, raise_exception: bool = False) -> bool:
+        return await self._update_info('room', raise_exception)
+
+    async def _update_info(self, projection: str, raise_exception: bool) -> bool:
         try:
-            self._room_info = await self.get_room_info()
+            await self._refresh_info()
         except Exception as e:
-            self._logger.error(f'Failed to update room info: {repr(e)}')
+            self._logger.error(f'Failed to update {projection} info: {repr(e)}')
             if raise_exception:
                 raise
             return False
         else:
             return True
 
-    @retry(
-        retry=retry_if_exception_type(
-            (asyncio.TimeoutError, aiohttp.ClientError, ValueError)
-        ),
-        wait=wait_exponential(max=10),
-        stop=stop_after_delay(60),
-    )
     async def get_room_info(self) -> RoomInfo:
-        try:
-            # frequent requests will be intercepted by the server's firewall!
-            room_info_data = await self._get_room_info_via_api()
-        except Exception:
-            # more cpu consumption
-            room_info_data = await self._get_room_info_via_html_page()
-        return RoomInfo.from_data(room_info_data)
+        await self._refresh_info()
+        return self._room_info
 
-    @retry(
-        retry=retry_if_exception_type((asyncio.TimeoutError, aiohttp.ClientError)),
-        wait=wait_exponential(max=10),
-        stop=stop_after_delay(60),
-    )
     async def get_user_info(self, uid: int) -> UserInfo:
-        try:
-            return await self._get_user_info_via_api(uid)
-        except Exception:
-            return await self._get_user_info_via_html_page()
+        await self._refresh_info()
+        return self._user_info
+
+    async def _refresh_info(self) -> None:
+        async with self._info_refresh_lock:
+            refresh_task = self._info_refresh_task
+            if refresh_task is None or refresh_task.done():
+                refresh_task = asyncio.create_task(self._refresh_info_once())
+                self._info_refresh_task = refresh_task
+                refresh_task.add_done_callback(self._on_info_refresh_done)
+        await asyncio.shield(refresh_task)
+
+    def _on_info_refresh_done(self, refresh_task: 'asyncio.Task[None]') -> None:
+        if self._info_refresh_task is refresh_task:
+            self._info_refresh_task = None
+        if not refresh_task.cancelled():
+            refresh_task.exception()
+
+    async def _refresh_info_once(self) -> None:
+        snapshot = await asyncio.wait_for(
+            self._load_info_snapshot(), timeout=self._info_timeout_seconds
+        )
+        self._room_info = snapshot.room_info
+        self._user_info = snapshot.user_info
+        self._room_id = snapshot.room_info.room_id
+        self._info_revision += 1
+
+    async def _load_info_snapshot(self) -> LiveInfoSnapshot:
+        loaders: Tuple[Callable[[], Awaitable[ResponseData]], ...] = (
+            lambda: self._webapi.get_info_by_room(self._room_id),
+            lambda: self._appapi.get_info_by_room(self._room_id),
+            self._get_room_info_res_via_html_page,
+        )
+        for loader in loaders:
+            try:
+                data = await loader()
+                return LiveInfoSnapshot(
+                    room_info=RoomInfo.from_data(data['room_info']),
+                    user_info=UserInfo.from_info_by_room(data),
+                )
+            except Exception:
+                continue
+        raise ApiRequestError(-1, 'room information is unavailable')
 
     async def get_timestamp(self) -> int:
         try:
@@ -403,18 +448,6 @@ class Live:
         room_info_data = await self._get_room_info_via_api()
         return int(room_info_data['live_status'])
 
-    async def _get_user_info_via_api(self, uid: int) -> UserInfo:
-        try:
-            data = await self._webapi.get_info_by_room(self._room_id)
-            return UserInfo.from_info_by_room(data)
-        except Exception:
-            try:
-                data = await self._appapi.get_info_by_room(self._room_id)
-                return UserInfo.from_info_by_room(data)
-            except Exception:
-                data = await self._appapi.get_user_info(uid)
-                return UserInfo.from_app_api_data(data)
-
     async def _get_room_info_via_api(self) -> ResponseData:
         try:
             info_data = await self._webapi.get_info_by_room(self._room_id)
@@ -436,14 +469,6 @@ class Live:
         assert m is not None, data
 
         return int(m.group(1))
-
-    async def _get_user_info_via_html_page(self) -> UserInfo:
-        info_res = await self._get_room_info_res_via_html_page()
-        return UserInfo.from_info_by_room(info_res)
-
-    async def _get_room_info_via_html_page(self) -> ResponseData:
-        info_res = await self._get_room_info_res_via_html_page()
-        return info_res['room_info']
 
     async def _get_room_play_info_via_html_page(self) -> ResponseData:
         return await self._get_room_init_res_via_html_page()
