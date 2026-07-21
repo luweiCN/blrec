@@ -211,10 +211,15 @@ async def test_publisher_waits_for_account_gate_and_rechecks_credentials(
         async with gate.hold(1):
             task = asyncio.create_task(publisher.create(1))
             lock = gates._locks[1]
-            for _index in range(100):
-                if task.done() or lock._waiters:
-                    break
-                await asyncio.sleep(0)
+
+            async def wait_for_gate_waiter() -> None:
+                while not lock._waiters:
+                    if task.done():
+                        await task
+                        raise AssertionError('publisher did not wait for account gate')
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_gate_waiter(), timeout=2)
             assert not task.done()
             assert protocol.calls == []
             await database.execute(
