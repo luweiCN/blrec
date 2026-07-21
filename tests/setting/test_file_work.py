@@ -366,9 +366,14 @@ async def test_settings_apply_reconciler_recovers_reserved_work_after_capacity_f
     async def persist() -> None:
         return None
 
+    def commit_live() -> None:
+        return None
+
     try:
         operations = await reconciler.commit_revisions(
-            (('settings:header', 'apply'), ('settings:live_monitor', 'apply')), persist
+            (('settings:header', 'apply'), ('settings:live_monitor', 'apply')),
+            persist,
+            commit_live,
         )
         assert operations == ()
 
@@ -420,9 +425,11 @@ async def test_settings_apply_reconciler_does_not_apply_a_reserved_revision_earl
     commit_entered = asyncio.Event()
     allow_commit = asyncio.Event()
 
-    async def commit() -> None:
+    async def persist() -> None:
         commit_entered.set()
         await allow_commit.wait()
+
+    def commit_live() -> None:
         current_value['value'] = 'new'
 
     commit_task = None
@@ -430,7 +437,9 @@ async def test_settings_apply_reconciler_does_not_apply_a_reserved_revision_earl
     try:
         await asyncio.wait_for(get_revision_entered.wait(), timeout=1)
         commit_task = asyncio.create_task(
-            reconciler.commit_revisions((('settings:header', 'apply'),), commit)
+            reconciler.commit_revisions(
+                (('settings:header', 'apply'),), persist, commit_live
+            )
         )
         try:
             await asyncio.wait_for(commit_entered.wait(), timeout=0.05)
@@ -450,4 +459,89 @@ async def test_settings_apply_reconciler_does_not_apply_a_reserved_revision_earl
         if commit_task is not None:
             await asyncio.gather(commit_task, return_exceptions=True)
         await reconciler.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_apply_retry_does_not_recover_an_unrequested_failure(
+    tmp_path: Path,
+) -> None:
+    from blrec.control.operations import ControlOperationJournal
+    from blrec.setting.file_work import SettingsApplyReconciler
+
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+
+    async def apply(_target_key: str, _action: str) -> None:
+        return None
+
+    reconciler = SettingsApplyReconciler(journal, apply)
+    try:
+        failed = await journal.submit_revision(
+            lane=reconciler.LANE,
+            kind='apply',
+            target_key='settings:logging',
+            action='apply',
+        )
+        claim = await journal.claim_next(reconciler.LANE)
+        assert claim is not None
+        await journal.finish_step(
+            claim, status='failed', error_code='SETTINGS_APPLY_FAILED'
+        )
+
+        recovered = await reconciler.retry(('settings:header',))
+
+        assert recovered == ()
+        assert await journal.queued_count(reconciler.LANE) == 0
+        revision = await journal.get_revision(reconciler.LANE, 'settings:logging')
+        assert revision is not None
+        assert revision.operation_id == failed.id
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_commit_does_not_recover_an_unrequested_failure(
+    tmp_path: Path,
+) -> None:
+    from blrec.control.operations import ControlOperationJournal
+    from blrec.setting.file_work import SettingsApplyReconciler
+
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+
+    async def apply(_target_key: str, _action: str) -> None:
+        return None
+
+    async def persist() -> None:
+        return None
+
+    def commit_live() -> None:
+        return None
+
+    reconciler = SettingsApplyReconciler(journal, apply)
+    try:
+        failed = await journal.submit_revision(
+            lane=reconciler.LANE,
+            kind='apply',
+            target_key='settings:logging',
+            action='apply',
+        )
+        claim = await journal.claim_next(reconciler.LANE)
+        assert claim is not None
+        await journal.finish_step(
+            claim, status='failed', error_code='SETTINGS_APPLY_FAILED'
+        )
+
+        recovered = await reconciler.commit_revisions(
+            (('settings:header', 'apply'),), persist, commit_live
+        )
+
+        assert [operation.target_key for operation in recovered] == ['settings:header']
+        logging_revision = await journal.get_revision(
+            reconciler.LANE, 'settings:logging'
+        )
+        assert logging_revision is not None
+        assert logging_revision.operation_id == failed.id
+    finally:
         await journal.close()

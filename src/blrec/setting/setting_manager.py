@@ -147,8 +147,10 @@ class SettingsManager:
                     for name in changed_sections
                 )
 
-                async def commit() -> None:
+                async def persist() -> None:
                     await self._dump_candidate(candidate, validate_paths=validate_paths)
+
+                def commit_live() -> None:
                     for name in changed_sections:
                         setattr(self._settings, name, getattr(candidate, name))
 
@@ -157,9 +159,10 @@ class SettingsManager:
                 ):
                     if self._apply_reconciler is not None:
                         return await self._apply_reconciler.commit_revisions(
-                            target_actions, commit
+                            target_actions, persist, commit_live
                         )
-                    await commit()
+                    await persist()
+                    commit_live()
                     return ()
 
                 committed_operations, cancelled = await _drain_admitted_work(
@@ -253,8 +256,10 @@ class SettingsManager:
                     for name in changed_sections
                 )
 
-                async def commit() -> None:
+                async def persist() -> None:
                     await self._dump_candidate(candidate)
+
+                def commit_live() -> None:
                     live_settings = self.find_task_settings(room_id)
                     assert live_settings is not None
                     for name in changed_sections:
@@ -265,9 +270,10 @@ class SettingsManager:
                 ):
                     if self._apply_reconciler is not None:
                         return await self._apply_reconciler.commit_revisions(
-                            target_actions, commit
+                            target_actions, persist, commit_live
                         )
-                    await commit()
+                    await persist()
+                    commit_live()
                     return ()
 
                 committed_operations, cancelled = await _drain_admitted_work(

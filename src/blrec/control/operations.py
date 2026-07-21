@@ -14,6 +14,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    List,
     Literal,
     Mapping,
     Optional,
@@ -239,10 +240,27 @@ class ControlOperationJournal:
         return await self._run(self._get_revision_sync, lane, target_key)
 
     async def recover_revision_gaps(
-        self, *, lane: str, kind: str, unassigned_only: bool = False
+        self,
+        *,
+        lane: str,
+        kind: str,
+        unassigned_only: bool = False,
+        target_keys: Optional[Sequence[str]] = None,
     ) -> Sequence[ControlOperationSnapshot]:
+        normalized_target_keys = (
+            None if target_keys is None else tuple(dict.fromkeys(target_keys))
+        )
+        if normalized_target_keys is not None:
+            if any(not target_key for target_key in normalized_target_keys):
+                raise ValueError('revision target keys must not be empty')
+            if not normalized_target_keys:
+                return ()
         operation_ids = await self._run(
-            self._recover_revision_gaps_sync, lane, kind, unassigned_only
+            self._recover_revision_gaps_sync,
+            lane,
+            kind,
+            unassigned_only,
+            normalized_target_keys,
         )
         snapshots = []
         for operation_id in operation_ids:
@@ -843,7 +861,11 @@ class ControlOperationJournal:
         )
 
     def _recover_revision_gaps_sync(
-        self, lane: str, kind: str, unassigned_only: bool
+        self,
+        lane: str,
+        kind: str,
+        unassigned_only: bool,
+        target_keys: Optional[Sequence[str]],
     ) -> Sequence[str]:
         connection = self._require_connection()
         now = float(self._clock())
@@ -851,13 +873,18 @@ class ControlOperationJournal:
         try:
             query = (
                 'SELECT target_key,desired_revision,operation_id '
-                'FROM control_revisions WHERE lane=? '
+                'FROM control_revisions WHERE lane=? AND kind=? '
                 'AND desired_revision>applied_revision'
             )
+            parameters: List[object] = [lane, kind]
             if unassigned_only:
                 query += ' AND operation_id IS NULL'
+            if target_keys is not None:
+                placeholders = ','.join('?' for _target_key in target_keys)
+                query += ' AND target_key IN ({})'.format(placeholders)
+                parameters.extend(target_keys)
             rows = connection.execute(
-                query + ' ORDER BY target_key', (lane,)
+                query + ' ORDER BY target_key', tuple(parameters)
             ).fetchall()
             operation_ids = []
             for row in rows:

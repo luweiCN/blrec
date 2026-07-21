@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
+from typing import Optional, Sequence, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,8 +35,9 @@ class FakeApplyReconciler:
         self.calls.append((target_key, action))
         return SimpleNamespace(id='operation-{}'.format(len(self.calls)))
 
-    async def commit_revisions(self, revisions, commit):
-        await commit()
+    async def commit_revisions(self, revisions, persist, commit_live):
+        await persist()
+        commit_live()
         return tuple(
             [await self.submit(target_key, action) for target_key, action in revisions]
         )
@@ -401,7 +403,10 @@ async def test_cancelled_admitted_task_state_write_keeps_file_and_memory_aligned
 async def test_revision_activation_failure_is_recovered_by_an_identical_patch(
     tmp_path: Path,
 ) -> None:
-    from blrec.control.operations import ControlOperationJournal
+    from blrec.control.operations import (
+        ControlOperationJournal,
+        ControlOperationSnapshot,
+    )
 
     path = tmp_path / 'settings.toml'
     settings = Settings()
@@ -426,14 +431,21 @@ async def test_revision_activation_failure_is_recovered_by_an_identical_patch(
     recover_calls = 0
 
     async def fail_first_recovery(
-        *, lane: str, kind: str, unassigned_only: bool = False
-    ):
+        *,
+        lane: str,
+        kind: str,
+        unassigned_only: bool = False,
+        target_keys: Optional[Sequence[str]] = None,
+    ) -> Sequence[ControlOperationSnapshot]:
         nonlocal recover_calls
         recover_calls += 1
         if recover_calls == 1:
             raise OSError('control database temporarily unavailable')
         return await original_recover(
-            lane=lane, kind=kind, unassigned_only=unassigned_only
+            lane=lane,
+            kind=kind,
+            unassigned_only=unassigned_only,
+            target_keys=target_keys,
         )
 
     journal.recover_revision_gaps = fail_first_recovery  # type: ignore[method-assign]
@@ -463,6 +475,126 @@ async def test_revision_activation_failure_is_recovered_by_an_identical_patch(
             ('settings:header', 'apply'),
             ('settings:live_monitor', 'apply'),
         ]
+    finally:
+        await reconciler.shutdown()
+        await coordinator.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_revision_reservation_failure_keeps_live_old_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from blrec.control.operations import (
+        ControlOperationJournal,
+        ControlRevisionSnapshot,
+    )
+
+    path = tmp_path / 'settings.toml'
+    settings = Settings()
+    settings._path = str(path)
+    settings.dump()
+    original_batch_size = settings.live_monitor.batch_size
+    coordinator = SettingsFileWorkCoordinator()
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    applied = []
+
+    async def apply(target_key: str, action: str) -> None:
+        applied.append((target_key, action, settings.live_monitor.batch_size))
+
+    reconciler = SettingsApplyReconciler(journal, apply)
+    manager = SettingsManager(
+        FakeSettingsApplication(),
+        settings,
+        file_work=coordinator,  # type: ignore[arg-type]
+    )
+    manager.set_apply_reconciler(reconciler)
+    original_reserve = journal.reserve_revisions
+    reserve_calls = 0
+
+    async def fail_first_reservation(
+        *, lane: str, kind: str, revisions: Sequence[Tuple[str, str]]
+    ) -> Sequence[ControlRevisionSnapshot]:
+        nonlocal reserve_calls
+        reserve_calls += 1
+        if reserve_calls == 1:
+            raise OSError('control database temporarily unavailable')
+        return await original_reserve(lane=lane, kind=kind, revisions=revisions)
+
+    monkeypatch.setattr(journal, 'reserve_revisions', fail_first_reservation)
+    request = SettingsIn.parse_obj({'liveMonitor': {'batchSize': 17}})
+    try:
+        with pytest.raises(OSError, match='temporarily unavailable'):
+            await manager.change_settings_with_operations(request)
+
+        assert Settings.load(str(path)).live_monitor.batch_size == 17
+        assert settings.live_monitor.batch_size == original_batch_size
+        assert (
+            await journal.get_revision('settings-apply', 'settings:live_monitor')
+            is None
+        )
+        assert applied == []
+
+        _result, operations = await manager.change_settings_with_operations(request)
+        assert len(operations) == 1
+        assert settings.live_monitor.batch_size == 17
+
+        reconciler.start()
+        await asyncio.wait_for(reconciler.wait_idle(), timeout=1)
+        assert applied == [('settings:live_monitor', 'apply', 17)]
+    finally:
+        await reconciler.shutdown()
+        await coordinator.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_persist_does_not_create_or_apply_a_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from blrec.control.operations import ControlOperationJournal
+
+    path = tmp_path / 'settings.toml'
+    settings = Settings()
+    settings._path = str(path)
+    settings.dump()
+    original_batch_size = settings.live_monitor.batch_size
+    coordinator = SettingsFileWorkCoordinator()
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    applied = []
+
+    async def apply(target_key: str, action: str) -> None:
+        applied.append((target_key, action, settings.live_monitor.batch_size))
+
+    async def fail_dump(*_args: object, **_kwargs: object) -> None:
+        raise OSError('persist failed')
+
+    monkeypatch.setattr(coordinator, 'atomic_dump', fail_dump)
+    reconciler = SettingsApplyReconciler(journal, apply)
+    manager = SettingsManager(
+        FakeSettingsApplication(),
+        settings,
+        file_work=coordinator,  # type: ignore[arg-type]
+    )
+    manager.set_apply_reconciler(reconciler)
+    try:
+        with pytest.raises(OSError, match='persist failed'):
+            await manager.change_settings_with_operations(
+                SettingsIn.parse_obj({'liveMonitor': {'batchSize': 17}})
+            )
+
+        assert settings.live_monitor.batch_size == original_batch_size
+        assert Settings.load(str(path)).live_monitor.batch_size == original_batch_size
+        assert (
+            await journal.get_revision('settings-apply', 'settings:live_monitor')
+            is None
+        )
+
+        reconciler.start()
+        await asyncio.wait_for(reconciler.wait_idle(), timeout=1)
+        assert applied == []
     finally:
         await reconciler.shutdown()
         await coordinator.shutdown()

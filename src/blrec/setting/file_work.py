@@ -178,50 +178,50 @@ class SettingsApplyReconciler:
     async def commit_revisions(
         self,
         revisions: Sequence[Tuple[str, str]],
-        commit: Callable[[], Awaitable[None]],
+        persist: Callable[[], Awaitable[None]],
+        commit_live: Callable[[], None],
     ) -> Tuple[ControlOperationSnapshot, ...]:
         normalized = tuple(revisions)
-        reserved = False
+        target_keys = tuple(target_key for target_key, _action in normalized)
+        live_committed = False
         try:
             async with self._submission_lock:
                 if not self._accepting:
                     raise RuntimeError('settings apply admission is closed')
+                await persist()
                 await self._journal.reserve_revisions(
                     lane=self.LANE, kind='apply', revisions=normalized
                 )
-                reserved = True
-                await commit()
+                commit_live()
+                live_committed = True
                 recovered = await self._journal.recover_revision_gaps(
-                    lane=self.LANE, kind='apply'
+                    lane=self.LANE, kind='apply', target_keys=target_keys
                 )
         finally:
-            if reserved:
+            if live_committed:
                 self.wake()
-        target_keys = {target_key for target_key, _action in normalized}
-        return tuple(
-            operation for operation in recovered if operation.target_key in target_keys
-        )
+        return tuple(recovered)
 
     async def retry(
         self, target_keys: Sequence[str]
     ) -> Tuple[ControlOperationSnapshot, ...]:
-        normalized = frozenset(target_keys)
+        normalized = tuple(dict.fromkeys(target_keys))
         if not normalized:
             return ()
         async with self._submission_lock:
             if not self._accepting:
                 raise RuntimeError('settings apply admission is closed')
             recovered = await self._journal.recover_revision_gaps(
-                lane=self.LANE, kind='apply'
+                lane=self.LANE, kind='apply', target_keys=normalized
             )
         self.wake()
-        return tuple(
-            operation for operation in recovered if operation.target_key in normalized
-        )
+        return tuple(recovered)
 
     async def recover(self) -> Tuple[ControlOperationSnapshot, ...]:
         recovered = tuple(
-            await self._journal.recover_revision_gaps(lane=self.LANE, kind='apply')
+            await self._journal.recover_revision_gaps(
+                lane=self.LANE, kind='apply', target_keys=None
+            )
         )
         if recovered:
             self.wake()
@@ -255,7 +255,7 @@ class SettingsApplyReconciler:
         while not self._stop_event.is_set():
             async with self._submission_lock:
                 await self._journal.recover_revision_gaps(
-                    lane=self.LANE, kind='apply', unassigned_only=True
+                    lane=self.LANE, kind='apply', unassigned_only=True, target_keys=None
                 )
                 claim = await self._journal.claim_next(self.LANE)
                 revision = (
