@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Optional, TypeVar
+from typing import Callable, Optional, TypeVar
 
 import aiohttp
 import requests
@@ -25,11 +25,13 @@ class ConnectionErrorHandler(AsyncCooperationMixin):
         *,
         disconnection_timeout: Optional[int] = None,
         check_interval: int = 3,
+        invalidate_stream_url: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__()
         self._live = live
         self.disconnection_timeout = disconnection_timeout or 600  # seconds
         self.check_interval = check_interval
+        self._invalidate_stream_url = invalidate_stream_url
 
     def __call__(self, source: Observable[_T]) -> Observable[_T]:
         return self._handle(source).pipe(
@@ -50,6 +52,8 @@ class ConnectionErrorHandler(AsyncCooperationMixin):
                 ) as e:
                     logger.warning(repr(e))
                     if self._wait_for_connection_error():
+                        if self._invalidate_stream_url is not None:
+                            self._invalidate_stream_url()
                         observer.on_error(exc)
                     else:
                         observer.on_completed()

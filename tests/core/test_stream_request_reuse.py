@@ -13,6 +13,7 @@ import requests
 import blrec.setting  # noqa: F401 - initializes core imports
 from blrec.bili.live import Live
 from blrec.bili.live_monitor import LiveEventListener, LiveMonitor
+from blrec.core.operators.connection_error_handler import ConnectionErrorHandler
 from blrec.core.operators.request_exception_handler import RequestExceptionHandler
 from blrec.core.operators.stream_fetcher import StreamFetcher
 from blrec.core.operators.stream_url_resolver import StreamURLResolver
@@ -475,3 +476,101 @@ async def test_connection_failure_resets_seed_before_retrying_transfer(
     assert values == ['https://fresh.example/live.flv']
     assert attempts == 2
     assert live.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_inner_connection_retry_resets_seed_in_production_operator_order() -> (
+    None
+):
+    class FakeLive:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def resolve_live_stream(self, *args: object, **kwargs: object) -> object:
+            self.calls += 1
+
+            class Resolution:
+                url = 'https://fresh.example/live.flv'
+                real_quality_number = 10000
+
+            return Resolution()
+
+    live = FakeLive()
+    holder = StreamParamHolder(quality_number=10000)
+    resolver = StreamURLResolver(live, Mock(), Mock(), holder)  # type: ignore[arg-type]
+
+    class Seed:
+        quality_number = 10000
+        api_platform = 'web'
+        stream_format = 'flv'
+        stream_codec = 'avc'
+        select_alternative = False
+        url = 'https://stale.example/live.flv'
+        real_quality_number = 10000
+
+    resolver.seed(Seed())  # type: ignore[arg-type]
+
+    def call_immediately(coro: Any) -> object:
+        try:
+            coro.send(None)
+        except StopIteration as completed:
+            return completed.value
+        raise AssertionError('fake coroutine unexpectedly suspended')
+
+    resolver._call_coroutine = call_immediately  # type: ignore[method-assign]
+    attempts = 0
+
+    def flaky_transfer(source: object) -> object:
+        def subscribe(observer: object, scheduler: object = None) -> object:
+            def on_next(url: str) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    observer.on_error(requests.ConnectionError('transfer failed'))
+                else:
+                    observer.on_next(url)
+
+            return source.subscribe(  # type: ignore[attr-defined,no-any-return]
+                on_next,
+                observer.on_error,  # type: ignore[attr-defined]
+                observer.on_completed,  # type: ignore[attr-defined]
+                scheduler=scheduler,
+            )
+
+        return reactivex.create(subscribe)  # type: ignore[arg-type,no-any-return]
+
+    connection_handler = ConnectionErrorHandler(
+        live, invalidate_stream_url=resolver.reset  # type: ignore[arg-type]
+    )
+    connection_handler._wait_for_connection_error = (  # type: ignore[method-assign]
+        lambda: True
+    )
+    values: list[str] = []
+    errors: list[Exception] = []
+    params = StreamParams('flv', 10000, 'web', False)
+
+    resolver(reactivex.just(params)).pipe(
+        flaky_transfer, connection_handler, RequestExceptionHandler(resolver)
+    ).subscribe(values.append, errors.append)
+
+    assert errors == []
+    assert values == ['https://fresh.example/live.flv']
+    assert attempts == 2
+    assert live.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unrecovered_connection_does_not_reset_for_retry() -> None:
+    invalidator = Mock()
+    handler = ConnectionErrorHandler(
+        Mock(), invalidate_stream_url=invalidator  # type: ignore[arg-type]
+    )
+    handler._wait_for_connection_error = lambda: False  # type: ignore[method-assign]
+    completed: list[bool] = []
+
+    handler(reactivex.throw(requests.ConnectionError('offline'))).subscribe(
+        on_completed=lambda: completed.append(True)
+    )
+
+    assert completed == [True]
+    invalidator.assert_not_called()

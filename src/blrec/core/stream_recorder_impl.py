@@ -112,7 +112,9 @@ class StreamRecorderImpl(
             self._stream_url_resolver
         )
         self._connection_error_handler = core_ops.ConnectionErrorHandler(
-            live, disconnection_timeout=disconnection_timeout
+            live,
+            disconnection_timeout=disconnection_timeout,
+            invalidate_stream_url=self._stream_url_resolver.reset,
         )
         self._exception_handler = core_ops.ExceptionHandler()
 
