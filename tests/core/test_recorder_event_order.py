@@ -54,6 +54,43 @@ async def test_recording_started_is_persisted_before_video_file_creation() -> No
 
 
 @pytest.mark.asyncio
+async def test_live_stream_snapshot_is_handed_to_stream_recorder() -> None:
+    recorder = object.__new__(Recorder)
+    recorder._logger = Mock()
+    recorder._recording = True
+    recorder._stream_available = False
+    recorder._stream_recorder = Mock()
+    recorder._stream_recorder.start_with_stream_snapshot = AsyncMock()
+    live = Mock()
+    live.get_timestamp = AsyncMock(return_value=123)
+    snapshot = object()
+
+    await recorder.on_live_stream_available(live, snapshot)
+
+    assert recorder._stream_available is True
+    assert recorder._stream_recorder.stream_available_time == 123
+    recorder._stream_recorder.start_with_stream_snapshot.assert_awaited_once_with(
+        snapshot
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_stream_without_snapshot_keeps_fresh_start_path() -> None:
+    recorder = object.__new__(Recorder)
+    recorder._logger = Mock()
+    recorder._recording = True
+    recorder._stream_available = False
+    recorder._stream_recorder = Mock()
+    recorder._stream_recorder.start = AsyncMock()
+    live = Mock()
+    live.get_timestamp = AsyncMock(return_value=123)
+
+    await recorder.on_live_stream_available(live)
+
+    recorder._stream_recorder.start.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_suppressed_live_does_not_restart_until_next_broadcast() -> None:
     recorder = object.__new__(Recorder)
     recorder._live = Mock()

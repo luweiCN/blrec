@@ -11,7 +11,7 @@ from loguru import logger
 from reactivex import abc
 from reactivex.typing import StartableFactory, StartableTarget
 
-from blrec.bili.live import Live
+from blrec.bili.live import Live, StreamResolution
 from blrec.bili.live_monitor import LiveMonitor
 from blrec.bili.typing import QualityNumber, StreamFormat
 from blrec.event.event_emitter import EventEmitter, EventListener
@@ -281,6 +281,9 @@ class StreamRecorderImpl(
 
     def update_progress_bar_info(self) -> None:
         self._progress_bar.update_bar_info()
+
+    def seed_stream_resolution(self, resolution: StreamResolution) -> None:
+        self._stream_url_resolver.seed(resolution)
 
     def _reset(self) -> None:
         self._files.clear()

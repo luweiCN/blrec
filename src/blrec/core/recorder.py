@@ -8,7 +8,7 @@ import humanize
 from loguru import logger
 
 from blrec.bili.danmaku_client import DanmakuClient
-from blrec.bili.live import Live
+from blrec.bili.live import Live, LiveStreamSnapshot
 from blrec.bili.live_monitor import LiveEventListener, LiveMonitor
 from blrec.bili.models import LiveStatus, RoomInfo
 from blrec.bili.typing import QualityNumber, StreamFormat
@@ -409,12 +409,17 @@ class Recorder(
         self._suppressed_live_start_time = None
         self._print_waiting_message()
 
-    async def on_live_stream_available(self, live: Live) -> None:
+    async def on_live_stream_available(
+        self, live: Live, snapshot: Optional[LiveStreamSnapshot] = None
+    ) -> None:
         self._logger.debug('The live stream becomes available')
         self._stream_available = True
         self._stream_recorder.stream_available_time = await live.get_timestamp()
         if self._recording:
-            await self._stream_recorder.start()
+            if snapshot is None:
+                await self._stream_recorder.start()
+            else:
+                await self._stream_recorder.start_with_stream_snapshot(snapshot)
 
     async def on_live_stream_reset(self, live: Live) -> None:
         self._logger.warning('The live stream has been reset')

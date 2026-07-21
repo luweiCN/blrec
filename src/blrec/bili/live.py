@@ -39,7 +39,7 @@ from .typing import ApiPlatform, QualityNumber, ResponseData, StreamCodec, Strea
 if TYPE_CHECKING:
     from blrec.networking.manager import NetworkRouteManager
 
-__all__ = ('Live', 'LiveInfoSnapshot')
+__all__ = ('Live', 'LiveInfoSnapshot', 'LiveStreamSnapshot', 'StreamResolution')
 
 from loguru import logger
 
@@ -55,6 +55,28 @@ class LiveInfoSnapshot:
     user_info: UserInfo
 
 
+@dataclass(frozen=True)
+class LiveStreamSnapshot:
+    quality_number: QualityNumber
+    api_platform: ApiPlatform
+    stream_format: StreamFormat
+    stream_codec: StreamCodec
+    select_alternative: bool
+    streams: Tuple[Any, ...]
+    observed_at: float
+
+
+@dataclass(frozen=True)
+class StreamResolution:
+    quality_number: QualityNumber
+    api_platform: ApiPlatform
+    stream_format: StreamFormat
+    stream_codec: StreamCodec
+    select_alternative: bool
+    url: str
+    real_quality_number: QualityNumber
+
+
 class Live:
     def __init__(
         self,
@@ -66,6 +88,7 @@ class Live:
         session: Optional[Any] = None,
         network_route_manager: Optional['NetworkRouteManager'] = None,
         info_timeout_seconds: float = 10,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._logger = logger.bind(room_id=room_id)
 
@@ -101,6 +124,7 @@ class Live:
         )
 
         self._info_timeout_seconds = info_timeout_seconds
+        self._monotonic = monotonic
         self._info_refresh_lock = asyncio.Lock()
         self._info_refresh_task: Optional['asyncio.Task[None]'] = None
         self._info_refresh_closed = False
@@ -390,7 +414,101 @@ class Live:
         stream_codec: StreamCodec = 'avc',
         select_alternative: bool = False,
     ) -> str:
+        resolution = await self.resolve_live_stream(
+            qn,
+            api_platform=api_platform,
+            stream_format=stream_format,
+            stream_codec=stream_codec,
+            select_alternative=select_alternative,
+        )
+        return resolution.url
+
+    async def get_live_stream_snapshot(
+        self,
+        qn: QualityNumber = 10000,
+        *,
+        api_platform: ApiPlatform = 'web',
+        stream_format: StreamFormat = 'flv',
+        stream_codec: StreamCodec = 'avc',
+        select_alternative: bool = False,
+    ) -> LiveStreamSnapshot:
         streams = await self.get_live_streams(qn, api_platform=api_platform)
+        return LiveStreamSnapshot(
+            quality_number=qn,
+            api_platform=api_platform,
+            stream_format=stream_format,
+            stream_codec=stream_codec,
+            select_alternative=select_alternative,
+            streams=tuple(streams),
+            observed_at=self._monotonic(),
+        )
+
+    async def resolve_live_stream(
+        self,
+        qn: QualityNumber = 10000,
+        *,
+        api_platform: ApiPlatform = 'web',
+        stream_format: StreamFormat = 'flv',
+        stream_codec: StreamCodec = 'avc',
+        select_alternative: bool = False,
+        snapshot: Optional[LiveStreamSnapshot] = None,
+    ) -> StreamResolution:
+        usable = (
+            snapshot
+            if self._snapshot_matches(
+                snapshot,
+                qn=qn,
+                api_platform=api_platform,
+                stream_format=stream_format,
+                stream_codec=stream_codec,
+                select_alternative=select_alternative,
+                max_age_seconds=2,
+            )
+            else None
+        )
+        streams = (
+            list(usable.streams)
+            if usable is not None
+            else await self.get_live_streams(qn, api_platform=api_platform)
+        )
+        resolution = self._select_stream(
+            streams, qn, api_platform, stream_format, stream_codec, select_alternative
+        )
+        self._real_quality_number = resolution.real_quality_number
+        return resolution
+
+    def _snapshot_matches(
+        self,
+        snapshot: Optional[LiveStreamSnapshot],
+        *,
+        qn: QualityNumber,
+        api_platform: ApiPlatform,
+        stream_format: StreamFormat,
+        stream_codec: StreamCodec,
+        select_alternative: bool,
+        max_age_seconds: float,
+    ) -> bool:
+        if snapshot is None:
+            return False
+        age = self._monotonic() - snapshot.observed_at
+        return (
+            0 <= age <= max_age_seconds
+            and snapshot.quality_number == qn
+            and snapshot.api_platform == api_platform
+            and snapshot.stream_format == stream_format
+            and snapshot.stream_codec == stream_codec
+            and snapshot.select_alternative == select_alternative
+        )
+
+    def _select_stream(
+        self,
+        streams: List[Any],
+        qn: QualityNumber,
+        api_platform: ApiPlatform,
+        stream_format: StreamFormat,
+        stream_codec: StreamCodec,
+        select_alternative: bool,
+    ) -> StreamResolution:
         if not streams:
             raise NoStreamAvailable(stream_format, stream_codec, qn)
 
@@ -410,7 +528,7 @@ class Live:
             or current_qns[0] not in accept_qns
         ):
             raise NoStreamQualityAvailable(stream_format, stream_codec, qn)
-        self._real_quality_number = cast(QualityNumber, current_qns[0])
+        real_quality_number = cast(QualityNumber, current_qns[0])
 
         def sort_by_host(info: Any) -> int:
             host = info['host']
@@ -441,12 +559,22 @@ class Live:
         urls = [i['host'] + i['base_url'] + i['extra'] for i in url_infos]
 
         if not select_alternative:
-            return urls[0]
+            url = urls[0]
+        else:
+            try:
+                url = urls[1]
+            except IndexError:
+                raise NoAlternativeStreamAvailable(stream_format, stream_codec, qn)
 
-        try:
-            return urls[1]
-        except IndexError:
-            raise NoAlternativeStreamAvailable(stream_format, stream_codec, qn)
+        return StreamResolution(
+            quality_number=qn,
+            api_platform=api_platform,
+            stream_format=stream_format,
+            stream_codec=stream_codec,
+            select_alternative=select_alternative,
+            url=url,
+            real_quality_number=real_quality_number,
+        )
 
     def _check_room_play_info(self, data: ResponseData) -> None:
         if data.get('is_hidden'):

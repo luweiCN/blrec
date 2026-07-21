@@ -12,10 +12,10 @@ from ..event.event_emitter import EventEmitter, EventListener
 from ..utils.mixins import SwitchableMixin
 from .danmaku_client import DanmakuClient, DanmakuCommand, DanmakuListener
 from .helpers import extract_formats
-from .live import Live
+from .live import Live, LiveStreamSnapshot
 from .live_status import ObservedStatus
 from .models import LiveStatus, RoomInfo
-from .typing import Danmaku
+from .typing import ApiPlatform, Danmaku, QualityNumber, StreamCodec, StreamFormat
 
 __all__ = 'LiveMonitor', 'LiveEventListener'
 
@@ -32,7 +32,9 @@ class LiveEventListener(EventListener):
     async def on_live_ended(self, live: Live) -> None:
         pass
 
-    async def on_live_stream_available(self, live: Live) -> None:
+    async def on_live_stream_available(
+        self, live: Live, snapshot: Optional[LiveStreamSnapshot] = None
+    ) -> None:
         pass
 
     async def on_live_stream_reset(self, live: Live) -> None:
@@ -55,6 +57,26 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
         self._danmaku_client = danmaku_client
         self._live = live
         self._status_sink = status_sink
+        self._stream_quality_number: QualityNumber = 10000
+        self._stream_api_platform: ApiPlatform = 'web'
+        self._stream_format: StreamFormat = 'flv'
+        self._stream_codec: StreamCodec = 'avc'
+        self._select_alternative_stream = False
+
+    def configure_stream_request(
+        self,
+        quality_number: QualityNumber,
+        *,
+        api_platform: ApiPlatform = 'web',
+        stream_format: StreamFormat = 'flv',
+        stream_codec: StreamCodec = 'avc',
+        select_alternative: bool = False,
+    ) -> None:
+        self._stream_quality_number = quality_number
+        self._stream_api_platform = api_platform
+        self._stream_format = stream_format
+        self._stream_codec = stream_codec
+        self._select_alternative_stream = select_alternative
 
     def _init_status(self) -> None:
         if self._status_sink is not None:
@@ -256,13 +278,20 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
 
         while True:
             try:
-                streams = await self._live.get_live_streams()
+                snapshot = await self._live.get_live_stream_snapshot(
+                    self._stream_quality_number,
+                    api_platform=self._stream_api_platform,
+                    stream_format=self._stream_format,
+                    stream_codec=self._stream_codec,
+                    select_alternative=self._select_alternative_stream,
+                )
+                streams = list(snapshot.streams)
                 if streams:
                     self._logger.debug('live stream available')
                     self._stream_available = True
                     flv_formats = extract_formats(streams, 'flv')
                     self._live._no_flv_stream = not flv_formats
-                    await self._emit('live_stream_available', self._live)
+                    await self._emit('live_stream_available', self._live, snapshot)
                     break
             except asyncio.CancelledError:
                 self._logger.debug('Cancelled checking if stream available')

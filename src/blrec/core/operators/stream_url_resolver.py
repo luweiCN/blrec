@@ -18,8 +18,9 @@ from blrec.bili.exceptions import (
     NoStreamFormatAvailable,
     NoStreamQualityAvailable,
 )
-from blrec.bili.live import Live
+from blrec.bili.live import Live, StreamResolution
 from blrec.bili.live_monitor import LiveMonitor
+from blrec.bili.typing import QualityNumber
 from blrec.utils import operators as utils_ops
 from blrec.utils.mixins import AsyncCooperationMixin
 
@@ -46,7 +47,9 @@ class StreamURLResolver(AsyncCooperationMixin):
         self._stream_url: str = ''
         self._stream_host: str = ''
         self._stream_params: Optional[StreamParams] = None
+        self._stream_real_quality_number: Optional[QualityNumber] = None
         self._attempts_for_no_stream: int = 0
+        self._seeded = False
 
     @property
     def stream_url(self) -> str:
@@ -68,13 +71,32 @@ class StreamURLResolver(AsyncCooperationMixin):
         self._stream_url = ''
         self._stream_host = ''
         self._stream_params = None
+        self._stream_real_quality_number = None
         self._attempts_for_no_stream = 0
+        self._seeded = False
+
+    def seed(self, resolution: StreamResolution) -> None:
+        self._stream_url = resolution.url
+        self._stream_host = urlparse(resolution.url).hostname or ''
+        self._stream_params = StreamParams(
+            stream_format=resolution.stream_format,
+            quality_number=resolution.quality_number,
+            api_platform=resolution.api_platform,
+            use_alternative_stream=resolution.select_alternative,
+        )
+        self._stream_real_quality_number = resolution.real_quality_number
+        self._stream_param_holder.real_quality_number = resolution.real_quality_number
+        self._attempts_for_no_stream = 0
+        self._seeded = True
 
     def rotate_routes(self) -> None:
         self.use_alternative_stream = not self.use_alternative_stream
 
     def __call__(self, source: Observable[StreamParams]) -> Observable[str]:
-        self.reset()
+        if self._seeded:
+            self._seeded = False
+        else:
+            self.reset()
         return self._solve(source).pipe(  # type: ignore
             ops.do_action(on_error=self._before_retry),
             utils_ops.retry(delay=1, should_retry=self._should_retry),
@@ -87,6 +109,10 @@ class StreamURLResolver(AsyncCooperationMixin):
         ) -> abc.DisposableBase:
             def on_next(params: StreamParams) -> None:
                 if self._can_resue_url(params):
+                    if self._stream_real_quality_number is not None:
+                        self._stream_param_holder.real_quality_number = (
+                            self._stream_real_quality_number
+                        )
                     observer.on_next(self._stream_url)
                     return
 
@@ -98,8 +124,8 @@ class StreamURLResolver(AsyncCooperationMixin):
                         f'api platform: {params.api_platform}, '
                         f'use alternative stream: {params.use_alternative_stream}'
                     )
-                    url = self._call_coroutine(
-                        self._live.get_live_stream_url(
+                    resolution = self._call_coroutine(
+                        self._live.resolve_live_stream(
                             params.quality_number,
                             api_platform=params.api_platform,
                             stream_format=params.stream_format,
@@ -110,22 +136,21 @@ class StreamURLResolver(AsyncCooperationMixin):
                     logger.warning(f'Failed to get live stream url: {repr(e)}')
                     observer.on_error(e)
                 else:
+                    url = resolution.url
                     logger.info(f"Got live stream url: '{url}'")
-                    real_quality_number = self._live.real_quality_number
-                    if real_quality_number is not None:
-                        self._stream_param_holder.real_quality_number = (
-                            real_quality_number
+                    real_quality_number = resolution.real_quality_number
+                    self._stream_param_holder.real_quality_number = real_quality_number
+                    if real_quality_number != params.quality_number:
+                        logger.warning(
+                            'The requested stream quality ({}) is unavailable; '
+                            'using the server-selected quality ({}) instead.',
+                            params.quality_number,
+                            real_quality_number,
                         )
-                        if real_quality_number != params.quality_number:
-                            logger.warning(
-                                'The requested stream quality ({}) is unavailable; '
-                                'using the server-selected quality ({}) instead.',
-                                params.quality_number,
-                                real_quality_number,
-                            )
                     self._stream_url = url
                     self._stream_host = urlparse(url).hostname or ''
                     self._stream_params = params
+                    self._stream_real_quality_number = real_quality_number
                     self._attempts_for_no_stream = 0
                     observer.on_next(url)
 
@@ -136,21 +161,7 @@ class StreamURLResolver(AsyncCooperationMixin):
         return Observable(subscribe)
 
     def _can_resue_url(self, params: StreamParams) -> bool:
-        if params == self._stream_params and self._stream_url:
-            try:
-                response = self._session.get(
-                    self._stream_url,
-                    stream=True,
-                    headers=self._live.stream_headers,
-                    timeout=3,
-                )
-                response.raise_for_status()
-            except Exception:
-                return False
-            else:
-                return True
-        else:
-            return False
+        return params == self._stream_params and bool(self._stream_url)
 
     def _should_retry(self, exc: Exception) -> bool:
         if isinstance(

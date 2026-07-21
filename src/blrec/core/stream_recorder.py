@@ -4,7 +4,7 @@ from typing import Iterator, Optional
 
 from loguru import logger
 
-from blrec.bili.live import Live
+from blrec.bili.live import Live, LiveStreamSnapshot, StreamResolution
 from blrec.bili.live_monitor import LiveMonitor
 from blrec.bili.typing import QualityNumber, StreamFormat
 from blrec.event.event_emitter import EventEmitter
@@ -49,9 +49,10 @@ class StreamRecorder(
 
         self._live = live
         self._live_monitor = live_monitor
-        self.stream_format = stream_format
+        self._stream_format = stream_format
         self.recording_mode = recording_mode
         self.fmp4_stream_timeout = fmp4_stream_timeout
+        self._pending_stream_snapshot: Optional[LiveStreamSnapshot] = None
 
         if stream_format == 'flv':
             cls = FLVStreamRecorderImpl
@@ -79,6 +80,9 @@ class StreamRecorder(
         )
 
         self._impl.add_listener(self)
+        self._live_monitor.configure_stream_request(
+            quality_number, stream_format=self.stream_format
+        )
 
     @property
     def stream_url(self) -> str:
@@ -145,12 +149,27 @@ class StreamRecorder(
         self._impl.path_template = value
 
     @property
+    def stream_format(self) -> StreamFormat:
+        return self._stream_format
+
+    @stream_format.setter
+    def stream_format(self, value: StreamFormat) -> None:
+        self._stream_format = value
+        if hasattr(self, '_impl'):
+            self._live_monitor.configure_stream_request(
+                self.quality_number, stream_format=value
+            )
+
+    @property
     def quality_number(self) -> QualityNumber:
         return self._impl.quality_number
 
     @quality_number.setter
     def quality_number(self, value: QualityNumber) -> None:
         self._impl.quality_number = value
+        self._live_monitor.configure_stream_request(
+            value, stream_format=self.stream_format
+        )
 
     @property
     def real_stream_format(self) -> Optional[StreamFormat]:
@@ -236,9 +255,20 @@ class StreamRecorder(
     def stopped(self) -> bool:
         return self._impl.stopped
 
+    async def start_with_stream_snapshot(self, snapshot: LiveStreamSnapshot) -> None:
+        self._pending_stream_snapshot = snapshot
+        try:
+            await self.start()
+        finally:
+            if self._pending_stream_snapshot is snapshot:
+                self._pending_stream_snapshot = None
+
     async def _do_start(self) -> None:
+        snapshot = self._pending_stream_snapshot
+        self._pending_stream_snapshot = None
         self.hls_stream_available_time = None
         stream_format = self.stream_format
+        resolution: Optional[StreamResolution] = None
 
         if self._live.has_no_flv_streams():
             if stream_format == 'flv':
@@ -251,8 +281,8 @@ class StreamRecorder(
         else:
             if stream_format == 'fmp4':
                 self._logger.info('Waiting for the fmp4 stream becomes available...')
-                available = await self._wait_fmp4_stream()
-                if available:
+                resolution = await self._wait_fmp4_stream(snapshot)
+                if resolution is not None:
                     if self.stream_available_time is not None:
                         self.hls_stream_available_time = (
                             await self._live.get_timestamp()
@@ -265,7 +295,13 @@ class StreamRecorder(
                     )
                     stream_format = 'flv'
 
+        if resolution is None and snapshot is not None:
+            resolution = await self._live.resolve_live_stream(
+                self.quality_number, stream_format=stream_format, snapshot=snapshot
+            )
         self._change_impl(stream_format)
+        if resolution is not None:
+            self._impl.seed_stream_resolution(resolution)
         await self._impl.start()
 
     async def _do_stop(self) -> None:
@@ -289,21 +325,29 @@ class StreamRecorder(
     async def on_stream_recording_completed(self) -> None:
         await self._emit('stream_recording_completed')
 
-    async def _wait_fmp4_stream(self) -> bool:
+    async def _wait_fmp4_stream(
+        self, snapshot: Optional[LiveStreamSnapshot]
+    ) -> Optional[StreamResolution]:
         end_time = time.monotonic() + self.fmp4_stream_timeout
         available = False  # debounce
+        candidate_snapshot = snapshot
         while True:
             try:
-                await self._impl._live.get_live_stream_url(stream_format='fmp4')
+                resolution = await self._live.resolve_live_stream(
+                    self.quality_number,
+                    stream_format='fmp4',
+                    snapshot=candidate_snapshot,
+                )
             except Exception:
                 available = False
                 if time.monotonic() > end_time:
-                    return False
+                    return None
             else:
                 if available:
-                    return True
+                    return resolution
                 else:
                     available = True
+            candidate_snapshot = None
             await asyncio.sleep(1)
 
     def _change_impl(self, stream_format: StreamFormat) -> None:
