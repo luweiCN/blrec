@@ -1,7 +1,8 @@
+import asyncio
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
 from blrec.web.routers import tasks
@@ -153,6 +154,57 @@ def test_batch_task_action_returns_per_room_results(
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_batch_refresh_uses_application_boundary_and_keeps_input_order() -> None:
+    old_app = tasks.app
+
+    class RefreshApplication(FakeApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+            self.three_entered = asyncio.Event()
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def update_task_info(self, room_id: int) -> None:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            if self.in_flight >= 3:
+                self.three_entered.set()
+            try:
+                await self.release.wait()
+                if room_id == 200:
+                    raise RuntimeError('refresh failed')
+            finally:
+                self.in_flight -= 1
+
+    refresh_app = RefreshApplication()
+    tasks.app = refresh_app  # type: ignore[assignment]
+    response = Response()
+    running = asyncio.create_task(
+        tasks.run_task_batch_action(
+            tasks.TaskBatchActionRequest(action='refresh', room_ids=[300, 100, 200]),
+            response,
+        )
+    )
+    try:
+        await asyncio.wait_for(refresh_app.three_entered.wait(), timeout=0.2)
+        assert refresh_app.max_in_flight == 3
+        refresh_app.release.set()
+        result = await running
+
+        assert [item.room_id for item in result.results] == [300, 100, 200]
+        assert [item.status for item in result.results] == [
+            'succeeded',
+            'succeeded',
+            'failed',
+        ]
+    finally:
+        refresh_app.release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        tasks.app = old_app
 
 
 def test_batch_task_action_rejects_duplicate_rooms(client: TestClient) -> None:

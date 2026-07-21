@@ -7,6 +7,8 @@ from loguru import logger
 
 from ..control.operations import (
     ClaimedControlStep,
+    ControlJournalClosed,
+    ControlJournalError,
     ControlOperationJournal,
     ControlOperationSnapshot,
     ControlStepInput,
@@ -51,12 +53,14 @@ class RoomMembershipReconciler:
         self._accepting = True
         self._submission_lock = asyncio.Lock()
         self._desired_absent_room_ids: Set[int] = set()
+        self._active_steps = 0
 
     def start(self) -> None:
         if self._worker is not None and not self._worker.done():
             return
         self._stop_event.clear()
         self._worker = asyncio.create_task(self._run())
+        self._worker.add_done_callback(lambda _worker: self._idle_event.set())
         self.wake()
 
     def close_admission(self) -> None:
@@ -159,7 +163,13 @@ class RoomMembershipReconciler:
     async def wait_idle(self) -> None:
         while True:
             await self._idle_event.wait()
-            if await self._journal.queued_count(self.LANE) == 0:
+            worker = self._worker
+            if worker is not None and worker.done():
+                await worker
+            if (
+                self._active_steps == 0
+                and await self._journal.queued_count(self.LANE) == 0
+            ):
                 return
             self._idle_event.clear()
 
@@ -203,10 +213,43 @@ class RoomMembershipReconciler:
         return operation
 
     async def _run(self) -> None:
+        pending: Set[asyncio.Task[None]] = set()
         while not self._stop_event.is_set():
-            async with self._submission_lock:
-                claim = await self._journal.claim_next(self.LANE)
-            if claim is None:
+            claim_error: Optional[BaseException] = None
+            while len(pending) < 2:
+                try:
+                    async with self._submission_lock:
+                        claim = await self._journal.claim_next(self.LANE)
+                except BaseException as claim_exception:
+                    claim_error = claim_exception
+                    break
+                if claim is None:
+                    break
+                self._idle_event.clear()
+                self._active_steps += 1
+                pending.add(asyncio.create_task(self._reconcile_claim(claim)))
+            if claim_error is not None:
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    self._active_steps -= len(pending)
+                    pending = set()
+                raise claim_error
+            if pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                results = await asyncio.gather(*done, return_exceptions=True)
+                self._active_steps -= len(done)
+                step_error = next(
+                    (result for result in results if isinstance(result, BaseException)),
+                    None,
+                )
+                if step_error is not None:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    self._active_steps -= len(pending)
+                    raise step_error
+                continue
+            else:
                 self._idle_event.set()
                 self._wake_event.clear()
                 if await self._journal.queued_count(self.LANE) != 0:
@@ -214,23 +257,22 @@ class RoomMembershipReconciler:
                     continue
                 wake_task = asyncio.create_task(self._wake_event.wait())
                 stop_task = asyncio.create_task(self._stop_event.wait())
-                done, pending = await asyncio.wait(
+                wait_done, wait_pending = await asyncio.wait(
                     (wake_task, stop_task), return_when=asyncio.FIRST_COMPLETED
                 )
-                for task in pending:
+                for task in wait_pending:
                     task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                if stop_task in done and stop_task.result():
+                await asyncio.gather(*wait_pending, return_exceptions=True)
+                if stop_task in wait_done and stop_task.result():
                     return
                 self._idle_event.clear()
                 continue
-            self._idle_event.clear()
-            await self._reconcile_claim(claim)
 
     async def _reconcile_claim(self, claim: ClaimedControlStep) -> None:
         operation = await self._journal.get(claim.operation_id)
         if operation is None:
             return
+        resolved_operation: ControlOperationSnapshot = operation
         try:
             if claim.key == 'scope':
                 room_ids = self._all_membership_room_ids()
@@ -252,7 +294,20 @@ class RoomMembershipReconciler:
                 if completed:
                     self._desired_absent_room_ids.update(room_ids)
                 return
-            step_result, operation_result = await self._apply_step(operation, claim)
+            room_action_key = self._room_action_key(resolved_operation, claim)
+            if room_action_key is None:
+                step_result, operation_result = await self._apply_step(
+                    resolved_operation, claim
+                )
+            else:
+                step_result, operation_result = (
+                    await self._task_control.run_room_action(
+                        room_action_key,
+                        lambda: self._apply_step(resolved_operation, claim),
+                    )
+                )
+        except (ControlJournalClosed, ControlJournalError):
+            raise
         except Exception as error:
             error_code = self._error_code(claim.key)
             logger.error(
@@ -286,11 +341,11 @@ class RoomMembershipReconciler:
         if claim.key == 'resolve':
             requested_room_id = self._requested_room_id(operation)
             resolved_room_id = await self._room_id_resolver(requested_room_id)
-            result: Dict[str, object] = {
+            resolve_result: Dict[str, object] = {
                 'requestedRoomId': requested_room_id,
                 'resolvedRoomId': resolved_room_id,
             }
-            return result, {'resolvedRoomId': resolved_room_id}
+            return resolve_result, {'resolvedRoomId': resolved_room_id}
 
         if claim.key == 'add':
             room_id = self._resolved_room_id(operation)
@@ -298,18 +353,29 @@ class RoomMembershipReconciler:
             already_present = self._task_manager.has_task(room_id)
             if not already_present:
                 await self._task_manager.add_task(settings, apply_desired_state=False)
-            return (
-                {'roomId': room_id, 'alreadyPresent': already_present},
-                {'resolvedRoomId': room_id, 'collected': True},
-            )
+            add_result: Dict[str, object] = {
+                'roomId': room_id,
+                'alreadyPresent': already_present,
+            }
+            if not already_present:
+                add_result['infoRevision'] = self._task_manager.get_task_info_revision(
+                    room_id
+                )
+            return (add_result, {'resolvedRoomId': room_id, 'collected': True})
 
         if claim.key == 'desired-state':
             room_id = self._resolved_room_id(operation)
-            delegated = await self._task_control.submit(
-                'start', [room_id], rejected={}, force=False
+            final = await self._task_control.reconcile_membership_start(
+                room_id,
+                membership_operation_id=operation.id,
+                reuse_info_revision=self._persisted_add_info_revision(operation),
             )
             return (
-                {'roomId': room_id, 'operationId': delegated.id},
+                {
+                    'roomId': room_id,
+                    'monitorEnabled': final[0],
+                    'recorderEnabled': final[1],
+                },
                 {'resolvedRoomId': room_id, 'collected': True},
             )
 
@@ -369,12 +435,35 @@ class RoomMembershipReconciler:
             raise ValueError('room membership operation has no removal rooms')
         return room_ids
 
+    @staticmethod
+    def _persisted_add_info_revision(
+        operation: ControlOperationSnapshot,
+    ) -> Optional[int]:
+        for step in operation.steps:
+            if step.key != 'add' or step.status != 'succeeded' or step.result is None:
+                continue
+            value = step.result.get('infoRevision')
+            if isinstance(value, int) and value > 0:
+                return value
+        return None
+
     def _all_membership_room_ids(self) -> Sequence[int]:
         settings = self._settings_manager.get_settings({'tasks'}).tasks
         assert settings is not None
         room_ids = set(self._task_manager.get_all_task_room_ids())
         room_ids.update(task.room_id for task in settings)
         return tuple(sorted(room_ids))
+
+    def _room_action_key(
+        self, operation: ControlOperationSnapshot, claim: ClaimedControlStep
+    ) -> Optional[int]:
+        if claim.key == 'resolve':
+            return self._requested_room_id(operation)
+        if claim.key in {'add', 'policy'}:
+            return self._resolved_room_id(operation)
+        if claim.key.startswith('teardown:'):
+            return int(claim.key.split(':', 1)[1])
+        return None
 
     @staticmethod
     def _error_code(step: str) -> str:

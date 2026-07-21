@@ -140,6 +140,10 @@ class RecordTask:
         return self._live.user_info
 
     @property
+    def info_revision(self) -> int:
+        return self._live.info_revision
+
+    @property
     def running_status(self) -> RunningStatus:
         if not self._monitor_enabled and not self._recorder_enabled:
             return RunningStatus.STOPPED

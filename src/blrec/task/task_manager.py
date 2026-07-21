@@ -13,12 +13,8 @@ from typing import (
     Tuple,
 )
 
-import aiohttp
-from tenacity import retry, retry_if_exception_type, stop_after_delay, wait_exponential
-
 from blrec.utils.libc import malloc_trim
 
-from ..bili.exceptions import ApiRequestError
 from ..core.typing import MetaData
 from ..exception import NotFoundError, submit_exception
 from ..flv.operators import StreamProfile
@@ -77,6 +73,7 @@ class RecordTaskManager:
         self._recording_journal = recording_journal
         self._network_session_pool = network_session_pool
         self._network_route_manager = network_route_manager
+        self._room_detail_slots = asyncio.Semaphore(2)
         self._tasks: Dict[int, RecordTask] = {}
 
     async def load_all_tasks(
@@ -117,18 +114,19 @@ class RecordTaskManager:
     def get_all_task_room_ids(self) -> Iterator[int]:
         yield from self._tasks
 
+    def get_ready_task_room_ids(self) -> Iterator[int]:
+        for room_id, task in self._tasks.items():
+            if task.ready:
+                yield room_id
+
     def get_task_control_state(self, room_id: int) -> Tuple[bool, bool]:
         task = self._get_task(room_id, check_ready=True)
         return task.monitor_enabled, task.recorder_enabled
 
-    @retry(
-        reraise=True,
-        retry=retry_if_exception_type(
-            (asyncio.TimeoutError, aiohttp.ClientError, ApiRequestError)
-        ),
-        wait=wait_exponential(max=10),
-        stop=stop_after_delay(60),
-    )
+    def get_task_info_revision(self, room_id: int) -> int:
+        task = self._get_task(room_id, check_ready=True)
+        return task.info_revision
+
     async def add_task(
         self, settings: TaskSettings, *, apply_desired_state: bool = True
     ) -> None:
@@ -156,7 +154,8 @@ class RecordTaskManager:
             await self._settings_manager.apply_task_header_settings(
                 settings.room_id, settings.header, restart_danmaku_client=False
             )
-            await task.setup()
+            async with self._room_detail_slots:
+                await task.setup()
 
             self._settings_manager.apply_task_output_settings(
                 settings.room_id, settings.output
@@ -222,10 +221,14 @@ class RecordTaskManager:
         malloc_trim(0)
         logger.debug('Removed all tasks')
 
-    async def start_task(self, room_id: int) -> None:
+    async def start_task(
+        self, room_id: int, *, reuse_info_revision: Optional[int] = None
+    ) -> None:
         logger.debug(f'Starting task {room_id}...')
         task = self._get_task(room_id, check_ready=True)
-        await task.update_info()
+        if reuse_info_revision is None or task.info_revision != reuse_info_revision:
+            async with self._room_detail_slots:
+                await task.update_info(raise_exception=True)
         await task.enable_monitor()
         await task.enable_recorder()
         logger.debug(f'Started task {room_id}')
@@ -356,15 +359,20 @@ class RecordTaskManager:
     async def update_task_info(self, room_id: int) -> None:
         logger.debug(f'Updating info for task {room_id}...')
         task = self._get_task(room_id, check_ready=True)
-        await task.update_info(raise_exception=True)
+        async with self._room_detail_slots:
+            await task.update_info(raise_exception=True)
         logger.debug(f'Updated info for task {room_id}')
 
     async def update_all_task_infos(self) -> None:
         logger.debug('Updating info for all tasks...')
-        for room_id, task in self._tasks.items():
-            if not task.ready:
-                continue
-            await self.update_task_info(room_id)
+        room_ids = tuple(room_id for room_id, task in self._tasks.items() if task.ready)
+        results = await asyncio.gather(
+            *(self.update_task_info(room_id) for room_id in room_ids),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         logger.debug('Updated info for all tasks')
 
     def apply_task_bili_api_settings(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -8,10 +9,153 @@ import pytest
 
 from blrec.control.operations import (
     ControlJournalClosed,
+    ControlJournalError,
     ControlLaneSaturated,
     ControlOperationJournal,
     ControlStepInput,
 )
+
+
+@pytest.mark.asyncio
+async def test_journal_wraps_storage_errors(tmp_path: Path) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+
+    def fail_queued_count(_lane: str) -> int:
+        raise sqlite3.OperationalError('database unavailable')
+
+    journal._queued_count_sync = fail_queued_count  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ControlJournalError) as raised:
+            await journal.queued_count('task-state')
+        assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_membership_remove_waits_for_older_short_room_add(tmp_path: Path) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    older = await journal.admit(
+        lane='room-membership',
+        kind='add',
+        target_key='6',
+        result={'requestedRoomId': 6},
+        steps=[
+            ControlStepInput(key='resolve'),
+            ControlStepInput(key='add'),
+            ControlStepInput(key='desired-state'),
+        ],
+    )
+    later = await journal.admit(
+        lane='room-membership',
+        kind='remove',
+        target_key='3582149',
+        result={'roomIds': [3582149]},
+        steps=[
+            ControlStepInput(key='desired-absent'),
+            ControlStepInput(key='teardown:3582149'),
+            ControlStepInput(key='settings'),
+        ],
+    )
+    try:
+        resolve = await journal.claim_next('room-membership')
+        assert resolve is not None
+        assert resolve.operation_id == older.id and resolve.key == 'resolve'
+        assert await journal.claim_next('room-membership') is None
+
+        await journal.finish_step(
+            resolve,
+            status='succeeded',
+            result={'requestedRoomId': 6, 'resolvedRoomId': 3582149},
+            operation_result={'resolvedRoomId': 3582149},
+        )
+        add = await journal.claim_next('room-membership')
+        assert add is not None
+        assert add.operation_id == older.id and add.key == 'add'
+        assert await journal.claim_next('room-membership') is None
+
+        await journal.finish_step(add, status='succeeded')
+        desired = await journal.claim_next('room-membership')
+        assert desired is not None
+        assert desired.operation_id == older.id and desired.key == 'desired-state'
+        assert await journal.claim_next('room-membership') is None
+
+        await journal.finish_step(desired, status='succeeded')
+        removal = await journal.claim_next('room-membership')
+        assert removal is not None
+        assert removal.operation_id == later.id and removal.key == 'desired-absent'
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_membership_keeps_different_resolved_rooms_concurrent(
+    tmp_path: Path,
+) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    older = await journal.admit(
+        lane='room-membership',
+        kind='add',
+        target_key='6',
+        result={'requestedRoomId': 6},
+        steps=[ControlStepInput(key='resolve'), ControlStepInput(key='add')],
+    )
+    later = await journal.admit(
+        lane='room-membership',
+        kind='remove',
+        target_key='200',
+        result={'roomIds': [200]},
+        steps=[ControlStepInput(key='desired-absent')],
+    )
+    try:
+        resolve = await journal.claim_next('room-membership')
+        assert resolve is not None
+        await journal.finish_step(
+            resolve,
+            status='succeeded',
+            result={'requestedRoomId': 6, 'resolvedRoomId': 100},
+            operation_result={'resolvedRoomId': 100},
+        )
+
+        add = await journal.claim_next('room-membership')
+        removal = await journal.claim_next('room-membership')
+        assert add is not None and add.operation_id == older.id
+        assert removal is not None and removal.operation_id == later.id
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_reopen_backfills_durable_admission_order(tmp_path: Path) -> None:
+    path = tmp_path / 'control.sqlite3'
+    journal = ControlOperationJournal(path)
+    await journal.open()
+    membership = await journal.admit(
+        lane='room-membership',
+        kind='collect',
+        target_key='100:0',
+        steps=[ControlStepInput(key='desired-state')],
+    )
+    await journal.admit(
+        lane='task-state',
+        kind='stop',
+        target_key='100',
+        steps=[ControlStepInput(key='100')],
+    )
+    await journal.close()
+
+    with sqlite3.connect(str(path)) as connection:
+        connection.execute('DROP TABLE control_operation_admissions')
+
+    reopened = ControlOperationJournal(path)
+    await reopened.open()
+    try:
+        assert await reopened.has_later_task_state_intent(membership.id, 100)
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio
@@ -553,6 +697,30 @@ async def test_failed_step_and_dependents_commit_in_one_durable_transaction(
         assert await reopened.claim_next('room-membership') is None
     finally:
         await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_membership_claim_waits_for_the_previous_step(tmp_path: Path) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    try:
+        await journal.admit(
+            lane='room-membership',
+            kind='collect',
+            target_key='100:0',
+            steps=[
+                ControlStepInput(key='resolve'),
+                ControlStepInput(key='add'),
+                ControlStepInput(key='desired-state'),
+            ],
+        )
+
+        resolve = await journal.claim_next('room-membership')
+
+        assert resolve is not None and resolve.key == 'resolve'
+        assert await journal.claim_next('room-membership') is None
+    finally:
+        await journal.close()
 
 
 @pytest.mark.asyncio

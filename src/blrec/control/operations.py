@@ -28,6 +28,7 @@ from blrec.request_metrics import record_database_call
 __all__ = (
     'ClaimedControlStep',
     'ControlJournalClosed',
+    'ControlJournalError',
     'ControlLaneSaturated',
     'ControlOperationJournal',
     'ControlOperationSnapshot',
@@ -44,6 +45,10 @@ _T = TypeVar('_T')
 
 
 class ControlJournalClosed(RuntimeError):
+    pass
+
+
+class ControlJournalError(RuntimeError):
     pass
 
 
@@ -360,6 +365,25 @@ class ControlOperationJournal:
     async def queued_count(self, lane: str) -> int:
         return int(await self._run(self._queued_count_sync, lane))
 
+    async def has_later_task_state_intent(
+        self, source_operation_id: str, room_id: int
+    ) -> bool:
+        return bool(
+            await self._run(
+                self._has_later_task_state_intent_sync,
+                source_operation_id,
+                str(room_id),
+            )
+        )
+
+    async def record_task_state_intents(
+        self, operation_id: str, room_ids: Sequence[int]
+    ) -> None:
+        room_keys = tuple(dict.fromkeys(str(room_id) for room_id in room_ids))
+        if not room_keys:
+            return
+        await self._run(self._record_task_state_intents_sync, operation_id, room_keys)
+
     async def _run(self, operation: Callable[..., _T], *args: Any) -> _T:
         if self._closed:
             raise ControlJournalClosed('control journal has been closed')
@@ -367,6 +391,8 @@ class ControlOperationJournal:
         started = time.perf_counter()
         try:
             return await loop.run_in_executor(self._executor, partial(operation, *args))
+        except (sqlite3.Error, OSError) as error:
+            raise ControlJournalError('control journal operation failed') from error
         finally:
             record_database_call(time.perf_counter() - started)
 
@@ -404,6 +430,27 @@ class ControlOperationJournal:
                 CREATE INDEX IF NOT EXISTS control_operation_lane_status
                 ON control_operations(lane,status,created_at,id);
 
+                CREATE TABLE IF NOT EXISTS control_operation_admissions(
+                    operation_id TEXT PRIMARY KEY
+                        REFERENCES control_operations(id) ON DELETE CASCADE,
+                    admission_order INTEGER NOT NULL UNIQUE
+                        CHECK(admission_order>=1)
+                );
+
+                CREATE TABLE IF NOT EXISTS control_room_intents(
+                    room_key TEXT PRIMARY KEY,
+                    admission_order INTEGER NOT NULL CHECK(admission_order>=1)
+                );
+
+                CREATE TABLE IF NOT EXISTS control_membership_rooms(
+                    operation_id TEXT NOT NULL REFERENCES control_operations(id)
+                        ON DELETE CASCADE,
+                    room_key TEXT NOT NULL,
+                    PRIMARY KEY(operation_id,room_key)
+                );
+                CREATE INDEX IF NOT EXISTS control_membership_room_key
+                ON control_membership_rooms(room_key,operation_id);
+
                 CREATE TABLE IF NOT EXISTS control_operation_steps(
                     operation_id TEXT NOT NULL REFERENCES control_operations(id)
                         ON DELETE CASCADE,
@@ -437,6 +484,53 @@ class ControlOperationJournal:
                 """
             )
             connection.execute('BEGIN IMMEDIATE')
+            next_admission_order = int(
+                connection.execute(
+                    'SELECT COALESCE(MAX(admission_order),0) '
+                    'FROM control_operation_admissions'
+                ).fetchone()[0]
+            )
+            missing_admissions = connection.execute(
+                'SELECT operation.id FROM control_operations operation '
+                'LEFT JOIN control_operation_admissions admission '
+                'ON admission.operation_id=operation.id '
+                'WHERE admission.operation_id IS NULL ORDER BY operation.rowid'
+            ).fetchall()
+            for row in missing_admissions:
+                next_admission_order += 1
+                connection.execute(
+                    'INSERT INTO control_operation_admissions('
+                    'operation_id,admission_order) VALUES(?,?)',
+                    (str(row['id']), next_admission_order),
+                )
+            membership_operations = connection.execute(
+                "SELECT id,result_json FROM control_operations "
+                "WHERE lane='room-membership'"
+            ).fetchall()
+            for row in membership_operations:
+                self._record_membership_rooms_sync(
+                    connection, str(row['id']), self._decode(row['result_json'])
+                )
+            persisted_intents = connection.execute(
+                'SELECT step.key,MAX(admission.admission_order) admission_order '
+                'FROM control_operations operation '
+                'JOIN control_operation_admissions admission '
+                'ON admission.operation_id=operation.id '
+                'JOIN control_operation_steps step '
+                'ON step.operation_id=operation.id '
+                "WHERE operation.lane='task-state' "
+                "AND step.status!='rejected' "
+                'AND (step.error_code IS NULL '
+                "OR step.error_code!='SETTINGS_PERSIST_FAILED') "
+                'GROUP BY step.key'
+            ).fetchall()
+            for row in persisted_intents:
+                connection.execute(
+                    'INSERT INTO control_room_intents(room_key,admission_order) '
+                    'VALUES(?,?) ON CONFLICT(room_key) DO UPDATE SET '
+                    'admission_order=MAX(admission_order,excluded.admission_order)',
+                    (str(row['key']), int(row['admission_order'])),
+                )
             connection.execute(
                 "UPDATE control_operation_steps SET status='queued' "
                 "WHERE status='running'"
@@ -597,6 +691,11 @@ class ControlOperationJournal:
                     now,
                 ),
             )
+            self._touch_admission_order_sync(connection, operation_id)
+            if lane == 'room-membership':
+                self._record_membership_rooms_sync(
+                    connection, operation_id, admitted_result
+                )
             connection.executemany(
                 'INSERT INTO control_operation_steps('
                 'operation_id,key,generation,status,result_json,error_code,updated_at'
@@ -827,6 +926,7 @@ class ControlOperationJournal:
                 now,
             ),
         )
+        self._touch_admission_order_sync(connection, operation_id)
         connection.execute(
             'INSERT INTO control_operation_steps('
             'operation_id,key,generation,status,result_json,error_code,updated_at'
@@ -1024,10 +1124,44 @@ class ControlOperationJournal:
                 'JOIN control_operations operation ON operation.id=step.operation_id '
                 "WHERE operation.lane=? AND step.status='queued' "
                 "AND operation.status IN ('accepted','running') "
+                "AND NOT (operation.lane='room-membership' "
+                "AND operation.kind='remove_all' AND EXISTS("
+                'SELECT 1 FROM control_operations previous_operation '
+                'WHERE previous_operation.lane=operation.lane '
+                'AND previous_operation.generation<operation.generation '
+                "AND previous_operation.status IN ('accepted','running'))) "
+                "AND NOT (operation.lane='room-membership' AND EXISTS("
+                'SELECT 1 FROM control_operations previous_remove_all '
+                'WHERE previous_remove_all.lane=operation.lane '
+                "AND previous_remove_all.kind='remove_all' "
+                'AND previous_remove_all.generation<operation.generation '
+                "AND previous_remove_all.status IN ('accepted','running'))) "
+                "AND NOT (operation.lane='room-membership' AND EXISTS("
+                'SELECT 1 FROM control_operation_steps previous '
+                'WHERE previous.operation_id=step.operation_id '
+                'AND previous.rowid<step.rowid '
+                "AND previous.status!='succeeded')) "
                 "AND NOT (operation.lane='room-membership' AND EXISTS("
                 'SELECT 1 FROM control_operation_steps blocked '
                 'WHERE blocked.operation_id=step.operation_id '
                 "AND blocked.status IN ('failed','rejected'))) "
+                "AND NOT (operation.lane='room-membership' "
+                "AND step.key!='resolve' AND EXISTS("
+                'SELECT 1 FROM control_operations previous_membership '
+                'WHERE previous_membership.lane=operation.lane '
+                'AND previous_membership.generation<operation.generation '
+                "AND previous_membership.status IN ('accepted','running') "
+                'AND (EXISTS(SELECT 1 FROM control_membership_rooms current_room '
+                'JOIN control_membership_rooms previous_room '
+                'ON previous_room.room_key=current_room.room_key '
+                'WHERE current_room.operation_id=operation.id '
+                'AND previous_room.operation_id=previous_membership.id) '
+                "OR (operation.kind='remove' "
+                "AND previous_membership.kind IN ('add','collect') "
+                'AND EXISTS(SELECT 1 FROM control_operation_steps previous_resolve '
+                'WHERE previous_resolve.operation_id=previous_membership.id '
+                "AND previous_resolve.key='resolve' "
+                "AND previous_resolve.status!='succeeded'))))) "
                 'ORDER BY step.generation,step.rowid LIMIT 1',
                 (lane,),
             ).fetchone()
@@ -1094,6 +1228,13 @@ class ControlOperationJournal:
             if cursor.rowcount != 1:
                 connection.execute('ROLLBACK')
                 return False
+            if claim.lane == 'room-membership':
+                self._record_membership_rooms_sync(
+                    connection, claim.operation_id, result
+                )
+                self._record_membership_rooms_sync(
+                    connection, claim.operation_id, operation_result
+                )
             if append_steps:
                 connection.executemany(
                     'INSERT INTO control_operation_steps('
@@ -1206,6 +1347,103 @@ class ControlOperationJournal:
             .fetchone()
         )
         return int(row[0])
+
+    def _has_later_task_state_intent_sync(
+        self, source_operation_id: str, room_key: str
+    ) -> bool:
+        row = (
+            self._require_connection()
+            .execute(
+                'SELECT COALESCE(intent.admission_order '
+                '>source_admission.admission_order,0) '
+                'FROM control_operations source_operation '
+                'JOIN control_operation_admissions source_admission '
+                'ON source_admission.operation_id=source_operation.id '
+                'LEFT JOIN control_room_intents intent ON intent.room_key=? '
+                'WHERE source_operation.id=?',
+                (room_key, source_operation_id),
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise ValueError('source control operation does not exist')
+        return bool(row[0])
+
+    def _record_task_state_intents_sync(
+        self, operation_id: str, room_keys: Sequence[str]
+    ) -> None:
+        connection = self._require_connection()
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            self._touch_admission_order_sync(connection, operation_id)
+            row = connection.execute(
+                'SELECT admission_order FROM control_operation_admissions '
+                'WHERE operation_id=?',
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError('task-state control operation does not exist')
+            admission_order = int(row['admission_order'])
+            connection.executemany(
+                'INSERT INTO control_room_intents(room_key,admission_order) '
+                'VALUES(?,?) ON CONFLICT(room_key) DO UPDATE SET '
+                'admission_order=excluded.admission_order',
+                [(room_key, admission_order) for room_key in room_keys],
+            )
+            connection.execute('COMMIT')
+        except BaseException:
+            connection.execute('ROLLBACK')
+            raise
+
+    @staticmethod
+    def _touch_admission_order_sync(
+        connection: sqlite3.Connection, operation_id: str
+    ) -> None:
+        operation_max = int(
+            connection.execute(
+                'SELECT COALESCE(MAX(admission_order),0) '
+                'FROM control_operation_admissions'
+            ).fetchone()[0]
+        )
+        intent_max = int(
+            connection.execute(
+                'SELECT COALESCE(MAX(admission_order),0) FROM control_room_intents'
+            ).fetchone()[0]
+        )
+        admission_order = max(operation_max, intent_max) + 1
+        connection.execute(
+            'INSERT INTO control_operation_admissions('
+            'operation_id,admission_order) VALUES(?,?) '
+            'ON CONFLICT(operation_id) DO UPDATE SET '
+            'admission_order=excluded.admission_order',
+            (operation_id, admission_order),
+        )
+
+    @staticmethod
+    def _record_membership_rooms_sync(
+        connection: sqlite3.Connection,
+        operation_id: str,
+        result: Optional[Mapping[str, Any]],
+    ) -> None:
+        if result is None:
+            return
+        room_ids = []
+        for key in ('requestedRoomId', 'resolvedRoomId'):
+            room_id = result.get(key)
+            if isinstance(room_id, int) and room_id > 0:
+                room_ids.append(room_id)
+        listed_room_ids = result.get('roomIds')
+        if isinstance(listed_room_ids, list):
+            room_ids.extend(
+                room_id
+                for room_id in listed_room_ids
+                if isinstance(room_id, int) and room_id > 0
+            )
+        connection.executemany(
+            'INSERT OR IGNORE INTO control_membership_rooms(operation_id,room_key) '
+            'VALUES(?,?)',
+            [(operation_id, str(room_id)) for room_id in dict.fromkeys(room_ids)],
+        )
 
     def _list_nonterminal_ids_sync(self, lane: str) -> Sequence[str]:
         rows = (

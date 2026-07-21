@@ -1,6 +1,7 @@
 from .operations import (
     ClaimedControlStep,
     ControlJournalClosed,
+    ControlJournalError,
     ControlLaneSaturated,
     ControlOperationJournal,
     ControlOperationSnapshot,
@@ -11,6 +12,7 @@ from .operations import (
 __all__ = (
     'ClaimedControlStep',
     'ControlJournalClosed',
+    'ControlJournalError',
     'ControlLaneSaturated',
     'ControlOperationJournal',
     'ControlOperationSnapshot',

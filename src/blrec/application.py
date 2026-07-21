@@ -351,14 +351,11 @@ class Application:
         reconciler = self._task_control_reconciler
         if reconciler is None:
             raise RuntimeError('task control service is not ready')
-        valid = []
         rejected = {}
         for room_id in room_ids:
-            if self.has_task(room_id):
-                valid.append(room_id)
-            else:
+            if not self.has_task(room_id):
                 rejected[room_id] = 'TASK_NOT_FOUND'
-        return await reconciler.submit(action, valid, rejected=rejected, force=force)
+        return await reconciler.submit(action, room_ids, rejected=rejected, force=force)
 
     async def submit_room_add(self, room_id: int) -> ControlOperationSnapshot:
         reconciler = self._room_membership_reconciler
@@ -551,12 +548,25 @@ class Application:
 
     async def update_task_info(self, room_id: int) -> None:
         logger.info(f'Updating info for task {room_id}...')
-        await self._task_manager.update_task_info(room_id)
+        reconciler = self._task_control_reconciler
+        if reconciler is None:
+            await self._task_manager.update_task_info(room_id)
+        else:
+            await reconciler.run_room_action(
+                room_id, lambda: self._task_manager.update_task_info(room_id)
+            )
         logger.info(f'Successfully updated info for task {room_id}')
 
     async def update_all_task_infos(self) -> None:
         logger.info('Updating info for all tasks...')
-        await self._task_manager.update_all_task_infos()
+        room_ids = tuple(self._task_manager.get_ready_task_room_ids())
+        results = await asyncio.gather(
+            *(self.update_task_info(room_id) for room_id in room_ids),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         logger.info('Successfully updated info for all tasks')
 
     def get_settings(

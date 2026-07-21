@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Literal, Optional
+import asyncio
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import attr
 from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
@@ -144,6 +145,41 @@ def _membership_admission(operation: Any) -> RoomMembershipAdmissionResponse:
     )
 
 
+async def _refresh_tasks(room_ids: List[int]) -> List[TaskBatchActionResult]:
+    async def refresh_one(
+        index: int, room_id: int
+    ) -> Tuple[int, TaskBatchActionResult]:
+        if not app.has_task(room_id):
+            return index, TaskBatchActionResult(
+                room_id=room_id,
+                accepted=False,
+                status='rejected',
+                message='录制任务不存在',
+            )
+        try:
+            await app.update_task_info(room_id)
+        except Exception as error:
+            result = TaskBatchActionResult(
+                room_id=room_id,
+                accepted=False,
+                status='failed',
+                message=str(error) or '操作失败',
+            )
+        else:
+            result = TaskBatchActionResult(
+                room_id=room_id,
+                accepted=True,
+                status='succeeded',
+                message='任务数据已刷新',
+            )
+        return index, result
+
+    indexed = await asyncio.gather(
+        *(refresh_one(index, room_id) for index, room_id in enumerate(room_ids))
+    )
+    return [result for _index, result in sorted(indexed)]
+
+
 @router.get('/data')
 async def get_task_data(
     page: PositiveInt = 1,
@@ -199,6 +235,18 @@ async def run_task_batch_action(
                 for room_id in command.room_ids
             ],
         )
+    if command.action == 'refresh':
+        results = await _refresh_tasks(command.room_ids)
+        rejected = sum(not result.accepted for result in results)
+        audit(
+            'recording_task_action',
+            level='WARNING' if rejected else 'INFO',
+            action=command.action,
+            room_ids=command.room_ids,
+            accepted=len(results) - rejected,
+            rejected=rejected,
+        )
+        return TaskBatchActionResponse(results=results)
     results = []
     for room_id in command.room_ids:
         if not app.has_task(room_id):
@@ -212,10 +260,7 @@ async def run_task_batch_action(
             )
             continue
         try:
-            if command.action == 'refresh':
-                await app.update_task_info(room_id)
-                message = '任务数据已刷新'
-            elif command.action == 'cut':
+            if command.action == 'cut':
                 if not app.cut_stream(room_id):
                     results.append(
                         TaskBatchActionResult(
