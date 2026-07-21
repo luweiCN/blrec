@@ -1461,6 +1461,24 @@ describe('RecordingSessionsComponent', () => {
     expect(service.listSessions).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps visible rows ready while reconciling an SSE state change', () => {
+    fixture.detectChanges();
+    const current = fixture.componentInstance.sessions[0];
+    const pending = new Subject<RecordingSessionsResponse>();
+    service.listSessions.and.returnValue(pending);
+
+    realtimeEvents.next({
+      type: 'upload_progress',
+      data: { jobs: [realtimeUploadJobFor(current, { state: 'approved' })] },
+    });
+
+    expect(service.listSessions).toHaveBeenCalledTimes(2);
+    expect(fixture.componentInstance.view.state).toBe('ready');
+    expect(fixture.componentInstance.sessions[0].uploadJob?.state).toBe(
+      'approved',
+    );
+  });
+
   it('preserves the ready view when an SSE snapshot has no scalar changes', () => {
     fixture.detectChanges();
     const beforeView = fixture.componentInstance.view;
@@ -1754,7 +1772,7 @@ describe('RecordingSessionsComponent', () => {
     expect(service.listSessions).toHaveBeenCalledTimes(1);
   });
 
-  it('reloads when a paginated-out job disappears from the SSE snapshot', () => {
+  it('does not reload when a paginated-out job leaves the SSE snapshot', () => {
     fixture.detectChanges();
     const currentJob = realtimeUploadJob();
     realtimeEvents.next({
@@ -1770,7 +1788,7 @@ describe('RecordingSessionsComponent', () => {
       data: { jobs: [currentJob] },
     });
 
-    expect(service.listSessions).toHaveBeenCalledTimes(1);
+    expect(service.listSessions).not.toHaveBeenCalled();
   });
 
   it('labels open-session parts as discovered rather than final', () => {

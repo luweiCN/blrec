@@ -78,6 +78,7 @@ interface RecordingListRequest {
   readonly limit: number;
   readonly offset: number;
   readonly filters: RecordingSessionFilters;
+  readonly showLoading: boolean;
 }
 
 type RecordingListResult =
@@ -169,9 +170,11 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.listSubscription = this.listRequests
       .pipe(
-        tap(() => {
-          this.view = { state: 'loading' };
-          this.changeDetector.markForCheck();
+        tap((request) => {
+          if (request.showLoading) {
+            this.view = { state: 'loading' };
+            this.changeDetector.markForCheck();
+          }
         }),
         switchMap((request) =>
           this.recordingSessions
@@ -204,7 +207,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     this.realtimeSubscription = this.realtime.events$.subscribe((event) => {
       if (event.type === 'resync') {
         if (this.view.state !== 'loading') {
-          this.load();
+          this.load(false);
         }
         return;
       }
@@ -297,12 +300,13 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return selected > 0 && selected < this.pageSessionIds.length;
   }
 
-  load(): void {
+  load(showLoading = true): void {
     const offset = (this.pageIndex - 1) * this.pageSize;
     this.listRequests.next({
       limit: this.pageSize,
       offset,
       filters: this.filters(),
+      showLoading,
     });
   }
 
@@ -541,7 +545,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
           this.uploadAction = null;
           this.uploadActionSessionIds = [];
           this.selectedSessionIds.clear();
-          this.load();
+          this.load(false);
         },
         error: (error: unknown) => {
           this.uploadActionError = this.describeError(error);
@@ -627,7 +631,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   closeSubmissionSettings(): void {
     this.submissionSession = null;
-    this.load();
+    this.load(false);
   }
 
   highlightEditorLink(session: RecordingSessionSummary): string[] {
@@ -653,7 +657,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   taskEditSaved(): void {
     this.closeTaskEdit();
     this.selectedSessionIds.clear();
-    this.load();
+    this.load(false);
   }
 
   selectedEditableJobIds(): readonly number[] {
@@ -1255,7 +1259,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     }
     this.retryPreviewVisible = false;
     this.retryPreviewItems = [];
-    this.load();
+    this.load(false);
     this.changeDetector.markForCheck();
   }
 
@@ -1381,14 +1385,15 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         )
         .map((session) => session.uploadJob!.id),
     );
+    const previousJobIds = this.realtimeUploadJobIds;
     const collectionChanged =
-      this.realtimeUploadJobIds === null
-        ? updates.some((item) => !pageJobIds.has(item.jobId)) ||
-          [...trackedPageJobIds].some((jobId) => !nextJobIds.has(jobId))
-        : !this.sameJobIds(this.realtimeUploadJobIds, nextJobIds);
+      (previousJobIds === null
+        ? updates.some((item) => !pageJobIds.has(item.jobId))
+        : [...nextJobIds].some((jobId) => !previousJobIds.has(jobId))) ||
+      [...trackedPageJobIds].some((jobId) => !nextJobIds.has(jobId));
     this.realtimeUploadJobIds = nextJobIds;
     if (collectionChanged) {
-      this.load();
+      this.load(false);
       return;
     }
     let stateChanged = false;
@@ -1455,7 +1460,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     };
     this.changeDetector.markForCheck();
     if (stateChanged) {
-      this.load();
+      this.load(false);
     }
   }
 
@@ -1469,9 +1474,4 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     return Array.isArray(jobs) ? (jobs as RealtimeUploadJobProgress[]) : null;
   }
 
-  private sameJobIds(left: Set<number>, right: Set<number>): boolean {
-    return (
-      left.size === right.size && [...left].every((jobId) => right.has(jobId))
-    );
-  }
 }
