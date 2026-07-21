@@ -713,6 +713,7 @@ class BiliAccountRuntime:
 
     async def _close_once(self) -> None:
         cover_library, self._cover_library = self._cover_library, None
+        cover_resolver, self._cover_resolver = self._cover_resolver, None
         if cover_library is not None:
             cover_library.close_admission()
         if self._deletion_worker is not None:
@@ -727,6 +728,8 @@ class BiliAccountRuntime:
         archive_reader, self._archive_reader = self._archive_reader, None
         if archive_reader is not None:
             await archive_reader.close()
+        if cover_resolver is not None:
+            await cover_resolver.close()
         if cover_library is not None:
             await cover_library.shutdown()
         refresh_task, self._refresh_task = self._refresh_task, None
@@ -740,7 +743,6 @@ class BiliAccountRuntime:
         self._policy_manager = None
         self._session_submission_manager = None
         self._category_catalog = None
-        self._cover_resolver = None
         self._collection_manager = None
         self._collection_publisher = None
         self._review_watcher = None
@@ -1051,12 +1053,14 @@ class BiliAccountRuntime:
         archive_reader, self._archive_reader = self._archive_reader, None
         if archive_reader is not None:
             await archive_reader.close()
+        cover_resolver, self._cover_resolver = self._cover_resolver, None
+        if cover_resolver is not None:
+            await cover_resolver.close()
         self._coordinator = None
         self._policy_manager = None
         self._session_submission_manager = None
         self._category_catalog = None
         self._cover_library = None
-        self._cover_resolver = None
         self._collection_manager = None
         self._collection_publisher = None
         self._review_watcher = None

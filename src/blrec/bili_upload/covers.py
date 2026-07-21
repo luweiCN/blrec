@@ -169,6 +169,13 @@ class _DigestWork:
     created_file: bool = False
 
 
+@dataclass(frozen=True)
+class _LiveCoverSource:
+    fingerprint: Tuple[Any, ...]
+    filename: str
+    content: bytes
+
+
 class CoverLibrary:
     MAX_BYTES = 2 * 1024 * 1024
     MIN_WIDTH = 1146
@@ -585,10 +592,18 @@ class CoverResolver:
         self._protocol = protocol
         self._bundle_loader = bundle_loader
         self._clock = clock
-        self._remote_loader = remote_loader or self._download
+        self._remote_loader = remote_loader
         self._locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+        self._file_semaphore = asyncio.Semaphore(2)
+        self._source_tasks: Dict[str, 'asyncio.Task[Optional[_LiveCoverSource]]'] = {}
+        self._live_tasks: Dict[Tuple[int, Tuple[Any, ...]], 'asyncio.Task[str]'] = {}
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._session_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+        self._closed = False
 
     async def remote_url(self, asset_id: int, account_id: int) -> str:
+        self._ensure_open()
         cached = await self._cached(asset_id, account_id)
         if cached is not None:
             return cached
@@ -618,6 +633,7 @@ class CoverResolver:
     async def upload_transient(
         self, account_id: int, *, filename: str, mime_type: str, content: bytes
     ) -> str:
+        self._ensure_open()
         bundle = await self._bundle_loader(account_id)
         return await self._protocol.upload_cover(
             bundle, filename=filename, mime_type=mime_type, content=content
@@ -626,18 +642,39 @@ class CoverResolver:
     async def live_url(
         self, account_id: int, *, local_path: Optional[str], source_url: str
     ) -> str:
-        content: Optional[bytes] = None
-        filename = 'live-cover.jpg'
+        self._ensure_open()
+        source: Optional[_LiveCoverSource] = None
         if local_path:
-            path = Path(local_path)
-            if path.is_file():
-                loop = asyncio.get_running_loop()
-                content = await loop.run_in_executor(None, self._read_limited, path)
-                filename = path.name or filename
-        if content is None:
+            source = await self._local_source(local_path)
+            self._ensure_open()
+        if source is None:
             self._validate_live_cover_url(source_url)
+            source = _LiveCoverSource(
+                fingerprint=('remote', source_url),
+                filename='live-cover.jpg',
+                content=b'',
+            )
+        key = (account_id, source.fingerprint)
+        task = self._live_tasks.get(key)
+        if task is None:
+            task = asyncio.create_task(
+                self._resolve_live_source(account_id, source, source_url)
+            )
+            self._live_tasks[key] = task
+            task.add_done_callback(partial(self._discard_task, self._live_tasks, key))
+        return await asyncio.shield(task)
+
+    async def _resolve_live_source(
+        self, account_id: int, source: _LiveCoverSource, source_url: str
+    ) -> str:
+        content = source.content
+        filename = source.filename
+        if source.fingerprint[0] == 'remote':
             try:
-                content = await self._remote_loader(source_url)
+                if self._remote_loader is None:
+                    content = await self._download(source_url)
+                else:
+                    content = await self._remote_loader(source_url)
             except CoverResolutionError:
                 raise
             except Exception:
@@ -656,6 +693,76 @@ class CoverResolver:
             account_id, filename=filename, mime_type=mime_type, content=content
         )
 
+    async def _local_source(self, local_path: str) -> Optional[_LiveCoverSource]:
+        task = self._source_tasks.get(local_path)
+        if task is None:
+            task = asyncio.create_task(
+                self._offload(partial(self._inspect_local_source, local_path))
+            )
+            self._source_tasks[local_path] = task
+            task.add_done_callback(
+                partial(self._discard_task, self._source_tasks, local_path)
+            )
+        return await asyncio.shield(task)
+
+    async def _offload(self, operation: Callable[[], T]) -> T:
+        async with self._file_semaphore:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, operation)
+
+    @staticmethod
+    def _inspect_local_source(local_path: str) -> Optional[_LiveCoverSource]:
+        try:
+            path = Path(local_path).expanduser().resolve(strict=True)
+            file_stat = path.stat()
+        except (OSError, RuntimeError):
+            return None
+        if not stat.S_ISREG(file_stat.st_mode):
+            return None
+        if file_stat.st_size > CoverLibrary.MAX_BYTES:
+            raise CoverResolutionError('live cover exceeds the supported size')
+        with path.open('rb') as source:
+            content = source.read(CoverLibrary.MAX_BYTES + 1)
+        if len(content) > CoverLibrary.MAX_BYTES:
+            raise CoverResolutionError('live cover exceeds the supported size')
+        return _LiveCoverSource(
+            fingerprint=('local', str(path), file_stat.st_mtime_ns, file_stat.st_size),
+            filename=path.name or 'live-cover.jpg',
+            content=content,
+        )
+
+    @staticmethod
+    def _discard_task(
+        tasks: Dict[Any, 'asyncio.Task[Any]'], key: Any, task: 'asyncio.Task[Any]'
+    ) -> None:
+        if tasks.get(key) is task:
+            tasks.pop(key, None)
+        if not task.cancelled():
+            task.exception()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError('cover resolver is closed')
+
+    async def close(self) -> None:
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            tasks = tuple(self._source_tasks.values()) + tuple(
+                self._live_tasks.values()
+            )
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._source_tasks.clear()
+            self._live_tasks.clear()
+            session, self._session = self._session, None
+            if session is not None:
+                await session.close()
+
     async def _cached(self, asset_id: int, account_id: int) -> Optional[str]:
         value = await self._database.scalar(
             'SELECT remote_url FROM cover_asset_uploads '
@@ -663,12 +770,6 @@ class CoverResolver:
             (asset_id, account_id),
         )
         return None if value is None else str(value)
-
-    @staticmethod
-    def _read_limited(path: Path) -> bytes:
-        if path.stat().st_size > CoverLibrary.MAX_BYTES:
-            raise CoverResolutionError('live cover exceeds the supported size')
-        return path.read_bytes()
 
     @staticmethod
     def _validate_live_cover_url(url: str) -> None:
@@ -685,18 +786,26 @@ class CoverResolver:
         ):
             raise CoverResolutionError('live cover URL is not trusted')
 
-    @staticmethod
-    async def _download(url: str) -> bytes:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, allow_redirects=False) as response:
-                if response.status != 200:
-                    raise CoverResolutionError('live cover download failed')
-                content = bytearray()
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    content.extend(chunk)
-                    if len(content) > CoverLibrary.MAX_BYTES:
-                        raise CoverResolutionError(
-                            'live cover exceeds the supported size'
-                        )
-                return bytes(content)
+    async def _download(self, url: str) -> bytes:
+        session = await self._download_session()
+        async with session.get(url, allow_redirects=False) as response:
+            if response.status != 200:
+                raise CoverResolutionError('live cover download failed')
+            content = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                content.extend(chunk)
+                if len(content) > CoverLibrary.MAX_BYTES:
+                    raise CoverResolutionError('live cover exceeds the supported size')
+            return bytes(content)
+
+    async def _download_session(self) -> aiohttp.ClientSession:
+        async with self._session_lock:
+            self._ensure_open()
+            if self._session is None:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(
+                        total=30, connect=5, sock_connect=5, sock_read=20
+                    ),
+                    cookie_jar=aiohttp.DummyCookieJar(),
+                )
+            return self._session

@@ -1,10 +1,9 @@
+import asyncio
 from enum import Enum
-from threading import Lock
-from typing import Set
+from typing import Dict, Optional, Set, Tuple, Union
 
 import aiofiles
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_fixed
 
 from blrec.bili.live import Live
 from blrec.event.event_emitter import EventEmitter, EventListener
@@ -16,6 +15,10 @@ from blrec.utils.mixins import SwitchableMixin
 from .stream_recorder import StreamRecorder, StreamRecorderEventListener
 
 __all__ = 'CoverDownloader', 'CoverDownloaderEventListener'
+
+
+_FAILED = object()
+_BroadcastKey = Tuple[int, int, str]
 
 
 class CoverDownloaderEventListener(EventListener):
@@ -53,13 +56,21 @@ class CoverDownloader(
         self._logger = logger.bind(**self._logger_context)
         self._live = live
         self._stream_recorder = stream_recorder
-        self._lock: Lock = Lock()
+        self._lock = asyncio.Lock()
         self._sha1_set: Set[str] = set()
+        self._cover_bytes: Dict[_BroadcastKey, Union[bytes, object]] = {}
+        self._broadcast_identity: Optional[Tuple[int, int]] = None
+        self._cover_url = ''
+        self._metadata_fallback_identity: Optional[Tuple[int, int]] = None
         self.save_cover = save_cover
         self.cover_save_strategy = cover_save_strategy
 
     def _do_enable(self) -> None:
         self._sha1_set.clear()
+        self._cover_bytes.clear()
+        self._broadcast_identity = None
+        self._cover_url = ''
+        self._metadata_fallback_identity = None
         self._stream_recorder.add_listener(self)
         self._logger.debug('Enabled cover downloader')
 
@@ -68,16 +79,17 @@ class CoverDownloader(
         self._logger.debug('Disabled cover downloader')
 
     async def on_video_file_completed(self, video_path: str) -> None:
-        with self._lock:
+        async with self._lock:
             if not self.save_cover:
                 return
             await self._save_cover(video_path)
 
     async def _save_cover(self, video_path: str) -> None:
         try:
-            await self._live.update_room_info()
-            cover_url = self._live.room_info.cover
-            data = await self._fetch_cover(cover_url)
+            result = await self._cover_bytes_for_part()
+            if result is None:
+                return
+            cover_url, data = result
             sha1 = sha1sum(data)
             if (
                 self.cover_save_strategy == CoverSaveStrategy.DEDUP
@@ -94,7 +106,39 @@ class CoverDownloader(
             self._logger.info(f'Saved cover image: {path}')
             await self._emit('cover_image_downloaded', path)
 
-    @retry(reraise=True, wait=wait_fixed(1), stop=stop_after_attempt(3))
+    async def _cover_bytes_for_part(self) -> Optional[Tuple[str, bytes]]:
+        room_info = self._live.room_info
+        identity = (room_info.room_id, room_info.live_start_time)
+        cover_url = room_info.cover
+        if not cover_url and self._metadata_fallback_identity != identity:
+            self._metadata_fallback_identity = identity
+            await self._live.update_info()
+            room_info = self._live.room_info
+            identity = (room_info.room_id, room_info.live_start_time)
+            cover_url = room_info.cover
+            self._metadata_fallback_identity = identity
+
+        if self._broadcast_identity != identity or self._cover_url != cover_url:
+            self._cover_bytes.clear()
+            self._broadcast_identity = identity
+            self._cover_url = cover_url
+        key = (identity[0], identity[1], cover_url)
+        cached = self._cover_bytes.get(key)
+        if cached is _FAILED:
+            return None
+        if isinstance(cached, bytes):
+            return cover_url, cached
+        if not cover_url:
+            self._cover_bytes[key] = _FAILED
+            return None
+        try:
+            data = await self._fetch_cover(cover_url)
+        except Exception:
+            self._cover_bytes[key] = _FAILED
+            raise
+        self._cover_bytes[key] = data
+        return cover_url, data
+
     async def _fetch_cover(self, url: str) -> bytes:
         async with self._live.session.get(url) as response:
             return await response.read()

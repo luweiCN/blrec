@@ -407,6 +407,35 @@ async def test_concurrent_runtime_close_calls_share_cover_drain_before_database_
 
 
 @pytest.mark.asyncio
+async def test_runtime_awaits_cover_resolver_before_database_close(
+    tmp_path: Path,
+) -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key='test-api-key',
+        credential_key=b'k' * 32,
+    )
+    events = []
+
+    class ObservedResolver:
+        async def close(self) -> None:
+            events.append('resolver_started')
+            await asyncio.sleep(0)
+            events.append('resolver_closed')
+
+    class ObservedDatabase:
+        async def close(self) -> None:
+            events.append('database_closed')
+
+    runtime._cover_resolver = ObservedResolver()  # type: ignore[assignment]
+    runtime._database = ObservedDatabase()  # type: ignore[assignment]
+
+    await runtime.close()
+
+    assert events == ['resolver_started', 'resolver_closed', 'database_closed']
+
+
+@pytest.mark.asyncio
 async def test_runtime_closes_each_successive_start_generation(tmp_path: Path) -> None:
     runtime = BiliAccountRuntime(
         BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),

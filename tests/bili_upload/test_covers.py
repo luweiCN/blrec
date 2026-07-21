@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import pytest
 
 from blrec.bili_upload.covers import (
@@ -21,6 +22,7 @@ from blrec.bili_upload.covers import (
     StoredCoverUnavailable,
 )
 from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.errors import RemoteOutcomeUnknown
 
 
 def png(width: int = 1600, height: int = 1000) -> bytes:
@@ -891,3 +893,381 @@ async def test_live_cover_rejects_an_untrusted_remote_source(tmp_path: Path) -> 
 
 async def async_value(value: Any) -> Any:
     return value
+
+
+@pytest.mark.asyncio
+async def test_live_cover_singleflights_identical_remote_source(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    protocol = FakeProtocol()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    remote_calls = []
+
+    async def load_remote(url: str) -> bytes:
+        remote_calls.append(url)
+        started.set()
+        await release.wait()
+        return jpeg()
+
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        protocol,
+        bundle_loader=lambda account_id: async_value('bundle-{}'.format(account_id)),
+        remote_loader=load_remote,
+    )
+    tasks = [
+        asyncio.create_task(
+            resolver.live_url(
+                1, local_path=None, source_url='https://i0.hdslb.com/live.jpg'
+            )
+        )
+        for _ in range(20)
+    ]
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.sleep(0)
+        assert remote_calls == ['https://i0.hdslb.com/live.jpg']
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert len(set(results)) == 1
+    assert len(protocol.calls) == 1
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_changed_source_fingerprint_is_not_reused(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    path = tmp_path / 'recorded.png'
+    path.write_bytes(png())
+    upload_started = asyncio.Queue()
+    release = asyncio.Event()
+
+    class BlockingProtocol(FakeProtocol):
+        async def upload_cover(
+            self, bundle: Any, *, filename: str, mime_type: str, content: bytes
+        ) -> str:
+            self.calls.append((bundle, filename, mime_type, content))
+            upload_started.put_nowait(None)
+            await release.wait()
+            return 'https://archive.biliimg.com/{}/{}.jpg'.format(
+                bundle, len(self.calls)
+            )
+
+    protocol = BlockingProtocol()
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        protocol,
+        bundle_loader=lambda account_id: async_value('bundle-{}'.format(account_id)),
+    )
+    first = asyncio.create_task(
+        resolver.live_url(
+            1, local_path=str(path), source_url='https://i0.hdslb.com/live.jpg'
+        )
+    )
+    await asyncio.wait_for(upload_started.get(), timeout=5)
+    path.write_bytes(png() + b'changed')
+    second = asyncio.create_task(
+        resolver.live_url(
+            1, local_path=str(path), source_url='https://i0.hdslb.com/live.jpg'
+        )
+    )
+    try:
+        await asyncio.wait_for(upload_started.get(), timeout=5)
+        assert len(protocol.calls) == 2
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_file_work_is_off_loop_and_bounded_to_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    paths = []
+    for index in range(3):
+        path = tmp_path / 'recorded-{}.png'.format(index)
+        path.write_bytes(png() + bytes((index,)))
+        paths.append(path)
+
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        FakeProtocol(),
+        bundle_loader=lambda account_id: async_value(account_id),
+    )
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered = asyncio.Queue()
+    release = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    maximum = 0
+    file_threads = []
+    original_is_file = Path.is_file
+    original_stat = Path.stat
+    original_read_bytes = Path.read_bytes
+
+    def observed_is_file(path: Path) -> bool:
+        file_threads.append(threading.get_ident())
+        return original_is_file(path)
+
+    def blocking_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        nonlocal active, maximum
+        thread_id = threading.get_ident()
+        file_threads.append(thread_id)
+        if thread_id == loop_thread:
+            return original_stat(path, *args, **kwargs)
+        with state_lock:
+            active += 1
+            maximum = max(maximum, active)
+        loop.call_soon_threadsafe(entered.put_nowait, None)
+        try:
+            assert release.wait(5)
+            return original_stat(path, *args, **kwargs)
+        finally:
+            with state_lock:
+                active -= 1
+
+    def observed_read_bytes(path: Path) -> bytes:
+        file_threads.append(threading.get_ident())
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, 'is_file', observed_is_file)
+    monkeypatch.setattr(Path, 'stat', blocking_stat)
+    monkeypatch.setattr(Path, 'read_bytes', observed_read_bytes)
+    tasks = [
+        asyncio.create_task(
+            resolver.live_url(
+                1, local_path=str(path), source_url='https://i0.hdslb.com/live.jpg'
+            )
+        )
+        for path in paths
+    ]
+    try:
+        await asyncio.wait_for(entered.get(), timeout=5)
+        await asyncio.wait_for(entered.get(), timeout=5)
+        await asyncio.sleep(0.05)
+        heartbeat = asyncio.Event()
+        loop.call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), timeout=5)
+        assert maximum == 2
+        assert loop_thread not in file_threads
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_reads_at_most_limit_plus_one_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    path = tmp_path / 'recorded.png'
+    path.write_bytes(png())
+    read_sizes = []
+    original_open = Path.open
+
+    class ObservedFile:
+        def __init__(self, file: Any) -> None:
+            self._file = file
+
+        def __enter__(self) -> 'ObservedFile':
+            self._file.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self._file.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return self._file.read(size)
+
+    def observed_open(path: Path, *args: Any, **kwargs: Any) -> ObservedFile:
+        return ObservedFile(original_open(path, *args, **kwargs))
+
+    monkeypatch.setattr(Path, 'open', observed_open)
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        FakeProtocol(),
+        bundle_loader=lambda account_id: async_value(account_id),
+    )
+
+    await resolver.live_url(
+        1, local_path=str(path), source_url='https://i0.hdslb.com/live.jpg'
+    )
+
+    assert read_sizes == [CoverLibrary.MAX_BYTES + 1]
+    await resolver.close()
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_download_uses_one_lifecycle_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    sessions = []
+
+    class Content:
+        async def iter_chunked(self, size: int) -> Any:
+            assert size == 64 * 1024
+            yield jpeg()
+
+    class Response:
+        status = 200
+        content = Content()
+
+        async def __aenter__(self) -> 'Response':
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.calls = []
+            self.closed = False
+            sessions.append(self)
+
+        def get(self, url: str, **kwargs: Any) -> Response:
+            self.calls.append((url, kwargs))
+            return Response()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(aiohttp, 'ClientSession', Session)
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        FakeProtocol(),
+        bundle_loader=lambda account_id: async_value(account_id),
+    )
+
+    await resolver.live_url(
+        1, local_path=None, source_url='https://i0.hdslb.com/first.jpg'
+    )
+    await resolver.live_url(
+        1, local_path=None, source_url='https://i1.hdslb.com/second.jpg'
+    )
+    await resolver.close()
+
+    assert len(sessions) == 1
+    session = sessions[0]
+    timeout = session.kwargs['timeout']
+    assert timeout.total == 30
+    assert timeout.connect == 5
+    assert timeout.sock_connect == 5
+    assert timeout.sock_read == 20
+    assert isinstance(session.kwargs['cookie_jar'], aiohttp.DummyCookieJar)
+    assert session.calls == [
+        ('https://i0.hdslb.com/first.jpg', {'allow_redirects': False}),
+        ('https://i1.hdslb.com/second.jpg', {'allow_redirects': False}),
+    ]
+    assert session.closed is True
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_close_cancels_and_awaits_inflight_work(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def load_remote(url: str) -> bytes:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+        return jpeg()
+
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        FakeProtocol(),
+        bundle_loader=lambda account_id: async_value(account_id),
+        remote_loader=load_remote,
+    )
+    task = asyncio.create_task(
+        resolver.live_url(
+            1, local_path=None, source_url='https://i0.hdslb.com/live.jpg'
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    await resolver.close()
+
+    assert cleaned.is_set()
+    assert task.done()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match='closed'):
+        await resolver.live_url(
+            1, local_path=None, source_url='https://i0.hdslb.com/live.jpg'
+        )
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_cover_unknown_upload_is_shared_but_never_retried_or_cached(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class UnknownProtocol(FakeProtocol):
+        async def upload_cover(
+            self, bundle: Any, *, filename: str, mime_type: str, content: bytes
+        ) -> str:
+            self.calls.append((bundle, filename, mime_type, content))
+            raise RemoteOutcomeUnknown('upload_cover')
+
+    protocol = UnknownProtocol()
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        protocol,
+        bundle_loader=lambda account_id: async_value(account_id),
+        remote_loader=lambda url: async_value(jpeg()),
+    )
+    first_wave = await asyncio.gather(
+        *(
+            resolver.live_url(
+                1, local_path=None, source_url='https://i0.hdslb.com/live.jpg'
+            )
+            for _ in range(20)
+        ),
+        return_exceptions=True,
+    )
+
+    assert all(isinstance(result, RemoteOutcomeUnknown) for result in first_wave)
+    assert len(protocol.calls) == 1
+
+    await asyncio.sleep(0)
+    with pytest.raises(RemoteOutcomeUnknown):
+        await resolver.live_url(
+            1, local_path=None, source_url='https://i0.hdslb.com/live.jpg'
+        )
+    assert len(protocol.calls) == 2
+    await resolver.close()
+    await database.close()
