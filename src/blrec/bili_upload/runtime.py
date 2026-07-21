@@ -5,10 +5,11 @@ import hashlib
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from loguru import logger
 
+from blrec.control.operations import ControlOperationJournal
 from blrec.networking.manager import NetworkRouteManager
 from blrec.notification.operational import (
     OperationalHealthScanner,
@@ -47,7 +48,11 @@ from .retention import RetentionManager
 from .review import ReviewWatcher
 from .session_submission import SessionSubmissionManager
 from .signing import WebSessionBuilder
-from .task_actions import UploadTaskActionManager, UploadTaskActionRejected
+from .task_actions import (
+    UploadTaskActionManager,
+    UploadTaskActionRejected,
+    UploadTaskBatchItem,
+)
 from .upload import UploadCoordinator
 from .upos import UposUploader
 
@@ -81,6 +86,7 @@ class BiliAccountRuntime:
         ] = None,
         notification_senders: Optional[Mapping[str, Any]] = None,
         notification_channel_enabled: Callable[[str], bool] = lambda _channel: False,
+        control_operation_journal: Optional[ControlOperationJournal] = None,
     ) -> None:
         if refresh_interval_seconds <= 0:
             raise ValueError('refresh interval must be positive')
@@ -106,6 +112,7 @@ class BiliAccountRuntime:
         self._operational_settings_provider = operational_settings_provider
         self._notification_senders = dict(notification_senders or {})
         self._notification_channel_enabled = notification_channel_enabled
+        self._control_operation_journal = control_operation_journal
         self._database: Optional[BiliUploadDatabase] = None
         self._transport: Optional[AiohttpProtocolTransport] = None
         self._manager: Optional[AccountManager] = None
@@ -135,6 +142,7 @@ class BiliAccountRuntime:
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
         self._upload_stop_event: Optional[asyncio.Event] = None
+        self._upload_wake_event: Optional[asyncio.Event] = None
         self._highlight_task: Optional[asyncio.Task[Any]] = None
         self._highlight_stop_event: Optional[asyncio.Event] = None
         self._media_index_task: Optional[asyncio.Task[Any]] = None
@@ -267,6 +275,8 @@ class BiliAccountRuntime:
         highlight_service: Optional[HighlightService] = None
         try:
             await database.open()
+            if self._control_operation_journal is not None:
+                await self._control_operation_journal.open()
             journal = RecordingJournalBridge(database, clock=self._clock)
             content_reader = RecordingContentReader(
                 database,
@@ -383,9 +393,12 @@ class BiliAccountRuntime:
                     None if self._recording_root is None else Path(self._recording_root)
                 ),
                 deletion_worker=deletion_worker,
+                control_journal=self._control_operation_journal,
+                wake_uploads=self._wake_upload_worker,
                 clock=self._clock,
             )
             await task_actions.recover_interrupted()
+            await task_actions.recover_retry_batches()
             policy_manager = RoomUploadPolicyManager(database, clock=self._clock)
             session_submission_manager = SessionSubmissionManager(
                 database, policy_manager=policy_manager, clock=self._clock
@@ -678,6 +691,16 @@ class BiliAccountRuntime:
             )
         raise UploadTaskActionRejected('不支持的场次操作')
 
+    async def run_recording_session_batch(
+        self, action: str, session_ids: Sequence[int], *, manager_subject: str
+    ) -> Tuple[UploadTaskBatchItem, ...]:
+        actions = self._task_actions
+        if actions is None:
+            raise UploadTaskActionRejected('上传任务管理当前不可用')
+        return await actions.run_session_batch(
+            action, session_ids, manager_subject=manager_subject
+        )
+
     async def close(self) -> None:
         async with self._lifecycle_lock:
             generation = self._lifecycle_generation
@@ -819,10 +842,12 @@ class BiliAccountRuntime:
             danmaku_imported = None
             danmaku_published = None
             repair_processed = None
+            retry_processed = None
             try:
                 await journal.finalize_cancelled_sessions()
                 await review_watcher.run_once()
                 if task_actions is not None:
+                    retry_processed = await task_actions.run_retry_batch_once()
                     repair_processed = await task_actions.run_once()
                 await coordinator.sync_live_sessions()
                 await coordinator.prepare_waiting_jobs()
@@ -848,21 +873,57 @@ class BiliAccountRuntime:
                 delay = _COMMENT_ACTION_INTERVAL_SECONDS
             elif danmaku_published is not None:
                 delay = _DANMAKU_ACTION_INTERVAL_SECONDS
-            elif upload_processed is not None or repair_processed is not None:
+            elif (
+                upload_processed is not None
+                or repair_processed is not None
+                or retry_processed is not None
+            ):
                 delay = 1
             elif danmaku_imported is not None:
                 delay = 1
             else:
                 delay = self._upload_interval_seconds
+            await self._wait_for_upload_delay(stop_event, delay)
+
+    def _wake_upload_worker(self) -> None:
+        wake_event = self._upload_wake_event
+        if wake_event is not None:
+            wake_event.set()
+
+    async def _wait_for_upload_delay(
+        self, stop_event: asyncio.Event, delay: float
+    ) -> None:
+        wake_event = self._upload_wake_event
+        if wake_event is None:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
+            return
+        if wake_event.is_set():
+            wake_event.clear()
+            return
+        stop_wait = asyncio.create_task(stop_event.wait())
+        wake_wait = asyncio.create_task(wake_event.wait())
+        try:
+            await asyncio.wait(
+                (stop_wait, wake_wait),
+                timeout=delay,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (stop_wait, wake_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stop_wait, wake_wait, return_exceptions=True)
+        if wake_event.is_set():
+            wake_event.clear()
 
     async def _stop_upload_worker(self) -> None:
         stop_event = self._upload_stop_event
         if stop_event is not None:
             stop_event.set()
+        self._wake_upload_worker()
         upload_task = self._upload_task
         try:
             if upload_task is not None:
@@ -872,6 +933,7 @@ class BiliAccountRuntime:
                 self._upload_task = None
             if self._upload_stop_event is stop_event:
                 self._upload_stop_event = None
+                self._upload_wake_event = None
 
     async def _start_upload_worker(self) -> None:
         if self._upload_task is not None and not self._upload_task.done():
@@ -905,6 +967,7 @@ class BiliAccountRuntime:
         assert task_actions is not None
         stop_event = asyncio.Event()
         self._upload_stop_event = stop_event
+        self._upload_wake_event = asyncio.Event()
         self._upload_task = asyncio.create_task(
             self._run_uploads(
                 journal,

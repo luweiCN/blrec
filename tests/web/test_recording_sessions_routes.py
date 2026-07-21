@@ -1,6 +1,7 @@
 from dataclasses import asdict, replace
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Sequence, Tuple
 from unittest.mock import AsyncMock
 
@@ -353,6 +354,7 @@ def restore_router_state() -> Iterator[None]:
     old_session_action_runner = getattr(
         recording_sessions, 'session_action_runner', None
     )
+    old_session_batch_runner = getattr(recording_sessions, 'session_batch_runner', None)
     old_submission_manager = getattr(recording_sessions, 'submission_manager', None)
     old_metadata_provider = getattr(
         recording_sessions, 'active_recording_metadata_provider', None
@@ -366,6 +368,7 @@ def restore_router_state() -> Iterator[None]:
     recording_sessions.unavailable_reason = old_reason
     recording_sessions.task_actions = old_task_actions
     recording_sessions.session_action_runner = old_session_action_runner
+    recording_sessions.session_batch_runner = old_session_batch_runner
     recording_sessions.submission_manager = old_submission_manager
     recording_sessions.active_recording_metadata_provider = old_metadata_provider
     recording_sessions.active_media_service = old_active_media_service
@@ -386,6 +389,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     recording_sessions.journal = FakeJournal()  # type: ignore[assignment]
     recording_sessions.task_actions = AsyncMock()
     recording_sessions.session_action_runner = AsyncMock()
+    recording_sessions.session_batch_runner = AsyncMock()
     recording_sessions.submission_manager = FakeSubmissionManager()
     media = tmp_path / 'part.flv'
     media.write_bytes(b'0123456789')
@@ -712,15 +716,13 @@ def test_approved_archive_with_disabled_danmaku_exposes_manual_backfill(
     assert 'repair_transcode' not in actions
 
 
-def test_retry_all_failed_upload_jobs_uses_server_selected_jobs(
+def test_retry_all_failed_upload_jobs_returns_durable_operation_admission(
     client: TestClient,
 ) -> None:
     actions = recording_sessions.task_actions
     assert actions is not None
-    actions.retryable_failed_job_ids.return_value = (9, 10)
-    actions.retry_failed.side_effect = (
-        '失败任务已重新排队',
-        UploadTaskActionRejected('失败分 P 的本地视频不可用'),
+    actions.admit_retry_all_failed.return_value = SimpleNamespace(
+        operation_id='retry-operation-1', status='accepted', total=201
     )
 
     response = client.post(
@@ -728,13 +730,15 @@ def test_retry_all_failed_upload_jobs_uses_server_selected_jobs(
         headers={'x-api-key': 'test-api-key'},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json() == {
-        'results': [
-            {'jobId': 9, 'accepted': True, 'message': '失败任务已重新排队'},
-            {'jobId': 10, 'accepted': False, 'message': '失败分 P 的本地视频不可用'},
-        ]
+        'operationId': 'retry-operation-1',
+        'status': 'accepted',
+        'total': 201,
     }
+    assert response.headers['X-BLREC-Operation-ID'] == 'retry-operation-1'
+    actions.admit_retry_all_failed.assert_awaited_once()
+    assert actions.admit_retry_all_failed.await_args.kwargs['manager_subject']
 
 
 def test_unavailable_journal_returns_503(client: TestClient) -> None:
@@ -759,10 +763,12 @@ def test_upload_job_actions_return_partial_batch_results(
     )
     actions = recording_sessions.task_actions
     assert isinstance(actions, AsyncMock)
-    actions.retry_failed.side_effect = [
-        '失败任务已重新排队',
-        UploadTaskActionRejected('投稿结果未知，不能自动重试'),
-    ]
+    actions.run_job_batch.return_value = (
+        SimpleNamespace(target_id=9, accepted=True, message='失败任务已重新排队'),
+        SimpleNamespace(
+            target_id=10, accepted=False, message='投稿结果未知，不能自动重试'
+        ),
+    )
 
     response = client.post(
         '/api/v1/recording-sessions/upload-jobs/actions',
@@ -777,10 +783,9 @@ def test_upload_job_actions_return_partial_batch_results(
             {'jobId': 10, 'accepted': False, 'message': '投稿结果未知，不能自动重试'},
         ]
     }
-    assert actions.retry_failed.await_count == 2
-    assert all(
-        call.kwargs['manager_subject'] for call in actions.retry_failed.await_args_list
-    )
+    actions.run_job_batch.assert_awaited_once()
+    assert actions.run_job_batch.await_args.args == ('retry_failed', [9, 10])
+    assert actions.run_job_batch.await_args.kwargs['manager_subject']
     assert audit_events == [
         (
             'upload_task_action',
@@ -814,12 +819,14 @@ def test_upload_job_actions_validate_nonempty_unique_batch(client: TestClient) -
 def test_recording_session_actions_work_without_an_upload_job(
     client: TestClient,
 ) -> None:
-    runner = recording_sessions.session_action_runner
+    runner = recording_sessions.session_batch_runner
     assert isinstance(runner, AsyncMock)
-    runner.side_effect = [
-        '本场录像将在文件就绪后上传',
-        UploadTaskActionRejected('录制场次不存在'),
-    ]
+    runner.return_value = (
+        SimpleNamespace(
+            target_id=1, accepted=True, message='本场录像将在文件就绪后上传'
+        ),
+        SimpleNamespace(target_id=2, accepted=False, message='录制场次不存在'),
+    )
 
     response = client.post(
         '/api/v1/recording-sessions/actions',
@@ -834,16 +841,21 @@ def test_recording_session_actions_work_without_an_upload_job(
             {'sessionId': 2, 'accepted': False, 'message': '录制场次不存在'},
         ]
     }
-    assert runner.await_count == 2
-    assert all(call.args[0] == 'set_upload' for call in runner.await_args_list)
+    runner.assert_awaited_once()
+    assert runner.await_args.args == ('set_upload', [1, 2])
+    assert runner.await_args.kwargs['manager_subject']
 
 
 def test_recording_session_actions_forward_manual_danmaku_backfill(
     client: TestClient,
 ) -> None:
-    runner = recording_sessions.session_action_runner
+    runner = recording_sessions.session_batch_runner
     assert isinstance(runner, AsyncMock)
-    runner.return_value = '已排队回灌 1 个分 P 的弹幕'
+    runner.return_value = (
+        SimpleNamespace(
+            target_id=1, accepted=True, message='已排队回灌 1 个分 P 的弹幕'
+        ),
+    )
 
     response = client.post(
         '/api/v1/recording-sessions/actions',
@@ -856,7 +868,8 @@ def test_recording_session_actions_forward_manual_danmaku_backfill(
         {'sessionId': 1, 'accepted': True, 'message': '已排队回灌 1 个分 P 的弹幕'}
     ]
     runner.assert_awaited_once()
-    assert runner.await_args.args[0] == 'backfill_danmaku'
+    assert runner.await_args.args == ('backfill_danmaku', [1])
+    assert runner.await_args.kwargs['manager_subject']
 
 
 def test_media_returns_the_fixed_file_snapshot(client: TestClient) -> None:

@@ -283,6 +283,44 @@ async def test_journal_deduplicates_nonterminal_and_retries_failed_as_new_attemp
 
 
 @pytest.mark.asyncio
+async def test_journal_can_idempotently_admit_a_cross_database_operation_id(
+    tmp_path: Path,
+) -> None:
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+    try:
+        first = await journal.admit(
+            operation_id='upload-retry-operation-1',
+            lane='upload-retry',
+            kind='retry-failed',
+            target_key='upload-retry-operation-1',
+            steps=[ControlStepInput(key='quantum:0')],
+            result={'processed': 0, 'total': 201},
+        )
+        duplicate = await journal.admit(
+            operation_id='upload-retry-operation-1',
+            lane='upload-retry',
+            kind='retry-failed',
+            target_key='upload-retry-operation-1',
+            steps=[ControlStepInput(key='quantum:0')],
+            result={'processed': 0, 'total': 201},
+        )
+
+        assert first.id == duplicate.id == 'upload-retry-operation-1'
+        assert await journal.queued_count('upload-retry') == 1
+        with pytest.raises(ValueError, match='different control operation'):
+            await journal.admit(
+                operation_id='upload-retry-operation-1',
+                lane='other-lane',
+                kind='retry-failed',
+                target_key='upload-retry-operation-1',
+                steps=[ControlStepInput(key='quantum:0')],
+            )
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_journal_limits_each_lane_to_one_hundred_nonterminal_operations(
     tmp_path: Path,
 ) -> None:

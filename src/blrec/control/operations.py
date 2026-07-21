@@ -169,6 +169,7 @@ class ControlOperationJournal:
     async def admit(
         self,
         *,
+        operation_id: Optional[str] = None,
         lane: str,
         kind: str,
         target_key: str,
@@ -180,6 +181,8 @@ class ControlOperationJournal:
             raise ControlJournalClosed('control journal admission is closed')
         if not lane or not kind or not target_key:
             raise ValueError('lane, kind and target key must not be empty')
+        if operation_id is not None and not operation_id.strip():
+            raise ValueError('control operation ID must not be empty')
         if not steps:
             raise ValueError('control operation must contain at least one step')
         keys = [step.key for step in steps]
@@ -190,6 +193,7 @@ class ControlOperationJournal:
             raise ValueError('reusable control steps must exist in the new operation')
         return await self._run(
             self._admit_sync,
+            operation_id,
             lane,
             kind,
             target_key,
@@ -469,6 +473,7 @@ class ControlOperationJournal:
 
     def _admit_sync(
         self,
+        requested_operation_id: Optional[str],
         lane: str,
         kind: str,
         target_key: str,
@@ -480,6 +485,24 @@ class ControlOperationJournal:
         now = float(self._clock())
         connection.execute('BEGIN IMMEDIATE')
         try:
+            if requested_operation_id is not None:
+                requested = connection.execute(
+                    'SELECT lane,kind,target_key FROM control_operations WHERE id=?',
+                    (requested_operation_id,),
+                ).fetchone()
+                if requested is not None:
+                    if (
+                        str(requested['lane']) != lane
+                        or str(requested['kind']) != kind
+                        or str(requested['target_key']) != target_key
+                    ):
+                        raise ValueError(
+                            'operation ID belongs to a different control operation'
+                        )
+                    connection.execute('COMMIT')
+                    snapshot = self._get_sync(requested_operation_id)
+                    assert snapshot is not None
+                    return snapshot
             existing = connection.execute(
                 'SELECT id FROM control_operations '
                 "WHERE lane=? AND kind=? AND target_key=? "
@@ -488,6 +511,11 @@ class ControlOperationJournal:
             ).fetchone()
             if existing is not None:
                 operation_id = str(existing['id'])
+                if (
+                    requested_operation_id is not None
+                    and requested_operation_id != operation_id
+                ):
+                    raise ValueError('a different control operation is already active')
                 connection.execute('COMMIT')
                 snapshot = self._get_sync(operation_id)
                 assert snapshot is not None
@@ -511,7 +539,7 @@ class ControlOperationJournal:
             ).fetchone()
             attempt = int(attempt_row[0])
             generation = int(generation_row[0])
-            operation_id = uuid.uuid4().hex
+            operation_id = requested_operation_id or uuid.uuid4().hex
             reused_steps: Dict[str, sqlite3.Row] = {}
             admitted_result = dict(result or {})
             if reuse_succeeded_step_keys:

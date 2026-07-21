@@ -176,6 +176,7 @@ _bili_account_runtime = BiliAccountRuntime(
         for channel in _notification_providers
     },
     notification_channel_enabled=_notification_channel_enabled,
+    control_operation_journal=_control_operation_journal,
 )
 app = Application(
     _settings,
@@ -287,6 +288,7 @@ recording_sessions.journal = None
 recording_sessions.content_reader = None
 recording_sessions.task_actions = None
 recording_sessions.session_action_runner = None
+recording_sessions.session_batch_runner = None
 recording_sessions.submission_manager = None
 recording_sessions.active_media_service = None
 recording_sessions.active_recording_metadata_provider = _active_recording_metadata
@@ -460,6 +462,9 @@ async def on_startup() -> None:
         recording_sessions.session_action_runner = (
             _bili_account_runtime.run_recording_session_action
         )
+        recording_sessions.session_batch_runner = (
+            _bili_account_runtime.run_recording_session_batch
+        )
         recording_sessions.submission_manager = (
             _bili_account_runtime.session_submission_manager
         )
@@ -517,6 +522,7 @@ async def on_startup() -> None:
             recording_sessions.content_reader = None
             recording_sessions.task_actions = None
             recording_sessions.session_action_runner = None
+            recording_sessions.session_batch_runner = None
             recording_sessions.submission_manager = None
             recording_sessions.active_media_service = None
             recording_retention.manager = None
@@ -588,6 +594,7 @@ async def on_shuntdown() -> None:
         recording_sessions.content_reader = None
         recording_sessions.task_actions = None
         recording_sessions.session_action_runner = None
+        recording_sessions.session_batch_runner = None
         recording_sessions.submission_manager = None
         recording_sessions.active_media_service = None
         recording_retention.manager = None

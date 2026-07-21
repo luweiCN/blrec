@@ -8,8 +8,20 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
+from blrec.control.operations import ControlOperationJournal, ControlStepInput
 from blrec.logging.audit import audit
 
 from .accounts import (
@@ -33,6 +45,8 @@ from .upos import FileIdentity, UposUploader, UposUploadPaused, UposUploadStoppe
 
 __all__ = (
     'UploadTaskActionManager',
+    'UploadTaskBatchItem',
+    'UploadRetryBatchAdmission',
     'UploadTaskActionPreview',
     'UploadTaskActionRejected',
     'UploadTaskSettingsView',
@@ -60,6 +74,20 @@ class UploadTaskActionPreview:
 @dataclass(frozen=True)
 class UploadTaskUpdateResult:
     collection_cleared: bool
+
+
+@dataclass(frozen=True)
+class UploadTaskBatchItem:
+    target_id: int
+    accepted: bool
+    message: str
+
+
+@dataclass(frozen=True)
+class UploadRetryBatchAdmission:
+    operation_id: str
+    status: Literal['accepted', 'running', 'succeeded', 'failed']
+    total: int
 
 
 @dataclass(frozen=True)
@@ -133,6 +161,8 @@ class UploadTaskActionManager:
         recording_root: Optional[Path] = None,
         remuxer: Optional[TranscodeRemuxer] = None,
         deletion_worker: Optional[LocalDeletionWorker] = None,
+        control_journal: Optional[ControlOperationJournal] = None,
+        wake_uploads: Callable[[], None] = lambda: None,
         worker_id: Optional[str] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -162,113 +192,972 @@ class UploadTaskActionManager:
             )
         self._worker_id = worker_id or 'repair-{}'.format(uuid.uuid4().hex)
         self._clock = clock
+        self._control_journal = control_journal
+        self._wake_uploads = wake_uploads
         self._run_lock = asyncio.Lock()
 
     async def retryable_failed_job_ids(self) -> Tuple[int, ...]:
         return tuple(item.job_id for item in await self.retryable_failed_jobs())
 
+    async def admit_retry_all_failed(
+        self, *, manager_subject: str
+    ) -> UploadRetryBatchAdmission:
+        if not manager_subject:
+            raise UploadTaskActionRejected('管理员身份不能为空')
+        journal = self._control_journal
+        if journal is None:
+            raise UploadTaskActionRejected('失败任务重试服务当前不可用')
+        now = int(self._clock())
+
+        def admit(connection: sqlite3.Connection) -> Tuple[str, int]:
+            active = connection.execute(
+                'SELECT operation_id,total_items FROM upload_retry_batches '
+                "WHERE state IN ('accepted','running') "
+                'ORDER BY created_at,operation_id LIMIT 1'
+            ).fetchone()
+            if active is not None:
+                return str(active['operation_id']), int(active['total_items'])
+            operation_id = uuid.uuid4().hex
+            connection.execute(
+                'INSERT INTO upload_retry_batches('
+                'operation_id,state,total_items,manager_subject,created_at,updated_at'
+                ") VALUES(?,'accepted',0,?,?,?)",
+                (operation_id, manager_subject, now, now),
+            )
+            connection.execute(
+                'INSERT INTO upload_retry_batch_items('
+                'operation_id,job_id,state,error_code) '
+                "SELECT ?,job.id,'queued',NULL FROM upload_jobs job "
+                'JOIN bili_accounts account ON account.id=job.account_id '
+                "WHERE job.state='paused' AND account.state='active' "
+                'AND job.operator_paused=0 '
+                "AND job.submit_state NOT IN ('in_flight','unknown_outcome') "
+                "AND job.repair_state NOT IN "
+                "('queued','checking','reuploading','editing') "
+                'AND NOT EXISTS('
+                'SELECT 1 FROM upload_parts part WHERE part.job_id=job.id '
+                "AND part.upload_state IN ('completing','unknown_outcome'))",
+                (operation_id,),
+            )
+            total = int(
+                connection.execute(
+                    'SELECT COUNT(*) FROM upload_retry_batch_items '
+                    'WHERE operation_id=?',
+                    (operation_id,),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                'UPDATE upload_retry_batches SET total_items=?,updated_at=? '
+                'WHERE operation_id=?',
+                (total, now, operation_id),
+            )
+            connection.execute(
+                'INSERT INTO management_audit('
+                'manager_subject,action,target_type,target_id,old_state,new_state,'
+                'reason,created_at) VALUES(?,?,?,?,?,?,?,?)',
+                (
+                    manager_subject,
+                    'retry_all_upload_jobs',
+                    'upload_retry_batch',
+                    operation_id,
+                    'none',
+                    'accepted',
+                    '管理员重试提交时符合条件的全部失败任务',
+                    now,
+                ),
+            )
+            return operation_id, total
+
+        operation_id, total = await self._database.write(admit)
+        operation = await self._ensure_retry_control_operation(operation_id, total)
+        self._wake_uploads()
+        return UploadRetryBatchAdmission(
+            operation_id=operation_id, status=operation.status, total=total
+        )
+
+    async def recover_retry_batches(self) -> int:
+        journal = self._control_journal
+        if journal is None:
+            return 0
+        rows = await self._database.fetchall(
+            'SELECT operation_id,total_items FROM upload_retry_batches '
+            "WHERE state IN ('accepted','running') ORDER BY created_at,operation_id"
+        )
+        for row in rows:
+            await self._ensure_retry_control_operation(
+                str(row['operation_id']), int(row['total_items'])
+            )
+        if rows:
+            self._wake_uploads()
+        return len(rows)
+
+    async def _ensure_retry_control_operation(
+        self, operation_id: str, total: int
+    ) -> Any:
+        journal = self._control_journal
+        if journal is None:
+            raise UploadTaskActionRejected('失败任务重试服务当前不可用')
+        return await journal.admit(
+            operation_id=operation_id,
+            lane='upload-retry',
+            kind='retry-failed',
+            target_key=operation_id,
+            steps=(ControlStepInput(key='quantum:0'),),
+            result={'processed': 0, 'total': total, 'succeeded': 0, 'rejected': 0},
+        )
+
+    async def run_retry_batch_once(self) -> Optional[str]:
+        journal = self._control_journal
+        if journal is None:
+            return None
+        claim = await journal.claim_next('upload-retry')
+        if claim is None:
+            return None
+        operation_id = claim.operation_id
+        now = int(self._clock())
+
+        def run_quantum(connection: sqlite3.Connection) -> Mapping[str, Any]:
+            batch = connection.execute(
+                'SELECT manager_subject,total_items FROM upload_retry_batches '
+                'WHERE operation_id=?',
+                (operation_id,),
+            ).fetchone()
+            if batch is None:
+                return {'missing': True}
+            manager_subject = str(batch['manager_subject'])
+            items = connection.execute(
+                'SELECT job_id FROM upload_retry_batch_items '
+                "WHERE operation_id=? AND state='queued' "
+                'ORDER BY job_id LIMIT 100',
+                (operation_id,),
+            ).fetchall()
+            connection.execute(
+                "UPDATE upload_retry_batches SET state='running',updated_at=? "
+                'WHERE operation_id=?',
+                (now, operation_id),
+            )
+            succeeded_now = 0
+            rejected_now = 0
+            for ordinal, item in enumerate(items):
+                job_id = int(item['job_id'])
+                savepoint = 'retry_item_{}'.format(ordinal)
+                connection.execute('SAVEPOINT {}'.format(savepoint))
+                try:
+                    self._retry_failed_in_connection(
+                        connection, job_id, manager_subject=manager_subject, now=now
+                    )
+                except UploadTaskActionRejected:
+                    connection.execute('ROLLBACK TO SAVEPOINT {}'.format(savepoint))
+                    connection.execute('RELEASE SAVEPOINT {}'.format(savepoint))
+                    error_code = self._retry_batch_rejection_code(
+                        connection, job_id, now
+                    )
+                    connection.execute(
+                        "UPDATE upload_retry_batch_items SET state='rejected',"
+                        'error_code=? WHERE operation_id=? AND job_id=? '
+                        "AND state='queued'",
+                        (error_code, operation_id, job_id),
+                    )
+                    rejected_now += 1
+                else:
+                    connection.execute('RELEASE SAVEPOINT {}'.format(savepoint))
+                    connection.execute(
+                        "UPDATE upload_retry_batch_items SET state='succeeded',"
+                        'error_code=NULL WHERE operation_id=? AND job_id=? '
+                        "AND state='queued'",
+                        (operation_id, job_id),
+                    )
+                    succeeded_now += 1
+            counts = connection.execute(
+                'SELECT COUNT(*) AS total,'
+                "SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END) AS queued,"
+                "SUM(CASE WHEN state='succeeded' THEN 1 ELSE 0 END) AS succeeded,"
+                "SUM(CASE WHEN state='rejected' THEN 1 ELSE 0 END) AS rejected "
+                'FROM upload_retry_batch_items WHERE operation_id=?',
+                (operation_id,),
+            ).fetchone()
+            total = int(batch['total_items'])
+            queued = int(counts['queued'] or 0)
+            succeeded = int(counts['succeeded'] or 0)
+            rejected = int(counts['rejected'] or 0)
+            processed = succeeded + rejected
+            connection.execute(
+                'UPDATE upload_retry_batches SET state=?,updated_at=? '
+                'WHERE operation_id=?',
+                ('succeeded' if queued == 0 else 'running', now, operation_id),
+            )
+            return {
+                'missing': False,
+                'processed': processed,
+                'total': total,
+                'succeeded': succeeded,
+                'rejected': rejected,
+                'remaining': queued,
+                'succeeded_now': succeeded_now,
+                'rejected_now': rejected_now,
+            }
+
+        result = await self._database.write(run_quantum)
+        if bool(result.get('missing')):
+            await journal.finish_step(
+                claim, status='failed', error_code='UPLOAD_RETRY_BATCH_MISSING'
+            )
+            return claim.operation_id
+        operation_result = {
+            key: int(result[key])
+            for key in ('processed', 'total', 'succeeded', 'rejected')
+        }
+        remaining = int(result['remaining'])
+        append_steps = (
+            (ControlStepInput(key='quantum:{}'.format(result['processed'])),)
+            if remaining
+            else ()
+        )
+        await journal.finish_step(
+            claim,
+            status='succeeded',
+            result={
+                'succeeded': int(result['succeeded_now']),
+                'rejected': int(result['rejected_now']),
+            },
+            operation_result=operation_result,
+            append_steps=append_steps,
+        )
+        if int(result['succeeded_now']):
+            self._wake_uploads()
+        return claim.operation_id
+
+    @staticmethod
+    def _retry_batch_rejection_code(
+        connection: sqlite3.Connection, job_id: int, now: int
+    ) -> str:
+        job = connection.execute(
+            'SELECT job.state,job.submit_state,job.lease_until,'
+            'job.operator_paused,job.repair_state,account.state AS account_state '
+            'FROM upload_jobs job JOIN bili_accounts account '
+            'ON account.id=job.account_id WHERE job.id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            return 'JOB_NOT_FOUND'
+        if str(job['submit_state']) in ('in_flight', 'unknown_outcome'):
+            return 'REMOTE_OUTCOME_UNKNOWN'
+        unknown_part = connection.execute(
+            'SELECT 1 FROM upload_parts WHERE job_id=? '
+            "AND upload_state IN ('completing','unknown_outcome') LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if unknown_part is not None:
+            return 'REMOTE_OUTCOME_UNKNOWN'
+        if job['lease_until'] is not None and int(job['lease_until']) > now:
+            return 'ACTIVE_LEASE'
+        if str(job['account_state']) != 'active':
+            return 'ACCOUNT_UNAVAILABLE'
+        if bool(job['operator_paused']):
+            return 'OPERATOR_PAUSED'
+        if str(job['repair_state']) in UploadTaskActionManager._ACTIVE_REPAIR_STATES:
+            return 'REPAIR_ACTIVE'
+        if str(job['state']) != 'paused':
+            return 'STATE_CHANGED'
+        return 'STATE_CHANGED'
+
+    async def run_job_batch(
+        self, action: str, job_ids: Sequence[int], *, manager_subject: str
+    ) -> Tuple[UploadTaskBatchItem, ...]:
+        normalized = self._validate_batch(
+            action,
+            job_ids,
+            manager_subject,
+            allowed_actions=(
+                'retry_failed',
+                'repair_transcode',
+                'skip_upload',
+                'repost_as_new',
+                'pause_upload',
+                'resume_upload',
+            ),
+        )
+        now = int(self._clock())
+
+        def run(connection: sqlite3.Connection) -> Tuple[UploadTaskBatchItem, ...]:
+            results = []
+            for ordinal, job_id in enumerate(normalized):
+                savepoint = 'item_{}'.format(ordinal)
+                connection.execute('SAVEPOINT {}'.format(savepoint))
+                try:
+                    message = self._run_job_action_in_connection(
+                        connection,
+                        action,
+                        job_id,
+                        manager_subject=manager_subject,
+                        now=now,
+                    )
+                except UploadTaskActionRejected as error:
+                    connection.execute('ROLLBACK TO SAVEPOINT {}'.format(savepoint))
+                    connection.execute('RELEASE SAVEPOINT {}'.format(savepoint))
+                    results.append(
+                        UploadTaskBatchItem(
+                            target_id=job_id, accepted=False, message=str(error)
+                        )
+                    )
+                else:
+                    connection.execute('RELEASE SAVEPOINT {}'.format(savepoint))
+                    results.append(
+                        UploadTaskBatchItem(
+                            target_id=job_id, accepted=True, message=message
+                        )
+                    )
+            return tuple(results)
+
+        results = await self._database.write(run)
+        if any(item.accepted for item in results):
+            self._wake_uploads()
+        return results
+
+    async def run_session_batch(
+        self, action: str, session_ids: Sequence[int], *, manager_subject: str
+    ) -> Tuple[UploadTaskBatchItem, ...]:
+        normalized = self._validate_batch(
+            action,
+            session_ids,
+            manager_subject,
+            allowed_actions=(
+                'set_upload',
+                'set_skip',
+                'retry_failed',
+                'repair_transcode',
+                'backfill_danmaku',
+                'repost_as_new',
+                'pause_upload',
+                'resume_upload',
+            ),
+        )
+        now = int(self._clock())
+
+        def run(connection: sqlite3.Connection) -> Tuple[UploadTaskBatchItem, ...]:
+            results = []
+            for ordinal, session_id in enumerate(normalized):
+                savepoint = 'item_{}'.format(ordinal)
+                connection.execute('SAVEPOINT {}'.format(savepoint))
+                try:
+                    message = self._run_session_action_in_connection(
+                        connection,
+                        action,
+                        session_id,
+                        manager_subject=manager_subject,
+                        now=now,
+                    )
+                except UploadTaskActionRejected as error:
+                    connection.execute('ROLLBACK TO SAVEPOINT {}'.format(savepoint))
+                    connection.execute('RELEASE SAVEPOINT {}'.format(savepoint))
+                    results.append(
+                        UploadTaskBatchItem(
+                            target_id=session_id, accepted=False, message=str(error)
+                        )
+                    )
+                else:
+                    connection.execute('RELEASE SAVEPOINT {}'.format(savepoint))
+                    results.append(
+                        UploadTaskBatchItem(
+                            target_id=session_id, accepted=True, message=message
+                        )
+                    )
+            return tuple(results)
+
+        results = await self._database.write(run)
+        if any(item.accepted for item in results):
+            self._wake_uploads()
+        return results
+
+    @staticmethod
+    def _validate_batch(
+        action: str,
+        target_ids: Sequence[int],
+        manager_subject: str,
+        *,
+        allowed_actions: Sequence[str],
+    ) -> Tuple[int, ...]:
+        if not manager_subject:
+            raise UploadTaskActionRejected('管理员身份不能为空')
+        normalized = tuple(target_ids)
+        if not normalized or len(normalized) > 100:
+            raise UploadTaskActionRejected('批量操作必须包含 1 到 100 项')
+        if any(target_id <= 0 for target_id in normalized):
+            raise UploadTaskActionRejected('批量操作 ID 必须为正数')
+        if len(set(normalized)) != len(normalized):
+            raise UploadTaskActionRejected('批量操作 ID 不能重复')
+        if action not in allowed_actions:
+            raise UploadTaskActionRejected('不支持的批量操作')
+        return normalized
+
+    def _run_session_action_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        action: str,
+        session_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        row = connection.execute(
+            'SELECT session.id,job.id AS job_id FROM recording_sessions session '
+            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
+            'WHERE session.id=?',
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise UploadTaskActionRejected('录制场次不存在')
+        job_id = row['job_id']
+        if action in ('set_upload', 'set_skip'):
+            if job_id is not None:
+                if action == 'set_skip':
+                    return self._skip_upload_in_connection(
+                        connection,
+                        int(job_id),
+                        manager_subject=manager_subject,
+                        now=now,
+                    )
+                return '本场录像已经创建上传任务'
+            return self._set_session_submission_decision_in_connection(
+                connection,
+                session_id,
+                'upload' if action == 'set_upload' else 'skip',
+                manager_subject=manager_subject,
+                now=now,
+            )
+        if job_id is None:
+            raise UploadTaskActionRejected('本场录像尚未创建上传任务')
+        numeric_job_id = int(job_id)
+        if action == 'backfill_danmaku':
+            return self._request_danmaku_backfill_in_connection(
+                connection, numeric_job_id, manager_subject=manager_subject, now=now
+            )
+        return self._run_job_action_in_connection(
+            connection, action, numeric_job_id, manager_subject=manager_subject, now=now
+        )
+
+    def _set_session_submission_decision_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        session_id: int,
+        decision: str,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        row = connection.execute(
+            'SELECT upload_decision,upload_resolution_state '
+            'FROM recording_sessions WHERE id=?',
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise UploadTaskActionRejected('录制场次不存在')
+        if str(row['upload_resolution_state']) == 'job_created':
+            raise UploadTaskActionRejected('本场投稿设置已经锁定')
+        old_decision = str(row['upload_decision'])
+        upload_intent = 'upload' if decision == 'upload' else 'skip'
+        connection.execute(
+            "UPDATE recording_sessions SET upload_decision=?,upload_intent=?,"
+            "upload_resolution_state='pending',upload_resolution_error=NULL,"
+            'upload_resolved_at=NULL WHERE id=?',
+            (decision, upload_intent, session_id),
+        )
+        if decision == 'skip':
+            connection.execute(
+                'INSERT OR REPLACE INTO upload_suppressions('
+                'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
+                (session_id, 'manager_skipped', manager_subject, now),
+            )
+            message = '本场录像已设为不上传'
+        else:
+            connection.execute(
+                'DELETE FROM upload_suppressions WHERE session_id=?', (session_id,)
+            )
+            message = '本场录像将在录制结束后创建上传任务'
+        self._audit_session(
+            connection,
+            manager_subject=manager_subject,
+            action='set_session_submission_decision',
+            session_id=session_id,
+            old_state=old_decision,
+            new_state=decision,
+            reason=message,
+            now=now,
+        )
+        return message
+
+    def _run_job_action_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        action: str,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        if action == 'retry_failed':
+            return self._retry_failed_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        if action == 'pause_upload':
+            return self._pause_upload_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        if action == 'resume_upload':
+            return self._resume_upload_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        if action == 'repair_transcode':
+            return self._request_transcode_repair_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        if action == 'skip_upload':
+            return self._skip_upload_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        if action == 'repost_as_new':
+            return self._repost_as_new_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        raise UploadTaskActionRejected('不支持的批量操作')
+
+    def _pause_upload_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT state,submit_state,operator_paused,lease_until '
+            'FROM upload_jobs WHERE id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        if bool(job['operator_paused']):
+            return '上传任务已经暂停'
+        state = str(job['state'])
+        if state not in ('ready', 'uploading', 'submitting'):
+            raise UploadTaskActionRejected('当前状态不能暂停上传')
+        if str(job['submit_state']) != 'prepared':
+            raise UploadTaskActionRejected('投稿请求已经开始，不能暂停上传')
+        if self._has_active_lease(job, now):
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        unsafe = connection.execute(
+            'SELECT 1 FROM upload_parts WHERE job_id=? '
+            "AND upload_state IN ('completing','unknown_outcome') LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if unsafe is not None:
+            raise UploadTaskActionRejected('存在结果未知的分 P，不能安全暂停')
+        connection.execute(
+            "UPDATE upload_jobs SET state='paused',operator_paused=1,"
+            'operator_resume_state=?,review_reason=?,next_attempt_at=0,'
+            'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
+            (state, '管理员已暂停上传任务', now, job_id),
+        )
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='pause_upload_job',
+            job_id=job_id,
+            old_state=state,
+            new_state='paused/operator',
+            reason='管理员暂停上传任务',
+            now=now,
+        )
+        return '上传任务已暂停'
+
+    def _resume_upload_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT job.state,job.submit_state,job.operator_paused,'
+            'job.lease_until,account.state AS account_state '
+            'FROM upload_jobs job JOIN bili_accounts account '
+            'ON account.id=job.account_id WHERE job.id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        if str(job['state']) != 'paused' or not bool(job['operator_paused']):
+            raise UploadTaskActionRejected('任务不是由管理员暂停的')
+        if str(job['submit_state']) != 'prepared':
+            raise UploadTaskActionRejected('投稿结果未知，不能盲目继续')
+        if str(job['account_state']) != 'active':
+            raise UploadTaskActionRejected('投稿账号当前不可用')
+        if self._has_active_lease(job, now):
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        parts = connection.execute(
+            'SELECT upload_state FROM upload_parts WHERE job_id=? '
+            'ORDER BY part_index',
+            (job_id,),
+        ).fetchall()
+        if not parts:
+            raise UploadTaskActionRejected('上传任务没有分 P')
+        states = {str(part['upload_state']) for part in parts}
+        if states & {'completing', 'unknown_outcome', 'failed'}:
+            raise UploadTaskActionRejected('分 P 状态需要先处理，不能继续上传')
+        new_state = 'submitting' if states == {'confirmed'} else 'ready'
+        connection.execute(
+            'UPDATE upload_jobs SET state=?,operator_paused=0,'
+            'operator_resume_state=NULL,review_reason=?,next_attempt_at=0,'
+            'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
+            (new_state, '管理员已继续上传任务', now, job_id),
+        )
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='resume_upload_job',
+            job_id=job_id,
+            old_state='paused/operator',
+            new_state=new_state,
+            reason='管理员继续上传任务',
+            now=now,
+        )
+        return '上传任务已继续'
+
+    def _request_transcode_repair_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT job.state,job.submit_state,job.aid,job.bvid,'
+            'job.repair_state,job.lease_until,account.state AS account_state '
+            'FROM upload_jobs job JOIN bili_accounts account '
+            'ON account.id=job.account_id WHERE job.id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        state = str(job['state'])
+        repair_state = str(job['repair_state'])
+        if state not in self._REPAIRABLE_JOB_STATES:
+            raise UploadTaskActionRejected('稿件尚未提交，不能检查转码状态')
+        if str(job['submit_state']) != 'confirmed' or (
+            job['aid'] is None or not job['bvid']
+        ):
+            raise UploadTaskActionRejected('任务缺少已确认的 AID/BVID')
+        if str(job['account_state']) != 'active':
+            raise UploadTaskActionRejected('投稿账号当前不可用')
+        if repair_state in self._ACTIVE_REPAIR_STATES or (
+            repair_state == 'waiting_review' and state == 'waiting_review'
+        ):
+            raise UploadTaskActionRejected('转码修复正在执行或等待审核')
+        if job['lease_until'] is not None and int(job['lease_until']) > now:
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        connection.execute(
+            "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
+            'repair_error=NULL,repair_requested_at=?,repair_completed_at=NULL,'
+            'updated_at=? WHERE id=?',
+            ('等待检查 B 站转码状态', now, now, job_id),
+        )
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='repair_upload_transcode',
+            job_id=job_id,
+            old_state=repair_state,
+            new_state='queued',
+            reason='管理员请求检查并修复转码异常分 P',
+            now=now,
+        )
+        return '已排队检查 B 站转码状态'
+
+    def _skip_upload_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT session_id,state,submit_state,repair_state,lease_until,'
+            'preupload_finalized FROM upload_jobs WHERE id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        if (
+            str(job['state']) not in ('waiting_artifacts', 'ready')
+            or str(job['submit_state']) != 'prepared'
+        ):
+            raise UploadTaskActionRejected('只有尚未开始上传的任务可以设为不上传')
+        if self._has_active_lease(job, now):
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
+            raise UploadTaskActionRejected('转码修复正在执行')
+        parts = connection.execute(
+            'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
+        ).fetchall()
+        if bool(job['preupload_finalized']) and any(
+            str(part['upload_state']) != 'prepared' for part in parts
+        ):
+            raise UploadTaskActionRejected('任务已经开始上传，不能设为不上传')
+        session_id = int(job['session_id'])
+        self._delete_job_children(connection, job_id)
+        connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
+        connection.execute(
+            'INSERT OR REPLACE INTO upload_suppressions('
+            'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
+            (session_id, 'manager_skipped', manager_subject, now),
+        )
+        connection.execute(
+            "UPDATE recording_sessions SET upload_intent='skip',"
+            "upload_decision='skip',upload_resolution_state='not_requested',"
+            'upload_resolution_error=NULL,upload_resolved_at=? WHERE id=?',
+            (now, session_id),
+        )
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='skip_upload_job',
+            job_id=job_id,
+            old_state='{}/{}'.format(job['state'], job['submit_state']),
+            new_state='suppressed',
+            reason='管理员将该场录像设为不上传',
+            now=now,
+        )
+        return '该场录像已设为不上传'
+
+    def _repost_as_new_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT job.session_id,job.account_id,job.policy_snapshot_json,'
+            'job.state,job.submit_state,job.aid,job.bvid,job.repair_state,'
+            'job.lease_until,account.state AS account_state '
+            'FROM upload_jobs job JOIN bili_accounts account '
+            'ON account.id=job.account_id WHERE job.id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        if (
+            str(job['state']) not in ('approved', 'completed')
+            or str(job['submit_state']) != 'confirmed'
+        ):
+            raise UploadTaskActionRejected('只有审核通过的任务可以重新投稿')
+        if job['aid'] is None or not job['bvid']:
+            raise UploadTaskActionRejected('原任务缺少 AID/BVID')
+        if str(job['account_state']) != 'active':
+            raise UploadTaskActionRejected('投稿账号当前不可用')
+        if self._has_active_lease(job, now):
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
+            raise UploadTaskActionRejected('转码修复正在执行')
+        parts = connection.execute(
+            'SELECT id,final_path,artifact_state FROM upload_parts '
+            'WHERE job_id=? ORDER BY part_index',
+            (job_id,),
+        ).fetchall()
+        if not parts or any(
+            str(part['artifact_state']) != 'ready'
+            or not part['final_path']
+            or not os.path.isfile(str(part['final_path']))
+            for part in parts
+        ):
+            raise UploadTaskActionRejected('本地成品文件不完整，不能重新投稿')
+        try:
+            snapshot = json.loads(str(job['policy_snapshot_json']))
+        except json.JSONDecodeError:
+            raise UploadTaskActionRejected('原投稿设置无法读取') from None
+        if not isinstance(snapshot, dict):
+            raise UploadTaskActionRejected('原投稿设置无法读取')
+        comment_state = 'pending' if bool(snapshot.get('auto_comment')) else 'disabled'
+        danmaku_state = (
+            'pending' if bool(snapshot.get('danmaku_backfill')) else 'disabled'
+        )
+        collection_state = (
+            'pending'
+            if snapshot.get('collection_section_id') is not None
+            else 'disabled'
+        )
+        connection.execute(
+            'INSERT INTO upload_job_archives('
+            'session_id,old_job_id,account_id,aid,bvid,state,submit_state,'
+            'policy_snapshot_json,reason,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            (
+                int(job['session_id']),
+                job_id,
+                int(job['account_id']),
+                int(job['aid']),
+                str(job['bvid']),
+                str(job['state']),
+                str(job['submit_state']),
+                str(job['policy_snapshot_json']),
+                'repost_as_new',
+                now,
+            ),
+        )
+        connection.execute(
+            'DELETE FROM danmaku_items WHERE part_id IN('
+            'SELECT id FROM upload_parts WHERE job_id=?)',
+            (job_id,),
+        )
+        connection.execute(
+            'DELETE FROM upload_chunks WHERE part_id IN('
+            'SELECT id FROM upload_parts WHERE job_id=?)',
+            (job_id,),
+        )
+        connection.execute('DELETE FROM comment_items WHERE job_id=?', (job_id,))
+        connection.execute(
+            "UPDATE upload_parts SET upload_state='prepared',"
+            "danmaku_import_state=?,remote_filename=NULL,cid=NULL,"
+            "upload_session_json=NULL,transcode_state='unknown',"
+            'transcode_fail_code=NULL,transcode_fail_desc=NULL WHERE job_id=?',
+            (danmaku_state, job_id),
+        )
+        connection.execute(
+            "UPDATE upload_jobs SET state='ready',submit_state='prepared',"
+            'comment_branch_state=?,danmaku_branch_state=?,'
+            'collection_branch_state=?,aid=NULL,bvid=NULL,review_reason=?,'
+            'lease_owner=NULL,lease_until=NULL,attempt=0,next_attempt_at=0,'
+            'scheduled_publish_at=NULL,collection_error=NULL,'
+            'upload_completed_at=NULL,submitted_at=NULL,approved_at=NULL,'
+            "submission_verification_state='pending',"
+            'submission_verified_at=NULL,submission_verification_json=NULL,'
+            "repair_state='idle',repair_message=NULL,repair_error=NULL,"
+            'repair_attempt=0,repair_requested_at=NULL,repair_completed_at=NULL,'
+            'repair_reupload_snapshot_json=NULL,updated_at=? WHERE id=?',
+            (
+                comment_state,
+                danmaku_state,
+                collection_state,
+                '管理员重新投稿；原稿件 {} 已保留'.format(job['bvid']),
+                now,
+                job_id,
+            ),
+        )
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='repost_upload_job',
+            job_id=job_id,
+            old_state='{}/{}'.format(job['state'], job['bvid']),
+            new_state='ready/new_archive',
+            reason='管理员要求重新投稿为新稿件，原远端稿件保留',
+            now=now,
+        )
+        return '已保留原稿件记录，并重新排队投稿为新稿件'
+
+    def _request_danmaku_backfill_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT job.state,job.submit_state,job.aid,job.bvid,'
+            'job.danmaku_branch_state,job.lease_until,'
+            'account.state AS account_state FROM upload_jobs job '
+            'JOIN bili_accounts account ON account.id=job.account_id '
+            'WHERE job.id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        if (
+            str(job['state']) not in ('approved', 'completed')
+            or str(job['submit_state']) != 'confirmed'
+            or job['aid'] is None
+            or not job['bvid']
+        ):
+            raise UploadTaskActionRejected('只有审核通过的稿件可以回灌弹幕')
+        if str(job['danmaku_branch_state']) != 'disabled':
+            raise UploadTaskActionRejected('该稿件的弹幕回灌已经启用或处理过')
+        if str(job['account_state']) != 'active':
+            raise UploadTaskActionRejected('投稿账号当前不可用')
+        if self._has_active_lease(job, now):
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        parts = connection.execute(
+            'SELECT id,xml_path,cid,danmaku_import_state FROM upload_parts '
+            'WHERE job_id=? ORDER BY part_index',
+            (job_id,),
+        ).fetchall()
+        if not parts:
+            raise UploadTaskActionRejected('上传任务没有分 P')
+        if any(str(part['danmaku_import_state']) != 'disabled' for part in parts):
+            raise UploadTaskActionRejected('弹幕回灌状态不一致，不能重复创建')
+        if any(self._positive_int(part['cid']) is None for part in parts):
+            raise UploadTaskActionRejected('稿件分 P 缺少 CID，暂时不能回灌')
+        if any(
+            not part['xml_path'] or not os.path.isfile(str(part['xml_path']))
+            for part in parts
+        ):
+            raise UploadTaskActionRejected('本地弹幕文件不完整，不能回灌')
+        existing_items = connection.execute(
+            'SELECT 1 FROM danmaku_items WHERE part_id IN('
+            'SELECT id FROM upload_parts WHERE job_id=?) LIMIT 1',
+            (job_id,),
+        ).fetchone()
+        if existing_items is not None:
+            raise UploadTaskActionRejected('已有弹幕发送记录，不能重复创建')
+        connection.execute(
+            "UPDATE upload_parts SET danmaku_import_state='pending' WHERE job_id=?",
+            (job_id,),
+        )
+        updated = connection.execute(
+            "UPDATE upload_jobs SET state='approved',"
+            "danmaku_branch_state='importing',updated_at=? "
+            "WHERE id=? AND state IN ('approved','completed') "
+            "AND danmaku_branch_state='disabled'",
+            (now, job_id),
+        )
+        if updated.rowcount != 1:
+            raise UploadTaskActionRejected('上传任务状态已经发生变化')
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='backfill_upload_danmaku',
+            job_id=job_id,
+            old_state='{}/disabled'.format(job['state']),
+            new_state='approved/importing',
+            reason='管理员手动启用审核通过稿件的弹幕回灌',
+            now=now,
+        )
+        return '已排队回灌 {} 个分 P 的弹幕'.format(len(parts))
+
     async def pause_upload(self, job_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
-
-        def pause(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT state,submit_state,operator_paused,lease_until '
-                'FROM upload_jobs WHERE id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if bool(job['operator_paused']):
-                return '上传任务已经暂停'
-            state = str(job['state'])
-            if state not in ('ready', 'uploading', 'submitting'):
-                raise UploadTaskActionRejected('当前状态不能暂停上传')
-            if str(job['submit_state']) != 'prepared':
-                raise UploadTaskActionRejected('投稿请求已经开始，不能暂停上传')
-            if self._has_active_lease(job, now):
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            unsafe = connection.execute(
-                'SELECT 1 FROM upload_parts WHERE job_id=? '
-                "AND upload_state IN ('completing','unknown_outcome') LIMIT 1",
-                (job_id,),
-            ).fetchone()
-            if unsafe is not None:
-                raise UploadTaskActionRejected('存在结果未知的分 P，不能安全暂停')
-            connection.execute(
-                "UPDATE upload_jobs SET state='paused',operator_paused=1,"
-                'operator_resume_state=?,review_reason=?,next_attempt_at=0,'
-                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
-                (state, '管理员已暂停上传任务', now, job_id),
+        return await self._database.write(
+            lambda connection: self._pause_upload_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
             )
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='pause_upload_job',
-                job_id=job_id,
-                old_state=state,
-                new_state='paused/operator',
-                reason='管理员暂停上传任务',
-                now=now,
-            )
-            return '上传任务已暂停'
-
-        return await self._database.write(pause)
+        )
 
     async def resume_upload(self, job_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
-
-        def resume(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT job.state,job.submit_state,job.operator_paused,'
-                'job.lease_until,account.state AS account_state '
-                'FROM upload_jobs job JOIN bili_accounts account '
-                'ON account.id=job.account_id WHERE job.id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if str(job['state']) != 'paused' or not bool(job['operator_paused']):
-                raise UploadTaskActionRejected('任务不是由管理员暂停的')
-            if str(job['submit_state']) != 'prepared':
-                raise UploadTaskActionRejected('投稿结果未知，不能盲目继续')
-            if str(job['account_state']) != 'active':
-                raise UploadTaskActionRejected('投稿账号当前不可用')
-            if self._has_active_lease(job, now):
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            parts = connection.execute(
-                'SELECT upload_state FROM upload_parts WHERE job_id=? '
-                'ORDER BY part_index',
-                (job_id,),
-            ).fetchall()
-            if not parts:
-                raise UploadTaskActionRejected('上传任务没有分 P')
-            states = {str(part['upload_state']) for part in parts}
-            if states & {'completing', 'unknown_outcome', 'failed'}:
-                raise UploadTaskActionRejected('分 P 状态需要先处理，不能继续上传')
-            new_state = 'submitting' if states == {'confirmed'} else 'ready'
-            connection.execute(
-                'UPDATE upload_jobs SET state=?,operator_paused=0,'
-                'operator_resume_state=NULL,review_reason=?,next_attempt_at=0,'
-                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
-                (new_state, '管理员已继续上传任务', now, job_id),
+        message = await self._database.write(
+            lambda connection: self._resume_upload_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
             )
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='resume_upload_job',
-                job_id=job_id,
-                old_state='paused/operator',
-                new_state=new_state,
-                reason='管理员继续上传任务',
-                now=now,
-            )
-            return '上传任务已继续'
-
-        return await self._database.write(resume)
+        )
+        self._wake_uploads()
+        return message
 
     async def update_task(
         self,
@@ -499,288 +1388,134 @@ class UploadTaskActionManager:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
 
-        def retry(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT job.state,job.submit_state,job.aid,job.bvid,'
-                'job.repair_state,job.operator_paused,job.lease_until,'
-                'account.state AS account_state '
-                'FROM upload_jobs job JOIN bili_accounts account '
-                'ON account.id=job.account_id WHERE job.id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if str(job['state']) != 'paused':
-                raise UploadTaskActionRejected('只有已暂停的任务可以重新排队')
-            if bool(job['operator_paused']):
-                raise UploadTaskActionRejected('任务由管理员暂停，请使用继续上传')
-            if str(job['account_state']) != 'active':
-                raise UploadTaskActionRejected('投稿账号当前不可用')
-            if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
-                raise UploadTaskActionRejected('转码修复正在执行')
-            if job['lease_until'] is not None and int(job['lease_until']) > now:
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            submit_state = str(job['submit_state'])
-            if submit_state in ('in_flight', 'unknown_outcome'):
-                raise UploadTaskActionRejected('投稿结果未知，自动重试可能产生重复稿件')
-            parts = connection.execute(
-                'SELECT id,artifact_state,upload_state FROM upload_parts '
-                'WHERE job_id=? ORDER BY part_index',
-                (job_id,),
+        message = await self._database.write(
+            lambda connection: self._retry_failed_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
+            )
+        )
+        self._wake_uploads()
+        return message
+
+    def _retry_failed_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        manager_subject: str,
+        now: int,
+    ) -> str:
+        job = connection.execute(
+            'SELECT job.state,job.submit_state,job.aid,job.bvid,'
+            'job.repair_state,job.operator_paused,job.lease_until,'
+            'account.state AS account_state '
+            'FROM upload_jobs job JOIN bili_accounts account '
+            'ON account.id=job.account_id WHERE job.id=?',
+            (job_id,),
+        ).fetchone()
+        if job is None:
+            raise UploadTaskActionRejected('上传任务不存在')
+        if str(job['state']) != 'paused':
+            raise UploadTaskActionRejected('只有已暂停的任务可以重新排队')
+        if bool(job['operator_paused']):
+            raise UploadTaskActionRejected('任务由管理员暂停，请使用继续上传')
+        if str(job['account_state']) != 'active':
+            raise UploadTaskActionRejected('投稿账号当前不可用')
+        if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
+            raise UploadTaskActionRejected('转码修复正在执行')
+        if job['lease_until'] is not None and int(job['lease_until']) > now:
+            raise UploadTaskActionRejected('任务正在执行，请稍后再试')
+        submit_state = str(job['submit_state'])
+        if submit_state in ('in_flight', 'unknown_outcome'):
+            raise UploadTaskActionRejected('投稿结果未知，自动重试可能产生重复稿件')
+        parts = connection.execute(
+            'SELECT id,artifact_state,upload_state FROM upload_parts '
+            'WHERE job_id=? ORDER BY part_index',
+            (job_id,),
+        ).fetchall()
+        if not parts:
+            raise UploadTaskActionRejected('上传任务没有分 P')
+        if any(
+            str(part['upload_state']) in ('completing', 'unknown_outcome')
+            for part in parts
+        ):
+            raise UploadTaskActionRejected(
+                '分 P 上传结果未知，自动重试可能造成重复上传'
+            )
+
+        old_state = '{}/{}'.format(job['state'], submit_state)
+        if submit_state == 'confirmed':
+            if job['aid'] is None or not job['bvid']:
+                raise UploadTaskActionRejected('已投稿任务缺少 AID/BVID')
+            new_state = 'waiting_review'
+        elif submit_state in ('prepared', 'failed_permanent'):
+            failed = [part for part in parts if str(part['upload_state']) == 'failed']
+            if any(str(part['artifact_state']) != 'ready' for part in failed):
+                raise UploadTaskActionRejected('失败分 P 的本地视频不可用')
+            for part in failed:
+                part_id = int(part['id'])
+                connection.execute(
+                    'DELETE FROM upload_chunks WHERE part_id=?', (part_id,)
+                )
+                connection.execute(
+                    "UPDATE upload_parts SET upload_state='prepared',"
+                    'remote_filename=NULL,upload_session_json=NULL '
+                    'WHERE id=? AND job_id=?',
+                    (part_id, job_id),
+                )
+            remaining = connection.execute(
+                'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
             ).fetchall()
-            if not parts:
-                raise UploadTaskActionRejected('上传任务没有分 P')
-            if any(
-                str(part['upload_state']) in ('completing', 'unknown_outcome')
-                for part in parts
-            ):
-                raise UploadTaskActionRejected(
-                    '分 P 上传结果未知，自动重试可能造成重复上传'
-                )
-
-            old_state = '{}/{}'.format(job['state'], submit_state)
-            if submit_state == 'confirmed':
-                if job['aid'] is None or not job['bvid']:
-                    raise UploadTaskActionRejected('已投稿任务缺少 AID/BVID')
-                new_state = 'waiting_review'
-            elif submit_state in ('prepared', 'failed_permanent'):
-                failed = [
-                    part for part in parts if str(part['upload_state']) == 'failed'
-                ]
-                if any(str(part['artifact_state']) != 'ready' for part in failed):
-                    raise UploadTaskActionRejected('失败分 P 的本地视频不可用')
-                for part in failed:
-                    part_id = int(part['id'])
-                    connection.execute(
-                        'DELETE FROM upload_chunks WHERE part_id=?', (part_id,)
-                    )
-                    connection.execute(
-                        "UPDATE upload_parts SET upload_state='prepared',"
-                        'remote_filename=NULL,upload_session_json=NULL '
-                        'WHERE id=? AND job_id=?',
-                        (part_id, job_id),
-                    )
-                remaining = connection.execute(
-                    'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
-                ).fetchall()
-                all_confirmed = all(
-                    str(part['upload_state']) == 'confirmed' for part in remaining
-                )
-                new_state = 'submitting' if all_confirmed else 'ready'
-                submit_state = 'prepared'
-            else:
-                raise UploadTaskActionRejected('当前投稿状态不能安全重试')
-
-            updated = connection.execute(
-                'UPDATE upload_jobs SET state=?,submit_state=?,next_attempt_at=0,'
-                'review_reason=?,lease_owner=NULL,lease_until=NULL,updated_at=? '
-                'WHERE id=?',
-                (new_state, submit_state, '管理员已重新排队失败任务', now, job_id),
+            all_confirmed = all(
+                str(part['upload_state']) == 'confirmed' for part in remaining
             )
-            if updated.rowcount != 1:
-                raise UploadTaskActionRejected('上传任务状态已经发生变化')
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='retry_upload_job',
-                job_id=job_id,
-                old_state=old_state,
-                new_state='{}/{}'.format(new_state, submit_state),
-                reason='管理员手动重试失败任务',
-                now=now,
-            )
-            return '失败任务已重新排队'
+            new_state = 'submitting' if all_confirmed else 'ready'
+            submit_state = 'prepared'
+        else:
+            raise UploadTaskActionRejected('当前投稿状态不能安全重试')
 
-        return await self._database.write(retry)
+        updated = connection.execute(
+            'UPDATE upload_jobs SET state=?,submit_state=?,next_attempt_at=0,'
+            'review_reason=?,lease_owner=NULL,lease_until=NULL,updated_at=? '
+            'WHERE id=?',
+            (new_state, submit_state, '管理员已重新排队失败任务', now, job_id),
+        )
+        if updated.rowcount != 1:
+            raise UploadTaskActionRejected('上传任务状态已经发生变化')
+        self._audit(
+            connection,
+            manager_subject=manager_subject,
+            action='retry_upload_job',
+            job_id=job_id,
+            old_state=old_state,
+            new_state='{}/{}'.format(new_state, submit_state),
+            reason='管理员手动重试失败任务',
+            now=now,
+        )
+        return '失败任务已重新排队'
 
     async def skip_upload(self, job_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
-
-        def skip(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT session_id,state,submit_state,repair_state,lease_until,'
-                'preupload_finalized '
-                'FROM upload_jobs WHERE id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if (
-                str(job['state']) not in ('waiting_artifacts', 'ready')
-                or str(job['submit_state']) != 'prepared'
-            ):
-                raise UploadTaskActionRejected('只有尚未开始上传的任务可以设为不上传')
-            if self._has_active_lease(job, now):
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
-                raise UploadTaskActionRejected('转码修复正在执行')
-            parts = connection.execute(
-                'SELECT upload_state FROM upload_parts WHERE job_id=?', (job_id,)
-            ).fetchall()
-            if bool(job['preupload_finalized']) and any(
-                str(part['upload_state']) != 'prepared' for part in parts
-            ):
-                raise UploadTaskActionRejected('任务已经开始上传，不能设为不上传')
-            session_id = int(job['session_id'])
-            self._delete_job_children(connection, job_id)
-            connection.execute('DELETE FROM upload_jobs WHERE id=?', (job_id,))
-            connection.execute(
-                'INSERT OR REPLACE INTO upload_suppressions('
-                'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
-                (session_id, 'manager_skipped', manager_subject, now),
-            )
-            connection.execute(
-                "UPDATE recording_sessions SET upload_intent='skip',"
-                "upload_decision='skip',upload_resolution_state='not_requested',"
-                'upload_resolution_error=NULL,upload_resolved_at=? WHERE id=?',
-                (now, session_id),
-            )
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='skip_upload_job',
-                job_id=job_id,
-                old_state='{}/{}'.format(job['state'], job['submit_state']),
-                new_state='suppressed',
-                reason='管理员将该场录像设为不上传',
-                now=now,
-            )
-            return '该场录像已设为不上传'
-
         async with self._run_lock:
-            return await self._database.write(skip)
+            return await self._database.write(
+                lambda connection: self._skip_upload_in_connection(
+                    connection, job_id, manager_subject=manager_subject, now=now
+                )
+            )
 
     async def repost_as_new(self, job_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
-
-        def repost(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT job.session_id,job.account_id,job.policy_snapshot_json,'
-                'job.state,job.submit_state,job.aid,job.bvid,job.repair_state,'
-                'job.lease_until,account.state AS account_state '
-                'FROM upload_jobs job JOIN bili_accounts account '
-                'ON account.id=job.account_id WHERE job.id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if (
-                str(job['state']) not in ('approved', 'completed')
-                or str(job['submit_state']) != 'confirmed'
-            ):
-                raise UploadTaskActionRejected('只有审核通过的任务可以重新投稿')
-            if job['aid'] is None or not job['bvid']:
-                raise UploadTaskActionRejected('原任务缺少 AID/BVID')
-            if str(job['account_state']) != 'active':
-                raise UploadTaskActionRejected('投稿账号当前不可用')
-            if self._has_active_lease(job, now):
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            if str(job['repair_state']) in self._ACTIVE_REPAIR_STATES:
-                raise UploadTaskActionRejected('转码修复正在执行')
-            parts = connection.execute(
-                'SELECT id,final_path,artifact_state FROM upload_parts '
-                'WHERE job_id=? ORDER BY part_index',
-                (job_id,),
-            ).fetchall()
-            if not parts or any(
-                str(part['artifact_state']) != 'ready'
-                or not part['final_path']
-                or not os.path.isfile(str(part['final_path']))
-                for part in parts
-            ):
-                raise UploadTaskActionRejected('本地成品文件不完整，不能重新投稿')
-            try:
-                snapshot = json.loads(str(job['policy_snapshot_json']))
-            except json.JSONDecodeError:
-                raise UploadTaskActionRejected('原投稿设置无法读取') from None
-            if not isinstance(snapshot, dict):
-                raise UploadTaskActionRejected('原投稿设置无法读取')
-            comment_state = (
-                'pending' if bool(snapshot.get('auto_comment')) else 'disabled'
-            )
-            danmaku_state = (
-                'pending' if bool(snapshot.get('danmaku_backfill')) else 'disabled'
-            )
-            collection_state = (
-                'pending'
-                if snapshot.get('collection_section_id') is not None
-                else 'disabled'
-            )
-            connection.execute(
-                'INSERT INTO upload_job_archives('
-                'session_id,old_job_id,account_id,aid,bvid,state,submit_state,'
-                'policy_snapshot_json,reason,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                (
-                    int(job['session_id']),
-                    job_id,
-                    int(job['account_id']),
-                    int(job['aid']),
-                    str(job['bvid']),
-                    str(job['state']),
-                    str(job['submit_state']),
-                    str(job['policy_snapshot_json']),
-                    'repost_as_new',
-                    now,
-                ),
-            )
-            connection.execute(
-                'DELETE FROM danmaku_items WHERE part_id IN('
-                'SELECT id FROM upload_parts WHERE job_id=?)',
-                (job_id,),
-            )
-            connection.execute(
-                'DELETE FROM upload_chunks WHERE part_id IN('
-                'SELECT id FROM upload_parts WHERE job_id=?)',
-                (job_id,),
-            )
-            connection.execute('DELETE FROM comment_items WHERE job_id=?', (job_id,))
-            connection.execute(
-                "UPDATE upload_parts SET upload_state='prepared',"
-                "danmaku_import_state=?,remote_filename=NULL,cid=NULL,"
-                'upload_session_json=NULL,transcode_state=\'unknown\','
-                'transcode_fail_code=NULL,transcode_fail_desc=NULL WHERE job_id=?',
-                (danmaku_state, job_id),
-            )
-            connection.execute(
-                "UPDATE upload_jobs SET state='ready',submit_state='prepared',"
-                'comment_branch_state=?,danmaku_branch_state=?,'
-                'collection_branch_state=?,aid=NULL,bvid=NULL,review_reason=?,'
-                'lease_owner=NULL,lease_until=NULL,attempt=0,next_attempt_at=0,'
-                'scheduled_publish_at=NULL,collection_error=NULL,'
-                'upload_completed_at=NULL,submitted_at=NULL,approved_at=NULL,'
-                "submission_verification_state='pending',"
-                'submission_verified_at=NULL,submission_verification_json=NULL,'
-                "repair_state='idle',repair_message=NULL,repair_error=NULL,"
-                'repair_attempt=0,repair_requested_at=NULL,repair_completed_at=NULL,'
-                'repair_reupload_snapshot_json=NULL,'
-                'updated_at=? WHERE id=?',
-                (
-                    comment_state,
-                    danmaku_state,
-                    collection_state,
-                    '管理员重新投稿；原稿件 {} 已保留'.format(job['bvid']),
-                    now,
-                    job_id,
-                ),
-            )
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='repost_upload_job',
-                job_id=job_id,
-                old_state='{}/{}'.format(job['state'], job['bvid']),
-                new_state='ready/new_archive',
-                reason='管理员要求重新投稿为新稿件，原远端稿件保留',
-                now=now,
-            )
-            return '已保留原稿件记录，并重新排队投稿为新稿件'
-
         async with self._run_lock:
-            return await self._database.write(repost)
+            message = await self._database.write(
+                lambda connection: self._repost_as_new_in_connection(
+                    connection, job_id, manager_subject=manager_subject, now=now
+                )
+            )
+        self._wake_uploads()
+        return message
 
     async def delete_local_task(self, job_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
@@ -806,63 +1541,18 @@ class UploadTaskActionManager:
     async def set_session_upload_intent(
         self, session_id: int, intent: str, *, manager_subject: str
     ) -> str:
-        if not manager_subject:
-            raise UploadTaskActionRejected('管理员身份不能为空')
         if intent not in ('upload', 'skip'):
             raise UploadTaskActionRejected('本场上传设置无效')
-        row = await self._database.fetchone(
-            'SELECT session.id,job.id AS job_id FROM recording_sessions session '
-            'LEFT JOIN upload_jobs job ON job.session_id=session.id '
-            'WHERE session.id=?',
-            (session_id,),
-        )
-        if row is None:
-            raise UploadTaskActionRejected('录制场次不存在')
-        if row['job_id'] is not None:
-            if intent == 'skip':
-                return await self.skip_upload(
-                    int(row['job_id']), manager_subject=manager_subject
-                )
-            return '本场录像已经创建上传任务'
-        now = int(self._clock())
-
-        def update(connection: sqlite3.Connection) -> str:
-            current = connection.execute(
-                'SELECT upload_intent FROM recording_sessions WHERE id=?', (session_id,)
-            ).fetchone()
-            if current is None:
-                raise UploadTaskActionRejected('录制场次不存在')
-            old_intent = str(current['upload_intent'])
-            connection.execute(
-                'UPDATE recording_sessions SET upload_intent=? WHERE id=?',
-                (intent, session_id),
-            )
-            if intent == 'skip':
-                connection.execute(
-                    'INSERT OR REPLACE INTO upload_suppressions('
-                    'session_id,reason,manager_subject,created_at) VALUES(?,?,?,?)',
-                    (session_id, 'manager_skipped', manager_subject, now),
-                )
-                message = '本场录像已设为不上传'
-            else:
-                connection.execute(
-                    'DELETE FROM upload_suppressions WHERE session_id=?', (session_id,)
-                )
-                message = '本场录像将在文件就绪后上传'
-            self._audit_session(
-                connection,
+        result = (
+            await self.run_session_batch(
+                'set_upload' if intent == 'upload' else 'set_skip',
+                (session_id,),
                 manager_subject=manager_subject,
-                action='set_session_upload_intent',
-                session_id=session_id,
-                old_state=old_intent,
-                new_state=intent,
-                reason=message,
-                now=now,
             )
-            return message
-
-        async with self._run_lock:
-            return await self._database.write(update)
+        )[0]
+        if not result.accepted:
+            raise UploadTaskActionRejected(result.message)
+        return result.message
 
     async def delete_session(self, session_id: int, *, manager_subject: str) -> str:
         if not manager_subject:
@@ -886,52 +1576,11 @@ class UploadTaskActionManager:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
-
-        def request(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT job.state,job.submit_state,job.aid,job.bvid,'
-                'job.repair_state,job.lease_until,account.state AS account_state '
-                'FROM upload_jobs job JOIN bili_accounts account '
-                'ON account.id=job.account_id WHERE job.id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            state = str(job['state'])
-            repair_state = str(job['repair_state'])
-            if state not in self._REPAIRABLE_JOB_STATES:
-                raise UploadTaskActionRejected('稿件尚未提交，不能检查转码状态')
-            if str(job['submit_state']) != 'confirmed' or (
-                job['aid'] is None or not job['bvid']
-            ):
-                raise UploadTaskActionRejected('任务缺少已确认的 AID/BVID')
-            if str(job['account_state']) != 'active':
-                raise UploadTaskActionRejected('投稿账号当前不可用')
-            if repair_state in self._ACTIVE_REPAIR_STATES or (
-                repair_state == 'waiting_review' and state == 'waiting_review'
-            ):
-                raise UploadTaskActionRejected('转码修复正在执行或等待审核')
-            if job['lease_until'] is not None and int(job['lease_until']) > now:
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            connection.execute(
-                "UPDATE upload_jobs SET repair_state='queued',repair_message=?,"
-                'repair_error=NULL,repair_requested_at=?,repair_completed_at=NULL,'
-                'updated_at=? WHERE id=?',
-                ('等待检查 B 站转码状态', now, now, job_id),
+        return await self._database.write(
+            lambda connection: self._request_transcode_repair_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
             )
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='repair_upload_transcode',
-                job_id=job_id,
-                old_state=repair_state,
-                new_state='queued',
-                reason='管理员请求检查并修复转码异常分 P',
-                now=now,
-            )
-            return '已排队检查 B 站转码状态'
-
-        return await self._database.write(request)
+        )
 
     async def request_danmaku_backfill(
         self, job_id: int, *, manager_subject: str
@@ -939,81 +1588,13 @@ class UploadTaskActionManager:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
-
-        def request(connection: sqlite3.Connection) -> str:
-            job = connection.execute(
-                'SELECT job.state,job.submit_state,job.aid,job.bvid,'
-                'job.danmaku_branch_state,job.lease_until,'
-                'account.state AS account_state FROM upload_jobs job '
-                'JOIN bili_accounts account ON account.id=job.account_id '
-                'WHERE job.id=?',
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                raise UploadTaskActionRejected('上传任务不存在')
-            if (
-                str(job['state']) not in ('approved', 'completed')
-                or str(job['submit_state']) != 'confirmed'
-                or job['aid'] is None
-                or not job['bvid']
-            ):
-                raise UploadTaskActionRejected('只有审核通过的稿件可以回灌弹幕')
-            if str(job['danmaku_branch_state']) != 'disabled':
-                raise UploadTaskActionRejected('该稿件的弹幕回灌已经启用或处理过')
-            if str(job['account_state']) != 'active':
-                raise UploadTaskActionRejected('投稿账号当前不可用')
-            if self._has_active_lease(job, now):
-                raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-            parts = connection.execute(
-                'SELECT id,xml_path,cid,danmaku_import_state FROM upload_parts '
-                'WHERE job_id=? ORDER BY part_index',
-                (job_id,),
-            ).fetchall()
-            if not parts:
-                raise UploadTaskActionRejected('上传任务没有分 P')
-            if any(str(part['danmaku_import_state']) != 'disabled' for part in parts):
-                raise UploadTaskActionRejected('弹幕回灌状态不一致，不能重复创建')
-            if any(self._positive_int(part['cid']) is None for part in parts):
-                raise UploadTaskActionRejected('稿件分 P 缺少 CID，暂时不能回灌')
-            if any(
-                not part['xml_path'] or not os.path.isfile(str(part['xml_path']))
-                for part in parts
-            ):
-                raise UploadTaskActionRejected('本地弹幕文件不完整，不能回灌')
-            existing_items = connection.execute(
-                'SELECT 1 FROM danmaku_items WHERE part_id IN('
-                'SELECT id FROM upload_parts WHERE job_id=?) LIMIT 1',
-                (job_id,),
-            ).fetchone()
-            if existing_items is not None:
-                raise UploadTaskActionRejected('已有弹幕发送记录，不能重复创建')
-            connection.execute(
-                "UPDATE upload_parts SET danmaku_import_state='pending' "
-                'WHERE job_id=?',
-                (job_id,),
+        message = await self._database.write(
+            lambda connection: self._request_danmaku_backfill_in_connection(
+                connection, job_id, manager_subject=manager_subject, now=now
             )
-            updated = connection.execute(
-                "UPDATE upload_jobs SET state='approved',"
-                "danmaku_branch_state='importing',updated_at=? "
-                "WHERE id=? AND state IN ('approved','completed') "
-                "AND danmaku_branch_state='disabled'",
-                (now, job_id),
-            )
-            if updated.rowcount != 1:
-                raise UploadTaskActionRejected('上传任务状态已经发生变化')
-            self._audit(
-                connection,
-                manager_subject=manager_subject,
-                action='backfill_upload_danmaku',
-                job_id=job_id,
-                old_state='{}/disabled'.format(job['state']),
-                new_state='approved/importing',
-                reason='管理员手动启用审核通过稿件的弹幕回灌',
-                now=now,
-            )
-            return '已排队回灌 {} 个分 P 的弹幕'.format(len(parts))
-
-        return await self._database.write(request)
+        )
+        self._wake_uploads()
+        return message
 
     async def recover_interrupted(self) -> None:
         await self._recover_interrupted_remux_artifacts()

@@ -1,7 +1,18 @@
 import os
 import secrets
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
@@ -40,7 +51,9 @@ from blrec.bili_upload.session_submission import (
 from blrec.bili_upload.task_actions import (
     UploadTaskActionManager,
     UploadTaskActionRejected,
+    UploadTaskBatchItem,
 )
+from blrec.control.operations import ControlJournalClosed, ControlLaneSaturated
 from blrec.logging.audit import audit
 from blrec.utils.string import camel_case
 from blrec.web.media_response import (
@@ -59,6 +72,9 @@ journal: Optional[RecordingJournalBridge] = None
 content_reader: Optional[RecordingContentReader] = None
 task_actions: Optional[UploadTaskActionManager] = None
 session_action_runner: Optional[Callable[..., Awaitable[str]]] = None
+session_batch_runner: Optional[
+    Callable[..., Awaitable[Sequence[UploadTaskBatchItem]]]
+] = None
 submission_manager: Optional[SessionSubmissionManager] = None
 active_recording_metadata_provider: Optional[
     Callable[[MediaResource], Optional[object]]
@@ -263,6 +279,12 @@ class UploadJobActionResultResponse(ApiModel):
 
 class UploadJobActionResponse(ApiModel):
     results: List[UploadJobActionResultResponse]
+
+
+class UploadRetryAdmissionResponse(ApiModel):
+    operation_id: str
+    status: Literal['accepted', 'running', 'succeeded', 'failed']
+    total: int
 
 
 class RecordingSessionActionRequest(ApiModel):
@@ -524,6 +546,17 @@ def get_session_action_runner() -> Callable[..., Awaitable[str]]:
             detail=unavailable_reason or 'Recording session actions are unavailable',
         )
     return session_action_runner
+
+
+def get_session_batch_runner() -> (
+    Callable[..., Awaitable[Sequence[UploadTaskBatchItem]]]
+):
+    if session_batch_runner is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Recording session actions are unavailable',
+        )
+    return session_batch_runner
 
 
 def get_submission_manager() -> SessionSubmissionManager:
@@ -1092,39 +1125,35 @@ async def run_upload_job_actions(
     subject: str = Depends(authenticated_manager_subject),
     actions: UploadTaskActionManager = Depends(get_task_actions),
 ) -> UploadJobActionResponse:
-    results = []
-    for job_id in command.job_ids:
-        try:
-            if command.action == 'retry_failed':
-                message = await actions.retry_failed(job_id, manager_subject=subject)
-            elif command.action == 'repair_transcode':
-                message = await actions.request_transcode_repair(
-                    job_id, manager_subject=subject
-                )
-            elif command.action == 'skip_upload':
-                message = await actions.skip_upload(job_id, manager_subject=subject)
-            elif command.action == 'repost_as_new':
-                message = await actions.repost_as_new(job_id, manager_subject=subject)
-            elif command.action == 'pause_upload':
-                message = await actions.pause_upload(job_id, manager_subject=subject)
-            elif command.action == 'resume_upload':
-                message = await actions.resume_upload(job_id, manager_subject=subject)
-            else:
+    if command.action == 'delete_local':
+        results = []
+        for job_id in command.job_ids:
+            try:
                 message = await actions.delete_local_task(
                     job_id, manager_subject=subject
                 )
-        except UploadTaskActionRejected as error:
-            results.append(
-                UploadJobActionResultResponse(
-                    job_id=job_id, accepted=False, message=str(error)
+            except UploadTaskActionRejected as error:
+                results.append(
+                    UploadJobActionResultResponse(
+                        job_id=job_id, accepted=False, message=str(error)
+                    )
                 )
-            )
-        else:
-            results.append(
-                UploadJobActionResultResponse(
-                    job_id=job_id, accepted=True, message=message
+            else:
+                results.append(
+                    UploadJobActionResultResponse(
+                        job_id=job_id, accepted=True, message=message
+                    )
                 )
+    else:
+        batch = await actions.run_job_batch(
+            command.action, command.job_ids, manager_subject=subject
+        )
+        results = [
+            UploadJobActionResultResponse(
+                job_id=item.target_id, accepted=item.accepted, message=item.message
             )
+            for item in batch
+        ]
     rejected = sum(not result.accepted for result in results)
     audit(
         'upload_task_action',
@@ -1199,23 +1228,39 @@ async def run_recording_session_actions(
     command: RecordingSessionActionRequest,
     subject: str = Depends(authenticated_manager_subject),
     runner: Callable[..., Awaitable[str]] = Depends(get_session_action_runner),
+    batch_runner: Callable[..., Awaitable[Sequence[UploadTaskBatchItem]]] = Depends(
+        get_session_batch_runner
+    ),
 ) -> RecordingSessionActionResponse:
-    results = []
-    for session_id in command.session_ids:
-        try:
-            message = await runner(command.action, session_id, manager_subject=subject)
-        except UploadTaskActionRejected as error:
-            results.append(
-                RecordingSessionActionResultResponse(
-                    session_id=session_id, accepted=False, message=str(error)
+    if command.action == 'delete_local':
+        results = []
+        for session_id in command.session_ids:
+            try:
+                message = await runner(
+                    command.action, session_id, manager_subject=subject
                 )
-            )
-        else:
-            results.append(
-                RecordingSessionActionResultResponse(
-                    session_id=session_id, accepted=True, message=message
+            except UploadTaskActionRejected as error:
+                results.append(
+                    RecordingSessionActionResultResponse(
+                        session_id=session_id, accepted=False, message=str(error)
+                    )
                 )
+            else:
+                results.append(
+                    RecordingSessionActionResultResponse(
+                        session_id=session_id, accepted=True, message=message
+                    )
+                )
+    else:
+        batch = await batch_runner(
+            command.action, command.session_ids, manager_subject=subject
+        )
+        results = [
+            RecordingSessionActionResultResponse(
+                session_id=item.target_id, accepted=item.accepted, message=item.message
             )
+            for item in batch
+        ]
     rejected = sum(not result.accepted for result in results)
     audit(
         'recording_session_action',
@@ -1228,36 +1273,37 @@ async def run_recording_session_actions(
     return RecordingSessionActionResponse(results=results)
 
 
-@router.post('/upload-jobs/retry-failed', response_model=UploadJobActionResponse)
+@router.post(
+    '/upload-jobs/retry-failed',
+    response_model=UploadRetryAdmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def retry_all_failed_upload_jobs(
+    response: Response,
     subject: str = Depends(authenticated_manager_subject),
     actions: UploadTaskActionManager = Depends(get_task_actions),
-) -> UploadJobActionResponse:
-    results = []
-    for job_id in await actions.retryable_failed_job_ids():
-        try:
-            message = await actions.retry_failed(job_id, manager_subject=subject)
-        except UploadTaskActionRejected as error:
-            results.append(
-                UploadJobActionResultResponse(
-                    job_id=job_id, accepted=False, message=str(error)
-                )
-            )
-        else:
-            results.append(
-                UploadJobActionResultResponse(
-                    job_id=job_id, accepted=True, message=message
-                )
-            )
-    rejected = sum(not result.accepted for result in results)
+) -> UploadRetryAdmissionResponse:
+    try:
+        admission = await actions.admit_retry_all_failed(manager_subject=subject)
+    except UploadTaskActionRejected as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    except (ControlJournalClosed, ControlLaneSaturated) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='失败任务重试队列繁忙，请稍后重试',
+            headers={'Retry-After': '1'},
+        ) from error
+    response.headers['X-BLREC-Operation-ID'] = admission.operation_id
     audit(
-        'upload_failed_jobs_retried',
-        level='WARNING' if rejected else 'INFO',
-        job_ids=[result.job_id for result in results],
-        accepted=len(results) - rejected,
-        rejected=rejected,
+        'upload_failed_jobs_retry_admitted',
+        operation_id=admission.operation_id,
+        total=admission.total,
     )
-    return UploadJobActionResponse(results=results)
+    return UploadRetryAdmissionResponse(
+        operation_id=admission.operation_id,
+        status=admission.status,
+        total=admission.total,
+    )
 
 
 @router.get(

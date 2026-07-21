@@ -44,6 +44,8 @@ REQUIRED_TABLES = {
     'highlight_inspections',
     'local_deletion_items',
     'owner_handoff_outcomes',
+    'upload_retry_batches',
+    'upload_retry_batch_items',
 }
 
 
@@ -78,7 +80,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -290,6 +292,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'recording_sessions_source_started_idx',
             'upload_jobs_state_session_idx',
             'highlight_clips_library_idx',
+            'upload_retry_batch_items_state_idx',
         } <= indexes
 
         await database.execute(
@@ -441,7 +444,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
     finally:
         await database.close()
 
@@ -489,7 +492,7 @@ async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
             'output_video_path': '/clips/legacy.mp4',
             'file_size_bytes': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
     finally:
         await database.close()
 
@@ -527,7 +530,7 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
         assert (
             await database.scalar(
                 'SELECT file_size_bytes FROM highlight_clips WHERE id=8'
@@ -591,7 +594,7 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
         sessions = await database.fetchall(
             'SELECT id,cancellation_generation FROM recording_sessions ORDER BY id'
         )
@@ -661,7 +664,7 @@ async def test_twenty_seventh_migration_persists_safe_highlight_inspections(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
         legacy = await database.fetchone(
             'SELECT inspection_json,source_fingerprint_json,idempotency_key '
             'FROM highlight_clips WHERE id=7'
@@ -732,7 +735,7 @@ async def test_twenty_eighth_migration_adds_repair_reupload_snapshot(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 28
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
         assert (
             await database.scalar(
                 'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=1'

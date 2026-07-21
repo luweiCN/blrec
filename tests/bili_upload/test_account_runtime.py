@@ -16,6 +16,7 @@ from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.policies import default_room_upload_policy
 from blrec.bili_upload.recording_content import RecordingContentReader
 from blrec.bili_upload.runtime import BiliAccountRuntime
+from blrec.control.operations import ControlOperationJournal, ControlStepInput
 from blrec.setting.models import BiliUploadSettings
 
 
@@ -569,6 +570,97 @@ async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
 
 
 @pytest.mark.asyncio
+async def test_upload_loop_runs_one_retry_quantum_per_iteration() -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path='/unused.sqlite3'),
+        api_key=None,
+        credential_key=None,
+    )
+    journal = SimpleNamespace(finalize_cancelled_sessions=AsyncMock(return_value=0))
+    coordinator = SimpleNamespace(
+        sync_live_sessions=AsyncMock(return_value=[]),
+        prepare_waiting_jobs=AsyncMock(return_value=[]),
+        run_once=AsyncMock(return_value=None),
+    )
+    review_watcher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    comment_publisher = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    danmaku_importer = SimpleNamespace(run_once=AsyncMock(return_value=None))
+    stop_event = asyncio.Event()
+
+    async def stop_after_iteration() -> None:
+        stop_event.set()
+
+    danmaku_publisher = SimpleNamespace(
+        run_once=AsyncMock(side_effect=stop_after_iteration)
+    )
+    task_actions = SimpleNamespace(
+        run_retry_batch_once=AsyncMock(return_value='retry-operation'),
+        run_once=AsyncMock(return_value=None),
+    )
+
+    await runtime._run_uploads(
+        journal,
+        coordinator,
+        review_watcher,
+        comment_publisher,
+        danmaku_importer,
+        danmaku_publisher,
+        stop_event,
+        task_actions=task_actions,
+    )
+
+    task_actions.run_retry_batch_once.assert_awaited_once_with()
+    task_actions.run_once.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_retry_admission_wakeup_interrupts_idle_upload_delay() -> None:
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path='/unused.sqlite3'),
+        api_key=None,
+        credential_key=None,
+    )
+    stop_event = asyncio.Event()
+    runtime._upload_stop_event = stop_event
+    runtime._upload_wake_event = asyncio.Event()
+
+    runtime._wake_upload_worker()
+    await asyncio.wait_for(runtime._wait_for_upload_delay(stop_event, 60), timeout=0.1)
+
+    assert not runtime._upload_wake_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_runtime_opens_shared_retry_journal_without_owning_its_close(
+    tmp_path: Path,
+) -> None:
+    control_journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path=str(tmp_path / 'blrec.sqlite3')),
+        api_key=None,
+        credential_key=b'k' * 32,
+        protocol=IdentityProtocol(),
+        control_operation_journal=control_journal,
+    )
+
+    assert await runtime.start()
+    try:
+        assert runtime.task_actions is not None
+        assert runtime.task_actions._control_journal is control_journal
+    finally:
+        await runtime.close()
+
+    operation = await control_journal.admit(
+        lane='test',
+        kind='still-open',
+        target_key='one',
+        steps=(ControlStepInput(key='one'),),
+    )
+    assert operation.status == 'accepted'
+    await control_journal.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_exposes_primary_cookie_and_forwards_auth_failures(
     tmp_path: Path,
 ) -> None:
@@ -665,6 +757,24 @@ async def test_session_action_maps_job_capability_to_job_id() -> None:
     assert message == '已重新排队'
     runtime._task_actions.retry_failed.assert_awaited_once_with(
         9, manager_subject='manager'
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_batch_delegates_once_to_the_transactional_manager() -> None:
+    runtime = object.__new__(BiliAccountRuntime)
+    expected = (SimpleNamespace(target_id=7, accepted=True, message='已设置'),)
+    runtime._task_actions = SimpleNamespace(
+        run_session_batch=AsyncMock(return_value=expected)
+    )
+
+    result = await runtime.run_recording_session_batch(
+        'set_upload', (7, 8), manager_subject='manager'
+    )
+
+    assert result == expected
+    runtime._task_actions.run_session_batch.assert_awaited_once_with(
+        'set_upload', (7, 8), manager_subject='manager'
     )
 
 

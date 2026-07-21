@@ -18,6 +18,7 @@ from blrec.bili_upload.task_actions import (
 )
 from blrec.bili_upload.transcode_remux import RemuxedArtifact
 from blrec.bili_upload.upos import FileIdentity
+from blrec.control.operations import ControlOperationJournal, ControlStepInput
 
 
 class FakeProtocol:
@@ -289,6 +290,8 @@ def make_manager(
     recording_root: Path,
     *,
     remuxer: Optional[FakeRemuxer] = None,
+    control_journal: Optional[ControlOperationJournal] = None,
+    wake_uploads=lambda: None,
 ) -> tuple[UploadTaskActionManager, FakeUploader, FakeEditPayloadBuilder]:
     uploader = FakeUploader(database)
     payload_builder = FakeEditPayloadBuilder(database)
@@ -307,6 +310,8 @@ def make_manager(
             clip_root=recording_root.parent / 'clips',
             clock=lambda: 1_000,
         ),
+        control_journal=control_journal,
+        wake_uploads=wake_uploads,
         clock=lambda: 1_000,
     )
     return manager, uploader, payload_builder
@@ -314,6 +319,43 @@ def make_manager(
 
 async def _async_value(value: Any) -> Any:
     return value
+
+
+async def seed_retry_jobs(
+    database: BiliUploadDatabase, tmp_path: Path, *, count: int
+) -> None:
+    await seed_job(
+        database,
+        tmp_path,
+        state='paused',
+        submit_state='prepared',
+        second_upload_state='failed',
+    )
+
+    def seed(connection) -> None:
+        for offset in range(1, count):
+            job_id = 9 + offset
+            connection.execute(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at) '
+                "VALUES(?,?,?,'closed',1)",
+                (job_id, 100 + job_id, 'retry:{}'.format(job_id)),
+            )
+            connection.execute(
+                'INSERT INTO upload_jobs('
+                'id,session_id,account_id,policy_snapshot_json,state,'
+                'submit_state,created_at,updated_at) '
+                "VALUES(?,?,1,'{}','paused','prepared',1,1)",
+                (job_id, job_id),
+            )
+            connection.execute(
+                'INSERT INTO upload_parts('
+                'id,job_id,part_index,source_path,artifact_state,upload_state) '
+                "VALUES(?,?,1,?,'ready','failed')",
+                (10_000 + job_id, job_id, '/fixture/{}.mp4'.format(job_id)),
+            )
+
+    await database.write(seed)
 
 
 def editable_snapshot() -> Dict[str, Any]:
@@ -549,6 +591,529 @@ async def test_retry_failed_resets_only_safe_failed_parts(tmp_path: Path) -> Non
             'new_state': 'ready/prepared',
         }
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_job_batch_uses_one_transaction_and_isolates_rejected_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='prepared',
+            second_upload_state='failed',
+        )
+
+        def seed_more(connection) -> None:
+            for job_id in range(10, 67):
+                connection.execute(
+                    'INSERT INTO recording_sessions('
+                    'id,room_id,broadcast_session_key,state,started_at) '
+                    "VALUES(?,?,?,'closed',1)",
+                    (job_id, 100 + job_id, 'batch:{}'.format(job_id)),
+                )
+                connection.execute(
+                    'INSERT INTO upload_jobs('
+                    'id,session_id,account_id,policy_snapshot_json,state,'
+                    'submit_state,created_at,updated_at) '
+                    "VALUES(?,?,1,'{}','paused','prepared',1,1)",
+                    (job_id, job_id),
+                )
+                connection.execute(
+                    'INSERT INTO upload_parts('
+                    'id,job_id,part_index,source_path,artifact_state,upload_state) '
+                    "VALUES(?,?,1,?,'ready','failed')",
+                    (1000 + job_id, job_id, '/fixture/{}.mp4'.format(job_id)),
+                )
+            connection.execute(
+                'UPDATE upload_jobs SET lease_owner=?,lease_until=? WHERE id=?',
+                ('active-worker', 2_000, 38),
+            )
+
+        await database.write(seed_more)
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+        wakeups = []
+        manager._wake_uploads = lambda: wakeups.append('wake')  # type: ignore[attr-defined]
+        statements: List[str] = []
+        await database.read(
+            lambda connection: connection.set_trace_callback(statements.append)
+        )
+        original_write = database.write
+        write_calls = 0
+
+        async def counted_write(operation):
+            nonlocal write_calls
+            write_calls += 1
+            return await original_write(operation)
+
+        monkeypatch.setattr(database, 'write', counted_write)
+
+        results = await manager.run_job_batch(
+            'retry_failed', tuple(range(9, 67)), manager_subject='manager'
+        )
+
+        assert write_calls == 1
+        assert len(results) == 58
+        assert [item.target_id for item in results if not item.accepted] == [38]
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM upload_jobs WHERE state='ready'"
+            )
+            == 57
+        )
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=38')
+            == 'paused'
+        )
+        assert sum(statement == 'BEGIN IMMEDIATE' for statement in statements) == 1
+        assert (
+            sum(statement.startswith('SAVEPOINT item_') for statement in statements)
+            == 58
+        )
+        assert any(
+            statement.startswith('ROLLBACK TO SAVEPOINT item_')
+            for statement in statements
+        )
+        assert wakeups == ['wake']
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('action', 'state', 'submit_state', 'part_state'),
+    (
+        ('pause_upload', 'ready', 'prepared', 'prepared'),
+        ('resume_upload', 'paused', 'prepared', 'prepared'),
+        ('repair_transcode', 'waiting_review', 'confirmed', 'confirmed'),
+        ('skip_upload', 'ready', 'prepared', 'prepared'),
+        ('repost_as_new', 'approved', 'confirmed', 'confirmed'),
+    ),
+)
+async def test_job_batch_supports_each_non_delete_action_in_one_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    state: str,
+    submit_state: str,
+    part_state: str,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / '{}.sqlite3'.format(action)))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state=state,
+            submit_state=submit_state,
+            second_upload_state=part_state,
+        )
+        if action in ('pause_upload', 'resume_upload', 'skip_upload'):
+            await database.execute(
+                "UPDATE upload_parts SET upload_state='prepared',"
+                'remote_filename=NULL'
+            )
+        if action == 'resume_upload':
+            await database.execute(
+                'UPDATE upload_jobs SET operator_paused=1,'
+                "operator_resume_state='ready' WHERE id=9"
+            )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+        original_write = database.write
+        write_calls = 0
+
+        async def counted_write(operation):
+            nonlocal write_calls
+            write_calls += 1
+            return await original_write(operation)
+
+        monkeypatch.setattr(database, 'write', counted_write)
+
+        results = await manager.run_job_batch(action, (9,), manager_subject='manager')
+
+        assert write_calls == 1
+        assert [(item.target_id, item.accepted) for item in results] == [(9, True)]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_session_batch_uses_one_transaction_and_preserves_partial_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'sessions.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='prepared',
+            second_upload_state='failed',
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,'
+            'upload_resolution_state) '
+            "VALUES(2,102,'session:2','closed',1,'job_created')"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(3,103,'session:3','closed',1)"
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+        original_write = database.write
+        write_calls = 0
+
+        async def counted_write(operation):
+            nonlocal write_calls
+            write_calls += 1
+            return await original_write(operation)
+
+        monkeypatch.setattr(database, 'write', counted_write)
+
+        results = await manager.run_session_batch(
+            'set_upload', (1, 2, 3), manager_subject='manager'
+        )
+
+        assert write_calls == 1
+        assert [(item.target_id, item.accepted) for item in results] == [
+            (1, True),
+            (2, False),
+            (3, True),
+        ]
+        assert (
+            await database.scalar(
+                'SELECT upload_decision FROM recording_sessions WHERE id=3'
+            )
+            == 'upload'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('count', 'expected_quantums'), ((101, 2), (201, 3)))
+async def test_retry_all_freezes_membership_and_runs_one_transaction_per_quantum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int, expected_quantums: int
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await database.open()
+    await journal.open()
+    try:
+        await seed_retry_jobs(database, tmp_path, count=count)
+        wakeups: List[str] = []
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            control_journal=journal,
+            wake_uploads=lambda: wakeups.append('wake'),
+        )
+
+        admission = await manager.admit_retry_all_failed(manager_subject='manager')
+
+        assert admission.total == count
+        assert admission.status == 'accepted'
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM upload_retry_batch_items '
+                'WHERE operation_id=? AND state=\'queued\'',
+                (admission.operation_id,),
+            )
+            == count
+        )
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM upload_jobs WHERE state='paused'"
+            )
+            == count
+        )
+        wakeups.clear()
+
+        original_write = database.write
+        write_calls = 0
+
+        async def counted_write(operation):
+            nonlocal write_calls
+            write_calls += 1
+            return await original_write(operation)
+
+        monkeypatch.setattr(database, 'write', counted_write)
+        processed = []
+        while True:
+            operation_id = await manager.run_retry_batch_once()
+            if operation_id is None:
+                break
+            processed.append(operation_id)
+            snapshot = await journal.get(admission.operation_id)
+            assert snapshot is not None
+            if snapshot.status == 'succeeded':
+                break
+
+        assert processed == [admission.operation_id] * expected_quantums
+        assert write_calls == expected_quantums
+        assert wakeups == ['wake'] * expected_quantums
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM upload_jobs WHERE state='ready'"
+            )
+            == count
+        )
+        snapshot = await journal.get(admission.operation_id)
+        assert snapshot is not None
+        assert snapshot.status == 'succeeded'
+        assert snapshot.result is not None
+        assert {
+            key: snapshot.result[key]
+            for key in ('processed', 'rejected', 'succeeded', 'total')
+        } == {'processed': count, 'rejected': 0, 'succeeded': count, 'total': count}
+        assert len(snapshot.steps) == expected_quantums
+    finally:
+        await journal.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_all_membership_does_not_drift_and_fences_changed_items(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await database.open()
+    await journal.open()
+    try:
+        await seed_retry_jobs(database, tmp_path, count=3)
+        await database.write(
+            lambda connection: (
+                connection.execute(
+                    'INSERT INTO recording_sessions('
+                    'id,room_id,broadcast_session_key,state,started_at) '
+                    "VALUES(1000,1,'not-selected','closed',1)"
+                ),
+                connection.execute(
+                    'INSERT INTO upload_jobs('
+                    'id,session_id,account_id,policy_snapshot_json,state,'
+                    'submit_state,created_at,updated_at) '
+                    "VALUES(1,1000,1,'{}','ready','prepared',1,1)"
+                ),
+                connection.execute(
+                    'INSERT INTO upload_parts('
+                    'id,job_id,part_index,source_path,artifact_state,upload_state) '
+                    "VALUES(1,1,1,'/fixture/1.mp4','ready','failed')"
+                ),
+            )
+        )
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            control_journal=journal,
+        )
+        admission = await manager.admit_retry_all_failed(manager_subject='manager')
+        assert admission.total == 3
+        await database.execute("UPDATE upload_jobs SET state='paused' WHERE id=1")
+        await database.execute(
+            "UPDATE upload_jobs SET submit_state='unknown_outcome' WHERE id=10"
+        )
+        await database.execute(
+            'UPDATE upload_jobs SET lease_owner=?,lease_until=? WHERE id=11',
+            ('active-worker', 2_000),
+        )
+
+        assert await manager.run_retry_batch_once() == admission.operation_id
+
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'paused'
+        )
+        rows = await database.fetchall(
+            'SELECT job_id,state,error_code FROM upload_retry_batch_items '
+            'WHERE operation_id=? ORDER BY job_id',
+            (admission.operation_id,),
+        )
+        assert [dict(row) for row in rows] == [
+            {'job_id': 9, 'state': 'succeeded', 'error_code': None},
+            {'job_id': 10, 'state': 'rejected', 'error_code': 'REMOTE_OUTCOME_UNKNOWN'},
+            {'job_id': 11, 'state': 'rejected', 'error_code': 'ACTIVE_LEASE'},
+        ]
+        snapshot = await journal.get(admission.operation_id)
+        assert snapshot is not None
+        assert snapshot.status == 'succeeded'
+        assert snapshot.result is not None
+        assert {
+            key: snapshot.result[key]
+            for key in ('processed', 'rejected', 'succeeded', 'total')
+        } == {'processed': 3, 'rejected': 2, 'succeeded': 1, 'total': 3}
+    finally:
+        await journal.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_all_duplicate_admission_reuses_frozen_operation(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await database.open()
+    await journal.open()
+    try:
+        await seed_retry_jobs(database, tmp_path, count=3)
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            control_journal=journal,
+        )
+        first = await manager.admit_retry_all_failed(manager_subject='manager')
+        await database.execute("UPDATE upload_jobs SET state='paused' WHERE id=9")
+
+        second = await manager.admit_retry_all_failed(manager_subject='manager')
+
+        assert second.operation_id == first.operation_id
+        assert second.total == first.total == 3
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM upload_retry_batches '
+                "WHERE state IN ('accepted','running')"
+            )
+            == 1
+        )
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM upload_retry_batch_items ' 'WHERE operation_id=?',
+                (first.operation_id,),
+            )
+            == 3
+        )
+    finally:
+        await journal.close()
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_all_recovers_after_restart_without_reprocessing_terminal_items(
+    tmp_path: Path,
+) -> None:
+    upload_path = tmp_path / 'upload.sqlite3'
+    control_path = tmp_path / 'control.sqlite3'
+    database = BiliUploadDatabase(str(upload_path))
+    journal = ControlOperationJournal(control_path)
+    await database.open()
+    await journal.open()
+    await seed_retry_jobs(database, tmp_path, count=101)
+    manager, _, _ = make_manager(
+        database, FakeProtocol(archive_response()), tmp_path, control_journal=journal
+    )
+    admission = await manager.admit_retry_all_failed(manager_subject='manager')
+    assert await manager.run_retry_batch_once() == admission.operation_id
+    await journal.close()
+    await database.close()
+
+    restarted_database = BiliUploadDatabase(str(upload_path))
+    restarted_journal = ControlOperationJournal(control_path)
+    await restarted_database.open()
+    await restarted_journal.open()
+    try:
+        restarted, _, _ = make_manager(
+            restarted_database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            control_journal=restarted_journal,
+        )
+        await restarted.recover_retry_batches()
+        assert await restarted.run_retry_batch_once() == admission.operation_id
+
+        snapshot = await restarted_journal.get(admission.operation_id)
+        assert snapshot is not None
+        assert snapshot.status == 'succeeded'
+        assert snapshot.result is not None
+        assert {
+            key: snapshot.result[key]
+            for key in ('processed', 'rejected', 'succeeded', 'total')
+        } == {'processed': 101, 'rejected': 0, 'succeeded': 101, 'total': 101}
+        assert (
+            await restarted_database.scalar(
+                'SELECT COUNT(*) FROM upload_retry_batch_items '
+                "WHERE operation_id=? AND state='succeeded'",
+                (admission.operation_id,),
+            )
+            == 101
+        )
+    finally:
+        await restarted_journal.close()
+        await restarted_database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_recovers_upload_orphan_and_fails_control_orphan(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await database.open()
+    await journal.open()
+    try:
+        await seed_retry_jobs(database, tmp_path, count=1)
+        await database.write(
+            lambda connection: (
+                connection.execute(
+                    'INSERT INTO upload_retry_batches('
+                    'operation_id,state,total_items,manager_subject,created_at,'
+                    "updated_at) VALUES('upload-orphan','accepted',1,'manager',1,1)"
+                ),
+                connection.execute(
+                    'INSERT INTO upload_retry_batch_items('
+                    'operation_id,job_id,state,error_code) '
+                    "VALUES('upload-orphan',9,'queued',NULL)"
+                ),
+            )
+        )
+        await journal.admit(
+            operation_id='control-orphan',
+            lane='upload-retry',
+            kind='retry-failed',
+            target_key='control-orphan',
+            steps=(ControlStepInput(key='quantum:0'),),
+            result={'processed': 0, 'total': 1, 'succeeded': 0, 'rejected': 0},
+        )
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            control_journal=journal,
+        )
+
+        await manager.recover_retry_batches()
+
+        upload_orphan = await journal.get('upload-orphan')
+        assert upload_orphan is not None
+        assert upload_orphan.status == 'accepted'
+        assert await manager.run_retry_batch_once() == 'control-orphan'
+        control_orphan = await journal.get('control-orphan')
+        assert control_orphan is not None
+        assert control_orphan.status == 'failed'
+        assert control_orphan.error_code == 'UPLOAD_RETRY_BATCH_MISSING'
+        assert await manager.run_retry_batch_once() == 'upload-orphan'
+        recovered = await journal.get('upload-orphan')
+        assert recovered is not None
+        assert recovered.status == 'succeeded'
+    finally:
+        await journal.close()
         await database.close()
 
 
@@ -1820,6 +2385,34 @@ async def test_manual_danmaku_backfill_queues_an_approved_disabled_branch(
 
 
 @pytest.mark.asyncio
+async def test_session_batch_can_queue_manual_danmaku_backfill(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'batch.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path, state='approved')
+        for part_id in (11, 12):
+            xml_path = tmp_path / 'batch-p{}.xml'.format(part_id)
+            xml_path.write_text('<i><d p="1,1,25,16777215">弹幕</d></i>')
+            await database.execute(
+                'UPDATE upload_parts SET xml_path=?,cid=? WHERE id=?',
+                (str(xml_path), 100 + part_id, part_id),
+            )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        results = await manager.run_session_batch(
+            'backfill_danmaku', (1,), manager_subject='manager'
+        )
+
+        assert [(item.target_id, item.accepted, item.message) for item in results] == [
+            (1, True, '已排队回灌 2 个分 P 的弹幕')
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_skip_upload_removes_unstarted_job_but_keeps_local_files(
     tmp_path: Path,
 ) -> None:
@@ -2035,7 +2628,7 @@ async def test_session_without_upload_job_can_switch_upload_intent(
             'SELECT upload_intent FROM recording_sessions WHERE id=1'
         )
 
-        assert upload_message == '本场录像将在文件就绪后上传'
+        assert upload_message == '本场录像将在录制结束后创建上传任务'
         assert upload_intent == 'upload'
         assert skip_message == '本场录像已设为不上传'
         assert skip_intent == 'skip'
