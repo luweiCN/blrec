@@ -84,6 +84,7 @@ class RuntimeProbe:
     content_reader = None
     task_actions = None
     run_recording_session_action = None
+    run_recording_session_batch = None
     session_submission_manager = None
     retention_manager = None
     policy_manager = None
