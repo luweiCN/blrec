@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 from dataclasses import replace
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import Mock
 
 import pytest
@@ -12,7 +12,7 @@ import requests
 
 import blrec.setting  # noqa: F401 - initializes core imports
 from blrec.bili.live import Live
-from blrec.bili.live_monitor import LiveMonitor
+from blrec.bili.live_monitor import LiveEventListener, LiveMonitor
 from blrec.core.operators.request_exception_handler import RequestExceptionHandler
 from blrec.core.operators.stream_fetcher import StreamFetcher
 from blrec.core.operators.stream_url_resolver import StreamURLResolver
@@ -79,7 +79,9 @@ class FakeImpl:
 
 
 def make_live(
-    monkeypatch: pytest.MonkeyPatch, clock: list[float]
+    monkeypatch: pytest.MonkeyPatch,
+    clock: list[float],
+    streams: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[Live, list[int]]:
     live = object.__new__(Live)
     live._room_id = 100
@@ -93,7 +95,7 @@ def make_live(
         qn: int = 10000, api_platform: str = 'web'
     ) -> list[dict[str, Any]]:
         calls.append(qn)
-        return stream_data()
+        return stream_data() if streams is None else streams
 
     monkeypatch.setattr(live, 'get_live_streams', get_live_streams)
     return live, calls
@@ -120,10 +122,20 @@ class StartRecorderOnAvailable:
     def __init__(self, recorder: StreamRecorder) -> None:
         self._recorder = recorder
 
-    async def on_live_stream_available(self, live: Live, snapshot: object) -> None:
+    async def on_live_stream_snapshot_available(
+        self, live: Live, snapshot: object
+    ) -> None:
         await self._recorder.start_with_stream_snapshot(
             snapshot  # type: ignore[arg-type]
         )
+
+
+class LegacyStreamListener(LiveEventListener):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def on_live_stream_available(self, live: Live) -> None:
+        self.calls += 1
 
 
 @pytest.mark.asyncio
@@ -142,6 +154,60 @@ async def test_flv_monitor_snapshot_is_seeded_without_second_play_request(
     assert len(play_calls) == 1
     assert recorder._impl.started == 1
     assert recorder._impl.seeded.url.endswith('/live.flv?qn=10000')
+
+
+@pytest.mark.asyncio
+async def test_snapshot_event_bridges_to_legacy_one_argument_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live, _play_calls = make_live(monkeypatch, [100.0])
+    monitor = LiveMonitor(Mock(), live)
+    listener = LegacyStreamListener()
+    monitor.add_listener(listener)
+
+    await monitor._check_if_stream_available()
+
+    assert listener.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unselectable_monitor_snapshot_falls_through_to_existing_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    streams = stream_data()
+    streams[0]['format'][0]['codec'][0]['codec_name'] = 'hevc'
+    clock = [100.0]
+    live, play_calls = make_live(monkeypatch, clock, streams)
+    monitor = LiveMonitor(Mock(), live)
+    monitor.configure_stream_request(10000, stream_format='flv')
+    recorder = make_recorder(live, monitor, 'flv')
+    snapshot = await live.get_live_stream_snapshot(
+        10000, stream_format='flv', stream_codec='avc'
+    )
+
+    await recorder.start_with_stream_snapshot(snapshot)
+
+    assert len(play_calls) == 1
+    assert recorder._impl.seeded is None
+    assert recorder._impl.started == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_monitor_snapshot_falls_through_to_existing_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    streams = stream_data()
+    streams[0]['format'][0]['codec'][0]['url_info'] = []
+    live, play_calls = make_live(monkeypatch, [100.0], streams)
+    monitor = LiveMonitor(Mock(), live)
+    recorder = make_recorder(live, monitor, 'flv')
+    snapshot = await live.get_live_stream_snapshot(10000, stream_format='flv')
+
+    await recorder.start_with_stream_snapshot(snapshot)
+
+    assert len(play_calls) == 1
+    assert recorder._impl.seeded is None
+    assert recorder._impl.started == 1
 
 
 @pytest.mark.asyncio
@@ -165,6 +231,63 @@ async def test_fmp4_monitor_snapshot_counts_as_first_debounce_success(
     assert len(play_calls) == 2
     assert recorder._impl.started == 1
     assert recorder._impl.seeded.url.endswith('/live.m3u8?qn=10000')
+
+
+@pytest.mark.asyncio
+async def test_failed_fmp4_confirmation_does_not_reseed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    live, play_calls = make_live(monkeypatch, clock)
+    monitor = LiveMonitor(Mock(), live)
+    recorder = make_recorder(live, monitor, 'fmp4')
+    recorder.fmp4_stream_timeout = 0
+    snapshot = await live.get_live_stream_snapshot(10000, stream_format='fmp4')
+
+    async def fail_confirmation(*args: object, **kwargs: object) -> object:
+        play_calls.append(10000)
+        raise RuntimeError('confirmation failed')
+
+    async def advance_one_second(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(live, 'get_live_streams', fail_confirmation)
+    monkeypatch.setattr('blrec.core.stream_recorder.asyncio.sleep', advance_one_second)
+    monkeypatch.setattr('blrec.core.stream_recorder.time.monotonic', lambda: clock[0])
+
+    await recorder.start_with_stream_snapshot(snapshot)
+
+    assert play_calls == [10000, 10000]
+    assert recorder._impl.seeded is None
+    assert recorder._impl.started == 1
+
+
+@pytest.mark.asyncio
+async def test_no_flv_fallback_still_waits_and_confirms_fmp4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    streams = stream_data()
+    streams[0]['format'] = [streams[0]['format'][1]]
+    clock = [100.0]
+    live, play_calls = make_live(monkeypatch, clock, streams)
+    monitor = LiveMonitor(Mock(), live)
+    monitor.configure_stream_request(10000, stream_format='flv')
+    recorder = make_recorder(live, monitor, 'flv')
+    monitor.add_listener(StartRecorderOnAvailable(recorder))  # type: ignore[arg-type]
+    sleeps: list[float] = []
+
+    async def advance_one_second(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr('blrec.core.stream_recorder.asyncio.sleep', advance_one_second)
+
+    await monitor._check_if_stream_available()
+
+    assert play_calls == [10000, 10000]
+    assert sleeps == [1]
+    assert recorder._impl.seeded.url.endswith('/live.m3u8?qn=10000')
+    assert recorder._impl.started == 1
 
 
 @pytest.mark.asyncio
@@ -272,3 +395,83 @@ async def test_real_403_resets_seed_and_rotates_before_fresh_resolution() -> Non
     assert values == ['https://alternative.example/live.flv']
     assert live.calls == [True]
     session.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_connection_failure_resets_seed_before_retrying_transfer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLive:
+        stream_headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def resolve_live_stream(self, *args: object, **kwargs: object) -> object:
+            self.calls += 1
+
+            class Resolution:
+                url = 'https://fresh.example/live.flv'
+                real_quality_number = 10000
+
+            return Resolution()
+
+    live = FakeLive()
+    holder = StreamParamHolder(quality_number=10000)
+    resolver = StreamURLResolver(live, Mock(), Mock(), holder)  # type: ignore[arg-type]
+
+    class Seed:
+        quality_number = 10000
+        api_platform = 'web'
+        stream_format = 'flv'
+        stream_codec = 'avc'
+        select_alternative = False
+        url = 'https://stale.example/live.flv'
+        real_quality_number = 10000
+
+    resolver.seed(Seed())  # type: ignore[arg-type]
+
+    def call_immediately(coro: Any) -> object:
+        try:
+            coro.send(None)
+        except StopIteration as completed:
+            return completed.value
+        raise AssertionError('fake coroutine unexpectedly suspended')
+
+    resolver._call_coroutine = call_immediately  # type: ignore[method-assign]
+    attempts = 0
+
+    def flaky_transfer(source: object) -> object:
+        def subscribe(observer: object, scheduler: object = None) -> object:
+            def on_next(url: str) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    observer.on_error(requests.ConnectionError('transfer failed'))
+                else:
+                    observer.on_next(url)
+
+            return source.subscribe(  # type: ignore[attr-defined,no-any-return]
+                on_next,
+                observer.on_error,  # type: ignore[attr-defined]
+                observer.on_completed,  # type: ignore[attr-defined]
+                scheduler=scheduler,
+            )
+
+        return reactivex.create(subscribe)  # type: ignore[arg-type,no-any-return]
+
+    monkeypatch.setattr(
+        'blrec.core.operators.request_exception_handler.time.sleep', lambda _: None
+    )
+    values: list[str] = []
+    errors: list[Exception] = []
+    params = StreamParams('flv', 10000, 'web', False)
+
+    resolver(reactivex.just(params)).pipe(
+        flaky_transfer, RequestExceptionHandler(resolver)
+    ).subscribe(values.append, errors.append)
+
+    assert errors == []
+    assert values == ['https://fresh.example/live.flv']
+    assert attempts == 2
+    assert live.calls == 1

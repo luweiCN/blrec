@@ -65,7 +65,7 @@ async def test_live_stream_snapshot_is_handed_to_stream_recorder() -> None:
     live.get_timestamp = AsyncMock(return_value=123)
     snapshot = object()
 
-    await recorder.on_live_stream_available(live, snapshot)
+    await recorder.on_live_stream_snapshot_available(live, snapshot)
 
     assert recorder._stream_available is True
     assert recorder._stream_recorder.stream_available_time == 123

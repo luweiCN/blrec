@@ -4,6 +4,7 @@ from typing import Iterator, Optional
 
 from loguru import logger
 
+from blrec.bili.helpers import extract_formats
 from blrec.bili.live import Live, LiveStreamSnapshot, StreamResolution
 from blrec.bili.live_monitor import LiveMonitor
 from blrec.bili.typing import QualityNumber, StreamFormat
@@ -278,27 +279,33 @@ class StreamRecorder(
                 )
                 stream_format = 'fmp4'
             self.hls_stream_available_time = self.stream_available_time
-        else:
-            if stream_format == 'fmp4':
-                self._logger.info('Waiting for the fmp4 stream becomes available...')
-                resolution = await self._wait_fmp4_stream(snapshot)
-                if resolution is not None:
-                    if self.stream_available_time is not None:
-                        self.hls_stream_available_time = (
-                            await self._live.get_timestamp()
-                        )
-                else:
-                    self._logger.warning(
-                        'The specified stream format (fmp4) is not available '
-                        f'in {self.fmp4_stream_timeout} seconcds, '
-                        'falling back to stream format (flv).'
-                    )
-                    stream_format = 'flv'
+            self._logger.info('Waiting for the fmp4 stream becomes available...')
+            resolution = await self._wait_fmp4_stream(snapshot)
+            snapshot = None
+        elif stream_format == 'fmp4':
+            self._logger.info('Waiting for the fmp4 stream becomes available...')
+            resolution = await self._wait_fmp4_stream(snapshot)
+            snapshot = None
+            if resolution is not None:
+                if self.stream_available_time is not None:
+                    self.hls_stream_available_time = await self._live.get_timestamp()
+            else:
+                self._logger.warning(
+                    'The specified stream format (fmp4) is not available '
+                    f'in {self.fmp4_stream_timeout} seconcds, '
+                    'falling back to stream format (flv).'
+                )
+                stream_format = 'flv'
 
         if resolution is None and snapshot is not None:
-            resolution = await self._live.resolve_live_stream(
-                self.quality_number, stream_format=stream_format, snapshot=snapshot
-            )
+            try:
+                resolution = self._live.resolve_live_stream_snapshot(
+                    snapshot, qn=self.quality_number, stream_format=stream_format
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                resolution = None
         self._change_impl(stream_format)
         if resolution is not None:
             self._impl.seed_stream_resolution(resolution)
@@ -332,12 +339,35 @@ class StreamRecorder(
         available = False  # debounce
         candidate_snapshot = snapshot
         while True:
+            resolution: Optional[StreamResolution] = None
             try:
-                resolution = await self._live.resolve_live_stream(
-                    self.quality_number,
-                    stream_format='fmp4',
-                    snapshot=candidate_snapshot,
-                )
+                if candidate_snapshot is None:
+                    resolution = await self._live.resolve_live_stream(
+                        self.quality_number, stream_format='fmp4'
+                    )
+                else:
+                    observed_fmp4 = bool(
+                        extract_formats(list(candidate_snapshot.streams), 'fmp4')
+                    )
+                    try:
+                        resolution = self._live.resolve_live_stream_snapshot(
+                            candidate_snapshot,
+                            qn=self.quality_number,
+                            stream_format='fmp4',
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        resolution = None
+                    if resolution is None:
+                        available = observed_fmp4
+                        if time.monotonic() > end_time:
+                            return None
+                        candidate_snapshot = None
+                        await asyncio.sleep(1)
+                        continue
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 available = False
                 if time.monotonic() > end_time:

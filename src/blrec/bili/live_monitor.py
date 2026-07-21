@@ -32,10 +32,13 @@ class LiveEventListener(EventListener):
     async def on_live_ended(self, live: Live) -> None:
         pass
 
-    async def on_live_stream_available(
-        self, live: Live, snapshot: Optional[LiveStreamSnapshot] = None
-    ) -> None:
+    async def on_live_stream_available(self, live: Live) -> None:
         pass
+
+    async def on_live_stream_snapshot_available(
+        self, live: Live, snapshot: LiveStreamSnapshot
+    ) -> None:
+        await self.on_live_stream_available(live)
 
     async def on_live_stream_reset(self, live: Live) -> None:
         pass
@@ -291,7 +294,9 @@ class LiveMonitor(EventEmitter[LiveEventListener], DanmakuListener, SwitchableMi
                     self._stream_available = True
                     flv_formats = extract_formats(streams, 'flv')
                     self._live._no_flv_stream = not flv_formats
-                    await self._emit('live_stream_available', self._live, snapshot)
+                    await self._emit(
+                        'live_stream_snapshot_available', self._live, snapshot
+                    )
                     break
             except asyncio.CancelledError:
                 self._logger.debug('Cancelled checking if stream available')

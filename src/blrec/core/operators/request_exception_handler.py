@@ -78,8 +78,12 @@ class RequestExceptionHandler:
             return False
 
     def _before_retry(self, exc: Exception) -> None:
-        if isinstance(
-            exc, requests.exceptions.HTTPError
-        ) and exc.response.status_code in (403, 404):
-            self._stream_url_resolver.reset()
+        if not self._should_retry(exc):
+            return
+        self._stream_url_resolver.reset()
+        if (
+            isinstance(exc, requests.exceptions.HTTPError)
+            and exc.response is not None
+            and exc.response.status_code in (403, 404)
+        ):
             self._stream_url_resolver.rotate_routes()

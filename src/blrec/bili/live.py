@@ -453,26 +453,51 @@ class Live:
         select_alternative: bool = False,
         snapshot: Optional[LiveStreamSnapshot] = None,
     ) -> StreamResolution:
-        usable = (
-            snapshot
-            if self._snapshot_matches(
-                snapshot,
-                qn=qn,
-                api_platform=api_platform,
-                stream_format=stream_format,
-                stream_codec=stream_codec,
-                select_alternative=select_alternative,
-                max_age_seconds=2,
-            )
-            else None
+        resolution = self.resolve_live_stream_snapshot(
+            snapshot,
+            qn=qn,
+            api_platform=api_platform,
+            stream_format=stream_format,
+            stream_codec=stream_codec,
+            select_alternative=select_alternative,
         )
-        streams = (
-            list(usable.streams)
-            if usable is not None
-            else await self.get_live_streams(qn, api_platform=api_platform)
-        )
+        if resolution is not None:
+            return resolution
+        streams = await self.get_live_streams(qn, api_platform=api_platform)
         resolution = self._select_stream(
             streams, qn, api_platform, stream_format, stream_codec, select_alternative
+        )
+        self._real_quality_number = resolution.real_quality_number
+        return resolution
+
+    def resolve_live_stream_snapshot(
+        self,
+        snapshot: Optional[LiveStreamSnapshot],
+        *,
+        qn: QualityNumber = 10000,
+        api_platform: ApiPlatform = 'web',
+        stream_format: StreamFormat = 'flv',
+        stream_codec: StreamCodec = 'avc',
+        select_alternative: bool = False,
+    ) -> Optional[StreamResolution]:
+        if not self._snapshot_matches(
+            snapshot,
+            qn=qn,
+            api_platform=api_platform,
+            stream_format=stream_format,
+            stream_codec=stream_codec,
+            select_alternative=select_alternative,
+            max_age_seconds=2,
+        ):
+            return None
+        assert snapshot is not None
+        resolution = self._select_stream(
+            list(snapshot.streams),
+            qn,
+            api_platform,
+            stream_format,
+            stream_codec,
+            select_alternative,
         )
         self._real_quality_number = resolution.real_quality_number
         return resolution

@@ -409,8 +409,16 @@ class Recorder(
         self._suppressed_live_start_time = None
         self._print_waiting_message()
 
-    async def on_live_stream_available(
-        self, live: Live, snapshot: Optional[LiveStreamSnapshot] = None
+    async def on_live_stream_available(self, live: Live) -> None:
+        await self._handle_live_stream_available(live, None)
+
+    async def on_live_stream_snapshot_available(
+        self, live: Live, snapshot: LiveStreamSnapshot
+    ) -> None:
+        await self._handle_live_stream_available(live, snapshot)
+
+    async def _handle_live_stream_available(
+        self, live: Live, snapshot: Optional[LiveStreamSnapshot]
     ) -> None:
         self._logger.debug('The live stream becomes available')
         self._stream_available = True
