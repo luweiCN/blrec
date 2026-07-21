@@ -156,6 +156,7 @@ class SettingsApplyReconciler:
             return
         self._stop_event.clear()
         self._worker = asyncio.create_task(self._run())
+        self._worker.add_done_callback(lambda _worker: self._idle_event.set())
         self.wake()
 
     def close_admission(self) -> None:
@@ -230,6 +231,9 @@ class SettingsApplyReconciler:
     async def wait_idle(self) -> None:
         while True:
             await self._idle_event.wait()
+            worker = self._worker
+            if worker is not None and worker.done():
+                await worker
             if await self._journal.queued_count(self.LANE) == 0:
                 return
             self._idle_event.clear()

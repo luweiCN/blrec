@@ -63,6 +63,36 @@ class BlockingSecondApplyReconciler(FakeApplyReconciler):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failing_method', ('recover_revision_gaps', 'claim_next'))
+@pytest.mark.parametrize('observer', ('wait_idle', 'shutdown'))
+async def test_settings_apply_worker_failure_reaches_lifecycle_waiters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_method: str, observer: str
+) -> None:
+    from blrec.control.operations import ControlOperationJournal
+
+    journal = ControlOperationJournal(tmp_path / 'control.sqlite3')
+    await journal.open()
+
+    async def apply(_target_key: str, _action: str) -> None:
+        pass
+
+    async def fail_journal_call(*_args: object, **_kwargs: object) -> object:
+        raise OSError('{} failed'.format(failing_method))
+
+    monkeypatch.setattr(journal, failing_method, fail_journal_call)
+    reconciler = SettingsApplyReconciler(journal, apply)
+    reconciler.start()
+    try:
+        with pytest.raises(OSError, match='{} failed'.format(failing_method)):
+            await asyncio.wait_for(getattr(reconciler, observer)(), timeout=0.2)
+    finally:
+        worker = reconciler._worker
+        if worker is not None:
+            await asyncio.gather(worker, return_exceptions=True)
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_global_patch_is_copy_on_write_and_dumps_once(tmp_path: Path) -> None:
     path = tmp_path / 'settings.toml'
     settings = Settings()
