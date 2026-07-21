@@ -105,6 +105,12 @@ describe('ClipLibraryComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('1 MB');
   });
 
+  it('owns vertical scrolling when the clip list exceeds the viewport', () => {
+    fixture.detectChanges();
+
+    expect(getComputedStyle(fixture.nativeElement).overflowY).toBe('auto');
+  });
+
   it('does not create an upload task until submission settings are confirmed', () => {
     fixture.detectChanges();
 

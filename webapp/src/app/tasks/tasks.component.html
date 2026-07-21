@@ -1,39 +1,41 @@
-<div class="tasks-page primary-page">
+<div class="tasks-page">
   <header class="tasks-page-header">
     <h2>房间管理</h2>
     <p>管理直播间的监控录制状态和自动投稿设置</p>
   </header>
-  <app-toolbar
-    [selection]="selection"
-    (selectionChange)="onSelectionChanged($event)"
-    [reverse]="reverse"
-    (reverseChange)="onReverseChanged($event)"
-    (filterChange)="filterTerm = $event"
-    [automaticSubmissionFilter]="automaticSubmissionFilter"
-    (automaticSubmissionFilterChange)="automaticSubmissionFilter = $event"
-    [submissionVisibilityFilter]="submissionVisibilityFilter"
-    (submissionVisibilityFilterChange)="submissionVisibilityFilter = $event"
-    [submissionAccountFilter]="submissionAccountFilter"
-    (submissionAccountFilterChange)="submissionAccountFilter = $event"
-    [submissionAccountOptions]="submissionAccountOptions"
-  ></app-toolbar>
-
-  <nz-spin
-    class="spinner"
-    [nzSize]="'large'"
-    [nzSpinning]="loading"
-    *ngIf="loading; else elseBlock"
-  ></nz-spin>
-  <ng-template #elseBlock>
-    <app-task-list
-      [dataList]="dataList | filterTasks: filterTerm"
+  <div class="tasks-page-content">
+    <app-toolbar
+      [selection]="selection"
+      (selectionChange)="onSelectionChanged($event)"
+      [reverse]="reverse"
+      (reverseChange)="onReverseChanged($event)"
+      (filterChange)="filterTerm = $event"
       [automaticSubmissionFilter]="automaticSubmissionFilter"
+      (automaticSubmissionFilterChange)="automaticSubmissionFilter = $event"
       [submissionVisibilityFilter]="submissionVisibilityFilter"
+      (submissionVisibilityFilterChange)="submissionVisibilityFilter = $event"
       [submissionAccountFilter]="submissionAccountFilter"
-      [roomUploadPolicies]="roomUploadPolicies"
-      (roomUploadPoliciesRefresh)="refreshRoomUploadPolicies()"
-    ></app-task-list>
-  </ng-template>
+      (submissionAccountFilterChange)="submissionAccountFilter = $event"
+      [submissionAccountOptions]="submissionAccountOptions"
+    ></app-toolbar>
+
+    <nz-spin
+      class="spinner"
+      [nzSize]="'large'"
+      [nzSpinning]="loading"
+      *ngIf="loading; else elseBlock"
+    ></nz-spin>
+    <ng-template #elseBlock>
+      <app-task-list
+        [dataList]="dataList | filterTasks: filterTerm"
+        [automaticSubmissionFilter]="automaticSubmissionFilter"
+        [submissionVisibilityFilter]="submissionVisibilityFilter"
+        [submissionAccountFilter]="submissionAccountFilter"
+        [roomUploadPolicies]="roomUploadPolicies"
+        (roomUploadPoliciesRefresh)="refreshRoomUploadPolicies()"
+      ></app-task-list>
+    </ng-template>
+  </div>
 </div>
 
 <button

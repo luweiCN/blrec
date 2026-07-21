@@ -187,10 +187,13 @@ describe('TasksComponent', () => {
     expect(component.selection).toBe(DataSelection.ALL);
   });
 
-  it('uses one shared primary-page container', () => {
+  it('uses the full list width with the shared content spacing', () => {
     expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
-      1,
+      0,
     );
+    const content = fixture.nativeElement.querySelector('.tasks-page-content');
+    expect(content).not.toBeNull();
+    expect(getComputedStyle(content).paddingLeft).toBe('24px');
   });
 
   it('identifies the page as room management', () => {

@@ -1,5 +1,8 @@
 :host {
+  box-sizing: border-box;
   display: block;
+  height: 100%;
+  overflow: auto;
 }
 
 .clip-library-page {
@@ -100,5 +103,11 @@ video {
     display: block;
     width: auto !important;
     border: 0;
+  }
+}
+
+@media (max-width: 575px) {
+  .clip-library-page {
+    padding: 0 12px 12px;
   }
 }

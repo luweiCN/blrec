@@ -31,8 +31,13 @@ describe('UploadTasksComponent', () => {
       fixture.nativeElement.querySelectorAll('app-recording-sessions').length,
     ).toBe(1);
     expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
-      1,
+      0,
     );
+    expect(
+      getComputedStyle(
+        fixture.nativeElement.querySelector('.upload-tasks-page'),
+      ).paddingRight,
+    ).toBe('0px');
     expect(fixture.nativeElement.querySelector('app-clip-library')).toBeNull();
     expect('clipLibrary' in fixture.componentInstance).toBeFalse();
     expect(playerLoader).not.toHaveBeenCalled();

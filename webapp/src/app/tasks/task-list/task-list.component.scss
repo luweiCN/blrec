@@ -1,9 +1,7 @@
 @use '../../shared/styles/layout';
 
 :host {
-  @extend %inner-content;
   display: block;
-  padding: 12px;
 }
 
 .task-table {

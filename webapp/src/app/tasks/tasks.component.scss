@@ -3,18 +3,14 @@
 
 :host {
   @extend %inner-content;
-  display: flex;
-  flex-direction: column;
-  // flex-direction: column-reverse;
+  box-sizing: border-box;
+  display: block;
   padding: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .tasks-page {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
+  min-height: 100%;
 }
 
 .tasks-page-header {
@@ -32,13 +28,18 @@
   }
 }
 
-.tasks-page app-task-list {
-  min-height: 0;
-  flex: 1;
+.tasks-page-content {
+  padding: 0 24px 24px;
 }
 
 .add-task-button {
   position: fixed;
   bottom: 5vh;
   right: 5vw;
+}
+
+@media (max-width: 575px) {
+  .tasks-page-content {
+    padding: 0 12px 12px;
+  }
 }
