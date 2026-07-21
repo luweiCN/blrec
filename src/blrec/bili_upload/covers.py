@@ -749,15 +749,16 @@ class CoverResolver:
             if self._closed:
                 return
             self._closed = True
-            tasks = tuple(self._source_tasks.values()) + tuple(
-                self._live_tasks.values()
-            )
-            for task in tasks:
+            source_tasks = tuple(self._source_tasks.values())
+            if source_tasks:
+                await asyncio.gather(*source_tasks, return_exceptions=True)
+            self._source_tasks.clear()
+            live_tasks = tuple(self._live_tasks.values())
+            for task in live_tasks:
                 if not task.done():
                     task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            self._source_tasks.clear()
+            if live_tasks:
+                await asyncio.gather(*live_tasks, return_exceptions=True)
             self._live_tasks.clear()
             session, self._session = self._session, None
             if session is not None:

@@ -67,10 +67,6 @@ class CoverDownloader(
 
     def _do_enable(self) -> None:
         self._sha1_set.clear()
-        self._cover_bytes.clear()
-        self._broadcast_identity = None
-        self._cover_url = ''
-        self._metadata_fallback_identity = None
         self._stream_recorder.add_listener(self)
         self._logger.debug('Enabled cover downloader')
 

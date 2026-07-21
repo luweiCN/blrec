@@ -1229,6 +1229,58 @@ async def test_live_cover_close_cancels_and_awaits_inflight_work(
 
 
 @pytest.mark.asyncio
+async def test_live_cover_close_drains_inflight_local_file_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_source(local_path: str) -> Any:
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(5)
+            return None
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        CoverResolver, '_inspect_local_source', staticmethod(blocking_source)
+    )
+    resolver = CoverResolver(
+        database,
+        CoverLibrary(database, tmp_path / 'covers'),
+        FakeProtocol(),
+        bundle_loader=lambda account_id: async_value(account_id),
+    )
+    request = asyncio.create_task(
+        resolver.live_url(
+            1,
+            local_path=str(tmp_path / 'recorded.jpg'),
+            source_url='https://i0.hdslb.com/live.jpg',
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    closing = asyncio.create_task(resolver.close())
+    try:
+        await asyncio.sleep(0.05)
+        assert not closing.done()
+        assert not finished.is_set()
+    finally:
+        release.set()
+
+    await asyncio.wait_for(closing, timeout=5)
+    assert finished.is_set()
+    result = await asyncio.gather(request, return_exceptions=True)
+    assert isinstance(result[0], RuntimeError)
+    assert str(result[0]) == 'cover resolver is closed'
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_live_cover_unknown_upload_is_shared_but_never_retried_or_cached(
     tmp_path: Path,
 ) -> None:

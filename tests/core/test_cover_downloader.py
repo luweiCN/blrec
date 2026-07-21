@@ -207,3 +207,42 @@ async def test_overlapping_parts_share_cover_without_blocking_event_loop(
     assert fetch_calls == 1
     assert (tmp_path / 'p1.jpg').read_bytes() == b'cover'
     assert (tmp_path / 'p2.jpg').read_bytes() == b'cover'
+
+
+@pytest.mark.asyncio
+async def test_disable_enable_keeps_success_cache_for_same_broadcast(
+    tmp_path: Path,
+) -> None:
+    live = _Live()
+    downloader = _downloader(live)
+    downloader.enable()
+    try:
+        await downloader.on_video_file_completed(str(tmp_path / 'p1.flv'))
+        downloader.disable()
+        downloader.enable()
+        await downloader.on_video_file_completed(str(tmp_path / 'p2.flv'))
+    finally:
+        downloader.disable()
+
+    assert live.session.calls == ['https://i0.hdslb.com/live.jpg']
+    assert (tmp_path / 'p1.jpg').read_bytes() == b'cover'
+    assert (tmp_path / 'p2.jpg').read_bytes() == b'cover'
+
+
+@pytest.mark.asyncio
+async def test_disable_enable_keeps_failed_fallback_for_same_broadcast(
+    tmp_path: Path,
+) -> None:
+    live = _Live(cover='')
+    downloader = _downloader(live)
+    downloader.enable()
+    try:
+        await downloader.on_video_file_completed(str(tmp_path / 'p1.flv'))
+        downloader.disable()
+        downloader.enable()
+        await downloader.on_video_file_completed(str(tmp_path / 'p2.flv'))
+    finally:
+        downloader.disable()
+
+    assert live.update_info_calls == 1
+    assert live.session.calls == []
