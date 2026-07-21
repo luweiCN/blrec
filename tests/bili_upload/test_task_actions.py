@@ -640,7 +640,9 @@ async def test_job_batch_uses_one_transaction_and_isolates_rejected_items(
             database, FakeProtocol(archive_response()), tmp_path
         )
         wakeups = []
-        manager._wake_uploads = lambda: wakeups.append('wake')  # type: ignore[attr-defined]
+        manager._wake_uploads = (  # type: ignore[attr-defined]
+            lambda: wakeups.append('wake')
+        )
         statements: List[str] = []
         await database.read(
             lambda connection: connection.set_trace_callback(statements.append)

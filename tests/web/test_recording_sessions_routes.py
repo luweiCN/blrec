@@ -32,7 +32,6 @@ from blrec.bili_upload.recording_content import (
     RecordingMediaDescriptor,
 )
 from blrec.bili_upload.session_submission import SessionSubmissionView
-from blrec.bili_upload.task_actions import UploadTaskActionRejected
 from blrec.flv.common import create_metadata_tag, parse_metadata
 from blrec.flv.io import FlvReader, FlvWriter
 from blrec.flv.models import FlvHeader

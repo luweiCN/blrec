@@ -99,8 +99,8 @@ async def test_global_patch_is_copy_on_write_and_dumps_once(tmp_path: Path) -> N
     settings._path = str(path)
     settings.dump()
     coordinator = SettingsFileWorkCoordinator()
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=coordinator
     )
     dumps = 0
     original_atomic_dump = coordinator.atomic_dump
@@ -155,10 +155,12 @@ async def test_failed_global_dump_keeps_live_settings_unchanged(tmp_path: Path) 
     settings = Settings()
     settings._path = str(tmp_path / 'settings.toml')
     coordinator = SettingsFileWorkCoordinator()
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=coordinator
     )
-    coordinator.atomic_dump = AsyncMock(side_effect=OSError('disk full'))  # type: ignore[method-assign]
+    coordinator.atomic_dump = AsyncMock(  # type: ignore[method-assign]
+        side_effect=OSError('disk full')
+    )
 
     try:
         with pytest.raises(OSError, match='disk full'):
@@ -177,8 +179,8 @@ async def test_output_directory_is_validated_in_the_file_worker(tmp_path: Path) 
     settings._path = str(tmp_path / 'settings.toml')
     original_out_dir = settings.output.out_dir
     coordinator = SettingsFileWorkCoordinator()
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=coordinator
     )
 
     try:
@@ -199,8 +201,8 @@ async def test_global_and_task_patches_share_one_mutation_order(tmp_path: Path) 
     settings = Settings(tasks=[{'roomId': 100}])
     settings._path = str(tmp_path / 'settings.toml')
     coordinator = SettingsFileWorkCoordinator()
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=coordinator
     )
     first_entered = asyncio.Event()
     first_release = asyncio.Event()
@@ -250,8 +252,8 @@ async def test_cancelled_persisted_patch_finishes_before_a_second_patch(
     settings.dump()
     coordinator = SettingsFileWorkCoordinator()
     reconciler = FakeApplyReconciler()
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=coordinator
     )
     manager.set_apply_reconciler(reconciler)  # type: ignore[arg-type]
     first_replace_entered = Event()
@@ -640,8 +642,8 @@ async def test_patch_persists_before_submitting_background_apply(
     settings._path = str(path)
     coordinator = SettingsFileWorkCoordinator()
     reconciler = FakeApplyReconciler()
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=coordinator  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=coordinator
     )
     manager.set_apply_reconciler(reconciler)  # type: ignore[arg-type]
 
@@ -674,8 +676,8 @@ async def test_patch_returns_while_apply_is_still_blocked(tmp_path: Path) -> Non
         await release.wait()
 
     reconciler = SettingsApplyReconciler(journal, blocked_apply)
-    manager = SettingsManager(
-        FakeSettingsApplication(), settings, file_work=file_work  # type: ignore[arg-type]
+    manager = SettingsManager(  # type: ignore[arg-type]
+        FakeSettingsApplication(), settings, file_work=file_work
     )
     manager.set_apply_reconciler(reconciler)
     reconciler.start()
