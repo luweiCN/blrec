@@ -72,4 +72,66 @@ describe('PartPlayerFactory', () => {
       jasmine.objectContaining({ lazyLoad: false }),
     );
   });
+
+  it('marks an MSE buffer failure as recoverable instead of a codec error', () => {
+    const onEvent = jasmine.createSpy<PartPlayerEventHandler>('onEvent');
+    new PartPlayerFactory().attachFlv(
+      document.createElement('video'),
+      '/api/media?signed',
+      {
+        playbackMode: 'seekable',
+        durationMs: 10_000,
+        fileSizeBytes: 1_024,
+      },
+      onEvent,
+    );
+    const errorListener = player.on.calls.argsFor(0)[1] as (
+      type: unknown,
+      detail: unknown,
+      info: unknown,
+    ) => void;
+
+    errorListener(
+      mpegts.ErrorTypes.MEDIA_ERROR,
+      mpegts.ErrorDetails.MEDIA_MSE_ERROR,
+      { code: 22 },
+    );
+
+    expect(onEvent).toHaveBeenCalledWith({
+      type: 'error',
+      message: '浏览器视频缓冲异常',
+      recoverable: true,
+    });
+  });
+
+  it('only reports codec incompatibility for the explicit codec error', () => {
+    const onEvent = jasmine.createSpy<PartPlayerEventHandler>('onEvent');
+    new PartPlayerFactory().attachFlv(
+      document.createElement('video'),
+      '/api/media?signed',
+      {
+        playbackMode: 'seekable',
+        durationMs: 10_000,
+        fileSizeBytes: 1_024,
+      },
+      onEvent,
+    );
+    const errorListener = player.on.calls.argsFor(0)[1] as (
+      type: unknown,
+      detail: unknown,
+      info: unknown,
+    ) => void;
+
+    errorListener(
+      mpegts.ErrorTypes.MEDIA_ERROR,
+      mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED,
+      {},
+    );
+
+    expect(onEvent).toHaveBeenCalledWith({
+      type: 'error',
+      message: '该录像的编码当前浏览器无法播放',
+      recoverable: false,
+    });
+  });
 });

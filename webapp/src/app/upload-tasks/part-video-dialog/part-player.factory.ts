@@ -43,10 +43,7 @@ export class PartPlayerFactory {
     player.on(
       mpegts.Events.ERROR,
       (type: unknown, detail: unknown, info: unknown) => {
-        onEvent({
-          type: 'error',
-          message: this.describeError(type, detail, info),
-        });
+        onEvent({ type: 'error', ...this.describeError(type, detail, info) });
       },
     );
     let firstFrameReported = false;
@@ -76,21 +73,52 @@ export class PartPlayerFactory {
     };
   }
 
-  private describeError(type: unknown, detail: unknown, info: unknown): string {
-    const code = this.errorCode(info);
-    if (code !== null) {
-      return `读取本地视频失败（HTTP ${code}）`;
-    }
-    if (type === mpegts.ErrorTypes.MEDIA_ERROR) {
-      return '该录像的编码当前浏览器无法播放';
-    }
+  private describeError(
+    type: unknown,
+    detail: unknown,
+    info: unknown,
+  ): { readonly message: string; readonly recoverable: boolean } {
     if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
-      return '读取本地视频失败，请检查连接后重新打开';
+      const code = this.errorCode(info);
+      return {
+        message:
+          code === null
+            ? '读取本地视频失败'
+            : `读取本地视频失败（HTTP ${code}）`,
+        recoverable: true,
+      };
+    }
+    if (detail === mpegts.ErrorDetails.MEDIA_MSE_ERROR) {
+      return {
+        message: '浏览器视频缓冲异常',
+        recoverable: true,
+      };
+    }
+    if (detail === mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED) {
+      return {
+        message: '该录像的编码当前浏览器无法播放',
+        recoverable: false,
+      };
+    }
+    if (
+      detail === mpegts.ErrorDetails.MEDIA_FORMAT_ERROR ||
+      detail === mpegts.ErrorDetails.MEDIA_FORMAT_UNSUPPORTED
+    ) {
+      return {
+        message: '该录像的媒体格式异常，当前浏览器无法继续播放',
+        recoverable: false,
+      };
     }
     if (typeof detail === 'string' && detail.length > 0) {
-      return `本地视频播放失败：${detail}`;
+      return {
+        message: `本地视频播放失败：${detail}`,
+        recoverable: false,
+      };
     }
-    return '本地视频播放失败，请重新打开后再试';
+    return {
+      message: '本地视频播放失败，请重新打开后再试',
+      recoverable: false,
+    };
   }
 
   private errorCode(info: unknown): number | null {

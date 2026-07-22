@@ -11,7 +11,11 @@ export type PartPlayerEvent =
   | { readonly type: 'attached' }
   | { readonly type: 'first_frame' }
   | { readonly type: 'stalled' }
-  | { readonly type: 'error'; readonly message: string };
+  | {
+      readonly type: 'error';
+      readonly message: string;
+      readonly recoverable: boolean;
+    };
 
 export type PartPlayerEventHandler = (event: PartPlayerEvent) => void;
 

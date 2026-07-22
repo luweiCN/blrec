@@ -20,12 +20,20 @@
       controls
       preload="metadata"
       [attr.src]="isFlv ? null : mediaUrl"
+      (loadedmetadata)="handleMediaMetadataLoaded()"
       (loadeddata)="handleFirstFrame()"
+      (canplay)="handleMediaCanPlay()"
       (playing)="handleFirstFrame()"
+      (pause)="handleMediaPause()"
+      (ended)="handleMediaEnded()"
       (timeupdate)="handleTimeUpdate()"
+      (volumechange)="handleVolumeChange($event)"
       (error)="handleNativeMediaError()"
       (stalled)="handleNativeMediaStalled()"
     ></video>
+    <p *ngIf="mediaUrl && !error" class="hint">
+      空格播放/暂停 · ←/→ 快退快进 · ↑/↓ 调节音量 · M 静音
+    </p>
     <p *ngIf="mediaAccess?.snapshotId" class="hint">
       当前可播放至打开播放器时的录制进度；重新打开可读取新增内容。
     </p>

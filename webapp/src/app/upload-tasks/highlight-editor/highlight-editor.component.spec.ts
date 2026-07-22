@@ -212,6 +212,10 @@ describe('HighlightEditorComponent', () => {
   });
 
   beforeEach(async () => {
+    localStorage.removeItem('blrec-playback-volume');
+    localStorage.removeItem('blrec-playback-position-11');
+    localStorage.removeItem('blrec-playback-position-12');
+    localStorage.removeItem('blrec-playback-position-13');
     highlights = jasmine.createSpyObj<HighlightService>('HighlightService', [
       'getTimeline',
       'listClips',
@@ -464,7 +468,11 @@ describe('HighlightEditorComponent', () => {
       partIndex: 3,
       mediaKind: 'native',
     });
-    callbacks.onEvent?.({ type: 'error', message: '旧播放器错误' });
+    callbacks.onEvent?.({
+      type: 'error',
+      message: '旧播放器错误',
+      recoverable: false,
+    });
 
     expect(component.mediaError).toBeNull();
   }));
@@ -477,7 +485,11 @@ describe('HighlightEditorComponent', () => {
       mediaKind: 'native',
     });
     playerFactory.attachFlv.and.callFake((_element, _url, _source, onEvent) => {
-      onEvent({ type: 'error', message: '播放器同步失败' });
+      onEvent({
+        type: 'error',
+        message: '播放器同步失败',
+        recoverable: false,
+      });
       return player;
     });
     player.pause.calls.reset();
@@ -1845,7 +1857,87 @@ describe('HighlightEditorComponent', () => {
     expect(pause).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the custom timeline visible in fullscreen mode', () => {
+  it('starts at half volume and remembers custom volume changes', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+
+    expect(video.volume).toBe(0.5);
+
+    component.setVolume(0.65);
+    expect(video.volume).toBe(0.65);
+    expect(localStorage.getItem('blrec-playback-volume')).toBe('0.65');
+  });
+
+  it('restores the remembered position when the editor is reopened', fakeAsync(() => {
+    fixture.destroy();
+    localStorage.setItem('blrec-playback-position-11', '18.500');
+
+    fixture = TestBed.createComponent(HighlightEditorComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    flushMicrotasks();
+
+    expect(component.playheadMs).toBe(18_500);
+  }));
+
+  it('supports repeated arrow seeking and space playback shortcuts', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    video.currentTime = 2;
+
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'ArrowRight', bubbles: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        code: 'ArrowRight',
+        repeat: true,
+        bubbles: true,
+      }),
+    );
+
+    expect(video.currentTime).toBe(12);
+
+    const play = spyOn(video, 'play').and.returnValue(Promise.resolve());
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'Space', bubbles: true }),
+    );
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it('really reloads media when reopening after an error', () => {
+    component.mediaError = '播放器出错';
+    recordings.createMediaAccess.calls.reset();
+
+    component.reopenMedia();
+
+    expect(recordings.createMediaAccess).toHaveBeenCalledOnceWith(11);
+    expect(component.mediaError).toBeNull();
+  });
+
+  it('rebuilds the player once after a recoverable runtime error', fakeAsync(() => {
+    const callbacks: { onEvent?: PartPlayerEventHandler } = {};
+    playerFactory.attachFlv.and.callFake((_element, _url, _source, handler) => {
+      callbacks.onEvent = handler;
+      return player;
+    });
+    component.selectPart(timeline.parts[1]);
+    flushMicrotasks();
+    recordings.createMediaAccess.calls.reset();
+
+    callbacks.onEvent?.({
+      type: 'error',
+      message: '浏览器视频缓冲异常',
+      recoverable: true,
+    });
+
+    expect(recordings.createMediaAccess).toHaveBeenCalledOnceWith(12);
+    expect(component.mediaError).toBeNull();
+  }));
+
+  it('enters system fullscreen without replacing webpage fullscreen', () => {
     const workbench = fixture.nativeElement.querySelector(
       '.editor-workbench',
     ) as HTMLElement;
@@ -1856,9 +1948,50 @@ describe('HighlightEditorComponent', () => {
       value: requestFullscreen,
     });
 
-    component.toggleFullscreen();
+    component.toggleSystemFullscreen();
 
     expect(requestFullscreen).toHaveBeenCalled();
+    component.toggleWebFullscreen();
+    expect(component.isWebFullscreen).toBeTrue();
+  });
+
+  it('uses webpage fullscreen without calling the browser fullscreen API', () => {
+    const workbench = fixture.nativeElement.querySelector(
+      '.editor-workbench',
+    ) as HTMLElement;
+    const requestFullscreen = jasmine.createSpy('requestFullscreen');
+    Object.defineProperty(workbench, 'requestFullscreen', {
+      value: requestFullscreen,
+    });
+
+    component.toggleWebFullscreen();
+    fixture.detectChanges();
+
+    expect(workbench.classList).toContain('web-fullscreen');
+    expect(workbench.classList).toContain('player-fullscreen');
+    expect(requestFullscreen).not.toHaveBeenCalled();
+    expect(getComputedStyle(workbench).position).toBe('fixed');
+    expect(
+      getComputedStyle(
+        workbench.querySelector('.video-stage video') as HTMLVideoElement,
+      ).objectFit,
+    ).toBe('contain');
+    expect(
+      getComputedStyle(
+        workbench.querySelector('.timeline-panel') as HTMLElement,
+      ).position,
+    ).toBe('absolute');
+    expect(
+      getComputedStyle(
+        workbench.querySelector('.editor-toolbar') as HTMLElement,
+      ).opacity,
+    ).toBe('0');
+
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape' }),
+    );
+    fixture.detectChanges();
+    expect(workbench.classList).not.toContain('web-fullscreen');
   });
 
   it('cancels only the selected pending range', () => {

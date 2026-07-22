@@ -19,6 +19,8 @@
     <section
       #editorWorkbench
       class="editor-workbench"
+      [class.web-fullscreen]="isWebFullscreen"
+      [class.player-fullscreen]="isWebFullscreen || isSystemFullscreen"
       aria-label="视频剪辑工作台"
     >
       <div class="editor-toolbar">
@@ -32,7 +34,7 @@
         <button
           type="button"
           class="dark-text-button"
-          (click)="selectPart(part, playheadMs - editorPartStartMs)"
+          (click)="reopenMedia()"
         >
           重新打开录像
         </button>
@@ -52,10 +54,12 @@
           preload="metadata"
           [attr.src]="part.mediaKind === 'flv' ? null : mediaUrl"
           (click)="togglePlayback()"
-          (loadedmetadata)="handleTimeUpdate()"
+          (dblclick)="handleVideoDoubleClick($event)"
+          (loadedmetadata)="handleMediaMetadataLoaded()"
           (canplay)="handleMediaCanPlay()"
           (play)="handleMediaPlay()"
           (pause)="handleMediaPause()"
+          (volumechange)="handleVolumeChange($event)"
           (timeupdate)="handleTimeUpdate()"
           (ended)="handleMediaEnded()"
           (error)="handleMediaError()"
@@ -85,19 +89,26 @@
             min="0"
             max="1"
             step="0.05"
-            value="1"
+            [value]="playbackVolume"
             aria-label="播放音量"
             (input)="setVolume($any($event.target).value)"
           />
           <button
             type="button"
             class="timeline-control"
-            (click)="toggleFullscreen()"
+            (click)="toggleWebFullscreen()"
           >
-            全屏
+            {{ isWebFullscreen ? "退出网页全屏" : "网页全屏" }}
+          </button>
+          <button
+            type="button"
+            class="timeline-control"
+            (click)="toggleSystemFullscreen()"
+          >
+            {{ isSystemFullscreen ? "退出系统全屏" : "系统全屏" }}
           </button>
           <span class="timeline-hint"
-            >点击或拖动时间轴后，可就地设置片段边界</span
+            >空格播放 · ←/→ 快退快进 · F 网页全屏</span
           >
           <div class="timeline-capture-actions">
             <button
@@ -593,9 +604,11 @@
       </p>
       <video
         *ngIf="clipPreviewUrl"
+        #clipPreviewElement
         controls
         preload="metadata"
         [src]="clipPreviewUrl"
+        (volumechange)="handleVolumeChange($event)"
         (error)="handleClipPreviewError()"
       ></video>
     </section>

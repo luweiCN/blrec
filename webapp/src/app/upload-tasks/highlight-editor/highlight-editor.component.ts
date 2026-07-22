@@ -4,6 +4,8 @@ import {
   ChangeDetectorRef,
   Component,
   ElementRef,
+  HostBinding,
+  HostListener,
   Inject,
   NgZone,
   OnDestroy,
@@ -43,8 +45,13 @@ import {
   MappedHighlight,
 } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
+import { PlaybackPreferencesService } from '../shared/playback-preferences.service';
 import { RecordingMediaAccess } from '../shared/recording-session.model';
 import { RecordingSessionService } from '../shared/recording-session.service';
+
+const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5_000;
+const MEDIA_STALL_RECOVERY_DELAY_MS = 5_000;
+const MEDIA_RECOVERY_COOLDOWN_MS = 10_000;
 
 interface HighlightClipDraft {
   readonly id: number;
@@ -133,6 +140,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   timelinePopover: TimelinePopover = { kind: 'none' };
   isPlaying = false;
   isMuted = false;
+  playbackVolume = 0.5;
+  isWebFullscreen = false;
+  isSystemFullscreen = false;
   editingDraftId: number | null = null;
   sourceClipId: number | null = null;
   clipPreviewId: number | null = null;
@@ -166,6 +176,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private mediaRequestGeneration = 0;
   private playerGeneration = 0;
   private pendingPlayerGeneration: number | null = null;
+  private resumePlaybackAfterReload = false;
+  private lastPositionSavedAt = 0;
+  private lastMediaRecoveryAt = 0;
+  private mediaStallTimer: number | null = null;
   private destroyed = false;
 
   constructor(
@@ -174,6 +188,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     private highlights: HighlightService,
     private recordings: RecordingSessionService,
     @Inject(PART_PLAYER_LOADER) private playerLoader: PartPlayerLoader,
+    private playbackPreferences: PlaybackPreferencesService,
     private changeDetector: ChangeDetectorRef,
     private zone: NgZone,
     realtime: RealtimeService,
@@ -181,6 +196,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.sessionId = Number(route.snapshot.paramMap.get('sessionId'));
     const partId = Number(route.snapshot.queryParamMap?.get('partId'));
     this.initialPartId = Number.isInteger(partId) && partId > 0 ? partId : null;
+    this.playbackVolume = this.playbackPreferences.volume;
     this.subscriptions.add(
       realtime.events$.subscribe((event) => this.handleRealtimeEvent(event)),
     );
@@ -193,13 +209,28 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.invalidatePlayer();
       return;
     }
+    this.applyPlaybackVolume(this.videoElement);
     this.attachFlvPlayer();
     this.applyPendingSeek();
+  }
+
+  @ViewChild('clipPreviewElement')
+  set clipPreviewElementRef(
+    value: ElementRef<HTMLVideoElement> | undefined,
+  ) {
+    if (value) {
+      this.applyPlaybackVolume(value.nativeElement);
+    }
   }
 
   @ViewChild('editorWorkbench')
   set editorWorkbenchRef(value: ElementRef<HTMLElement> | undefined) {
     this.editorWorkbenchElement = value?.nativeElement ?? null;
+  }
+
+  @HostBinding('class.player-fullscreen-active')
+  get playerFullscreenActive(): boolean {
+    return this.isWebFullscreen || this.isSystemFullscreen;
   }
 
   @ViewChild(CdkConnectedOverlay)
@@ -311,12 +342,15 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.rememberPlaybackPosition(true);
     this.destroyed = true;
+    this.clearMediaStallTimer();
     this.mediaRequestGeneration += 1;
     this.mediaRequest?.unsubscribe();
     this.clipsRequest?.unsubscribe();
     this.subscriptions.unsubscribe();
     this.invalidatePlayer();
+    this.isWebFullscreen = false;
   }
 
   refreshTimeline(): void {
@@ -339,11 +373,34 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     });
   }
 
-  selectPart(part: HighlightTimelinePart, localOffsetMs = 0): void {
+  selectPart(
+    part: HighlightTimelinePart,
+    localOffsetMs = 0,
+    restoreRememberedPosition = false,
+  ): void {
     const changed = this.selectedPart?.partId !== part.partId;
+    if (changed) {
+      this.rememberPlaybackPosition(true);
+    }
+    const rememberedSeconds =
+      changed && restoreRememberedPosition
+        ? this.playbackPreferences.position(part.partId)
+        : null;
+    const selectedOffsetMs = Math.max(
+      0,
+      Math.min(
+        part.durationMs,
+        rememberedSeconds === null
+          ? localOffsetMs
+          : rememberedSeconds * 1_000,
+      ),
+    );
     this.selectedPart = part;
-    this.playheadMs = part.timelineStartMs + localOffsetMs;
-    this.pendingSeekSeconds = Math.max(0, localOffsetMs / 1000);
+    this.playheadMs = part.timelineStartMs + selectedOffsetMs;
+    this.pendingSeekSeconds = selectedOffsetMs / 1_000;
+    if (changed) {
+      this.lastPositionSavedAt = 0;
+    }
     if (changed || this.mediaUrl === null) {
       this.loadMedia();
     } else {
@@ -798,11 +855,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   handleMediaPlay(): void {
+    this.clearMediaStallTimer();
     this.isPlaying = true;
   }
 
   handleMediaPause(): void {
     this.isPlaying = false;
+    this.rememberPlaybackPosition(true);
   }
 
   toggleMute(): void {
@@ -821,15 +880,134 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (!Number.isFinite(volume)) {
       return;
     }
-    this.videoElement.volume = volume;
+    this.playbackVolume = this.playbackPreferences.rememberVolume(volume);
+    this.videoElement.volume = this.playbackVolume;
     this.videoElement.muted = volume === 0;
     this.isMuted = this.videoElement.muted;
   }
 
-  toggleFullscreen(): void {
-    void this.editorWorkbenchElement
-      ?.requestFullscreen?.()
-      .catch(() => undefined);
+  handleVolumeChange(event: Event): void {
+    const element = event.currentTarget;
+    if (!(element instanceof HTMLVideoElement)) {
+      return;
+    }
+    this.playbackVolume = this.playbackPreferences.rememberVolume(
+      element.volume,
+    );
+    if (
+      element !== this.videoElement &&
+      this.videoElement !== null &&
+      this.videoElement.volume !== this.playbackVolume
+    ) {
+      this.videoElement.volume = this.playbackVolume;
+    }
+    if (element === this.videoElement) {
+      this.isMuted = element.muted;
+    }
+  }
+
+  reopenMedia(): void {
+    if (!this.selectedPart) {
+      return;
+    }
+    this.pendingSeekSeconds = Math.max(
+      0,
+      this.videoElement?.currentTime ??
+        (this.playheadMs - this.editorPartStartMs) / 1_000,
+    );
+    this.resumePlaybackAfterReload =
+      this.videoElement !== null && !this.videoElement.paused;
+    this.lastMediaRecoveryAt = 0;
+    this.loadMedia();
+  }
+
+  toggleWebFullscreen(): void {
+    if (this.isSystemFullscreen) {
+      return;
+    }
+    this.isWebFullscreen = !this.isWebFullscreen;
+  }
+
+  toggleSystemFullscreen(): void {
+    const workbench = this.editorWorkbenchElement;
+    if (!workbench) {
+      return;
+    }
+    if (this.document.fullscreenElement === workbench) {
+      void this.document.exitFullscreen?.().catch(() => undefined);
+      return;
+    }
+    this.isWebFullscreen = false;
+    void workbench.requestFullscreen?.().catch(() => undefined);
+  }
+
+  handleVideoDoubleClick(event: MouseEvent): void {
+    event.preventDefault();
+    this.toggleWebFullscreen();
+  }
+
+  @HostListener('document:fullscreenchange')
+  handleFullscreenChange(): void {
+    this.isSystemFullscreen =
+      this.document.fullscreenElement === this.editorWorkbenchElement;
+    this.changeDetector.markForCheck();
+  }
+
+  @HostListener('document:keydown', ['$event'])
+  handlePlayerShortcut(event: KeyboardEvent): void {
+    if (event.key === 'Escape' && this.isWebFullscreen) {
+      event.preventDefault();
+      this.isWebFullscreen = false;
+      return;
+    }
+    if (
+      !this.videoElement ||
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      this.isEditableShortcutTarget(event.target)
+    ) {
+      return;
+    }
+    switch (event.code) {
+      case 'Space':
+        if (!event.repeat) {
+          event.preventDefault();
+          this.togglePlayback();
+        }
+        return;
+      case 'ArrowLeft':
+        event.preventDefault();
+        this.seekRelative(-5);
+        return;
+      case 'ArrowRight':
+        event.preventDefault();
+        this.seekRelative(5);
+        return;
+      case 'ArrowUp':
+        event.preventDefault();
+        this.setVolume(this.playbackVolume + 0.1);
+        return;
+      case 'ArrowDown':
+        event.preventDefault();
+        this.setVolume(this.playbackVolume - 0.1);
+        return;
+      case 'KeyM':
+        if (!event.repeat) {
+          event.preventDefault();
+          this.toggleMute();
+        }
+        return;
+      case 'KeyF':
+        if (!event.repeat) {
+          event.preventDefault();
+          this.toggleWebFullscreen();
+        }
+        return;
+      default:
+        return;
+    }
   }
 
   openClipSubmission(clip: HighlightClip): void {
@@ -1072,8 +1250,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (!this.videoElement || !this.selectedPart) {
       return;
     }
+    this.clearMediaStallTimer();
     this.playheadMs =
       this.selectedPart.timelineStartMs + this.videoElement.currentTime * 1000;
+    this.rememberPlaybackPosition(false);
     if (this.previewingDraftId === null) {
       return;
     }
@@ -1088,12 +1268,23 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   handleMediaCanPlay(): void {
-    if (this.previewingDraftId !== null) {
+    this.clearMediaStallTimer();
+    this.applyPendingSeek();
+    if (this.previewingDraftId !== null || this.resumePlaybackAfterReload) {
+      this.resumePlaybackAfterReload = false;
       void this.videoElement?.play().catch(() => undefined);
     }
   }
 
+  handleMediaMetadataLoaded(): void {
+    this.applyPendingSeek();
+    this.handleTimeUpdate();
+  }
+
   handleMediaEnded(): void {
+    if (this.selectedPart) {
+      this.playbackPreferences.clearPosition(this.selectedPart.partId);
+    }
     if (
       this.previewingDraftId === null ||
       !this.timeline ||
@@ -1116,11 +1307,22 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   handleMediaError(): void {
-    this.mediaError = '本地视频播放失败，请刷新后重试';
+    const code = this.videoElement?.error?.code;
+    if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+      this.failMedia('该录像的编码或格式当前浏览器无法播放');
+      return;
+    }
+    this.recoverMedia('本地视频播放失败');
   }
 
   handleMediaStalled(): void {
-    this.mediaError = '本地视频加载停滞，请检查连接后重试';
+    if (this.mediaStallTimer !== null || this.mediaError !== null) {
+      return;
+    }
+    this.mediaStallTimer = window.setTimeout(() => {
+      this.mediaStallTimer = null;
+      this.recoverMedia('本地视频持续加载停滞');
+    }, MEDIA_STALL_RECOVERY_DELAY_MS);
   }
 
   formatTime(valueMs: number | null): string {
@@ -1659,7 +1861,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             const localOffset = requestedPart
               ? 0
               : Math.max(0, playhead - part.timelineStartMs);
-            this.selectPart(part, localOffset);
+            this.selectPart(part, localOffset, initial);
             if (initial) {
               this.startMs = part.timelineStartMs;
               this.endMs = Math.min(
@@ -1717,11 +1919,16 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     );
   }
 
-  private loadMedia(): void {
+  private loadMedia(resetRecoveryCooldown = true): void {
     if (!this.selectedPart) {
       return;
     }
     const part = this.selectedPart;
+    this.rememberPlaybackPosition(true);
+    this.clearMediaStallTimer();
+    if (resetRecoveryCooldown) {
+      this.lastMediaRecoveryAt = 0;
+    }
     this.mediaRequest?.unsubscribe();
     const generation = ++this.mediaRequestGeneration;
     this.invalidatePlayer();
@@ -1802,9 +2009,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
           }
           this.zone.run(() => {
             if (event.type === 'error') {
-              this.mediaError = event.message;
-              this.invalidatePlayer();
-              this.changeDetector.markForCheck();
+              if (event.recoverable) {
+                this.recoverMedia(event.message);
+              } else {
+                this.failMedia(event.message);
+              }
             } else if (event.type === 'stalled') {
               this.handleMediaStalled();
               this.changeDetector.markForCheck();
@@ -1855,6 +2064,88 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.mediaUrl === url &&
       this.videoElement === element
     );
+  }
+
+  private recoverMedia(message: string): void {
+    if (!this.selectedPart || this.mediaLoading) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_COOLDOWN_MS) {
+      this.failMedia(`${message}，请点击“重新打开录像”再试`);
+      return;
+    }
+    this.lastMediaRecoveryAt = now;
+    this.pendingSeekSeconds = Math.max(0, this.videoElement?.currentTime ?? 0);
+    this.resumePlaybackAfterReload =
+      this.videoElement !== null && !this.videoElement.paused;
+    this.loadMedia(false);
+  }
+
+  private failMedia(message: string): void {
+    this.clearMediaStallTimer();
+    this.mediaLoading = false;
+    this.mediaError = message;
+    this.invalidatePlayer();
+    this.changeDetector.markForCheck();
+  }
+
+  private seekRelative(seconds: number): void {
+    const element = this.videoElement;
+    if (!element || !this.selectedPart) {
+      return;
+    }
+    const maxSeconds = Math.max(0, this.selectedPart.durationMs / 1_000);
+    element.currentTime = Math.max(
+      0,
+      Math.min(maxSeconds, element.currentTime + seconds),
+    );
+    this.handleTimeUpdate();
+  }
+
+  private isEditableShortcutTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof Element &&
+      (target.closest('input, textarea, select, button, [contenteditable]') !==
+        null ||
+        target.closest('.timeline-track') !== null)
+    );
+  }
+
+  private applyPlaybackVolume(element: HTMLVideoElement): void {
+    this.playbackVolume = this.playbackPreferences.volume;
+    element.volume = this.playbackVolume;
+    if (element === this.videoElement) {
+      this.isMuted = element.muted;
+    }
+  }
+
+  private rememberPlaybackPosition(force: boolean): void {
+    const element = this.videoElement;
+    const part = this.selectedPart;
+    if (!element || !part || !Number.isFinite(element.currentTime)) {
+      return;
+    }
+    if (element.ended) {
+      this.playbackPreferences.clearPosition(part.partId);
+      return;
+    }
+    const now = Date.now();
+    if (
+      !force &&
+      now - this.lastPositionSavedAt < PLAYBACK_POSITION_SAVE_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.playbackPreferences.rememberPosition(part.partId, element.currentTime);
+    this.lastPositionSavedAt = now;
+  }
+
+  private clearMediaStallTimer(): void {
+    if (this.mediaStallTimer !== null) {
+      window.clearTimeout(this.mediaStallTimer);
+      this.mediaStallTimer = null;
+    }
   }
 
   private applyPendingSeek(): void {

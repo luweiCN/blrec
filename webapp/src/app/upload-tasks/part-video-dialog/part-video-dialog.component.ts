@@ -3,6 +3,7 @@ import {
   Component,
   ElementRef,
   EventEmitter,
+  HostListener,
   Inject,
   Input,
   OnChanges,
@@ -21,6 +22,7 @@ import {
   RecordingPart,
   RecordingSession,
 } from '../shared/recording-session.model';
+import { PlaybackPreferencesService } from '../shared/playback-preferences.service';
 import { RecordingSessionService } from '../shared/recording-session.service';
 import { PART_PLAYER_LOADER } from './part-player.loader';
 import type {
@@ -47,6 +49,9 @@ interface DanmakuRecoveryState {
 }
 
 const PLAYBACK_DEADLINE_MS = 10_000;
+const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5_000;
+const MEDIA_STALL_RECOVERY_DELAY_MS = 5_000;
+const MEDIA_RECOVERY_COOLDOWN_MS = 10_000;
 const MAX_DANMAKU_ROWS = 1_000;
 
 @Component({
@@ -69,6 +74,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   danmakuNextCursor: number | null = null;
   activeDanmakuIndex: number | null = null;
   followDanmaku = true;
+  playbackVolume = 0.5;
 
   private videoElement: HTMLVideoElement | null = null;
   private danmakuListElement: HTMLElement | null = null;
@@ -79,14 +85,23 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   private timer: number | null = null;
   private playerGeneration = 0;
   private pendingPlayerGeneration: number | null = null;
+  private playbackPartId: number | null = null;
+  private pendingSeekSeconds: number | null = null;
+  private resumePlaybackAfterReload = false;
+  private lastPositionSavedAt = 0;
+  private lastMediaRecoveryAt = 0;
+  private mediaStallTimer: number | null = null;
   private destroyed = false;
 
   constructor(
     private recordingSessions: RecordingSessionService,
     @Inject(PART_PLAYER_LOADER) private playerLoader: PartPlayerLoader,
+    private playbackPreferences: PlaybackPreferencesService,
     private changeDetector: ChangeDetectorRef,
     private zone: NgZone,
-  ) {}
+  ) {
+    this.playbackVolume = this.playbackPreferences.volume;
+  }
 
   @ViewChild('videoElement')
   set videoElementRef(value: ElementRef<HTMLVideoElement> | undefined) {
@@ -95,6 +110,8 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       this.invalidatePlayer();
       return;
     }
+    this.applyPlaybackVolume(this.videoElement);
+    this.applyPendingSeek();
     this.attachFlvPlayer();
   }
 
@@ -160,24 +177,70 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   handleNativeMediaError(): void {
-    if (!this.isFlv) {
-      this.fail('本地视频播放失败，请重新打开后再试');
+    if (this.isFlv) {
+      return;
     }
+    const code = this.videoElement?.error?.code;
+    if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+      this.fail('该录像的编码或格式当前浏览器无法播放');
+      return;
+    }
+    this.recoverMedia('本地视频播放失败');
   }
 
   handleNativeMediaStalled(): void {
-    if (!this.isFlv) {
-      this.fail('本地视频加载停滞，请检查连接后重试');
+    if (this.mediaStallTimer !== null || this.error !== null) {
+      return;
     }
+    this.mediaStallTimer = window.setTimeout(() => {
+      this.mediaStallTimer = null;
+      this.recoverMedia('本地视频持续加载停滞');
+    }, MEDIA_STALL_RECOVERY_DELAY_MS);
   }
 
   handleFirstFrame(): void {
     this.clearTimer();
+    this.clearMediaStallTimer();
     this.playbackState = { kind: 'playing' };
     this.changeDetector.markForCheck();
   }
 
+  handleMediaCanPlay(): void {
+    this.clearMediaStallTimer();
+    this.applyPendingSeek();
+    if (this.resumePlaybackAfterReload) {
+      this.resumePlaybackAfterReload = false;
+      void this.videoElement?.play().catch(() => undefined);
+    }
+  }
+
+  handleMediaMetadataLoaded(): void {
+    this.applyPendingSeek();
+  }
+
+  handleMediaPause(): void {
+    this.rememberPlaybackPosition(true);
+  }
+
+  handleMediaEnded(): void {
+    if (this.playbackPartId !== null) {
+      this.playbackPreferences.clearPosition(this.playbackPartId);
+    }
+  }
+
+  handleVolumeChange(event: Event): void {
+    const element = event.currentTarget;
+    if (!(element instanceof HTMLVideoElement)) {
+      return;
+    }
+    this.playbackVolume = this.playbackPreferences.rememberVolume(
+      element.volume,
+    );
+  }
+
   handleTimeUpdate(): void {
+    this.clearMediaStallTimer();
+    this.rememberPlaybackPosition(false);
     if (this.videoElement === null || this.danmakuItems.length === 0) {
       this.activeDanmakuIndex = null;
       return;
@@ -262,16 +325,78 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       .join(':');
   }
 
-  private loadMedia(): void {
+  @HostListener('document:keydown', ['$event'])
+  handlePlayerShortcut(event: KeyboardEvent): void {
+    if (
+      !this.visible ||
+      !this.videoElement ||
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      this.isEditableShortcutTarget(event.target)
+    ) {
+      return;
+    }
+    switch (event.code) {
+      case 'Space':
+        if (!event.repeat) {
+          event.preventDefault();
+          this.togglePlayback();
+        }
+        return;
+      case 'ArrowLeft':
+        event.preventDefault();
+        this.seekRelative(-5);
+        return;
+      case 'ArrowRight':
+        event.preventDefault();
+        this.seekRelative(5);
+        return;
+      case 'ArrowUp':
+        event.preventDefault();
+        this.setVolume(this.playbackVolume + 0.1);
+        return;
+      case 'ArrowDown':
+        event.preventDefault();
+        this.setVolume(this.playbackVolume - 0.1);
+        return;
+      case 'KeyM':
+        if (!event.repeat) {
+          event.preventDefault();
+          this.videoElement.muted = !this.videoElement.muted;
+        }
+        return;
+      default:
+        return;
+    }
+  }
+
+  private loadMedia(
+    resetRecoveryCooldown = true,
+    restoreRememberedPosition = true,
+  ): void {
+    this.rememberPlaybackPosition(true);
+    this.clearMediaStallTimer();
     this.request?.unsubscribe();
     this.invalidatePlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
     this.playbackState = { kind: 'idle' };
     this.loadDanmaku(0, false);
+    this.playbackPartId = null;
     if (this.localMediaPath === null) {
       this.fail('该分 P 的本地视频不可用');
       return;
+    }
+    this.playbackPartId = this.part.id;
+    this.lastPositionSavedAt = 0;
+    if (restoreRememberedPosition) {
+      this.pendingSeekSeconds = this.playbackPreferences.position(this.part.id);
+      this.resumePlaybackAfterReload = false;
+    }
+    if (resetRecoveryCooldown) {
+      this.lastMediaRecoveryAt = 0;
     }
     this.deadlineAt = Date.now() + PLAYBACK_DEADLINE_MS;
     this.playbackState = { kind: 'access_loading' };
@@ -564,11 +689,129 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       return;
     }
     if (event.type === 'stalled') {
-      this.fail('本地视频加载停滞，请检查连接后重试');
+      this.handleNativeMediaStalled();
       return;
     }
     if (event.type === 'error') {
-      this.fail(event.message);
+      if (event.recoverable) {
+        this.recoverMedia(event.message);
+      } else {
+        this.fail(event.message);
+      }
+    }
+  }
+
+  private recoverMedia(message: string): void {
+    const now = Date.now();
+    if (now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_COOLDOWN_MS) {
+      this.fail(`${message}，请关闭后重新打开录像`);
+      return;
+    }
+    this.lastMediaRecoveryAt = now;
+    this.pendingSeekSeconds = Math.max(0, this.videoElement?.currentTime ?? 0);
+    this.resumePlaybackAfterReload =
+      this.videoElement !== null && !this.videoElement.paused;
+    this.loadMedia(false, false);
+  }
+
+  private togglePlayback(): void {
+    if (!this.videoElement) {
+      return;
+    }
+    if (this.videoElement.paused) {
+      void this.videoElement.play().catch(() => undefined);
+    } else {
+      this.videoElement.pause();
+    }
+  }
+
+  private seekRelative(seconds: number): void {
+    const element = this.videoElement;
+    if (!element) {
+      return;
+    }
+    const accessDuration = this.mediaAccess?.durationMs;
+    const maxSeconds =
+      accessDuration !== null && accessDuration !== undefined
+        ? accessDuration / 1_000
+        : Number.isFinite(element.duration)
+        ? element.duration
+        : Number.POSITIVE_INFINITY;
+    element.currentTime = Math.max(
+      0,
+      Math.min(maxSeconds, element.currentTime + seconds),
+    );
+    this.handleTimeUpdate();
+  }
+
+  private setVolume(value: number): void {
+    if (!this.videoElement || !Number.isFinite(value)) {
+      return;
+    }
+    this.playbackVolume = this.playbackPreferences.rememberVolume(value);
+    this.videoElement.volume = this.playbackVolume;
+    this.videoElement.muted = this.playbackVolume === 0;
+  }
+
+  private isEditableShortcutTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof Element &&
+      target.closest('input, textarea, select, button, [contenteditable]') !==
+        null
+    );
+  }
+
+  private applyPlaybackVolume(element: HTMLVideoElement): void {
+    this.playbackVolume = this.playbackPreferences.volume;
+    element.volume = this.playbackVolume;
+  }
+
+  private applyPendingSeek(): void {
+    const element = this.videoElement;
+    if (!element || this.pendingSeekSeconds === null) {
+      return;
+    }
+    const durationSeconds =
+      this.mediaAccess?.durationMs === null ||
+      this.mediaAccess?.durationMs === undefined
+        ? this.pendingSeekSeconds
+        : this.mediaAccess.durationMs / 1_000;
+    try {
+      element.currentTime = Math.max(
+        0,
+        Math.min(durationSeconds, this.pendingSeekSeconds),
+      );
+      this.pendingSeekSeconds = null;
+    } catch (_error) {
+      // Metadata may not be ready yet; loadedmetadata will retry.
+    }
+  }
+
+  private rememberPlaybackPosition(force: boolean): void {
+    const element = this.videoElement;
+    const partId = this.playbackPartId;
+    if (!element || partId === null || !Number.isFinite(element.currentTime)) {
+      return;
+    }
+    if (element.ended) {
+      this.playbackPreferences.clearPosition(partId);
+      return;
+    }
+    const now = Date.now();
+    if (
+      !force &&
+      now - this.lastPositionSavedAt < PLAYBACK_POSITION_SAVE_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.playbackPreferences.rememberPosition(partId, element.currentTime);
+    this.lastPositionSavedAt = now;
+  }
+
+  private clearMediaStallTimer(): void {
+    if (this.mediaStallTimer !== null) {
+      window.clearTimeout(this.mediaStallTimer);
+      this.mediaStallTimer = null;
     }
   }
 
@@ -604,7 +847,9 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   private fail(message: string): void {
+    this.rememberPlaybackPosition(true);
     this.clearTimer();
+    this.clearMediaStallTimer();
     this.playbackState = { kind: 'error', message };
     this.invalidatePlayer();
     this.changeDetector.markForCheck();
@@ -637,11 +882,13 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   private reset(): void {
+    this.rememberPlaybackPosition(true);
     this.request?.unsubscribe();
     this.request = undefined;
     this.danmakuRequest?.unsubscribe();
     this.danmakuRequest = undefined;
     this.clearTimer();
+    this.clearMediaStallTimer();
     this.invalidatePlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
@@ -652,6 +899,9 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     this.danmakuNextCursor = null;
     this.activeDanmakuIndex = null;
     this.followDanmaku = true;
+    this.playbackPartId = null;
+    this.pendingSeekSeconds = null;
+    this.resumePlaybackAfterReload = false;
   }
 
   private describeError(error: unknown, fallback: string): string {

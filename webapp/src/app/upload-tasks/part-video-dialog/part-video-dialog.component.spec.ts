@@ -110,6 +110,8 @@ describe('PartVideoDialogComponent', () => {
   } as RecordingSession;
 
   beforeEach(async () => {
+    localStorage.removeItem('blrec-playback-volume');
+    localStorage.removeItem('blrec-playback-position-2');
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
       [
@@ -228,6 +230,88 @@ describe('PartVideoDialogComponent', () => {
     fixture.componentInstance.handleClose();
   }));
 
+  it('starts at half volume and remembers native volume changes', fakeAsync(() => {
+    fixture.detectChanges();
+    flushMicrotasks();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+
+    expect(video.volume).toBe(0.5);
+
+    video.volume = 0.7;
+    video.dispatchEvent(new Event('volumechange'));
+    expect(localStorage.getItem('blrec-playback-volume')).toBe('0.7');
+    fixture.componentInstance.handleClose();
+  }));
+
+  it('restores and periodically remembers the position of the same part', fakeAsync(() => {
+    localStorage.setItem('blrec-playback-position-2', '7.500');
+    fixture.detectChanges();
+    flushMicrotasks();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+
+    fixture.componentInstance.handleMediaMetadataLoaded();
+    expect(video.currentTime).toBe(7.5);
+
+    video.currentTime = 8.25;
+    fixture.componentInstance.handleTimeUpdate();
+    expect(localStorage.getItem('blrec-playback-position-2')).toBe('8.250');
+    fixture.componentInstance.handleClose();
+  }));
+
+  it('supports repeated arrow seeking and space playback shortcuts', fakeAsync(() => {
+    fixture.detectChanges();
+    flushMicrotasks();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+    video.currentTime = 2;
+
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'ArrowRight', bubbles: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        code: 'ArrowRight',
+        repeat: true,
+        bubbles: true,
+      }),
+    );
+
+    expect(video.currentTime).toBe(12);
+
+    const play = spyOn(video, 'play').and.returnValue(Promise.resolve());
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'Space', bubbles: true }),
+    );
+    expect(play).toHaveBeenCalledTimes(1);
+    fixture.componentInstance.handleClose();
+  }));
+
+  it('reopens once after a recoverable FLV runtime error', fakeAsync(() => {
+    const callbacks: { report?: PartPlayerEventHandler } = {};
+    playerFactory.attachFlv.and.callFake((_element, _url, _source, handler) => {
+      callbacks.report = handler;
+      return player;
+    });
+    fixture.detectChanges();
+    flushMicrotasks();
+    service.createMediaAccess.calls.reset();
+
+    callbacks.report?.({
+      type: 'error',
+      message: '浏览器视频缓冲异常',
+      recoverable: true,
+    });
+
+    expect(service.createMediaAccess).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.error).toBeNull();
+    fixture.componentInstance.handleClose();
+  }));
+
   it('does not load the FLV runtime for a closed dialog', () => {
     fixture.componentRef.setInput('visible', false);
 
@@ -308,7 +392,11 @@ describe('PartVideoDialogComponent', () => {
 
   it('disposes a player invalidated by a synchronous attach event', fakeAsync(() => {
     playerFactory.attachFlv.and.callFake((_element, _url, _source, onEvent) => {
-      onEvent({ type: 'error', message: '播放器同步失败' });
+      onEvent({
+        type: 'error',
+        message: '播放器同步失败',
+        recoverable: false,
+      });
       return player;
     });
 
@@ -722,7 +810,7 @@ describe('PartVideoDialogComponent', () => {
     expect(player.destroy).toHaveBeenCalled();
   }));
 
-  it('surfaces native MP4 playback errors', () => {
+  it('reopens native MP4 after a recoverable playback error', () => {
     fixture.componentRef.setInput('part', {
       ...part,
       finalPath: '/rec/p1.mp4',
@@ -733,15 +821,15 @@ describe('PartVideoDialogComponent', () => {
     const video = overlayContainer
       .getContainerElement()
       .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+    service.createMediaAccess.calls.reset();
     video.dispatchEvent(new Event('error'));
     fixture.detectChanges();
 
-    expect(overlayContainer.getContainerElement().textContent).toContain(
-      '本地视频播放失败，请重新打开后再试',
-    );
+    expect(service.createMediaAccess).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.error).toBeNull();
   });
 
-  it('surfaces stalled native MP4 playback', () => {
+  it('waits before reopening a persistently stalled native MP4', fakeAsync(() => {
     fixture.componentRef.setInput('part', {
       ...part,
       finalPath: '/rec/p1.mp4',
@@ -752,11 +840,15 @@ describe('PartVideoDialogComponent', () => {
     const video = overlayContainer
       .getContainerElement()
       .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+    service.createMediaAccess.calls.reset();
     video.dispatchEvent(new Event('stalled'));
-    fixture.detectChanges();
+    tick(4_999);
 
-    expect(overlayContainer.getContainerElement().textContent).toContain(
-      '本地视频加载停滞，请检查连接后重试',
-    );
-  });
+    expect(service.createMediaAccess).not.toHaveBeenCalled();
+
+    tick(1);
+    expect(service.createMediaAccess).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.error).toBeNull();
+    fixture.componentInstance.handleClose();
+  }));
 });
