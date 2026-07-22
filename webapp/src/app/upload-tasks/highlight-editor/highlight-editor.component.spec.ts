@@ -2044,11 +2044,11 @@ describe('HighlightEditorComponent', () => {
     expect(requestFullscreen).not.toHaveBeenCalled();
     expect(getComputedStyle(workbench).position).toBe('fixed');
     expect(getComputedStyle(workbench).display).toBe('grid');
-    expect(
-      getComputedStyle(
-        workbench.querySelector('.video-stage video') as HTMLVideoElement,
-      ).objectFit,
-    ).toBe('contain');
+    const video = workbench.querySelector(
+      '.video-stage video',
+    ) as HTMLVideoElement;
+    expect(getComputedStyle(video).objectFit).toBe('contain');
+    expect(getComputedStyle(video).position).toBe('absolute');
     expect(
       getComputedStyle(
         workbench.querySelector('.timeline-panel') as HTMLElement,
@@ -2064,6 +2064,15 @@ describe('HighlightEditorComponent', () => {
         workbench.querySelector('.editor-toolbar') as HTMLElement,
       ).opacity,
     ).toBe('0');
+    const workbenchRect = workbench.getBoundingClientRect();
+    const videoStageRect = (
+      workbench.querySelector('.video-stage') as HTMLElement
+    ).getBoundingClientRect();
+    const timelinePanelRect = (
+      workbench.querySelector('.timeline-panel') as HTMLElement
+    ).getBoundingClientRect();
+    expect(videoStageRect.bottom).toBeCloseTo(timelinePanelRect.top, 0);
+    expect(timelinePanelRect.bottom).toBeCloseTo(workbenchRect.bottom, 0);
 
     document.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape' }),
