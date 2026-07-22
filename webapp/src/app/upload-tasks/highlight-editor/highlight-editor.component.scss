@@ -243,6 +243,31 @@ video {
   accent-color: #5b9eff;
 }
 
+.playback-rate-control {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  color: #aeb9c8;
+  font-size: 12px;
+}
+
+.playback-rate-control select {
+  min-height: 34px;
+  padding: 5px 26px 5px 9px;
+  border: 1px solid #445167;
+  border-radius: 7px;
+  background: #202b3b;
+  color: #eef3fb;
+  font: inherit;
+}
+
+.playback-rate-control select:hover,
+.playback-rate-control select:focus-visible {
+  border-color: #79aaff;
+  outline: none;
+}
+
 .timeline-hint {
   flex: 1;
   color: #8f9daf;

@@ -143,7 +143,8 @@ export class HighlightService {
     const token = encodeURIComponent(access.token);
     const path =
       `/api/v1/highlights/clips/${clipId}/media` +
-      `?media_token=${token}&media_expires=${access.expiresAt}`;
+      `?media_token=${token}&media_expires=${access.expiresAt}` +
+      '&ngsw-bypass=1';
     return this.url.makeApiUrl(path);
   }
 

@@ -138,6 +138,7 @@ export class RecordingSessionService {
     if (access.snapshotId !== null) {
       path += `&media_snapshot=${encodeURIComponent(access.snapshotId)}`;
     }
+    path += '&ngsw-bypass=1';
     return this.url.makeApiUrl(path);
   }
 

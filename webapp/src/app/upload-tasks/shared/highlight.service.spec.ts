@@ -228,7 +228,7 @@ describe('HighlightService', () => {
       }),
     ).toBe(
       '/api/v1/highlights/clips/3/media' +
-        '?media_token=signed%20token&media_expires=123',
+        '?media_token=signed%20token&media_expires=123&ngsw-bypass=1',
     );
     expect(
       service.downloadUrl(3, {
@@ -238,7 +238,7 @@ describe('HighlightService', () => {
       }),
     ).toBe(
       '/api/v1/highlights/clips/3/media' +
-        '?media_token=signed%20token&media_expires=123&download=1',
+        '?media_token=signed%20token&media_expires=123&ngsw-bypass=1&download=1',
     );
   });
 });

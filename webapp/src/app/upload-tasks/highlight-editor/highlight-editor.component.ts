@@ -51,7 +51,9 @@ import { RecordingSessionService } from '../shared/recording-session.service';
 
 const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5_000;
 const MEDIA_STALL_RECOVERY_DELAY_MS = 5_000;
-const MEDIA_RECOVERY_COOLDOWN_MS = 10_000;
+const MEDIA_RECOVERY_DUPLICATE_WINDOW_MS = 1_000;
+const MAX_MEDIA_RECOVERY_ATTEMPTS = 3;
+const MEDIA_RECOVERY_PROGRESS_SECONDS = 5;
 
 interface HighlightClipDraft {
   readonly id: number;
@@ -141,6 +143,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   isPlaying = false;
   isMuted = false;
   playbackVolume = 0.5;
+  playbackRate = 1;
   isWebFullscreen = false;
   isSystemFullscreen = false;
   editingDraftId: number | null = null;
@@ -179,6 +182,8 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   private resumePlaybackAfterReload = false;
   private lastPositionSavedAt = 0;
   private lastMediaRecoveryAt = 0;
+  private mediaRecoveryAttempts = 0;
+  private mediaRecoveryCheckpointSeconds: number | null = null;
   private mediaStallTimer: number | null = null;
   private destroyed = false;
 
@@ -197,6 +202,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     const partId = Number(route.snapshot.queryParamMap?.get('partId'));
     this.initialPartId = Number.isInteger(partId) && partId > 0 ? partId : null;
     this.playbackVolume = this.playbackPreferences.volume;
+    this.playbackRate = this.playbackPreferences.rate;
     this.subscriptions.add(
       realtime.events$.subscribe((event) => this.handleRealtimeEvent(event)),
     );
@@ -209,7 +215,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       this.invalidatePlayer();
       return;
     }
-    this.applyPlaybackVolume(this.videoElement);
+    this.applyPlaybackPreferences(this.videoElement);
     this.attachFlvPlayer();
     this.applyPendingSeek();
   }
@@ -219,7 +225,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     value: ElementRef<HTMLVideoElement> | undefined,
   ) {
     if (value) {
-      this.applyPlaybackVolume(value.nativeElement);
+      this.applyPlaybackPreferences(value.nativeElement);
     }
   }
 
@@ -404,7 +410,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     if (changed || this.mediaUrl === null) {
       this.loadMedia();
     } else {
-      this.applyPendingSeek();
+      this.applyPendingSeek(true);
     }
   }
 
@@ -861,7 +867,13 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   handleMediaPause(): void {
     this.isPlaying = false;
-    this.rememberPlaybackPosition(true);
+    if (
+      !this.mediaLoading &&
+      !this.resumePlaybackAfterReload &&
+      this.pendingSeekSeconds === null
+    ) {
+      this.rememberPlaybackPosition(true);
+    }
   }
 
   toggleMute(): void {
@@ -903,6 +915,37 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
     if (element === this.videoElement) {
       this.isMuted = element.muted;
+    }
+  }
+
+  setPlaybackRate(value: number | string): void {
+    const rate = Number(value);
+    if (!Number.isFinite(rate)) {
+      return;
+    }
+    this.playbackRate = this.playbackPreferences.rememberRate(rate);
+    if (this.videoElement) {
+      this.videoElement.playbackRate = this.playbackRate;
+    }
+  }
+
+  handlePlaybackRateChange(event: Event): void {
+    const element = event.currentTarget;
+    if (!(element instanceof HTMLVideoElement)) {
+      return;
+    }
+    this.playbackRate = this.playbackPreferences.rememberRate(
+      element.playbackRate,
+    );
+    if (element.playbackRate !== this.playbackRate) {
+      element.playbackRate = this.playbackRate;
+    }
+    if (
+      element !== this.videoElement &&
+      this.videoElement !== null &&
+      this.videoElement.playbackRate !== this.playbackRate
+    ) {
+      this.videoElement.playbackRate = this.playbackRate;
     }
   }
 
@@ -1253,6 +1296,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.clearMediaStallTimer();
     this.playheadMs =
       this.selectedPart.timelineStartMs + this.videoElement.currentTime * 1000;
+    if (
+      this.mediaRecoveryCheckpointSeconds !== null &&
+      this.videoElement.currentTime >=
+        this.mediaRecoveryCheckpointSeconds + MEDIA_RECOVERY_PROGRESS_SECONDS
+    ) {
+      this.mediaRecoveryAttempts = 0;
+      this.mediaRecoveryCheckpointSeconds = null;
+    }
     this.rememberPlaybackPosition(false);
     if (this.previewingDraftId === null) {
       return;
@@ -1269,7 +1320,7 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
 
   handleMediaCanPlay(): void {
     this.clearMediaStallTimer();
-    this.applyPendingSeek();
+    this.applyPendingSeek(true);
     if (this.previewingDraftId !== null || this.resumePlaybackAfterReload) {
       this.resumePlaybackAfterReload = false;
       void this.videoElement?.play().catch(() => undefined);
@@ -1277,11 +1328,15 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   handleMediaMetadataLoaded(): void {
-    this.applyPendingSeek();
+    this.applyPendingSeek(true);
     this.handleTimeUpdate();
   }
 
   handleMediaEnded(): void {
+    if (this.mediaEndedPrematurely()) {
+      this.recoverMedia('录像在预期结束前停止播放', true);
+      return;
+    }
     if (this.selectedPart) {
       this.playbackPreferences.clearPosition(this.selectedPart.partId);
     }
@@ -1307,6 +1362,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   }
 
   handleMediaError(): void {
+    if (this.selectedPart?.mediaKind === 'flv') {
+      return;
+    }
     const code = this.videoElement?.error?.code;
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
       this.failMedia('该录像的编码或格式当前浏览器无法播放');
@@ -1924,18 +1982,22 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
       return;
     }
     const part = this.selectedPart;
-    this.rememberPlaybackPosition(true);
+    if (this.pendingSeekSeconds === null) {
+      this.rememberPlaybackPosition(true);
+    }
     this.clearMediaStallTimer();
     if (resetRecoveryCooldown) {
       this.lastMediaRecoveryAt = 0;
+      this.mediaRecoveryAttempts = 0;
+      this.mediaRecoveryCheckpointSeconds = null;
     }
     this.mediaRequest?.unsubscribe();
     const generation = ++this.mediaRequestGeneration;
+    this.mediaLoading = true;
     this.invalidatePlayer();
     this.mediaUrl = null;
     this.mediaAccess = null;
     this.mediaError = null;
-    this.mediaLoading = true;
     this.mediaRequest = this.recordings
       .createMediaAccess(part.partId)
       .subscribe({
@@ -2066,19 +2128,31 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     );
   }
 
-  private recoverMedia(message: string): void {
+  private recoverMedia(message: string, forceResume = false): void {
     if (!this.selectedPart || this.mediaLoading) {
       return;
     }
     const now = Date.now();
-    if (now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_COOLDOWN_MS) {
-      this.failMedia(`${message}，请点击“重新打开录像”再试`);
+    if (
+      now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_DUPLICATE_WINDOW_MS
+    ) {
+      return;
+    }
+    if (this.mediaRecoveryAttempts >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
+      this.failMedia(`${message}，已自动重试 3 次，请重新打开录像`);
       return;
     }
     this.lastMediaRecoveryAt = now;
-    this.pendingSeekSeconds = Math.max(0, this.videoElement?.currentTime ?? 0);
+    const checkpoint = Math.max(0, this.videoElement?.currentTime ?? 0);
+    this.pendingSeekSeconds = checkpoint;
+    this.mediaRecoveryCheckpointSeconds = checkpoint;
+    this.mediaRecoveryAttempts += 1;
+    this.playbackPreferences.rememberPosition(
+      this.selectedPart.partId,
+      checkpoint,
+    );
     this.resumePlaybackAfterReload =
-      this.videoElement !== null && !this.videoElement.paused;
+      forceResume || (this.videoElement !== null && !this.videoElement.paused);
     this.loadMedia(false);
   }
 
@@ -2112,9 +2186,11 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     );
   }
 
-  private applyPlaybackVolume(element: HTMLVideoElement): void {
+  private applyPlaybackPreferences(element: HTMLVideoElement): void {
     this.playbackVolume = this.playbackPreferences.volume;
+    this.playbackRate = this.playbackPreferences.rate;
     element.volume = this.playbackVolume;
+    element.playbackRate = this.playbackRate;
     if (element === this.videoElement) {
       this.isMuted = element.muted;
     }
@@ -2148,8 +2224,14 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     }
   }
 
-  private applyPendingSeek(): void {
+  private applyPendingSeek(mediaReady = false): void {
     if (!this.videoElement || this.pendingSeekSeconds === null) {
+      return;
+    }
+    if (
+      !mediaReady &&
+      this.videoElement.readyState < HTMLMediaElement.HAVE_METADATA
+    ) {
       return;
     }
     try {
@@ -2158,6 +2240,23 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     } catch (_error) {
       // Metadata may not be ready yet; loadedmetadata will retry.
     }
+  }
+
+  private mediaEndedPrematurely(): boolean {
+    const element = this.videoElement;
+    const part = this.selectedPart;
+    if (!element || !part || part.recording) {
+      return false;
+    }
+    const expectedSeconds =
+      this.mediaAccess?.durationMs === null ||
+      this.mediaAccess?.durationMs === undefined
+        ? part.durationMs / 1_000
+        : this.mediaAccess.durationMs / 1_000;
+    return (
+      Number.isFinite(expectedSeconds) &&
+      element.currentTime + 1 < expectedSeconds
+    );
   }
 
   private previewBoundary(boundary: 'start' | 'end'): void {

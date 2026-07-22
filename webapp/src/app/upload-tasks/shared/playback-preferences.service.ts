@@ -3,9 +3,11 @@ import { Injectable } from '@angular/core';
 import { StorageService } from 'src/app/core/services/storage.service';
 
 const PLAYBACK_VOLUME_KEY = 'blrec-playback-volume';
+const PLAYBACK_RATE_KEY = 'blrec-playback-rate';
 const PLAYBACK_POSITION_PREFIX = 'blrec-playback-position-';
 
 export const DEFAULT_PLAYBACK_VOLUME = 0.5;
+export const DEFAULT_PLAYBACK_RATE = 1;
 
 @Injectable({ providedIn: 'root' })
 export class PlaybackPreferencesService {
@@ -26,6 +28,25 @@ export class PlaybackPreferencesService {
     const volume = Math.max(0, Math.min(1, value));
     this.storage.setData(PLAYBACK_VOLUME_KEY, String(volume));
     return volume;
+  }
+
+  get rate(): number {
+    const stored = this.storage.getData(PLAYBACK_RATE_KEY);
+    if (stored === null) {
+      return DEFAULT_PLAYBACK_RATE;
+    }
+    const rate = Number(stored);
+    return Number.isFinite(rate) && rate >= 0.5 && rate <= 2
+      ? rate
+      : DEFAULT_PLAYBACK_RATE;
+  }
+
+  rememberRate(value: number): number {
+    const rate = Number.isFinite(value)
+      ? Math.max(0.5, Math.min(2, value))
+      : DEFAULT_PLAYBACK_RATE;
+    this.storage.setData(PLAYBACK_RATE_KEY, String(rate));
+    return rate;
   }
 
   position(partId: number): number | null {

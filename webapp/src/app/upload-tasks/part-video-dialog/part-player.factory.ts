@@ -32,10 +32,10 @@ export class PartPlayerFactory {
     };
     const player = mpegts.createPlayer(mediaDataSource, {
       enableWorker: false,
-      enableStashBuffer: false,
+      enableStashBuffer: !sequential,
       lazyLoad: !sequential,
-      lazyLoadMaxDuration: 60,
-      lazyLoadRecoverDuration: 15,
+      lazyLoadMaxDuration: 120,
+      lazyLoadRecoverDuration: 60,
       autoCleanupSourceBuffer: true,
       autoCleanupMaxBackwardDuration: 120,
       autoCleanupMinBackwardDuration: 60,

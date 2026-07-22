@@ -111,6 +111,7 @@ describe('PartVideoDialogComponent', () => {
 
   beforeEach(async () => {
     localStorage.removeItem('blrec-playback-volume');
+    localStorage.removeItem('blrec-playback-rate');
     localStorage.removeItem('blrec-playback-position-2');
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
@@ -245,6 +246,20 @@ describe('PartVideoDialogComponent', () => {
     fixture.componentInstance.handleClose();
   }));
 
+  it('changes and remembers playback speed from the dialog control', fakeAsync(() => {
+    fixture.detectChanges();
+    flushMicrotasks();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+
+    fixture.componentInstance.setPlaybackRate(1.25);
+
+    expect(video.playbackRate).toBe(1.25);
+    expect(localStorage.getItem('blrec-playback-rate')).toBe('1.25');
+    fixture.componentInstance.handleClose();
+  }));
+
   it('restores and periodically remembers the position of the same part', fakeAsync(() => {
     localStorage.setItem('blrec-playback-position-2', '7.500');
     fixture.detectChanges();
@@ -309,6 +324,37 @@ describe('PartVideoDialogComponent', () => {
 
     expect(service.createMediaAccess).toHaveBeenCalledTimes(1);
     expect(fixture.componentInstance.error).toBeNull();
+    fixture.componentInstance.handleClose();
+  }));
+
+  it('restores the recovery checkpoint after the rebuilt dialog player resets to zero', fakeAsync(() => {
+    const callbacks: { report?: PartPlayerEventHandler } = {};
+    playerFactory.attachFlv.and.callFake((_element, _url, _source, handler) => {
+      callbacks.report = handler;
+      return player;
+    });
+    fixture.detectChanges();
+    flushMicrotasks();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+    Object.defineProperty(video, 'paused', {
+      configurable: true,
+      value: false,
+    });
+    spyOn(video, 'play').and.returnValue(Promise.resolve());
+    video.currentTime = 8;
+
+    callbacks.report?.({
+      type: 'error',
+      message: '浏览器视频缓冲异常',
+      recoverable: true,
+    });
+    flushMicrotasks();
+    video.currentTime = 0;
+    fixture.componentInstance.handleMediaCanPlay();
+
+    expect(video.currentTime).toBe(8);
     fixture.componentInstance.handleClose();
   }));
 

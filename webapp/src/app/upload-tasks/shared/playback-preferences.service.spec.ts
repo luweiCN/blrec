@@ -10,12 +10,14 @@ describe('PlaybackPreferencesService', () => {
 
   beforeEach(() => {
     localStorage.removeItem('blrec-playback-volume');
+    localStorage.removeItem('blrec-playback-rate');
     localStorage.removeItem('blrec-playback-position-42');
     service = TestBed.inject(PlaybackPreferencesService);
   });
 
   afterEach(() => {
     localStorage.removeItem('blrec-playback-volume');
+    localStorage.removeItem('blrec-playback-rate');
     localStorage.removeItem('blrec-playback-position-42');
   });
 
@@ -34,5 +36,13 @@ describe('PlaybackPreferencesService', () => {
 
     service.clearPosition(42);
     expect(service.position(42)).toBeNull();
+  });
+
+  it('defaults to normal speed and remembers a supported playback rate', () => {
+    expect(service.rate).toBe(1);
+
+    service.rememberRate(1.5);
+
+    expect(service.rate).toBe(1.5);
   });
 });

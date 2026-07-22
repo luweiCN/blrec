@@ -51,7 +51,9 @@ interface DanmakuRecoveryState {
 const PLAYBACK_DEADLINE_MS = 10_000;
 const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5_000;
 const MEDIA_STALL_RECOVERY_DELAY_MS = 5_000;
-const MEDIA_RECOVERY_COOLDOWN_MS = 10_000;
+const MEDIA_RECOVERY_DUPLICATE_WINDOW_MS = 1_000;
+const MAX_MEDIA_RECOVERY_ATTEMPTS = 3;
+const MEDIA_RECOVERY_PROGRESS_SECONDS = 5;
 const MAX_DANMAKU_ROWS = 1_000;
 
 @Component({
@@ -75,6 +77,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   activeDanmakuIndex: number | null = null;
   followDanmaku = true;
   playbackVolume = 0.5;
+  playbackRate = 1;
 
   private videoElement: HTMLVideoElement | null = null;
   private danmakuListElement: HTMLElement | null = null;
@@ -90,6 +93,8 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   private resumePlaybackAfterReload = false;
   private lastPositionSavedAt = 0;
   private lastMediaRecoveryAt = 0;
+  private mediaRecoveryAttempts = 0;
+  private mediaRecoveryCheckpointSeconds: number | null = null;
   private mediaStallTimer: number | null = null;
   private destroyed = false;
 
@@ -101,6 +106,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     private zone: NgZone,
   ) {
     this.playbackVolume = this.playbackPreferences.volume;
+    this.playbackRate = this.playbackPreferences.rate;
   }
 
   @ViewChild('videoElement')
@@ -110,7 +116,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       this.invalidatePlayer();
       return;
     }
-    this.applyPlaybackVolume(this.videoElement);
+    this.applyPlaybackPreferences(this.videoElement);
     this.applyPendingSeek();
     this.attachFlvPlayer();
   }
@@ -207,7 +213,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
 
   handleMediaCanPlay(): void {
     this.clearMediaStallTimer();
-    this.applyPendingSeek();
+    this.applyPendingSeek(true);
     if (this.resumePlaybackAfterReload) {
       this.resumePlaybackAfterReload = false;
       void this.videoElement?.play().catch(() => undefined);
@@ -215,14 +221,24 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   }
 
   handleMediaMetadataLoaded(): void {
-    this.applyPendingSeek();
+    this.applyPendingSeek(true);
   }
 
   handleMediaPause(): void {
-    this.rememberPlaybackPosition(true);
+    if (
+      !this.loading &&
+      !this.resumePlaybackAfterReload &&
+      this.pendingSeekSeconds === null
+    ) {
+      this.rememberPlaybackPosition(true);
+    }
   }
 
   handleMediaEnded(): void {
+    if (this.mediaEndedPrematurely()) {
+      this.recoverMedia('录像在预期结束前停止播放', true);
+      return;
+    }
     if (this.playbackPartId !== null) {
       this.playbackPreferences.clearPosition(this.playbackPartId);
     }
@@ -238,8 +254,41 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     );
   }
 
+  setPlaybackRate(value: number | string): void {
+    const rate = Number(value);
+    if (!Number.isFinite(rate)) {
+      return;
+    }
+    this.playbackRate = this.playbackPreferences.rememberRate(rate);
+    if (this.videoElement) {
+      this.videoElement.playbackRate = this.playbackRate;
+    }
+  }
+
+  handlePlaybackRateChange(event: Event): void {
+    const element = event.currentTarget;
+    if (!(element instanceof HTMLVideoElement)) {
+      return;
+    }
+    this.playbackRate = this.playbackPreferences.rememberRate(
+      element.playbackRate,
+    );
+    if (element.playbackRate !== this.playbackRate) {
+      element.playbackRate = this.playbackRate;
+    }
+  }
+
   handleTimeUpdate(): void {
     this.clearMediaStallTimer();
+    if (
+      this.videoElement !== null &&
+      this.mediaRecoveryCheckpointSeconds !== null &&
+      this.videoElement.currentTime >=
+        this.mediaRecoveryCheckpointSeconds + MEDIA_RECOVERY_PROGRESS_SECONDS
+    ) {
+      this.mediaRecoveryAttempts = 0;
+      this.mediaRecoveryCheckpointSeconds = null;
+    }
     this.rememberPlaybackPosition(false);
     if (this.videoElement === null || this.danmakuItems.length === 0) {
       this.activeDanmakuIndex = null;
@@ -376,7 +425,9 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     resetRecoveryCooldown = true,
     restoreRememberedPosition = true,
   ): void {
-    this.rememberPlaybackPosition(true);
+    if (this.pendingSeekSeconds === null) {
+      this.rememberPlaybackPosition(true);
+    }
     this.clearMediaStallTimer();
     this.request?.unsubscribe();
     this.invalidatePlayer();
@@ -397,6 +448,8 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     }
     if (resetRecoveryCooldown) {
       this.lastMediaRecoveryAt = 0;
+      this.mediaRecoveryAttempts = 0;
+      this.mediaRecoveryCheckpointSeconds = null;
     }
     this.deadlineAt = Date.now() + PLAYBACK_DEADLINE_MS;
     this.playbackState = { kind: 'access_loading' };
@@ -701,16 +754,30 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     }
   }
 
-  private recoverMedia(message: string): void {
+  private recoverMedia(message: string, forceResume = false): void {
     const now = Date.now();
-    if (now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_COOLDOWN_MS) {
-      this.fail(`${message}，请关闭后重新打开录像`);
+    if (
+      now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_DUPLICATE_WINDOW_MS
+    ) {
+      return;
+    }
+    if (this.mediaRecoveryAttempts >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
+      this.fail(`${message}，已自动重试 3 次，请关闭后重新打开录像`);
       return;
     }
     this.lastMediaRecoveryAt = now;
-    this.pendingSeekSeconds = Math.max(0, this.videoElement?.currentTime ?? 0);
+    const checkpoint = Math.max(0, this.videoElement?.currentTime ?? 0);
+    this.pendingSeekSeconds = checkpoint;
+    this.mediaRecoveryCheckpointSeconds = checkpoint;
+    this.mediaRecoveryAttempts += 1;
+    if (this.playbackPartId !== null) {
+      this.playbackPreferences.rememberPosition(
+        this.playbackPartId,
+        checkpoint,
+      );
+    }
     this.resumePlaybackAfterReload =
-      this.videoElement !== null && !this.videoElement.paused;
+      forceResume || (this.videoElement !== null && !this.videoElement.paused);
     this.loadMedia(false, false);
   }
 
@@ -761,14 +828,19 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     );
   }
 
-  private applyPlaybackVolume(element: HTMLVideoElement): void {
+  private applyPlaybackPreferences(element: HTMLVideoElement): void {
     this.playbackVolume = this.playbackPreferences.volume;
+    this.playbackRate = this.playbackPreferences.rate;
     element.volume = this.playbackVolume;
+    element.playbackRate = this.playbackRate;
   }
 
-  private applyPendingSeek(): void {
+  private applyPendingSeek(mediaReady = false): void {
     const element = this.videoElement;
     if (!element || this.pendingSeekSeconds === null) {
+      return;
+    }
+    if (!mediaReady && element.readyState < HTMLMediaElement.HAVE_METADATA) {
       return;
     }
     const durationSeconds =
@@ -785,6 +857,19 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     } catch (_error) {
       // Metadata may not be ready yet; loadedmetadata will retry.
     }
+  }
+
+  private mediaEndedPrematurely(): boolean {
+    const element = this.videoElement;
+    const expectedDurationMs = this.mediaAccess?.durationMs;
+    if (
+      !element ||
+      expectedDurationMs === null ||
+      expectedDurationMs === undefined
+    ) {
+      return false;
+    }
+    return element.currentTime + 1 < expectedDurationMs / 1_000;
   }
 
   private rememberPlaybackPosition(force: boolean): void {
@@ -902,6 +987,9 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     this.playbackPartId = null;
     this.pendingSeekSeconds = null;
     this.resumePlaybackAfterReload = false;
+    this.lastMediaRecoveryAt = 0;
+    this.mediaRecoveryAttempts = 0;
+    this.mediaRecoveryCheckpointSeconds = null;
   }
 
   private describeError(error: unknown, fallback: string): string {

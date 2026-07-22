@@ -152,7 +152,7 @@ describe('RecordingSessionService', () => {
         requestId: 'request-service',
       }),
     ).toBe(
-      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id',
+      '/api/v1/recording-sessions/parts/7/media?media_token=signed%20token&media_expires=123&media_snapshot=snapshot-id&ngsw-bypass=1',
     );
 
     service.listDanmaku(7, 100, 50).subscribe();

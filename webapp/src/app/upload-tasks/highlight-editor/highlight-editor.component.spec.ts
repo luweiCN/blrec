@@ -213,6 +213,7 @@ describe('HighlightEditorComponent', () => {
 
   beforeEach(async () => {
     localStorage.removeItem('blrec-playback-volume');
+    localStorage.removeItem('blrec-playback-rate');
     localStorage.removeItem('blrec-playback-position-11');
     localStorage.removeItem('blrec-playback-position-12');
     localStorage.removeItem('blrec-playback-position-13');
@@ -1869,6 +1870,17 @@ describe('HighlightEditorComponent', () => {
     expect(localStorage.getItem('blrec-playback-volume')).toBe('0.65');
   });
 
+  it('changes and remembers playback speed from the timeline controls', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+
+    component.setPlaybackRate(1.5);
+
+    expect(video.playbackRate).toBe(1.5);
+    expect(localStorage.getItem('blrec-playback-rate')).toBe('1.5');
+  });
+
   it('restores the remembered position when the editor is reopened', fakeAsync(() => {
     fixture.destroy();
     localStorage.setItem('blrec-playback-position-11', '18.500');
@@ -1936,6 +1948,64 @@ describe('HighlightEditorComponent', () => {
     expect(recordings.createMediaAccess).toHaveBeenCalledOnceWith(12);
     expect(component.mediaError).toBeNull();
   }));
+
+  it('restores the recovery checkpoint after the rebuilt player resets to zero', fakeAsync(() => {
+    const callbacks: { onEvent?: PartPlayerEventHandler } = {};
+    playerFactory.attachFlv.and.callFake((_element, _url, _source, handler) => {
+      callbacks.onEvent = handler;
+      return player;
+    });
+    component.selectPart(timeline.parts[1]);
+    flushMicrotasks();
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    Object.defineProperty(video, 'paused', {
+      configurable: true,
+      value: false,
+    });
+    spyOn(video, 'play').and.returnValue(Promise.resolve());
+    video.currentTime = 67;
+
+    callbacks.onEvent?.({
+      type: 'error',
+      message: '浏览器视频缓冲异常',
+      recoverable: true,
+    });
+    flushMicrotasks();
+    video.currentTime = 0;
+    component.handleMediaCanPlay();
+
+    expect(video.currentTime).toBe(67);
+  }));
+
+  it('ignores native source errors owned by the FLV player', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    Object.defineProperty(video, 'error', {
+      configurable: true,
+      value: { code: MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED },
+    });
+    recordings.createMediaAccess.calls.reset();
+
+    component.handleMediaError();
+
+    expect(component.mediaError).toBeNull();
+    expect(recordings.createMediaAccess).not.toHaveBeenCalled();
+  });
+
+  it('reopens an indexed FLV that ends before its expected duration', () => {
+    const video = fixture.nativeElement.querySelector(
+      '[data-testid="editor-video"]',
+    ) as HTMLVideoElement;
+    video.currentTime = 60;
+    recordings.createMediaAccess.calls.reset();
+
+    component.handleMediaEnded();
+
+    expect(recordings.createMediaAccess).toHaveBeenCalledOnceWith(11);
+  });
 
   it('enters system fullscreen without replacing webpage fullscreen', () => {
     const workbench = fixture.nativeElement.querySelector(

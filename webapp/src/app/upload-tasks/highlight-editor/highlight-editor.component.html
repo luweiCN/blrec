@@ -60,6 +60,7 @@
           (play)="handleMediaPlay()"
           (pause)="handleMediaPause()"
           (volumechange)="handleVolumeChange($event)"
+          (ratechange)="handlePlaybackRateChange($event)"
           (timeupdate)="handleTimeUpdate()"
           (ended)="handleMediaEnded()"
           (error)="handleMediaError()"
@@ -93,6 +94,21 @@
             aria-label="播放音量"
             (input)="setVolume($any($event.target).value)"
           />
+          <label class="playback-rate-control">
+            <span>倍速</span>
+            <select
+              aria-label="播放速度"
+              [value]="playbackRate"
+              (change)="setPlaybackRate($any($event.target).value)"
+            >
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1">1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+          </label>
           <button
             type="button"
             class="timeline-control"
@@ -609,6 +625,7 @@
         preload="metadata"
         [src]="clipPreviewUrl"
         (volumechange)="handleVolumeChange($event)"
+        (ratechange)="handlePlaybackRateChange($event)"
         (error)="handleClipPreviewError()"
       ></video>
     </section>

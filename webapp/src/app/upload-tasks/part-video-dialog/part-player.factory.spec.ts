@@ -46,8 +46,10 @@ describe('PartPlayerFactory', () => {
       },
       jasmine.objectContaining({
         enableWorker: false,
-        enableStashBuffer: false,
+        enableStashBuffer: true,
         lazyLoad: true,
+        lazyLoadMaxDuration: 120,
+        lazyLoadRecoverDuration: 60,
       }),
     );
     expect(player.attachMediaElement).toHaveBeenCalledOnceWith(element);
