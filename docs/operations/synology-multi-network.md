@@ -60,7 +60,7 @@ docker run --rm --entrypoint python \
   -v /volume1/docker/blrec-next/config:/cfg \
   -v /volume1/docker/blrec-next/log:/log \
   -v /volume1/docker/blrec-next/rec:/rec \
-  ghcr.io/luweicn/blrec:3.0.0-beta.24 \
+  ghcr.io/luweicn/blrec:3.0.0-beta.25 \
   /app/scripts/migrate_legacy_settings.py \
   /legacy/settings.toml /cfg/settings.toml \
   --rooms 30038570 25654586 21045351 10802797 2604398
