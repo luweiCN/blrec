@@ -191,6 +191,14 @@ export class ClipLibraryComponent implements OnInit {
   }
 
   retry(clip: HighlightClipSummary): void {
+    if (clip.deletionState !== 'none') {
+      this.message.error('片段正在删除，不能重试生成');
+      return;
+    }
+    if (clip.sourceSessionId === null) {
+      this.message.error('源录像关联已丢失，无法重试，请删除后重新创建片段');
+      return;
+    }
     this.highlights.retryClip(clip.id).subscribe({
       next: () => {
         this.message.success('片段已重新排队生成');
@@ -211,7 +219,7 @@ export class ClipLibraryComponent implements OnInit {
         new Promise<void>((resolve, reject) => {
           this.highlights.deleteClip(clip.id).subscribe({
             next: () => {
-              this.message.success('片段已删除');
+              this.message.success('已提交删除，正在处理');
               this.load();
               resolve();
             },
@@ -225,6 +233,12 @@ export class ClipLibraryComponent implements OnInit {
   }
 
   stateLabel(clip: HighlightClipSummary): string {
+    if (clip.deletionState === 'failed') {
+      return '删除失败';
+    }
+    if (this.deletionActive(clip)) {
+      return '正在删除';
+    }
     return {
       queued: '等待生成',
       processing: '正在生成',
@@ -235,6 +249,12 @@ export class ClipLibraryComponent implements OnInit {
   }
 
   stateColor(clip: HighlightClipSummary): string {
+    if (clip.deletionState === 'failed') {
+      return 'error';
+    }
+    if (this.deletionActive(clip)) {
+      return 'processing';
+    }
     return {
       queued: 'default',
       processing: 'processing',
@@ -242,6 +262,14 @@ export class ClipLibraryComponent implements OnInit {
       failed: 'error',
       cancelled: 'default',
     }[clip.state];
+  }
+
+  deletionActive(clip: HighlightClipSummary): boolean {
+    return (
+      clip.deletionState === 'requested' ||
+      clip.deletionState === 'quiescing' ||
+      clip.deletionState === 'deleting'
+    );
   }
 
   uploadLabel(clip: HighlightClipSummary): string {

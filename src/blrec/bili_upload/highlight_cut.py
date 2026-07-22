@@ -229,7 +229,13 @@ class LosslessClipper:
         concat_path: Optional[str] = None
         try:
             if len(inspection.sources) == 1:
-                self._cut_source(inspection.sources[0], temporary_output)
+                source = inspection.sources[0]
+                input_seek_ms = (
+                    None
+                    if source.recording
+                    else source.actual_start_ms + inspection.extra_lead_ms
+                )
+                self._cut_source(source, temporary_output, input_seek_ms=input_seek_ms)
             else:
                 for source in inspection.sources:
                     segment_path = self._temporary_path(
@@ -286,7 +292,13 @@ class LosslessClipper:
             if concat_path is not None:
                 self._remove(concat_path)
 
-    def _cut_source(self, source: InspectedClipSource, output_path: str) -> None:
+    def _cut_source(
+        self,
+        source: InspectedClipSource,
+        output_path: str,
+        *,
+        input_seek_ms: Optional[int] = None,
+    ) -> None:
         input_options: Tuple[str, ...]
         if source.recording:
             input_options = (
@@ -298,7 +310,9 @@ class LosslessClipper:
         else:
             input_options = (
                 '-ss',
-                self._seconds(source.actual_start_ms),
+                self._seconds(
+                    source.actual_start_ms if input_seek_ms is None else input_seek_ms
+                ),
                 '-i',
                 source.path,
             )

@@ -58,6 +58,9 @@
           <div *ngIf="clip.errorMessage" class="error-line">
             {{ clip.errorMessage }}
           </div>
+          <div *ngIf="clip.deletionError" class="error-line">
+            删除失败：{{ clip.deletionError }}
+          </div>
         </td>
         <td class="clip-source-column">
           <div>{{ clip.sourceAnchorName || "未知主播" }}</div>
@@ -91,7 +94,7 @@
             nz-button
             nzType="link"
             type="button"
-            [disabled]="clip.state !== 'ready'"
+            [disabled]="clip.state !== 'ready' || clip.deletionState !== 'none'"
             (click)="openPreview(clip)"
           >
             预览
@@ -100,7 +103,7 @@
             nz-button
             nzType="link"
             type="button"
-            [disabled]="clip.state !== 'ready'"
+            [disabled]="clip.state !== 'ready' || clip.deletionState !== 'none'"
             (click)="download(clip)"
           >
             下载
@@ -110,16 +113,22 @@
             nz-button
             nzType="link"
             type="button"
-            [disabled]="clip.state !== 'ready'"
+            [disabled]="clip.state !== 'ready' || clip.deletionState !== 'none'"
             (click)="openUpload(clip)"
           >
             投稿
           </button>
           <button
-            *ngIf="clip.state === 'failed'"
+            *ngIf="clip.state === 'failed' && clip.deletionState === 'none'"
             nz-button
             nzType="link"
             type="button"
+            [disabled]="clip.sourceSessionId === null"
+            [attr.title]="
+              clip.sourceSessionId === null
+                ? '源录像关联已丢失，无法重试，请删除后重新创建片段'
+                : null
+            "
             (click)="retry(clip)"
           >
             重试
@@ -129,9 +138,10 @@
             nzType="link"
             nzDanger
             type="button"
+            [disabled]="deletionActive(clip)"
             (click)="delete(clip)"
           >
-            删除
+            {{ clip.deletionState === "failed" ? "重试删除" : "删除" }}
           </button>
         </td>
       </tr>

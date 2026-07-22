@@ -694,9 +694,9 @@ async def retry_clip(
     try:
         value = await highlight_service.retry_clip(clip_id)
     except ValueError as error:
-        if 'only a failed' in str(error) or 'state changed' in str(error):
-            raise _clip_conflict(error) from None
-        raise _not_found(error) from None
+        if str(error).startswith('unknown highlight clip'):
+            raise _not_found(error) from None
+        raise _clip_conflict(error) from None
     return _clip_response(value)
 
 

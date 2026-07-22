@@ -566,11 +566,17 @@ async def test_legacy_clip_migration_updates_its_local_upload_paths(
 
 @pytest.mark.asyncio
 async def test_failed_clip_can_be_queued_for_retry(database, tmp_path: Path) -> None:
+    await seed_timeline(database, tmp_path)
     await database.execute(
         'INSERT INTO highlight_clips('
-        'id,room_id,name,requested_start_ms,requested_end_ms,state,error_message,'
-        'next_attempt_at,file_size_bytes,created_at,updated_at) '
-        "VALUES(1,100,'失败片段',0,1000,'failed','ffprobe failed',99,123,1,1)"
+        'id,room_id,source_session_id,name,requested_start_ms,requested_end_ms,'
+        'state,error_message,next_attempt_at,file_size_bytes,created_at,updated_at) '
+        "VALUES(1,100,1,'失败片段',0,1000,'failed','ffprobe failed',99,123,1,1)"
+    )
+    await database.execute(
+        'INSERT INTO highlight_clip_sources('
+        'clip_id,part_id,ordinal,requested_start_ms,requested_end_ms) '
+        'VALUES(1,1,1,0,1000)'
     )
     service = HighlightService(database, recording_root=tmp_path)
 
@@ -583,6 +589,34 @@ async def test_failed_clip_can_be_queued_for_retry(database, tmp_path: Path) -> 
         await database.scalar('SELECT next_attempt_at FROM highlight_clips WHERE id=1')
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_clip_without_a_persisted_source_cannot_be_retried(
+    database, tmp_path: Path
+) -> None:
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,state,error_message,'
+        'attempt,next_attempt_at,created_at,updated_at) '
+        "VALUES(1,100,'旧片段',0,1000,'failed','没有源视频分段',2,99,1,1)"
+    )
+    service = HighlightService(database, recording_root=tmp_path)
+
+    with pytest.raises(ValueError, match='源录像关联已丢失'):
+        await service.retry_clip(1)
+
+    row = await database.fetchone(
+        'SELECT state,error_message,attempt,next_attempt_at '
+        'FROM highlight_clips WHERE id=1'
+    )
+    assert row is not None
+    assert dict(row) == {
+        'state': 'failed',
+        'error_message': '没有源视频分段',
+        'attempt': 2,
+        'next_attempt_at': 99,
+    }
 
 
 @pytest.mark.asyncio

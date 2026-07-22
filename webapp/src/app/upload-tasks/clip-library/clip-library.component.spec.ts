@@ -17,6 +17,8 @@ const clip: HighlightClipSummary = {
   sourceSessionId: 9,
   name: '五杀高光',
   state: 'ready',
+  deletionState: 'none',
+  deletionError: null,
   errorMessage: null,
   createdAt: 1_100,
   updatedAt: 1_100,
@@ -49,6 +51,8 @@ const fullClip: HighlightClip = {
 describe('ClipLibraryComponent', () => {
   let fixture: ComponentFixture<ClipLibraryComponent>;
   let service: jasmine.SpyObj<HighlightService>;
+  let message: jasmine.SpyObj<NzMessageService>;
+  let modal: jasmine.SpyObj<NzModalService>;
 
   beforeEach(async () => {
     service = jasmine.createSpyObj<HighlightService>('HighlightService', [
@@ -69,6 +73,11 @@ describe('ClipLibraryComponent', () => {
     service.retryClip.and.returnValue(of(fullClip));
     service.deleteClip.and.returnValue(of(void 0));
     service.createUploadTask.and.returnValue(of({ jobId: 17 }));
+    message = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+      'success',
+      'error',
+    ]);
+    modal = jasmine.createSpyObj<NzModalService>('NzModalService', ['confirm']);
 
     await TestBed.configureTestingModule({
       declarations: [ClipLibraryComponent],
@@ -76,16 +85,11 @@ describe('ClipLibraryComponent', () => {
         { provide: HighlightService, useValue: service },
         {
           provide: NzMessageService,
-          useValue: jasmine.createSpyObj<NzMessageService>('NzMessageService', [
-            'success',
-            'error',
-          ]),
+          useValue: message,
         },
         {
           provide: NzModalService,
-          useValue: jasmine.createSpyObj<NzModalService>('NzModalService', [
-            'confirm',
-          ]),
+          useValue: modal,
         },
       ],
       schemas: [NO_ERRORS_SCHEMA],
@@ -130,5 +134,56 @@ describe('ClipLibraryComponent', () => {
 
     expect(fixture.nativeElement.textContent).toContain('大小待索引');
     expect(fixture.nativeElement.textContent).not.toContain('0 B');
+  });
+
+  it('reports deletion as queued instead of already completed', async () => {
+    fixture.detectChanges();
+
+    fixture.componentInstance.delete(clip);
+    const options = modal.confirm.calls.mostRecent().args[0];
+    expect(options).toBeDefined();
+    const onOk = options!.nzOnOk as () => Promise<void>;
+    await onOk();
+
+    expect(service.deleteClip).toHaveBeenCalledOnceWith(3);
+    expect(message.success).toHaveBeenCalledOnceWith('已提交删除，正在处理');
+  });
+
+  it('shows a failed deletion and offers deletion retry', () => {
+    service.listAllClips.and.returnValue(
+      of({
+        total: 1,
+        items: [
+          {
+            ...clip,
+            deletionState: 'failed',
+            deletionError: 'path_ownership_violation',
+          },
+        ],
+      }),
+    );
+
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('删除失败');
+    expect(fixture.nativeElement.textContent).toContain(
+      'path_ownership_violation',
+    );
+    expect(fixture.nativeElement.textContent).toContain('重试删除');
+  });
+
+  it('does not retry a failed clip after its source recording was lost', () => {
+    const unavailable = {
+      ...clip,
+      state: 'failed' as const,
+      sourceSessionId: null,
+    };
+
+    fixture.componentInstance.retry(unavailable);
+
+    expect(service.retryClip).not.toHaveBeenCalled();
+    expect(message.error).toHaveBeenCalledOnceWith(
+      '源录像关联已丢失，无法重试，请删除后重新创建片段',
+    );
   });
 });

@@ -381,8 +381,9 @@ class HighlightService:
     )
     _CLIP_SUMMARY_SELECT = (
         'WITH selected_clips AS ('
-        'SELECT id FROM highlight_clips '
+        'SELECT id FROM highlight_clips INDEXED BY highlight_clips_library_idx '
         "WHERE state!='cancelled' "
+        "AND deletion_state IN ('none','failed') "
         'ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?),'
         'selected_jobs AS ('
         'SELECT job.id FROM selected_clips selected '
@@ -1643,7 +1644,8 @@ class HighlightService:
             raise ValueError('clip list offset must not be negative')
         total = int(
             await self._database.scalar(
-                "SELECT COUNT(*) FROM highlight_clips WHERE state!='cancelled'"
+                "SELECT COUNT(*) FROM highlight_clips WHERE state!='cancelled' "
+                "AND deletion_state IN ('none','failed')"
             )
         )
         rows = await self._database.fetchall(self._CLIP_SUMMARY_SELECT, (limit, offset))
@@ -1722,11 +1724,17 @@ class HighlightService:
         clip = await self.get_clip(clip_id)
         if clip.state != 'failed':
             raise ValueError('only a failed highlight clip can be retried')
+        if clip.deletion_state != 'none':
+            raise ValueError('片段正在删除，不能重试生成')
+        if not clip.sources:
+            raise ValueError('源录像关联已丢失，无法重试，请删除后重新创建片段')
         updated = await self._database.execute(
             "UPDATE highlight_clips SET state='queued',error_message=NULL,"
             'lease_owner=NULL,lease_until=NULL,next_attempt_at=0,'
             'file_size_bytes=NULL,updated_at=? '
-            "WHERE id=? AND state='failed'",
+            "WHERE id=? AND state='failed' AND deletion_state='none' "
+            'AND EXISTS(SELECT 1 FROM highlight_clip_sources source '
+            'WHERE source.clip_id=highlight_clips.id)',
             (int(self._clock()), clip_id),
         )
         if updated != 1:

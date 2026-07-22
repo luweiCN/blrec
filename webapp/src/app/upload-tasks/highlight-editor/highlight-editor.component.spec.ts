@@ -190,6 +190,8 @@ describe('HighlightEditorComponent', () => {
     outputVideoPath: null,
     outputXmlPath: null,
     state: 'processing',
+    deletionState: 'none',
+    deletionError: null,
     confirmationRequired: true,
     confirmed: true,
     errorMessage: null,

@@ -675,9 +675,12 @@ class LocalDeletionWorker:
                 collected.append(str(session['cover_path']))
             raw_paths = tuple(collected)
             root = self._recording_root
-        paths = tuple(
-            dict.fromkeys(self._owned_path(value, root) for value in raw_paths)
-        )
+        if owner_kind == 'clip':
+            paths = self._owned_clip_paths(raw_paths)
+        else:
+            paths = tuple(
+                dict.fromkeys(self._owned_path(value, root) for value in raw_paths)
+            )
 
         def snapshot(connection: sqlite3.Connection) -> None:
             table = (
@@ -930,6 +933,36 @@ class LocalDeletionWorker:
         if path.suffix.lower() not in self._FILE_SUFFIXES:
             raise LocalDeletionRejected('path_suffix_not_allowed')
         return path
+
+    def _owned_clip_paths(self, raw_paths: Tuple[str, ...]) -> Tuple[Path, ...]:
+        paths: List[Path] = []
+        for raw_path in raw_paths:
+            try:
+                paths.append(self._owned_path(raw_path, self._clip_root))
+            except LocalDeletionRejected as error:
+                ownership_violation = str(error) == 'path_ownership_violation'
+                if ownership_violation and self._missing_legacy_clip_output(raw_path):
+                    audit(
+                        'local_deletion_missing_legacy_clip_output_skipped',
+                        owner_kind='clip',
+                        path=raw_path,
+                        result='missing',
+                    )
+                    continue
+                raise
+        return tuple(dict.fromkeys(paths))
+
+    def _missing_legacy_clip_output(self, raw_path: str) -> bool:
+        path = Path(os.path.abspath(os.path.expanduser(raw_path)))
+        resolved = path.resolve(strict=False)
+        if resolved.suffix.lower() not in ('.mp4', '.xml'):
+            return False
+        try:
+            resolved.relative_to(self._clip_root)
+        except ValueError:
+            partial = Path(str(path) + '.partial')
+            return not os.path.lexists(path) and not os.path.lexists(partial)
+        return False
 
     def _unlink_if_present(self, path: Path) -> None:
         try:

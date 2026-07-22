@@ -461,6 +461,21 @@ def test_unsafe_clip_range_returns_conflict(client: TestClient) -> None:
     assert '最后 10 秒' in response.json()['detail']
 
 
+def test_retry_without_a_persisted_source_returns_conflict(client: TestClient) -> None:
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.retry_clip.side_effect = ValueError(
+        '源录像关联已丢失，无法重试，请删除后重新创建片段'
+    )
+
+    response = client.post('/api/v1/highlights/clips/3/retry', headers=auth())
+
+    assert response.status_code == 409
+    assert (
+        response.json()['detail'] == '源录像关联已丢失，无法重试，请删除后重新创建片段'
+    )
+
+
 def test_ready_clip_supports_signed_byte_range_playback(
     client: TestClient, tmp_path: Path
 ) -> None:

@@ -314,6 +314,8 @@ def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
 
     command, options = calls[0]
     assert isinstance(command, tuple)
+    assert command[command.index('-ss') + 1] == '30.000'
+    assert command[command.index('-t') + 1] == '51.400'
     assert ('-c', 'copy') == command[command.index('-c') : command.index('-c') + 2]
     assert ('-avoid_negative_ts', 'make_zero') == command[
         command.index('-avoid_negative_ts') : command.index('-avoid_negative_ts') + 2

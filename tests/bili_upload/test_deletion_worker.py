@@ -548,6 +548,13 @@ async def test_failed_clip_deletion_stays_visible_with_its_error(
             unlink=refuse_unlink,
         )
         await worker.request_clip(7)
+
+        total, summaries = await HighlightService(database).list_clip_summaries(
+            limit=20, offset=0
+        )
+        assert total == 0
+        assert summaries == ()
+
         await worker.run_once()
 
         total, summaries = await HighlightService(database).list_clip_summaries(
@@ -561,6 +568,80 @@ async def test_failed_clip_deletion_stays_visible_with_its_error(
         assert detail.deletion_state == 'failed'
         assert detail.deletion_error == 'unlink_PermissionError'
         assert output.exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_legacy_clip_outputs_do_not_block_record_deletion(
+    tmp_path: Path,
+) -> None:
+    recording_root = tmp_path / 'rec'
+    clip_root = tmp_path / 'clips'
+    recording_root.mkdir()
+    clip_root.mkdir()
+    legacy_video = recording_root / 'highlights' / '100' / 'highlight-7.mp4'
+    legacy_xml = recording_root / 'highlights' / '100' / 'highlight-7.xml'
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,'
+            'output_video_path,output_xml_path,state,created_at,updated_at) '
+            "VALUES(7,100,'legacy',0,1000,?,?,'failed',1,1)",
+            (str(legacy_video), str(legacy_xml)),
+        )
+        worker = LocalDeletionWorker(
+            database, recording_root=recording_root, clip_root=clip_root
+        )
+
+        await worker.request_clip(7)
+        assert await worker.run_once() == ('clip', 7)
+
+        assert await database.scalar('SELECT COUNT(*) FROM highlight_clips') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_legacy_clip_output_outside_owned_root_is_rejected(
+    tmp_path: Path,
+) -> None:
+    recording_root = tmp_path / 'rec'
+    clip_root = tmp_path / 'clips'
+    legacy_root = recording_root / 'highlights' / '100'
+    recording_root.mkdir()
+    clip_root.mkdir()
+    legacy_root.mkdir(parents=True)
+    legacy_video = legacy_root / 'highlight-7.mp4'
+    legacy_video.write_bytes(b'clip')
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO highlight_clips('
+            'id,room_id,name,requested_start_ms,requested_end_ms,'
+            'output_video_path,state,created_at,updated_at) '
+            "VALUES(7,100,'legacy',0,1000,?,'failed',1,1)",
+            (str(legacy_video),),
+        )
+        worker = LocalDeletionWorker(
+            database, recording_root=recording_root, clip_root=clip_root
+        )
+
+        await worker.request_clip(7)
+        assert await worker.run_once() == ('clip', 7)
+
+        row = await database.fetchone(
+            'SELECT deletion_state,deletion_error FROM highlight_clips WHERE id=7'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'deletion_state': 'failed',
+            'deletion_error': 'path_ownership_violation',
+        }
+        assert legacy_video.read_bytes() == b'clip'
     finally:
         await database.close()
 

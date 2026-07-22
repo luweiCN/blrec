@@ -91,6 +91,13 @@ export type HighlightClipCreateResult =
 export type HighlightClipState =
   'queued' | 'processing' | 'ready' | 'failed' | 'cancelled';
 
+export type HighlightDeletionState =
+  | 'none'
+  | 'requested'
+  | 'quiescing'
+  | 'deleting'
+  | 'failed';
+
 export interface HighlightClipSource {
   readonly partId: number;
   readonly ordinal: number;
@@ -114,6 +121,8 @@ export interface HighlightClip {
   readonly outputVideoPath: string | null;
   readonly outputXmlPath: string | null;
   readonly state: HighlightClipState;
+  readonly deletionState: HighlightDeletionState;
+  readonly deletionError: string | null;
   readonly confirmationRequired: boolean;
   readonly confirmed: boolean;
   readonly errorMessage: string | null;
@@ -137,6 +146,8 @@ export interface HighlightClipSummary {
   readonly sourceSessionId: number | null;
   readonly name: string;
   readonly state: HighlightClipState;
+  readonly deletionState: HighlightDeletionState;
+  readonly deletionError: string | null;
   readonly errorMessage: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
