@@ -1971,6 +1971,7 @@ describe('HighlightEditorComponent', () => {
     expect(workbench.classList).toContain('player-fullscreen');
     expect(requestFullscreen).not.toHaveBeenCalled();
     expect(getComputedStyle(workbench).position).toBe('fixed');
+    expect(getComputedStyle(workbench).display).toBe('grid');
     expect(
       getComputedStyle(
         workbench.querySelector('.video-stage video') as HTMLVideoElement,
@@ -1980,7 +1981,12 @@ describe('HighlightEditorComponent', () => {
       getComputedStyle(
         workbench.querySelector('.timeline-panel') as HTMLElement,
       ).position,
-    ).toBe('absolute');
+    ).toBe('relative');
+    expect(
+      getComputedStyle(
+        workbench.querySelector('.video-stage') as HTMLElement,
+      ).position,
+    ).toBe('relative');
     expect(
       getComputedStyle(
         workbench.querySelector('.editor-toolbar') as HTMLElement,

@@ -40,10 +40,22 @@ export class PartPlayerFactory {
       autoCleanupMaxBackwardDuration: 120,
       autoCleanupMinBackwardDuration: 60,
     });
+    let destroyed = false;
+    const pendingErrorTimers = new Set<number>();
     player.on(
       mpegts.Events.ERROR,
       (type: unknown, detail: unknown, info: unknown) => {
-        onEvent({ type: 'error', ...this.describeError(type, detail, info) });
+        const error = this.describeError(type, detail, info);
+        if (error === null) {
+          return;
+        }
+        const timer = window.setTimeout(() => {
+          pendingErrorTimers.delete(timer);
+          if (!destroyed) {
+            onEvent({ type: 'error', ...error });
+          }
+        });
+        pendingErrorTimers.add(timer);
       },
     );
     let firstFrameReported = false;
@@ -65,6 +77,11 @@ export class PartPlayerFactory {
       unload: () => player.unload(),
       detachMediaElement: () => player.detachMediaElement(),
       destroy: () => {
+        destroyed = true;
+        for (const timer of pendingErrorTimers) {
+          window.clearTimeout(timer);
+        }
+        pendingErrorTimers.clear();
         element.removeEventListener('loadeddata', firstFrame);
         element.removeEventListener('playing', firstFrame);
         element.removeEventListener('stalled', stalled);
@@ -77,7 +94,7 @@ export class PartPlayerFactory {
     type: unknown,
     detail: unknown,
     info: unknown,
-  ): { readonly message: string; readonly recoverable: boolean } {
+  ): { readonly message: string; readonly recoverable: boolean } | null {
     if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
       const code = this.errorCode(info);
       return {
@@ -95,6 +112,9 @@ export class PartPlayerFactory {
       };
     }
     if (detail === mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED) {
+      if (info === 'Flv: Unsupported codec in video frame: 0') {
+        return null;
+      }
       return {
         message: '该录像的编码当前浏览器无法播放',
         recoverable: false,

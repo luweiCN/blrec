@@ -1,4 +1,5 @@
 import mpegts from 'mpegts.js';
+import { fakeAsync, tick } from '@angular/core/testing';
 
 import { PartPlayerFactory } from './part-player.factory';
 import type {
@@ -73,7 +74,7 @@ describe('PartPlayerFactory', () => {
     );
   });
 
-  it('marks an MSE buffer failure as recoverable instead of a codec error', () => {
+  it('marks an MSE buffer failure as recoverable instead of a codec error', fakeAsync(() => {
     const onEvent = jasmine.createSpy<PartPlayerEventHandler>('onEvent');
     new PartPlayerFactory().attachFlv(
       document.createElement('video'),
@@ -85,6 +86,7 @@ describe('PartPlayerFactory', () => {
       },
       onEvent,
     );
+    onEvent.calls.reset();
     const errorListener = player.on.calls.argsFor(0)[1] as (
       type: unknown,
       detail: unknown,
@@ -97,14 +99,16 @@ describe('PartPlayerFactory', () => {
       { code: 22 },
     );
 
+    expect(onEvent).not.toHaveBeenCalled();
+    tick();
     expect(onEvent).toHaveBeenCalledWith({
       type: 'error',
       message: '浏览器视频缓冲异常',
       recoverable: true,
     });
-  });
+  }));
 
-  it('only reports codec incompatibility for the explicit codec error', () => {
+  it('only reports codec incompatibility for the explicit codec error', fakeAsync(() => {
     const onEvent = jasmine.createSpy<PartPlayerEventHandler>('onEvent');
     new PartPlayerFactory().attachFlv(
       document.createElement('video'),
@@ -116,6 +120,7 @@ describe('PartPlayerFactory', () => {
       },
       onEvent,
     );
+    onEvent.calls.reset();
     const errorListener = player.on.calls.argsFor(0)[1] as (
       type: unknown,
       detail: unknown,
@@ -128,10 +133,40 @@ describe('PartPlayerFactory', () => {
       {},
     );
 
+    tick();
     expect(onEvent).toHaveBeenCalledWith({
       type: 'error',
       message: '该录像的编码当前浏览器无法播放',
       recoverable: false,
     });
-  });
+  }));
+
+  it('keeps playing past an isolated malformed FLV video tag', fakeAsync(() => {
+    const onEvent = jasmine.createSpy<PartPlayerEventHandler>('onEvent');
+    new PartPlayerFactory().attachFlv(
+      document.createElement('video'),
+      '/api/media?signed',
+      {
+        playbackMode: 'seekable',
+        durationMs: 10_000,
+        fileSizeBytes: 1_024,
+      },
+      onEvent,
+    );
+    onEvent.calls.reset();
+    const errorListener = player.on.calls.argsFor(0)[1] as (
+      type: unknown,
+      detail: unknown,
+      info: unknown,
+    ) => void;
+
+    errorListener(
+      mpegts.ErrorTypes.MEDIA_ERROR,
+      mpegts.ErrorDetails.MEDIA_CODEC_UNSUPPORTED,
+      'Flv: Unsupported codec in video frame: 0',
+    );
+    tick();
+
+    expect(onEvent).not.toHaveBeenCalled();
+  }));
 });
