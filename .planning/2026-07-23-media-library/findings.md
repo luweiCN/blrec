@@ -60,7 +60,9 @@
 - `media_library_items`：一项对应一场永久直播或一个直接导入片段；持有 `session_id`、`kind`、`origin`、展示名称、备注、迁移状态、稳定存储键和时间戳。
 - `media_library_tags` 与 `media_library_item_tags`：规范化标签及多对多关系。
 - 视频、弹幕与上传所需的规范文件关系继续由 `recording_parts` 持有；手动导入会创建内部 session/run/parts。
-- 生成的高光继续由 `highlight_clips` 持有，片段页查询以来源 session 聚合；直接导入的 `kind=clip` 条目在媒体库的“上传片段”分类中管理，不伪造剪辑来源关系。
+- 生成的高光继续由 `highlight_clips` 持有，片段页查询以来源 session 聚合；直接导入的 `kind=clip` 条目与生成高光统一展示在媒体库“片段”页签中，但不伪造剪辑来源关系。
+- 收藏录像常为 FLV，外部导入录像常为 MP4。媒体库原先把两者都直接绑定到原生 `<video>`，导致收藏 FLV 授权和 Range 响应正常却无法解码；预览必须按格式复用现有 FLV 播放适配。
+- 剪辑编辑器要求明确的 `partId`，因此媒体库剪辑入口必须放在具体分 P 行内，不能从整场直播只传 `sessionId`。
 
 ### File layout
 

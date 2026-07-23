@@ -1,4 +1,8 @@
-<nz-page-header nzTitle="片段管理" nzSubtitle="按来源直播场次查看和管理高光片段">
+<nz-page-header
+  *ngIf="!embedded"
+  nzTitle="片段管理"
+  nzSubtitle="按来源直播场次查看和管理高光片段"
+>
   <nz-page-header-extra>
     <a
       nz-button
@@ -7,7 +11,7 @@
       [queryParams]="{ kind: 'clip', import: 1 }"
     >
       <i nz-icon nzType="cloud-upload"></i>
-      上传外部片段
+      导入外部片段
     </a>
     <button nz-button type="button" (click)="load()">
       <i nz-icon nzType="reload"></i>
@@ -169,9 +173,7 @@
                 投稿
               </button>
               <button
-                *ngIf="
-                  clip.state === 'failed' && clip.deletionState === 'none'
-                "
+                *ngIf="clip.state === 'failed' && clip.deletionState === 'none'"
                 nz-button
                 nzType="link"
                 type="button"
@@ -193,9 +195,7 @@
                 [disabled]="deletionActive(clip)"
                 (click)="delete(clip)"
               >
-                {{
-                  clip.deletionState === "failed" ? "重试删除" : "删除"
-                }}
+                {{ clip.deletionState === "failed" ? "重试删除" : "删除" }}
               </button>
             </td>
           </tr>
@@ -229,11 +229,7 @@
   (nzOnOk)="saveRename()"
 >
   <ng-container *nzModalContent>
-    <form
-      class="rename-form"
-      aria-label="重命名片段"
-      (ngSubmit)="saveRename()"
-    >
+    <form class="rename-form" aria-label="重命名片段" (ngSubmit)="saveRename()">
       <label for="clip-rename-name">片段名称</label>
       <input
         id="clip-rename-name"

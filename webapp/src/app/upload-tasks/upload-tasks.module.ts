@@ -29,9 +29,9 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { UploadPolicyDialogModule } from '../tasks/upload-policy-dialog/upload-policy-dialog.module';
-import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
+import { PartVideoDialogModule } from './part-video-dialog/part-video-dialog.module';
 import { RecordingSessionRowComponent } from './recording-sessions/recording-session-row.component';
-import { PartVideoDialogComponent } from './part-video-dialog/part-video-dialog.component';
+import { RecordingSessionsComponent } from './recording-sessions/recording-sessions.component';
 import { UploadTasksRoutingModule } from './upload-tasks-routing.module';
 import { UploadTasksComponent } from './upload-tasks.component';
 import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.component';
@@ -41,7 +41,6 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
     UploadTasksComponent,
     RecordingSessionsComponent,
     RecordingSessionRowComponent,
-    PartVideoDialogComponent,
     TaskEditDialogComponent,
   ],
   imports: [
@@ -50,6 +49,7 @@ import { TaskEditDialogComponent } from './task-edit-dialog/task-edit-dialog.com
     OverlayModule,
     FormsModule,
     UploadPolicyDialogModule,
+    PartVideoDialogModule,
     UploadTasksRoutingModule,
     NzAlertModule,
     NzButtonModule,

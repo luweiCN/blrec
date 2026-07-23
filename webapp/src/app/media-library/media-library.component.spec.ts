@@ -3,17 +3,15 @@ import { HttpResponse } from '@angular/common/http';
 import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
-import {
-  ActivatedRoute,
-  Router,
-  convertToParamMap,
-} from '@angular/router';
+import { ActivatedRoute, convertToParamMap } from '@angular/router';
+import { RouterTestingModule } from '@angular/router/testing';
 
 import { NzMessageService } from 'ng-zorro-antd/message';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { of, throwError } from 'rxjs';
 
 import { RecordingSubmissionService } from '../tasks/upload-policy-dialog/recording-submission.service';
+import { RecordingSessionDetail } from '../upload-tasks/shared/recording-session.model';
 import { RecordingSessionService } from '../upload-tasks/shared/recording-session.service';
 import { MediaLibraryItem } from './media-library.model';
 import { MediaLibraryComponent } from './media-library.component';
@@ -53,6 +51,67 @@ function item(state: MediaLibraryItem['state'] = 'ready'): MediaLibraryItem {
   };
 }
 
+function sessionDetail(partId = 11): RecordingSessionDetail {
+  return {
+    id: 7,
+    roomId: 100,
+    broadcastSessionKey: '100:100',
+    liveStartTime: 100,
+    state: 'closed',
+    startedAt: 100,
+    endedAt: 200,
+    title: '原直播标题',
+    coverUrl: '',
+    coverPath: null,
+    anchorUid: null,
+    anchorName: '主播',
+    areaId: null,
+    areaName: '',
+    parentAreaId: null,
+    parentAreaName: '',
+    liveEndTime: 200,
+    partCount: 1,
+    danmakuCount: 0,
+    totalFileSizeBytes: 3,
+    recordDurationSeconds: 10,
+    uploadIntent: 'none',
+    uploadDecision: 'follow_room',
+    submissionInherited: true,
+    uploadResolutionState: 'not_requested',
+    uploadResolutionError: null,
+    uploadSuppressed: false,
+    deletionState: 'none',
+    deletionError: null,
+    sourceKind: 'live',
+    highlightClipId: null,
+    mediaLibraryItemId: 9,
+    displayState: 'not_uploading',
+    availableActions: ['delete_local'],
+    uploadJob: null,
+    parts: [
+      {
+        id: partId,
+        runId: 'run-1',
+        partIndex: 1,
+        sourcePath: '/favorites/key/part-0001.flv',
+        finalPath: null,
+        xmlPath: '/favorites/key/part-0001.xml',
+        recordStartTime: 100,
+        recordEndTime: 110,
+        recordDurationSeconds: 10,
+        fileSizeBytes: 3,
+        danmakuCount: 0,
+        artifactState: 'ready',
+        xmlCompleted: true,
+        sourceExists: true,
+        finalExists: false,
+        errorMessage: null,
+        mediaIndexState: 'ready',
+      },
+    ],
+  };
+}
+
 describe('MediaLibraryComponent', () => {
   let fixture: ComponentFixture<MediaLibraryComponent>;
   let service: jasmine.SpyObj<MediaLibraryService>;
@@ -61,14 +120,18 @@ describe('MediaLibraryComponent', () => {
   let message: jasmine.SpyObj<NzMessageService>;
 
   beforeEach(async () => {
-    service = jasmine.createSpyObj<MediaLibraryService>(
-      'MediaLibraryService',
-      ['list', 'createImport', 'uploadPart', 'completeImport', 'update', 'delete'],
-    );
+    service = jasmine.createSpyObj<MediaLibraryService>('MediaLibraryService', [
+      'list',
+      'createImport',
+      'uploadPart',
+      'completeImport',
+      'update',
+      'delete',
+    ]);
     service.list.and.returnValue(of({ total: 1, items: [item()] }));
     recordingSessions = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      ['createMediaAccess', 'mediaUrl', 'runSessionAction'],
+      ['getSession', 'createMediaAccess', 'mediaUrl', 'runSessionAction'],
     );
     submissions = jasmine.createSpyObj<RecordingSubmissionService>(
       'RecordingSubmissionService',
@@ -82,7 +145,7 @@ describe('MediaLibraryComponent', () => {
 
     await TestBed.configureTestingModule({
       declarations: [MediaLibraryComponent],
-      imports: [CommonModule, FormsModule],
+      imports: [CommonModule, FormsModule, RouterTestingModule],
       providers: [
         { provide: MediaLibraryService, useValue: service },
         { provide: RecordingSessionService, useValue: recordingSessions },
@@ -100,10 +163,6 @@ describe('MediaLibraryComponent', () => {
             queryParamMap: of(convertToParamMap({ kind: 'broadcast' })),
           },
         },
-        {
-          provide: Router,
-          useValue: jasmine.createSpyObj<Router>('Router', ['navigate']),
-        },
       ],
       schemas: [NO_ERRORS_SCHEMA],
     }).compileComponents();
@@ -116,6 +175,98 @@ describe('MediaLibraryComponent', () => {
 
     expect(service.list).toHaveBeenCalledOnceWith('broadcast', 20, 0, '');
     expect(fixture.componentInstance.items[0].displayName).toBe('外部直播');
+  });
+
+  it('opens a collected FLV in the shared recording preview dialog', () => {
+    const favorite = {
+      ...item(),
+      origin: 'recording' as const,
+      parts: [
+        {
+          ...item().parts[0],
+          originalFilename: 'recording.flv',
+        },
+      ],
+    };
+    recordingSessions.getSession.and.returnValue(of(sessionDetail()));
+
+    fixture.componentInstance.openPreview(favorite, favorite.parts[0]);
+    fixture.detectChanges();
+
+    expect(recordingSessions.getSession).toHaveBeenCalledOnceWith(7);
+    expect(fixture.componentInstance.previewRecordingPart?.sourcePath).toBe(
+      '/favorites/key/part-0001.flv',
+    );
+    expect(fixture.componentInstance.previewSession?.title).toBe('外部直播');
+    expect(fixture.componentInstance.previewVisible).toBeTrue();
+    expect(
+      fixture.nativeElement.querySelector('app-part-video-dialog'),
+    ).not.toBeNull();
+  });
+
+  it('does not open a preview when the selected part disappeared', () => {
+    recordingSessions.getSession.and.returnValue(
+      of({ ...sessionDetail(), parts: [] }),
+    );
+    const imported = item();
+
+    fixture.componentInstance.openPreview(imported, imported.parts[0]);
+
+    expect(fixture.componentInstance.previewVisible).toBeFalse();
+    expect(message.error).toHaveBeenCalledOnceWith('该分 P 的本地录像已不存在');
+  });
+
+  it('offers clipping on each concrete broadcast part', () => {
+    const broadcast = {
+      ...item(),
+      parts: [
+        item().parts[0],
+        {
+          ...item().parts[0],
+          partIndex: 2,
+          recordingPartId: 12,
+          originalFilename: 'two.mp4',
+        },
+      ],
+    };
+    service.list.and.returnValue(of({ total: 1, items: [broadcast] }));
+
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.item-actions a')).toBeNull();
+    const links = Array.from(
+      fixture.nativeElement.querySelectorAll(
+        '[data-testid="edit-media-part"]',
+      ) as NodeListOf<HTMLAnchorElement>,
+    );
+    expect(links.length).toBe(2);
+    expect(links[0].getAttribute('href')).toContain(
+      '/recordings/highlights/7?partId=11',
+    );
+    expect(links[1].getAttribute('href')).toContain(
+      '/recordings/highlights/7?partId=12',
+    );
+  });
+
+  it('presents generated and imported clips in one media-library tab', () => {
+    const component = fixture.componentInstance;
+    fixture.detectChanges();
+    component.kind = 'clip';
+    service.list.and.returnValue(
+      of({ total: 1, items: [{ ...item(), kind: 'clip' }] }),
+    );
+
+    component.load();
+    fixture.detectChanges();
+
+    expect(
+      fixture.nativeElement.querySelector('[role="tablist"]'),
+    ).not.toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('上传片段');
+    expect(fixture.nativeElement.textContent).toContain('导入外部片段');
+    expect(
+      fixture.nativeElement.querySelector('app-clip-library'),
+    ).not.toBeNull();
   });
 
   it('uploads selected files sequentially in the displayed part order', () => {

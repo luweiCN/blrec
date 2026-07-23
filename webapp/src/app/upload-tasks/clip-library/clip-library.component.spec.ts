@@ -84,9 +84,7 @@ describe('ClipLibraryComponent', () => {
     );
     service.mediaUrl.and.returnValue('/api/clip.mp4');
     service.downloadUrl.and.returnValue('/api/clip.mp4?download=1');
-    service.renameClip.and.returnValue(
-      of({ ...fullClip, name: '重命名高光' }),
-    );
+    service.renameClip.and.returnValue(of({ ...fullClip, name: '重命名高光' }));
     service.retryClip.and.returnValue(of(fullClip));
     service.deleteClip.and.returnValue(of(void 0));
     service.createUploadTask.and.returnValue(of({ jobId: 17 }));
@@ -126,6 +124,16 @@ describe('ClipLibraryComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('1 MB');
   });
 
+  it('embeds the grouped clip manager without a second page header', () => {
+    fixture.componentInstance.embedded = true;
+
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.classList).toContain('embedded');
+    expect(fixture.nativeElement.querySelector('nz-page-header')).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('五杀高光');
+  });
+
   it('owns vertical scrolling when the clip list exceeds the viewport', () => {
     fixture.detectChanges();
 
@@ -146,9 +154,7 @@ describe('ClipLibraryComponent', () => {
     service.listClipGroups.and.returnValue(
       of({
         total: 1,
-        items: [
-          { ...group, clips: [{ ...clip, fileSizeBytes: null }] },
-        ],
+        items: [{ ...group, clips: [{ ...clip, fileSizeBytes: null }] }],
       }),
     );
 

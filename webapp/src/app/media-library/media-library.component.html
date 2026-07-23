@@ -1,8 +1,8 @@
-<nz-page-header [nzTitle]="pageTitle" [nzSubtitle]="pageSubtitle">
+<nz-page-header nzTitle="媒体库" [nzSubtitle]="pageSubtitle">
   <nz-page-header-extra>
     <button nz-button nzType="primary" type="button" (click)="openImport()">
       <i nz-icon nzType="cloud-upload"></i>
-      {{ kind === "broadcast" ? "上传直播" : "上传片段" }}
+      {{ kind === "broadcast" ? "导入外部直播" : "导入外部片段" }}
     </button>
     <button
       nz-button
@@ -17,27 +17,30 @@
 </nz-page-header>
 
 <main class="media-library-page" aria-live="polite">
+  <div class="library-tabs" role="tablist" aria-label="媒体库内容">
+    <button
+      nz-button
+      role="tab"
+      type="button"
+      [nzType]="kind === 'broadcast' ? 'primary' : 'default'"
+      [attr.aria-selected]="kind === 'broadcast'"
+      (click)="selectKind('broadcast')"
+    >
+      直播收藏
+    </button>
+    <button
+      nz-button
+      role="tab"
+      type="button"
+      [nzType]="kind === 'clip' ? 'primary' : 'default'"
+      [attr.aria-selected]="kind === 'clip'"
+      (click)="selectKind('clip')"
+    >
+      片段
+    </button>
+  </div>
+
   <div class="library-toolbar">
-    <div class="kind-switch" role="group" aria-label="媒体库类型">
-      <button
-        nz-button
-        type="button"
-        [nzType]="kind === 'broadcast' ? 'primary' : 'default'"
-        [attr.aria-pressed]="kind === 'broadcast'"
-        (click)="selectKind('broadcast')"
-      >
-        直播收藏
-      </button>
-      <button
-        nz-button
-        type="button"
-        [nzType]="kind === 'clip' ? 'primary' : 'default'"
-        [attr.aria-pressed]="kind === 'clip'"
-        (click)="selectKind('clip')"
-      >
-        上传片段
-      </button>
-    </div>
     <nz-input-group [nzPrefix]="searchIcon">
       <input
         nz-input
@@ -69,6 +72,23 @@
     nzDescription="这里的文件不计入录像容量，也不会被自动保留策略或低空间任务删除，只能手动删除。"
   ></nz-alert>
 
+  <section *ngIf="kind === 'clip'" class="clip-section">
+    <header class="section-heading">
+      <div>
+        <h2>直播剪辑片段</h2>
+        <p>从录制场次或收藏直播的具体分批中剪出的片段。</p>
+      </div>
+    </header>
+    <app-clip-library [embedded]="true"></app-clip-library>
+  </section>
+
+  <header *ngIf="kind === 'clip'" class="section-heading external-heading">
+    <div>
+      <h2>外部导入片段</h2>
+      <p>从其他地方采集并导入本系统永久保存的独立视频片段。</p>
+    </div>
+  </header>
+
   <nz-alert
     *ngIf="view.state === 'error'"
     nzType="error"
@@ -84,13 +104,13 @@
   <div *ngIf="view.state === 'ready' && items.length === 0" class="empty-state">
     <i nz-icon [nzType]="kind === 'broadcast' ? 'star' : 'scissor'"></i>
     <strong>
-      {{ kind === "broadcast" ? "还没有收藏直播" : "还没有上传片段" }}
+      {{ kind === "broadcast" ? "还没有收藏直播" : "还没有外部导入片段" }}
     </strong>
     <span>
       {{
         kind === "broadcast"
-          ? "可以从录制任务收藏，也可直接上传多个分 P。"
-          : "上传从其他来源采集的视频片段。"
+          ? "可以从录制任务收藏，也可导入包含多个分批的外部直播。"
+          : "可以导入从其他来源采集的独立视频片段。"
       }}
     </span>
   </div>
@@ -119,14 +139,6 @@
           </p>
         </div>
         <div class="item-actions">
-          <a
-            *ngIf="item.kind === 'broadcast' && item.state === 'ready'"
-            nz-button
-            nzType="link"
-            [routerLink]="['/recordings/highlights', item.sessionId]"
-          >
-            剪辑
-          </a>
           <button
             nz-button
             nzType="link"
@@ -200,11 +212,26 @@
               {{ formatBytes(part.expectedSize) }}
             </td>
             <td>
+              <a
+                *ngIf="
+                  item.kind === 'broadcast' &&
+                  item.state === 'ready' &&
+                  part.recordingPartId !== null
+                "
+                nz-button
+                nzType="link"
+                data-testid="edit-media-part"
+                [routerLink]="['/recordings/highlights', item.sessionId]"
+                [queryParams]="{ partId: part.recordingPartId }"
+              >
+                剪辑
+              </a>
               <button
                 nz-button
                 nzType="link"
                 type="button"
                 [disabled]="part.recordingPartId === null"
+                [nzLoading]="previewOpeningPartId === part.recordingPartId"
                 (click)="openPreview(item, part)"
               >
                 预览
@@ -260,7 +287,7 @@
 </main>
 
 <nz-modal
-  [nzTitle]="importKind === 'broadcast' ? '上传外部直播' : '上传外部片段'"
+  [nzTitle]="importKind === 'broadcast' ? '导入外部直播' : '导入外部片段'"
   nzWidth="760px"
   [nzVisible]="importVisible"
   [nzMaskClosable]="!importSubmitting"
@@ -278,8 +305,12 @@
           [ngModel]="importKind"
           (ngModelChange)="importKindChanged($event)"
         >
-          <label nz-radio nzValue="broadcast">完整直播（可多分 P）</label>
-          <label nz-radio nzValue="clip">单个片段</label>
+          <label nz-radio nzValue="broadcast">
+            整场直播（从系统外导入，可多分批）
+          </label>
+          <label nz-radio nzValue="clip">
+            独立片段（从系统外导入，单文件）
+          </label>
         </nz-radio-group>
       </fieldset>
 
@@ -353,8 +384,8 @@
         <span>
           {{
             importKind === "broadcast"
-              ? "可多选，下方顺序就是投稿分 P 顺序。"
-              : "片段只能选择一个文件。"
+              ? "可多选，下方顺序就是直播分批和投稿分 P 顺序。"
+              : "外部片段只能选择一个文件。"
           }}
         </span>
       </div>
@@ -479,18 +510,13 @@
   </ng-container>
 </nz-modal>
 
-<nz-modal
-  [nzTitle]="previewName || '视频预览'"
-  [nzVisible]="previewPart !== null"
-  [nzFooter]="null"
-  nzWidth="960px"
-  (nzOnCancel)="closePreview()"
->
-  <ng-container *nzModalContent>
-    <div *ngIf="previewLoading" class="preview-loading">正在打开视频…</div>
-    <video *ngIf="previewUrl" controls autoplay [src]="previewUrl"></video>
-  </ng-container>
-</nz-modal>
+<app-part-video-dialog
+  *ngIf="previewSession && previewRecordingPart"
+  [visible]="previewVisible"
+  [session]="previewSession"
+  [part]="previewRecordingPart"
+  (visibleChange)="previewVisibilityChanged($event)"
+></app-part-video-dialog>
 
 <app-upload-policy-dialog
   *ngIf="submissionItem as item"

@@ -1,7 +1,4 @@
-import {
-  HttpEventType,
-  HttpResponse,
-} from '@angular/common/http';
+import { HttpEventType, HttpResponse } from '@angular/common/http';
 import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
@@ -17,6 +14,10 @@ import { Subject } from 'rxjs';
 import { finalize, takeUntil } from 'rxjs/operators';
 
 import { RecordingSubmissionService } from '../tasks/upload-policy-dialog/recording-submission.service';
+import type {
+  RecordingPart,
+  RecordingSessionDetail,
+} from '../upload-tasks/shared/recording-session.model';
 import { RecordingSessionService } from '../upload-tasks/shared/recording-session.service';
 import {
   MediaLibraryItem,
@@ -77,10 +78,10 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
   editSaving = false;
   editError: string | null = null;
 
-  previewPart: MediaLibraryPart | null = null;
-  previewName = '';
-  previewUrl: string | null = null;
-  previewLoading = false;
+  previewSession: RecordingSessionDetail | null = null;
+  previewRecordingPart: RecordingPart | null = null;
+  previewVisible = false;
+  previewOpeningPartId: number | null = null;
 
   submissionItem: MediaLibraryItem | null = null;
   submissionStarting = false;
@@ -128,13 +129,13 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
   }
 
   get pageTitle(): string {
-    return this.kind === 'broadcast' ? '直播收藏' : '上传片段';
+    return this.kind === 'broadcast' ? '直播收藏' : '片段';
   }
 
   get pageSubtitle(): string {
     return this.kind === 'broadcast'
       ? '永久保存整场直播，统一管理分 P、剪辑和投稿历史'
-      : '集中保存和投稿从其他来源采集的片段';
+      : '统一管理从直播剪出的片段和从系统外导入的独立片段';
   }
 
   load(): void {
@@ -384,39 +385,58 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
       this.message.error('该分 P 尚未准备好');
       return;
     }
-    this.previewPart = part;
-    this.previewName = `${item.displayName} · P${part.partIndex}`;
-    this.previewUrl = null;
-    this.previewLoading = true;
+    const recordingPartId = part.recordingPartId;
+    this.previewOpeningPartId = recordingPartId;
+    this.previewSession = null;
+    this.previewRecordingPart = null;
+    this.previewVisible = false;
     this.recordingSessions
-      .createMediaAccess(part.recordingPartId)
+      .getSession(item.sessionId)
       .pipe(
         finalize(() => {
-          this.previewLoading = false;
-          this.changeDetector.markForCheck();
+          if (this.previewOpeningPartId === recordingPartId) {
+            this.previewOpeningPartId = null;
+            this.changeDetector.markForCheck();
+          }
         }),
         takeUntil(this.destroy$),
       )
       .subscribe({
-        next: (access) => {
-          this.previewUrl = this.recordingSessions.mediaUrl(
-            part.recordingPartId!,
-            access,
-          );
+        next: (session) => {
+          if (this.previewOpeningPartId !== recordingPartId) {
+            return;
+          }
+          const recordingPart =
+            session.parts.find(
+              (candidate) => candidate.id === recordingPartId,
+            ) ?? null;
+          if (recordingPart === null) {
+            this.message.error('该分 P 的本地录像已不存在');
+            return;
+          }
+          this.previewSession = {
+            ...session,
+            title: item.displayName,
+          };
+          this.previewRecordingPart = recordingPart;
+          this.previewVisible = true;
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
+          if (this.previewOpeningPartId !== recordingPartId) {
+            return;
+          }
           this.message.error(`打开视频失败：${this.errorMessage(error)}`);
-          this.closePreview();
         },
       });
   }
 
-  closePreview(): void {
-    this.previewPart = null;
-    this.previewName = '';
-    this.previewUrl = null;
-    this.previewLoading = false;
+  previewVisibilityChanged(visible: boolean): void {
+    this.previewVisible = visible;
+    if (!visible) {
+      this.previewSession = null;
+      this.previewRecordingPart = null;
+    }
     this.changeDetector.markForCheck();
   }
 
@@ -431,7 +451,8 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
           part.recordingPartId!,
           access,
         );
-        anchor.download = part.originalFilename || `${item.displayName}-P${part.partIndex}`;
+        anchor.download =
+          part.originalFilename || `${item.displayName}-P${part.partIndex}`;
         anchor.rel = 'noopener';
         document.body.appendChild(anchor);
         anchor.click();
@@ -485,8 +506,7 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
   repost(item: MediaLibraryItem): void {
     this.modal.confirm({
       nzTitle: `重新投稿“${item.displayName}”？`,
-      nzContent:
-        '当前 aid/bvid 会保留在投稿历史中，并以新稿件重新上传。',
+      nzContent: '当前 aid/bvid 会保留在投稿历史中，并以新稿件重新上传。',
       nzOnOk: () =>
         new Promise<void>((resolve, reject) => {
           this.recordingSessions
@@ -495,7 +515,9 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
               next: (response) => {
                 const result = response.results[0];
                 if (!result?.accepted) {
-                  const error = new Error(result?.message || '重新投稿未被接受');
+                  const error = new Error(
+                    result?.message || '重新投稿未被接受',
+                  );
                   this.message.error(error.message);
                   reject(error);
                   return;
@@ -563,7 +585,7 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
   }
 
   originLabel(item: MediaLibraryItem): string {
-    return item.origin === 'recording' ? '系统收藏' : '外部上传';
+    return item.origin === 'recording' ? '系统收藏' : '外部导入';
   }
 
   sourceLabel(item: MediaLibraryItem): string {
@@ -708,9 +730,7 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
     ) {
       return;
     }
-    const match = /^第 (\d+) 个分 P .*请重新上传/.exec(
-      candidate.error.detail,
-    );
+    const match = /^第 (\d+) 个分 P .*请重新上传/.exec(candidate.error.detail);
     const index = match ? Number(match[1]) - 1 : -1;
     const draft = this.importFiles[index];
     if (!draft) {
@@ -738,7 +758,14 @@ export class MediaLibraryComponent implements OnInit, OnDestroy {
   }
 
   private parseTags(value: string): readonly string[] {
-    return [...new Set(value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean))];
+    return [
+      ...new Set(
+        value
+          .split(/[,，]/)
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+      ),
+    ];
   }
 
   private errorMessage(error: unknown): string {

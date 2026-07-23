@@ -5,8 +5,17 @@
   overflow: auto;
 }
 
+:host.embedded {
+  height: auto;
+  overflow: visible;
+}
+
 .clip-library-page {
   padding: 0 24px 24px;
+}
+
+:host.embedded .clip-library-page {
+  padding: 0;
 }
 
 .clip-toolbar {

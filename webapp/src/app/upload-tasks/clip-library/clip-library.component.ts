@@ -2,6 +2,8 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  HostBinding,
+  Input,
   OnInit,
 } from '@angular/core';
 
@@ -32,6 +34,13 @@ type ClipLibraryView =
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class ClipLibraryComponent implements OnInit {
+  @Input() embedded = false;
+
+  @HostBinding('class.embedded')
+  get embeddedHost(): boolean {
+    return this.embedded;
+  }
+
   view: ClipLibraryView = { state: 'loading' };
   pageIndex = 1;
   pageSize = 20;
@@ -74,9 +83,7 @@ export class ClipLibraryComponent implements OnInit {
           group.sourceSessionId === null ? '' : String(group.sourceSessionId),
           String(group.roomId),
         ].some((value) => value.toLowerCase().includes(query)) ||
-        group.clips.some((clip) =>
-          clip.name.toLowerCase().includes(query),
-        ),
+        group.clips.some((clip) => clip.name.toLowerCase().includes(query)),
     );
   }
 
@@ -361,17 +368,19 @@ export class ClipLibraryComponent implements OnInit {
     if (clip.uploadJobId === null) {
       return '未创建任务';
     }
-    return {
-      waiting_artifacts: '等待文件',
-      ready: '等待上传',
-      uploading: '正在上传',
-      submitting: '正在投稿',
-      waiting_review: '等待审核',
-      approved: '审核通过',
-      rejected: '审核未通过',
-      paused: '已暂停',
-      completed: '已完成',
-    }[clip.uploadState ?? ''] ?? '处理中';
+    return (
+      {
+        waiting_artifacts: '等待文件',
+        ready: '等待上传',
+        uploading: '正在上传',
+        submitting: '正在投稿',
+        waiting_review: '等待审核',
+        approved: '审核通过',
+        rejected: '审核未通过',
+        paused: '已暂停',
+        completed: '已完成',
+      }[clip.uploadState ?? ''] ?? '处理中'
+    );
   }
 
   archiveUrl(clip: HighlightClipSummary): string | null {
@@ -412,7 +421,10 @@ export class ClipLibraryComponent implements OnInit {
 
   private errorMessage(error: unknown): string {
     if (error && typeof error === 'object') {
-      const candidate = error as { error?: { detail?: unknown }; message?: unknown };
+      const candidate = error as {
+        error?: { detail?: unknown };
+        message?: unknown;
+      };
       if (typeof candidate.error?.detail === 'string') {
         return candidate.error.detail;
       }
