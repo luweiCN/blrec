@@ -64,6 +64,7 @@ from .routers import (
     control_operations,
     highlights,
     live_status,
+    media_library,
     network,
     realtime,
     recording_retention,
@@ -293,6 +294,9 @@ recording_sessions.submission_manager = None
 recording_sessions.active_media_service = None
 recording_sessions.active_recording_metadata_provider = _active_recording_metadata
 recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+media_library.library = None
+media_library.item_deleter = None
+media_library.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_retention.manager = None
 recording_retention.unavailable_reason = _bili_account_runtime.unavailable_reason
 room_upload_policies.manager = None
@@ -470,6 +474,9 @@ async def on_startup() -> None:
         )
         recording_sessions.active_media_service = active_media
         recording_sessions.unavailable_reason = _bili_account_runtime.unavailable_reason
+        media_library.library = _bili_account_runtime.media_library
+        media_library.item_deleter = _bili_account_runtime.delete_media_library_item
+        media_library.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_retention.manager = _bili_account_runtime.retention_manager
         recording_retention.unavailable_reason = (
             _bili_account_runtime.unavailable_reason
@@ -525,6 +532,8 @@ async def on_startup() -> None:
             recording_sessions.session_batch_runner = None
             recording_sessions.submission_manager = None
             recording_sessions.active_media_service = None
+            media_library.library = None
+            media_library.item_deleter = None
             recording_retention.manager = None
             room_upload_policies.manager = None
             room_upload_policies.category_catalog = None
@@ -597,6 +606,8 @@ async def on_shuntdown() -> None:
         recording_sessions.session_batch_runner = None
         recording_sessions.submission_manager = None
         recording_sessions.active_media_service = None
+        media_library.library = None
+        media_library.item_deleter = None
         recording_retention.manager = None
         room_upload_policies.manager = None
         room_upload_policies.category_catalog = None
@@ -655,6 +666,7 @@ api.include_router(network.router, prefix='/api/v1')
 api.include_router(realtime.router, prefix='/api/v1')
 api.include_router(bili_accounts.router, prefix='/api/v1')
 api.include_router(recording_sessions.router, prefix='/api/v1')
+api.include_router(media_library.router, prefix='/api/v1')
 api.include_router(recording_retention.router, prefix='/api/v1')
 api.include_router(room_upload_policies.router, prefix='/api/v1')
 api.include_router(upload_covers.router, prefix='/api/v1')

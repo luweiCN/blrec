@@ -166,6 +166,23 @@ export interface HighlightClipList {
   readonly items: readonly HighlightClipSummary[];
 }
 
+export interface HighlightClipGroup {
+  readonly key: string;
+  readonly sourceSessionId: number | null;
+  readonly roomId: number;
+  readonly sourceAnchorName: string;
+  readonly sourceTitle: string;
+  readonly sourceStartedAt: number | null;
+  readonly latestCreatedAt: number;
+  readonly clipCount: number;
+  readonly clips: readonly HighlightClipSummary[];
+}
+
+export interface HighlightClipGroupList {
+  readonly total: number;
+  readonly items: readonly HighlightClipGroup[];
+}
+
 export interface CreateHighlightClipRequest {
   readonly markerId: number | null;
   readonly name: string;

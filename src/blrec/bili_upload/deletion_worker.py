@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 from blrec.logging.audit import audit
 
 from .database import BiliUploadDatabase
+from .media_library import media_library_move_staging_path
 
 __all__ = ('LocalDeletionWorker', 'LocalDeletionRejected')
 
@@ -51,6 +52,7 @@ class LocalDeletionWorker:
         *,
         recording_root: Path,
         clip_root: Path,
+        media_library_root: Optional[Path] = None,
         active_session_canceller: Optional[Callable[[int], Awaitable[None]]] = None,
         clock: Callable[[], float] = time.time,
         unlink: Callable[[Path], None] = lambda path: path.unlink(),
@@ -58,6 +60,11 @@ class LocalDeletionWorker:
         self._database = database
         self._recording_root = self._resolve_root(recording_root)
         self._clip_root = self._resolve_root(clip_root)
+        self._media_library_root = self._resolve_root(
+            self._recording_root.parent / 'favorites'
+            if media_library_root is None
+            else media_library_root
+        )
         self._active_session_canceller = active_session_canceller
         self._clock = clock
         self._unlink = unlink
@@ -482,6 +489,16 @@ class LocalDeletionWorker:
         ).fetchone()[0]
         if int(postprocessor):
             blockers.append('postprocessor')
+        media_library = connection.execute(
+            'SELECT COUNT(*) FROM media_library_items item '
+            'WHERE item.session_id=? AND ('
+            "item.state='moving' OR EXISTS("
+            'SELECT 1 FROM media_library_parts part '
+            'WHERE part.item_id=item.id AND part.state=\'uploading\'))',
+            (session_id,),
+        ).fetchone()[0]
+        if int(media_library):
+            blockers.append('media_library')
         highlight = connection.execute(
             'SELECT COUNT(*) FROM highlight_clips clip '
             'JOIN highlight_clip_sources source ON source.clip_id=clip.id '
@@ -649,20 +666,38 @@ class LocalDeletionWorker:
                     if row[column]
                 )
             )
-            root = self._clip_root
         else:
             session = await self._database.fetchone(
                 'SELECT cover_path FROM recording_sessions '
                 'WHERE id=? AND cancellation_generation=?',
                 (owner_id, generation),
             )
+            library = await self._database.fetchone(
+                'SELECT storage_key FROM media_library_items WHERE session_id=?',
+                (owner_id,),
+            )
             rows = await self._database.fetchall(
                 'SELECT source_path,final_path,xml_path FROM recording_parts '
                 'WHERE session_id=? UNION ALL '
                 'SELECT part.source_path,part.final_path,part.xml_path '
                 'FROM upload_parts part JOIN upload_jobs job ON job.id=part.job_id '
-                'WHERE job.session_id=?',
-                (owner_id, owner_id),
+                'WHERE job.session_id=? UNION ALL '
+                'SELECT part.storage_path,part.staging_path,NULL '
+                'FROM media_library_parts part '
+                'JOIN media_library_items item ON item.id=part.item_id '
+                'WHERE item.session_id=? UNION ALL '
+                'SELECT move.source_path,move.target_path,NULL '
+                'FROM media_library_file_moves move '
+                'JOIN media_library_items item ON item.id=move.item_id '
+                'WHERE item.session_id=?',
+                (owner_id, owner_id, owner_id, owner_id),
+            )
+            move_rows = await self._database.fetchall(
+                'SELECT move.id,move.target_path '
+                'FROM media_library_file_moves move '
+                'JOIN media_library_items item ON item.id=move.item_id '
+                'WHERE item.session_id=?',
+                (owner_id,),
             )
             collected: List[str] = []
             for row in rows:
@@ -673,13 +708,33 @@ class LocalDeletionWorker:
                 )
             if session is not None and session['cover_path']:
                 collected.append(str(session['cover_path']))
+            collected.extend(
+                str(
+                    media_library_move_staging_path(
+                        Path(str(row['target_path'])), int(row['id'])
+                    )
+                )
+                for row in move_rows
+            )
             raw_paths = tuple(collected)
-            root = self._recording_root
         if owner_kind == 'clip':
             paths = self._owned_clip_paths(raw_paths)
         else:
+            roots = [self._recording_root]
+            if library is not None:
+                item_root = (
+                    self._media_library_root / str(library['storage_key'])
+                ).resolve()
+                try:
+                    item_root.relative_to(self._media_library_root)
+                except ValueError:
+                    raise LocalDeletionRejected('path_ownership_violation') from None
+                roots.append(item_root)
             paths = tuple(
-                dict.fromkeys(self._owned_path(value, root) for value in raw_paths)
+                dict.fromkeys(
+                    self._owned_path_in_roots(value, tuple(roots))
+                    for value in raw_paths
+                )
             )
 
         def snapshot(connection: sqlite3.Connection) -> None:
@@ -933,6 +988,15 @@ class LocalDeletionWorker:
         if path.suffix.lower() not in self._FILE_SUFFIXES:
             raise LocalDeletionRejected('path_suffix_not_allowed')
         return path
+
+    def _owned_path_in_roots(self, raw_path: str, roots: Tuple[Path, ...]) -> Path:
+        for root in roots:
+            try:
+                return self._owned_path(raw_path, root)
+            except LocalDeletionRejected as error:
+                if str(error) != 'path_ownership_violation':
+                    raise
+        raise LocalDeletionRejected('path_ownership_violation')
 
     def _owned_clip_paths(self, raw_paths: Tuple[str, ...]) -> Tuple[Path, ...]:
         paths: List[Path] = []

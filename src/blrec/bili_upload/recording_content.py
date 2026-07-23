@@ -300,8 +300,11 @@ class RecordingContentReader:
     _MEDIA_TYPES = {
         '.flv': 'video/x-flv',
         '.m4s': 'video/iso.segment',
+        '.mkv': 'video/x-matroska',
+        '.mov': 'video/quicktime',
         '.mp4': 'video/mp4',
         '.ts': 'video/mp2t',
+        '.webm': 'video/webm',
     }
     _DANMAKU_CACHE_SIZE = 2
     _DANMAKU_CACHE_TTL_SECONDS = 10 * 60
@@ -310,11 +313,23 @@ class RecordingContentReader:
     _DANMAKU_PREFIX_BYTES = 4_096
 
     def __init__(
-        self, database: BiliUploadDatabase, *, recording_root: Optional[Path] = None
+        self,
+        database: BiliUploadDatabase,
+        *,
+        recording_root: Optional[Path] = None,
+        media_library_root: Optional[Path] = None,
     ) -> None:
         self._database = database
+        resolved_recording_root = (
+            None if recording_root is None else recording_root.resolve()
+        )
         self._recording_root = (
-            None if recording_root is None else str(recording_root.resolve())
+            None if resolved_recording_root is None else str(resolved_recording_root)
+        )
+        if media_library_root is None and resolved_recording_root is not None:
+            media_library_root = resolved_recording_root.parent / 'favorites'
+        self._media_library_root = (
+            None if media_library_root is None else media_library_root.resolve()
         )
         self._danmaku_cache_lock = threading.RLock()
         self._danmaku_closed = False
@@ -327,10 +342,11 @@ class RecordingContentReader:
         row = await self._database.fetchone(
             'SELECT session.room_id,part.part_index,part.source_path,part.final_path,'
             'part.artifact_state,part.media_index_state,'
-            'job.state AS job_state,job.bvid '
+            'job.state AS job_state,job.bvid,item.storage_key '
             'FROM recording_parts part '
             'JOIN recording_sessions session ON session.id=part.session_id '
             'LEFT JOIN upload_jobs job ON job.session_id=part.session_id '
+            'LEFT JOIN media_library_items item ON item.session_id=part.session_id '
             'WHERE part.id=?',
             (int(part_id),),
         )
@@ -362,6 +378,14 @@ class RecordingContentReader:
         )
         job_state = None if row['job_state'] is None else str(row['job_state'])
         bvid = None if row['bvid'] is None else str(row['bvid'])
+        expected_root = self._recording_root
+        if row['storage_key'] is not None and self._media_library_root is not None:
+            item_root = (self._media_library_root / str(row['storage_key'])).resolve()
+            try:
+                item_root.relative_to(self._media_library_root)
+            except ValueError:
+                raise RecordingContentInvalid('媒体库文件路径越界') from None
+            expected_root = str(item_root)
         return RecordingMediaDescriptor(
             part_id=int(part_id),
             room_id=int(row['room_id']),
@@ -370,7 +394,7 @@ class RecordingContentReader:
             bvid=bvid,
             remote_available=bool(bvid and job_state in ('approved', 'completed')),
             index_state=str(row['media_index_state']),
-            expected_root=self._recording_root,
+            expected_root=expected_root,
         )
 
     async def media(self, part_id: int) -> MediaResource:

@@ -51,6 +51,7 @@ import { HighlightService } from '../shared/highlight.service';
 import { RealtimeService } from '../../core/services/realtime.service';
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 import { RecordingSessionRowAction } from './recording-session-row.component';
+import { MediaLibraryService } from '../../media-library/media-library.service';
 
 const RETRY_OPERATION_STORAGE_KEY = 'blrec-upload-retry-operation-id';
 const CONTROL_OPERATION_POLL_TIMEOUT = 'CONTROL_OPERATION_POLL_TIMEOUT';
@@ -104,6 +105,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   videoPart: RecordingPart | null = null;
   readonly selectedSessionIds = new Set<number>();
   readonly cuttingRoomIds = new Set<number>();
+  readonly favoritingSessionIds = new Set<number>();
   uploadAction: RecordingSessionAction | null = null;
   uploadActionSessionIds: readonly number[] = [];
   uploadActionSubmitting = false;
@@ -165,6 +167,7 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     private taskManager: TaskManagerService,
     private highlights: HighlightService,
     private controlOperations: ControlOperationService,
+    private mediaLibrary: MediaLibraryService,
   ) {}
 
   ngOnInit(): void {
@@ -447,6 +450,9 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         }
         return;
       }
+      case 'favorite':
+        this.favoriteSession(action.sessionId);
+        return;
       case 'edit-submission': {
         const session = this.sessionById(action.sessionId);
         if (session) {
@@ -465,6 +471,30 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         return exhaustiveAction;
       }
     }
+  }
+
+  favoriteSession(sessionId: number): void {
+    if (this.favoritingSessionIds.has(sessionId)) {
+      return;
+    }
+    this.favoritingSessionIds.add(sessionId);
+    this.mediaLibrary
+      .favorite(sessionId)
+      .pipe(
+        finalize(() => {
+          this.favoritingSessionIds.delete(sessionId);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.message.success('已收藏到媒体库，不再参与容量清理');
+          this.load(false);
+        },
+        error: (error: unknown) => {
+          this.message.error(`收藏失败：${this.describeError(error)}`);
+        },
+      });
   }
 
   setAllPageSessionsSelected(selected: boolean): void {

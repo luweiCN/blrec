@@ -247,6 +247,7 @@
         [selected]="isSessionSelected(session.id)"
         [scope]="scope"
         [cutting]="cuttingRoomIds.has(session.roomId)"
+        [favoriting]="favoritingSessionIds.has(session.id)"
         (rowAction)="handleRowAction($event)"
       ></tr>
     </tbody>

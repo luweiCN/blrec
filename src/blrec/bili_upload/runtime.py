@@ -40,6 +40,7 @@ from .highlight_worker import HighlightWorker
 from .highlights import HighlightService
 from .journal import RecordingJournalBridge
 from .media_index import MediaIndexWorker
+from .media_library import MediaLibrary, MediaLibraryConflict
 from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyCommand, RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
@@ -138,6 +139,7 @@ class BiliAccountRuntime:
         self._highlight_worker: Optional[HighlightWorker] = None
         self._media_index_worker: Optional[MediaIndexWorker] = None
         self._deletion_worker: Optional[LocalDeletionWorker] = None
+        self._media_library: Optional[MediaLibrary] = None
         self._notification_scanner: Optional[OperationalHealthScanner] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
@@ -247,6 +249,10 @@ class BiliAccountRuntime:
         return self._deletion_worker
 
     @property
+    def media_library(self) -> Optional[MediaLibrary]:
+        return self._media_library
+
+    @property
     def unavailable_reason(self) -> Optional[str]:
         return self._unavailable_reason
 
@@ -278,11 +284,16 @@ class BiliAccountRuntime:
             if self._control_operation_journal is not None:
                 await self._control_operation_journal.open()
             journal = RecordingJournalBridge(database, clock=self._clock)
+            recording_root = (
+                Path(self._recording_root)
+                if self._recording_root is not None
+                else Path(database.path).parent / 'rec'
+            )
+            media_library_root = recording_root.resolve().parent / 'favorites'
             content_reader = RecordingContentReader(
                 database,
-                recording_root=(
-                    None if self._recording_root is None else Path(self._recording_root)
-                ),
+                recording_root=recording_root,
+                media_library_root=media_library_root,
             )
             await journal.reconcile_open_sessions()
             lossless_clipper = LosslessClipper()
@@ -311,19 +322,17 @@ class BiliAccountRuntime:
             await highlight_worker.backfill_file_sizes(limit=100)
             media_index_worker = MediaIndexWorker(database, clock=self._clock)
             await media_index_worker.recover_interrupted()
-            recording_root = (
-                Path(self._recording_root)
-                if self._recording_root is not None
-                else Path(database.path).parent / 'rec'
-            )
             deletion_worker = LocalDeletionWorker(
                 database,
                 recording_root=recording_root,
                 clip_root=recording_root.resolve().parent / 'clips',
+                media_library_root=media_library_root,
                 active_session_canceller=self._active_session_canceller,
                 clock=self._clock,
             )
             await deletion_worker.recover_interrupted()
+            media_library = MediaLibrary(database, recording_root, clock=self._clock)
+            await media_library.recover_interrupted()
             key_id = hashlib.sha256(self._credential_key).hexdigest()
             keys: Dict[str, bytes] = dict(self._old_credential_keys)
             keys[key_id] = self._credential_key
@@ -517,6 +526,7 @@ class BiliAccountRuntime:
         self._highlight_worker = highlight_worker
         self._media_index_worker = media_index_worker
         self._deletion_worker = deletion_worker
+        self._media_library = media_library
         self._notification_scanner = notification_scanner
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
@@ -607,6 +617,21 @@ class BiliAccountRuntime:
         except LocalDeletionRejected as error:
             raise UploadTaskActionRejected(str(error)) from None
         return 'queued'
+
+    async def delete_media_library_item(
+        self, item_id: int, *, manager_subject: str
+    ) -> int:
+        media_library = self._media_library
+        deletion_worker = self._deletion_worker
+        if media_library is None or deletion_worker is None:
+            raise MediaLibraryConflict('媒体库删除当前不可用')
+        item = await media_library.get_item(item_id)
+        try:
+            return await deletion_worker.request_session(
+                item.session_id, manager_subject=manager_subject
+            )
+        except LocalDeletionRejected as error:
+            raise MediaLibraryConflict(str(error)) from None
 
     async def run_recording_session_action(
         self, action: str, session_id: int, *, manager_subject: str
@@ -756,6 +781,7 @@ class BiliAccountRuntime:
         self._highlight_worker = None
         self._media_index_worker = None
         self._deletion_worker = None
+        self._media_library = None
         self._notification_scanner = None
         content_reader, self._content_reader = self._content_reader, None
         if content_reader is not None:

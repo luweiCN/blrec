@@ -10,7 +10,10 @@ import { NzModalService } from 'ng-zorro-antd/modal';
 import { finalize } from 'rxjs/operators';
 
 import { RoomUploadPolicyRequest } from '../../tasks/upload-policy-dialog/room-upload-policy.model';
-import { HighlightClipSummary } from '../shared/highlight.model';
+import {
+  HighlightClipGroup,
+  HighlightClipSummary,
+} from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
 
 type ClipLibraryView =
@@ -18,7 +21,7 @@ type ClipLibraryView =
   | {
       readonly state: 'ready';
       readonly total: number;
-      readonly clips: readonly HighlightClipSummary[];
+      readonly groups: readonly HighlightClipGroup[];
     }
   | { readonly state: 'error'; readonly message: string };
 
@@ -39,6 +42,10 @@ export class ClipLibraryComponent implements OnInit {
   previewLoading = false;
   uploadClip: HighlightClipSummary | null = null;
   uploadSubmitting = false;
+  editingClip: HighlightClipSummary | null = null;
+  renameName = '';
+  renameSaving = false;
+  renameError: string | null = null;
 
   constructor(
     private highlights: HighlightService,
@@ -51,21 +58,25 @@ export class ClipLibraryComponent implements OnInit {
     this.load();
   }
 
-  get clips(): readonly HighlightClipSummary[] {
+  get groups(): readonly HighlightClipGroup[] {
     if (this.view.state !== 'ready') {
       return [];
     }
     const query = this.query.trim().toLowerCase();
     if (!query) {
-      return this.view.clips;
+      return this.view.groups;
     }
-    return this.view.clips.filter((clip) =>
-      [
-        clip.name,
-        clip.sourceAnchorName ?? '',
-        clip.sourceTitle ?? '',
-        String(clip.roomId),
-      ].some((value) => value.toLowerCase().includes(query)),
+    return this.view.groups.filter(
+      (group) =>
+        [
+          group.sourceAnchorName,
+          group.sourceTitle,
+          group.sourceSessionId === null ? '' : String(group.sourceSessionId),
+          String(group.roomId),
+        ].some((value) => value.toLowerCase().includes(query)) ||
+        group.clips.some((clip) =>
+          clip.name.toLowerCase().includes(query),
+        ),
     );
   }
 
@@ -76,13 +87,13 @@ export class ClipLibraryComponent implements OnInit {
   load(): void {
     this.view = { state: 'loading' };
     this.highlights
-      .listAllClips(this.pageSize, (this.pageIndex - 1) * this.pageSize)
+      .listClipGroups(this.pageSize, (this.pageIndex - 1) * this.pageSize)
       .subscribe({
         next: (response) => {
           this.view = {
             state: 'ready',
             total: response.total,
-            clips: response.items,
+            groups: response.items,
           };
           this.changeDetector.markForCheck();
         },
@@ -102,6 +113,27 @@ export class ClipLibraryComponent implements OnInit {
     this.pageSize = pageSize;
     this.pageIndex = 1;
     this.load();
+  }
+
+  trackGroup(_index: number, group: HighlightClipGroup): string {
+    return group.key;
+  }
+
+  trackClip(_index: number, clip: HighlightClipSummary): number {
+    return clip.id;
+  }
+
+  groupTitle(group: HighlightClipGroup): string {
+    return group.sourceTitle || '未记录直播标题';
+  }
+
+  groupSource(group: HighlightClipGroup): string {
+    if (group.sourceSessionId === null) {
+      return '未关联录像场次';
+    }
+    return `${group.sourceAnchorName || '未知主播'} · 房间 ${
+      group.roomId
+    } · 场次 ${group.sourceSessionId}`;
   }
 
   openPreview(clip: HighlightClipSummary): void {
@@ -162,6 +194,59 @@ export class ClipLibraryComponent implements OnInit {
       this.uploadClip = null;
       this.changeDetector.markForCheck();
     }
+  }
+
+  openRename(clip: HighlightClipSummary): void {
+    this.editingClip = clip;
+    this.renameName = clip.name;
+    this.renameError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  closeRename(): void {
+    if (!this.renameSaving) {
+      this.editingClip = null;
+      this.renameError = null;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  saveRename(): void {
+    const clip = this.editingClip;
+    if (clip === null || this.renameSaving) {
+      return;
+    }
+    const name = this.renameName.trim();
+    if (!name) {
+      this.renameError = '名称不能为空';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    if (name.length > 200) {
+      this.renameError = '名称不能超过 200 个字符';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.renameSaving = true;
+    this.renameError = null;
+    this.highlights
+      .renameClip(clip.id, name)
+      .pipe(
+        finalize(() => {
+          this.renameSaving = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.message.success('片段已重命名');
+          this.editingClip = null;
+          this.load();
+        },
+        error: (error: unknown) => {
+          this.renameError = this.errorMessage(error);
+        },
+      });
   }
 
   submitUpload(settings: RoomUploadPolicyRequest): void {

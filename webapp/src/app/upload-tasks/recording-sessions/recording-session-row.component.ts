@@ -28,6 +28,7 @@ export type RecordingSessionRowAction =
     }
   | { readonly type: 'details'; readonly sessionId: number }
   | { readonly type: 'cut-current'; readonly sessionId: number }
+  | { readonly type: 'favorite'; readonly sessionId: number }
   | { readonly type: 'edit-submission'; readonly sessionId: number }
   | {
       readonly type: 'session-action';
@@ -48,6 +49,7 @@ export class RecordingSessionRowComponent {
   @Input() selected = false;
   @Input() scope: RecordingSessionScope = 'uploads';
   @Input() cutting = false;
+  @Input() favoriting = false;
   @Output() readonly rowAction = new EventEmitter<RecordingSessionRowAction>();
 
   selectionChanged(selected: boolean): void {
@@ -64,6 +66,10 @@ export class RecordingSessionRowComponent {
 
   cutCurrent(): void {
     this.rowAction.emit({ type: 'cut-current', sessionId: this.session.id });
+  }
+
+  favorite(): void {
+    this.rowAction.emit({ type: 'favorite', sessionId: this.session.id });
   }
 
   editSubmission(): void {
@@ -93,6 +99,17 @@ export class RecordingSessionRowComponent {
     );
   }
 
+  canFavorite(): boolean {
+    return (
+      this.scope === 'recordings' &&
+      this.session.sourceKind === 'live' &&
+      this.session.state === 'closed' &&
+      this.session.deletionState === 'none' &&
+      (this.session.mediaLibraryItemId === null ||
+        this.session.mediaLibraryItemId === undefined)
+    );
+  }
+
   hasAction(action: RecordingSessionAction): boolean {
     return this.session.availableActions.includes(action);
   }
@@ -100,6 +117,7 @@ export class RecordingSessionRowComponent {
   hasMoreActions(): boolean {
     return (
       this.canCutCurrentFile() ||
+      this.canFavorite() ||
       this.session.availableActions.some((action) => action !== 'delete_local')
     );
   }

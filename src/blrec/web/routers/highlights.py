@@ -14,6 +14,7 @@ from blrec.bili_upload.highlight_cut import ClipInspection, HighlightCutError
 from blrec.bili_upload.highlight_worker import HighlightWorker
 from blrec.bili_upload.highlights import (
     HighlightClip,
+    HighlightClipGroup,
     HighlightClipMediaResource,
     HighlightClipSummary,
     HighlightConfirmationRequired,
@@ -151,6 +152,17 @@ class CreateClipRequest(InspectClipRequest):
     inspection_token: Optional[str] = Field(None, min_length=20, max_length=200)
 
 
+class RenameClipRequest(ApiModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+    @validator('name')
+    def name_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError('name must not be blank')
+        return normalized
+
+
 class InspectedSourceResponse(ApiModel):
     part_id: int
     actual_start_ms: int
@@ -244,6 +256,23 @@ class ClipSummaryResponse(ApiModel):
 class ClipListResponse(ApiModel):
     total: int
     items: List[ClipSummaryResponse]
+
+
+class ClipGroupResponse(ApiModel):
+    key: str
+    source_session_id: Optional[int]
+    room_id: int
+    source_anchor_name: str
+    source_title: str
+    source_started_at: Optional[int]
+    latest_created_at: int
+    clip_count: int
+    clips: List[ClipSummaryResponse]
+
+
+class ClipGroupListResponse(ApiModel):
+    total: int
+    items: List[ClipGroupResponse]
 
 
 class UploadTaskResponse(ApiModel):
@@ -453,6 +482,20 @@ def _clip_response(value: HighlightClip) -> ClipResponse:
 
 def _clip_summary_response(value: HighlightClipSummary) -> ClipSummaryResponse:
     return ClipSummaryResponse(**value.__dict__)
+
+
+def _clip_group_response(value: HighlightClipGroup) -> ClipGroupResponse:
+    return ClipGroupResponse(
+        key=value.key,
+        source_session_id=value.source_session_id,
+        room_id=value.room_id,
+        source_anchor_name=value.source_anchor_name,
+        source_title=value.source_title,
+        source_started_at=value.source_started_at,
+        latest_created_at=value.latest_created_at,
+        clip_count=value.clip_count,
+        clips=[_clip_summary_response(clip) for clip in value.clips],
+    )
 
 
 def _not_found(error: ValueError) -> HTTPException:
@@ -672,6 +715,19 @@ async def list_all_clips(
     )
 
 
+@router.get('/clips/groups', response_model=ClipGroupListResponse)
+async def list_clip_groups(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> ClipGroupListResponse:
+    total, values = await highlight_service.list_clip_groups(limit=limit, offset=offset)
+    return ClipGroupListResponse(
+        total=total, items=[_clip_group_response(value) for value in values]
+    )
+
+
 @router.get('/clips/{clip_id}', response_model=ClipResponse)
 async def get_clip(
     clip_id: int,
@@ -680,6 +736,20 @@ async def get_clip(
 ) -> ClipResponse:
     try:
         value = await highlight_service.get_clip(clip_id)
+    except ValueError as error:
+        raise _not_found(error) from None
+    return _clip_response(value)
+
+
+@router.patch('/clips/{clip_id}', response_model=ClipResponse)
+async def rename_clip(
+    clip_id: int,
+    payload: RenameClipRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    highlight_service: HighlightService = Depends(get_service),
+) -> ClipResponse:
+    try:
+        value = await highlight_service.rename_clip(clip_id, payload.name)
     except ValueError as error:
         raise _not_found(error) from None
     return _clip_response(value)

@@ -6,6 +6,7 @@ import { of } from 'rxjs';
 
 import {
   HighlightClip,
+  HighlightClipGroup,
   HighlightClipSummary,
 } from '../shared/highlight.model';
 import { HighlightService } from '../shared/highlight.service';
@@ -48,6 +49,18 @@ const fullClip: HighlightClip = {
   sources: [],
 };
 
+const group: HighlightClipGroup = {
+  key: 'session:9',
+  sourceSessionId: 9,
+  roomId: 100,
+  sourceAnchorName: '主播名',
+  sourceTitle: '排位赛',
+  sourceStartedAt: 1_000,
+  latestCreatedAt: 1_100,
+  clipCount: 1,
+  clips: [clip],
+};
+
 describe('ClipLibraryComponent', () => {
   let fixture: ComponentFixture<ClipLibraryComponent>;
   let service: jasmine.SpyObj<HighlightService>;
@@ -56,20 +69,24 @@ describe('ClipLibraryComponent', () => {
 
   beforeEach(async () => {
     service = jasmine.createSpyObj<HighlightService>('HighlightService', [
-      'listAllClips',
+      'listClipGroups',
       'createMediaAccess',
       'mediaUrl',
       'downloadUrl',
+      'renameClip',
       'retryClip',
       'deleteClip',
       'createUploadTask',
     ]);
-    service.listAllClips.and.returnValue(of({ total: 1, items: [clip] }));
+    service.listClipGroups.and.returnValue(of({ total: 1, items: [group] }));
     service.createMediaAccess.and.returnValue(
       of({ token: 'signed', expiresAt: 2_000, fileSizeBytes: 1_048_576 }),
     );
     service.mediaUrl.and.returnValue('/api/clip.mp4');
     service.downloadUrl.and.returnValue('/api/clip.mp4?download=1');
+    service.renameClip.and.returnValue(
+      of({ ...fullClip, name: '重命名高光' }),
+    );
     service.retryClip.and.returnValue(of(fullClip));
     service.deleteClip.and.returnValue(of(void 0));
     service.createUploadTask.and.returnValue(of({ jobId: 17 }));
@@ -101,7 +118,7 @@ describe('ClipLibraryComponent', () => {
   it('shows permanent clip assets and their source recording', () => {
     fixture.detectChanges();
 
-    expect(service.listAllClips).toHaveBeenCalledOnceWith(20, 0);
+    expect(service.listClipGroups).toHaveBeenCalledOnceWith(20, 0);
     expect(fixture.nativeElement.textContent).toContain('五杀高光');
     expect(fixture.nativeElement.textContent).toContain('主播名');
     expect(fixture.nativeElement.textContent).toContain('排位赛');
@@ -126,14 +143,41 @@ describe('ClipLibraryComponent', () => {
   });
 
   it('shows a not-indexed label for a legacy clip without a persisted size', () => {
-    service.listAllClips.and.returnValue(
-      of({ total: 1, items: [{ ...clip, fileSizeBytes: null }] }),
+    service.listClipGroups.and.returnValue(
+      of({
+        total: 1,
+        items: [
+          { ...group, clips: [{ ...clip, fileSizeBytes: null }] },
+        ],
+      }),
     );
 
     fixture.detectChanges();
 
     expect(fixture.nativeElement.textContent).toContain('大小待索引');
     expect(fixture.nativeElement.textContent).not.toContain('0 B');
+  });
+
+  it('renames a clip display name without changing its file', () => {
+    fixture.detectChanges();
+
+    fixture.componentInstance.openRename(clip);
+    fixture.componentInstance.renameName = '  重命名高光  ';
+    fixture.componentInstance.saveRename();
+
+    expect(service.renameClip).toHaveBeenCalledOnceWith(3, '重命名高光');
+    expect(message.success).toHaveBeenCalledOnceWith('片段已重命名');
+    expect(fixture.componentInstance.editingClip).toBeNull();
+  });
+
+  it('does not submit a blank clip name', () => {
+    fixture.componentInstance.openRename(clip);
+    fixture.componentInstance.renameName = '   ';
+
+    fixture.componentInstance.saveRename();
+
+    expect(service.renameClip).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.renameError).toBe('名称不能为空');
   });
 
   it('reports deletion as queued instead of already completed', async () => {
@@ -150,14 +194,19 @@ describe('ClipLibraryComponent', () => {
   });
 
   it('shows a failed deletion and offers deletion retry', () => {
-    service.listAllClips.and.returnValue(
+    service.listClipGroups.and.returnValue(
       of({
         total: 1,
         items: [
           {
-            ...clip,
-            deletionState: 'failed',
-            deletionError: 'path_ownership_violation',
+            ...group,
+            clips: [
+              {
+                ...clip,
+                deletionState: 'failed',
+                deletionError: 'path_ownership_violation',
+              },
+            ],
           },
         ],
       }),

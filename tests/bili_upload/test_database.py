@@ -46,6 +46,11 @@ REQUIRED_TABLES = {
     'owner_handoff_outcomes',
     'upload_retry_batches',
     'upload_retry_batch_items',
+    'media_library_items',
+    'media_library_tags',
+    'media_library_item_tags',
+    'media_library_parts',
+    'media_library_file_moves',
 }
 
 
@@ -80,7 +85,7 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -352,6 +357,83 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
 
 
 @pytest.mark.asyncio
+async def test_media_library_schema_constraints_and_list_index(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            "INSERT INTO recording_sessions("
+            "id,room_id,broadcast_session_key,state,started_at) "
+            "VALUES(1,100,'100:1','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO media_library_items('
+            'id,session_id,kind,origin,storage_key,display_name,state,'
+            'created_at,updated_at) '
+            "VALUES(1,1,'broadcast','recording','0123456789abcdef0123456789abcdef',"
+            "'第一场直播','ready',1,1)"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'INSERT INTO media_library_items('
+                'session_id,kind,origin,storage_key,display_name,state,'
+                'created_at,updated_at) '
+                "VALUES(1,'broadcast','recording',"
+                "'fedcba9876543210fedcba9876543210','重复收藏','ready',1,1)"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'UPDATE media_library_items SET state=?,error=NULL WHERE id=1',
+                ('failed',),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                'UPDATE media_library_items SET display_name=? WHERE id=1', ('   ',)
+            )
+
+        await database.execute(
+            "INSERT INTO media_library_tags(id,name) VALUES(1,'Keep')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "INSERT INTO media_library_tags(id,name) VALUES(2,'keep')"
+            )
+        await database.execute(
+            'INSERT INTO media_library_item_tags(item_id,tag_id) VALUES(1,1)'
+        )
+
+        indexes = {
+            row['name']
+            for row in await database.fetchall(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        assert {
+            'media_library_items_list_idx',
+            'media_library_parts_recording_part_idx',
+            'media_library_item_tags_tag_idx',
+            'media_library_file_moves_state_idx',
+            'highlight_clips_source_library_idx',
+        } <= indexes
+        plan = await database.fetchall(
+            'EXPLAIN QUERY PLAN SELECT id FROM media_library_items '
+            'WHERE kind=? '
+            'ORDER BY created_at DESC,id DESC LIMIT 20',
+            ('broadcast',),
+        )
+        assert any('media_library_items_list_idx' in str(row['detail']) for row in plan)
+        assert not any('TEMP B-TREE' in str(row['detail']) for row in plan)
+
+        await database.execute('DELETE FROM recording_sessions WHERE id=1')
+        assert await database.scalar('SELECT COUNT(*) FROM media_library_items') == 0
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM media_library_item_tags') == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> None:
     path = tmp_path / 'blrec.sqlite3'
     migration = (
@@ -444,7 +526,7 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
     finally:
         await database.close()
 
@@ -492,7 +574,7 @@ async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
             'output_video_path': '/clips/legacy.mp4',
             'file_size_bytes': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
     finally:
         await database.close()
 
@@ -530,7 +612,7 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
         assert (
             await database.scalar(
                 'SELECT file_size_bytes FROM highlight_clips WHERE id=8'
@@ -594,7 +676,7 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
         sessions = await database.fetchall(
             'SELECT id,cancellation_generation FROM recording_sessions ORDER BY id'
         )
@@ -664,7 +746,7 @@ async def test_twenty_seventh_migration_persists_safe_highlight_inspections(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
         legacy = await database.fetchone(
             'SELECT inspection_json,source_fingerprint_json,idempotency_key '
             'FROM highlight_clips WHERE id=7'
@@ -735,7 +817,7 @@ async def test_twenty_eighth_migration_adds_repair_reupload_snapshot(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 29
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
         assert (
             await database.scalar(
                 'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=1'

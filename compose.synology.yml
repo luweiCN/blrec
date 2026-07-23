@@ -16,4 +16,5 @@ services:
       - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg
       - ${BLREC_LOG_DIR:-/volume1/docker/blrec-next/log}:/log
       - ${BLREC_RECORDING_DIR:-/volume1/docker/blrec-next/rec}:/rec
+      - ${BLREC_FAVORITES_DIR:-/volume1/docker/blrec-next/favorites}:/favorites
       - ${BLREC_CLIP_DIR:-/volume1/docker/blrec-next/clips}:/clips

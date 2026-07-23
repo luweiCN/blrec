@@ -21,6 +21,9 @@
       <nz-tag *ngIf="session.sourceKind === 'highlight'" nzColor="orange">
         高光
       </nz-tag>
+      <nz-tag *ngIf="session.mediaLibraryItemId" nzColor="gold">
+        已收藏
+      </nz-tag>
       <ng-container *ngIf="archiveUrl() as url; else plainTitle">
         <a
           class="archive-title"
@@ -157,6 +160,15 @@
         (click)="cutCurrent()"
       >
         {{ cutting ? "正在切割…" : "切割当前文件" }}
+      </li>
+      <li
+        *ngIf="canFavorite()"
+        nz-menu-item
+        data-testid="favorite-recording"
+        [nzDisabled]="favoriting"
+        (click)="favorite()"
+      >
+        {{ favoriting ? "正在收藏…" : "收藏到媒体库" }}
       </li>
       <li
         *ngIf="hasAction('set_upload')"

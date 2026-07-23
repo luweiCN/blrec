@@ -106,6 +106,12 @@ describe('HighlightService', () => {
       'GET',
     );
 
+    service.renameClip(3, '重命名高光').subscribe();
+    const rename = http.expectOne('/api/v1/highlights/clips/3');
+    expect(rename.request.method).toBe('PATCH');
+    expect(rename.request.body).toEqual({ name: '重命名高光' });
+    rename.flush({});
+
     service.retryClip(3).subscribe();
     const retry = http.expectOne('/api/v1/highlights/clips/3/retry');
     expect(retry.request.method).toBe('POST');
@@ -194,6 +200,16 @@ describe('HighlightService', () => {
     });
     expect(item?.fileSizeBytes).toBeNull();
     expect('outputVideoPath' in (item as object)).toBeFalse();
+  });
+
+  it('loads clip groups with group-first pagination', () => {
+    service.listClipGroups(20, 40).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/highlights/clips/groups?limit=20&offset=40',
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush({ total: 0, items: [] });
   });
 
   it('updates and deletes independent marker metadata', () => {

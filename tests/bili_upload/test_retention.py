@@ -589,3 +589,56 @@ async def test_retention_rejects_video_path_outside_recording_root(
         assert 'outside' in str(error).lower()
     finally:
         await database.close()
+
+
+@pytest.mark.parametrize(
+    ('retention_mode', 'submitted_at', 'approved_at'),
+    (
+        ('upload_completed', None, None),
+        ('submitted', 1_000, None),
+        ('approved', 900, 1_000),
+        ('capacity', 1_000, None),
+    ),
+)
+@pytest.mark.asyncio
+async def test_media_library_session_is_excluded_from_all_retention(
+    tmp_path: Path,
+    retention_mode: str,
+    submitted_at: Optional[int],
+    approved_at: Optional[int],
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        video, _xml = await seed_recording(
+            database,
+            root,
+            identifier=1,
+            room_id=100,
+            retention_mode=retention_mode,
+            retention_days=0,
+            submitted_at=submitted_at,
+            approved_at=approved_at,
+            content=b'permanent',
+        )
+        await database.execute(
+            'INSERT INTO media_library_items('
+            'session_id,kind,origin,storage_key,display_name,state,created_at,'
+            'updated_at) VALUES(1,\'broadcast\',\'recording\',?,\'永久直播\','
+            "'ready',1,1)",
+            ('f' * 32,),
+        )
+        manager = RetentionManager(
+            database, root, capacity_bytes=lambda: 1, clock=lambda: 10_000
+        )
+
+        assert await manager.run_once() == 0
+        assert video.exists()
+        assert (await manager.status()).managed_video_bytes == 0
+        assert await manager._event_candidates(10_000) == []
+        assert await manager._capacity_candidates() == []
+    finally:
+        await database.close()

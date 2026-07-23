@@ -226,6 +226,7 @@ describe('HighlightEditorComponent', () => {
       'getClipInspection',
       'createClip',
       'getClip',
+      'renameClip',
       'retryClip',
       'deleteClip',
       'prepareUploadSession',
@@ -248,6 +249,9 @@ describe('HighlightEditorComponent', () => {
         state: 'ready',
         outputVideoPath: '/rec/highlight-3.mp4',
       }),
+    );
+    highlights.renameClip.and.callFake((id, name) =>
+      of({ ...processingClip, id, name }),
     );
     highlights.retryClip.and.returnValue(
       of({ ...processingClip, state: 'queued', errorMessage: null }),
@@ -2192,6 +2196,49 @@ describe('HighlightEditorComponent', () => {
 
     expect(highlights.retryClip).toHaveBeenCalledOnceWith(3);
     expect(component.clips[0].state).toBe('queued');
+  });
+
+  it('renames a created clip from the clip list', () => {
+    const readyClip: HighlightClip = {
+      ...processingClip,
+      state: 'ready',
+      sources: [
+        {
+          partId: 11,
+          ordinal: 0,
+          requestedStartMs: 10_000,
+          requestedEndMs: 20_000,
+          actualStartMs: 10_000,
+          actualEndMs: 20_000,
+        },
+      ],
+    };
+    component.clips = [readyClip];
+    fixture.detectChanges();
+    const renameButton = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>(
+        '.clip-actions button',
+      ),
+    ).find((button) => button.textContent?.trim() === '重命名');
+
+    expect(renameButton).toBeDefined();
+    renameButton?.click();
+    component.clipRenameName = '  新片段名称  ';
+    component.saveClipRename(readyClip);
+
+    expect(highlights.renameClip).toHaveBeenCalledOnceWith(3, '新片段名称');
+    expect(component.clips[0].name).toBe('新片段名称');
+    expect(component.editingClipNameId).toBeNull();
+  });
+
+  it('does not submit a blank clip name from the clip list', () => {
+    component.beginClipRename(processingClip);
+    component.clipRenameName = '   ';
+
+    component.saveClipRename(processingClip);
+
+    expect(highlights.renameClip).not.toHaveBeenCalled();
+    expect(component.actionError).toBe('请输入片段名称');
   });
 
   it('selects the following part at an exact adjacent-part boundary', () => {

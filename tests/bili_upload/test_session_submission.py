@@ -103,6 +103,38 @@ async def test_session_submission_inherits_room_policy_until_explicit_save(
 
 
 @pytest.mark.asyncio
+async def test_media_library_submission_is_always_manual_deletion(
+    database: BiliUploadDatabase,
+) -> None:
+    await seed(database)
+    await database.execute(
+        'INSERT INTO media_library_items('
+        'session_id,kind,origin,storage_key,display_name,state,created_at,'
+        "updated_at) VALUES(1,'broadcast','upload',?,'永久直播','ready',1,1)",
+        ('f' * 32,),
+    )
+    policy_manager = RoomUploadPolicyManager(database, clock=lambda: 10)
+    await policy_manager.upsert(
+        100, command(retention_mode='approved', retention_days=30)
+    )
+    manager = SessionSubmissionManager(
+        database, policy_manager=policy_manager, clock=lambda: 20
+    )
+
+    inherited = await manager.get(1)
+    saved = await manager.save_override(
+        1,
+        command(retention_mode='submitted', retention_days=7),
+        manager_subject='administrator',
+    )
+
+    assert inherited.settings.retention_mode == 'never'
+    assert inherited.settings.retention_days == 0
+    assert saved.settings.retention_mode == 'never'
+    assert saved.settings.retention_days == 0
+
+
+@pytest.mark.asyncio
 async def test_session_submission_decision_can_be_changed_before_job_creation(
     database: BiliUploadDatabase,
 ) -> None:

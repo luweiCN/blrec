@@ -10,6 +10,7 @@ import pytest
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.deletion_worker import LocalDeletionWorker
 from blrec.bili_upload.highlights import HighlightService
+from blrec.bili_upload.media_library import media_library_move_staging_path
 
 
 async def _seed_session(
@@ -235,6 +236,191 @@ async def test_worker_processes_at_most_128_owned_paths_and_resumes(
 
         assert not any(path.exists() for path in paths)
         assert await database.scalar('SELECT COUNT(*) FROM local_deletion_items') == 0
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_deletes_media_import_storage_and_staging_files(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        recording_root = tmp_path / 'rec'
+        key = 'a' * 32
+        directory = tmp_path / 'favorites' / key
+        incoming = directory / 'incoming'
+        incoming.mkdir(parents=True)
+        stored = directory / 'part-0001.mp4'
+        staging = incoming / 'part-0002.mp4'
+        interrupted_target = directory / 'cover.jpg'
+        move_staging = media_library_move_staging_path(interrupted_target, 1)
+        stored.write_bytes(b'stored')
+        staging.write_bytes(b'partial')
+        interrupted_target.write_bytes(b'cover')
+        move_staging.write_bytes(b'partial cover')
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+            "VALUES(1,0,'import:test','manual_review',1,'live')"
+        )
+        await database.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            "VALUES('import:test',1,'finished',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO media_library_items('
+            'id,session_id,kind,origin,storage_key,display_name,state,created_at,'
+            "updated_at) VALUES(1,1,'broadcast','upload',?,'导入','uploading',1,1)",
+            (key,),
+        )
+        await database.execute(
+            'INSERT INTO media_library_parts('
+            'item_id,part_index,original_filename,storage_path,expected_size,'
+            "received_size,state) VALUES(1,1,'stored.mp4',?,6,6,'uploaded')",
+            (str(stored),),
+        )
+        await database.execute(
+            'INSERT INTO media_library_parts('
+            'item_id,part_index,original_filename,storage_path,staging_path,'
+            'expected_size,received_size,state) '
+            "VALUES(1,2,'partial.mp4',?,?,10,0,'pending')",
+            (str(directory / 'part-0002.mp4'), str(staging)),
+        )
+        await database.execute(
+            'INSERT INTO media_library_file_moves('
+            'item_id,source_path,target_path,state,error,created_at,updated_at) '
+            "VALUES(1,?,?,'failed','commit interrupted',1,1)",
+            (str(recording_root / 'missing-cover.jpg'), str(interrupted_target)),
+        )
+        worker = LocalDeletionWorker(
+            database,
+            recording_root=recording_root,
+            clip_root=tmp_path / 'clips',
+            clock=lambda: 100,
+        )
+
+        await worker.request_session(1, manager_subject='manager')
+        assert await worker.run_once() == ('session', 1)
+
+        assert not stored.exists()
+        assert not staging.exists()
+        assert not interrupted_target.exists()
+        assert not move_staging.exists()
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_another_media_library_item_directory(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        key = 'a' * 32
+        outside_item = tmp_path / 'favorites' / ('b' * 32) / 'part-0001.mp4'
+        outside_item.parent.mkdir(parents=True)
+        outside_item.write_bytes(b'other item')
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+            "VALUES(1,100,'import:owned','manual_review',1,'live')"
+        )
+        await database.execute(
+            'INSERT INTO media_library_items('
+            'id,session_id,kind,origin,storage_key,display_name,state,created_at,'
+            "updated_at) VALUES(1,1,'clip','upload',?,'导入','uploading',1,1)",
+            (key,),
+        )
+        await database.execute(
+            'INSERT INTO media_library_parts('
+            'item_id,part_index,original_filename,storage_path,expected_size,'
+            "received_size,state) VALUES(1,1,'clip.mp4',?,10,10,'uploaded')",
+            (str(outside_item),),
+        )
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path / 'rec', clip_root=tmp_path / 'clips'
+        )
+
+        await worker.request_session(1, manager_subject='manager')
+        await worker.run_once()
+
+        assert outside_item.exists()
+        assert (
+            await database.scalar(
+                'SELECT deletion_state FROM recording_sessions WHERE id=1'
+            )
+            == 'failed'
+        )
+        assert (
+            await database.scalar(
+                'SELECT deletion_error FROM recording_sessions WHERE id=1'
+            )
+            == 'path_ownership_violation'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_waits_for_active_media_library_file_operation(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        recording_root = tmp_path / 'rec'
+        key = 'b' * 32
+        path = tmp_path / 'favorites' / key / 'part-0001.mp4'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'video')
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,source_kind) '
+            "VALUES(1,100,'import:busy','manual_review',1,'live')"
+        )
+        await database.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            "VALUES('import:busy',1,'finished',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO media_library_items('
+            'id,session_id,kind,origin,storage_key,display_name,state,created_at,'
+            "updated_at) VALUES(1,1,'clip','upload',?,'导入','uploading',1,1)",
+            (key,),
+        )
+        await database.execute(
+            'INSERT INTO media_library_parts('
+            'item_id,part_index,original_filename,storage_path,staging_path,'
+            'expected_size,received_size,state) '
+            "VALUES(1,1,'clip.mp4',?,?,5,0,'uploading')",
+            (str(path), str(path.parent / 'incoming' / 'part-0001.mp4')),
+        )
+        worker = LocalDeletionWorker(
+            database, recording_root=recording_root, clip_root=tmp_path / 'clips'
+        )
+        await worker.request_session(1, manager_subject='manager')
+
+        assert await worker.run_once() == ('session', 1)
+        assert path.exists()
+        assert (
+            await database.scalar(
+                'SELECT deletion_state FROM recording_sessions WHERE id=1'
+            )
+            == 'requested'
+        )
+        assert await database.scalar('SELECT COUNT(*) FROM local_deletion_items') == 0
+
+        await database.execute(
+            "UPDATE media_library_parts SET state='failed',"
+            "error='上传已停止' WHERE item_id=1 AND part_index=1"
+        )
+        assert await worker.run_once() == ('session', 1)
+        assert not path.exists()
         assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 0
     finally:
         await database.close()

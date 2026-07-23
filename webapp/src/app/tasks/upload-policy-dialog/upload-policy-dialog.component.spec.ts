@@ -428,6 +428,29 @@ describe('UploadPolicyDialogComponent', () => {
     expect(saved).toHaveBeenCalled();
   });
 
+  it('forces manual deletion for permanent media-library sessions', () => {
+    fixture = TestBed.createComponent(UploadPolicyDialogComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('roomId', 100);
+    fixture.componentRef.setInput('roomName', '永久直播');
+    fixture.componentRef.setInput('sessionId', 7);
+    fixture.componentRef.setInput('manualDeletionOnly', true);
+    fixture.detectChanges();
+    component.draft.retentionMode = 'approved';
+    component.draft.retentionDays = 999_999;
+
+    component.save();
+
+    expect(fixture.nativeElement.textContent).not.toContain('视频删除策略');
+    expect(submissionService.save).toHaveBeenCalledOnceWith(
+      7,
+      jasmine.objectContaining({
+        retentionMode: 'never',
+        retentionDays: 0,
+      }),
+    );
+  });
+
   it('uses a clip-specific form and returns the final submission title', () => {
     policyService.get.and.returnValue(of(existingPolicy));
     fixture = TestBed.createComponent(UploadPolicyDialogComponent);

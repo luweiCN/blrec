@@ -15,6 +15,15 @@ def test_dockerfile_builds_frontend_wheel_and_runtime_separately() -> None:
     assert 'scripts/migrate_biliupforjava_rooms.py' in dockerfile
     assert 'HEALTHCHECK' in dockerfile
     assert '/api/v1/auth/status' in dockerfile
+    assert '"/favorites"' in dockerfile
+
+
+def test_synology_compose_persists_sibling_favorites_directory() -> None:
+    compose = (ROOT / 'compose.synology.yml').read_text(encoding='utf8')
+    environment = (ROOT / 'synology.env.example').read_text(encoding='utf8')
+    assert 'BLREC_FAVORITES_DIR' in compose
+    assert ':/favorites' in compose
+    assert 'BLREC_FAVORITES_DIR=/volume1/docker/blrec-next/favorites' in environment
 
 
 def test_docker_context_excludes_local_and_generated_state() -> None:

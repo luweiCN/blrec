@@ -75,6 +75,16 @@
               nzMatchRouter="true"
               nz-tooltip
               nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '媒体库' : ''"
+            >
+              <i nz-icon nzType="star" nzTheme="outline"></i>
+              <span><a routerLink="/media-library">媒体库</a></span>
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
               [nzTooltipTitle]="collapsed ? '投稿账号' : ''"
             >
               <i nz-icon nzType="user" nzTheme="outline"></i>

@@ -516,21 +516,62 @@
       </p>
       <ul class="clip-list" aria-live="polite">
         <li *ngFor="let item of visibleClips; trackBy: trackClip">
-          <button
-            type="button"
-            class="clip-main"
-            (click)="selectClipForEditing(item)"
+          <ng-container
+            *ngIf="editingClipNameId !== item.id; else clipNameEditor"
           >
-            <strong>{{ item.name }}</strong>
-            <span>
-              {{ formatTime(item.requestedStartMs - editorPartStartMs) }}–{{
-                formatTime(item.requestedEndMs - editorPartStartMs)
-              }}
-            </span>
-            <span *ngIf="item.errorMessage" class="clip-error">
-              {{ item.errorMessage }}
-            </span>
-          </button>
+            <button
+              type="button"
+              class="clip-main"
+              (click)="selectClipForEditing(item)"
+            >
+              <strong>{{ item.name }}</strong>
+              <span>
+                {{ formatTime(item.requestedStartMs - editorPartStartMs) }}–{{
+                  formatTime(item.requestedEndMs - editorPartStartMs)
+                }}
+              </span>
+              <span *ngIf="item.errorMessage" class="clip-error">
+                {{ item.errorMessage }}
+              </span>
+            </button>
+          </ng-container>
+          <ng-template #clipNameEditor>
+            <form
+              class="clip-main"
+              aria-label="重命名片段"
+              (ngSubmit)="saveClipRename(item)"
+            >
+              <label for="clip-name-{{ item.id }}">片段名称</label>
+              <input
+                id="clip-name-{{ item.id }}"
+                type="text"
+                name="clipRenameName"
+                maxlength="200"
+                autocomplete="off"
+                [disabled]="savingClipNameId === item.id"
+                [(ngModel)]="clipRenameName"
+              />
+              <div class="clip-actions">
+                <button
+                  type="submit"
+                  class="primary-button"
+                  [disabled]="
+                    !clipRenameName.trim() || savingClipNameId === item.id
+                  "
+                >
+                  {{ savingClipNameId === item.id ? "保存中…" : "保存" }}
+                </button>
+                <button
+                  type="button"
+                  class="secondary-button"
+                  [disabled]="savingClipNameId === item.id"
+                  (click)="cancelClipRename()"
+                >
+                  取消
+                </button>
+              </div>
+            </form>
+          </ng-template>
           <span class="status-pill" [attr.data-state]="item.state">
             {{
               item.state === "ready"
@@ -559,6 +600,15 @@
             查看稿件
           </a>
           <div class="clip-actions">
+            <button
+              *ngIf="editingClipNameId !== item.id"
+              type="button"
+              class="secondary-button"
+              [disabled]="savingClipNameId !== null"
+              (click)="beginClipRename(item)"
+            >
+              重命名
+            </button>
             <button
               *ngIf="item.state === 'failed'"
               type="button"

@@ -1,0 +1,504 @@
+<nz-page-header [nzTitle]="pageTitle" [nzSubtitle]="pageSubtitle">
+  <nz-page-header-extra>
+    <button nz-button nzType="primary" type="button" (click)="openImport()">
+      <i nz-icon nzType="cloud-upload"></i>
+      {{ kind === "broadcast" ? "上传直播" : "上传片段" }}
+    </button>
+    <button
+      nz-button
+      type="button"
+      [disabled]="view.state === 'loading'"
+      (click)="load()"
+    >
+      <i nz-icon nzType="reload"></i>
+      刷新
+    </button>
+  </nz-page-header-extra>
+</nz-page-header>
+
+<main class="media-library-page" aria-live="polite">
+  <div class="library-toolbar">
+    <div class="kind-switch" role="group" aria-label="媒体库类型">
+      <button
+        nz-button
+        type="button"
+        [nzType]="kind === 'broadcast' ? 'primary' : 'default'"
+        [attr.aria-pressed]="kind === 'broadcast'"
+        (click)="selectKind('broadcast')"
+      >
+        直播收藏
+      </button>
+      <button
+        nz-button
+        type="button"
+        [nzType]="kind === 'clip' ? 'primary' : 'default'"
+        [attr.aria-pressed]="kind === 'clip'"
+        (click)="selectKind('clip')"
+      >
+        上传片段
+      </button>
+    </div>
+    <nz-input-group [nzPrefix]="searchIcon">
+      <input
+        nz-input
+        type="search"
+        maxlength="100"
+        placeholder="搜索名称、主播、原标题或标签"
+        [(ngModel)]="query"
+        (keyup.enter)="applySearch()"
+      />
+    </nz-input-group>
+    <ng-template #searchIcon><i nz-icon nzType="search"></i></ng-template>
+    <button nz-button type="button" (click)="applySearch()">搜索</button>
+    <button
+      *ngIf="query"
+      nz-button
+      nzType="link"
+      type="button"
+      (click)="clearSearch()"
+    >
+      清空
+    </button>
+  </div>
+
+  <nz-alert
+    class="retention-notice"
+    nzType="info"
+    nzShowIcon
+    nzMessage="永久保存区"
+    nzDescription="这里的文件不计入录像容量，也不会被自动保留策略或低空间任务删除，只能手动删除。"
+  ></nz-alert>
+
+  <nz-alert
+    *ngIf="view.state === 'error'"
+    nzType="error"
+    nzShowIcon
+    nzMessage="媒体库加载失败"
+    [nzDescription]="view.message"
+  ></nz-alert>
+
+  <div *ngIf="view.state === 'loading'" class="loading-state" role="status">
+    正在加载媒体库…
+  </div>
+
+  <div *ngIf="view.state === 'ready' && items.length === 0" class="empty-state">
+    <i nz-icon [nzType]="kind === 'broadcast' ? 'star' : 'scissor'"></i>
+    <strong>
+      {{ kind === "broadcast" ? "还没有收藏直播" : "还没有上传片段" }}
+    </strong>
+    <span>
+      {{
+        kind === "broadcast"
+          ? "可以从录制任务收藏，也可直接上传多个分 P。"
+          : "上传从其他来源采集的视频片段。"
+      }}
+    </span>
+  </div>
+
+  <section class="library-list" [attr.aria-label]="pageTitle + '列表'">
+    <article
+      *ngFor="let item of items; trackBy: trackItem"
+      class="library-item"
+    >
+      <header class="item-header">
+        <div class="item-title">
+          <div>
+            <nz-tag [nzColor]="stateColor(item.state)">
+              {{ stateLabel(item.state) }}
+            </nz-tag>
+            <nz-tag>{{ originLabel(item) }}</nz-tag>
+            <nz-tag *ngFor="let tag of item.tags">{{ tag }}</nz-tag>
+          </div>
+          <h2>{{ item.displayName }}</h2>
+          <p>
+            {{ sourceLabel(item) }}
+            <ng-container *ngIf="item.origin === 'recording'">
+              · 原标题 {{ item.sourceTitle || "未记录" }}
+            </ng-container>
+            · {{ item.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
+          </p>
+        </div>
+        <div class="item-actions">
+          <a
+            *ngIf="item.kind === 'broadcast' && item.state === 'ready'"
+            nz-button
+            nzType="link"
+            [routerLink]="['/recordings/highlights', item.sessionId]"
+          >
+            剪辑
+          </a>
+          <button
+            nz-button
+            nzType="link"
+            type="button"
+            [disabled]="item.state !== 'ready'"
+            (click)="openSubmission(item)"
+          >
+            投稿设置
+          </button>
+          <button
+            *ngIf="item.submissions.length > 0"
+            nz-button
+            nzType="link"
+            type="button"
+            [disabled]="item.state !== 'ready'"
+            (click)="repost(item)"
+          >
+            重新投稿
+          </button>
+          <button
+            nz-button
+            nzType="link"
+            type="button"
+            (click)="openEdit(item)"
+          >
+            重命名与标签
+          </button>
+          <button
+            nz-button
+            nzType="link"
+            nzDanger
+            type="button"
+            (click)="deleteItem(item)"
+          >
+            删除
+          </button>
+        </div>
+      </header>
+
+      <p *ngIf="item.note" class="item-note">{{ item.note }}</p>
+      <p *ngIf="item.error" class="item-error">{{ item.error }}</p>
+
+      <nz-table
+        nzSize="small"
+        [nzData]="item.parts"
+        [nzFrontPagination]="false"
+        [nzShowPagination]="false"
+        nzTableLayout="fixed"
+      >
+        <thead>
+          <tr>
+            <th nzWidth="72px">分 P</th>
+            <th>文件</th>
+            <th nzWidth="180px">时长与大小</th>
+            <th nzWidth="180px">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let part of item.parts; trackBy: trackPart">
+            <td>P{{ part.partIndex }}</td>
+            <td>
+              <div class="part-name" [title]="part.originalFilename">
+                {{ part.originalFilename }}
+              </div>
+              <div *ngIf="part.error" class="item-error">
+                {{ part.error }}
+              </div>
+            </td>
+            <td>
+              {{ formatDuration(part.durationSeconds) }} ·
+              {{ formatBytes(part.expectedSize) }}
+            </td>
+            <td>
+              <button
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="part.recordingPartId === null"
+                (click)="openPreview(item, part)"
+              >
+                预览
+              </button>
+              <button
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="part.recordingPartId === null"
+                (click)="download(item, part)"
+              >
+                下载
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </nz-table>
+
+      <section
+        *ngIf="item.submissions.length > 0"
+        class="submission-history"
+        aria-label="投稿历史"
+      >
+        <strong>关联稿件</strong>
+        <a
+          *ngFor="let submission of item.submissions"
+          [href]="submissionUrl(submission.bvid)"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <nz-tag [nzColor]="submission.current ? 'blue' : 'default'">
+            {{ submission.current ? "当前" : "历史" }}
+          </nz-tag>
+          {{ submission.bvid }} · {{ submission.accountName }}
+        </a>
+      </section>
+    </article>
+  </section>
+
+  <div *ngIf="view.state === 'ready' && total > 0" class="pagination-bar">
+    <span>共 {{ total }} 项</span>
+    <nz-pagination
+      nzSize="small"
+      [nzPageIndex]="pageIndex"
+      [nzPageSize]="pageSize"
+      [nzTotal]="total"
+      [nzPageSizeOptions]="pageSizeOptions"
+      [nzShowSizeChanger]="true"
+      (nzPageIndexChange)="pageIndexChanged($event)"
+      (nzPageSizeChange)="pageSizeChanged($event)"
+    ></nz-pagination>
+  </div>
+</main>
+
+<nz-modal
+  [nzTitle]="importKind === 'broadcast' ? '上传外部直播' : '上传外部片段'"
+  nzWidth="760px"
+  [nzVisible]="importVisible"
+  [nzMaskClosable]="!importSubmitting"
+  [nzClosable]="!importSubmitting"
+  [nzKeyboard]="!importSubmitting"
+  [nzFooter]="importFooter"
+  (nzOnCancel)="closeImport()"
+>
+  <ng-container *nzModalContent>
+    <form class="import-form" aria-label="外部媒体上传">
+      <fieldset [disabled]="importSubmitting || importItemId !== null">
+        <legend>媒体类型</legend>
+        <nz-radio-group
+          name="importKind"
+          [ngModel]="importKind"
+          (ngModelChange)="importKindChanged($event)"
+        >
+          <label nz-radio nzValue="broadcast">完整直播（可多分 P）</label>
+          <label nz-radio nzValue="clip">单个片段</label>
+        </nz-radio-group>
+      </fieldset>
+
+      <label for="import-display-name">展示名称 <span>*</span></label>
+      <input
+        id="import-display-name"
+        nz-input
+        name="importDisplayName"
+        maxlength="200"
+        [disabled]="importSubmitting || importItemId !== null"
+        [(ngModel)]="importDisplayName"
+      />
+
+      <div class="form-grid">
+        <div>
+          <label for="import-anchor">主播 / 来源名</label>
+          <input
+            id="import-anchor"
+            nz-input
+            name="importAnchorName"
+            maxlength="200"
+            [disabled]="importSubmitting || importItemId !== null"
+            [(ngModel)]="importAnchorName"
+          />
+        </div>
+        <div>
+          <label for="import-room">来源 B 站房间号（可选）</label>
+          <nz-input-number
+            id="import-room"
+            name="importRoomId"
+            [nzMin]="1"
+            [nzStep]="1"
+            [nzDisabled]="importSubmitting || importItemId !== null"
+            [(ngModel)]="importRoomId"
+          ></nz-input-number>
+        </div>
+      </div>
+
+      <label for="import-tags">标签</label>
+      <input
+        id="import-tags"
+        nz-input
+        name="importTags"
+        maxlength="820"
+        placeholder="多个标签用逗号分隔"
+        [disabled]="importSubmitting || importItemId !== null"
+        [(ngModel)]="importTags"
+      />
+
+      <label for="import-note">备注</label>
+      <textarea
+        id="import-note"
+        nz-input
+        name="importNote"
+        rows="3"
+        maxlength="2000"
+        [disabled]="importSubmitting || importItemId !== null"
+        [(ngModel)]="importNote"
+      ></textarea>
+
+      <div class="file-picker">
+        <label class="file-button" for="media-file-input"> 选择视频文件 </label>
+        <input
+          id="media-file-input"
+          type="file"
+          accept=".flv,.mp4,.ts,.m4s,.mkv,.mov,.webm,video/*"
+          [multiple]="importKind === 'broadcast'"
+          [disabled]="importSubmitting || importItemId !== null"
+          (change)="filesSelected($event)"
+        />
+        <span>
+          {{
+            importKind === "broadcast"
+              ? "可多选，下方顺序就是投稿分 P 顺序。"
+              : "片段只能选择一个文件。"
+          }}
+        </span>
+      </div>
+
+      <ol *ngIf="importFiles.length > 0" class="import-parts">
+        <li *ngFor="let draft of importFiles; let index = index">
+          <span class="part-index">P{{ index + 1 }}</span>
+          <span class="import-filename" [title]="draft.file.name">
+            {{ draft.file.name }}
+          </span>
+          <span>{{ formatBytes(draft.file.size) }}</span>
+          <span>{{ importFileStateLabel(draft) }}</span>
+          <div class="reorder-actions">
+            <button
+              type="button"
+              aria-label="上移分 P"
+              [disabled]="index === 0 || importSubmitting"
+              (click)="moveImportFile(index, -1)"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              aria-label="下移分 P"
+              [disabled]="index === importFiles.length - 1 || importSubmitting"
+              (click)="moveImportFile(index, 1)"
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              aria-label="移除分 P"
+              [disabled]="importSubmitting"
+              (click)="removeImportFile(index)"
+            >
+              ×
+            </button>
+          </div>
+          <nz-progress
+            *ngIf="draft.state !== 'pending'"
+            [nzPercent]="draft.progress"
+            [nzStatus]="draft.state === 'failed' ? 'exception' : 'active'"
+            nzSize="small"
+          ></nz-progress>
+          <span *ngIf="draft.error" class="item-error">{{ draft.error }}</span>
+        </li>
+      </ol>
+
+      <nz-alert
+        *ngIf="importError"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="importError"
+      ></nz-alert>
+    </form>
+  </ng-container>
+</nz-modal>
+
+<ng-template #importFooter>
+  <button
+    nz-button
+    type="button"
+    [disabled]="importSubmitting"
+    (click)="closeImport()"
+  >
+    关闭
+  </button>
+  <button
+    nz-button
+    nzType="primary"
+    type="button"
+    [nzLoading]="importSubmitting"
+    (click)="submitImport()"
+  >
+    {{ importItemId === null ? "开始上传" : "重试上传" }}
+  </button>
+</ng-template>
+
+<nz-modal
+  nzTitle="重命名与标签"
+  [nzVisible]="editItem !== null"
+  [nzOkLoading]="editSaving"
+  [nzMaskClosable]="!editSaving"
+  [nzClosable]="!editSaving"
+  (nzOnCancel)="closeEdit()"
+  (nzOnOk)="saveEdit()"
+>
+  <ng-container *nzModalContent>
+    <form class="edit-form" aria-label="编辑媒体库信息">
+      <label for="edit-display-name">展示名称</label>
+      <input
+        id="edit-display-name"
+        nz-input
+        name="editDisplayName"
+        maxlength="200"
+        [(ngModel)]="editDisplayName"
+      />
+      <label for="edit-tags">标签</label>
+      <input
+        id="edit-tags"
+        nz-input
+        name="editTags"
+        placeholder="多个标签用逗号分隔"
+        [(ngModel)]="editTags"
+      />
+      <label for="edit-note">备注</label>
+      <textarea
+        id="edit-note"
+        nz-input
+        name="editNote"
+        rows="4"
+        maxlength="2000"
+        [(ngModel)]="editNote"
+      ></textarea>
+      <nz-alert
+        *ngIf="editError"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="editError"
+      ></nz-alert>
+    </form>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [nzTitle]="previewName || '视频预览'"
+  [nzVisible]="previewPart !== null"
+  [nzFooter]="null"
+  nzWidth="960px"
+  (nzOnCancel)="closePreview()"
+>
+  <ng-container *nzModalContent>
+    <div *ngIf="previewLoading" class="preview-loading">正在打开视频…</div>
+    <video *ngIf="previewUrl" controls autoplay [src]="previewUrl"></video>
+  </ng-container>
+</nz-modal>
+
+<app-upload-policy-dialog
+  *ngIf="submissionItem as item"
+  [roomId]="item.roomId"
+  [sessionId]="item.sessionId"
+  [roomName]="item.displayName"
+  [allowRestoreInherited]="false"
+  [manualDeletionOnly]="true"
+  (saved)="submissionSettingsSaved()"
+  (closed)="closeSubmission()"
+></app-upload-policy-dialog>

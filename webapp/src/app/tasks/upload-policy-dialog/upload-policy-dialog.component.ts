@@ -118,6 +118,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
   @Input() liveParentAreaName = '';
   @Input() allowRestoreInherited = true;
   @Input() deferredSave = false;
+  @Input() manualDeletionOnly = false;
   @Output() closed = new EventEmitter<void>();
   @Output() saved = new EventEmitter<void>();
   @Output() settingsConfirmed = new EventEmitter<RoomUploadPolicyRequest>();
@@ -644,8 +645,14 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
         this.publishMode === 'scheduled'
           ? Math.round(this.publishDelayHours * 3600)
           : 0,
-      retentionMode: this.deferredSave ? 'never' : this.draft.retentionMode,
-      retentionDays: this.deferredSave ? 0 : this.draft.retentionDays,
+      retentionMode:
+        this.deferredSave || this.manualDeletionOnly
+          ? 'never'
+          : this.draft.retentionMode,
+      retentionDays:
+        this.deferredSave || this.manualDeletionOnly
+          ? 0
+          : this.draft.retentionDays,
     };
     if (this.deferredSave) {
       this.settingsConfirmed.emit(request);
@@ -816,11 +823,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     this.collectionLoading = true;
     this.collectionError = null;
     this.policyService
-      .collections(
-        this.draft.accountMode,
-        this.draft.accountId,
-        forceRefresh,
-      )
+      .collections(this.draft.accountMode, this.draft.accountId, forceRefresh)
       .pipe(
         finalize(() => {
           if (generation === this.collectionLoadGeneration) {
@@ -978,6 +981,7 @@ export class UploadPolicyDialogComponent implements OnInit, OnDestroy {
     }
     if (
       !this.deferredSave &&
+      !this.manualDeletionOnly &&
       (!Number.isInteger(this.draft.retentionDays) ||
         this.draft.retentionDays < 0 ||
         this.draft.retentionDays > 3650)

@@ -401,6 +401,7 @@ export interface RecordingSessionSummary {
   readonly deletionError: string | null;
   readonly sourceKind: 'live' | 'highlight';
   readonly highlightClipId: number | null;
+  readonly mediaLibraryItemId?: number | null;
   readonly displayState: RecordingSessionDisplayState;
   readonly availableActions: readonly RecordingSessionAction[];
   readonly uploadJob: UploadJobSummary | null;
