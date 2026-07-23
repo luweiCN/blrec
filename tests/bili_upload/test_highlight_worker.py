@@ -442,6 +442,69 @@ async def test_inspection_token_creates_idempotent_clip_and_worker_reuses_probe(
 
 
 @pytest.mark.asyncio
+async def test_worker_reprobes_inspection_created_by_an_older_cut_algorithm(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    await seed_active_recording(database, root)
+    clipper = FakeClipper()
+    service = HighlightService(
+        database,
+        recording_root=root,
+        clipper=clipper,
+        inspection_secret=b'test-inspection-secret',
+    )
+    idempotency_key = str(uuid.uuid4())
+    try:
+        accepted = await service.submit_clip_inspection(
+            session_id=1,
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            active_durations_ms={1: 120_000},
+            idempotency_key=idempotency_key,
+        )
+        ready = await wait_for_inspection(
+            service, accepted.operation_id, claim_key=str(uuid.uuid4())
+        )
+        assert ready.inspection_token is not None
+        clip = await service.create_clip(
+            session_id=1,
+            marker_id=None,
+            name='旧算法预检',
+            requested_start_ms=20_000,
+            requested_end_ms=70_000,
+            confirm_keyframe=False,
+            active_durations_ms={1: 120_000},
+            inspection_token=ready.inspection_token,
+            idempotency_key=idempotency_key,
+        )
+        assert not isinstance(clip, HighlightInspectionOperation)
+        stored = await database.scalar(
+            'SELECT inspection_json FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+        legacy = json.loads(str(stored))
+        legacy.pop('algorithmVersion')
+        await database.execute(
+            'UPDATE highlight_clips SET inspection_json=? WHERE id=?',
+            (json.dumps(legacy), clip.id),
+        )
+
+        worker = HighlightWorker(
+            database, clipper, FakeDanmakuClipper(), worker_id='worker'
+        )
+        assert await worker.run_once() == clip.id
+
+        assert len(clipper.inspect_calls) == 2
+        refreshed = await database.scalar(
+            'SELECT inspection_json FROM highlight_clips WHERE id=?', (clip.id,)
+        )
+        assert json.loads(str(refreshed))['algorithmVersion'] == 2
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_growing_recording_keeps_validated_inspection_for_create_and_worker(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:

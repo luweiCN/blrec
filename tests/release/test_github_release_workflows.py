@@ -10,6 +10,10 @@ def test_test_workflow_is_reusable_and_covers_runtime_python() -> None:
     assert "'3.11'" in workflow
     assert 'scripts/docker-smoke.sh blrec:release-test' in workflow
     assert 'VERSION=3.0.0-beta.29' in workflow
+    assert 'name: Highlight media regression' in workflow
+    assert 'timeout-minutes: 15' in workflow
+    assert 'BLREC_RUN_HIGHLIGHT_MEDIA_TESTS' in workflow
+    assert 'test_highlight_cut_ffmpeg.py' in workflow
 
 
 def test_test_workflow_checks_the_browser_extension_independently() -> None:

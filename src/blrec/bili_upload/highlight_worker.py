@@ -31,6 +31,7 @@ from .highlights import (
     _fingerprint_json,
     _fingerprint_matches,
     _inspection_from_json,
+    _inspection_is_current,
     _inspection_json,
 )
 
@@ -614,6 +615,7 @@ class HighlightWorker:
             if (
                 work.inspection_json is not None
                 and work.source_fingerprint_json is not None
+                and _inspection_is_current(work.inspection_json)
                 and _fingerprint_matches(work.source_fingerprint_json, fingerprint_json)
             ):
                 persisted = _inspection_from_json(
@@ -741,6 +743,8 @@ class HighlightWorker:
             actual_end_ms=result.inspection.actual_end_ms,
             source_part_ids=[source.part_id for source in work.sources],
             output_size=result.artifact.size_bytes,
+            cut_strategy=result.artifact.strategy,
+            fallback_reason=result.artifact.fallback_reason,
             elapsed_seconds=round(result.elapsed_seconds, 3),
             danmaku_count=result.danmaku.message_count,
             result='ready',

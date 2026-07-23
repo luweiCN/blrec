@@ -34,17 +34,43 @@ jobs:
         run: python -m pytest
 
       - name: Check formatting
-        run: black --check src tests
+        run: black --check src tests scripts
 
       - name: Check import order
-        run: isort --check-only src tests
+        run: isort --check-only src tests scripts
 
       - name: Lint
-        run: flake8 src tests
+        run: flake8 src tests scripts
 
       - name: Type check
         if: matrix.python-version == '3.8'
         run: mypy src/blrec
+
+  highlight-media:
+    name: Highlight media regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install FFmpeg and backend dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install '.[dev]'
+
+      - name: Run real highlight media matrix
+        env:
+          BLREC_RUN_HIGHLIGHT_MEDIA_TESTS: '1'
+        run: python -m pytest tests/bili_upload/test_highlight_cut_ffmpeg.py -q
 
   frontend:
     name: Frontend

@@ -38,6 +38,8 @@ from .highlight_cut import (
     LosslessClipper,
 )
 
+_INSPECTION_ALGORITHM_VERSION = 2
+
 
 class HighlightRangeUnavailable(RuntimeError):
     pass
@@ -294,6 +296,7 @@ def _stable_end_for_source(source: ClipSource, safe_tail_ms: int) -> int:
 def _inspection_json(inspection: ClipInspection) -> str:
     return json.dumps(
         {
+            'algorithmVersion': _INSPECTION_ALGORITHM_VERSION,
             'requestedStartMs': inspection.requested_start_ms,
             'requestedEndMs': inspection.requested_end_ms,
             'actualStartMs': inspection.actual_start_ms,
@@ -326,9 +329,22 @@ def _inspection_json(inspection: ClipInspection) -> str:
     )
 
 
+def _inspection_is_current(value: str) -> bool:
+    try:
+        document = json.loads(value)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(document, Mapping)
+        and document.get('algorithmVersion') == _INSPECTION_ALGORITHM_VERSION
+    )
+
+
 def _inspection_from_json(value: str, fingerprint_json: str) -> ClipInspection:
     from .highlight_cut import InspectedClipSource, MediaProfile
 
+    if not _inspection_is_current(value):
+        raise HighlightCutError('高光检查结果版本已过期，请重新检查')
     document = json.loads(value)
     fingerprint = json.loads(fingerprint_json)
     sources = document['sources']
@@ -708,7 +724,8 @@ class HighlightService:
                 (
                     candidate
                     for candidate in reusable_rows
-                    if _fingerprint_matches(
+                    if _inspection_is_current(str(candidate['result_json']))
+                    and _fingerprint_matches(
                         str(candidate['fingerprint_json']), fingerprint
                     )
                 ),

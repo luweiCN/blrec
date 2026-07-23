@@ -59,6 +59,42 @@ def test_inspect_backs_up_to_the_previous_keyframe(tmp_path: Path) -> None:
     assert inspection.sources[0].output_offset_ms == 0
 
 
+def test_inspect_clamps_to_first_keyframe_when_video_starts_after_request(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (1_926, 4_926)))
+
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 1_100, 6_100),),
+        requested_start_ms=1_100,
+        requested_end_ms=6_100,
+        stable_end_ms=100_000,
+    )
+
+    assert inspection.actual_start_ms == 1_926
+    assert inspection.actual_end_ms == 6_100
+    assert inspection.extra_lead_ms == 0
+    assert inspection.confirmation_required is False
+    assert inspection.sources[0].actual_start_ms == 1_926
+    assert inspection.output_duration_ms == 4_174
+
+
+def test_inspect_rejects_range_before_first_video_keyframe(tmp_path: Path) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (7_000, 10_000)))
+
+    with pytest.raises(HighlightCutError, match='范围内没有可用的视频关键帧'):
+        clipper.inspect(
+            (ClipSource(1, str(source), 1_100, 6_100),),
+            requested_start_ms=1_100,
+            requested_end_ms=6_100,
+            stable_end_ms=100_000,
+        )
+
+
 def test_inspect_requires_confirmation_above_ten_seconds(tmp_path: Path) -> None:
     source = tmp_path / 'source.flv'
     source.write_bytes(b'video')
@@ -282,6 +318,66 @@ def test_inspect_uses_safe_ffprobe_argument_arrays(
     assert inspection.actual_start_ms == 28_600
 
 
+def test_inspect_scans_keyframes_from_start_when_indexed_probe_skips_keyframe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    source.write_bytes(b'video')
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        if '-skip_frame' in command and command[
+            command.index('-read_intervals') + 1
+        ].startswith('%+'):
+            document = {
+                'frames': [
+                    {'best_effort_timestamp_time': '0.067'},
+                    {'best_effort_timestamp_time': '28.600'},
+                    {'best_effort_timestamp_time': '31.000'},
+                ]
+            }
+        elif '-skip_frame' in command:
+            document = {'frames': [{'best_effort_timestamp_time': '31.0'}]}
+        else:
+            document = {
+                'streams': [
+                    {
+                        'codec_type': 'video',
+                        'codec_name': 'h264',
+                        'width': 1920,
+                        'height': 1080,
+                        'r_frame_rate': '60/1',
+                        'extradata_size': 42,
+                    }
+                ],
+                'format': {'duration': '100.0'},
+            }
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps(document).encode('utf8'), stderr=b''
+        )
+
+    monkeypatch.setattr(subprocess, 'run', run)
+
+    inspection = LosslessClipper().inspect(
+        (ClipSource(1, str(source), 30_000, 80_000),),
+        requested_start_ms=30_000,
+        requested_end_ms=80_000,
+        stable_end_ms=100_000,
+    )
+
+    assert len(calls) == 3
+    fallback_command = calls[-1]
+    assert ('-skip_frame', 'nokey') == fallback_command[
+        fallback_command.index('-skip_frame') : fallback_command.index('-skip_frame')
+        + 2
+    ]
+    assert fallback_command[fallback_command.index('-read_intervals') + 1] == (
+        '%+35.000'
+    )
+    assert inspection.actual_start_ms == 28_600
+
+
 def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,8 +411,8 @@ def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
     command, options = calls[0]
     assert isinstance(command, tuple)
     seek_indexes = [index for index, value in enumerate(command) if value == '-ss']
-    assert [command[index + 1] for index in seek_indexes] == ['0.000', '28.500']
-    assert seek_indexes[0] < command.index('-i') < seek_indexes[1]
+    assert [command[index + 1] for index in seek_indexes] == ['28.500']
+    assert command.index('-i') < seek_indexes[0]
     assert command[command.index('-t') + 1] == '51.500'
     assert ('-c', 'copy') == command[command.index('-c') : command.index('-c') + 2]
     assert ('-avoid_negative_ts', 'make_zero') == command[
@@ -366,6 +462,271 @@ def test_cut_uses_two_stage_seek_to_keep_the_inspected_keyframe(
     assert [command[index + 1] for index in seek_indexes] == ['30.000', '29.900']
     assert seek_indexes[0] < command.index('-i') < seek_indexes[1]
     assert command[command.index('-t') + 1] == '20.100'
+
+
+def test_cut_does_not_input_seek_to_zero_for_a_keyframe_near_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+    source_profile = profile(duration_ms=120_000)
+    inspection = ClipInspection(
+        sources=(InspectedClipSource(1, str(source), 67, 6_700, 0, source_profile),),
+        requested_start_ms=1_100,
+        requested_end_ms=6_700,
+        actual_start_ms=67,
+        actual_end_ms=6_700,
+        extra_lead_ms=1_033,
+        confirmation_required=False,
+    )
+    calls = []
+
+    def probe(path: str):
+        duration_ms = 120_000 if path == str(source) else 6_633
+        return profile(duration_ms=duration_ms), (0,)
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+
+    LosslessClipper(probe=probe).cut(inspection, str(output))
+
+    command = calls[0]
+    input_index = command.index('-i')
+    assert '-ss' not in command[:input_index]
+
+
+def test_cut_transcodes_when_stream_copy_boundary_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+    source_profile = profile(duration_ms=120_000)
+    inspection = ClipInspection(
+        sources=(InspectedClipSource(1, str(source), 3_000, 8_000, 0, source_profile),),
+        requested_start_ms=3_500,
+        requested_end_ms=8_000,
+        actual_start_ms=3_000,
+        actual_end_ms=8_000,
+        extra_lead_ms=500,
+        confirmation_required=False,
+    )
+    calls = []
+
+    def probe(path: str):
+        duration_ms = 120_000 if path == str(source) else 5_000
+        return profile(duration_ms=duration_ms), (0,)
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    clipper = LosslessClipper(probe=probe)
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(
+        clipper,
+        '_validate_stream_copy_boundaries',
+        lambda _inspection, _path: (_ for _ in ()).throw(
+            HighlightCutError('流复制结果丢失起始关键帧')
+        ),
+        raising=False,
+    )
+
+    artifact = clipper.cut(inspection, str(output))
+
+    assert artifact.strategy == 'transcoded'
+    assert len(calls) == 2
+    assert ('-c', 'copy') == calls[0][calls[0].index('-c') :][:2]
+    assert ('-c:v', 'libx264') == calls[1][calls[1].index('-c:v') :][:2]
+    assert ('-c:a', 'aac') == calls[1][calls[1].index('-c:a') :][:2]
+
+
+def test_cut_transcodes_when_stream_copy_is_not_fully_decodable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+    source_profile = profile(duration_ms=120_000)
+    inspection = ClipInspection(
+        sources=(InspectedClipSource(1, str(source), 3_000, 8_000, 0, source_profile),),
+        requested_start_ms=3_500,
+        requested_end_ms=8_000,
+        actual_start_ms=3_000,
+        actual_end_ms=8_000,
+        extra_lead_ms=500,
+        confirmation_required=False,
+    )
+    calls = []
+    validation_labels = []
+
+    def probe(path: str):
+        duration_ms = 120_000 if path == str(source) else 5_000
+        return profile(duration_ms=duration_ms), (0,)
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    def validate_decode(_path: str, *, label: str) -> None:
+        validation_labels.append(label)
+        if label == '流复制':
+            raise HighlightCutError('流复制结果无法完整解码')
+
+    clipper = LosslessClipper(probe=probe)
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(clipper, '_validate_fully_decodable', validate_decode)
+
+    artifact = clipper.cut(inspection, str(output))
+
+    assert artifact.strategy == 'transcoded'
+    assert validation_labels == ['流复制', '自动转码']
+    assert len(calls) == 2
+
+
+def test_transcoded_boundary_validation_requires_consecutive_matching_frames() -> None:
+    def frames(values):
+        return tuple(bytes([value]) * 16 for value in values)
+
+    assert LosslessClipper._visually_matches(
+        frames((0, 50, 100)), frames((200, 0, 50, 100, 200))
+    )
+    assert not LosslessClipper._visually_matches(
+        frames((0, 50, 100)), frames((0, 200, 100))
+    )
+
+
+def test_cut_retries_transcode_sequentially_when_fast_seek_is_still_wrong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+    source_profile = profile(duration_ms=180_000)
+    inspection = ClipInspection(
+        sources=(
+            InspectedClipSource(1, str(source), 60_000, 70_000, 0, source_profile),
+        ),
+        requested_start_ms=61_000,
+        requested_end_ms=70_000,
+        actual_start_ms=60_000,
+        actual_end_ms=70_000,
+        extra_lead_ms=1_000,
+        confirmation_required=False,
+    )
+    calls = []
+    transcode_validations = []
+
+    def probe(path: str):
+        duration_ms = 180_000 if path == str(source) else 10_000
+        return profile(duration_ms=duration_ms), (0,)
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    def validate_transcode(_inspection, _path):
+        transcode_validations.append(True)
+        if len(transcode_validations) == 1:
+            raise HighlightCutError('快速转码起点仍然错误')
+
+    clipper = LosslessClipper(probe=probe)
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(
+        clipper,
+        '_validate_stream_copy_boundaries',
+        lambda _inspection, _path: (_ for _ in ()).throw(
+            HighlightCutError('流复制边界错误')
+        ),
+    )
+    monkeypatch.setattr(clipper, '_validate_transcoded_boundaries', validate_transcode)
+
+    artifact = clipper.cut(inspection, str(output))
+
+    assert artifact.strategy == 'transcoded_sequential'
+    assert '快速转码起点仍然错误' in (artifact.fallback_reason or '')
+    assert len(calls) == 3
+    fast_input_index = calls[1].index('-i')
+    sequential_input_index = calls[2].index('-i')
+    assert calls[1].index('-ss') < fast_input_index
+    assert all(
+        index > sequential_input_index
+        for index, value in enumerate(calls[2])
+        if value == '-ss'
+    )
+
+
+def test_cut_transcodes_when_stream_copy_process_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+
+    def probe(path: str):
+        duration_ms = 100_000 if path == str(source) else 5_000
+        return profile(duration_ms=duration_ms), (0, 3_000)
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout=b'', stderr=b'copy failed')
+        Path(command[-1]).write_bytes(b'transcoded')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=probe)
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 3_500, 8_000),),
+        requested_start_ms=3_500,
+        requested_end_ms=8_000,
+        stable_end_ms=100_000,
+    )
+
+    artifact = clipper.cut(inspection, str(output))
+
+    assert artifact.strategy == 'transcoded'
+    assert 'copy failed' in (artifact.fallback_reason or '')
+    assert output.read_bytes() == b'transcoded'
+    assert len(calls) == 2
+
+
+def test_cut_does_not_repeat_a_timed_out_ffmpeg_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=lambda _path: (profile(), (0,)))
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 0, 5_000),),
+        requested_start_ms=0,
+        requested_end_ms=5_000,
+        stable_end_ms=100_000,
+    )
+
+    with pytest.raises(HighlightCutError, match='超时'):
+        clipper.cut(inspection, str(output))
+
+    assert len(calls) == 1
+    assert not output.exists()
 
 
 def test_cut_seeks_after_opening_a_growing_flv(
