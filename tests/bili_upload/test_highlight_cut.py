@@ -314,8 +314,10 @@ def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
 
     command, options = calls[0]
     assert isinstance(command, tuple)
-    assert command[command.index('-ss') + 1] == '30.000'
-    assert command[command.index('-t') + 1] == '51.400'
+    seek_indexes = [index for index, value in enumerate(command) if value == '-ss']
+    assert [command[index + 1] for index in seek_indexes] == ['0.000', '28.500']
+    assert seek_indexes[0] < command.index('-i') < seek_indexes[1]
+    assert command[command.index('-t') + 1] == '51.500'
     assert ('-c', 'copy') == command[command.index('-c') : command.index('-c') + 2]
     assert ('-avoid_negative_ts', 'make_zero') == command[
         command.index('-avoid_negative_ts') : command.index('-avoid_negative_ts') + 2
@@ -324,6 +326,46 @@ def test_cut_uses_stream_copy_and_atomically_keeps_valid_output(
     assert output.read_bytes() == b'clip'
     assert artifact.path == str(output)
     assert artifact.duration_ms == 51_400
+
+
+def test_cut_uses_two_stage_seek_to_keep_the_inspected_keyframe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+    source_profile = profile(duration_ms=120_000)
+    inspection = ClipInspection(
+        sources=(
+            InspectedClipSource(1, str(source), 60_000, 80_000, 0, source_profile),
+        ),
+        requested_start_ms=62_000,
+        requested_end_ms=80_000,
+        actual_start_ms=60_000,
+        actual_end_ms=80_000,
+        extra_lead_ms=2_000,
+        confirmation_required=False,
+    )
+    calls = []
+
+    def probe(path: str):
+        duration_ms = 120_000 if path == str(source) else 20_000
+        return profile(duration_ms=duration_ms), (0,)
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+
+    LosslessClipper(probe=probe).cut(inspection, str(output))
+
+    command = calls[0]
+    seek_indexes = [index for index, value in enumerate(command) if value == '-ss']
+    assert [command[index + 1] for index in seek_indexes] == ['30.000', '29.900']
+    assert seek_indexes[0] < command.index('-i') < seek_indexes[1]
+    assert command[command.index('-t') + 1] == '20.100'
 
 
 def test_cut_seeks_after_opening_a_growing_flv(
@@ -386,6 +428,35 @@ def test_cut_rejects_output_that_loses_audio(
     )
 
     with pytest.raises(HighlightCutError, match='音频'):
+        clipper.cut(inspection, str(output))
+    assert not output.exists()
+
+
+def test_cut_reports_expected_and_actual_duration_on_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / 'source.flv'
+    output = tmp_path / 'clip.mp4'
+    source.write_bytes(b'video')
+
+    def probe(path: str):
+        duration_ms = 100_000 if path == str(source) else 20_600
+        return profile(duration_ms=duration_ms), (0,)
+
+    def run(command, **kwargs):
+        Path(command[-1]).write_bytes(b'clip')
+        return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    clipper = LosslessClipper(probe=probe)
+    inspection = clipper.inspect(
+        (ClipSource(1, str(source), 0, 20_000),),
+        requested_start_ms=0,
+        requested_end_ms=20_000,
+        stable_end_ms=20_000,
+    )
+
+    with pytest.raises(HighlightCutError, match=r'计划 20\.000 秒，实际 20\.600 秒'):
         clipper.cut(inspection, str(output))
     assert not output.exists()
 

@@ -74,6 +74,10 @@ class CutArtifact:
 
 Probe = Callable[[str], Tuple[MediaProfile, Sequence[int]]]
 
+_FINALIZED_SEEK_PREROLL_MS = 30_000
+_FINALIZED_FINE_SEEK_MARGIN_MS = 100
+_OUTPUT_DURATION_TOLERANCE_MS = 500
+
 
 class LosslessClipper:
     def __init__(
@@ -229,13 +233,7 @@ class LosslessClipper:
         concat_path: Optional[str] = None
         try:
             if len(inspection.sources) == 1:
-                source = inspection.sources[0]
-                input_seek_ms = (
-                    None
-                    if source.recording
-                    else source.actual_start_ms + inspection.extra_lead_ms
-                )
-                self._cut_source(source, temporary_output, input_seek_ms=input_seek_ms)
+                self._cut_source(inspection.sources[0], temporary_output)
             else:
                 for source in inspection.sources:
                     segment_path = self._temporary_path(
@@ -275,9 +273,18 @@ class LosslessClipper:
             if expected_audio and not output_profile.has_audio:
                 raise HighlightCutError('无损剪辑结果丢失了音频流')
             planned_duration_ms = inspection.output_duration_ms
-            tolerance_ms = max(2_000, int(planned_duration_ms * 0.02))
-            if abs(output_profile.duration_ms - planned_duration_ms) > tolerance_ms:
-                raise HighlightCutError('无损剪辑结果与计划时长差异过大')
+            if (
+                abs(output_profile.duration_ms - planned_duration_ms)
+                > _OUTPUT_DURATION_TOLERANCE_MS
+            ):
+                raise HighlightCutError(
+                    '无损剪辑结果时长异常（计划 {:.3f} 秒，实际 {:.3f} 秒，'
+                    '偏差 {:+.3f} 秒）'.format(
+                        planned_duration_ms / 1000.0,
+                        output_profile.duration_ms / 1000.0,
+                        (output_profile.duration_ms - planned_duration_ms) / 1000.0,
+                    )
+                )
             size_bytes = os.path.getsize(temporary_output)
             os.replace(temporary_output, str(output))
             return CutArtifact(
@@ -292,14 +299,9 @@ class LosslessClipper:
             if concat_path is not None:
                 self._remove(concat_path)
 
-    def _cut_source(
-        self,
-        source: InspectedClipSource,
-        output_path: str,
-        *,
-        input_seek_ms: Optional[int] = None,
-    ) -> None:
+    def _cut_source(self, source: InspectedClipSource, output_path: str) -> None:
         input_options: Tuple[str, ...]
+        duration_ms = source.actual_end_ms - source.actual_start_ms
         if source.recording:
             input_options = (
                 '-i',
@@ -307,14 +309,24 @@ class LosslessClipper:
                 '-ss',
                 self._seconds(source.actual_start_ms),
             )
+        elif source.actual_start_ms == 0:
+            input_options = ('-i', source.path)
         else:
+            # FLV indexes can make one input-side seek land on either adjacent
+            # GOP. Seek near the target first, then walk to just before the
+            # keyframe selected during inspection so stream copy keeps it.
+            coarse_seek_ms = max(0, source.actual_start_ms - _FINALIZED_SEEK_PREROLL_MS)
+            relative_start_ms = source.actual_start_ms - coarse_seek_ms
+            fine_seek_ms = max(0, relative_start_ms - _FINALIZED_FINE_SEEK_MARGIN_MS)
+            seek_margin_ms = relative_start_ms - fine_seek_ms
+            duration_ms += seek_margin_ms
             input_options = (
                 '-ss',
-                self._seconds(
-                    source.actual_start_ms if input_seek_ms is None else input_seek_ms
-                ),
+                self._seconds(coarse_seek_ms),
                 '-i',
                 source.path,
+                '-ss',
+                self._seconds(fine_seek_ms),
             )
         command = (
             self._ffmpeg,
@@ -322,7 +334,7 @@ class LosslessClipper:
             '-nostdin',
             *input_options,
             '-t',
-            self._seconds(source.actual_end_ms - source.actual_start_ms),
+            self._seconds(duration_ms),
             '-map',
             '0:v:0',
             '-map',
