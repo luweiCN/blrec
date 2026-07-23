@@ -388,6 +388,7 @@ class RecordingSessionResponse(ApiModel):
     deletion_error: Optional[str]
     source_kind: str
     highlight_clip_id: Optional[int]
+    media_library_item_id: Optional[int]
     display_state: str
     available_actions: List[str]
     upload_job: Optional[UploadJobProgressResponse]
@@ -424,6 +425,7 @@ class RecordingSessionSummaryResponse(ApiModel):
     deletion_error: Optional[str]
     source_kind: str
     highlight_clip_id: Optional[int]
+    media_library_item_id: Optional[int]
     display_state: str
     available_actions: List[str]
     upload_job: Optional[UploadJobSummaryResponse]
@@ -889,6 +891,7 @@ def _session_response(
         deletion_error=session.deletion_error,
         source_kind=session.source_kind,
         highlight_clip_id=session.highlight_clip_id,
+        media_library_item_id=session.media_library_item_id,
         display_state=display_state,
         available_actions=available_actions,
         upload_job=(None if upload_job is None else _upload_job_response(upload_job)),
@@ -930,6 +933,7 @@ def _session_summary_response(
         deletion_error=session.deletion_error,
         source_kind=session.source_kind,
         highlight_clip_id=session.highlight_clip_id,
+        media_library_item_id=session.media_library_item_id,
         display_state=display_state,
         available_actions=available_actions,
         upload_job=(

@@ -137,6 +137,9 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
   submittingClipId: number | null = null;
   downloadingClipId: number | null = null;
   retryingClipId: number | null = null;
+  editingClipNameId: number | null = null;
+  clipRenameName = '';
+  savingClipNameId: number | null = null;
   draggingPlayhead = false;
   hoverTimeMs: number | null = null;
   timelinePopover: TimelinePopover = { kind: 'none' };
@@ -1156,11 +1159,73 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     );
   }
 
+  beginClipRename(clip: HighlightClip): void {
+    if (this.savingClipNameId !== null) {
+      return;
+    }
+    this.editingClipNameId = clip.id;
+    this.clipRenameName = clip.name;
+    this.actionError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  cancelClipRename(): void {
+    if (this.savingClipNameId === null) {
+      this.editingClipNameId = null;
+      this.clipRenameName = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  saveClipRename(clip: HighlightClip): void {
+    if (
+      this.editingClipNameId !== clip.id ||
+      this.savingClipNameId !== null
+    ) {
+      return;
+    }
+    const name = this.clipRenameName.trim();
+    if (!name) {
+      this.actionError = '请输入片段名称';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    if (name.length > 200) {
+      this.actionError = '片段名称不能超过 200 个字符';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.savingClipNameId = clip.id;
+    this.actionError = null;
+    this.subscriptions.add(
+      this.highlights.renameClip(clip.id, name).subscribe({
+        next: (updated) => {
+          this.clips = this.clips.map((item) =>
+            item.id === updated.id ? updated : item,
+          );
+          this.savingClipNameId = null;
+          this.editingClipNameId = null;
+          this.clipRenameName = '';
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.savingClipNameId = null;
+          this.actionError = this.describeError(error, '重命名高光片段失败');
+          this.changeDetector.markForCheck();
+        },
+      }),
+    );
+  }
+
   deleteClip(clip: HighlightClip): void {
     this.subscriptions.add(
       this.highlights.deleteClip(clip.id).subscribe({
         next: () => {
           this.clips = this.clips.filter((item) => item.id !== clip.id);
+          if (this.editingClipNameId === clip.id) {
+            this.editingClipNameId = null;
+            this.clipRenameName = '';
+          }
           if (this.clipPreviewId === clip.id) {
             this.closeClipPreview();
           }

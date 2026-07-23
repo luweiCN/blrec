@@ -213,6 +213,8 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.highlight_worker is not None
         assert runtime.media_index_worker is not None
         assert runtime.deletion_worker is not None
+        assert runtime.media_library is not None
+        assert runtime.media_library.storage_root == (tmp_path / 'favorites').resolve()
 
         for _ in range(100):
             if protocol.oauth_calls:
@@ -256,6 +258,7 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.highlight_worker is None
     assert runtime.media_index_worker is None
     assert runtime.deletion_worker is None
+    assert runtime.media_library is None
 
 
 @pytest.mark.asyncio

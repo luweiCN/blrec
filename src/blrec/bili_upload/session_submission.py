@@ -88,7 +88,9 @@ class SessionSubmissionManager:
     async def get(self, session_id: int) -> SessionSubmissionView:
         row = await self._database.fetchone(
             'SELECT id,room_id,upload_decision,upload_override_json,'
-            'upload_resolution_state,upload_resolution_error '
+            'upload_resolution_state,upload_resolution_error,'
+            'EXISTS(SELECT 1 FROM media_library_items item '
+            'WHERE item.session_id=recording_sessions.id) AS is_media_library '
             'FROM recording_sessions WHERE id=?',
             (session_id,),
         )
@@ -109,6 +111,8 @@ class SessionSubmissionManager:
             else:
                 settings = room_upload_policy_command(policy)
                 settings_source = 'room'
+        if bool(row['is_media_library']):
+            settings = replace(settings, retention_mode='never', retention_days=0)
         return SessionSubmissionView(
             session_id=int(row['id']),
             room_id=int(row['room_id']),
@@ -172,11 +176,18 @@ class SessionSubmissionManager:
     ) -> SessionSubmissionView:
         self._require_subject(manager_subject)
         session = await self._database.fetchone(
-            'SELECT room_id FROM recording_sessions WHERE id=?', (session_id,)
+            'SELECT room_id,EXISTS('
+            'SELECT 1 FROM media_library_items item '
+            'WHERE item.session_id=recording_sessions.id'
+            ') AS is_media_library '
+            'FROM recording_sessions WHERE id=?',
+            (session_id,),
         )
         if session is None:
             raise RecordingSessionNotFound('recording session not found')
         normalized = replace(command, enabled=True)
+        if bool(session['is_media_library']):
+            normalized = replace(normalized, retention_mode='never', retention_days=0)
         await self._policy_manager.validate(int(session['room_id']), normalized)
         encoded = encode_submission_settings(normalized)
         now = int(self._clock())

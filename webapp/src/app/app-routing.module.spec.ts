@@ -45,7 +45,7 @@ describe('AppRoutingModule', () => {
     }
   });
 
-  it('loads list, clip, and editor routes from independent modules', async () => {
+  it('loads list, library, clip, and editor routes from independent modules', async () => {
     await expectAsync(loadModuleName('recordings')).toBeResolvedTo(
       'UploadTasksModule',
     );
@@ -54,6 +54,9 @@ describe('AppRoutingModule', () => {
     );
     await expectAsync(loadModuleName('clips')).toBeResolvedTo(
       'ClipLibraryModule',
+    );
+    await expectAsync(loadModuleName('media-library')).toBeResolvedTo(
+      'MediaLibraryModule',
     );
     for (const path of [
       'recordings/highlights/:sessionId',
@@ -66,7 +69,7 @@ describe('AppRoutingModule', () => {
     }
   });
 
-  it('keeps all six upload surfaces behind AuthGuard', () => {
+  it('keeps all seven media surfaces behind AuthGuard', () => {
     for (const path of [
       'recordings/highlights/:sessionId',
       'upload-tasks/highlights/:sessionId',
@@ -74,6 +77,7 @@ describe('AppRoutingModule', () => {
       'recordings',
       'upload-tasks',
       'clips',
+      'media-library',
     ]) {
       expect(route(path).canActivate).toContain(AuthGuard);
     }

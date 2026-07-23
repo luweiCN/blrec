@@ -620,6 +620,49 @@ async def test_failed_clip_without_a_persisted_source_cannot_be_retried(
 
 
 @pytest.mark.asyncio
+async def test_clip_can_be_renamed_without_changing_its_files(
+    database: BiliUploadDatabase,
+) -> None:
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,name,requested_start_ms,requested_end_ms,output_video_path,'
+        'output_xml_path,state,created_at,updated_at) '
+        "VALUES(1,100,'旧名称',0,1000,'/clips/old.mp4','/clips/old.xml',"
+        "'ready',1,1)"
+    )
+    service = HighlightService(database, clock=lambda: 99)
+
+    clip = await service.rename_clip(1, '  新名称  ')
+
+    assert clip.name == '新名称'
+    row = await database.fetchone(
+        'SELECT name,output_video_path,output_xml_path,updated_at '
+        'FROM highlight_clips WHERE id=1'
+    )
+    assert row is not None
+    assert dict(row) == {
+        'name': '新名称',
+        'output_video_path': '/clips/old.mp4',
+        'output_xml_path': '/clips/old.xml',
+        'updated_at': 99,
+    }
+
+
+@pytest.mark.asyncio
+async def test_clip_rename_rejects_invalid_names_and_unknown_clips(
+    database: BiliUploadDatabase,
+) -> None:
+    service = HighlightService(database)
+
+    with pytest.raises(ValueError, match='1 to 200'):
+        await service.rename_clip(1, '   ')
+    with pytest.raises(ValueError, match='1 to 200'):
+        await service.rename_clip(1, 'x' * 201)
+    with pytest.raises(ValueError, match='unknown highlight clip'):
+        await service.rename_clip(1, '新名称')
+
+
+@pytest.mark.asyncio
 async def test_list_clips_restores_upload_progress_for_a_recording(
     database, tmp_path: Path
 ) -> None:
@@ -703,6 +746,55 @@ async def test_global_clip_library_is_newest_first_and_includes_source_metadata(
     assert clips[0].source_title == '第二场'
     assert clips[0].duration_ms == 15_000
     assert clips[0].file_size_bytes == 20
+
+
+@pytest.mark.asyncio
+async def test_clip_library_groups_by_source_session_before_pagination(
+    database: BiliUploadDatabase,
+) -> None:
+    await database.execute(
+        'INSERT INTO recording_sessions('
+        'id,room_id,broadcast_session_key,state,started_at,title,anchor_name,'
+        'source_kind) '
+        "VALUES(1,100,'100:1','closed',10,'第一场','主播甲','live'),"
+        "(2,200,'200:2','closed',20,'第二场','主播乙','live')"
+    )
+    await database.execute(
+        'INSERT INTO highlight_clips('
+        'id,room_id,source_session_id,name,requested_start_ms,requested_end_ms,'
+        'state,created_at,updated_at) '
+        "VALUES(1,100,1,'第一场片段 A',0,1000,'ready',1,1),"
+        "(2,200,2,'第二场片段',0,1000,'ready',2,2),"
+        "(3,100,1,'第一场片段 B',1000,2000,'ready',3,3)"
+    )
+
+    total, groups = await HighlightService(database).list_clip_groups(limit=1, offset=0)
+
+    assert total == 2
+    assert len(groups) == 1
+    assert groups[0].source_session_id == 1
+    assert groups[0].source_title == '第一场'
+    assert groups[0].source_anchor_name == '主播甲'
+    assert groups[0].clip_count == 2
+    assert [clip.name for clip in groups[0].clips] == ['第一场片段 B', '第一场片段 A']
+
+    _total, second_page = await HighlightService(database).list_clip_groups(
+        limit=1, offset=1
+    )
+    assert second_page[0].source_session_id == 2
+
+
+@pytest.mark.asyncio
+async def test_clip_group_query_uses_source_group_index(
+    database: BiliUploadDatabase,
+) -> None:
+    plan = await database.fetchall(
+        'EXPLAIN QUERY PLAN ' + HighlightService._CLIP_GROUP_SELECT, (20, 0)
+    )
+    details = [str(row['detail']) for row in plan]
+
+    assert any('highlight_clips_source_library_idx' in detail for detail in details)
+    assert not any('TEMP B-TREE FOR GROUP BY' in detail for detail in details)
 
 
 @pytest.mark.asyncio

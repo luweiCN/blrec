@@ -52,6 +52,7 @@ function summary(): RecordingSessionSummary {
     deletionError: null,
     sourceKind: 'live',
     highlightClipId: null,
+    mediaLibraryItemId: null,
     displayState: 'waiting_review',
     availableActions: [
       'edit_submission',
@@ -129,6 +130,7 @@ function isOnPush(component: unknown): boolean {
           [selected]="selected"
           [scope]="scope"
           [cutting]="cutting"
+          [favoriting]="favoriting"
         ></tr>
       </tbody>
     </table>
@@ -139,6 +141,7 @@ class HostComponent {
   selected = false;
   scope: 'recordings' | 'uploads' = 'uploads';
   cutting = false;
+  favoriting = false;
 }
 
 describe('RecordingSessionRowComponent', () => {
@@ -240,6 +243,7 @@ describe('RecordingSessionRowComponent', () => {
       selectionChanged(selected: boolean): void;
       showDetails(): void;
       cutCurrent(): void;
+      favorite(): void;
       editSubmission(): void;
       runSessionAction(action: RecordingSessionServerAction): void;
       editTask(jobId: number): void;
@@ -248,6 +252,7 @@ describe('RecordingSessionRowComponent', () => {
     controls.selectionChanged(true);
     controls.showDetails();
     controls.cutCurrent();
+    controls.favorite();
     controls.editSubmission();
     controls.runSessionAction(serverAction);
     controls.editTask(9);
@@ -260,6 +265,7 @@ describe('RecordingSessionRowComponent', () => {
       { type: 'selected', sessionId: 1, selected: true },
       { type: 'details', sessionId: 1 },
       { type: 'cut-current', sessionId: 1 },
+      { type: 'favorite', sessionId: 1 },
       { type: 'edit-submission', sessionId: 1 },
       { type: 'session-action', sessionId: 1, action: 'retry_failed' },
       { type: 'edit-task', jobId: 9 },
@@ -287,6 +293,26 @@ describe('RecordingSessionRowComponent', () => {
     host.cutting = true;
     fixture.detectChanges();
     expect(row.cutting).toBeTrue();
+  });
+
+  it('offers permanent collection only for closed recording sessions', () => {
+    host.scope = 'recordings';
+    fixture.detectChanges();
+
+    expect(row.canFavorite()).toBeTrue();
+
+    host.session = { ...host.session, state: 'open' };
+    fixture.detectChanges();
+    expect(row.canFavorite()).toBeFalse();
+
+    host.session = {
+      ...host.session,
+      state: 'closed',
+      mediaLibraryItemId: 8,
+    };
+    fixture.detectChanges();
+    expect(row.canFavorite()).toBeFalse();
+    expect(fixture.nativeElement.textContent).toContain('已收藏');
   });
 
   it('renders the active recording upload intent', () => {

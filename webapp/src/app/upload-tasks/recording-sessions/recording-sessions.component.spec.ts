@@ -61,6 +61,8 @@ import {
   RecordingSessionRowAction,
 } from './recording-session-row.component';
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
+import { MediaLibraryService } from '../../media-library/media-library.service';
+import { MediaLibraryItem } from '../../media-library/media-library.model';
 
 @Component({ selector: 'app-task-edit-dialog', template: '' })
 class TaskEditDialogStubComponent {
@@ -198,6 +200,7 @@ describe('RecordingSessionsComponent', () => {
   let taskManager: jasmine.SpyObj<TaskManagerService>;
   let highlights: jasmine.SpyObj<HighlightService>;
   let controlOperations: jasmine.SpyObj<ControlOperationService>;
+  let mediaLibrary: jasmine.SpyObj<MediaLibraryService>;
   let realtimeEvents: FakeRealtimeSource;
   let detailSession: RecordingSessionDetail;
   let summarySession: RecordingSessionSummary;
@@ -266,6 +269,11 @@ describe('RecordingSessionsComponent', () => {
     realtimeEvents = new FakeRealtimeSource();
     service.runJobAction.and.returnValue(of({ results: [] }));
     service.runSessionAction.and.returnValue(of({ results: [] }));
+    mediaLibrary = jasmine.createSpyObj<MediaLibraryService>(
+      'MediaLibraryService',
+      ['favorite'],
+    );
+    mediaLibrary.favorite.and.returnValue(of({} as MediaLibraryItem));
     service.retryFailedJobs.and.returnValue(
       of({ operationId: 'upload-retry-1', status: 'accepted', total: 0 }),
     );
@@ -460,6 +468,7 @@ describe('RecordingSessionsComponent', () => {
       ],
       providers: [
         { provide: RecordingSessionService, useValue: service },
+        { provide: MediaLibraryService, useValue: mediaLibrary },
         { provide: Clipboard, useValue: clipboard },
         { provide: NzMessageService, useValue: message },
         { provide: TaskManagerService, useValue: taskManager },
@@ -621,6 +630,9 @@ describe('RecordingSessionsComponent', () => {
       openSession.roomId,
     );
     expect(taskManager.cutStream).toHaveBeenCalledOnceWith(openSession.roomId);
+
+    emit({ type: 'favorite', sessionId: openSession.id });
+    expect(mediaLibrary.favorite).toHaveBeenCalledOnceWith(openSession.id);
   });
 
   it('shows preupload phases instead of generic internal job states', () => {

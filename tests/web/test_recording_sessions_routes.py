@@ -440,9 +440,10 @@ def test_list_recording_sessions_returns_redacted_part_state(
                 'uploadSuppressed': False,
                 'deletionState': 'none',
                 'deletionError': None,
-                'sourceKind': 'live',
-                'highlightClipId': None,
-                'displayState': 'waiting_review',
+                    'sourceKind': 'live',
+                    'highlightClipId': None,
+                    'mediaLibraryItemId': None,
+                    'displayState': 'waiting_review',
                 'availableActions': ['delete_local'],
                 'uploadJob': {
                     'id': 9,

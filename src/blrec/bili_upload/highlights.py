@@ -198,6 +198,19 @@ class HighlightClipSummary:
 
 
 @dataclass(frozen=True)
+class HighlightClipGroup:
+    key: str
+    source_session_id: Optional[int]
+    room_id: int
+    source_anchor_name: str
+    source_title: str
+    source_started_at: Optional[int]
+    latest_created_at: int
+    clip_count: int
+    clips: Tuple[HighlightClipSummary, ...]
+
+
+@dataclass(frozen=True)
 class HighlightClipMediaResource:
     clip_id: int
     name: str
@@ -418,6 +431,38 @@ class HighlightService:
         'LEFT JOIN upload_summary progress ON progress.job_id=job.id '
         'LEFT JOIN recording_sessions source ON source.id=clip.source_session_id '
         'ORDER BY clip.created_at DESC,clip.id DESC'
+    )
+    _CLIP_GROUP_SELECT = (
+        'WITH eligible_clips AS ('
+        "SELECT id,CASE WHEN source_session_id IS NULL THEN 'clip:'||id "
+        "ELSE 'session:'||source_session_id END AS group_key,created_at "
+        'FROM highlight_clips INDEXED BY highlight_clips_source_library_idx '
+        "WHERE state!='cancelled' AND deletion_state IN ('none','failed')) ,"
+        'selected_groups AS ('
+        'SELECT group_key,MAX(created_at) AS latest_created_at,'
+        'MAX(id) AS latest_clip_id,COUNT(*) AS clip_count '
+        'FROM eligible_clips GROUP BY group_key '
+        'ORDER BY latest_created_at DESC,latest_clip_id DESC LIMIT ? OFFSET ?) '
+        'SELECT selected.group_key,selected.latest_created_at,selected.clip_count,'
+        'clip.id,clip.room_id,clip.source_session_id,clip.name,clip.state,'
+        'clip.error_message,clip.created_at,clip.updated_at,clip.deletion_state,'
+        'clip.deletion_error,clip.file_size_bytes,'
+        "COALESCE(source.anchor_name,'') AS source_anchor_name,"
+        "COALESCE(source.title,'') AS source_title,source.started_at "
+        'AS source_started_at,'
+        'MAX(0,COALESCE(NULLIF(clip.actual_end_ms,0),clip.requested_end_ms)-'
+        'COALESCE(NULLIF(clip.actual_start_ms,0),clip.requested_start_ms)) '
+        'AS duration_ms,job.id AS upload_job_id,job.state AS upload_state,'
+        'CASE WHEN job.id IS NULL THEN NULL '
+        "WHEN job.state IN ('approved','completed') THEN 100.0 ELSE 0.0 END "
+        'AS upload_percent,job.bvid AS upload_bvid '
+        'FROM selected_groups selected '
+        'JOIN eligible_clips eligible ON eligible.group_key=selected.group_key '
+        'JOIN highlight_clips clip ON clip.id=eligible.id '
+        'LEFT JOIN recording_sessions source ON source.id=clip.source_session_id '
+        'LEFT JOIN upload_jobs job ON job.session_id=clip.upload_session_id '
+        'ORDER BY selected.latest_created_at DESC,selected.latest_clip_id DESC,'
+        'clip.created_at DESC,clip.id DESC'
     )
 
     def __init__(
@@ -1596,6 +1641,25 @@ class HighlightService:
         )
         return self._apply_upload_progress(clip, progress)
 
+    async def rename_clip(self, clip_id: int, name: str) -> HighlightClip:
+        normalized_name = name.strip()
+        if not normalized_name or len(normalized_name) > 200:
+            raise ValueError('highlight name must contain 1 to 200 characters')
+        changed = await self._database.execute(
+            'UPDATE highlight_clips SET name=?,updated_at=? WHERE id=?',
+            (normalized_name, int(self._clock()), clip_id),
+        )
+        if changed != 1:
+            raise ValueError("unknown highlight clip '{}'".format(clip_id))
+        clip = await self.get_clip(clip_id)
+        audit(
+            'highlight_clip_renamed',
+            clip_id=clip_id,
+            room_id=clip.room_id,
+            result='saved',
+        )
+        return clip
+
     async def list_clips(self, session_id: int) -> Tuple[HighlightClip, ...]:
         session = await self._database.fetchone(
             "SELECT id FROM recording_sessions WHERE id=? AND source_kind='live'",
@@ -1650,6 +1714,70 @@ class HighlightService:
         )
         rows = await self._database.fetchall(self._CLIP_SUMMARY_SELECT, (limit, offset))
         return total, tuple(self._clip_summary_from_row(row) for row in rows)
+
+    async def list_clip_groups(
+        self, *, limit: int, offset: int
+    ) -> Tuple[int, Tuple[HighlightClipGroup, ...]]:
+        if limit < 1 or limit > 100:
+            raise ValueError('clip group limit must be between 1 and 100')
+        if offset < 0:
+            raise ValueError('clip group offset must not be negative')
+        total = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM ('
+                'SELECT 1 FROM highlight_clips '
+                "WHERE state!='cancelled' "
+                "AND deletion_state IN ('none','failed') "
+                "GROUP BY CASE WHEN source_session_id IS NULL THEN 'clip:'||id "
+                "ELSE 'session:'||source_session_id END)"
+            )
+        )
+        rows = await self._database.fetchall(self._CLIP_GROUP_SELECT, (limit, offset))
+        job_ids = tuple(
+            dict.fromkeys(
+                int(row['upload_job_id'])
+                for row in rows
+                if row['upload_job_id'] is not None
+                and str(row['upload_state']) not in ('approved', 'completed')
+            )
+        )
+        progress = await self._upload_progress(job_ids)
+        keys: List[str] = []
+        metadata: Dict[str, sqlite3.Row] = {}
+        clips: Dict[str, List[HighlightClipSummary]] = {}
+        for row in rows:
+            key = str(row['group_key'])
+            if key not in clips:
+                keys.append(key)
+                metadata[key] = row
+                clips[key] = []
+            summary = self._clip_summary_from_row(row)
+            if summary.upload_job_id is not None and summary.upload_state not in (
+                'approved',
+                'completed',
+            ):
+                summary = replace(
+                    summary, upload_percent=progress.get(summary.upload_job_id, 0.0)
+                )
+            clips[key].append(summary)
+        return total, tuple(
+            HighlightClipGroup(
+                key=key,
+                source_session_id=clips[key][0].source_session_id,
+                room_id=clips[key][0].room_id,
+                source_anchor_name=clips[key][0].source_anchor_name,
+                source_title=clips[key][0].source_title,
+                source_started_at=(
+                    None
+                    if metadata[key]['source_started_at'] is None
+                    else int(metadata[key]['source_started_at'])
+                ),
+                latest_created_at=int(metadata[key]['latest_created_at']),
+                clip_count=int(metadata[key]['clip_count']),
+                clips=tuple(clips[key]),
+            )
+            for key in keys
+        )
 
     async def _upload_progress(self, job_ids: Tuple[int, ...]) -> Dict[int, float]:
         if not job_ids:

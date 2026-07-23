@@ -90,6 +90,14 @@ const routes: Routes = [
       ),
   },
   {
+    path: 'media-library',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./media-library/media-library.module').then(
+        (m) => m.MediaLibraryModule,
+      ),
+  },
+  {
     path: 'upload-policies',
     pathMatch: 'full',
     redirectTo: 'tasks',

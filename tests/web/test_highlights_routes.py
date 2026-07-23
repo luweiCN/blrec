@@ -14,6 +14,7 @@ from blrec.bili_upload.highlight_cut import (
 )
 from blrec.bili_upload.highlights import (
     HighlightClip,
+    HighlightClipGroup,
     HighlightClipMediaResource,
     HighlightClipSource,
     HighlightClipSummary,
@@ -105,6 +106,20 @@ def clip_summary() -> HighlightClipSummary:
     )
 
 
+def clip_group() -> HighlightClipGroup:
+    return HighlightClipGroup(
+        key='session:9',
+        source_session_id=9,
+        room_id=100,
+        source_anchor_name='主播',
+        source_title='测试直播',
+        source_started_at=1_000,
+        latest_created_at=1_100,
+        clip_count=1,
+        clips=(clip_summary(),),
+    )
+
+
 @dataclass(frozen=True)
 class MarkerCount:
     part_id: int
@@ -130,7 +145,9 @@ class FakeHighlightService:
         self.create_clip = AsyncMock(return_value=clip())
         self.list_clips = AsyncMock(return_value=(clip(),))
         self.list_clip_summaries = AsyncMock(return_value=(1, (clip_summary(),)))
+        self.list_clip_groups = AsyncMock(return_value=(1, (clip_group(),)))
         self.get_clip = AsyncMock(return_value=clip())
+        self.rename_clip = AsyncMock(return_value=clip())
         self.retry_clip = AsyncMock(return_value=clip())
         self.delete_clip = AsyncMock(return_value='cancelled')
         self.clip_video_path = AsyncMock()
@@ -238,6 +255,54 @@ def test_global_clip_library_route_is_paginated(client: TestClient) -> None:
     service = highlights.service
     assert service is not None
     service.list_clip_summaries.assert_awaited_once_with(limit=20, offset=0)
+
+
+def test_clip_library_group_route_paginates_source_sessions(client: TestClient) -> None:
+    response = client.get(
+        '/api/v1/highlights/clips/groups?limit=20&offset=0', headers=auth()
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'total': 1,
+        'items': [
+            {
+                'key': 'session:9',
+                'sourceSessionId': 9,
+                'roomId': 100,
+                'sourceAnchorName': '主播',
+                'sourceTitle': '测试直播',
+                'sourceStartedAt': 1_000,
+                'latestCreatedAt': 1_100,
+                'clipCount': 1,
+                'clips': [
+                    {
+                        'id': 3,
+                        'roomId': 100,
+                        'sourceSessionId': 9,
+                        'name': '第一段高光',
+                        'state': 'queued',
+                        'errorMessage': None,
+                        'createdAt': 1_100,
+                        'updatedAt': 1_100,
+                        'sourceAnchorName': '主播',
+                        'sourceTitle': '测试直播',
+                        'durationMs': 52_000,
+                        'fileSizeBytes': None,
+                        'uploadJobId': None,
+                        'uploadState': None,
+                        'uploadPercent': None,
+                        'uploadBvid': None,
+                        'deletionState': 'none',
+                        'deletionError': None,
+                    }
+                ],
+            }
+        ],
+    }
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.list_clip_groups.assert_awaited_once_with(limit=20, offset=0)
 
 
 def upload_settings() -> dict:
@@ -388,10 +453,16 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     assert fetched.json()['outputVideoPath'].endswith('highlight-3.mp4')
     assert fetched.json()['sources'][0]['partId'] == 1
 
-    retried = client.post('/api/v1/highlights/clips/3/retry', headers=auth())
-    assert retried.status_code == 200
+    renamed = client.patch(
+        '/api/v1/highlights/clips/3', headers=auth(), json={'name': '重命名高光'}
+    )
+    assert renamed.status_code == 200
     service = highlights.service
     assert isinstance(service, FakeHighlightService)
+    service.rename_clip.assert_awaited_once_with(3, '重命名高光')
+
+    retried = client.post('/api/v1/highlights/clips/3/retry', headers=auth())
+    assert retried.status_code == 200
     service.retry_clip.assert_awaited_once_with(3)
 
     listed = client.get('/api/v1/highlights/sessions/9/clips', headers=auth())
@@ -417,6 +488,17 @@ def test_timeline_inspection_and_clip_lifecycle(client: TestClient) -> None:
     deleter = highlights.clip_deleter
     assert isinstance(deleter, AsyncMock)
     deleter.assert_awaited_once_with(3)
+
+
+def test_clip_rename_validates_the_display_name(client: TestClient) -> None:
+    response = client.patch(
+        '/api/v1/highlights/clips/3', headers=auth(), json={'name': '   '}
+    )
+
+    assert response.status_code == 422
+    service = highlights.service
+    assert isinstance(service, FakeHighlightService)
+    service.rename_clip.assert_not_awaited()
 
 
 def test_inspection_overload_returns_retry_after(client: TestClient) -> None:

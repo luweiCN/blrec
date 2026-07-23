@@ -112,6 +112,7 @@ class RecordingSession:
     deletion_error: Optional[str] = None
     source_kind: str = 'live'
     highlight_clip_id: Optional[int] = None
+    media_library_item_id: Optional[int] = None
     parts: Tuple[RecordingPart, ...] = ()
 
     @property
@@ -302,6 +303,7 @@ class RecordingSessionSummary:
     source_kind: str
     highlight_clip_id: Optional[int]
     upload_job: Optional[UploadJobSummary]
+    media_library_item_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -1330,10 +1332,11 @@ class RecordingJournalBridge:
             'session.upload_decision,session.upload_override_json,'
             'session.upload_resolution_state,session.upload_resolution_error,'
             'session.deletion_state,session.deletion_error,session.source_kind,'
-            'clip.id AS highlight_clip_id '
+            'clip.id AS highlight_clip_id,library.id AS media_library_item_id '
             'FROM recording_sessions session '
             'JOIN recording_runs run ON run.session_id=session.id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
+            'LEFT JOIN media_library_items library ON library.session_id=session.id '
             'WHERE run.id=?',
             (run_id,),
         )
@@ -1357,6 +1360,7 @@ class RecordingJournalBridge:
             'session.upload_resolution_state,session.upload_resolution_error,'
             'session.deletion_state,session.deletion_error,session.source_kind,'
             'clip.id AS highlight_clip_id,'
+            'library.id AS media_library_item_id,'
             'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
             'AS upload_suppressed FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
@@ -1364,6 +1368,7 @@ class RecordingJournalBridge:
             'ON suppression.session_id=session.id '
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
+            'LEFT JOIN media_library_items library ON library.session_id=session.id '
             'WHERE session.id=?',
             (session_id,),
         )
@@ -1442,6 +1447,7 @@ class RecordingJournalBridge:
             'session.upload_resolution_state,session.upload_resolution_error,'
             'session.deletion_state,session.deletion_error,'
             'session.source_kind,clip.id AS highlight_clip_id,'
+            'library.id AS media_library_item_id,'
             'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
             'AS upload_suppressed FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
@@ -1450,6 +1456,7 @@ class RecordingJournalBridge:
             'ON suppression.session_id=session.id '
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
+            'LEFT JOIN media_library_items library ON library.session_id=session.id '
             + where_sql
             + ' ORDER BY session.started_at {},session.id {} LIMIT ? OFFSET ?'.format(
                 direction, direction
@@ -1606,7 +1613,8 @@ class RecordingJournalBridge:
             'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
             'AS upload_suppressed,'
             'session.deletion_state,session.deletion_error,session.source_kind,'
-            'clip.id AS highlight_clip_id,job.id AS job_id,'
+            'clip.id AS highlight_clip_id,library.id AS media_library_item_id,'
+            'job.id AS job_id,'
             'job.session_id AS job_session_id,job.account_id,'
             'account.uid AS account_uid,'
             'account.display_name AS account_display_name,'
@@ -1682,6 +1690,7 @@ class RecordingJournalBridge:
             'ON suppression.session_id=session.id '
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
+            'LEFT JOIN media_library_items library ON library.session_id=session.id '
             'LEFT JOIN part_summary ON part_summary.session_id=session.id '
             'LEFT JOIN chunk_summary ON chunk_summary.job_id=job.id '
             'LEFT JOIN danmaku_summary ON danmaku_summary.job_id=job.id '
@@ -1742,7 +1751,12 @@ class RecordingJournalBridge:
         clauses: List[str] = []
         parameters: List[object] = []
         if scope == 'recordings':
-            clauses.append("session.source_kind='live'")
+            clauses.append(
+                "session.source_kind='live' AND NOT EXISTS("
+                'SELECT 1 FROM media_library_items library '
+                'WHERE library.session_id=session.id '
+                "AND library.origin='upload')"
+            )
         elif scope == 'uploads':
             clauses.append('job.id IS NOT NULL')
         normalized_query = query.strip()
@@ -2372,6 +2386,11 @@ class RecordingJournalBridge:
                 else int(row['highlight_clip_id'])
             ),
             upload_job=upload_job,
+            media_library_item_id=(
+                None
+                if row['media_library_item_id'] is None
+                else int(row['media_library_item_id'])
+            ),
         )
 
     def _make_upload_job_summary(
@@ -2579,6 +2598,12 @@ class RecordingJournalBridge:
                 if 'highlight_clip_id' not in row.keys()
                 or row['highlight_clip_id'] is None
                 else int(row['highlight_clip_id'])
+            ),
+            media_library_item_id=(
+                None
+                if 'media_library_item_id' not in row.keys()
+                or row['media_library_item_id'] is None
+                else int(row['media_library_item_id'])
             ),
             parts=parts,
         )

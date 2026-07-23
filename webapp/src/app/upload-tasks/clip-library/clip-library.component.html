@@ -1,5 +1,14 @@
-<nz-page-header nzTitle="片段管理" nzSubtitle="永久保存已剪辑的高光片段">
+<nz-page-header nzTitle="片段管理" nzSubtitle="按来源直播场次查看和管理高光片段">
   <nz-page-header-extra>
+    <a
+      nz-button
+      nzType="primary"
+      routerLink="/media-library"
+      [queryParams]="{ kind: 'clip', import: 1 }"
+    >
+      <i nz-icon nzType="cloud-upload"></i>
+      上传外部片段
+    </a>
     <button nz-button type="button" (click)="load()">
       <i nz-icon nzType="reload"></i>
       刷新
@@ -13,7 +22,7 @@
       <input
         nz-input
         type="search"
-        placeholder="搜索片段、主播、直播标题或房间号"
+        placeholder="搜索当前页的场次或片段"
         [(ngModel)]="query"
       />
     </nz-input-group>
@@ -29,127 +38,174 @@
     [nzDescription]="view.message"
   ></nz-alert>
 
-  <nz-table
-    nzSize="middle"
-    nzTableLayout="fixed"
-    [nzData]="clips"
-    [nzLoading]="view.state === 'loading'"
-    [nzFrontPagination]="false"
-    [nzShowPagination]="false"
-    nzNoResult="还没有创建片段"
+  <div
+    *ngIf="view.state === 'loading'"
+    class="loading-state"
+    role="status"
+    aria-live="polite"
   >
-    <thead>
-      <tr>
-        <th class="clip-name-column">片段</th>
-        <th class="clip-source-column">来源直播</th>
-        <th class="clip-file-column">文件</th>
-        <th class="clip-upload-column">投稿状态</th>
-        <th class="clip-actions-column">操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr *ngFor="let clip of clips">
-        <td class="clip-name-column">
-          <strong>{{ clip.name }}</strong>
-          <div class="secondary-line">
-            <nz-tag [nzColor]="stateColor(clip)">{{ stateLabel(clip) }}</nz-tag>
-            {{ clip.createdAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
-          </div>
-          <div *ngIf="clip.errorMessage" class="error-line">
-            {{ clip.errorMessage }}
-          </div>
-          <div *ngIf="clip.deletionError" class="error-line">
-            删除失败：{{ clip.deletionError }}
-          </div>
-        </td>
-        <td class="clip-source-column">
-          <div>{{ clip.sourceAnchorName || "未知主播" }}</div>
-          <div class="secondary-line" [title]="clip.sourceTitle || ''">
-            {{ clip.sourceTitle || "未记录直播标题" }}
-          </div>
-          <div class="secondary-line">
-            房间 {{ clip.roomId }} · 场次 {{ clip.sourceSessionId || "—" }}
-          </div>
-        </td>
-        <td class="clip-file-column">
-          <div>{{ formatDuration(clip.durationMs) }}</div>
-          <div class="secondary-line">{{ formatBytes(clip.fileSizeBytes) }}</div>
-        </td>
-        <td class="clip-upload-column">
-          <ng-container *ngIf="archiveUrl(clip) as url; else plainUploadState">
-            <a [href]="url" target="_blank" rel="noopener noreferrer">
-              {{ uploadLabel(clip) }}
-            </a>
-          </ng-container>
-          <ng-template #plainUploadState>{{ uploadLabel(clip) }}</ng-template>
-          <nz-progress
-            *ngIf="clip.uploadJobId && (clip.uploadPercent || 0) < 100"
-            [nzPercent]="clip.uploadPercent || 0"
-            [nzShowInfo]="false"
-            nzSize="small"
-          ></nz-progress>
-        </td>
-        <td class="clip-actions-column">
-          <button
-            nz-button
-            nzType="link"
-            type="button"
-            [disabled]="clip.state !== 'ready' || clip.deletionState !== 'none'"
-            (click)="openPreview(clip)"
-          >
-            预览
-          </button>
-          <button
-            nz-button
-            nzType="link"
-            type="button"
-            [disabled]="clip.state !== 'ready' || clip.deletionState !== 'none'"
-            (click)="download(clip)"
-          >
-            下载
-          </button>
-          <button
-            *ngIf="!clip.uploadJobId"
-            nz-button
-            nzType="link"
-            type="button"
-            [disabled]="clip.state !== 'ready' || clip.deletionState !== 'none'"
-            (click)="openUpload(clip)"
-          >
-            投稿
-          </button>
-          <button
-            *ngIf="clip.state === 'failed' && clip.deletionState === 'none'"
-            nz-button
-            nzType="link"
-            type="button"
-            [disabled]="clip.sourceSessionId === null"
-            [attr.title]="
-              clip.sourceSessionId === null
-                ? '源录像关联已丢失，无法重试，请删除后重新创建片段'
-                : null
-            "
-            (click)="retry(clip)"
-          >
-            重试
-          </button>
-          <button
-            nz-button
-            nzType="link"
-            nzDanger
-            type="button"
-            [disabled]="deletionActive(clip)"
-            (click)="delete(clip)"
-          >
-            {{ clip.deletionState === "failed" ? "重试删除" : "删除" }}
-          </button>
-        </td>
-      </tr>
-    </tbody>
-  </nz-table>
+    正在加载片段场次…
+  </div>
+
+  <div
+    *ngIf="view.state === 'ready' && groups.length === 0"
+    class="empty-state"
+  >
+    还没有符合条件的片段
+  </div>
+
+  <section class="clip-groups" aria-label="片段场次列表">
+    <details
+      *ngFor="let group of groups; trackBy: trackGroup"
+      class="clip-group"
+      open
+    >
+      <summary>
+        <span class="group-heading">
+          <strong>{{ groupTitle(group) }}</strong>
+          <span>{{ groupSource(group) }}</span>
+        </span>
+        <span class="group-count">{{ group.clipCount }} 个片段</span>
+      </summary>
+
+      <nz-table
+        nzSize="middle"
+        nzTableLayout="fixed"
+        [nzData]="group.clips"
+        [nzFrontPagination]="false"
+        [nzShowPagination]="false"
+      >
+        <thead>
+          <tr>
+            <th class="clip-name-column">片段</th>
+            <th class="clip-file-column">文件</th>
+            <th class="clip-upload-column">投稿状态</th>
+            <th class="clip-actions-column">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let clip of group.clips; trackBy: trackClip">
+            <td class="clip-name-column">
+              <strong>{{ clip.name }}</strong>
+              <div class="secondary-line">
+                <nz-tag [nzColor]="stateColor(clip)">
+                  {{ stateLabel(clip) }}
+                </nz-tag>
+                {{ clip.createdAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
+              </div>
+              <div *ngIf="clip.errorMessage" class="error-line">
+                {{ clip.errorMessage }}
+              </div>
+              <div *ngIf="clip.deletionError" class="error-line">
+                删除失败：{{ clip.deletionError }}
+              </div>
+            </td>
+            <td class="clip-file-column">
+              <div>{{ formatDuration(clip.durationMs) }}</div>
+              <div class="secondary-line">
+                {{ formatBytes(clip.fileSizeBytes) }}
+              </div>
+            </td>
+            <td class="clip-upload-column">
+              <ng-container
+                *ngIf="archiveUrl(clip) as url; else plainUploadState"
+              >
+                <a [href]="url" target="_blank" rel="noopener noreferrer">
+                  {{ uploadLabel(clip) }}
+                </a>
+              </ng-container>
+              <ng-template #plainUploadState>
+                {{ uploadLabel(clip) }}
+              </ng-template>
+              <nz-progress
+                *ngIf="clip.uploadJobId && (clip.uploadPercent || 0) < 100"
+                [nzPercent]="clip.uploadPercent || 0"
+                [nzShowInfo]="false"
+                nzSize="small"
+              ></nz-progress>
+            </td>
+            <td class="clip-actions-column">
+              <button
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="deletionActive(clip)"
+                (click)="openRename(clip)"
+              >
+                重命名
+              </button>
+              <button
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="
+                  clip.state !== 'ready' || clip.deletionState !== 'none'
+                "
+                (click)="openPreview(clip)"
+              >
+                预览
+              </button>
+              <button
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="
+                  clip.state !== 'ready' || clip.deletionState !== 'none'
+                "
+                (click)="download(clip)"
+              >
+                下载
+              </button>
+              <button
+                *ngIf="!clip.uploadJobId"
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="
+                  clip.state !== 'ready' || clip.deletionState !== 'none'
+                "
+                (click)="openUpload(clip)"
+              >
+                投稿
+              </button>
+              <button
+                *ngIf="
+                  clip.state === 'failed' && clip.deletionState === 'none'
+                "
+                nz-button
+                nzType="link"
+                type="button"
+                [disabled]="clip.sourceSessionId === null"
+                [attr.title]="
+                  clip.sourceSessionId === null
+                    ? '源录像关联已丢失，无法重试，请删除后重新创建片段'
+                    : null
+                "
+                (click)="retry(clip)"
+              >
+                重试
+              </button>
+              <button
+                nz-button
+                nzType="link"
+                nzDanger
+                type="button"
+                [disabled]="deletionActive(clip)"
+                (click)="delete(clip)"
+              >
+                {{
+                  clip.deletionState === "failed" ? "重试删除" : "删除"
+                }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </nz-table>
+    </details>
+  </section>
 
   <div *ngIf="total > 0" class="pagination-bar">
-    <span>共 {{ total }} 条</span>
+    <span>共 {{ total }} 个场次</span>
     <nz-pagination
       nzSize="small"
       [nzPageIndex]="pageIndex"
@@ -162,6 +218,39 @@
     ></nz-pagination>
   </div>
 </main>
+
+<nz-modal
+  nzTitle="重命名片段"
+  [nzVisible]="editingClip !== null"
+  [nzOkLoading]="renameSaving"
+  [nzMaskClosable]="!renameSaving"
+  [nzClosable]="!renameSaving"
+  (nzOnCancel)="closeRename()"
+  (nzOnOk)="saveRename()"
+>
+  <ng-container *nzModalContent>
+    <form
+      class="rename-form"
+      aria-label="重命名片段"
+      (ngSubmit)="saveRename()"
+    >
+      <label for="clip-rename-name">片段名称</label>
+      <input
+        id="clip-rename-name"
+        nz-input
+        name="renameName"
+        maxlength="200"
+        [(ngModel)]="renameName"
+      />
+      <nz-alert
+        *ngIf="renameError"
+        nzType="error"
+        nzShowIcon
+        [nzMessage]="renameError"
+      ></nz-alert>
+    </form>
+  </ng-container>
+</nz-modal>
 
 <nz-modal
   [nzTitle]="previewClip?.name || '片段预览'"

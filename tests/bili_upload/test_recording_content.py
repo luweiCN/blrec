@@ -84,6 +84,27 @@ async def test_media_prefers_existing_final_file(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('suffix', 'content_type'),
+    (
+        ('.mkv', 'video/x-matroska'),
+        ('.mov', 'video/quicktime'),
+        ('.webm', 'video/webm'),
+    ),
+)
+async def test_media_uses_video_content_type_for_import_formats(
+    database: BiliUploadDatabase, tmp_path: Path, suffix: str, content_type: str
+) -> None:
+    source = tmp_path / 'source.flv'
+    final = tmp_path / ('imported' + suffix)
+    part_id = await _seed_part(database, source, final)
+
+    resource = await RecordingContentReader(database).media(part_id)
+
+    assert resource.content_type == content_type
+
+
+@pytest.mark.asyncio
 async def test_media_descriptor_keeps_final_first_without_touching_filesystem(
     database: BiliUploadDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -121,6 +142,69 @@ async def test_media_descriptor_keeps_final_first_without_touching_filesystem(
         False,
         False,
     ]
+
+
+@pytest.mark.asyncio
+async def test_media_descriptor_uses_exact_media_library_item_root(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    recording_root = tmp_path / 'rec'
+    favorites_root = tmp_path / 'favorites'
+    key = 'a' * 32
+    item_root = favorites_root / key
+    item_root.mkdir(parents=True)
+    source = item_root / 'part-0001.mp4'
+    part_id = await _seed_part(database, source)
+    session_id = await database.scalar(
+        'SELECT session_id FROM recording_parts WHERE id=?', (part_id,)
+    )
+    await database.execute(
+        'INSERT INTO media_library_items('
+        'session_id,kind,origin,storage_key,display_name,state,created_at,'
+        "updated_at) VALUES(?,'broadcast','upload',?,'永久直播','ready',1,1)",
+        (int(session_id), key),
+    )
+    reader = RecordingContentReader(
+        database, recording_root=recording_root, media_library_root=favorites_root
+    )
+
+    descriptor = await reader.media_descriptor(part_id)
+
+    assert descriptor.expected_root == str(item_root.resolve())
+
+
+@pytest.mark.asyncio
+async def test_media_descriptor_rejects_library_item_symlink_outside_root(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    recording_root = tmp_path / 'rec'
+    favorites_root = tmp_path / 'favorites'
+    outside = tmp_path / 'outside'
+    favorites_root.mkdir()
+    outside.mkdir()
+    key = 'b' * 32
+    item_root = favorites_root / key
+    try:
+        item_root.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip('directory symlinks are unavailable: {}'.format(error))
+    source = item_root / 'part-0001.mp4'
+    part_id = await _seed_part(database, source)
+    session_id = await database.scalar(
+        'SELECT session_id FROM recording_parts WHERE id=?', (part_id,)
+    )
+    await database.execute(
+        'INSERT INTO media_library_items('
+        'session_id,kind,origin,storage_key,display_name,state,created_at,'
+        "updated_at) VALUES(?,'broadcast','upload',?,'越界直播','ready',1,1)",
+        (int(session_id), key),
+    )
+    reader = RecordingContentReader(
+        database, recording_root=recording_root, media_library_root=favorites_root
+    )
+
+    with pytest.raises(RecordingContentInvalid, match='路径越界'):
+        await reader.media_descriptor(part_id)
 
 
 @pytest.mark.asyncio

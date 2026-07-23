@@ -95,6 +95,8 @@ class RuntimeProbe:
     highlight_worker = None
     create_highlight_upload_task = None
     delete_highlight_clip = None
+    media_library = None
+    delete_media_library_item = None
 
     def __init__(self, events) -> None:
         self.events = events

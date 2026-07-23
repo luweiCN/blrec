@@ -9,6 +9,7 @@ import {
   CreateHighlightClipRequest,
   HighlightClip,
   HighlightClipCreateResult,
+  HighlightClipGroupList,
   HighlightClipList,
   HighlightInspectionOperation,
   HighlightMarker,
@@ -91,9 +92,24 @@ export class HighlightService {
     return this.http.get<HighlightClipList>(this.url.makeApiUrl(path));
   }
 
+  listClipGroups(
+    limit: number,
+    offset: number,
+  ): Observable<HighlightClipGroupList> {
+    const path = `/api/v1/highlights/clips/groups?limit=${limit}&offset=${offset}`;
+    return this.http.get<HighlightClipGroupList>(this.url.makeApiUrl(path));
+  }
+
   getClip(clipId: number): Observable<HighlightClip> {
     return this.http.get<HighlightClip>(
       this.url.makeApiUrl(`/api/v1/highlights/clips/${clipId}`),
+    );
+  }
+
+  renameClip(clipId: number, name: string): Observable<HighlightClip> {
+    return this.http.patch<HighlightClip>(
+      this.url.makeApiUrl(`/api/v1/highlights/clips/${clipId}`),
+      { name },
     );
   }
 

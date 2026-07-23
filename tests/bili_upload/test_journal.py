@@ -1234,7 +1234,8 @@ async def test_list_sessions_identifies_derived_highlight_media(database) -> Non
         "INSERT INTO recording_sessions("
         "id,room_id,broadcast_session_key,state,started_at,source_kind) "
         "VALUES(1,100,'100:live','closed',1,'live'),"
-        "(2,100,'highlight:7','closed',2,'highlight')"
+        "(2,100,'highlight:7','closed',2,'highlight'),"
+        "(3,0,'import:external','closed',3,'live')"
     )
     await database.execute(
         'INSERT INTO highlight_clips('
@@ -1242,13 +1243,21 @@ async def test_list_sessions_identifies_derived_highlight_media(database) -> Non
         'requested_end_ms,state,created_at,updated_at) '
         "VALUES(7,100,1,2,'高光',0,1000,'ready',1,1)"
     )
+    await database.execute(
+        'INSERT INTO media_library_items('
+        'session_id,kind,origin,storage_key,display_name,state,created_at,updated_at) '
+        "VALUES(3,'broadcast','upload',?,'外部直播','ready',3,3)",
+        ('d' * 32,),
+    )
 
     sessions = await RecordingJournalBridge(database).list_sessions(sort_order='oldest')
 
     assert [(item.source_kind, item.highlight_clip_id) for item in sessions] == [
         ('live', None),
         ('highlight', 7),
+        ('live', None),
     ]
+    assert [item.media_library_item_id for item in sessions] == [None, None, 1]
 
     recordings = await RecordingJournalBridge(database).list_sessions(
         scope='recordings'
@@ -1274,6 +1283,7 @@ async def test_list_sessions_identifies_derived_highlight_media(database) -> Non
     assert jobs[2].title == '最终投稿标题'
     summaries = await journal.list_session_summaries(scope='uploads')
     assert summaries[0].title == '最终投稿标题'
+    assert summaries[0].media_library_item_id is None
 
 
 @pytest.mark.asyncio
