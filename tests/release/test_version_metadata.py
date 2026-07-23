@@ -6,14 +6,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_version_matches_preview_beta() -> None:
-    assert blrec.__version__ == '3.0.0-beta.30'
+    assert blrec.__version__ == '3.0.0-beta.31'
 
 
-def test_release_notes_describe_beta_scope_and_completed_validation() -> None:
-    notes = (ROOT / 'docs/releases/3.0.0-beta.30.md').read_text(encoding='utf8')
-    assert '# BLREC 3.0.0-beta.30' in notes
+def test_release_notes_describe_media_library_scope() -> None:
+    notes = (ROOT / 'docs/releases/3.0.0-beta.31.md').read_text(encoding='utf8')
+    assert '# BLREC 3.0.0-beta.31' in notes
     assert '公开测试版' in notes
-    assert '300/300' in notes
-    assert '0 个失败' in notes
-    assert '尚未完成真实环境验收' not in notes
+    assert '永久收藏' in notes
+    assert '/favorites' in notes
+    assert '数据库迁移' in notes
     assert 'latest' not in notes.lower()
