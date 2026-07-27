@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Tuple
 
 import pytest
@@ -141,6 +142,55 @@ async def test_operational_notification_state_survives_restart(tmp_path: Path) -
             detail='重启后仍然失败',
         )
         assert second_sender.calls == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_network_scan_retires_legacy_upload_failover_state(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    center = OperationalNotificationCenter(
+        database,
+        settings_provider=OperationalNotificationSettings,
+        senders={},
+        channel_enabled=lambda _channel: False,
+    )
+    scanner = OperationalHealthScanner(
+        database,
+        center,
+        network_route_manager=SimpleNamespace(notification_states=lambda: []),
+    )
+    try:
+        await center.report(
+            'network_failover',
+            'network-route:upload:failover',
+            healthy=False,
+            title='网络路由已切换备用线路',
+            detail='upload 当前使用 无可用线路',
+        )
+
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM operational_notification_states '
+                "WHERE event_code='network_failover' "
+                "AND object_key='network-route:upload:failover'"
+            )
+            == 1
+        )
+
+        await scanner._scan_network()
+
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM operational_notification_states '
+                "WHERE event_code='network_failover' "
+                "AND object_key='network-route:upload:failover'"
+            )
+            == 0
+        )
     finally:
         await database.close()
 

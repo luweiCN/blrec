@@ -364,6 +364,12 @@ class NetworkSettings(BaseModel):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.mode != 'fixed':
                 raise ValueError('{} network route must use fixed mode'.format(field))
+            if (
+                field == 'upload'
+                and isinstance(route, NetworkRouteSettings)
+                and route.failover_enabled
+            ):
+                values[field] = route.copy(update={'failover_enabled': False})
         return values
 
 

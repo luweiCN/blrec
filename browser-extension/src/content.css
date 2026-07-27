@@ -88,6 +88,24 @@
   box-shadow: 0 3px 14px rgb(0 0 0 / 24%);
 }
 
+.blrec-highlight-actions--player {
+  position: absolute;
+  z-index: 2147483645;
+  right: 16px;
+  bottom: 64px;
+  margin: 0;
+  padding: 5px;
+  border-radius: 18px;
+  background: rgb(24 25 28 / 92%);
+  box-shadow: 0 3px 14px rgb(0 0 0 / 24%);
+  pointer-events: auto;
+}
+
+.blrec-highlight-actions--player .blrec-highlight-popover {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
 .blrec-highlight-toast {
   position: fixed;
   z-index: 2147483646;
@@ -100,6 +118,12 @@
   box-shadow: 0 5px 18px rgb(0 0 0 / 24%);
   color: #fff;
   font: 14px/20px system-ui, sans-serif;
+}
+
+.blrec-highlight-toast--player {
+  position: absolute;
+  top: 16px;
+  right: 16px;
 }
 
 .blrec-highlight-toast[data-state="error"] {

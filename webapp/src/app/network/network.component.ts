@@ -284,6 +284,8 @@ export class NetworkComponent implements OnInit, OnDestroy {
   }
 
   private copySettings(settings: NetworkSettings): NetworkSettings {
-    return JSON.parse(JSON.stringify(settings)) as NetworkSettings;
+    const copied = JSON.parse(JSON.stringify(settings)) as NetworkSettings;
+    copied.upload.failoverEnabled = false;
+    return copied;
   }
 }

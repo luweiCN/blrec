@@ -7,6 +7,7 @@ from typing import List
 
 import pytest
 
+from blrec.bili_upload import deletion_worker as deletion_worker_module
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.deletion_worker import LocalDeletionWorker
 from blrec.bili_upload.highlights import HighlightService
@@ -19,19 +20,27 @@ async def _seed_session(
     *,
     path_count: int = 1,
     recording: bool = False,
+    session_id: int = 1,
+    room_id: int = 100,
 ) -> List[Path]:
+    run_id = 'run-{}'.format(session_id)
     await database.execute(
         "INSERT INTO recording_sessions("
         "id,room_id,broadcast_session_key,state,started_at) "
-        "VALUES(1,100,'100:1',?,1)",
-        ('open' if recording else 'closed',),
+        'VALUES(?,?,?,?,1)',
+        (
+            session_id,
+            room_id,
+            '{}:1'.format(room_id),
+            'open' if recording else 'closed',
+        ),
     )
     await database.execute(
         'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
         'VALUES(?,?,?,?,?)',
         (
-            'run-1',
-            1,
+            run_id,
+            session_id,
             'recording' if recording else 'finished',
             1,
             None if recording else 2,
@@ -47,7 +56,7 @@ async def _seed_session(
             'session_id,run_id,part_index,source_path,final_path,'
             'record_start_time,artifact_state,created_at,updated_at) '
             "VALUES(?,?,?,?,?,1,'ready',1,1)",
-            (1, 'run-1', index, str(path), str(path)),
+            (session_id, run_id, index, str(path), str(path)),
         )
     return paths
 
@@ -169,12 +178,12 @@ async def test_run_rechecks_after_a_wake_between_empty_scan_and_wait(
             if calls == 1:
                 first_scan.set()
                 await release_first_scan.wait()
-                return None
+                return deletion_worker_module._DeletionPass(None, False, False)
             second_scan.set()
             stop_event.set()
-            return None
+            return deletion_worker_module._DeletionPass(None, False, False)
 
-        worker.run_once = controlled_run_once  # type: ignore[method-assign]
+        worker._run_once_pass = controlled_run_once  # type: ignore[method-assign]
         run_task = asyncio.create_task(worker.run(stop_event))
         await first_scan.wait()
 
@@ -190,6 +199,180 @@ async def test_run_rechecks_after_a_wake_between_empty_scan_and_wait(
             worker.wake()
         if 'run_task' in locals():
             await asyncio.gather(run_task, return_exceptions=True)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_deletion_does_not_starve_a_later_owner(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        first_root = tmp_path / 'first'
+        second_root = tmp_path / 'second'
+        first_root.mkdir()
+        second_root.mkdir()
+        first_paths = await _seed_session(database, first_root)
+        second_paths = await _seed_session(
+            database, second_root, session_id=2, room_id=200
+        )
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='postprocessing' "
+            'WHERE session_id=1'
+        )
+        now = [100]
+        worker = LocalDeletionWorker(
+            database,
+            recording_root=tmp_path,
+            clip_root=tmp_path / 'clips',
+            clock=lambda: now[0],
+        )
+        await worker.request_session(1, manager_subject='manager')
+        now[0] += 1
+        await worker.request_session(2, manager_subject='manager')
+
+        assert await worker.run_once() == ('session', 2)
+
+        assert first_paths[0].exists()
+        assert not second_paths[0].exists()
+        assert await database.scalar(
+            'SELECT COUNT(*) FROM recording_sessions WHERE id=1'
+        )
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM recording_sessions WHERE id=2')
+            == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_deletion_worker_reports_unchanged_blocker_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    stop_event = asyncio.Event()
+    waiting = asyncio.Event()
+    waiting_events = []
+    try:
+        await _seed_session(database, tmp_path)
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='postprocessing' "
+            'WHERE session_id=1'
+        )
+
+        def capture(event: str, **fields: object) -> None:
+            if event == 'local_deletion_waiting_for_owner':
+                waiting_events.append(fields)
+                waiting.set()
+
+        monkeypatch.setattr(deletion_worker_module, 'audit', capture)
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        await worker.request_session(1, manager_subject='manager')
+        run_task = asyncio.create_task(worker.run(stop_event))
+
+        await asyncio.wait_for(waiting.wait(), timeout=0.5)
+        await asyncio.sleep(1.1)
+
+        assert len(waiting_events) == 1
+    finally:
+        stop_event.set()
+        if 'worker' in locals():
+            worker.wake()
+        if 'run_task' in locals():
+            await asyncio.wait_for(run_task, timeout=0.5)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_deletion_is_rechecked_without_an_explicit_wake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    stop_event = asyncio.Event()
+    waiting = asyncio.Event()
+    try:
+        paths = await _seed_session(database, tmp_path)
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='postprocessing' "
+            'WHERE session_id=1'
+        )
+
+        def capture(event: str, **_fields: object) -> None:
+            if event == 'local_deletion_waiting_for_owner':
+                waiting.set()
+
+        monkeypatch.setattr(deletion_worker_module, 'audit', capture)
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        await worker.request_session(1, manager_subject='manager')
+        run_task = asyncio.create_task(worker.run(stop_event))
+        await asyncio.wait_for(waiting.wait(), timeout=0.5)
+
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='ready' WHERE session_id=1"
+        )
+
+        async def wait_for_deletion() -> None:
+            while paths[0].exists():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_deletion(), timeout=1.5)
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM recording_sessions WHERE id=1')
+            == 0
+        )
+    finally:
+        stop_event.set()
+        if 'worker' in locals():
+            worker.wake()
+        if 'run_task' in locals():
+            await asyncio.wait_for(run_task, timeout=0.5)
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_iteration_failure_is_retried_without_an_explicit_wake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    stop_event = asyncio.Event()
+    try:
+        paths = await _seed_session(database, tmp_path)
+        worker = LocalDeletionWorker(
+            database, recording_root=tmp_path, clip_root=tmp_path / 'clips'
+        )
+        original = worker._run_once_pass
+        attempts = 0
+
+        async def fail_once(*args: object, **kwargs: object):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError('transient database failure')
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(worker, '_run_once_pass', fail_once)
+        await worker.request_session(1, manager_subject='manager')
+        run_task = asyncio.create_task(worker.run(stop_event))
+
+        async def wait_for_deletion() -> None:
+            while paths[0].exists():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_deletion(), timeout=1.5)
+        assert attempts >= 2
+    finally:
+        stop_event.set()
+        if 'worker' in locals():
+            worker.wake()
+        if 'run_task' in locals():
+            await asyncio.wait_for(run_task, timeout=0.5)
         await database.close()
 
 

@@ -568,7 +568,10 @@ async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
         api_key=None,
         credential_key=None,
     )
-    journal = SimpleNamespace(finalize_cancelled_sessions=AsyncMock(return_value=1))
+    journal = SimpleNamespace(
+        finalize_cancelled_sessions=AsyncMock(return_value=1),
+        reconcile_stale_finished_parts=AsyncMock(return_value=1),
+    )
     coordinator = SimpleNamespace(
         sync_live_sessions=AsyncMock(return_value=[1]),
         prepare_waiting_jobs=AsyncMock(return_value=[1]),
@@ -597,6 +600,7 @@ async def test_upload_loop_finalizes_cancelled_sessions_before_job_creation(
     )
 
     journal.finalize_cancelled_sessions.assert_awaited_once_with()
+    journal.reconcile_stale_finished_parts.assert_awaited_once_with()
     coordinator.sync_live_sessions.assert_awaited_once_with()
     coordinator.prepare_waiting_jobs.assert_awaited_once_with()
 
@@ -608,7 +612,10 @@ async def test_upload_loop_runs_one_retry_quantum_per_iteration() -> None:
         api_key=None,
         credential_key=None,
     )
-    journal = SimpleNamespace(finalize_cancelled_sessions=AsyncMock(return_value=0))
+    journal = SimpleNamespace(
+        finalize_cancelled_sessions=AsyncMock(return_value=0),
+        reconcile_stale_finished_parts=AsyncMock(return_value=0),
+    )
     coordinator = SimpleNamespace(
         sync_live_sessions=AsyncMock(return_value=[]),
         prepare_waiting_jobs=AsyncMock(return_value=[]),

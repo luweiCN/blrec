@@ -27,7 +27,11 @@ from urllib.parse import urlsplit, urlunsplit
 import aiohttp
 
 from blrec.bili import wbi
-from blrec.networking.manager import NetworkPurpose, NetworkRouteManager
+from blrec.networking.manager import (
+    NetworkPurpose,
+    NetworkRouteManager,
+    NetworkUnavailable,
+)
 from blrec.networking.resolver import SourceBoundResolver
 
 from .crypto import CredentialBundle
@@ -159,14 +163,17 @@ class AiohttpProtocolTransport:
         # below so session/route setup time is also charged to the same deadline.
         self._request_timeout()
         purpose = self.purpose_for_operation(request.operation)
-        selection = (
-            None
-            if self._route_manager is None
-            else self._route_manager.select(purpose, anonymous=False)
-        )
-        session = await self._get_session(
-            purpose, None if selection is None else selection.source_address
-        )
+        try:
+            selection = (
+                None
+                if self._route_manager is None
+                else self._route_manager.select(purpose, anonymous=False)
+            )
+            session = await self._get_session(
+                purpose, None if selection is None else selection.source_address
+            )
+        except NetworkUnavailable:
+            raise TransportFailure(headers_sent=False) from None
         request_timeout = self._request_timeout()
         trace_context = {'headers_sent': False}
         kwargs: Dict[str, Any] = {

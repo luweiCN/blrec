@@ -586,11 +586,9 @@ class RecordTask:
         if not self._recorder_enabled:
             return
 
-        if force:
-            await self._postprocessor.stop()
+        try:
             await self._recorder.stop()
-        else:
-            await self._recorder.stop()
+        finally:
             await self._postprocessor.stop()
         self._recorder_enabled = False
 

@@ -79,7 +79,7 @@ describe('NetworkComponent', () => {
       roomStatus: routeSettings(),
       danmaku: routeSettings(),
       recording: routeSettings(),
-      upload: routeSettings(),
+      upload: { ...routeSettings(), failoverEnabled: true },
       biliApi: routeSettings(),
     };
     networkService = jasmine.createSpyObj<NetworkService>(
@@ -132,6 +132,10 @@ describe('NetworkComponent', () => {
     expect(fixture.nativeElement.querySelectorAll('.primary-page').length).toBe(
       1
     );
+  });
+
+  it('always displays upload failover as disabled', () => {
+    expect(fixture.componentInstance.route('upload').failoverEnabled).toBeFalse();
   });
 
   it('keeps horizontal scrolling on the table instead of the whole panel', () => {

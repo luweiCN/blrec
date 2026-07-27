@@ -755,6 +755,143 @@ class RecordingJournalBridge:
             result='completed',
         )
 
+    async def reconcile_stale_finished_parts(self, *, grace_seconds: int = 60) -> int:
+        if grace_seconds < 0:
+            raise ValueError('finished artifact grace must not be negative')
+        now = int(self._clock())
+        cutoff = now - grace_seconds
+        candidates = await self._database.fetchall(
+            'SELECT part.id,part.session_id,part.run_id,part.source_path,'
+            'part.final_path,part.record_start_time,part.updated_at,'
+            'session.live_end_time,session.cancellation_generation '
+            'FROM recording_parts part '
+            'JOIN recording_runs run ON run.id=part.run_id '
+            'JOIN recording_sessions session ON session.id=part.session_id '
+            "WHERE session.source_kind='live' AND session.state='open' "
+            "AND session.deletion_state='none' "
+            'AND session.live_end_time IS NOT NULL '
+            'AND session.live_end_time<=? '
+            "AND run.state='finished' "
+            "AND part.artifact_state='recording' "
+            'AND part.source_completed_at IS NULL '
+            'AND NOT EXISTS(SELECT 1 FROM recording_runs active '
+            'WHERE active.session_id=session.id '
+            "AND active.state='recording')",
+            (cutoff,),
+        )
+        loop = asyncio.get_running_loop()
+        recoveries: Dict[int, Optional[_ArtifactRecoveryDecision]] = {}
+        for part in candidates:
+            source_path = str(part['source_path'])
+            final_path = None if part['final_path'] is None else str(part['final_path'])
+            paths = tuple(
+                dict.fromkeys(path for path in (final_path, source_path) if path)
+            )
+            has_nonempty_path = False
+            for path in paths:
+                try:
+                    if os.path.getsize(path) > 0:
+                        has_nonempty_path = True
+                        break
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    has_nonempty_path = True
+                    break
+            if has_nonempty_path:
+                recoveries[int(part['id'])] = None
+                continue
+            recoveries[int(part['id'])] = await loop.run_in_executor(
+                None, self._recover_artifact, source_path, final_path
+            )
+
+        def write(connection: sqlite3.Connection) -> int:
+            reconciled = 0
+            for candidate in candidates:
+                part_id = int(candidate['id'])
+                decision = recoveries[part_id]
+                if decision is None or decision.artifact is not None:
+                    continue
+                current = connection.execute(
+                    'SELECT part.session_id,part.record_start_time,'
+                    'session.live_end_time '
+                    'FROM recording_parts part '
+                    'JOIN recording_runs run ON run.id=part.run_id '
+                    'JOIN recording_sessions session '
+                    'ON session.id=part.session_id '
+                    'WHERE part.id=? AND part.run_id=? '
+                    "AND part.artifact_state='recording' "
+                    'AND part.source_completed_at IS NULL '
+                    'AND part.updated_at=? '
+                    "AND session.source_kind='live' "
+                    "AND session.state='open' "
+                    "AND session.deletion_state='none' "
+                    'AND session.live_end_time=? '
+                    'AND session.live_end_time<=? '
+                    'AND session.cancellation_generation=? '
+                    "AND run.state='finished' "
+                    'AND NOT EXISTS(SELECT 1 FROM recording_runs active '
+                    'WHERE active.session_id=session.id '
+                    "AND active.state='recording')",
+                    (
+                        part_id,
+                        str(candidate['run_id']),
+                        int(candidate['updated_at']),
+                        int(candidate['live_end_time']),
+                        cutoff,
+                        int(candidate['cancellation_generation']),
+                    ),
+                ).fetchone()
+                if current is None:
+                    continue
+                live_end_time = int(current['live_end_time'])
+                state = 'failed' if decision.any_path_exists else 'missing'
+                message = (
+                    '录制结束后文件无法解析，已自动排除'
+                    if decision.any_path_exists
+                    else '录制结束后文件缺失，已自动排除'
+                )
+                updated = connection.execute(
+                    'UPDATE recording_parts SET artifact_state=?,'
+                    'final_path=NULL,file_size_bytes=NULL,'
+                    'record_end_time=COALESCE(record_end_time,?),'
+                    'record_duration_seconds=COALESCE('
+                    'record_duration_seconds,MAX(0,?-record_start_time)),'
+                    'source_completed_at=COALESCE(source_completed_at,?),'
+                    'postprocessed_at=COALESCE(postprocessed_at,?),'
+                    'error_message=?,updated_at=? '
+                    "WHERE id=? AND artifact_state='recording' "
+                    'AND source_completed_at IS NULL AND updated_at=?',
+                    (
+                        state,
+                        live_end_time,
+                        live_end_time,
+                        now,
+                        now,
+                        message,
+                        now,
+                        part_id,
+                        int(candidate['updated_at']),
+                    ),
+                ).rowcount
+                if not updated:
+                    continue
+                self._refresh_session_state(
+                    connection, int(candidate['session_id']), now
+                )
+                reconciled += 1
+            return reconciled
+
+        reconciled = await self._database.write(write)
+        if reconciled:
+            audit(
+                'recording_finished_artifacts_reconciled',
+                candidates=len(candidates),
+                reconciled_parts=reconciled,
+                result='completed',
+            )
+        return reconciled
+
     async def finalize_cancelled_sessions(self, *, grace_seconds: int = 600) -> int:
         if grace_seconds < 0:
             raise ValueError('resume grace must not be negative')

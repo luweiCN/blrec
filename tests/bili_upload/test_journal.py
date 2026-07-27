@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import AsyncIterator, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -1438,6 +1439,118 @@ async def test_reconcile_excludes_unreadable_interrupted_file(
     assert part.artifact_state == 'failed'
     assert part.final_path is None
     assert part.error_message == '录制异常中断，文件无法解析，已自动排除'
+
+
+@pytest.mark.asyncio
+async def test_finished_run_with_zero_byte_recording_tail_is_reconciled(
+    database, tmp_path: Path
+) -> None:
+    now = [1_000]
+    first = tmp_path / 'first.flv'
+    tail = tmp_path / 'tail.flv'
+    first.write_bytes(b'video')
+    tail.write_bytes(b'')
+    journal = RecordingJournalBridge(
+        database, clock=lambda: now[0], artifact_probe=lambda _path: None
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(first), record_start_time=901)
+    await journal.video_completed(run_id, str(first))
+    await journal.video_postprocessed(run_id, str(first), str(first))
+    await journal.video_created(run_id, str(tail), record_start_time=990)
+    await journal.recording_finished(run_id)
+
+    now[0] = 1_060
+    assert await journal.reconcile_stale_finished_parts() == 1
+
+    session = await journal.session_for_run(run_id)
+    parts = await journal.parts_for_run(run_id)
+    assert session.state == 'closed'
+    assert [part.artifact_state for part in parts] == ['ready', 'failed']
+    assert parts[1].error_message == '录制结束后文件无法解析，已自动排除'
+
+
+@pytest.mark.asyncio
+async def test_finished_tail_is_not_reconciled_before_grace(
+    database, tmp_path: Path
+) -> None:
+    now = [1_000]
+    tail = tmp_path / 'tail.flv'
+    tail.write_bytes(b'')
+    journal = RecordingJournalBridge(
+        database, clock=lambda: now[0], artifact_probe=lambda _path: None
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(tail), record_start_time=990)
+    await journal.recording_finished(run_id)
+
+    now[0] = 1_059
+    assert await journal.reconcile_stale_finished_parts() == 0
+    assert (await journal.parts_for_run(run_id))[0].artifact_state == 'recording'
+
+    now[0] = 1_060
+    assert await journal.reconcile_stale_finished_parts() == 1
+    assert (await journal.parts_for_run(run_id))[0].artifact_state == 'failed'
+    assert (await journal.session_for_run(run_id)).state == 'skipped'
+
+
+@pytest.mark.asyncio
+async def test_valid_finished_tail_is_left_for_the_postprocessor(
+    database, tmp_path: Path
+) -> None:
+    now = [1_000]
+    tail = tmp_path / 'tail.flv'
+    tail.write_bytes(b'valid video')
+    journal = RecordingJournalBridge(
+        database,
+        clock=lambda: now[0],
+        artifact_probe=lambda path: RecoveredArtifact(path, 11, 5),
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(tail), record_start_time=990)
+    await journal.recording_finished(run_id)
+
+    now[0] = 1_060
+    assert await journal.reconcile_stale_finished_parts() == 0
+
+    part = (await journal.parts_for_run(run_id))[0]
+    assert part.artifact_state == 'recording'
+    assert part.final_path is None
+    assert part.file_size_bytes is None
+    assert (await journal.session_for_run(run_id)).state == 'open'
+
+
+@pytest.mark.asyncio
+async def test_video_completion_wins_race_with_finished_tail_reconciliation(
+    database, tmp_path: Path
+) -> None:
+    now = [1_000]
+    tail = tmp_path / 'tail.flv'
+    tail.write_bytes(b'')
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+
+    def blocked_probe(_path: str) -> None:
+        probe_started.set()
+        assert release_probe.wait(timeout=2)
+        return None
+
+    journal = RecordingJournalBridge(
+        database, clock=lambda: now[0], artifact_probe=blocked_probe
+    )
+    run_id = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(run_id, str(tail), record_start_time=990)
+    await journal.recording_finished(run_id)
+    now[0] = 1_060
+    reconciliation = asyncio.create_task(journal.reconcile_stale_finished_parts())
+    while not probe_started.is_set():
+        await asyncio.sleep(0)
+
+    await journal.video_completed(run_id, str(tail))
+    release_probe.set()
+
+    assert await reconciliation == 0
+    assert (await journal.parts_for_run(run_id))[0].artifact_state == 'postprocessing'
 
 
 @pytest.mark.asyncio

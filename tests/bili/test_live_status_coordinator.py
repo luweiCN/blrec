@@ -642,7 +642,7 @@ async def test_later_batch_negative_confirms_failed_wss_hint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_cooldown_limits_physical_requests() -> None:
+async def test_new_broadcast_bypasses_previous_confirmation_cooldown() -> None:
     clock = MutableClock()
     listener = AsyncMock()
     confirmer = AsyncMock(
@@ -654,8 +654,79 @@ async def test_confirmation_cooldown_limits_physical_requests() -> None:
     client = ScriptedBatchClient(
         results=[
             batch_result(1, ObservedStatus.LIVE, live_time=1),
+            batch_result(1, ObservedStatus.PREPARING, live_time=0),
+            batch_result(1, ObservedStatus.PREPARING, live_time=0),
             batch_result(1, ObservedStatus.LIVE, live_time=2),
-            batch_result(1, ObservedStatus.LIVE, live_time=2),
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, clock=clock)
+    registration = coordinator.register(1, 1001, listener, confirmer)
+
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+
+    assert coordinator.fallback_count == 2
+    assert confirmer.await_count == 2
+    assert registration.observation_key == '1:2'
+    assert [item.args[0].status for item in listener.await_args_list] == [
+        ObservedStatus.LIVE,
+        ObservedStatus.PREPARING,
+        ObservedStatus.LIVE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_new_broadcast_without_live_time_bypasses_previous_cooldown() -> None:
+    clock = MutableClock()
+    listener = AsyncMock()
+    confirmer = AsyncMock(
+        side_effect=[
+            confirmation(1, ObservedStatus.LIVE, live_time=0),
+            confirmation(1, ObservedStatus.LIVE, live_time=0),
+        ]
+    )
+    client = ScriptedBatchClient(
+        results=[
+            batch_result(1, ObservedStatus.LIVE, live_time=0),
+            batch_result(1, ObservedStatus.PREPARING, live_time=0),
+            batch_result(1, ObservedStatus.PREPARING, live_time=0),
+            batch_result(1, ObservedStatus.LIVE, live_time=0),
+        ]
+    )
+    coordinator = LiveStatusCoordinator(client, clock=clock)
+    coordinator.register(1, 1001, listener, confirmer)
+
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+    await coordinator.poll_once()
+
+    assert coordinator.fallback_count == 2
+    assert confirmer.await_count == 2
+    assert [item.args[0].status for item in listener.await_args_list] == [
+        ObservedStatus.LIVE,
+        ObservedStatus.PREPARING,
+        ObservedStatus.LIVE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_cooldown_limits_same_broadcast_requests() -> None:
+    clock = MutableClock()
+    listener = AsyncMock()
+    confirmer = AsyncMock(
+        side_effect=[
+            confirmation(1, ObservedStatus.PREPARING, live_time=0),
+            confirmation(1, ObservedStatus.LIVE, live_time=1),
+        ]
+    )
+    client = ScriptedBatchClient(
+        results=[
+            batch_result(1, ObservedStatus.LIVE, live_time=1),
+            batch_result(1, ObservedStatus.LIVE, live_time=1),
+            batch_result(1, ObservedStatus.LIVE, live_time=1),
         ]
     )
     coordinator = LiveStatusCoordinator(client, clock=clock)
@@ -666,14 +737,14 @@ async def test_confirmation_cooldown_limits_physical_requests() -> None:
 
     assert coordinator.fallback_count == 1
     assert confirmer.await_count == 1
-    assert listener.await_count == 1
+    assert listener.await_count == 0
 
     clock.advance(600)
     await coordinator.poll_once()
 
     assert coordinator.fallback_count == 2
     assert confirmer.await_count == 2
-    assert listener.await_count == 2
+    assert listener.await_count == 1
 
 
 @pytest.mark.asyncio

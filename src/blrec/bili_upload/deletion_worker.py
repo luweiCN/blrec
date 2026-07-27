@@ -4,8 +4,9 @@ import asyncio
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from blrec.logging.audit import audit
 
@@ -17,6 +18,13 @@ __all__ = ('LocalDeletionWorker', 'LocalDeletionRejected')
 
 class LocalDeletionRejected(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class _DeletionPass:
+    owner: Optional[Tuple[str, int]]
+    progressed: bool
+    had_candidates: bool
 
 
 class LocalDeletionWorker:
@@ -72,6 +80,7 @@ class LocalDeletionWorker:
         self._wake_event = asyncio.Event()
         self._wake_generation = 0
         self._accepting = True
+        self._reported_blockers: Dict[Tuple[str, int, int], Tuple[str, ...]] = {}
 
     async def request_session(self, session_id: int, *, manager_subject: str) -> int:
         if not self._accepting:
@@ -212,103 +221,131 @@ class LocalDeletionWorker:
         while not stop_event.is_set():
             wake_generation = self._wake_generation
             try:
-                processed = await self.run_once(stop_event=stop_event)
+                outcome = await self._run_once_pass(stop_event=stop_event)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                processed = None
+                outcome = _DeletionPass(None, False, True)
                 audit(
                     'local_deletion_worker_iteration_failed',
                     level='ERROR',
                     error_type=type(error).__name__,
                     result='will_retry',
                 )
-            if processed is not None:
+            if outcome.progressed:
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=0.1)
                 except asyncio.TimeoutError:
                     pass
                 continue
-            self._wake_event.clear()
-            if stop_event.is_set():
-                return
-            if self._wake_generation != wake_generation:
-                continue
-            wake_task = asyncio.create_task(self._wake_event.wait())
-            stop_task = asyncio.create_task(stop_event.wait())
-            done, pending = await asyncio.wait(
-                (wake_task, stop_task), return_when=asyncio.FIRST_COMPLETED
+            await self._wait_for_wake_or_stop(
+                stop_event,
+                wake_generation,
+                timeout=1.0 if outcome.had_candidates else None,
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            if stop_task in done and stop_task.result():
-                return
 
     async def run_once(
         self, *, stop_event: Optional[asyncio.Event] = None
     ) -> Optional[Tuple[str, int]]:
-        async with self._run_lock:
-            owner = await self._next_owner()
-            if owner is None:
-                return None
-            owner_kind, owner_id, generation = owner
-            if stop_event is not None and stop_event.is_set():
-                return owner_kind, owner_id
-            try:
-                ready = await self._quiesce(owner_kind, owner_id, generation)
-                if not ready:
-                    return owner_kind, owner_id
-                await self._snapshot_items(owner_kind, owner_id, generation)
-                await self._delete_quantum(
-                    owner_kind, owner_id, generation, stop_event=stop_event
-                )
-                await self._finish_if_empty(owner_kind, owner_id, generation)
-            except LocalDeletionRejected as error:
-                await self._fail_owner(owner_kind, owner_id, generation, str(error))
-            except OSError as error:
-                await self._fail_owner(
-                    owner_kind,
-                    owner_id,
-                    generation,
-                    'unlink_{}'.format(type(error).__name__),
-                )
-            return owner_kind, owner_id
+        return (await self._run_once_pass(stop_event=stop_event)).owner
 
-    async def _next_owner(self) -> Optional[Tuple[str, int, int]]:
-        session = await self._database.fetchone(
+    async def _run_once_pass(
+        self, *, stop_event: Optional[asyncio.Event] = None
+    ) -> _DeletionPass:
+        async with self._run_lock:
+            owners = await self._candidate_owners()
+            candidate_keys = {
+                (owner_kind, owner_id, generation)
+                for owner_kind, owner_id, generation in owners
+            }
+            for key in tuple(self._reported_blockers):
+                if key not in candidate_keys:
+                    self._reported_blockers.pop(key, None)
+            if not owners:
+                return _DeletionPass(None, False, False)
+            first_owner = (owners[0][0], owners[0][1])
+            for owner_kind, owner_id, generation in owners:
+                if stop_event is not None and stop_event.is_set():
+                    return _DeletionPass(first_owner, False, True)
+                try:
+                    ready = await self._quiesce(owner_kind, owner_id, generation)
+                    if not ready:
+                        continue
+                    self._reported_blockers.pop(
+                        (owner_kind, owner_id, generation), None
+                    )
+                    await self._snapshot_items(owner_kind, owner_id, generation)
+                    await self._delete_quantum(
+                        owner_kind, owner_id, generation, stop_event=stop_event
+                    )
+                    await self._finish_if_empty(owner_kind, owner_id, generation)
+                except LocalDeletionRejected as error:
+                    await self._fail_owner(owner_kind, owner_id, generation, str(error))
+                except OSError as error:
+                    await self._fail_owner(
+                        owner_kind,
+                        owner_id,
+                        generation,
+                        'unlink_{}'.format(type(error).__name__),
+                    )
+                return _DeletionPass((owner_kind, owner_id), True, True)
+            return _DeletionPass(first_owner, False, True)
+
+    async def _wait_for_wake_or_stop(
+        self,
+        stop_event: asyncio.Event,
+        wake_generation: int,
+        *,
+        timeout: Optional[float],
+    ) -> None:
+        self._wake_event.clear()
+        if stop_event.is_set() or self._wake_generation != wake_generation:
+            return
+        wake_task = asyncio.create_task(self._wake_event.wait())
+        stop_task = asyncio.create_task(stop_event.wait())
+        done, pending = await asyncio.wait(
+            (wake_task, stop_task), timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if stop_task in done:
+            stop_task.result()
+
+    async def _candidate_owners(self) -> Tuple[Tuple[str, int, int], ...]:
+        sessions = await self._database.fetchall(
             'SELECT session.id,session.cancellation_generation '
             'FROM recording_sessions session '
             "WHERE session.deletion_state IN ('requested','deleting') "
             'AND NOT EXISTS(SELECT 1 FROM highlight_clips clip '
             'WHERE clip.upload_session_id=session.id '
             "AND clip.deletion_state!='none') "
-            'ORDER BY session.deletion_requested_at,session.id LIMIT 1'
+            'ORDER BY session.deletion_requested_at,session.id'
         )
-        if session is not None:
-            return (
-                'session',
-                int(session['id']),
-                int(session['cancellation_generation']),
-            )
-        clip = await self._database.fetchone(
+        clips = await self._database.fetchall(
             'SELECT id,cancellation_generation FROM highlight_clips '
             "WHERE deletion_state IN ('requested','quiescing','deleting') "
-            'ORDER BY deletion_requested_at,id LIMIT 1'
+            'ORDER BY deletion_requested_at,id'
         )
-        if clip is None:
-            return None
-        return 'clip', int(clip['id']), int(clip['cancellation_generation'])
+        return tuple(
+            ('session', int(row['id']), int(row['cancellation_generation']))
+            for row in sessions
+        ) + tuple(
+            ('clip', int(row['id']), int(row['cancellation_generation']))
+            for row in clips
+        )
 
     async def _quiesce(self, owner_kind: str, owner_id: int, generation: int) -> bool:
         if owner_kind == 'clip':
             return await self._quiesce_clip(owner_id, generation)
+        blocker_key = (owner_kind, owner_id, generation)
         row = await self._database.fetchone(
             'SELECT room_id FROM recording_sessions WHERE id=? '
             'AND cancellation_generation=?',
             (owner_id, generation),
         )
         if row is None:
+            self._reported_blockers.pop(blocker_key, None)
             return False
         active = await self._database.scalar(
             "SELECT COUNT(*) FROM recording_runs WHERE session_id=? "
@@ -330,13 +367,16 @@ class LocalDeletionWorker:
             return False
         blockers = await self._session_blockers(owner_id)
         if blockers:
-            audit(
-                'local_deletion_waiting_for_owner',
-                owner_kind=owner_kind,
-                owner_id=owner_id,
-                blockers=','.join(blockers),
-            )
+            if self._reported_blockers.get(blocker_key) != blockers:
+                audit(
+                    'local_deletion_waiting_for_owner',
+                    owner_kind=owner_kind,
+                    owner_id=owner_id,
+                    blockers=','.join(blockers),
+                )
+                self._reported_blockers[blocker_key] = blockers
             return False
+        self._reported_blockers.pop(blocker_key, None)
         await self._cancel_idle_local_work(owner_id, generation)
         return True
 

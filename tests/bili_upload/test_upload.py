@@ -20,6 +20,7 @@ from blrec.bili_upload.errors import (
     RemoteOutcomeUnknown,
 )
 from blrec.bili_upload.highlights import HighlightService
+from blrec.bili_upload.journal import RecordingJournalBridge
 from blrec.bili_upload.policies import (
     RoomUploadPolicyManager,
     default_room_upload_policy,
@@ -875,6 +876,45 @@ async def test_preupload_rate_limit_waits_and_retries_without_pausing(
 
 
 @pytest.mark.asyncio
+async def test_upload_request_not_sent_uses_future_retry_without_hot_loop(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+
+    class NotSentUploader(FakeUploader):
+        async def upload_part(
+            self, part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            del part_id, bundle, claim
+            raise DefinitelyNotSent('upload_chunk')
+
+    try:
+        await seed_ready_session(database, tmp_path)
+        clock = MutableClock(1000)
+        protocol = FakeProtocol()
+        worker = coordinator(database, protocol, NotSentUploader(database), clock)
+        await worker.create_ready_jobs()
+
+        assert await worker.run_once() == 1
+        job = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,review_reason,lease_owner '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert job['state'] == 'uploading'
+        assert job['submit_state'] == 'prepared'
+        assert int(job['next_attempt_at']) > clock.now
+        assert job['lease_owner'] is None
+        assert '自动重试' in str(job['review_reason'])
+        assert protocol.submit_calls == []
+
+        assert await worker.run_once() is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_open_session_preuploads_closed_part_without_submitting(
     tmp_path: Path,
 ) -> None:
@@ -1014,7 +1054,7 @@ async def test_preupload_restart_reuses_confirmed_part(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalized_preupload_advances_after_pending_tail_fails(
+async def test_finalized_preupload_advances_after_online_tail_reconciliation(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
@@ -1022,17 +1062,26 @@ async def test_finalized_preupload_advances_after_pending_tail_fails(
     try:
         await seed_ready_session(database, tmp_path)
         await make_session_open_with_one_closed_part(database)
-        protocol = FakeProtocol()
-        worker = coordinator(
-            database, protocol, FakeUploader(database), MutableClock(1000)
+        tail_path = Path(
+            str(
+                await database.scalar(
+                    'SELECT source_path FROM recording_parts WHERE id=2'
+                )
+            )
         )
+        tail_path.write_bytes(b'')
+        protocol = FakeProtocol()
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, MutableClock(1000))
         await worker.sync_live_sessions()
         await worker.prepare_waiting_jobs()
         await worker.run_once()
 
         await database.execute(
-            "UPDATE recording_sessions SET state='closed',ended_at=960,"
-            'live_end_time=960 WHERE id=1'
+            "UPDATE recording_runs SET state='finished',ended_at=960 " "WHERE id='run'"
+        )
+        await database.execute(
+            'UPDATE recording_sessions SET live_end_time=960 WHERE id=1'
         )
         await worker.sync_live_sessions()
         assert (
@@ -1040,16 +1089,17 @@ async def test_finalized_preupload_advances_after_pending_tail_fails(
             == 'waiting_artifacts'
         )
 
-        await database.execute(
-            "UPDATE recording_parts SET artifact_state='failed',final_path=NULL,"
-            "error_message='尾部分 P 处理失败' WHERE id=2"
+        journal = RecordingJournalBridge(
+            database, clock=lambda: 1_020, artifact_probe=lambda _path: None
         )
+        assert await journal.reconcile_stale_finished_parts() == 1
 
         assert await worker.prepare_waiting_jobs() == [1]
         assert await database.scalar('SELECT state FROM upload_jobs WHERE id=1') == (
             'ready'
         )
         await worker.run_once()
+        assert uploader.calls == [1]
         assert len(protocol.submit_calls) == 1
     finally:
         await database.close()

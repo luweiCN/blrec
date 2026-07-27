@@ -6,7 +6,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from blrec.bili_upload.protocol import AiohttpProtocolTransport, ProtocolRequest
+from blrec.bili_upload.protocol import (
+    AiohttpProtocolTransport,
+    ProtocolRequest,
+    TransportFailure,
+)
 from blrec.networking.aiohttp_session import AiohttpSessionPool
 from blrec.networking.manager import NetworkInterface, NetworkRouteManager
 from blrec.networking.requests_session import (
@@ -497,6 +501,31 @@ def test_non_upload_protocol_operations_use_bili_api_route() -> None:
     assert AiohttpProtocolTransport.purpose_for_operation('submit_archive') == (
         'bili_api'
     )
+
+
+@pytest.mark.asyncio
+async def test_upload_route_unavailable_is_classified_as_not_sent() -> None:
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(upload={'interface': 'lan1'}),
+        interface_provider=_interfaces,
+    )
+    manager.report_failure('upload', 'lan1')
+    manager.report_failure('upload', 'lan1')
+    transport = AiohttpProtocolTransport(route_manager=manager)
+
+    with pytest.raises(TransportFailure) as raised:
+        await transport.send(
+            ProtocolRequest(
+                operation='upload_chunk',
+                method='PUT',
+                url='https://upload.example/part',
+                headers={},
+                body=b'payload',
+            )
+        )
+
+    assert raised.value.headers_sent is False
+    assert transport._session is None
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HighlightContentController } from '../src/content';
 import { BackgroundMessage, BackgroundResponse } from '../src/shared/messages';
@@ -14,6 +14,15 @@ class FakeObserver {
   trigger(): void {
     this.callback([], this as unknown as MutationObserver);
   }
+}
+
+const controllers: HighlightContentController[] = [];
+
+function trackController(
+  controller: HighlightContentController
+): HighlightContentController {
+  controllers.push(controller);
+  return controller;
 }
 
 function locationAt(pathname: string): Location {
@@ -31,28 +40,39 @@ function makeController(
       return { ok: true, data: {} };
     }
   );
-  let observer: FakeObserver | null = null;
+  const observers: FakeObserver[] = [];
   let refresh: (() => Promise<void>) | null = null;
-  const controller = new HighlightContentController({
-    document,
-    location: locationAt('/100'),
-    sendMessage,
-    now: () => 1_000_000,
-    createObserver: (callback) => {
-      observer = new FakeObserver(callback);
-      return observer;
-    },
-    scheduleRefresh: (callback) => {
-      refresh = callback;
-      return () => undefined;
-    },
-  });
+  const controller = trackController(
+    new HighlightContentController({
+      document,
+      location: locationAt('/100'),
+      sendMessage,
+      now: () => 1_000_000,
+      createObserver: (callback) => {
+        const observer = new FakeObserver(callback);
+        observers.push(observer);
+        return observer;
+      },
+      scheduleRefresh: (callback) => {
+        refresh = callback;
+        return () => undefined;
+      },
+    })
+  );
   return {
     controller,
     sendMessage,
     get observer() {
+      const observer = observers[0];
       if (!observer) {
         throw new Error('observer was not created');
+      }
+      return observer;
+    },
+    get modeObserver() {
+      const observer = observers[1];
+      if (!observer) {
+        throw new Error('mode observer was not created');
       }
       return observer;
     },
@@ -66,9 +86,21 @@ function makeController(
 }
 
 describe('Bilibili live controls', () => {
+  afterEach(() => {
+    controllers.splice(0).forEach((controller) => controller.destroy());
+  });
+
   beforeEach(() => {
     document.head.innerHTML = '';
-    document.body.innerHTML = '<div class="right-ctnr"></div>';
+    document.body.className = '';
+    document.body.innerHTML = [
+      '<div class="right-ctnr"></div>',
+      '<div id="fullscreen-container"><div id="live-player"></div></div>',
+    ].join('');
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: null,
+    });
   });
 
   it('shows the two collection actions for an uncollected room', async () => {
@@ -98,6 +130,166 @@ describe('Bilibili live controls', () => {
 
     const text = document.querySelector('.blrec-highlight-actions')?.textContent;
     expect(text).toBe('添加高光');
+  });
+
+  it('moves the existing action into the player while web fullscreen is active', async () => {
+    const setup = makeController({ collected: true, recording: true });
+    await setup.controller.start();
+    const actions = document.querySelector<HTMLElement>(
+      '.blrec-highlight-actions'
+    )!;
+    expect(setup.modeObserver.observe).toHaveBeenCalledWith(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+
+    document.body.classList.add('player-full-win');
+    setup.modeObserver.trigger();
+
+    expect(actions.parentElement?.id).toBe('live-player');
+    expect(actions.classList.contains('blrec-highlight-actions--player')).toBe(
+      true
+    );
+    expect(document.querySelectorAll('.blrec-highlight-actions')).toHaveLength(1);
+
+    document.body.classList.remove('player-full-win');
+    setup.modeObserver.trigger();
+
+    expect(actions.parentElement?.className).toBe('right-ctnr');
+    expect(actions.classList.contains('blrec-highlight-actions--player')).toBe(
+      false
+    );
+  });
+
+  it('keeps the action and feedback inside the browser fullscreen tree', async () => {
+    const setup = makeController({ collected: true, recording: true });
+    await setup.controller.start();
+    const fullscreenContainer = document.querySelector<HTMLElement>(
+      '#fullscreen-container'
+    )!;
+    const player = document.querySelector<HTMLElement>('#live-player')!;
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: fullscreenContainer,
+    });
+
+    document.dispatchEvent(new Event('fullscreenchange'));
+
+    const actions = document.querySelector<HTMLElement>(
+      '.blrec-highlight-actions'
+    )!;
+    expect(actions.parentElement).toBe(player);
+    actions.querySelector<HTMLButtonElement>('button')!.click();
+    actions
+      .querySelector<HTMLButtonElement>('[data-action="save-highlight"]')!
+      .click();
+    await vi.waitFor(() =>
+      expect(document.querySelector('.blrec-highlight-toast')?.parentElement).toBe(
+        player
+      )
+    );
+
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: null,
+    });
+    document.dispatchEvent(new Event('fullscreenchange'));
+
+    expect(actions.parentElement?.className).toBe('right-ctnr');
+  });
+
+  it('keeps controls inside an internal fullscreen target', async () => {
+    const player = document.querySelector<HTMLElement>('#live-player')!;
+    player.innerHTML = '<div id="internal-fullscreen"></div>';
+    const fullscreenTarget = document.querySelector<HTMLElement>(
+      '#internal-fullscreen'
+    )!;
+    const setup = makeController({ collected: true, recording: true });
+    await setup.controller.start();
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: fullscreenTarget,
+    });
+
+    document.dispatchEvent(new Event('fullscreenchange'));
+
+    expect(
+      document.querySelector('.blrec-highlight-actions')?.parentElement
+    ).toBe(fullscreenTarget);
+  });
+
+  it('keeps failed highlight feedback inside the fullscreen tree', async () => {
+    const setup = makeController({ collected: true, recording: true });
+    setup.sendMessage.mockImplementation(async (message) => {
+      if (message.type === 'ROOM_STATUS') {
+        return { ok: true, data: { collected: true, recording: true } };
+      }
+      return { ok: false, message: '保存失败' };
+    });
+    await setup.controller.start();
+    const fullscreenContainer = document.querySelector<HTMLElement>(
+      '#fullscreen-container'
+    )!;
+    const player = document.querySelector<HTMLElement>('#live-player')!;
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: fullscreenContainer,
+    });
+    document.dispatchEvent(new Event('fullscreenchange'));
+
+    const actions = document.querySelector<HTMLElement>(
+      '.blrec-highlight-actions'
+    )!;
+    actions.querySelector<HTMLButtonElement>('button')!.click();
+    actions
+      .querySelector<HTMLButtonElement>('[data-action="save-highlight"]')!
+      .click();
+
+    await vi.waitFor(() => {
+      const toast = document.querySelector<HTMLElement>(
+        '.blrec-highlight-toast'
+      );
+      expect(toast?.parentElement).toBe(player);
+      expect(toast?.dataset['state']).toBe('error');
+    });
+  });
+
+  it('does not revive observers or controls after destroy during status load', async () => {
+    let resolveStatus:
+      | ((response: BackgroundResponse) => void)
+      | undefined;
+    const sendMessage = vi.fn(
+      () =>
+        new Promise<BackgroundResponse>((resolve) => {
+          resolveStatus = resolve;
+        })
+    );
+    const createObserver = vi.fn(
+      (callback: MutationCallback) => new FakeObserver(callback)
+    );
+    const scheduleRefresh = vi.fn(() => () => undefined);
+    const controller = trackController(
+      new HighlightContentController({
+        document,
+        location: locationAt('/100'),
+        sendMessage,
+        createObserver,
+        scheduleRefresh,
+      })
+    );
+
+    const starting = controller.start();
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    controller.destroy();
+    resolveStatus?.({
+      ok: true,
+      data: { collected: true, recording: true },
+    });
+    await starting;
+
+    expect(createObserver).not.toHaveBeenCalled();
+    expect(scheduleRefresh).not.toHaveBeenCalled();
+    expect(document.querySelector('.blrec-highlight-actions')).toBeNull();
   });
 
   it('starts once and restores a removed container without duplication', async () => {
@@ -166,14 +358,16 @@ describe('Bilibili live controls', () => {
         },
       };
     });
-    const controller = new HighlightContentController({
-      document,
-      location: locationAt('/6'),
-      sendMessage,
-      waitForOperationPoll: () => Promise.resolve(),
-      createObserver: (callback) => new FakeObserver(callback),
-      scheduleRefresh: () => () => undefined,
-    });
+    const controller = trackController(
+      new HighlightContentController({
+        document,
+        location: locationAt('/6'),
+        sendMessage,
+        waitForOperationPoll: () => Promise.resolve(),
+        createObserver: (callback) => new FakeObserver(callback),
+        scheduleRefresh: () => () => undefined,
+      })
+    );
     await controller.start();
 
     document
@@ -208,14 +402,16 @@ describe('Bilibili live controls', () => {
         },
       };
     });
-    const controller = new HighlightContentController({
-      document,
-      location: locationAt('/100'),
-      sendMessage: setup.sendMessage,
-      waitForOperationPoll: () => Promise.resolve(),
-      createObserver: (callback) => new FakeObserver(callback),
-      scheduleRefresh: () => () => undefined,
-    });
+    const controller = trackController(
+      new HighlightContentController({
+        document,
+        location: locationAt('/100'),
+        sendMessage: setup.sendMessage,
+        waitForOperationPoll: () => Promise.resolve(),
+        createObserver: (callback) => new FakeObserver(callback),
+        scheduleRefresh: () => () => undefined,
+      })
+    );
     await controller.start();
 
     document
@@ -260,14 +456,16 @@ describe('Bilibili live controls', () => {
         },
       };
     });
-    const controller = new HighlightContentController({
-      document,
-      location: locationAt('/100'),
-      sendMessage: setup.sendMessage,
-      waitForOperationPoll: () => Promise.resolve(),
-      createObserver: (callback) => new FakeObserver(callback),
-      scheduleRefresh: () => () => undefined,
-    });
+    const controller = trackController(
+      new HighlightContentController({
+        document,
+        location: locationAt('/100'),
+        sendMessage: setup.sendMessage,
+        waitForOperationPoll: () => Promise.resolve(),
+        createObserver: (callback) => new FakeObserver(callback),
+        scheduleRefresh: () => () => undefined,
+      })
+    );
     await controller.start();
 
     const buttons = document.querySelectorAll<HTMLButtonElement>(
@@ -293,14 +491,16 @@ describe('Bilibili live controls', () => {
         })
     );
     const setup = makeController({ collected: false, recording: false });
-    const controller = new HighlightContentController({
-      document,
-      location: locationAt('/100'),
-      sendMessage: setup.sendMessage,
-      createObserver: (callback) => new FakeObserver(callback),
-      scheduleRefresh: () => () => undefined,
-      waitForOperationPoll,
-    });
+    const controller = trackController(
+      new HighlightContentController({
+        document,
+        location: locationAt('/100'),
+        sendMessage: setup.sendMessage,
+        createObserver: (callback) => new FakeObserver(callback),
+        scheduleRefresh: () => () => undefined,
+        waitForOperationPoll,
+      })
+    );
     setup.sendMessage.mockImplementation(async (message) => {
       if (message.type === 'ROOM_STATUS') {
         return { ok: true, data: { collected: false, recording: false } };

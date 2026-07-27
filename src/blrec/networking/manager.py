@@ -251,27 +251,34 @@ class NetworkRouteManager:
                 selection = self.select(purpose)
             except NetworkUnavailable:
                 selection = None
-            states.append(
-                NetworkNotificationState(
-                    event='network_failover',
-                    object_key='network-route:{}:failover'.format(purpose),
-                    healthy=selection is not None and selection.role != 'fallback',
-                    title=(
-                        '网络路由已恢复主线路'
-                        if selection is not None and selection.role != 'fallback'
-                        else '网络路由已切换备用线路'
-                    ),
-                    detail='{} 当前使用 {}'.format(
-                        purpose,
-                        (
-                            selection.interface_name
-                            if selection is not None
-                            else '无可用线路'
-                        )
-                        or '系统默认网络',
-                    ),
+            if route.failover_enabled and purpose != 'upload':
+                states.append(
+                    NetworkNotificationState(
+                        event='network_failover',
+                        object_key='network-route:{}:failover'.format(purpose),
+                        healthy=(
+                            selection is not None and selection.role != 'fallback'
+                        ),
+                        title=(
+                            '网络路由无可用备用线路'
+                            if selection is None
+                            else (
+                                '网络路由已恢复主线路'
+                                if selection.role != 'fallback'
+                                else '网络路由已切换备用线路'
+                            )
+                        ),
+                        detail='{} 当前使用 {}'.format(
+                            purpose,
+                            (
+                                selection.interface_name
+                                if selection is not None
+                                else '无可用线路'
+                            )
+                            or '系统默认网络',
+                        ),
+                    )
                 )
-            )
             states.append(
                 NetworkNotificationState(
                     event='network_unavailable',

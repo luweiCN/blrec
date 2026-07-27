@@ -32,7 +32,9 @@ from .live_status import (
 
 __all__ = ('LiveStatusCoordinator', 'StatusCircuitBreaker')
 
-_RegistrationState = Tuple[ObservedStatus, Optional[str], int, bool, bool, bool]
+_RegistrationState = Tuple[
+    ObservedStatus, Optional[str], Optional[str], int, bool, bool, bool
+]
 _RoomMappingLoader = Callable[[Sequence[int]], Awaitable[Dict[int, Tuple[int, int]]]]
 _RoomStatusConfirmer = Callable[[int], Awaitable[StatusSnapshot]]
 _RegistrationConfirmer = Union[StatusConfirmer, _RoomStatusConfirmer]
@@ -51,6 +53,7 @@ class _Registration:
     mapping_resolved: bool
     current: ObservedStatus = ObservedStatus.UNKNOWN
     observation_key: Optional[str] = None
+    pending_confirmation_key: Optional[str] = None
     negative_count: int = 0
     wss_negative: bool = False
     wss_active: bool = False
@@ -63,6 +66,7 @@ class _Registration:
 class _FallbackEntry:
     task: asyncio.Task[StatusSnapshot]
     started_at: float
+    confirmation_key: Optional[str]
     generations: Dict[int, _Registration]
     consumed: Dict[int, _Registration]
 
@@ -275,7 +279,9 @@ class LiveStatusCoordinator:
         if self._notification_pending(registration):
             return
         registration.wss_negative = True
-        confirmed = await self._confirm(registration)
+        confirmed = await self._confirm(
+            registration, confirmation_key=registration.observation_key
+        )
         if self._registrations.get(registration_key) is registration:
             await self._apply_snapshot(registration, confirmed)
 
@@ -515,7 +521,9 @@ class LiveStatusCoordinator:
             is not registration
         ):
             return
-        confirmed = await self._confirm(registration)
+        confirmed = await self._confirm(
+            registration, confirmation_key=registration.observation_key
+        )
         if self._registrations.get(registration.registration_key) is registration:
             await self._apply_snapshot(registration, confirmed)
 
@@ -539,7 +547,16 @@ class LiveStatusCoordinator:
                     registration.retry_pending = False
                     await self._schedule_notification(registration, snapshot, previous)
                 return
-            confirmed = await self._confirm(registration)
+            confirmation_key = snapshot.observation_key
+            if confirmation_key is None:
+                if registration.pending_confirmation_key is None:
+                    registration.pending_confirmation_key = '{}:local:{}'.format(
+                        registration.uid, self._fallback_count + 1
+                    )
+                confirmation_key = registration.pending_confirmation_key
+            confirmed = await self._confirm(
+                registration, confirmation_key=confirmation_key
+            )
             if (
                 self._registrations.get(registration.registration_key)
                 is not registration
@@ -554,13 +571,15 @@ class LiveStatusCoordinator:
             registration.observation_key = (
                 confirmed.observation_key
                 or snapshot.observation_key
-                or '{}:local:{}'.format(registration.uid, int(self._clock()))
+                or confirmation_key
             )
+            registration.pending_confirmation_key = None
             await self._schedule_notification(registration, confirmed, previous)
             return
 
         if registration.current is not ObservedStatus.LIVE:
             registration.current = snapshot.status
+            registration.pending_confirmation_key = None
             return
         previous = self._registration_state(registration)
         registration.negative_count += 1
@@ -574,6 +593,7 @@ class LiveStatusCoordinator:
         registration.wss_negative = False
         registration.wss_active = False
         registration.retry_pending = False
+        registration.pending_confirmation_key = None
         await self._schedule_notification(registration, snapshot, previous)
 
     async def _schedule_notification(
@@ -639,7 +659,9 @@ class LiveStatusCoordinator:
             await asyncio.gather(*tasks, return_exceptions=True)
             self._running_fallback_tasks.difference_update(tasks)
 
-    async def _confirm(self, registration: _Registration) -> StatusSnapshot:
+    async def _confirm(
+        self, registration: _Registration, *, confirmation_key: Optional[str] = None
+    ) -> StatusSnapshot:
         now = self._clock()
         entry = self._fallback_tasks.get(registration.room_id)
         generation = (
@@ -652,10 +674,16 @@ class LiveStatusCoordinator:
             and entry.task.done()
             and now - entry.started_at >= self._fallback_cooldown_seconds
         )
+        different_broadcast = (
+            entry is not None
+            and confirmation_key is not None
+            and entry.confirmation_key != confirmation_key
+        )
         if (
             entry is None
             or entry.task.cancelled()
             or expired
+            or different_broadcast
             or generation is None
             or generation is not registration
         ):
@@ -667,6 +695,7 @@ class LiveStatusCoordinator:
             entry = _FallbackEntry(
                 task=task,
                 started_at=now,
+                confirmation_key=confirmation_key,
                 generations={
                     item.registration_key: item
                     for item in self._registrations.values()
@@ -689,6 +718,16 @@ class LiveStatusCoordinator:
         except Exception as exc:
             self._mark_fallback_consumed(entry, registration)
             submit_exception(exc)
+            return self._unknown_snapshot(registration)
+        if self._fallback_tasks.get(registration.room_id) is not entry:
+            return self._unknown_snapshot(registration)
+        if (
+            confirmation_key is not None
+            and snapshot.status is ObservedStatus.LIVE
+            and snapshot.observation_key is not None
+            and snapshot.observation_key != confirmation_key
+        ):
+            self._fallback_tasks.pop(registration.room_id, None)
             return self._unknown_snapshot(registration)
         self._mark_fallback_consumed(entry, registration)
         return snapshot
@@ -727,6 +766,7 @@ class LiveStatusCoordinator:
         return (
             registration.current,
             registration.observation_key,
+            registration.pending_confirmation_key,
             registration.negative_count,
             registration.wss_negative,
             registration.wss_active,
@@ -740,6 +780,7 @@ class LiveStatusCoordinator:
         (
             registration.current,
             registration.observation_key,
+            registration.pending_confirmation_key,
             registration.negative_count,
             registration.wss_negative,
             registration.wss_active,

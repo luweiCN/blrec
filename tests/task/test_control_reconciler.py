@@ -132,6 +132,48 @@ def make_settings_manager(settings: Settings) -> SettingsManager:
     return manager
 
 
+@pytest.mark.asyncio
+async def test_force_disable_keeps_postprocessor_available_for_the_final_part() -> None:
+    task = make_record_task(monitor_enabled=True, recorder_enabled=True)
+
+    class FinalPartPostprocessor:
+        def __init__(self) -> None:
+            self.accepting = True
+            self.accepted_final_part = False
+
+        async def stop(self) -> None:
+            self.accepting = False
+
+    class FinishingRecorder:
+        def __init__(self, postprocessor: FinalPartPostprocessor) -> None:
+            self._postprocessor = postprocessor
+
+        async def stop(self) -> None:
+            if self._postprocessor.accepting:
+                self._postprocessor.accepted_final_part = True
+
+    postprocessor = FinalPartPostprocessor()
+    task._postprocessor = postprocessor
+    task._recorder = FinishingRecorder(postprocessor)
+
+    await task.disable_recorder(force=True)
+
+    assert postprocessor.accepted_final_part
+    assert not task.recorder_enabled
+
+
+@pytest.mark.asyncio
+async def test_force_disable_stops_postprocessor_when_recorder_stop_fails() -> None:
+    task = make_record_task(monitor_enabled=True, recorder_enabled=True)
+    task._recorder.stop.side_effect = RuntimeError('recorder stop failed')
+
+    with pytest.raises(RuntimeError, match='recorder stop failed'):
+        await task.disable_recorder(force=True)
+
+    task._postprocessor.stop.assert_awaited_once_with()
+    assert task.recorder_enabled
+
+
 async def admit_membership_operation(
     journal: ControlOperationJournal, room_id: int = 100
 ) -> Any:

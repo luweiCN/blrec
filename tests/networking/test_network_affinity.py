@@ -123,6 +123,58 @@ def test_upload_never_fails_over_to_another_interface() -> None:
         manager.select('upload')
 
 
+def test_upload_route_normalizes_failover_to_disabled() -> None:
+    settings = NetworkSettings(
+        upload={'mode': 'fixed', 'interface': 'eth0', 'failoverEnabled': True}
+    )
+
+    assert settings.upload.failover_enabled is False
+
+
+def test_upload_route_does_not_publish_a_failover_notification_state() -> None:
+    settings = NetworkSettings(
+        recording={'interface': 'eth0', 'failoverEnabled': True},
+        upload={'interface': 'eth0', 'failoverEnabled': True},
+    )
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+
+    states = manager.notification_states()
+
+    assert any(
+        state.event == 'network_failover'
+        and state.object_key == 'network-route:recording:failover'
+        for state in states
+    )
+    assert not any(
+        state.event == 'network_failover'
+        and state.object_key == 'network-route:upload:failover'
+        for state in states
+    )
+    assert any(
+        state.event == 'network_unavailable'
+        and state.object_key == 'network-route:upload:unavailable'
+        for state in states
+    )
+
+
+def test_failover_notification_does_not_claim_a_switch_when_no_route_exists() -> None:
+    settings = NetworkSettings(recording={'interface': 'eth0', 'failoverEnabled': True})
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+    for interface_name in ('eth0', 'eth1'):
+        manager.report_failure('recording', interface_name)
+        manager.report_failure('recording', interface_name)
+
+    state = next(
+        state
+        for state in manager.notification_states()
+        if state.object_key == 'network-route:recording:failover'
+    )
+
+    assert state.healthy is False
+    assert state.title == '网络路由无可用备用线路'
+    assert '无可用线路' in state.detail
+
+
 def test_account_and_upload_routes_reject_round_robin_configuration() -> None:
     with pytest.raises(ValidationError):
         NetworkSettings(upload={'mode': 'round_robin'})

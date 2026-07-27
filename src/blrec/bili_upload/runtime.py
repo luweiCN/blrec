@@ -873,6 +873,7 @@ class BiliAccountRuntime:
             retry_processed = None
             try:
                 await journal.finalize_cancelled_sessions()
+                await journal.reconcile_stale_finished_parts()
                 await review_watcher.run_once()
                 if task_actions is not None:
                     retry_processed = await task_actions.run_retry_batch_once()

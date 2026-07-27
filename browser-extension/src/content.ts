@@ -42,10 +42,13 @@ export class HighlightContentController {
   private roomId: number | null = null;
   private status: RoomStatus | null = null;
   private observer: ObserverLike | null = null;
+  private modeObserver: ObserverLike | null = null;
   private cancelStatusRefresh: (() => void) | null = null;
   private cancelNamePrompt: (() => void) | null = null;
   private readonly playerDelay = new PlayerDelayCalibrator();
+  private readonly handleFullscreenChange = () => this.ensureRendered();
   private started = false;
+  private lifecycleGeneration = 0;
   private membershipGeneration = 0;
 
   constructor(dependencies: ContentDependencies) {
@@ -72,26 +75,49 @@ export class HighlightContentController {
       return;
     }
     this.started = true;
+    const lifecycleGeneration = ++this.lifecycleGeneration;
     this.roomId = parseRoomId(this.location, this.document);
     if (this.roomId === null) {
       return;
     }
     await this.refreshStatus();
+    if (
+      !this.started ||
+      lifecycleGeneration !== this.lifecycleGeneration
+    ) {
+      return;
+    }
     this.observer = this.createObserver(() => this.ensureRendered());
     if (this.document.body) {
       this.observer.observe(this.document.body, {
         childList: true,
         subtree: true,
       });
+      this.modeObserver = this.createObserver(() => this.ensureRendered());
+      this.modeObserver.observe(this.document.body, {
+        attributes: true,
+        attributeFilter: ['class'],
+      });
     }
+    this.document.addEventListener(
+      'fullscreenchange',
+      this.handleFullscreenChange
+    );
     this.cancelStatusRefresh = this.scheduleRefresh(() => this.refreshStatus());
   }
 
   destroy(): void {
     this.started = false;
+    this.lifecycleGeneration += 1;
     this.membershipGeneration += 1;
     this.observer?.disconnect();
     this.observer = null;
+    this.modeObserver?.disconnect();
+    this.modeObserver = null;
+    this.document.removeEventListener(
+      'fullscreenchange',
+      this.handleFullscreenChange
+    );
     this.cancelStatusRefresh?.();
     this.cancelStatusRefresh = null;
     this.cancelNamePrompt?.();
@@ -107,10 +133,17 @@ export class HighlightContentController {
     if (this.roomId === null) {
       return;
     }
+    const lifecycleGeneration = this.lifecycleGeneration;
     const response = await this.sendMessage({
       type: 'ROOM_STATUS',
       roomId: this.roomId,
     });
+    if (
+      !this.started ||
+      lifecycleGeneration !== this.lifecycleGeneration
+    ) {
+      return;
+    }
     if (!response.ok || !this.isRoomStatus(response.data)) {
       this.status = null;
       this.removeActions();
@@ -130,35 +163,75 @@ export class HighlightContentController {
       this.removeActions();
       return;
     }
-    const existing = this.document.querySelectorAll('.blrec-highlight-actions');
-    if (existing.length > 0) {
-      Array.from(existing)
-        .slice(1)
-        .forEach((element) => element.remove());
-      return;
-    }
-    const container = this.document.createElement('div');
-    container.className = 'blrec-highlight-actions';
-    container.setAttribute('aria-label', 'BLREC 直播操作');
-    if (this.status.recording) {
-      container.append(
-        this.actionButton('添加高光', () => this.addHighlight(container))
-      );
-    } else {
-      container.append(
-        this.actionButton('收录', () => this.collect(container, false)),
-        this.actionButton('收录并投稿', () => this.collect(container, true))
-      );
-    }
-    const anchor = this.document.querySelector(
+    const existing = Array.from(
+      this.document.querySelectorAll<HTMLElement>('.blrec-highlight-actions')
+    );
+    let container = existing.shift();
+    existing.forEach((element) => element.remove());
+
+    const playerAnchor = this.playerAnchor();
+    const headerAnchor = this.document.querySelector<HTMLElement>(
       '.right-ctnr, .upper-row .right-ctnr, #head-info-vm'
     );
-    if (anchor) {
-      anchor.append(container);
-    } else if (this.document.body) {
-      container.classList.add('blrec-highlight-actions--fallback');
-      this.document.body.append(container);
+    const anchor = playerAnchor ?? headerAnchor ?? this.document.body;
+    if (!anchor) {
+      container?.remove();
+      return;
     }
+    if (!container) {
+      const createdContainer = this.document.createElement('div');
+      createdContainer.className = 'blrec-highlight-actions';
+      createdContainer.setAttribute('aria-label', 'BLREC 直播操作');
+      if (this.status.recording) {
+        createdContainer.append(
+          this.actionButton('添加高光', () =>
+            this.addHighlight(createdContainer)
+          )
+        );
+      } else {
+        createdContainer.append(
+          this.actionButton('收录', () =>
+            this.collect(createdContainer, false)
+          ),
+          this.actionButton('收录并投稿', () =>
+            this.collect(createdContainer, true)
+          )
+        );
+      }
+      container = createdContainer;
+    }
+    container.classList.toggle(
+      'blrec-highlight-actions--player',
+      anchor === playerAnchor
+    );
+    container.classList.toggle(
+      'blrec-highlight-actions--fallback',
+      anchor === this.document.body
+    );
+    if (container.parentElement !== anchor) {
+      anchor.append(container);
+    }
+  }
+
+  private playerAnchor(): Element | null {
+    const player = this.document.querySelector<HTMLElement>('#live-player');
+    if (!player) {
+      return null;
+    }
+    const fullscreenElement = this.document.fullscreenElement;
+    if (fullscreenElement !== null) {
+      if (fullscreenElement === player || fullscreenElement.contains(player)) {
+        return player;
+      }
+      if (player.contains(fullscreenElement)) {
+        return fullscreenElement;
+      }
+    }
+    const body = this.document.body;
+    return body?.classList.contains('player-full-win') ||
+      body?.classList.contains('fullscreen-fix')
+      ? player
+      : null;
   }
 
   private actionButton(
@@ -309,7 +382,13 @@ export class HighlightContentController {
     toast.dataset['state'] = state;
     toast.setAttribute('role', 'status');
     toast.textContent = message;
-    this.document.body?.append(toast);
+    const playerAnchor = this.playerAnchor();
+    if (playerAnchor) {
+      toast.classList.add('blrec-highlight-toast--player');
+      playerAnchor.append(toast);
+    } else {
+      this.document.body?.append(toast);
+    }
     setTimeout(() => toast.remove(), 2800);
   }
 

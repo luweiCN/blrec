@@ -114,6 +114,17 @@ class OperationalNotificationCenter:
         self._dispatch(event, object_key, route.targets, title[:200], detail[:2000])
         return True
 
+    async def retire_state(self, event: OperationalEventCode, object_key: str) -> bool:
+        def delete(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                'DELETE FROM operational_notification_states '
+                'WHERE event_code=? AND object_key=?',
+                (event, object_key),
+            )
+            return cursor.rowcount == 1
+
+        return await self._database.write(delete)
+
     def _dispatch(
         self,
         event: OperationalEventCode,
@@ -308,6 +319,9 @@ class OperationalHealthScanner:
     async def _scan_network(self) -> None:
         if self._network_route_manager is None:
             return
+        await self._center.retire_state(
+            'network_failover', 'network-route:upload:failover'
+        )
         for state in self._network_route_manager.notification_states():
             await self._center.report(
                 state.event,
