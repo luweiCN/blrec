@@ -206,6 +206,9 @@ class NetworkRouteManager:
             return None
         return self.interfaces().get(interface_name)
 
+    def system_default_interface_name(self) -> Optional[str]:
+        return self._system_default_interface_name(self.interfaces())
+
     @property
     def traffic_meter(self) -> TrafficMeter:
         return self._traffic_meter
@@ -404,7 +407,9 @@ class NetworkRouteManager:
             configured = interfaces.get(route.interface or '')
             if route.interface is None:
                 return self._audited_selection(
-                    self._system_selection(purpose),
+                    self._system_selection(
+                        purpose, self._system_default_interface_name(interfaces)
+                    ),
                     anonymous=anonymous,
                     affinity_key=affinity_key,
                 )
@@ -602,7 +607,25 @@ class NetworkRouteManager:
         )
 
     @staticmethod
-    def _system_selection(purpose: NetworkPurpose) -> RouteSelection:
+    def _system_default_interface_name(
+        interfaces: Mapping[str, NetworkInterface]
+    ) -> Optional[str]:
+        return next(
+            (
+                interface.name
+                for _, interface in sorted(interfaces.items())
+                if interface.enabled and interface.is_default
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _system_selection(
+        purpose: NetworkPurpose, interface_name: Optional[str]
+    ) -> RouteSelection:
         return RouteSelection(
-            purpose=purpose, interface_name=None, source_address=None, role='system'
+            purpose=purpose,
+            interface_name=interface_name,
+            source_address=None,
+            role='system',
         )
