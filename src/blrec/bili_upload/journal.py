@@ -34,6 +34,7 @@ _VAINGLORY_STATUS_SELECT_SQL = (
     'match_scan.state AS match_index_state,'
     'COALESCE(match_scan.match_count,0) AS match_count,'
     'match_publication.state AS match_publication_state,'
+    'match_publication.chapter_state AS match_chapter_state,'
     'match_publication.description_state AS match_description_state,'
     'match_publication.error AS match_publication_error,'
     'COALESCE((SELECT COUNT(*) FROM vainglory_publication_comments comment '
@@ -154,6 +155,7 @@ class RecordingSession:
     match_index_state: Optional[str] = None
     match_count: int = 0
     match_publication_state: Optional[str] = None
+    match_chapter_state: Optional[str] = None
     match_description_state: Optional[str] = None
     match_comment_state: Optional[str] = None
     match_comment_count: int = 0
@@ -353,6 +355,7 @@ class RecordingSessionSummary:
     match_index_state: Optional[str] = None
     match_count: int = 0
     match_publication_state: Optional[str] = None
+    match_chapter_state: Optional[str] = None
     match_description_state: Optional[str] = None
     match_comment_state: Optional[str] = None
     match_comment_count: int = 0
@@ -2656,6 +2659,11 @@ class RecordingJournalBridge:
                 if row['match_publication_state'] is None
                 else str(row['match_publication_state'])
             ),
+            match_chapter_state=(
+                None
+                if row['match_chapter_state'] is None
+                else str(row['match_chapter_state'])
+            ),
             match_description_state=(
                 None
                 if row['match_description_state'] is None
@@ -2899,6 +2907,12 @@ class RecordingJournalBridge:
                 if 'match_publication_state' not in row.keys()
                 or row['match_publication_state'] is None
                 else str(row['match_publication_state'])
+            ),
+            match_chapter_state=(
+                None
+                if 'match_chapter_state' not in row.keys()
+                or row['match_chapter_state'] is None
+                else str(row['match_chapter_state'])
             ),
             match_description_state=(
                 None

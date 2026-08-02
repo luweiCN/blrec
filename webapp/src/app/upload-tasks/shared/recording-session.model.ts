@@ -144,6 +144,8 @@ export type MatchIndexState = 'pending' | 'analyzing' | 'ready' | 'failed';
 export type MatchPublicationState =
   'prepared' | 'running' | 'confirmed' | 'paused' | 'failed';
 
+export type MatchChapterState = 'prepared' | 'confirmed' | 'skipped';
+
 export type MatchDescriptionState =
   'prepared' | 'in_flight' | 'confirmed' | 'skipped_no_room';
 
@@ -421,6 +423,7 @@ export interface RecordingSessionSummary {
   readonly matchIndexState: MatchIndexState | null;
   readonly matchCount: number;
   readonly matchPublicationState: MatchPublicationState | null;
+  readonly matchChapterState: MatchChapterState | null;
   readonly matchDescriptionState: MatchDescriptionState | null;
   readonly matchCommentState: MatchCommentState | null;
   readonly matchCommentCount: number;

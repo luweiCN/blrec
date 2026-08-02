@@ -399,6 +399,7 @@ class RecordingSessionResponse(ApiModel):
     match_index_state: Optional[str]
     match_count: int
     match_publication_state: Optional[str]
+    match_chapter_state: Optional[str]
     match_description_state: Optional[str]
     match_comment_state: Optional[str]
     match_comment_count: int
@@ -444,6 +445,7 @@ class RecordingSessionSummaryResponse(ApiModel):
     match_index_state: Optional[str]
     match_count: int
     match_publication_state: Optional[str]
+    match_chapter_state: Optional[str]
     match_description_state: Optional[str]
     match_comment_state: Optional[str]
     match_comment_count: int
@@ -961,6 +963,7 @@ def _session_response(
         match_index_state=session.match_index_state,
         match_count=session.match_count,
         match_publication_state=session.match_publication_state,
+        match_chapter_state=session.match_chapter_state,
         match_description_state=session.match_description_state,
         match_comment_state=session.match_comment_state,
         match_comment_count=session.match_comment_count,
@@ -1011,6 +1014,7 @@ def _session_summary_response(
         match_index_state=session.match_index_state,
         match_count=session.match_count,
         match_publication_state=session.match_publication_state,
+        match_chapter_state=session.match_chapter_state,
         match_description_state=session.match_description_state,
         match_comment_state=session.match_comment_state,
         match_comment_count=session.match_comment_count,

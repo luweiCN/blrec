@@ -1667,7 +1667,7 @@ def _native_timestamp(match: MatchRecord) -> Optional[str]:
         if hours
         else '{:02d}:{:02d}'.format(minutes, seconds)
     )
-    return 'P{} {}'.format(page, timestamp)
+    return '{}#{}'.format(page, timestamp)
 
 
 def _match_link(match: MatchRecord) -> Optional[str]:
