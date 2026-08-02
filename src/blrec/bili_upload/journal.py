@@ -30,6 +30,44 @@ UploadJobDisplayState = Literal[
     'standard', 'preuploading', 'preuploaded_waiting', 'preupload_paused'
 ]
 
+_VAINGLORY_STATUS_SELECT_SQL = (
+    'match_scan.state AS match_index_state,'
+    'COALESCE(match_scan.match_count,0) AS match_count,'
+    'match_publication.state AS match_publication_state,'
+    'match_publication.description_state AS match_description_state,'
+    'match_publication.error AS match_publication_error,'
+    'COALESCE((SELECT COUNT(*) FROM vainglory_publication_comments comment '
+    'WHERE comment.publication_id=match_publication.id),0) '
+    'AS match_comment_count,'
+    'COALESCE((SELECT COUNT(*) FROM vainglory_publication_comments comment '
+    "WHERE comment.publication_id=match_publication.id AND comment.state='confirmed'"
+    '),0) AS match_confirmed_comment_count,'
+    'CASE WHEN match_publication.id IS NULL THEN NULL '
+    'WHEN NOT EXISTS(SELECT 1 FROM vainglory_publication_comments comment '
+    "WHERE comment.publication_id=match_publication.id) THEN 'prepared' "
+    'WHEN EXISTS(SELECT 1 FROM vainglory_publication_comments comment '
+    'WHERE comment.publication_id=match_publication.id '
+    "AND comment.state='unknown_outcome') THEN 'unknown_outcome' "
+    'WHEN EXISTS(SELECT 1 FROM vainglory_publication_comments comment '
+    'WHERE comment.publication_id=match_publication.id '
+    "AND comment.state='failed') THEN 'failed' "
+    'WHEN NOT EXISTS(SELECT 1 FROM vainglory_publication_comments comment '
+    'WHERE comment.publication_id=match_publication.id '
+    "AND comment.state!='confirmed') THEN 'confirmed' "
+    'WHEN EXISTS(SELECT 1 FROM vainglory_publication_comments comment '
+    'WHERE comment.publication_id=match_publication.id '
+    "AND comment.state='in_flight') THEN 'in_flight' "
+    "ELSE 'prepared' END AS match_comment_state,"
+)
+
+_VAINGLORY_STATUS_JOIN_SQL = (
+    'LEFT JOIN vainglory_scan_jobs match_scan ON match_scan.session_id=session.id '
+    'LEFT JOIN vainglory_publications match_publication '
+    'ON match_publication.id=(SELECT MAX(latest_publication.id) '
+    'FROM vainglory_publications latest_publication '
+    'WHERE latest_publication.session_id=session.id) '
+)
+
 if TYPE_CHECKING:
     from blrec.core.recorder import Recorder
     from blrec.postprocess.postprocessor import Postprocessor
@@ -113,6 +151,14 @@ class RecordingSession:
     source_kind: str = 'live'
     highlight_clip_id: Optional[int] = None
     media_library_item_id: Optional[int] = None
+    match_index_state: Optional[str] = None
+    match_count: int = 0
+    match_publication_state: Optional[str] = None
+    match_description_state: Optional[str] = None
+    match_comment_state: Optional[str] = None
+    match_comment_count: int = 0
+    match_confirmed_comment_count: int = 0
+    match_publication_error: Optional[str] = None
     parts: Tuple[RecordingPart, ...] = ()
 
     @property
@@ -304,6 +350,14 @@ class RecordingSessionSummary:
     highlight_clip_id: Optional[int]
     upload_job: Optional[UploadJobSummary]
     media_library_item_id: Optional[int] = None
+    match_index_state: Optional[str] = None
+    match_count: int = 0
+    match_publication_state: Optional[str] = None
+    match_description_state: Optional[str] = None
+    match_comment_state: Optional[str] = None
+    match_comment_count: int = 0
+    match_confirmed_comment_count: int = 0
+    match_publication_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1499,7 +1553,8 @@ class RecordingJournalBridge:
             'session.deletion_state,session.deletion_error,session.source_kind,'
             'clip.id AS highlight_clip_id,'
             'library.id AS media_library_item_id,'
-            'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
+            + _VAINGLORY_STATUS_SELECT_SQL
+            + 'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
             'AS upload_suppressed FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN upload_suppressions suppression '
@@ -1507,7 +1562,8 @@ class RecordingJournalBridge:
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
             'LEFT JOIN media_library_items library ON library.session_id=session.id '
-            'WHERE session.id=?',
+            + _VAINGLORY_STATUS_JOIN_SQL
+            + 'WHERE session.id=?',
             (session_id,),
         )
         if row is None:
@@ -1586,7 +1642,8 @@ class RecordingJournalBridge:
             'session.deletion_state,session.deletion_error,'
             'session.source_kind,clip.id AS highlight_clip_id,'
             'library.id AS media_library_item_id,'
-            'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
+            + _VAINGLORY_STATUS_SELECT_SQL
+            + 'CASE WHEN suppression.session_id IS NULL THEN 0 ELSE 1 END '
             'AS upload_suppressed FROM recording_sessions session '
             'LEFT JOIN upload_jobs job ON job.session_id=session.id '
             'LEFT JOIN bili_accounts account ON account.id=job.account_id '
@@ -1595,6 +1652,7 @@ class RecordingJournalBridge:
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
             'LEFT JOIN media_library_items library ON library.session_id=session.id '
+            + _VAINGLORY_STATUS_JOIN_SQL
             + where_sql
             + ' ORDER BY session.started_at {},session.id {} LIMIT ? OFFSET ?'.format(
                 direction, direction
@@ -1757,7 +1815,8 @@ class RecordingJournalBridge:
             'AS upload_suppressed,'
             'session.deletion_state,session.deletion_error,session.source_kind,'
             'clip.id AS highlight_clip_id,library.id AS media_library_item_id,'
-            'job.id AS job_id,'
+            + _VAINGLORY_STATUS_SELECT_SQL
+            + 'job.id AS job_id,'
             'job.session_id AS job_session_id,job.account_id,'
             'account.uid AS account_uid,'
             'account.display_name AS account_display_name,'
@@ -1851,7 +1910,8 @@ class RecordingJournalBridge:
             'LEFT JOIN room_upload_policies policy ON policy.room_id=session.room_id '
             'LEFT JOIN highlight_clips clip ON clip.upload_session_id=session.id '
             'LEFT JOIN media_library_items library ON library.session_id=session.id '
-            'LEFT JOIN part_summary ON part_summary.session_id=session.id '
+            + _VAINGLORY_STATUS_JOIN_SQL
+            + 'LEFT JOIN part_summary ON part_summary.session_id=session.id '
             'LEFT JOIN chunk_summary ON chunk_summary.job_id=job.id '
             'LEFT JOIN danmaku_summary ON danmaku_summary.job_id=job.id '
             'ORDER BY session.started_at {0},session.id {0}'
@@ -2585,6 +2645,34 @@ class RecordingJournalBridge:
                 if row['media_library_item_id'] is None
                 else int(row['media_library_item_id'])
             ),
+            match_index_state=(
+                None
+                if row['match_index_state'] is None
+                else str(row['match_index_state'])
+            ),
+            match_count=int(row['match_count']),
+            match_publication_state=(
+                None
+                if row['match_publication_state'] is None
+                else str(row['match_publication_state'])
+            ),
+            match_description_state=(
+                None
+                if row['match_description_state'] is None
+                else str(row['match_description_state'])
+            ),
+            match_comment_state=(
+                None
+                if row['match_comment_state'] is None
+                else str(row['match_comment_state'])
+            ),
+            match_comment_count=int(row['match_comment_count']),
+            match_confirmed_comment_count=int(row['match_confirmed_comment_count']),
+            match_publication_error=(
+                None
+                if row['match_publication_error'] is None
+                else str(row['match_publication_error'])
+            ),
         )
 
     def _make_upload_job_summary(
@@ -2798,6 +2886,47 @@ class RecordingJournalBridge:
                 if 'media_library_item_id' not in row.keys()
                 or row['media_library_item_id'] is None
                 else int(row['media_library_item_id'])
+            ),
+            match_index_state=(
+                None
+                if 'match_index_state' not in row.keys()
+                or row['match_index_state'] is None
+                else str(row['match_index_state'])
+            ),
+            match_count=(int(row['match_count']) if 'match_count' in row.keys() else 0),
+            match_publication_state=(
+                None
+                if 'match_publication_state' not in row.keys()
+                or row['match_publication_state'] is None
+                else str(row['match_publication_state'])
+            ),
+            match_description_state=(
+                None
+                if 'match_description_state' not in row.keys()
+                or row['match_description_state'] is None
+                else str(row['match_description_state'])
+            ),
+            match_comment_state=(
+                None
+                if 'match_comment_state' not in row.keys()
+                or row['match_comment_state'] is None
+                else str(row['match_comment_state'])
+            ),
+            match_comment_count=(
+                int(row['match_comment_count'])
+                if 'match_comment_count' in row.keys()
+                else 0
+            ),
+            match_confirmed_comment_count=(
+                int(row['match_confirmed_comment_count'])
+                if 'match_confirmed_comment_count' in row.keys()
+                else 0
+            ),
+            match_publication_error=(
+                None
+                if 'match_publication_error' not in row.keys()
+                or row['match_publication_error'] is None
+                else str(row['match_publication_error'])
             ),
             parts=parts,
         )

@@ -53,6 +53,14 @@ function summary(): RecordingSessionSummary {
     sourceKind: 'live',
     highlightClipId: null,
     mediaLibraryItemId: null,
+    matchIndexState: null,
+    matchCount: 0,
+    matchPublicationState: null,
+    matchDescriptionState: null,
+    matchCommentState: null,
+    matchCommentCount: 0,
+    matchConfirmedCommentCount: 0,
+    matchPublicationError: null,
     displayState: 'waiting_review',
     availableActions: [
       'edit_submission',
@@ -430,7 +438,8 @@ describe('RecordingSessionRowComponent', () => {
         ...job,
         state: 'submitting',
         nextAttemptAt: 2_000,
-        reviewReason: 'B 站当日投稿数量已达上限（129018），将在次日自动重新投稿',
+        reviewReason:
+          'B 站当日投稿数量已达上限（129018），将在次日自动重新投稿',
       }),
     ).toBe('等待次日投稿');
     expect(
@@ -449,7 +458,7 @@ describe('RecordingSessionRowComponent', () => {
     fixture.detectChanges();
     expect(
       fixture.nativeElement.querySelector('[data-testid="upload-job-reason"]')
-      ?.textContent,
+        ?.textContent,
     ).toContain('验证码或人工验证');
   });
 
@@ -463,8 +472,7 @@ describe('RecordingSessionRowComponent', () => {
         state: 'submitting',
         submitState: 'prepared',
         nextAttemptAt: 2_800,
-        reviewReason:
-          'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',
+        reviewReason: 'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',
         confirmedPartCount: 2,
         discoveredPartCount: 2,
       },

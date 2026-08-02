@@ -85,6 +85,14 @@ function sessionDetail(partId = 11): RecordingSessionDetail {
     sourceKind: 'live',
     highlightClipId: null,
     mediaLibraryItemId: 9,
+    matchIndexState: null,
+    matchCount: 0,
+    matchPublicationState: null,
+    matchDescriptionState: null,
+    matchCommentState: null,
+    matchCommentCount: 0,
+    matchConfirmedCommentCount: 0,
+    matchPublicationError: null,
     displayState: 'not_uploading',
     availableActions: ['delete_local'],
     uploadJob: null,
@@ -236,9 +244,7 @@ describe('MediaLibraryComponent', () => {
     const analyze = fixture.nativeElement.querySelector(
       '[data-testid="analyze-media-matches"]',
     ) as HTMLAnchorElement | null;
-    expect(analyze?.getAttribute('href')).toContain(
-      '/vainglory?sessionId=7',
-    );
+    expect(analyze?.getAttribute('href')).toContain('/vainglory?sessionId=7');
     const links = Array.from(
       fixture.nativeElement.querySelectorAll(
         '[data-testid="edit-media-part"]',

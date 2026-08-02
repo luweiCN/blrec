@@ -90,6 +90,14 @@ function session(local: boolean): RecordingSessionDetail {
     deletionError: null,
     sourceKind: 'live',
     highlightClipId: null,
+    matchIndexState: null,
+    matchCount: 0,
+    matchPublicationState: null,
+    matchDescriptionState: null,
+    matchCommentState: null,
+    matchCommentCount: 0,
+    matchConfirmedCommentCount: 0,
+    matchPublicationError: null,
     displayState: 'completed',
     availableActions: [],
     uploadJob: null,
@@ -441,9 +449,7 @@ describe('VaingloryComponent remote media', () => {
 
   it('bulk excludes selected sessions from anchor statistics', () => {
     vainglory.bulkUpdateSessions.and.returnValue(of({ updatedCount: 2 }));
-    vainglory.listMatchSessions.and.returnValue(
-      of({ total: 0, items: [] }),
-    );
+    vainglory.listMatchSessions.and.returnValue(of({ total: 0, items: [] }));
     component.selectedSessionIds.add(9);
     component.selectedSessionIds.add(10);
 

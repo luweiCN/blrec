@@ -139,6 +139,17 @@ export type RecordingSessionDisplayState =
 
 export type RecordingSessionScope = 'recordings' | 'uploads';
 
+export type MatchIndexState = 'pending' | 'analyzing' | 'ready' | 'failed';
+
+export type MatchPublicationState =
+  'prepared' | 'running' | 'confirmed' | 'paused' | 'failed';
+
+export type MatchDescriptionState =
+  'prepared' | 'in_flight' | 'confirmed' | 'skipped_no_room';
+
+export type MatchCommentState =
+  'prepared' | 'in_flight' | 'unknown_outcome' | 'confirmed' | 'failed';
+
 export interface RecordingSessionFilters {
   readonly scope: RecordingSessionScope;
   readonly query: string;
@@ -407,6 +418,14 @@ export interface RecordingSessionSummary {
   readonly sourceKind: 'live' | 'highlight';
   readonly highlightClipId: number | null;
   readonly mediaLibraryItemId?: number | null;
+  readonly matchIndexState: MatchIndexState | null;
+  readonly matchCount: number;
+  readonly matchPublicationState: MatchPublicationState | null;
+  readonly matchDescriptionState: MatchDescriptionState | null;
+  readonly matchCommentState: MatchCommentState | null;
+  readonly matchCommentCount: number;
+  readonly matchConfirmedCommentCount: number;
+  readonly matchPublicationError: string | null;
   readonly displayState: RecordingSessionDisplayState;
   readonly availableActions: readonly RecordingSessionAction[];
   readonly uploadJob: UploadJobSummary | null;

@@ -1103,6 +1103,44 @@ class BiliAccountRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def _run_danmaku_imports(
+        self, importer: DanmakuImporter, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            processed = None
+            try:
+                processed = await importer.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Bilibili danmaku import worker iteration failed')
+            delay = 1.0 if processed is not None else self._upload_interval_seconds
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_danmaku_publications(
+        self, publisher: DanmakuPublisher, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            processed = None
+            try:
+                processed = await publisher.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Bilibili danmaku publisher iteration failed')
+            delay = (
+                _DANMAKU_ACTION_INTERVAL_SECONDS
+                if processed is not None
+                else min(5.0, self._upload_interval_seconds)
+            )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
     async def _run_uploads(
         self,
         journal: RecordingJournalBridge,
@@ -1131,12 +1169,16 @@ class BiliAccountRuntime:
         review_worker = asyncio.create_task(
             self._run_reviews(review_watcher, stop_event)
         )
+        danmaku_import_worker = asyncio.create_task(
+            self._run_danmaku_imports(danmaku_importer, stop_event)
+        )
+        danmaku_publication_worker = asyncio.create_task(
+            self._run_danmaku_publications(danmaku_publisher, stop_event)
+        )
         try:
             while not stop_event.is_set():
                 upload_processed = None
                 comment_processed = None
-                danmaku_imported = None
-                danmaku_published = None
                 repair_processed = None
                 retry_processed = None
                 try:
@@ -1152,8 +1194,6 @@ class BiliAccountRuntime:
                     elif synced or prepared:
                         self._wake_upload_worker()
                     comment_processed = await comment_publisher.run_once()
-                    danmaku_imported = await danmaku_importer.run_once()
-                    danmaku_published = await danmaku_publisher.run_once()
                     if retention_manager is not None:
                         await retention_manager.run_once()
                 except asyncio.CancelledError:
@@ -1170,15 +1210,11 @@ class BiliAccountRuntime:
                 delay: float
                 if comment_processed is not None:
                     delay = _COMMENT_ACTION_INTERVAL_SECONDS
-                elif danmaku_published is not None:
-                    delay = _DANMAKU_ACTION_INTERVAL_SECONDS
                 elif (
                     upload_processed is not None
                     or repair_processed is not None
                     or retry_processed is not None
                 ):
-                    delay = 1
-                elif danmaku_imported is not None:
                     delay = 1
                 else:
                     delay = self._upload_interval_seconds
@@ -1186,7 +1222,13 @@ class BiliAccountRuntime:
         finally:
             workers = [
                 worker
-                for worker in (upload_pool, collection_worker, review_worker)
+                for worker in (
+                    upload_pool,
+                    collection_worker,
+                    review_worker,
+                    danmaku_import_worker,
+                    danmaku_publication_worker,
+                )
                 if worker is not None
             ]
             for worker in workers:
