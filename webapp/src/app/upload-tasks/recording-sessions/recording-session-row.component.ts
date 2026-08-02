@@ -199,6 +199,32 @@ export class RecordingSessionRowComponent {
     }
   }
 
+  matchChapterLabel(): string {
+    switch (this.session.matchChapterState) {
+      case 'prepared':
+        return '分段：待写入';
+      case 'confirmed':
+        return '分段：已完成';
+      case 'skipped':
+        return '分段：已跳过';
+      default:
+        return '分段：未生成';
+    }
+  }
+
+  matchChapterColor(): string {
+    switch (this.session.matchChapterState) {
+      case 'prepared':
+        return 'processing';
+      case 'confirmed':
+        return 'success';
+      case 'skipped':
+        return 'warning';
+      default:
+        return 'default';
+    }
+  }
+
   matchDescriptionColor(): string {
     switch (this.session.matchDescriptionState) {
       case 'prepared':
