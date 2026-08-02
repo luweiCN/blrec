@@ -1153,8 +1153,8 @@ class VaingloryPublicationService:
 
         def reset(connection: sqlite3.Connection) -> None:
             connection.execute(
-                'UPDATE vainglory_publication_comments SET rpid=NULL,updated_at=? '
-                'WHERE id=?',
+                "UPDATE vainglory_publication_comments SET rpid=NULL,"
+                "uploaded_pictures_json='[]',updated_at=? WHERE id=?",
                 (now, int(comment['id'])),
             )
             if int(comment['ordinal']) == 0:
@@ -1165,7 +1165,11 @@ class VaingloryPublicationService:
                 )
 
         await self._database.write(reset)
-        await self._retry_comment(comment, 'B 站未附加结算图，已删除文字评论并自动重发')
+        await self._retry_comment(
+            comment,
+            'B 站未附加结算图，已删除文字评论并重新上传图片后重发',
+            minimum_delay=60,
+        )
 
     async def _publish_pin(
         self, publication: Mapping[str, Any], bundle: CredentialBundle
@@ -1239,9 +1243,11 @@ class VaingloryPublicationService:
         )
         return _positive_int(value)
 
-    async def _retry_comment(self, comment: Mapping[str, Any], message: str) -> None:
+    async def _retry_comment(
+        self, comment: Mapping[str, Any], message: str, *, minimum_delay: int = 5
+    ) -> None:
         attempt = int(comment['attempt_count'])
-        delay = min(3600, max(5, 2 ** min(attempt + 1, 11)))
+        delay = min(3600, max(minimum_delay, 2 ** min(attempt + 1, 11)))
         now = self._now()
         next_attempt_at = now + delay
 

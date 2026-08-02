@@ -154,6 +154,116 @@ export class RecordingSessionRowComponent {
       : `${this.session.partCount} 个分 P`;
   }
 
+  matchIndexLabel(): string {
+    switch (this.session.matchIndexState) {
+      case 'pending':
+      case 'analyzing':
+        return '对局：识别中';
+      case 'ready':
+        return this.session.matchCount > 0
+          ? `对局：${this.session.matchCount} 局`
+          : '对局：未发现';
+      case 'failed':
+        return '对局：识别失败';
+      default:
+        return '对局：未识别';
+    }
+  }
+
+  matchIndexColor(): string {
+    switch (this.session.matchIndexState) {
+      case 'pending':
+      case 'analyzing':
+        return 'processing';
+      case 'ready':
+        return this.session.matchCount > 0 ? 'success' : 'default';
+      case 'failed':
+        return 'error';
+      default:
+        return 'default';
+    }
+  }
+
+  matchDescriptionLabel(): string {
+    switch (this.session.matchDescriptionState) {
+      case 'prepared':
+        return '简介：待发送';
+      case 'in_flight':
+        return '简介：发送中';
+      case 'confirmed':
+        return '简介：已发送';
+      case 'skipped_no_room':
+        return '简介：空间不足';
+      default:
+        return '简介：未生成';
+    }
+  }
+
+  matchDescriptionColor(): string {
+    switch (this.session.matchDescriptionState) {
+      case 'prepared':
+      case 'in_flight':
+        return 'processing';
+      case 'confirmed':
+        return 'success';
+      case 'skipped_no_room':
+        return 'warning';
+      default:
+        return 'default';
+    }
+  }
+
+  matchCommentLabel(): string {
+    const confirmed = this.session.matchConfirmedCommentCount;
+    const total = this.session.matchCommentCount;
+    if (
+      this.session.matchPublicationState === 'failed' &&
+      this.session.matchCommentState !== 'confirmed'
+    ) {
+      return '评论：失败';
+    }
+    switch (this.session.matchCommentState) {
+      case 'prepared':
+        return total > 0 && confirmed > 0
+          ? `评论：${confirmed} / ${total}`
+          : '评论：待发送';
+      case 'in_flight':
+        return '评论：发送中';
+      case 'unknown_outcome':
+        return '评论：待核对';
+      case 'confirmed':
+        return total > 0
+          ? `评论：已发送 ${confirmed} / ${total}`
+          : '评论：已发送';
+      case 'failed':
+        return '评论：失败';
+      default:
+        return '评论：未生成';
+    }
+  }
+
+  matchCommentColor(): string {
+    if (
+      this.session.matchPublicationState === 'failed' &&
+      this.session.matchCommentState !== 'confirmed'
+    ) {
+      return 'error';
+    }
+    switch (this.session.matchCommentState) {
+      case 'prepared':
+      case 'in_flight':
+        return 'processing';
+      case 'unknown_outcome':
+        return 'warning';
+      case 'confirmed':
+        return 'success';
+      case 'failed':
+        return 'error';
+      default:
+        return 'default';
+    }
+  }
+
   formatDuration(seconds: number | null): string {
     if (seconds === null) {
       return '—';

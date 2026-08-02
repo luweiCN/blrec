@@ -396,6 +396,14 @@ class RecordingSessionResponse(ApiModel):
     source_kind: str
     highlight_clip_id: Optional[int]
     media_library_item_id: Optional[int]
+    match_index_state: Optional[str]
+    match_count: int
+    match_publication_state: Optional[str]
+    match_description_state: Optional[str]
+    match_comment_state: Optional[str]
+    match_comment_count: int
+    match_confirmed_comment_count: int
+    match_publication_error: Optional[str]
     display_state: str
     available_actions: List[str]
     upload_job: Optional[UploadJobProgressResponse]
@@ -433,6 +441,14 @@ class RecordingSessionSummaryResponse(ApiModel):
     source_kind: str
     highlight_clip_id: Optional[int]
     media_library_item_id: Optional[int]
+    match_index_state: Optional[str]
+    match_count: int
+    match_publication_state: Optional[str]
+    match_description_state: Optional[str]
+    match_comment_state: Optional[str]
+    match_comment_count: int
+    match_confirmed_comment_count: int
+    match_publication_error: Optional[str]
     display_state: str
     available_actions: List[str]
     upload_job: Optional[UploadJobSummaryResponse]
@@ -942,6 +958,14 @@ def _session_response(
         source_kind=session.source_kind,
         highlight_clip_id=session.highlight_clip_id,
         media_library_item_id=session.media_library_item_id,
+        match_index_state=session.match_index_state,
+        match_count=session.match_count,
+        match_publication_state=session.match_publication_state,
+        match_description_state=session.match_description_state,
+        match_comment_state=session.match_comment_state,
+        match_comment_count=session.match_comment_count,
+        match_confirmed_comment_count=session.match_confirmed_comment_count,
+        match_publication_error=session.match_publication_error,
         display_state=display_state,
         available_actions=available_actions,
         upload_job=(None if upload_job is None else _upload_job_response(upload_job)),
@@ -984,6 +1008,14 @@ def _session_summary_response(
         source_kind=session.source_kind,
         highlight_clip_id=session.highlight_clip_id,
         media_library_item_id=session.media_library_item_id,
+        match_index_state=session.match_index_state,
+        match_count=session.match_count,
+        match_publication_state=session.match_publication_state,
+        match_description_state=session.match_description_state,
+        match_comment_state=session.match_comment_state,
+        match_comment_count=session.match_comment_count,
+        match_confirmed_comment_count=session.match_confirmed_comment_count,
+        match_publication_error=session.match_publication_error,
         display_state=display_state,
         available_actions=available_actions,
         upload_job=(
