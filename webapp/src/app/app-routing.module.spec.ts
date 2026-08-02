@@ -61,9 +61,6 @@ describe('AppRoutingModule', () => {
     await expectAsync(loadModuleName('vainglory')).toBeResolvedTo(
       'VaingloryModule',
     );
-    await expectAsync(loadModuleName('rankings-preview')).toBeResolvedTo(
-      'PublicDashboardModule',
-    );
     for (const path of [
       'recordings/highlights/:sessionId',
       'upload-tasks/highlights/:sessionId',
@@ -88,10 +85,6 @@ describe('AppRoutingModule', () => {
     ]) {
       expect(route(path).canActivate).toContain(AuthGuard);
     }
-  });
-
-  it('keeps the mock rankings preview public', () => {
-    expect(route('rankings-preview').canActivate).toBeUndefined();
   });
 
   it('does not preload lazy feature modules while the list is idle', () => {

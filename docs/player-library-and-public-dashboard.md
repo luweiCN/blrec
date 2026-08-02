@@ -4,7 +4,9 @@
 
 本期把对局统计的主身份从会变化的直播名称提升为稳定的“玩家”，并允许管理员维护玩家展示名、创建玩家、绑定或改绑直播间。对局录像、OCR、B 站账号和管理能力仍只存在于本地 BLREC。
 
-公网化只发布排行榜所需的只读数据，不把 NAS、SQLite 文件或当前管理 API 暴露到互联网。本期不实现公网部署与同步程序；本文给出后续可直接实施的边界和协议。
+公网化只发布排行榜所需的只读数据，不把 NAS、SQLite 文件或当前管理 API 暴露到互联网。公开榜单源码位于仓库根目录的 `public-dashboard/`，它是一个拥有独立 `package.json`、构建产物和发布流程的 Angular 应用。原有 `webapp/` 只负责 BLREC 后台管理，随 NAS 镜像发布，不包含公开榜单路由。
+
+本期不实现公网部署与同步程序；本文给出后续可直接实施的边界和协议。
 
 ## 领域模型
 
@@ -125,7 +127,9 @@ LIVE INDEX 不是排名分数，而是当前公开快照的状态区，固定展
              Nginx + vg.luwei.host
 ```
 
-静态前端也使用版本目录发布到 `/srv/vg-dashboard/releases/<releaseId>`，验证后再原子切换 `/srv/vg-dashboard/current` 软链接。Nginx 已占用 80/443，第一版不需要额外开放应用端口，也不需要常驻云端 API 或 Docker 容器。
+静态前端由 `public-dashboard/` 独立执行 `npm ci && npm run build`，再把 `dist/` 作为版本目录发布到 `/srv/vg-dashboard/releases/<releaseId>`，验证后原子切换 `/srv/vg-dashboard/current` 软链接。BLREC 的 `webapp/` 构建和 NAS 镜像更新不会发布这个站点；反过来，站点发布也不会改动后台管理。
+
+Nginx 已占用 80/443，第一版不需要额外开放应用端口，也不需要常驻云端 API 或 Docker 容器。
 
 ### 已核查的服务器条件
 

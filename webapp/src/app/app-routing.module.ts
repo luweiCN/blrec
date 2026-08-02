@@ -11,13 +11,6 @@ const routes: Routes = [
     loadChildren: () => import('./auth/auth.module').then((m) => m.AuthModule),
   },
   {
-    path: 'rankings-preview',
-    loadChildren: () =>
-      import('./public-dashboard/public-dashboard.module').then(
-        (m) => m.PublicDashboardModule,
-      ),
-  },
-  {
     path: 'tasks',
     canActivate: [AuthGuard],
     loadChildren: () =>

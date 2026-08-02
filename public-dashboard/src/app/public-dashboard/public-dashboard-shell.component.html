@@ -1,6 +1,6 @@
 <main class="dashboard">
   <header class="site-header">
-    <a class="brand" routerLink="/rankings-preview" aria-label="虚荣对局榜首页">
+    <a class="brand" routerLink="/" aria-label="虚荣对局榜首页">
       <span class="brand-mark" aria-hidden="true"><span>V</span></span>
       <span class="brand-copy">
         <strong>虚荣对局榜</strong>
@@ -10,7 +10,7 @@
 
     <nav aria-label="榜单页面">
       <a
-        routerLink="/rankings-preview"
+        routerLink="/"
         routerLinkActive="active"
         ariaCurrentWhenActive="page"
         [routerLinkActiveOptions]="{ exact: true }"
@@ -18,14 +18,14 @@
         总览
       </a>
       <a
-        routerLink="/rankings-preview/players"
+        routerLink="/players"
         routerLinkActive="active"
         ariaCurrentWhenActive="page"
       >
         玩家排行
       </a>
       <a
-        routerLink="/rankings-preview/heroes"
+        routerLink="/heroes"
         routerLinkActive="active"
         ariaCurrentWhenActive="page"
       >

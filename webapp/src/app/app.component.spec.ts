@@ -72,14 +72,6 @@ describe('AppComponent', () => {
     );
   });
 
-  it('renders the rankings preview without the admin shell', () => {
-    const fixture = TestBed.createComponent(AppComponent);
-    fixture.componentInstance.publicDashboardPage = true;
-    fixture.detectChanges();
-
-    expect(fixture.nativeElement.querySelector('.sidebar')).toBeNull();
-  });
-
   it('shows recording, upload-task, and Bilibili-account navigation', () => {
     const fixture = TestBed.createComponent(AppComponent);
     fixture.detectChanges();
