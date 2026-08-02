@@ -62,6 +62,7 @@ _T = TypeVar('_T')
 
 
 class BiliUploadDatabase:
+    LATEST_SCHEMA_VERSION = 47
     LEASE_TTL_SECONDS = 120
     RENEW_WINDOW_SECONDS = 60
     _CLAIM_TABLES = frozenset(
@@ -156,6 +157,35 @@ class BiliUploadDatabase:
             normalized_states,
             lease_owner,
             int(time.time()) if now is None else int(now),
+            None,
+            False,
+        )
+
+    async def claim_by_id(
+        self,
+        table: str,
+        row_id: int,
+        states: Sequence[str],
+        lease_owner: str,
+        *,
+        now: Optional[int] = None,
+    ) -> Optional[LeaseClaim]:
+        self._validate_claim_table(table)
+        if row_id <= 0:
+            raise ValueError('claim row ID must be positive')
+        if not states:
+            raise ValueError('claim states must not be empty')
+        if not lease_owner:
+            raise ValueError('lease owner must not be empty')
+        normalized_states = tuple(getattr(state, 'value', state) for state in states)
+        return await self._run(
+            self._claim_sync,
+            table,
+            normalized_states,
+            lease_owner,
+            int(time.time()) if now is None else int(now),
+            int(row_id),
+            True,
         )
 
     async def renew(self, claim: LeaseClaim, *, now: Optional[int] = None) -> int:
@@ -271,37 +301,57 @@ class BiliUploadDatabase:
         return list(self._require_connection().execute(sql, parameters).fetchall())
 
     def _claim_sync(
-        self, table: str, states: Tuple[str, ...], lease_owner: str, now: int
+        self,
+        table: str,
+        states: Tuple[str, ...],
+        lease_owner: str,
+        now: int,
+        target_id: Optional[int],
+        ignore_schedule: bool,
     ) -> Optional[LeaseClaim]:
         connection = self._require_connection()
         placeholders = ','.join('?' for _ in states)
         owner_fence = self._claim_owner_fence(table)
+        target_clause = '' if target_id is None else 'AND id=? '
+        schedule_clause = '' if ignore_schedule else 'AND next_attempt_at<=? '
+        selection_parameters: List[Any] = list(states)
+        if target_id is not None:
+            selection_parameters.append(target_id)
+        if not ignore_schedule:
+            selection_parameters.append(now)
+        selection_parameters.append(now)
         connection.execute('BEGIN IMMEDIATE')
         try:
             row = connection.execute(
                 'SELECT id FROM {} WHERE state IN ({}) '
-                'AND next_attempt_at<=? '
+                '{}'
+                '{}'
                 'AND (lease_until IS NULL OR lease_until<=?) '
                 '{} '
                 'ORDER BY priority DESC,next_attempt_at,id LIMIT 1'.format(
-                    table, placeholders, owner_fence
+                    table, placeholders, target_clause, schedule_clause, owner_fence
                 ),
-                (*states, now, now),
+                tuple(selection_parameters),
             ).fetchone()
             if row is None:
                 connection.execute('COMMIT')
                 return None
             row_id = int(row['id'])
             lease_until = now + self.LEASE_TTL_SECONDS
+            update_parameters: List[Any] = [lease_owner, lease_until, row_id]
+            update_parameters.extend(states)
+            if not ignore_schedule:
+                update_parameters.append(now)
+            update_parameters.append(now)
             cursor = connection.execute(
                 'UPDATE {} SET lease_owner=?, '
                 'lease_generation=lease_generation+1,lease_until=?,attempt=attempt+1 '
                 'WHERE id=? AND state IN ({}) '
-                'AND next_attempt_at<=? '
+                '{}'
                 'AND (lease_until IS NULL OR lease_until<=?) {}'.format(
-                    table, placeholders, owner_fence
+                    table, placeholders, schedule_clause, owner_fence
                 ),
-                (lease_owner, lease_until, row_id, *states, now, now),
+                tuple(update_parameters),
             )
             if cursor.rowcount != 1:
                 connection.execute('ROLLBACK')
@@ -452,7 +502,7 @@ class BiliUploadDatabase:
                 ).fetchone()
                 assert row is not None
                 current_version = int(row[0])
-            latest_version = 30
+            latest_version = self.LATEST_SCHEMA_VERSION
             if current_version > latest_version:
                 raise sqlite3.DatabaseError(
                     'database schema is newer than this application'

@@ -31,6 +31,7 @@ from blrec.bili_upload.recording_content import (
     RecordingMediaCandidate,
     RecordingMediaDescriptor,
 )
+from blrec.bili_upload.remote_media import RemoteMediaStatus
 from blrec.bili_upload.session_submission import SessionSubmissionView
 from blrec.flv.common import create_metadata_tag, parse_metadata
 from blrec.flv.io import FlvReader, FlvWriter
@@ -345,6 +346,31 @@ class FakeSubmissionManager:
         return self.view
 
 
+class FakeRemoteMediaCache:
+    def __init__(self) -> None:
+        self.requests = []
+        self.retain_requests = []
+
+    async def status(self, part_id: int) -> RemoteMediaStatus:
+        return RemoteMediaStatus(
+            part_id=part_id,
+            state='missing',
+            progress=0,
+            remote_available=True,
+            account_id=7,
+            bvid='BV1abcdefgh',
+            cid=123,
+            page=1,
+        )
+
+    async def request(
+        self, part_id: int, *, retain_for_playback: bool = False
+    ) -> RemoteMediaStatus:
+        self.requests.append(part_id)
+        self.retain_requests.append(retain_for_playback)
+        return replace(await self.status(part_id), state='pending')
+
+
 @pytest.fixture(autouse=True)
 def restore_router_state() -> Iterator[None]:
     old_journal = recording_sessions.journal
@@ -359,6 +385,7 @@ def restore_router_state() -> Iterator[None]:
         recording_sessions, 'active_recording_metadata_provider', None
     )
     old_active_media_service = getattr(recording_sessions, 'active_media_service', None)
+    old_remote_media_cache = getattr(recording_sessions, 'remote_media_cache', None)
     had_content_reader = hasattr(recording_sessions, 'content_reader')
     old_content_reader = getattr(recording_sessions, 'content_reader', None)
     old_key = security.api_key
@@ -371,6 +398,7 @@ def restore_router_state() -> Iterator[None]:
     recording_sessions.submission_manager = old_submission_manager
     recording_sessions.active_recording_metadata_provider = old_metadata_provider
     recording_sessions.active_media_service = old_active_media_service
+    recording_sessions.remote_media_cache = old_remote_media_cache
     if hasattr(recording_sessions, 'media_snapshot_store'):
         recording_sessions.media_snapshot_store.clear()
     if had_content_reader:
@@ -394,6 +422,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     media.write_bytes(b'0123456789')
     recording_sessions.content_reader = FakeContentReader(media)
     recording_sessions.active_media_service = FakeActiveMediaService()
+    recording_sessions.remote_media_cache = FakeRemoteMediaCache()
     recording_sessions.unavailable_reason = None
     with TestClient(api) as value:
         yield value
@@ -975,6 +1004,27 @@ def test_media_requires_authentication(client: TestClient) -> None:
     response = client.get('/api/v1/recording-sessions/parts/2/media')
 
     assert response.status_code == 401
+
+
+def test_remote_media_download_is_asynchronous_and_exposes_progress(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        '/api/v1/recording-sessions/parts/2/remote-media',
+        headers={'x-api-key': 'test-api-key'},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload['state'] == 'pending'
+    assert payload['progress'] == 0
+    assert payload['remoteAvailable'] is True
+    assert payload['bvid'] == 'BV1abcdefgh'
+    assert payload['page'] == 1
+    cache = recording_sessions.remote_media_cache
+    assert isinstance(cache, FakeRemoteMediaCache)
+    assert cache.requests == [2]
+    assert cache.retain_requests == [True]
 
 
 def test_media_access_token_authorizes_range_requests_without_exposing_api_key(

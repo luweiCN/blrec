@@ -98,6 +98,12 @@ const routes: Routes = [
       ),
   },
   {
+    path: 'vainglory',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./vainglory/vainglory.module').then((m) => m.VaingloryModule),
+  },
+  {
     path: 'upload-policies',
     pathMatch: 'full',
     redirectTo: 'tasks',

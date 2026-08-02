@@ -180,6 +180,29 @@ def test_account_and_upload_routes_reject_round_robin_configuration() -> None:
         NetworkSettings(upload={'mode': 'round_robin'})
     with pytest.raises(ValidationError):
         NetworkSettings(bili_api={'mode': 'round_robin'})
+    with pytest.raises(ValidationError):
+        NetworkSettings(archive_download={'mode': 'round_robin'})
+
+
+def test_archive_download_route_is_sticky_and_never_fails_over() -> None:
+    settings = NetworkSettings(
+        archive_download={'mode': 'fixed', 'interface': 'eth0', 'failoverEnabled': True}
+    )
+    manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
+
+    assert settings.archive_download.failover_enabled is False
+    first = manager.select('archive_download', affinity_key='archive:BV1')
+    again = manager.select('archive_download', affinity_key='archive:BV1')
+    manager.report_failure('archive_download', 'eth0')
+    manager.report_failure('archive_download', 'eth0')
+
+    assert first.interface_name == again.interface_name == 'eth0'
+    assert (
+        manager.select('archive_download', affinity_key='archive:BV1').interface_name
+        == 'eth0'
+    )
+    with pytest.raises(NetworkUnavailable):
+        manager.select('archive_download', affinity_key='archive:BV2')
 
 
 def test_business_http_error_does_not_change_route_health() -> None:

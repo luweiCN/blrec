@@ -1,0 +1,1530 @@
+<nz-page-header
+  nzTitle="虚荣对局索引"
+  nzSubtitle="按直播、玩家、英雄、胜负和模式找到录播里的那一局"
+>
+  <nz-page-header-extra>
+    <button nz-button type="button" (click)="openHeroReviews()">
+      <i nz-icon nzType="question-circle"></i>
+      未识别英雄
+      <ng-container *ngIf="unrecognizedHeroPositionCount > 0">
+        （{{ unrecognizedHeroPositionCount }}）
+      </ng-container>
+    </button>
+    <button nz-button type="button" (click)="openRecordedPlayerReviews()">
+      <i nz-icon nzType="user-switch"></i>
+      主播英雄待确认
+      <ng-container *ngIf="recordedPlayerReviewTotal > 0">
+        （{{ recordedPlayerReviewTotal }}）
+      </ng-container>
+    </button>
+    <button
+      nz-button
+      type="button"
+      (click)="analysisTaskModalVisible = true"
+    >
+      <i nz-icon nzType="unordered-list"></i>
+      对局分析任务
+      <ng-container *ngIf="analysisQueue as queue">
+        （{{ queue.active.length }} 执行中 / {{ queue.pendingCount }} 等待）
+      </ng-container>
+    </button>
+    <button nz-button type="button" (click)="openArchiveManager()">
+      <i nz-icon nzType="cloud-download"></i>
+      历史数据接入
+    </button>
+    <button nz-button type="button" (click)="heroManagerVisible = true">
+      <i nz-icon nzType="database"></i>
+      英雄库
+    </button>
+    <button nz-button type="button" (click)="refreshPage()">
+      <i nz-icon nzType="reload"></i>
+      刷新
+    </button>
+  </nz-page-header-extra>
+</nz-page-header>
+
+<main class="vainglory-page" aria-live="polite">
+  <section
+    *ngIf="indexSummary as summary"
+    class="index-summary-grid"
+    aria-label="对局索引概览"
+  >
+    <article>
+      <span>总对局</span>
+      <strong>{{ summary.matchCount }}</strong>
+      <small>来自 {{ summary.sessionCount }} 场直播</small>
+    </article>
+    <article>
+      <span>已绑定主播</span>
+      <strong>{{ summary.anchorCount }}</strong>
+      <small>另有 {{ summary.unassignedSessionCount }} 场待归属</small>
+    </article>
+    <article>
+      <span>计入统计的战绩</span>
+      <strong>{{ summary.winCount }} 胜 / {{ summary.lossCount }} 负</strong>
+      <small>{{ summary.unknownCount }} 局胜负待确认</small>
+    </article>
+    <button
+      type="button"
+      style="
+        display: grid;
+        gap: 4px;
+        padding: 14px 16px;
+        border: 1px solid #e8e8e8;
+        border-radius: 8px;
+        background: #fff;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      "
+      (click)="openHeroReviews()"
+    >
+      <span>英雄识别率</span>
+      <strong>{{ heroRecognitionPercent(summary) }}%</strong>
+      <small>
+        {{ summary.recognizedHeroCount }}/{{ summary.playerSlotCount }} 个位置
+        <ng-container *ngIf="unrecognizedHeroPositionCount > 0">
+          · 点击处理 {{ unrecognizedHeroPositionCount }} 个未识别位置
+        </ng-container>
+      </small>
+    </button>
+  </section>
+
+  <nz-tabset>
+    <nz-tab nzTitle="列表">
+      <div class="tab-panel">
+        <section *ngIf="sessionId !== null" class="scan-panel">
+          <div>
+            <strong>当前录播：#{{ sessionId }}</strong>
+            <span *ngIf="scanView.state === 'loading'">正在读取分析状态…</span>
+            <span *ngIf="scanView.state === 'missing'">尚未分析</span>
+            <span *ngIf="scanView.state === 'error'" class="error-text">
+              {{ scanView.message }}
+            </span>
+            <ng-container *ngIf="scanJob as job">
+              <span>{{ scanStateLabel(job) }}</span>
+              <span *ngIf="job.error" class="error-text">{{ job.error }}</span>
+            </ng-container>
+          </div>
+          <nz-progress
+            *ngIf="
+              scanJob?.state === 'pending' || scanJob?.state === 'analyzing'
+            "
+            [nzPercent]="(scanJob?.progress ?? 0) * 100"
+            [nzShowInfo]="true"
+            nzSize="small"
+          ></nz-progress>
+          <button
+            nz-button
+            nzType="primary"
+            type="button"
+            [nzLoading]="scanRequesting"
+            [disabled]="
+              scanJob?.state === 'pending' || scanJob?.state === 'analyzing'
+            "
+            (click)="requestScan()"
+          >
+            {{
+              scanJob?.state === "ready" || scanJob?.state === "failed"
+                ? "重新分析"
+                : "开始分析"
+            }}
+          </button>
+        </section>
+
+        <section class="filter-panel" aria-label="对局筛选">
+          <input
+            nz-input
+            type="search"
+            maxlength="200"
+            placeholder="直播原标题关键词"
+            [(ngModel)]="sourceTitle"
+            (keyup.enter)="applySearch()"
+          />
+          <input
+            nz-input
+            type="search"
+            maxlength="80"
+            placeholder="玩家名（支持部分匹配）"
+            [(ngModel)]="playerName"
+            (keyup.enter)="applySearch()"
+          />
+          <nz-select
+            nzAllowClear
+            nzShowSearch
+            nzPlaceHolder="全部主播"
+            [(ngModel)]="anchorNameFilter"
+          >
+            <nz-option nzValue="" nzLabel="未知主播"></nz-option>
+            <nz-option
+              *ngFor="let stats of anchorStats; trackBy: trackAnchorStats"
+              [nzValue]="stats.anchorName"
+              [nzLabel]="stats.anchorName"
+            ></nz-option>
+          </nz-select>
+          <nz-select
+            nzAllowClear
+            nzShowSearch
+            nzMode="multiple"
+            nzPlaceHolder="阵容英雄（可多选）"
+            [(ngModel)]="heroIds"
+          >
+            <nz-option
+              *ngFor="let hero of heroes; trackBy: trackHero"
+              [nzValue]="hero.id"
+              [nzLabel]="hero.label || '英雄 #' + hero.id"
+            ></nz-option>
+          </nz-select>
+          <nz-select
+            nzAllowClear
+            nzPlaceHolder="全部统计状态"
+            [(ngModel)]="statsIncludedFilter"
+          >
+            <nz-option [nzValue]="true" nzLabel="计入统计"></nz-option>
+            <nz-option [nzValue]="false" nzLabel="不计入统计"></nz-option>
+          </nz-select>
+          <nz-select
+            nzAllowClear
+            nzPlaceHolder="全部胜负"
+            [(ngModel)]="winnerColor"
+          >
+            <nz-option nzValue="teal" nzLabel="主播获胜"></nz-option>
+            <nz-option nzValue="orange" nzLabel="主播失败"></nz-option>
+          </nz-select>
+          <nz-select
+            nzAllowClear
+            nzPlaceHolder="全部模式"
+            [(ngModel)]="gameMode"
+          >
+            <nz-option nzValue="3v3" nzLabel="3V3"></nz-option>
+            <nz-option nzValue="5v5" nzLabel="5V5"></nz-option>
+            <nz-option nzValue="aram" nzLabel="大乱斗 / 天赋模式"></nz-option>
+            <nz-option nzValue="other" nzLabel="其他"></nz-option>
+            <nz-option nzValue="unknown" nzLabel="待识别"></nz-option>
+          </nz-select>
+          <button
+            nz-button
+            nzType="primary"
+            type="button"
+            (click)="applySearch()"
+          >
+            搜索
+          </button>
+          <button nz-button type="button" (click)="clearSearch()">清空</button>
+        </section>
+
+        <nz-alert
+          *ngIf="sessionsView.state === 'error'"
+          nzType="error"
+          nzShowIcon
+          nzMessage="直播场次加载失败"
+          [nzDescription]="sessionsView.message"
+        ></nz-alert>
+
+        <div *ngIf="sessionsView.state === 'loading'" class="loading-state">
+          <nz-spin nzSimple></nz-spin>
+          <span>正在加载直播场次…</span>
+        </div>
+
+        <div
+          *ngIf="sessionsView.state === 'ready' && sessions.length === 0"
+          class="empty-state"
+        >
+          <strong>没有找到符合条件的对局</strong>
+          <span *ngIf="sessionId === null">
+            请先从“录制任务”选择一场录像并开始分析。
+          </span>
+        </div>
+
+        <section
+          *ngIf="sessionsView.state === 'ready' && sessions.length > 0"
+          class="session-bulk-actions"
+          aria-label="直播场次批量操作"
+        >
+          <label
+            nz-checkbox
+            [ngModel]="currentPageSelected()"
+            (ngModelChange)="selectCurrentPage($event)"
+          >
+            全选本页
+          </label>
+          <span>已选 {{ selectedSessionIds.size }} 场</span>
+          <button
+            nz-button
+            type="button"
+            [nzLoading]="bulkActionLoading('anchor')"
+            [disabled]="
+              selectedSessionIds.size === 0 || bulkUpdatingAction !== null
+            "
+            (click)="bulkSetSessionAnchor()"
+          >
+            批量设置主播
+          </button>
+          <button
+            nz-button
+            type="button"
+            [nzLoading]="bulkActionLoading('include')"
+            [disabled]="
+              selectedSessionIds.size === 0 || bulkUpdatingAction !== null
+            "
+            (click)="bulkSetStatsIncluded(true)"
+          >
+            计入统计
+          </button>
+          <button
+            nz-button
+            nzDanger
+            type="button"
+            [nzLoading]="bulkActionLoading('exclude')"
+            [disabled]="
+              selectedSessionIds.size === 0 || bulkUpdatingAction !== null
+            "
+            (click)="bulkSetStatsIncluded(false)"
+          >
+            不计入统计
+          </button>
+        </section>
+
+        <section class="session-list" aria-label="直播场次列表">
+          <article
+            *ngFor="let session of sessions; trackBy: trackSession"
+            class="session-card"
+          >
+            <header class="session-card-header">
+              <label
+                nz-checkbox
+                class="session-select"
+                [ngModel]="isSessionSelected(session.sessionId)"
+                (ngModelChange)="
+                  setSessionSelected(session.sessionId, $event)
+                "
+              ></label>
+              <div>
+                <h2>{{ session.title || "未命名录播" }}</h2>
+                <p class="session-source">
+                  主播：{{ session.anchorName || "未知" }} · 原直播标题：{{
+                    session.sourceTitle || "未记录"
+                  }}
+                </p>
+                <p>
+                  {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }} ·
+                  {{ session.matchCount }} 局 ·
+                  {{ sessionModes(session) || "模式待识别" }} · 对局累计
+                  {{ formatDuration(session.durationSeconds) }}
+                </p>
+              </div>
+              <div class="session-summary">
+                <nz-tag nzColor="cyan">{{ session.winCount }} 胜</nz-tag>
+                <nz-tag nzColor="volcano">{{ session.lossCount }} 负</nz-tag>
+                <nz-tag *ngIf="session.unknownCount > 0">
+                  {{ session.unknownCount }} 局待核对
+                </nz-tag>
+                <nz-tag
+                  [nzColor]="
+                    session.statsIncluded === false ? 'default' : 'green'
+                  "
+                >
+                  {{
+                    session.statsIncluded === false
+                      ? "不计入统计"
+                      : "计入统计"
+                  }}
+                </nz-tag>
+                <a
+                  *ngIf="sessionBiliUrl(session) as archiveUrl"
+                  nz-button
+                  type="button"
+                  [href]="archiveUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  B站稿件
+                </a>
+                <button
+                  nz-button
+                  type="button"
+                  (click)="openSessionDetails(session)"
+                >
+                  查看详情
+                </button>
+              </div>
+            </header>
+
+            <nz-drawer
+              *ngIf="selectedSession?.sessionId === session.sessionId"
+              [nzVisible]="detailsDrawerVisible"
+              [nzTitle]="session.title || '直播详情'"
+              [nzWidth]="'92vw'"
+              nzPlacement="right"
+              (nzOnClose)="closeSessionDetails()"
+            >
+              <ng-container *nzDrawerContent>
+                <section class="session-details">
+                  <div class="session-title-editor">
+                    <div>
+                      <strong>这场直播的索引标题</strong>
+                      <span>
+                        主播：{{ session.anchorName || "未知" }} ·
+                        原直播标题：{{ session.sourceTitle || "未记录" }}
+                      </span>
+                    </div>
+                    <input
+                      nz-input
+                      maxlength="200"
+                      [(ngModel)]="sessionTitleDraft"
+                      (keyup.enter)="saveSessionTitle()"
+                    />
+                    <button
+                      nz-button
+                      nzType="primary"
+                      type="button"
+                      [nzLoading]="savingSessionTitle"
+                      (click)="saveSessionTitle()"
+                    >
+                      保存直播标题
+                    </button>
+                  </div>
+                  <div class="session-title-editor">
+                    <div>
+                      <strong>这场直播的主播</strong>
+                      <span>
+                        从房间管理中的主播列表选择，支持搜索主播名和房间号
+                      </span>
+                    </div>
+                    <nz-select
+                      class="anchor-select"
+                      nzShowSearch
+                      nzPlaceHolder="搜索并选择主播"
+                      [nzLoading]="managedAnchorsLoading"
+                      [(ngModel)]="sessionAnchorDraft"
+                    >
+                      <nz-option
+                        *ngFor="let anchor of managedAnchors"
+                        [nzValue]="anchor.anchorName"
+                        [nzLabel]="anchor.label"
+                      ></nz-option>
+                    </nz-select>
+                    <button
+                      nz-button
+                      nzType="primary"
+                      type="button"
+                      [nzLoading]="savingSessionAnchor"
+                      [disabled]="!sessionAnchorDraft"
+                      (click)="saveSessionAnchor()"
+                    >
+                      保存主播
+                    </button>
+                  </div>
+                  <ng-container
+                    *ngIf="detailsFor(session.sessionId) as details"
+                  >
+                    <div
+                      *ngIf="details.state === 'loading'"
+                      class="details-state"
+                    >
+                      <nz-spin nzSimple></nz-spin>
+                      <span>正在加载这场直播的对局…</span>
+                    </div>
+                    <nz-alert
+                      *ngIf="details.state === 'error'"
+                      nzType="error"
+                      nzMessage="对局详情加载失败"
+                      [nzDescription]="details.message"
+                    ></nz-alert>
+                    <div *ngIf="details.state === 'ready'" class="match-list">
+                      <article
+                        *ngFor="
+                          let match of details.items;
+                          let matchIndex = index;
+                          trackBy: trackMatch
+                        "
+                        class="match-card"
+                      >
+                        <header>
+                          <div>
+                            <div class="match-title-row">
+                              <h2>第 {{ matchIndex + 1 }} 局</h2>
+                            </div>
+                            <p>
+                              {{ gameModeLabel(match.gameMode) }} · P{{
+                                match.partIndex
+                              }}
+                              · {{ formatDuration(match.startedAtMs / 1000) }} –
+                              {{ formatDuration(match.resultAtMs / 1000) }}
+                            </p>
+                          </div>
+                          <div
+                            class="recorded-player-control"
+                            style="display: grid; width: min(320px, 100%); gap: 5px"
+                          >
+                            <div
+                              style="
+                                display: flex;
+                                align-items: center;
+                                justify-content: space-between;
+                                gap: 8px;
+                                color: #595959;
+                                font-size: 12px;
+                              "
+                            >
+                              <span>主人公英雄</span>
+                              <nz-tag
+                                [nzColor]="recordedPlayerStateColor(match)"
+                                style="margin-right: 0"
+                              >
+                                {{ recordedPlayerStateLabel(match) }}
+                              </nz-tag>
+                            </div>
+                            <div
+                              style="
+                                display: grid;
+                                grid-template-columns: 32px minmax(0, 1fr);
+                                align-items: center;
+                                gap: 7px;
+                              "
+                            >
+                              <span
+                                style="
+                                  display: grid;
+                                  width: 32px;
+                                  height: 32px;
+                                  overflow: hidden;
+                                  place-items: center;
+                                  border-radius: 50%;
+                                  background: #f0f0f0;
+                                  color: #8c8c8c;
+                                "
+                              >
+                                <ng-container
+                                  *ngIf="
+                                    recordedPlayer(match) as selectedPlayer;
+                                    else missingRecordedPlayerAvatar
+                                  "
+                                >
+                                  <img
+                                    *ngIf="
+                                      heroThumbnail(selectedPlayer) as thumbnail;
+                                      else missingRecordedPlayerAvatar
+                                    "
+                                    [src]="thumbnail"
+                                    [alt]="plainHeroName(selectedPlayer)"
+                                    style="
+                                      width: 32px;
+                                      height: 32px;
+                                      object-fit: cover;
+                                    "
+                                  />
+                                </ng-container>
+                                <ng-template #missingRecordedPlayerAvatar>
+                                  <span aria-hidden="true">?</span>
+                                </ng-template>
+                              </span>
+                              <nz-select
+                                nzShowSearch
+                                nzPlaceHolder="选择主人公所用英雄"
+                                style="min-width: 0"
+                                [ngModel]="recordedPlayerSelection(match)"
+                                [nzLoading]="recordedPlayerSaving(match)"
+                                [nzDisabled]="
+                                  match.recordedPlayerState === 'unsupported' ||
+                                  savingRecordedPlayerMatchId !== null
+                                "
+                                (ngModelChange)="
+                                  selectRecordedPlayer(match, $event)
+                                "
+                              >
+                                <nz-option
+                                  *ngFor="
+                                    let player of recordedPlayerCandidates(match);
+                                    trackBy: trackPlayer
+                                  "
+                                  [nzValue]="recordedPlayerOptionValue(player)"
+                                  [nzLabel]="recordedPlayerOptionLabel(player)"
+                                ></nz-option>
+                              </nz-select>
+                            </div>
+                          </div>
+                          <div class="result-summary">
+                            <nz-tag
+                              [nzColor]="
+                                match.winnerColor === 'teal'
+                                  ? 'cyan'
+                                  : 'volcano'
+                              "
+                            >
+                              {{ winnerLabel(match) }}
+                            </nz-tag>
+                            <strong>{{
+                              formatDuration(match.durationSeconds)
+                            }}</strong>
+                            <button
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              [nzLoading]="matchMediaOpening(match, 'play')"
+                              [disabled]="!matchMediaReady(match)"
+                              (click)="openMatch(match)"
+                            >
+                              播放
+                            </button>
+                            <button
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              [nzLoading]="matchMediaOpening(match, 'clip')"
+                              [disabled]="!matchMediaReady(match)"
+                              (click)="openMatchClip(match)"
+                            >
+                              剪辑
+                            </button>
+                            <a
+                              *ngIf="biliPlaybackUrl(match) as playbackUrl"
+                              nz-button
+                              nzType="link"
+                              [href]="playbackUrl"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              B站播放
+                            </a>
+                            <ng-container
+                              *ngIf="remoteMediaStatus(match) as remoteMedia"
+                            >
+                              <button
+                                *ngIf="
+                                  remoteMedia.remoteAvailable &&
+                                  !matchMediaReady(match)
+                                "
+                                nz-button
+                                type="button"
+                                [nzLoading]="
+                                  matchMediaOpening(match, 'download')
+                                "
+                                [disabled]="remoteMediaActive(remoteMedia)"
+                                (click)="downloadMatchMedia(match)"
+                              >
+                                {{
+                                  remoteMediaActive(remoteMedia)
+                                    ? "下载中"
+                                    : remoteMedia.state === "failed"
+                                      ? "重新下载"
+                                      : "下载视频"
+                                }}
+                              </button>
+                              <nz-progress
+                                *ngIf="remoteMediaActive(remoteMedia)"
+                                data-testid="match-remote-media-progress"
+                                nzSize="small"
+                                [nzPercent]="remoteMediaPercent(match.partId)"
+                              ></nz-progress>
+                              <span
+                                *ngIf="remoteMedia.state === 'failed'"
+                                class="remote-media-error"
+                              >
+                                {{ remoteMedia.error || "下载失败，可重试" }}
+                              </span>
+                              <span
+                                *ngIf="
+                                  !remoteMedia.remoteAvailable &&
+                                  !matchMediaReady(match) &&
+                                  remoteMedia.state !== 'failed'
+                                "
+                                class="remote-media-unavailable"
+                              >
+                                暂无可下载的视频源
+                              </span>
+                            </ng-container>
+                          </div>
+                        </header>
+
+                        <div class="match-content">
+                          <figure class="match-result-frame">
+                            <ng-container
+                              *ngIf="
+                                match.resultFrameUrl as resultFrameUrl;
+                                else missingResultFrame
+                              "
+                            >
+                              <div class="match-result-frame-preview">
+                                <img
+                                  nz-image
+                                  [nzSrc]="resultFrameUrl"
+                                  alt="对局结算画面"
+                                  loading="lazy"
+                                />
+                              </div>
+                            </ng-container>
+                            <ng-template #missingResultFrame>
+                              <div class="missing-result-frame">
+                                未保存结算画面
+                              </div>
+                            </ng-template>
+                          </figure>
+                          <section
+                            *ngFor="let side of ['left', 'right']"
+                            class="team"
+                            [class.teal-team]="
+                              teamColor(match, $any(side)) === 'teal'
+                            "
+                            [class.orange-team]="
+                              teamColor(match, $any(side)) === 'orange'
+                            "
+                          >
+                            <h3>
+                              {{ teamLabel(teamColor(match, $any(side))) }}
+                              <span>
+                                {{ teamKills(match, $any(side)) ?? "—" }} 击杀 ·
+                                {{
+                                  formatEconomy(teamEconomy(match, $any(side)))
+                                }}
+                                经济
+                              </span>
+                            </h3>
+                            <div
+                              *ngFor="
+                                let player of players(match, $any(side));
+                                trackBy: trackPlayer
+                              "
+                              class="player-row"
+                            >
+                              <div class="hero">
+                                <img
+                                  *ngIf="
+                                    heroThumbnail(player) as thumbnail;
+                                    else heroPlaceholder
+                                  "
+                                  [src]="thumbnail"
+                                  [alt]="heroName(player)"
+                                />
+                                <ng-template #heroPlaceholder>
+                                  <span aria-hidden="true">?</span>
+                                </ng-template>
+                                <small>
+                                  {{ heroName(player) }}
+                                  <ng-container *ngIf="player.heroSource === 'manual'">
+                                    · 人工
+                                  </ng-container>
+                                </small>
+                              </div>
+                              <strong [title]="player.name">
+                                {{ player.name || "未识别玩家" }}
+                              </strong>
+                              <span class="kda">{{ formatKda(player) }}</span>
+                              <span>{{ formatEconomy(player.economy) }}</span>
+                            </div>
+                          </section>
+                        </div>
+                      </article>
+                    </div>
+                  </ng-container>
+                </section>
+              </ng-container>
+            </nz-drawer>
+          </article>
+        </section>
+
+        <div *ngIf="total > 0" class="pagination-bar">
+          <span>共 {{ total }} 场直播</span>
+          <nz-pagination
+            nzSize="small"
+            [nzPageIndex]="pageIndex"
+            [nzPageSize]="pageSize"
+            [nzTotal]="total"
+            [nzShowSizeChanger]="false"
+            (nzPageIndexChange)="pageChanged($event)"
+          ></nz-pagination>
+        </div>
+        <nz-modal
+          [(nzVisible)]="bulkAnchorModalVisible"
+          nzTitle="批量设置主播"
+          nzOkText="确认设置"
+          nzCancelText="取消"
+          [nzOkDisabled]="!bulkAnchorDraft"
+          [nzOkLoading]="bulkActionLoading('anchor')"
+          [nzMaskClosable]="bulkUpdatingAction !== 'anchor'"
+          (nzOnOk)="confirmBulkSetSessionAnchor()"
+          (nzOnCancel)="closeBulkAnchorModal()"
+        >
+          <ng-container *nzModalContent>
+            <p>将选中的 {{ selectedSessionIds.size }} 场直播设置为：</p>
+            <nz-select
+              class="bulk-anchor-select"
+              nzShowSearch
+              nzPlaceHolder="搜索主播名或房间号"
+              [nzLoading]="managedAnchorsLoading"
+              [(ngModel)]="bulkAnchorDraft"
+            >
+              <nz-option
+                *ngFor="let anchor of managedAnchors"
+                [nzValue]="anchor.anchorName"
+                [nzLabel]="anchor.label"
+              ></nz-option>
+            </nz-select>
+          </ng-container>
+        </nz-modal>
+      </div>
+    </nz-tab>
+    <nz-tab nzTitle="数据">
+      <div class="tab-panel">
+        <nz-alert
+          *ngIf="anchorStatsView.state === 'error'"
+          nzType="error"
+          nzShowIcon
+          nzMessage="主播数据加载失败"
+          [nzDescription]="anchorStatsView.message"
+        ></nz-alert>
+        <div *ngIf="anchorStatsView.state === 'loading'" class="loading-state">
+          <nz-spin nzSimple></nz-spin>
+          <span>正在汇总主播数据…</span>
+        </div>
+        <div
+          *ngIf="anchorStatsView.state === 'ready' && anchorStats.length === 0"
+          class="empty-state"
+        >
+          <strong>还没有可统计的主播对局</strong>
+          <span>对局分析完成后，这里会按主播自动汇总。</span>
+        </div>
+        <section
+          *ngIf="anchorStats.length > 0"
+          class="anchor-stats-grid"
+          aria-label="主播对局统计"
+        >
+          <article
+            *ngFor="let stats of anchorStats; trackBy: trackAnchorStats"
+            class="anchor-stats-card"
+          >
+            <header>
+              <div>
+                <h2>{{ stats.anchorName || "未知主播" }}</h2>
+                <span>
+                  {{ stats.sessionCount }} 场直播
+                  <ng-container *ngIf="stats.anchorUid !== null">
+                    · UID {{ stats.anchorUid }}
+                  </ng-container>
+                </span>
+              </div>
+              <a
+                *ngIf="stats.roomId > 0"
+                nz-button
+                nzType="link"
+                [href]="'https://live.bilibili.com/' + stats.roomId"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                直播间 {{ stats.roomId }}
+              </a>
+            </header>
+            <dl>
+              <div>
+                <dt>总对局</dt>
+                <dd>{{ stats.matchCount }}</dd>
+              </div>
+              <div>
+                <dt>胜</dt>
+                <dd class="wins">{{ stats.winCount }}</dd>
+              </div>
+              <div>
+                <dt>负</dt>
+                <dd class="losses">{{ stats.lossCount }}</dd>
+              </div>
+              <div>
+                <dt>胜率</dt>
+                <dd>{{ stats.winRate | percent: "1.0-1" }}</dd>
+              </div>
+            </dl>
+            <p *ngIf="stats.unknownCount > 0">
+              另有 {{ stats.unknownCount }} 局胜负待核对
+            </p>
+          </article>
+        </section>
+      </div>
+    </nz-tab>
+  </nz-tabset>
+</main>
+
+<nz-modal
+  [nzVisible]="archiveManagerVisible"
+  nzTitle="历史 B 站稿件接入"
+  [nzFooter]="null"
+  [nzWidth]="1040"
+  (nzOnCancel)="closeArchiveManager()"
+>
+  <ng-container *nzModalContent>
+    <p class="archive-manager-help">
+      选择当前保存迁移后稿件的投稿账号。系统会下载新稿件的最高画质并逐个分 P
+      分析；不足 10 分钟的分 P 会跳过。识别结果会回填到同一个新稿件的简介和置顶评论，
+      分析完成即删除临时视频。进程异常退出后会从未完成任务继续。
+    </p>
+    <nz-alert
+      *ngIf="archiveAccountsError"
+      nzType="error"
+      [nzMessage]="archiveAccountsError"
+    ></nz-alert>
+    <nz-spin [nzSpinning]="archiveAccountsLoading">
+      <nz-alert
+        *ngIf="!archiveAccountsLoading && archiveAccounts.length === 0"
+        nzType="info"
+        nzMessage="没有可用的 B 站账号"
+      ></nz-alert>
+      <div class="archive-account-list">
+        <div
+          *ngFor="let account of archiveAccounts"
+          class="archive-account-row"
+        >
+          <img
+            *ngIf="account.avatarUrl"
+            [src]="account.avatarUrl"
+            alt=""
+            referrerpolicy="no-referrer"
+          />
+          <div class="archive-account-summary">
+            <strong>{{ account.displayName }}</strong>
+            <span>UID {{ account.uid }}</span>
+            <ng-container
+              *ngIf="archiveSyncs.get(account.id) as sync; else notSynced"
+            >
+              <span>{{ archiveSyncLabel(sync) }}</span>
+              <span *ngIf="sync.operatorPaused">任务已暂停</span>
+              <span>
+                今日已领取 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个 ·
+                已扫描至第 {{ sync.nextPage - 1 }} 页
+              </span>
+              <nz-progress
+                *ngIf="archiveSyncActive(sync)"
+                nzSize="small"
+                [nzPercent]="archiveSyncPercent(sync)"
+              ></nz-progress>
+              <span *ngIf="sync.error" class="error-text">
+                {{ sync.error }}
+              </span>
+            </ng-container>
+            <ng-template #notSynced>
+              <span>尚未接入</span>
+            </ng-template>
+          </div>
+          <div
+            *ngIf="archiveSyncs.get(account.id) as sync"
+            class="archive-account-controls"
+          >
+            <label [for]="'archive-daily-limit-' + account.id">
+              每日上限
+            </label>
+            <input
+              nz-input
+              type="number"
+              min="1"
+              max="500"
+              step="1"
+              [id]="'archive-daily-limit-' + account.id"
+              [ngModel]="archiveDailyLimit(account.id, sync)"
+              (ngModelChange)="setArchiveDailyLimit(account.id, $event)"
+            />
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              [nzLoading]="requestingArchiveAccountIds.has(account.id)"
+              (click)="updateArchiveSyncControl(account, sync)"
+            >
+              保存
+            </button>
+            <button
+              *ngIf="archiveSyncActive(sync)"
+              nz-button
+              nzSize="small"
+              type="button"
+              [nzLoading]="requestingArchiveAccountIds.has(account.id)"
+              (click)="
+                updateArchiveSyncControl(account, sync, !sync.operatorPaused)
+              "
+            >
+              {{ sync.operatorPaused ? "继续" : "暂停" }}
+            </button>
+          </div>
+          <button
+            nz-button
+            nzType="primary"
+            type="button"
+            [nzLoading]="requestingArchiveAccountIds.has(account.id)"
+            [disabled]="
+              archiveSyncs.get(account.id)?.state === 'discovering' ||
+              archiveSyncs.get(account.id)?.state === 'running'
+            "
+            (click)="requestArchiveSync(account)"
+          >
+            {{
+              archiveSyncs.get(account.id)?.state === "ready" ||
+              archiveSyncs.get(account.id)?.state === "failed"
+                ? "重新扫描"
+                : "开始接入"
+            }}
+          </button>
+          <section
+            *ngIf="archiveItems(account.id).length > 0"
+            class="archive-processing-panel"
+          >
+            <div
+              *ngFor="let current of archiveActiveItems(account.id)"
+              class="archive-current-item"
+            >
+              <header>
+                <div>
+                  <span class="archive-target-label">新稿件</span>
+                  <a
+                    [href]="
+                      'https://www.bilibili.com/video/' + current.bvid
+                    "
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {{ current.title }}
+                  </a>
+                </div>
+                <nz-tag nzColor="processing">
+                  {{ archiveStageLabel(current) }}
+                </nz-tag>
+              </header>
+              <div class="archive-item-meta">
+                <span>{{ current.bvid }}</span>
+                <span *ngIf="current.pageCount > 0">
+                  分 P
+                  {{ current.currentPage || current.completedPageCount || 1 }}/{{
+                    current.pageCount
+                  }}
+                </span>
+                <span *ngIf="current.currentPartTitle">
+                  {{ current.currentPartTitle }}
+                </span>
+                <span>已识别 {{ current.matchCount }} 局</span>
+              </div>
+              <nz-progress
+                nzSize="small"
+                [nzPercent]="archiveItemPercent(current)"
+                [nzStatus]="current.stage === 'failed' ? 'exception' : 'active'"
+              ></nz-progress>
+              <div class="archive-stage-grid">
+                <div>
+                  <strong>下载</strong>
+                  <span>{{ archiveDownloadLabel(current) }}</span>
+                </div>
+                <div>
+                  <strong>分析</strong>
+                  <span>{{ archiveAnalysisLabel(current) }}</span>
+                </div>
+                <div>
+                  <strong>OCR / 英雄</strong>
+                  <span>{{ archiveOcrLabel(current) }}</span>
+                </div>
+                <div>
+                  <strong>回填新稿件</strong>
+                  <span>{{ archivePublicationLabel(current) }}</span>
+                </div>
+              </div>
+              <span *ngIf="current.error" class="error-text">
+                {{ current.error }}
+              </span>
+            </div>
+            <div
+              *ngIf="archiveRecentItems(account.id).length > 0"
+              class="archive-recent-items"
+            >
+              <strong>最近处理</strong>
+              <a
+                *ngFor="let item of archiveRecentItems(account.id)"
+                [href]="'https://www.bilibili.com/video/' + item.bvid"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <span>{{ item.title }}</span>
+                <small>{{ archiveStageLabel(item) }}</small>
+              </a>
+            </div>
+          </section>
+        </div>
+      </div>
+    </nz-spin>
+    <section class="archive-content-reviews">
+      <header>
+        <div>
+          <h3>疑似非虚荣的公开稿件</h3>
+          <span>
+            所有分 P 已完成分析但未发现虚荣结算；仅供复核，不会自动删除
+          </span>
+        </div>
+        <strong>{{ archiveContentReviewTotal }} 个</strong>
+      </header>
+      <nz-alert
+        *ngIf="archiveContentReviewsError"
+        nzType="error"
+        [nzMessage]="archiveContentReviewsError"
+      ></nz-alert>
+      <nz-spin [nzSpinning]="archiveContentReviewsLoading">
+        <nz-empty
+          *ngIf="
+            !archiveContentReviewsLoading &&
+            !archiveContentReviewsError &&
+            archiveContentReviews.length === 0
+          "
+          nzNotFoundContent="暂时没有疑似非虚荣稿件"
+        ></nz-empty>
+        <ul *ngIf="archiveContentReviews.length > 0">
+          <li *ngFor="let review of archiveContentReviews">
+            <div>
+              <a
+                [href]="'https://www.bilibili.com/video/' + review.bvid"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {{ review.title }}
+              </a>
+              <span>
+                {{ review.accountName }} · {{ review.bvid }}
+                <ng-container *ngIf="review.publishedAt !== null">
+                  ·
+                  {{
+                    review.publishedAt * 1000
+                      | date: "yyyy-MM-dd HH:mm"
+                  }}
+                </ng-container>
+              </span>
+            </div>
+            <small>{{ review.reason }}</small>
+          </li>
+        </ul>
+      </nz-spin>
+      <nz-pagination
+        *ngIf="archiveContentReviewTotal > archiveContentReviewPageSize"
+        nzSize="small"
+        [nzPageIndex]="archiveContentReviewPageIndex"
+        [nzPageSize]="archiveContentReviewPageSize"
+        [nzTotal]="archiveContentReviewTotal"
+        [nzShowSizeChanger]="false"
+        (nzPageIndexChange)="archiveContentReviewPageChanged($event)"
+      ></nz-pagination>
+    </section>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="heroReviewVisible"
+  nzTitle="未识别英雄"
+  [nzFooter]="null"
+  [nzWidth]="1080"
+  (nzOnCancel)="heroReviewVisible = false"
+>
+  <ng-container *nzModalContent>
+    <p class="recorded-player-review-help">
+      这里只显示仍有英雄空位的结算画面。请按阵营和行号选择英雄；人工结果会触发稿件内容刷新，并且不会被后续自动识别或整段重扫覆盖。
+    </p>
+    <nz-alert
+      *ngIf="heroReviewView.state === 'error'"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="heroReviewView.message"
+    ></nz-alert>
+    <div *ngIf="heroReviewView.state === 'loading'" class="loading-state">
+      <nz-spin nzSimple></nz-spin>
+      <span>正在加载未识别英雄…</span>
+    </div>
+    <div
+      *ngIf="heroReviewView.state === 'ready' && heroReviews.length === 0"
+      class="empty-state"
+    >
+      <strong>没有待处理的英雄位置</strong>
+      <span>当前所有英雄位置都已有识别结果。</span>
+    </div>
+    <section
+      *ngIf="heroReviews.length > 0"
+      class="hero-review-list"
+      style="display: grid; gap: 12px; max-height: 68vh; overflow: auto"
+      aria-label="未识别英雄列表"
+    >
+      <article
+        *ngFor="let match of heroReviews; trackBy: trackMatch"
+        class="hero-review-item"
+        style="
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+          gap: 12px;
+          padding: 12px;
+          border: 1px solid #e8e8e8;
+          border-radius: 8px;
+        "
+      >
+        <figure style="margin: 0">
+          <img
+            *ngIf="match.resultFrameUrl"
+            nz-image
+            [nzSrc]="match.resultFrameUrl"
+            alt="存在未识别英雄的结算画面"
+            loading="lazy"
+            style="display: block; width: 100%; background: #000"
+          />
+        </figure>
+        <div style="display: grid; align-content: start; gap: 10px">
+          <header
+            style="display: flex; justify-content: space-between; gap: 12px"
+          >
+            <div style="display: grid">
+              <strong>{{ match.title || "未命名录播" }}</strong>
+              <span style="color: #8c8c8c">
+                P{{ match.partIndex }} ·
+                {{ formatDuration(match.resultAtMs / 1000) }} ·
+                {{ gameModeLabel(match.gameMode) }}
+              </span>
+            </div>
+            <a
+              *ngIf="biliPlaybackUrl(match) as playbackUrl"
+              [href]="playbackUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              B站播放
+            </a>
+          </header>
+          <div style="display: grid; gap: 8px">
+            <article
+              *ngFor="
+                let player of unrecognizedPlayers(match);
+                trackBy: trackPlayer
+              "
+              style="
+                display: grid;
+                grid-template-columns: minmax(130px, 0.7fr)
+                  minmax(180px, 1fr) auto;
+                align-items: center;
+                gap: 8px;
+                padding-top: 8px;
+                border-top: 1px solid #f0f0f0;
+              "
+            >
+              <div style="display: grid; min-width: 0">
+                <strong>{{ heroReviewPositionLabel(player) }}</strong>
+                <span
+                  style="
+                    overflow: hidden;
+                    color: #8c8c8c;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                  "
+                >
+                  {{ player.name || "未识别玩家" }}
+                </span>
+              </div>
+              <nz-select
+                nzShowSearch
+                nzAllowClear
+                nzPlaceHolder="搜索并选择英雄"
+                [ngModel]="heroReviewDraft(match, player)"
+                [nzDisabled]="savingHeroReviewKey !== null"
+                (ngModelChange)="setHeroReviewDraft(match, player, $event)"
+              >
+                <nz-option
+                  *ngFor="let hero of heroes; trackBy: trackHero"
+                  [nzValue]="hero.id"
+                  [nzLabel]="hero.label"
+                ></nz-option>
+              </nz-select>
+              <button
+                nz-button
+                nzType="primary"
+                type="button"
+                [nzLoading]="heroReviewSaving(match, player)"
+                [disabled]="
+                  heroReviewDraft(match, player) === null ||
+                  savingHeroReviewKey !== null
+                "
+                (click)="saveHeroReview(match, player)"
+              >
+                保存
+              </button>
+            </article>
+          </div>
+        </div>
+      </article>
+    </section>
+    <p
+      *ngIf="heroReviewTotal > heroReviews.length"
+      class="recorded-player-review-help"
+    >
+      当前先显示前 {{ heroReviews.length }} 场，共 {{ heroReviewTotal }}
+      场；处理完成后重新打开会继续加载下一批。
+    </p>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="recordedPlayerReviewVisible"
+  nzTitle="主播英雄待确认"
+  [nzFooter]="null"
+  [nzWidth]="1080"
+  (nzOnCancel)="recordedPlayerReviewVisible = false"
+>
+  <ng-container *nzModalContent>
+    <p class="recorded-player-review-help">
+      这里只显示高亮差异不足、算法主动放弃的结算画面。请从蓝绿色主播队中选择被录制者所在的一行；人工确认结果不会被后续自动识别覆盖。
+    </p>
+    <nz-alert
+      *ngIf="recordedPlayerReviewView.state === 'error'"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="recordedPlayerReviewView.message"
+    ></nz-alert>
+    <div
+      *ngIf="recordedPlayerReviewView.state === 'loading'"
+      class="loading-state"
+    >
+      <nz-spin nzSimple></nz-spin>
+      <span>正在加载待确认截图…</span>
+    </div>
+    <div
+      *ngIf="
+        recordedPlayerReviewView.state === 'ready' &&
+        recordedPlayerReviews.length === 0
+      "
+      class="empty-state"
+    >
+      <strong>没有待确认的主播英雄</strong>
+      <span>当前所有可判断的结算画面均已确认。</span>
+    </div>
+    <section
+      *ngIf="recordedPlayerReviews.length > 0"
+      class="recorded-player-review-list"
+      style="display: grid; gap: 12px; max-height: 68vh; overflow: auto"
+      aria-label="主播英雄待确认列表"
+    >
+      <article
+        *ngFor="let match of recordedPlayerReviews; trackBy: trackMatch"
+        class="recorded-player-review-item"
+        style="
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+          gap: 12px;
+        "
+      >
+        <figure style="margin: 0">
+          <img
+            *ngIf="match.resultFrameUrl"
+            nz-image
+            [nzSrc]="match.resultFrameUrl"
+            alt="待确认的对局结算画面"
+            loading="lazy"
+            style="width: 100%; background: #000"
+          />
+        </figure>
+        <div style="display: grid; align-content: start; gap: 8px">
+          <header style="display: flex; justify-content: space-between">
+            <div style="display: grid">
+              <strong>{{ match.title || "未命名录播" }}</strong>
+              <span>
+                P{{ match.partIndex }} ·
+                {{ formatDuration(match.resultAtMs / 1000) }} ·
+                {{ gameModeLabel(match.gameMode) }}
+              </span>
+            </div>
+            <a
+              *ngIf="biliPlaybackUrl(match) as playbackUrl"
+              [href]="playbackUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              B站播放
+            </a>
+          </header>
+          <div
+            class="recorded-player-candidates"
+            style="display: grid; gap: 6px"
+          >
+            <article
+              *ngFor="
+                let player of recordedPlayerCandidates(match);
+                trackBy: trackPlayer
+              "
+              style="
+                display: grid;
+                grid-template-columns: 42px minmax(0, 1fr) auto;
+                align-items: center;
+                gap: 8px;
+              "
+            >
+              <div
+                class="recorded-player-candidate-hero"
+                style="width: 42px; height: 42px"
+              >
+                <img
+                  *ngIf="heroThumbnail(player) as thumbnail"
+                  [src]="thumbnail"
+                  [alt]="heroName(player)"
+                  style="width: 100%; height: 100%; border-radius: 50%"
+                />
+                <span *ngIf="!heroThumbnail(player)" aria-hidden="true">?</span>
+              </div>
+              <div style="display: grid">
+                <strong>{{ player.name || "未识别玩家" }}</strong>
+                <span>
+                  {{ heroName(player) }} · {{ formatKda(player) }}
+                </span>
+              </div>
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="
+                  recordedPlayerSaving(match) &&
+                  savingRecordedPlayerSlot === player.slot
+                "
+                [disabled]="savingRecordedPlayerMatchId !== null"
+                (click)="confirmRecordedPlayer(match, player)"
+              >
+                确认此行
+              </button>
+            </article>
+          </div>
+        </div>
+      </article>
+    </section>
+    <p
+      *ngIf="recordedPlayerReviewTotal > recordedPlayerReviews.length"
+      class="recorded-player-review-help"
+    >
+      当前先显示前 {{ recordedPlayerReviews.length }} 条，共
+      {{ recordedPlayerReviewTotal }} 条；确认后重新打开会继续加载下一批。
+    </p>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="heroManagerVisible"
+  nzTitle="英雄库"
+  [nzFooter]="null"
+  [nzWidth]="860"
+  (nzOnCancel)="heroManagerVisible = false"
+>
+  <ng-container *nzModalContent>
+    <p class="hero-manager-help">
+      固定使用 57 个标准高清英雄头像；当前已加载 {{ heroes.length }}
+      项。低置信度结果会保留为未识别，不会生成错误英雄或覆盖标准头像。
+    </p>
+    <nz-alert
+      *ngIf="heroesView.state === 'error'"
+      nzType="error"
+      [nzMessage]="heroesView.message"
+    ></nz-alert>
+    <div class="hero-grid">
+      <div
+        *ngFor="let hero of heroes; trackBy: trackHero"
+        class="hero-library-item"
+      >
+        <img [src]="hero.thumbnailUrl" alt="" />
+        <strong>{{ hero.label }}</strong>
+      </div>
+    </div>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="analysisTaskModalVisible"
+  nzTitle="对局分析任务"
+  [nzFooter]="null"
+  [nzWidth]="860"
+  (nzOnCancel)="analysisTaskModalVisible = false"
+>
+  <ng-container *nzModalContent>
+    <section
+      *ngIf="analysisQueue as queue; else analysisQueueLoading"
+      class="analysis-task-center"
+      aria-label="对局分析任务中心"
+    >
+      <header>
+        <div>
+          <h2>任务状态</h2>
+          <span>
+            新录播优先处理
+            <ng-container *ngIf="indexSampledAt !== null">
+              · SSE 更新于 {{ indexSampledAt * 1000 | date: "HH:mm:ss" }}
+            </ng-container>
+          </span>
+        </div>
+        <nz-tag
+          [nzColor]="
+            queue.workerState === 'failed'
+              ? 'red'
+              : queue.active.length > 0
+                ? 'blue'
+                : 'default'
+          "
+        >
+          {{ analysisQueueWorkerLabel(queue) }}
+        </nz-tag>
+      </header>
+
+      <div *ngFor="let active of queue.active" class="analysis-active-task">
+        <div>
+          <strong>{{ active.title || "未命名直播" }}</strong>
+          <span>
+            {{ analysisQueueCategoryLabel(active.category) }} · 分 P
+            {{ active.partIndex }}
+            <ng-container *ngIf="active.anchorName">
+              · {{ active.anchorName }}
+            </ng-container>
+          </span>
+        </div>
+        <div class="analysis-active-status">
+          <span>{{ analysisQueueStageLabel(active) }}</span>
+          <span>
+            最后进度 {{ active.updatedAt * 1000 | date: "HH:mm:ss" }}
+          </span>
+        </div>
+        <nz-progress
+          nzSize="small"
+          nzStatus="active"
+          [nzPercent]="analysisQueuePercent(active)"
+        ></nz-progress>
+      </div>
+
+      <div *ngIf="queue.active.length === 0" class="analysis-idle-state">
+        当前没有正在执行的分析任务。
+      </div>
+
+      <div class="analysis-queue-counts">
+        <span><strong>{{ queue.pendingCount }}</strong> 总等待</span>
+        <span><strong>{{ queue.manualPending }}</strong> 手动任务</span>
+        <span><strong>{{ queue.realtimePending }}</strong> 新录播</span>
+        <span><strong>{{ queue.archivePending }}</strong> 历史接入</span>
+        <span><strong>{{ queue.migrationPending }}</strong> 稿件迁移</span>
+        <span><strong>{{ queue.backlogPending }}</strong> 旧数据重扫</span>
+      </div>
+
+      <div *ngIf="queue.queued.length > 0" class="analysis-next-tasks">
+        <strong>接下来处理</strong>
+        <ol>
+          <li *ngFor="let queued of queue.queued">
+            <span>
+              {{ analysisQueueCategoryLabel(queued.category) }} ·
+              {{ analysisQueueStageLabel(queued) }}
+            </span>
+            <strong>{{ queued.title || "未命名直播" }}</strong>
+            <small>
+              分 P {{ queued.partIndex }}
+              <ng-container *ngIf="queued.anchorName">
+                · {{ queued.anchorName }}
+              </ng-container>
+            </small>
+          </li>
+        </ol>
+      </div>
+    </section>
+    <ng-template #analysisQueueLoading>
+      <nz-spin nzSimple></nz-spin>
+    </ng-template>
+  </ng-container>
+</nz-modal>
+
+<app-part-video-dialog
+  *ngIf="previewSession && previewPart"
+  [visible]="previewVisible"
+  [session]="previewSession"
+  [part]="previewPart"
+  [initialSeekSeconds]="previewSeekSeconds"
+  (visibleChange)="closePreview()"
+></app-part-video-dialog>

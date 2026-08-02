@@ -325,7 +325,9 @@ describe('HighlightEditorComponent', () => {
           useValue: {
             snapshot: {
               paramMap: { get: () => '9' },
-              queryParamMap: { get: () => '11' },
+              queryParamMap: {
+                get: (key: string) => (key === 'partId' ? '11' : null),
+              },
             },
           },
         },
@@ -521,6 +523,19 @@ describe('HighlightEditorComponent', () => {
     expect(component.positionPercent(45_000)).toBe(50);
     expect(fixture.nativeElement.querySelectorAll('.marker-pin').length).toBe(
       0,
+    );
+  });
+
+  it('opens the selected part at the requested match start offset', () => {
+    Object.defineProperty(component, 'initialSeekMs', { value: 12_000 });
+
+    (
+      component as unknown as { loadTimeline(initial: boolean): void }
+    ).loadTimeline(true);
+
+    expect(component.selectedPart?.partId).toBe(11);
+    expect(component.playheadMs).toBe(
+      (component.selectedPart?.timelineStartMs ?? 0) + 12_000,
     );
   });
 

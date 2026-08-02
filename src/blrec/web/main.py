@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -74,6 +75,7 @@ from .routers import (
     tasks,
     update,
     upload_covers,
+    vainglory,
     validation,
     websockets,
 )
@@ -219,12 +221,212 @@ async def _realtime_highlight_snapshot() -> List[Mapping[str, object]]:
     return list(await highlight_worker.progress())
 
 
+async def _realtime_archive_migration_snapshot() -> Mapping[str, object]:
+    service = _bili_account_runtime.archive_migration
+    if service is None:
+        return {'migrations': [], 'items': {}}
+    statuses = await service.list_statuses()
+    migrations: List[Dict[str, object]] = []
+    items: Dict[str, object] = {}
+    for status_value in statuses:
+        migrations.append(
+            {
+                'id': status_value.id,
+                'sourceUid': status_value.source_uid,
+                'sourceName': status_value.source_name,
+                'downloadAccountId': status_value.download_account_id,
+                'targetAccountId': status_value.target_account_id,
+                'state': status_value.state,
+                'progress': status_value.progress,
+                'discoveredCount': status_value.discovered_count,
+                'completedCount': status_value.completed_count,
+                'failedCount': status_value.failed_count,
+                'error': status_value.error,
+                'requestedAt': status_value.requested_at,
+                'startedAt': status_value.started_at,
+                'completedAt': status_value.completed_at,
+                'updatedAt': status_value.updated_at,
+                'operatorPaused': status_value.operator_paused,
+                'dailyLimit': status_value.daily_limit,
+                'dailyUsed': status_value.daily_used,
+                'quotaDay': status_value.quota_day,
+            }
+        )
+        item_values = await service.list_items(status_value.id, limit=100)
+        items[str(status_value.id)] = [
+            {
+                'id': item.id,
+                'migrationId': item.migration_id,
+                'bvid': item.bvid,
+                'title': item.title,
+                'publishedAt': item.published_at,
+                'state': item.state,
+                'progress': item.progress,
+                'pageCount': item.page_count,
+                'downloadedPageCount': item.downloaded_page_count,
+                'attemptCount': item.attempt_count,
+                'sessionId': item.session_id,
+                'uploadJobId': item.upload_job_id,
+                'uploadState': item.upload_state,
+                'submitState': item.submit_state,
+                'commentBranchState': item.comment_branch_state,
+                'danmakuBranchState': item.danmaku_branch_state,
+                'analysisState': item.analysis_state,
+                'targetBvid': item.target_bvid,
+                'error': item.error,
+                'updatedAt': item.updated_at,
+            }
+            for item in item_values
+        ]
+    return {'migrations': migrations, 'items': items}
+
+
+async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
+    index_service = _bili_account_runtime.vainglory_service
+    analysis_queue: Dict[str, object] = {
+        'workerState': 'stopped',
+        'active': [],
+        'queued': [],
+        'pendingCount': 0,
+        'manualPending': 0,
+        'realtimePending': 0,
+        'archivePending': 0,
+        'migrationPending': 0,
+        'backlogPending': 0,
+    }
+    index_summary: Dict[str, int] = {
+        'matchCount': 0,
+        'sessionCount': 0,
+        'anchorCount': 0,
+        'unassignedSessionCount': 0,
+        'winCount': 0,
+        'lossCount': 0,
+        'unknownCount': 0,
+        'playerSlotCount': 0,
+        'recognizedHeroCount': 0,
+    }
+    if index_service is not None:
+        queue_status = await index_service.analysis_queue_status()
+        summary = await index_service.index_summary()
+
+        def queue_item(value: Any) -> Dict[str, object]:
+            return {
+                'partId': value.part_id,
+                'sessionId': value.session_id,
+                'partIndex': value.part_index,
+                'title': value.title,
+                'anchorName': value.anchor_name,
+                'state': value.state,
+                'stage': value.stage,
+                'category': value.category,
+                'progress': value.progress,
+                'requestedAt': value.requested_at,
+                'startedAt': value.started_at,
+                'updatedAt': value.updated_at,
+            }
+
+        analysis_queue = {
+            'workerState': index_service.worker_state,
+            'active': [queue_item(item) for item in queue_status.active],
+            'queued': [queue_item(item) for item in queue_status.queued],
+            'pendingCount': queue_status.pending_count,
+            'manualPending': queue_status.manual_pending,
+            'realtimePending': queue_status.realtime_pending,
+            'archivePending': queue_status.archive_pending,
+            'migrationPending': queue_status.migration_pending,
+            'backlogPending': queue_status.backlog_pending,
+        }
+        index_summary = {
+            'matchCount': summary.match_count,
+            'sessionCount': summary.session_count,
+            'anchorCount': summary.anchor_count,
+            'unassignedSessionCount': summary.unassigned_session_count,
+            'winCount': summary.win_count,
+            'lossCount': summary.loss_count,
+            'unknownCount': summary.unknown_count,
+            'playerSlotCount': summary.player_slot_count,
+            'recognizedHeroCount': summary.recognized_hero_count,
+        }
+    return {
+        'sampledAt': int(time.time()),
+        'analysisQueue': analysis_queue,
+        'indexSummary': index_summary,
+    }
+
+
+async def _realtime_archive_backfill_snapshot() -> Mapping[str, object]:
+    service = _bili_account_runtime.archive_backfill
+    if service is None:
+        return {'syncs': [], 'items': {}}
+    statuses = await service.list_statuses()
+    syncs: List[Dict[str, object]] = []
+    items: Dict[str, object] = {}
+    for status_value in statuses:
+        syncs.append(
+            {
+                'accountId': status_value.account_id,
+                'state': status_value.state,
+                'progress': status_value.progress,
+                'discoveredCount': status_value.discovered_count,
+                'completedCount': status_value.completed_count,
+                'error': status_value.error,
+                'requestedAt': status_value.requested_at,
+                'startedAt': status_value.started_at,
+                'completedAt': status_value.completed_at,
+                'updatedAt': status_value.updated_at,
+                'operatorPaused': status_value.operator_paused,
+                'dailyLimit': status_value.daily_limit,
+                'dailyUsed': status_value.daily_used,
+                'quotaDay': status_value.quota_day,
+                'nextPage': status_value.next_page,
+                'discoveryComplete': status_value.discovery_complete,
+            }
+        )
+        item_values = await service.list_items(status_value.account_id, limit=30)
+        items[str(status_value.account_id)] = [
+            {
+                'id': item.id,
+                'accountId': item.account_id,
+                'aid': item.aid,
+                'bvid': item.bvid,
+                'title': item.title,
+                'publishedAt': item.published_at,
+                'state': item.state,
+                'stage': item.stage,
+                'progress': item.progress,
+                'pageCount': item.page_count,
+                'completedPageCount': item.completed_page_count,
+                'currentPage': item.current_page,
+                'currentPartTitle': item.current_part_title,
+                'downloadProgress': item.download_progress,
+                'downloadedBytes': item.downloaded_bytes,
+                'totalBytes': item.total_bytes,
+                'analysisState': item.analysis_state,
+                'analysisProgress': item.analysis_progress,
+                'matchCount': item.match_count,
+                'publicationState': item.publication_state,
+                'descriptionState': item.description_state,
+                'commentCount': item.comment_count,
+                'confirmedCommentCount': item.confirmed_comment_count,
+                'pinState': item.pin_state,
+                'publicationProgress': item.publication_progress,
+                'error': item.error,
+                'updatedAt': item.updated_at,
+            }
+            for item in item_values
+        ]
+    return {'syncs': syncs, 'items': items}
+
+
 _realtime_sampler = RealtimeSampler(
     realtime.broker,
     task_provider=_realtime_task_snapshot,
     network_provider=network.snapshot,
     upload_provider=_realtime_upload_snapshot,
     highlight_provider=_realtime_highlight_snapshot,
+    archive_migration_provider=_realtime_archive_migration_snapshot,
+    archive_backfill_provider=_realtime_archive_backfill_snapshot,
+    vainglory_index_provider=_realtime_vainglory_index_snapshot,
 )
 
 
@@ -284,9 +486,11 @@ async def _active_highlight_durations(session_id: int) -> Mapping[int, int]:
 
 
 bili_accounts.manager = None
+bili_accounts.archive_migration = None
 bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
 recording_sessions.journal = None
 recording_sessions.content_reader = None
+recording_sessions.remote_media_cache = None
 recording_sessions.task_actions = None
 recording_sessions.session_action_runner = None
 recording_sessions.session_batch_runner = None
@@ -317,6 +521,9 @@ browser_extension.highlight_service = None
 browser_extension.policy_manager = None
 browser_extension.category_catalog = None
 browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
+vainglory.service = None
+vainglory.archive_backfill = None
+vainglory.unavailable_reason = _bili_account_runtime.unavailable_reason
 network.manager = _network_route_manager
 control_operations.journal = _control_operation_journal
 
@@ -459,9 +666,11 @@ async def on_startup() -> None:
         await _notification_dispatcher.start()
         await _bili_account_runtime.start()
         bili_accounts.manager = _bili_account_runtime.manager
+        bili_accounts.archive_migration = _bili_account_runtime.archive_migration
         bili_accounts.unavailable_reason = _bili_account_runtime.unavailable_reason
         recording_sessions.journal = _bili_account_runtime.journal
         recording_sessions.content_reader = _bili_account_runtime.content_reader
+        recording_sessions.remote_media_cache = _bili_account_runtime.remote_media_cache
         recording_sessions.task_actions = _bili_account_runtime.task_actions
         recording_sessions.session_action_runner = (
             _bili_account_runtime.run_recording_session_action
@@ -501,6 +710,9 @@ async def on_startup() -> None:
         browser_extension.policy_manager = _bili_account_runtime.policy_manager
         browser_extension.category_catalog = _bili_account_runtime.category_catalog
         browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
+        vainglory.service = _bili_account_runtime.vainglory_service
+        vainglory.archive_backfill = _bili_account_runtime.archive_backfill
+        vainglory.unavailable_reason = _bili_account_runtime.unavailable_reason
         application_launch_entered = True
         await app.launch()
         await settings_apply.recover()
@@ -525,8 +737,10 @@ async def on_startup() -> None:
             finally:
                 security.reset()
             bili_accounts.manager = None
+            bili_accounts.archive_migration = None
             recording_sessions.journal = None
             recording_sessions.content_reader = None
+            recording_sessions.remote_media_cache = None
             recording_sessions.task_actions = None
             recording_sessions.session_action_runner = None
             recording_sessions.session_batch_runner = None
@@ -543,6 +757,8 @@ async def on_startup() -> None:
             highlights.worker = None
             highlights.upload_task_creator = None
             highlights.clip_deleter = None
+            vainglory.service = None
+            vainglory.archive_backfill = None
             browser_extension.reset()
             await _realtime_sampler.stop()
             if settings_apply_started:
@@ -599,8 +815,10 @@ async def on_shuntdown() -> None:
             security.reset()
         await _realtime_sampler.stop()
         bili_accounts.manager = None
+        bili_accounts.archive_migration = None
         recording_sessions.journal = None
         recording_sessions.content_reader = None
+        recording_sessions.remote_media_cache = None
         recording_sessions.task_actions = None
         recording_sessions.session_action_runner = None
         recording_sessions.session_batch_runner = None
@@ -617,6 +835,8 @@ async def on_shuntdown() -> None:
         highlights.worker = None
         highlights.upload_task_creator = None
         highlights.clip_deleter = None
+        vainglory.service = None
+        vainglory.archive_backfill = None
         browser_extension.reset()
         try:
             if settings_apply is not None:
@@ -672,6 +892,7 @@ api.include_router(room_upload_policies.router, prefix='/api/v1')
 api.include_router(upload_covers.router, prefix='/api/v1')
 api.include_router(bili_collections.router, prefix='/api/v1')
 api.include_router(highlights.router, prefix='/api/v1')
+api.include_router(vainglory.router, prefix='/api/v1')
 api.include_router(browser_extension.router, prefix='/api/v1')
 
 

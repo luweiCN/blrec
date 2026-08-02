@@ -178,6 +178,339 @@
       </div>
   </nz-card>
 
+  <nz-card class="archive-migration-card" nzTitle="账号稿件迁移">
+    <nz-alert
+      nzType="info"
+      nzShowIcon
+      nzMessage="把旧账号的稿件转成新账号上传任务"
+      nzDescription="系统会逐个读取源账号公开稿件，使用所选登录账号的 Cookie 下载最高画质和全部分 P，再为目标账号创建可编辑的上传任务。重复扫描不会重复创建任务。"
+    ></nz-alert>
+
+    <div class="archive-migration-form">
+      <div class="form-row">
+        <label for="archive-source-uid">源账号 UID</label>
+        <input
+          id="archive-source-uid"
+          nz-input
+          type="number"
+          min="1"
+          step="1"
+          inputmode="numeric"
+          placeholder="填写早期发布视频的大号 UID"
+          data-testid="archive-source-uid"
+          [(ngModel)]="archiveMigrationSourceUid"
+        />
+      </div>
+
+      <div class="form-row">
+        <label for="archive-download-account">下载使用的登录账号</label>
+        <nz-select
+          id="archive-download-account"
+          nzPlaceHolder="选择用于高清下载的 Cookie"
+          data-testid="archive-download-account"
+          [(ngModel)]="archiveDownloadAccountId"
+        >
+          <nz-option
+            *ngFor="let account of activeAccounts"
+            [nzValue]="account.id"
+            [nzLabel]="account.displayName + '（UID ' + account.uid + '）'"
+          ></nz-option>
+        </nz-select>
+      </div>
+
+      <div class="form-row">
+        <label for="archive-target-account">投稿目标账号</label>
+        <nz-select
+          id="archive-target-account"
+          nzPlaceHolder="选择接收上传任务的小号"
+          data-testid="archive-target-account"
+          [(ngModel)]="archiveTargetAccountId"
+        >
+          <nz-option
+            *ngFor="let account of activeAccounts"
+            [nzValue]="account.id"
+            [nzLabel]="account.displayName + '（UID ' + account.uid + '）'"
+          ></nz-option>
+        </nz-select>
+      </div>
+
+      <div class="archive-migration-actions">
+        <button
+          nz-button
+          nzType="primary"
+          type="button"
+          data-testid="start-archive-migration"
+          [nzLoading]="archiveMigrationSubmitting"
+          [disabled]="!canRequestArchiveMigration"
+          (click)="requestArchiveMigration()"
+        >
+          开始读取并创建任务
+        </button>
+        <button
+          nz-button
+          type="button"
+          data-testid="refresh-archive-migrations"
+          [nzLoading]="archiveMigrationsLoading"
+          (click)="refreshArchiveMigrations()"
+        >
+          刷新进度
+        </button>
+      </div>
+    </div>
+
+    <nz-alert
+      *ngIf="activeAccounts.length === 0"
+      class="archive-migration-feedback"
+      nzType="warning"
+      nzShowIcon
+      nzMessage="请先登录至少一个可用的 B 站账号"
+    ></nz-alert>
+    <nz-alert
+      *ngIf="archiveMigrationError"
+      class="archive-migration-feedback"
+      nzType="error"
+      nzShowIcon
+      [nzMessage]="archiveMigrationError"
+    ></nz-alert>
+
+    <nz-empty
+      *ngIf="
+        !archiveMigrationsLoading &&
+        !archiveMigrationError &&
+        archiveMigrations.length === 0
+      "
+      nzNotFoundContent="还没有账号稿件迁移记录"
+    ></nz-empty>
+
+    <section
+      class="archive-migration-list"
+      *ngIf="archiveMigrations.length > 0"
+    >
+      <article
+        class="archive-migration-record"
+        *ngFor="let migration of archiveMigrations"
+      >
+        <div class="archive-migration-panel-header">
+          <div class="archive-migration-panel-title">
+            <strong>
+              {{ archiveMigrationSourceLabel(migration) }}
+              →
+              {{ accountDisplayName(migration.targetAccountId) }}
+            </strong>
+            <span>
+              {{ archiveMigrationStateLabel(migration.state) }}
+              <ng-container *ngIf="migration.operatorPaused">
+                · 已暂停
+              </ng-container>
+              · 已处理
+              {{
+                migration.completedCount + migration.failedCount
+              }}/{{ migration.discoveredCount }}
+              · 已建任务 {{ migration.completedCount }}
+              <ng-container *ngIf="migration.failedCount > 0">
+                · 失败 {{ migration.failedCount }}
+              </ng-container>
+            </span>
+          </div>
+          <div class="archive-migration-panel-progress">
+            <span>{{ archiveMigrationProgress(migration) }}%</span>
+            <nz-progress
+              [nzPercent]="archiveMigrationProgress(migration)"
+              [nzStatus]="archiveMigrationProgressStatus(migration)"
+              [nzShowInfo]="false"
+            ></nz-progress>
+          </div>
+        </div>
+
+        <div class="archive-migration-summary">
+          <div class="archive-migration-counts">
+            <span>发现 {{ migration.discoveredCount }} 个稿件</span>
+            <span>已建任务 {{ migration.completedCount }}</span>
+            <span *ngIf="migration.failedCount > 0">
+              失败 {{ migration.failedCount }}
+            </span>
+            <span>
+              下载账号：{{ accountDisplayName(migration.downloadAccountId) }}
+            </span>
+            <span>
+              今日已领取 {{ migration.dailyUsed }}/{{ migration.dailyLimit }} 个
+            </span>
+          </div>
+          <div
+            *ngIf="archiveMigrationCurrentItem(migration) as current"
+            class="archive-migration-current"
+          >
+            <div class="archive-migration-item-main">
+              <nz-tag [nzColor]="archiveMigrationItemColor(current)">
+                {{ archiveMigrationItemStateLabel(current) }}
+              </nz-tag>
+              <a
+                class="archive-migration-item-title"
+                [href]="archiveSourceUrl(current)"
+                target="_blank"
+                rel="noopener"
+                [title]="current.title"
+              >
+                {{ current.title }}
+              </a>
+              <span class="archive-migration-item-meta">
+                源稿 {{ current.bvid }}
+                <ng-container *ngIf="current.pageCount > 1">
+                  · {{ current.pageCount }} P
+                </ng-container>
+              </span>
+              <a
+                *ngIf="archiveTargetUrl(current) as targetUrl"
+                [href]="targetUrl"
+                target="_blank"
+                rel="noopener"
+              >
+                查看迁移后稿件
+              </a>
+            </div>
+            <nz-progress
+              *ngIf="current.state === 'downloading'"
+              [nzPercent]="archiveMigrationItemProgress(current)"
+              [nzShowInfo]="false"
+              nzStatus="active"
+            ></nz-progress>
+            <nz-alert
+              *ngIf="current.error"
+              nzType="error"
+              nzShowIcon
+              [nzMessage]="current.error"
+            ></nz-alert>
+          </div>
+
+          <nz-collapse
+            *ngIf="archiveMigrationItems(migration).length > 0"
+            class="archive-migration-items"
+          >
+            <nz-collapse-panel
+              [nzHeader]="
+                '稿件明细（最新优先，显示 ' +
+                archiveMigrationItems(migration).length +
+                ' 条）'
+              "
+            >
+              <div
+                class="archive-migration-item"
+                *ngFor="
+                  let item of archiveMigrationItems(migration);
+                  trackBy: trackArchiveMigrationItem
+                "
+              >
+                <div class="archive-migration-item-main">
+                  <nz-tag [nzColor]="archiveMigrationItemColor(item)">
+                    {{ archiveMigrationItemStateLabel(item) }}
+                  </nz-tag>
+                  <a
+                    class="archive-migration-item-title"
+                    [href]="archiveSourceUrl(item)"
+                    target="_blank"
+                    rel="noopener"
+                    [title]="item.title"
+                  >
+                    {{ item.title }}
+                  </a>
+                  <span class="archive-migration-item-meta">
+                    {{ item.bvid }}
+                    <ng-container *ngIf="item.publishedAt">
+                      · {{ item.publishedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
+                    </ng-container>
+                    <ng-container *ngIf="item.pageCount > 1">
+                      · {{ item.pageCount }} P
+                    </ng-container>
+                  </span>
+                  <a
+                    *ngIf="archiveTargetUrl(item) as targetUrl"
+                    [href]="targetUrl"
+                    target="_blank"
+                    rel="noopener"
+                  >
+                    迁移后稿件
+                  </a>
+                </div>
+                <nz-progress
+                  *ngIf="item.state === 'downloading'"
+                  [nzPercent]="archiveMigrationItemProgress(item)"
+                  [nzShowInfo]="false"
+                  nzStatus="active"
+                ></nz-progress>
+                <span *ngIf="item.error" class="archive-migration-item-error">
+                  {{ item.error }}
+                </span>
+              </div>
+            </nz-collapse-panel>
+          </nz-collapse>
+          <div class="archive-migration-controls">
+            <button
+              nz-button
+              type="button"
+              [attr.data-testid]="'toggle-archive-migration-' + migration.id"
+              [nzLoading]="archiveMigrationControlIds.has(migration.id)"
+              (click)="toggleArchiveMigration(migration)"
+            >
+              {{ migration.operatorPaused ? "继续迁移" : "暂停迁移" }}
+            </button>
+            <label [for]="'migration-daily-limit-' + migration.id">
+              每日处理上限
+            </label>
+            <input
+              nz-input
+              type="number"
+              min="1"
+              max="500"
+              step="1"
+              [id]="'migration-daily-limit-' + migration.id"
+              [attr.data-testid]="
+                'archive-migration-daily-limit-' + migration.id
+              "
+              [ngModel]="archiveMigrationDailyLimit(migration)"
+              (ngModelChange)="
+                setArchiveMigrationDailyLimit(migration.id, $event)
+              "
+            />
+            <button
+              nz-button
+              type="button"
+              [attr.data-testid]="
+                'save-archive-migration-daily-limit-' + migration.id
+              "
+              [nzLoading]="archiveMigrationControlIds.has(migration.id)"
+              (click)="updateArchiveMigrationControl(migration)"
+            >
+              保存上限
+            </button>
+          </div>
+          <nz-alert
+            *ngIf="migration.error"
+            nzType="error"
+            nzShowIcon
+            [nzMessage]="migration.error"
+          ></nz-alert>
+          <button
+            *ngIf="
+              migration.failedCount > 0 ||
+              migration.state === 'failed' ||
+              migration.state === 'completed'
+            "
+            nz-button
+            type="button"
+            [disabled]="archiveMigrationSubmitting"
+            (click)="requestArchiveMigration(migration)"
+          >
+            {{
+              migration.failedCount > 0
+                ? '重试 ' + migration.failedCount + ' 个失败稿件'
+                : '重新扫描新稿件'
+            }}
+          </button>
+        </div>
+      </article>
+    </section>
+  </nz-card>
+
   <nz-modal
     nzTitle="设为主账号"
     nzOkText="确认切换"

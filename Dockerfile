@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
 
+ARG BUILDPLATFORM=linux/amd64
 FROM --platform=$BUILDPLATFORM node:18-bookworm-slim AS webapp-builder
 WORKDIR /build
-COPY webapp/package.json webapp/package-lock.json ./webapp/
-RUN cd webapp && npm ci
 COPY webapp ./webapp
-RUN cd webapp && npm run build
+RUN cd webapp && \
+    npm ci && \
+    npm run build && \
+    rm -rf node_modules /root/.npm
 
 FROM python:3.11-slim-bookworm AS wheel-builder
 WORKDIR /build
@@ -18,6 +20,19 @@ COPY --from=webapp-builder /build/src/blrec/data/webapp ./src/blrec/data/webapp
 RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels .
 
 FROM python:3.11-slim-bookworm AS runtime
+WORKDIR /app
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        iproute2 \
+        tesseract-ocr \
+        tesseract-ocr-chi-sim && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=wheel-builder /wheels /wheels
+RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels blrec && \
+    rm -rf /wheels
+COPY scripts/migrate_legacy_settings.py /app/scripts/migrate_legacy_settings.py
+COPY scripts/migrate_biliupforjava_rooms.py /app/scripts/migrate_biliupforjava_rooms.py
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \
@@ -25,15 +40,6 @@ LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.licenses="GPL-3.0-only" \
       org.opencontainers.image.description="Bilibili live recording and publishing service"
-WORKDIR /app
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg iproute2 && \
-    rm -rf /var/lib/apt/lists/*
-COPY --from=wheel-builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels blrec && \
-    rm -rf /wheels
-COPY scripts/migrate_legacy_settings.py /app/scripts/migrate_legacy_settings.py
-COPY scripts/migrate_biliupforjava_rooms.py /app/scripts/migrate_biliupforjava_rooms.py
 ENV BLREC_DEFAULT_SETTINGS_FILE=/cfg/settings.toml \
     BLREC_DEFAULT_LOG_DIR=/log \
     BLREC_DEFAULT_OUT_DIR=/rec \

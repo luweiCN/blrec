@@ -163,6 +163,42 @@ describe('RecordingSessionService', () => {
     danmakuRequest.flush({ items: [], nextCursor: null });
   });
 
+  it('reads and requests an asynchronous remote-media download', () => {
+    service.getRemoteMediaStatus(7).subscribe();
+    const statusRequest = http.expectOne(
+      '/api/v1/recording-sessions/parts/7/remote-media',
+    );
+    expect(statusRequest.request.method).toBe('GET');
+    statusRequest.flush({
+      partId: 7,
+      state: 'downloading',
+      progress: 0.25,
+      remoteAvailable: true,
+      accountId: 2,
+      bvid: 'BV1abcdefgh',
+      cid: 77,
+      page: 1,
+      downloadedBytes: 25,
+      totalBytes: 100,
+      cachedAt: null,
+      expiresAt: null,
+      error: null,
+    });
+
+    service.requestRemoteMedia(7).subscribe();
+    const request = http.expectOne(
+      '/api/v1/recording-sessions/parts/7/remote-media',
+    );
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toBeNull();
+    request.flush({
+      partId: 7,
+      state: 'pending',
+      progress: 0,
+      remoteAvailable: true,
+    });
+  });
+
   it('recognizes only the fixed danmaku cursor conflict', () => {
     const stale = new HttpErrorResponse({
       status: 409,

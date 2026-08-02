@@ -58,6 +58,9 @@ describe('AppRoutingModule', () => {
     await expectAsync(loadModuleName('media-library')).toBeResolvedTo(
       'MediaLibraryModule',
     );
+    await expectAsync(loadModuleName('vainglory')).toBeResolvedTo(
+      'VaingloryModule',
+    );
     for (const path of [
       'recordings/highlights/:sessionId',
       'upload-tasks/highlights/:sessionId',
@@ -69,7 +72,7 @@ describe('AppRoutingModule', () => {
     }
   });
 
-  it('keeps all seven media surfaces behind AuthGuard', () => {
+  it('keeps all media surfaces behind AuthGuard', () => {
     for (const path of [
       'recordings/highlights/:sessionId',
       'upload-tasks/highlights/:sessionId',
@@ -78,6 +81,7 @@ describe('AppRoutingModule', () => {
       'upload-tasks',
       'clips',
       'media-library',
+      'vainglory',
     ]) {
       expect(route(path).canActivate).toContain(AuthGuard);
     }

@@ -88,6 +88,7 @@ class _VideoPacket:
 Probe = Callable[[str], Tuple[MediaProfile, Sequence[int]]]
 
 _FINALIZED_SEEK_PREROLL_MS = 30_000
+_RECORDING_SEEK_PREROLL_MS = 120_000
 _FINALIZED_FINE_SEEK_MARGIN_MS = 100
 _OUTPUT_DURATION_TOLERANCE_MS = 500
 _BOUNDARY_TOLERANCE_MS = 100
@@ -422,7 +423,9 @@ class LosslessClipper:
             label='顺序转码' if sequential else '自动转码',
             required_codec='h264',
         )
-        self._validate_transcoded_boundaries(inspection, output_path)
+        self._validate_transcoded_boundaries(
+            inspection, output_path, sequential=sequential
+        )
         return output_profile
 
     def _concat_segments(
@@ -531,27 +534,26 @@ class LosslessClipper:
         cls, inspection: ClipInspection, error: HighlightCutError
     ) -> bool:
         return cls._can_fallback(error) and any(
-            not source.recording and source.actual_start_ms > 0
-            for source in inspection.sources
+            source.actual_start_ms > 0 for source in inspection.sources
         )
 
     def _cut_source(self, source: InspectedClipSource, output_path: str) -> None:
         input_options: Tuple[str, ...]
         duration_ms = source.actual_end_ms - source.actual_start_ms
-        if source.recording:
-            input_options = (
-                '-i',
-                source.path,
-                '-ss',
-                self._seconds(source.actual_start_ms),
-            )
-        elif source.actual_start_ms == 0:
+        if source.actual_start_ms == 0:
             input_options = ('-i', source.path)
         else:
             # FLV indexes can make one input-side seek land on either adjacent
             # GOP. Seek near the target first, then walk to just before the
-            # keyframe selected during inspection so stream copy keeps it.
-            coarse_seek_ms = max(0, source.actual_start_ms - _FINALIZED_SEEK_PREROLL_MS)
+            # keyframe selected during inspection so stream copy keeps it. A
+            # growing FLV receives a larger pre-roll because its index may be
+            # incomplete, but it still avoids reading hours from the beginning.
+            preroll_ms = (
+                _RECORDING_SEEK_PREROLL_MS
+                if source.recording
+                else _FINALIZED_SEEK_PREROLL_MS
+            )
+            coarse_seek_ms = max(0, source.actual_start_ms - preroll_ms)
             relative_start_ms = source.actual_start_ms - coarse_seek_ms
             fine_seek_ms = max(0, relative_start_ms - _FINALIZED_FINE_SEEK_MARGIN_MS)
             seek_margin_ms = relative_start_ms - fine_seek_ms
@@ -594,11 +596,16 @@ class LosslessClipper:
     ) -> None:
         duration_ms = source.actual_end_ms - source.actual_start_ms
         input_options: Tuple[str, ...]
-        if source.recording or sequential:
+        if sequential:
             input_options = ('-i', source.path)
             fine_seek_ms = source.actual_start_ms
         else:
-            coarse_seek_ms = max(0, source.actual_start_ms - _FINALIZED_SEEK_PREROLL_MS)
+            preroll_ms = (
+                _RECORDING_SEEK_PREROLL_MS
+                if source.recording
+                else _FINALIZED_SEEK_PREROLL_MS
+            )
+            coarse_seek_ms = max(0, source.actual_start_ms - preroll_ms)
             fine_seek_ms = source.actual_start_ms - coarse_seek_ms
             input_options = (
                 ('-i', source.path)
@@ -769,7 +776,7 @@ class LosslessClipper:
         return tuple(parsed)
 
     def _validate_transcoded_boundaries(
-        self, inspection: ClipInspection, output_path: str
+        self, inspection: ClipInspection, output_path: str, *, sequential: bool
     ) -> None:
         if self._probe_override is not None:
             return
@@ -779,13 +786,13 @@ class LosslessClipper:
             first_source.path,
             start_ms=first_source.actual_start_ms,
             duration_ms=_VISUAL_PROBE_WINDOW_MS,
-            recording=first_source.recording,
+            sequential=sequential,
         )
         output_start = self._probe_visual_frames(
             output_path,
             start_ms=0,
             duration_ms=_VISUAL_PROBE_WINDOW_MS,
-            recording=False,
+            sequential=False,
         )
         if not self._visually_matches(output_start[:3], source_start):
             raise HighlightCutError('自动转码结果没有从预检确定的画面开始')
@@ -801,24 +808,24 @@ class LosslessClipper:
             last_source.path,
             start_ms=source_tail_start_ms,
             duration_ms=last_source.actual_end_ms - source_tail_start_ms,
-            recording=last_source.recording,
+            sequential=sequential,
         )
         output_tail = self._probe_visual_frames(
             output_path,
             start_ms=output_tail_start_ms,
             duration_ms=_VISUAL_PROBE_WINDOW_MS * 2,
-            recording=False,
+            sequential=False,
         )
         if not self._visually_matches(output_tail[-3:], source_tail):
             raise HighlightCutError('自动转码结果的结束画面与计划边界不一致')
 
     def _probe_visual_frames(
-        self, path: str, *, start_ms: int, duration_ms: int, recording: bool
+        self, path: str, *, start_ms: int, duration_ms: int, sequential: bool
     ) -> Tuple[bytes, ...]:
         if duration_ms <= 0:
             raise HighlightCutError('画面边界检查范围无效')
         input_options: Tuple[str, ...]
-        if recording:
+        if sequential:
             input_options = ('-i', path)
             fine_seek_ms = start_ms
         else:

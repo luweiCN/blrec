@@ -139,6 +139,16 @@
           </p>
         </div>
         <div class="item-actions">
+          <a
+            *ngIf="item.kind === 'broadcast' && item.state === 'ready'"
+            nz-button
+            nzType="link"
+            data-testid="analyze-media-matches"
+            [routerLink]="['/vainglory']"
+            [queryParams]="{ sessionId: item.sessionId }"
+          >
+            识别对局
+          </a>
           <button
             nz-button
             nzType="link"

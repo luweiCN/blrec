@@ -393,6 +393,53 @@ async def test_preupload_406_defers_without_pausing_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_capacity_grows_on_success_and_steps_back_on_406(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = []
+        for index in range(1, 4):
+            path = tmp_path / 'part-{}.flv'.format(index)
+            path.write_bytes(('part-{}'.format(index)).encode('ascii'))
+            paths.append(path)
+        await prepared_part(database, paths[0])
+        for index, path in enumerate(paths[1:], start=2):
+            await database.execute(
+                'INSERT INTO upload_parts('
+                'id,job_id,part_index,source_path,final_path,artifact_state,'
+                "upload_state) VALUES(?,1,?,?,?,'ready','prepared')",
+                (index, index, str(path), str(path)),
+            )
+        claim = await claim_job(database)
+        protocol = FakeProtocol()
+        capacity_changes = []
+        now = [1000]
+        uploader = UposUploader(
+            database,
+            protocol,
+            chunk_size=32,
+            concurrency=1,
+            clock=lambda: now[0],
+            capacity_changed=capacity_changes.append,
+        )
+
+        await uploader.upload_part(1, bundle=object(), claim=claim)
+        await uploader.upload_part(2, bundle=object(), claim=claim)
+        protocol.preupload_error = BiliApiError(406, operation='preupload')
+        with pytest.raises(UposUploadDeferred):
+            await uploader.upload_part(3, bundle=object(), claim=claim)
+        now[0] += 61
+        await uploader.upload_part(3, bundle=object(), claim=claim)
+
+        assert capacity_changes == [2, 3, 2]
+        assert uploader.task_capacity == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_preupload_http_503_retries_at_most_three_then_succeeds(
     tmp_path: Path,
 ) -> None:

@@ -30,6 +30,8 @@ class _CollectionJob:
 
 
 class CollectionPublisher:
+    _READY_JOB_STATES = ('waiting_review', 'approved', 'completed')
+
     def __init__(
         self,
         database: BiliUploadDatabase,
@@ -51,9 +53,26 @@ class CollectionPublisher:
         return await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='failed',"
             'collection_error=?,updated_at=? '
-            "WHERE state='approved' AND collection_branch_state='running'",
+            "WHERE collection_branch_state='running'",
             ('上次加入合集时程序中断，请先在 B 站确认后再重试', int(self._clock())),
         )
+
+    async def run_once(self) -> Optional[int]:
+        row = await self._database.fetchone(
+            'SELECT job.id FROM upload_jobs job '
+            'JOIN recording_sessions session ON session.id=job.session_id '
+            "WHERE job.state IN ('waiting_review','approved','completed') "
+            "AND job.collection_branch_state='pending' "
+            'AND job.aid IS NOT NULL '
+            'AND EXISTS(SELECT 1 FROM upload_parts part '
+            'WHERE part.job_id=job.id AND part.cid IS NOT NULL) '
+            "AND session.deletion_state='none' ORDER BY job.id LIMIT 1"
+        )
+        if row is None:
+            return None
+        job_id = int(row['id'])
+        await self.create(job_id)
+        return job_id
 
     async def create(self, job_id: int) -> None:
         row = await self._database.fetchone(
@@ -68,12 +87,14 @@ class CollectionPublisher:
             return
         if str(row['deletion_state']) != 'none':
             return
-        if str(row['state']) != 'approved':
-            raise ValueError('collection job is not ready')
+        if str(row['state']) not in self._READY_JOB_STATES:
+            return
         updated = await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='running',"
             'collection_error=NULL,updated_at=? '
-            "WHERE id=? AND state='approved' AND collection_branch_state='pending' "
+            "WHERE id=? "
+            "AND state IN ('waiting_review','approved','completed') "
+            "AND collection_branch_state='pending' "
             'AND EXISTS(SELECT 1 FROM recording_sessions session '
             'WHERE session.id=upload_jobs.session_id '
             "AND session.deletion_state='none')",
@@ -101,7 +122,9 @@ class CollectionPublisher:
         completed = await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='completed',"
             'collection_error=NULL,updated_at=? '
-            "WHERE id=? AND state='approved' AND collection_branch_state='running'",
+            "WHERE id=? "
+            "AND state IN ('waiting_review','approved','completed') "
+            "AND collection_branch_state='running'",
             (int(self._clock()), job_id),
         )
         if completed == 1:
@@ -163,7 +186,9 @@ class CollectionPublisher:
         updated = await self._database.execute(
             "UPDATE upload_jobs SET collection_branch_state='failed',"
             'collection_error=?,updated_at=? '
-            "WHERE id=? AND state='approved' AND collection_branch_state='running'",
+            "WHERE id=? "
+            "AND state IN ('waiting_review','approved','completed') "
+            "AND collection_branch_state='running'",
             (message, int(self._clock()), job_id),
         )
         if updated == 1:

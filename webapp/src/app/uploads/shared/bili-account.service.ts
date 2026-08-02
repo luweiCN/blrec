@@ -8,6 +8,10 @@ import {
   AccountRelationships,
   AccountRemovalRequest,
   AccountRemovalResult,
+  ArchiveMigrationItem,
+  ArchiveMigrationControl,
+  ArchiveMigrationRequest,
+  ArchiveMigrationStatus,
   BiliAccount,
   QrSession,
   RefreshResult,
@@ -70,5 +74,40 @@ export class BiliAccountService {
       `/api/v1/bili-accounts/${accountId}/removal`
     );
     return this.http.post<AccountRemovalResult>(url, request);
+  }
+
+  listArchiveMigrations(): Observable<ArchiveMigrationStatus[]> {
+    const url = this.url.makeApiUrl(
+      '/api/v1/bili-accounts/archive-migrations'
+    );
+    return this.http.get<ArchiveMigrationStatus[]>(url);
+  }
+
+  requestArchiveMigration(
+    request: ArchiveMigrationRequest
+  ): Observable<ArchiveMigrationStatus> {
+    const url = this.url.makeApiUrl(
+      '/api/v1/bili-accounts/archive-migrations'
+    );
+    return this.http.post<ArchiveMigrationStatus>(url, request);
+  }
+
+  listArchiveMigrationItems(
+    migrationId: number
+  ): Observable<ArchiveMigrationItem[]> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/archive-migrations/${migrationId}/items`
+    );
+    return this.http.get<ArchiveMigrationItem[]>(url);
+  }
+
+  updateArchiveMigration(
+    migrationId: number,
+    control: ArchiveMigrationControl
+  ): Observable<ArchiveMigrationStatus> {
+    const url = this.url.makeApiUrl(
+      `/api/v1/bili-accounts/archive-migrations/${migrationId}`
+    );
+    return this.http.patch<ArchiveMigrationStatus>(url, control);
   }
 }

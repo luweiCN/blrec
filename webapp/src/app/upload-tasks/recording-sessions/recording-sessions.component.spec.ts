@@ -48,6 +48,7 @@ import {
 } from '../../core/services/realtime.service';
 import { UrlService } from '../../core/services/url.service';
 import {
+  RemoteMediaStatus,
   RecordingSession,
   RecordingSessionDetail,
   RecordingSessionSummary,
@@ -215,6 +216,8 @@ describe('RecordingSessionsComponent', () => {
         'runSessionAction',
         'retryFailedJobs',
         'previewRetryFailedJobs',
+        'getRemoteMediaStatus',
+        'requestRemoteMedia',
       ],
     );
     clipboard = jasmine.createSpyObj<Clipboard>('Clipboard', ['copy']);
@@ -278,6 +281,23 @@ describe('RecordingSessionsComponent', () => {
       of({ operationId: 'upload-retry-1', status: 'accepted', total: 0 }),
     );
     service.previewRetryFailedJobs.and.returnValue(of({ items: [] }));
+    const downloadingRemoteMedia: RemoteMediaStatus = {
+      partId: 2,
+      state: 'downloading',
+      progress: 0.25,
+      remoteAvailable: true,
+      accountId: 1,
+      bvid: 'BV1abcdefgh',
+      cid: 101,
+      page: 1,
+      downloadedBytes: 25,
+      totalBytes: 100,
+      cachedAt: null,
+      expiresAt: null,
+      error: null,
+    };
+    service.getRemoteMediaStatus.and.returnValue(of(downloadingRemoteMedia));
+    service.requestRemoteMedia.and.returnValue(of(downloadingRemoteMedia));
     detailSession = {
       id: 1,
       roomId: 100,
@@ -703,7 +723,7 @@ describe('RecordingSessionsComponent', () => {
     ).toContain('高光 2');
   });
 
-  it('does not offer highlight editing when a part has no local video', () => {
+  it('queues a remote download when a part has no local video', () => {
     fixture.componentInstance.scope = 'recordings';
     fixture.detectChanges();
     service.getSession.and.returnValue(
@@ -721,9 +741,25 @@ describe('RecordingSessionsComponent', () => {
     );
     fixture.detectChanges();
 
+    const play = document.body.querySelector(
+      '[data-testid="open-part-video"]',
+    ) as HTMLButtonElement | null;
+    const clip = document.body.querySelector(
+      '[data-testid="edit-highlight-part"]',
+    ) as HTMLButtonElement | null;
+    expect(play).not.toBeNull();
+    expect(play?.disabled).toBeFalse();
+    expect(clip).not.toBeNull();
+
+    play?.click();
+    fixture.detectChanges();
+
+    expect(service.requestRemoteMedia).toHaveBeenCalledOnceWith(2);
+    expect(message.info).toHaveBeenCalled();
     expect(
-      document.body.querySelector('[data-testid="edit-highlight-part"]'),
-    ).toBeNull();
+      document.body.querySelector('[data-testid="remote-media-progress"]')
+        ?.textContent,
+    ).toContain('25%');
   });
 
   it('labels derived highlight tasks without offering another cut', () => {
@@ -879,7 +915,7 @@ describe('RecordingSessionsComponent', () => {
     expect(deleteButton?.textContent?.trim()).toBe('删除');
 
     fixture.componentInstance.openSessionAction('retry_failed', [1]);
-    expect(fixture.componentInstance.uploadActionTitle()).toBe('重试上传');
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('重试失败任务');
     fixture.componentInstance.openSessionAction('repair_transcode', [1]);
     expect(fixture.componentInstance.uploadActionTitle()).toBe('修复转码');
     fixture.componentInstance.openSessionAction('backfill_danmaku', [1]);
@@ -888,6 +924,42 @@ describe('RecordingSessionsComponent', () => {
     expect(fixture.componentInstance.uploadActionTitle()).toBe('重新投稿');
     fixture.componentInstance.openSessionAction('delete_local', [1]);
     expect(fixture.componentInstance.uploadActionTitle()).toBe('删除');
+  });
+
+  it('describes a direct frequency retry as an immediate submission retry', () => {
+    fixture.detectChanges();
+    const session = fixture.componentInstance.sessions[0];
+    if (fixture.componentInstance.view.state !== 'ready') {
+      throw new Error('expected a ready recording-session view');
+    }
+    fixture.componentInstance.view = {
+      state: 'ready',
+      response: {
+        ...fixture.componentInstance.view.response,
+        sessions: [
+          {
+            ...session,
+            uploadJob: {
+              ...session.uploadJob!,
+              state: 'submitting',
+              submitState: 'prepared',
+              operatorPaused: false,
+              nextAttemptAt: 2_800,
+              reviewReason:
+                'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',
+              confirmedPartCount: 2,
+              discoveredPartCount: 2,
+            },
+          },
+        ],
+      },
+    };
+    fixture.componentInstance.openSessionAction('retry_failed', [session.id]);
+
+    expect(fixture.componentInstance.uploadActionTitle()).toBe('立即重试投稿');
+    expect(fixture.componentInstance.uploadActionDescription()).toContain(
+      '不会重传已确认的分 P',
+    );
   });
 
   it('shows one completed status and links an approved archive title', () => {

@@ -384,7 +384,8 @@ class RecordingJournalBridge:
                     "AND state IN ('open','cancelled') "
                     "AND deletion_state='none' "
                     'AND NOT EXISTS(SELECT 1 FROM upload_jobs '
-                    'WHERE upload_jobs.session_id=recording_sessions.id) '
+                    'WHERE upload_jobs.session_id=recording_sessions.id '
+                    'AND upload_jobs.preupload_finalized=1) '
                     'ORDER BY id DESC LIMIT 1',
                     (room_id, live_start_time),
                 ).fetchone()
@@ -1693,6 +1694,11 @@ class RecordingJournalBridge:
             'COUNT(*) AS discovered_part_count,'
             "COUNT(CASE WHEN part.upload_state='confirmed' THEN 1 END) "
             'AS confirmed_part_count,'
+            "COUNT(CASE WHEN part.upload_state IN ('completing','unknown_outcome') "
+            'THEN 1 END) AS unknown_upload_part_count,'
+            "COUNT(CASE WHEN part.upload_state IN "
+            "('completing','unknown_outcome','failed') THEN 1 END) "
+            'AS unsafe_resume_part_count,'
             'COALESCE('
             'MIN(CASE WHEN part.total_bytes<=0 '
             'OR part.confirmed_bytes<part.total_bytes '
@@ -1775,8 +1781,22 @@ class RecordingJournalBridge:
             'COALESCE(danmaku_summary.pending,0) AS danmaku_pending,'
             'COALESCE(danmaku_summary.unknown_count,0) AS danmaku_unknown,'
             'COALESCE(danmaku_summary.failed,0) AS danmaku_failed,'
-            "CASE WHEN job.state='paused' "
+            'CASE WHEN ('
+            "(job.state='paused' AND job.operator_paused=0 "
             "AND job.submit_state NOT IN ('in_flight','unknown_outcome') "
+            'AND COALESCE(chunk_summary.discovered_part_count,0)>0 '
+            'AND COALESCE(chunk_summary.unknown_upload_part_count,0)=0) '
+            'OR '
+            "(job.state='submitting' AND job.submit_state='prepared' "
+            'AND job.operator_paused=0 AND job.next_attempt_at>? '
+            'AND (job.lease_until IS NULL OR job.lease_until<=?) '
+            "AND (instr(COALESCE(job.review_reason,''),'137022')>0 "
+            "OR instr(COALESCE(job.review_reason,''),'投稿频控冷却')>0 "
+            "OR instr(COALESCE(job.review_reason,''),'投稿过于频繁')>0) "
+            'AND COALESCE(chunk_summary.discovered_part_count,0)>0 '
+            'AND COALESCE(chunk_summary.confirmed_part_count,0)='
+            'COALESCE(chunk_summary.discovered_part_count,0))'
+            ') '
             "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
             'THEN 1 ELSE 0 END AS can_retry,'
             "CASE WHEN job.state IN ('waiting_review','approved','rejected',"
@@ -1791,7 +1811,7 @@ class RecordingJournalBridge:
             "AND job.submit_state='prepared' "
             'AND (job.lease_until IS NULL OR job.lease_until<=?) '
             'THEN 1 ELSE 0 END AS can_skip,'
-            "CASE WHEN job.state IN ('approved','completed') "
+            "CASE WHEN job.state IN ('approved','rejected','completed') "
             "AND job.submit_state='confirmed' AND job.aid IS NOT NULL "
             "AND COALESCE(job.bvid,'')!='' "
             "AND job.repair_state NOT IN ('queued','checking','reuploading','editing') "
@@ -1804,7 +1824,10 @@ class RecordingJournalBridge:
             "AND job.submit_state='prepared' AND job.operator_paused=0 "
             'THEN 1 ELSE 0 END AS can_pause,'
             "CASE WHEN job.state='paused' AND job.submit_state='prepared' "
-            'AND job.operator_paused=1 THEN 1 ELSE 0 END AS can_resume,'
+            'AND job.operator_paused=1 '
+            'AND COALESCE(chunk_summary.discovered_part_count,0)>0 '
+            'AND COALESCE(chunk_summary.unsafe_resume_part_count,0)=0 '
+            'THEN 1 ELSE 0 END AS can_resume,'
             "CASE WHEN job.state IN ('waiting_artifacts','ready','paused') "
             "AND (job.state!='paused' OR job.operator_paused=1) "
             "AND job.submit_state='prepared' "
@@ -1835,7 +1858,7 @@ class RecordingJournalBridge:
         ).format(direction)
         now = int(self._clock())
         rows = await self._database.fetchall(
-            summary_sql, (*parameters, limit, offset, now, now, now)
+            summary_sql, (*parameters, limit, offset, now, now, now, now, now)
         )
         sampled_at = self._clock()
         return tuple(self._make_session_summary(row, sampled_at) for row in rows)
@@ -2163,7 +2186,7 @@ class RecordingJournalBridge:
                 repair_error=(
                     None if row['repair_error'] is None else str(row['repair_error'])
                 ),
-                can_retry=self._can_retry_upload_job(row),
+                can_retry=self._can_retry_upload_job(row, parts),
                 can_repair=self._can_repair_upload_job(row, parts),
                 can_skip=self._can_skip_upload_job(row),
                 can_repost=self._can_repost_upload_job(row),
@@ -2200,7 +2223,7 @@ class RecordingJournalBridge:
                     else None
                 ),
                 can_pause=self._can_pause_upload_job(row),
-                can_resume=self._can_resume_upload_job(row),
+                can_resume=self._can_resume_upload_job(row, parts),
                 can_edit=self._can_edit_upload_job(row, parts),
                 confirmed_bytes=confirmed_bytes,
                 total_bytes=total_bytes,
@@ -2323,14 +2346,41 @@ class RecordingJournalBridge:
             )
         return result
 
-    @staticmethod
-    def _can_retry_upload_job(row: sqlite3.Row) -> bool:
-        return (
-            str(row['state']) == 'paused'
-            and str(row['submit_state']) not in ('in_flight', 'unknown_outcome')
-            and str(row['repair_state'])
-            not in ('queued', 'checking', 'reuploading', 'editing')
+    def _can_retry_upload_job(
+        self, row: sqlite3.Row, parts: Sequence[UploadPartProgress]
+    ) -> bool:
+        now = int(self._clock())
+        repair_available = str(row['repair_state']) not in (
+            'queued',
+            'checking',
+            'reuploading',
+            'editing',
         )
+        paused_retry = (
+            str(row['state']) == 'paused'
+            and not bool(row['operator_paused'])
+            and str(row['submit_state']) not in ('in_flight', 'unknown_outcome')
+            and bool(parts)
+            and all(
+                part.upload_state not in ('completing', 'unknown_outcome')
+                for part in parts
+            )
+        )
+        reason = '' if row['review_reason'] is None else str(row['review_reason'])
+        immediate_submission_retry = (
+            str(row['state']) == 'submitting'
+            and str(row['submit_state']) == 'prepared'
+            and not bool(row['operator_paused'])
+            and int(row['next_attempt_at']) > now
+            and (row['lease_until'] is None or int(row['lease_until']) <= now)
+            and any(
+                marker in reason
+                for marker in ('137022', '投稿频控冷却', '投稿过于频繁')
+            )
+            and bool(parts)
+            and all(part.upload_state == 'confirmed' for part in parts)
+        )
+        return repair_available and (paused_retry or immediate_submission_retry)
 
     @staticmethod
     def _can_repair_upload_job(
@@ -2358,7 +2408,7 @@ class RecordingJournalBridge:
     @staticmethod
     def _can_repost_upload_job(row: sqlite3.Row) -> bool:
         return (
-            str(row['state']) in ('approved', 'completed')
+            str(row['state']) in ('approved', 'rejected', 'completed')
             and str(row['submit_state']) == 'confirmed'
             and row['aid'] is not None
             and bool(row['bvid'])
@@ -2383,11 +2433,18 @@ class RecordingJournalBridge:
         )
 
     @staticmethod
-    def _can_resume_upload_job(row: sqlite3.Row) -> bool:
+    def _can_resume_upload_job(
+        row: sqlite3.Row, parts: Sequence[UploadPartProgress]
+    ) -> bool:
         return (
             str(row['state']) == 'paused'
             and str(row['submit_state']) == 'prepared'
             and bool(row['operator_paused'])
+            and bool(parts)
+            and all(
+                part.upload_state not in ('completing', 'unknown_outcome', 'failed')
+                for part in parts
+            )
         )
 
     def _can_edit_upload_job(

@@ -26,7 +26,11 @@ class FakeProtocol:
 
 
 async def seed_job(
-    database: BiliUploadDatabase, *, branch_state: str = 'pending', snapshot: Any = None
+    database: BiliUploadDatabase,
+    *,
+    branch_state: str = 'pending',
+    job_state: str = 'approved',
+    snapshot: Any = None,
 ) -> None:
     await database.execute(
         'INSERT INTO bili_accounts('
@@ -50,9 +54,9 @@ async def seed_job(
         'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
         'comment_branch_state,danmaku_branch_state,collection_branch_state,'
         'aid,bvid,created_at,updated_at) '
-        "VALUES(1,1,1,?,'approved','confirmed','disabled','disabled',"
+        "VALUES(1,1,1,?,?,'confirmed','disabled','disabled',"
         "?,303,'BVfixture',1,1)",
-        (json.dumps(policy), branch_state),
+        (json.dumps(policy), job_state, branch_state),
     )
     await database.execute(
         'INSERT INTO upload_parts('
@@ -110,6 +114,41 @@ async def test_publisher_adds_the_approved_archive_using_its_first_cid(
             and fields['job_id'] == 1
             and fields['section_id'] == 21
             for event, fields in events
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publisher_adds_archive_immediately_while_waiting_for_review(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    protocol = FakeProtocol()
+    try:
+        await seed_job(database, job_state='waiting_review')
+        publisher = CollectionPublisher(
+            database,
+            protocol,
+            bundle_loader=async_value,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await publisher.run_once() == 1
+
+        assert protocol.calls == [
+            (
+                'bundle-1',
+                {'section_id': 21, 'aid': 303, 'cid': 101, 'title': '测试稿件'},
+            )
+        ]
+        assert (
+            await database.scalar(
+                'SELECT collection_branch_state FROM upload_jobs WHERE id=1'
+            )
+            == 'completed'
         )
     finally:
         await database.close()

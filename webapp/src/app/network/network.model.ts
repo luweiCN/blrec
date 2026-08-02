@@ -3,7 +3,8 @@ export type NetworkPurpose =
   | 'danmaku'
   | 'recording'
   | 'upload'
-  | 'biliApi';
+  | 'biliApi'
+  | 'archiveDownload';
 
 export interface NetworkProbe {
   reachable: boolean;

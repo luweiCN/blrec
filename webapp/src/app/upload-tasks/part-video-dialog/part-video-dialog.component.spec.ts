@@ -115,19 +115,13 @@ describe('PartVideoDialogComponent', () => {
     localStorage.removeItem('blrec-playback-position-2');
     service = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
-      [
-        'createMediaAccess',
-        'mediaUrl',
-        'listDanmaku',
-        'isDanmakuCursorStale',
-      ],
+      ['createMediaAccess', 'mediaUrl', 'listDanmaku', 'isDanmakuCursorStale'],
     );
     service.isDanmakuCursorStale.and.callFake(
       (error) =>
         error instanceof HttpErrorResponse &&
         error.status === 409 &&
-        error.error?.detail ===
-          '弹幕分页状态已失效，请从第一页重新加载',
+        error.error?.detail === '弹幕分页状态已失效，请从第一页重新加载',
     );
     service.createMediaAccess.and.returnValue(
       of({
@@ -274,6 +268,21 @@ describe('PartVideoDialogComponent', () => {
     video.currentTime = 8.25;
     fixture.componentInstance.handleTimeUpdate();
     expect(localStorage.getItem('blrec-playback-position-2')).toBe('8.250');
+    fixture.componentInstance.handleClose();
+  }));
+
+  it('uses an explicit result timestamp instead of the remembered position', fakeAsync(() => {
+    localStorage.setItem('blrec-playback-position-2', '7.500');
+    fixture.componentRef.setInput('initialSeekSeconds', 11.25);
+    fixture.detectChanges();
+    flushMicrotasks();
+    const video = overlayContainer
+      .getContainerElement()
+      .querySelector('[data-testid="part-video"]') as HTMLVideoElement;
+
+    fixture.componentInstance.handleMediaMetadataLoaded();
+
+    expect(video.currentTime).toBe(11.25);
     fixture.componentInstance.handleClose();
   }));
 
@@ -529,8 +538,7 @@ describe('PartVideoDialogComponent', () => {
             new HttpErrorResponse({
               status: 409,
               error: {
-                detail:
-                  '弹幕分页状态已失效，请从第一页重新加载',
+                detail: '弹幕分页状态已失效，请从第一页重新加载',
               },
             }),
         );
@@ -599,9 +607,9 @@ describe('PartVideoDialogComponent', () => {
     fixture.componentInstance.loadMoreDanmaku();
 
     expect(calls).toEqual([0, 2, 0, 2]);
-    expect(fixture.componentInstance.danmakuItems.map((item) => item.index)).toEqual([
-      0, 1, 2,
-    ]);
+    expect(
+      fixture.componentInstance.danmakuItems.map((item) => item.index),
+    ).toEqual([0, 1, 2]);
     expect(fixture.componentInstance.danmakuItems[1].content).toBe(
       '更新后的第二条',
     );
@@ -621,8 +629,7 @@ describe('PartVideoDialogComponent', () => {
             new HttpErrorResponse({
               status: 409,
               error: {
-                detail:
-                  '弹幕分页状态已失效，请从第一页重新加载',
+                detail: '弹幕分页状态已失效，请从第一页重新加载',
               },
             }),
         );
@@ -699,8 +706,7 @@ describe('PartVideoDialogComponent', () => {
             new HttpErrorResponse({
               status: 409,
               error: {
-                detail:
-                  '弹幕分页状态已失效，请从第一页重新加载',
+                detail: '弹幕分页状态已失效，请从第一页重新加载',
               },
             }),
         );

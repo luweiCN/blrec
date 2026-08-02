@@ -7,15 +7,10 @@ import {
   OnDestroy,
   OnInit,
 } from '@angular/core';
+import { Router } from '@angular/router';
 
-import { EMPTY, forkJoin, of, Subject, Subscription } from 'rxjs';
-import {
-  catchError,
-  finalize,
-  map,
-  switchMap,
-  tap,
-} from 'rxjs/operators';
+import { EMPTY, forkJoin, of, Subject, Subscription, timer } from 'rxjs';
+import { catchError, finalize, map, switchMap, tap } from 'rxjs/operators';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import {
@@ -26,6 +21,7 @@ import {
   CommentBranchState,
   DanmakuBranchState,
   DanmakuImportState,
+  RemoteMediaStatus,
   RecordingArtifactState,
   RecordingPart,
   RecordingSessionAction,
@@ -52,6 +48,11 @@ import { RealtimeService } from '../../core/services/realtime.service';
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 import { RecordingSessionRowAction } from './recording-session-row.component';
 import { MediaLibraryService } from '../../media-library/media-library.service';
+import {
+  VaingloryMatch,
+  VaingloryMatchPlayer,
+} from '../../vainglory/vainglory.model';
+import { VaingloryService } from '../../vainglory/vainglory.service';
 
 const RETRY_OPERATION_STORAGE_KEY = 'blrec-upload-retry-operation-id';
 const CONTROL_OPERATION_POLL_TIMEOUT = 'CONTROL_OPERATION_POLL_TIMEOUT';
@@ -85,6 +86,11 @@ interface RecordingListRequest {
 type RecordingListResult =
   | { readonly kind: 'ready'; readonly response: RecordingSessionsResponse }
   | { readonly kind: 'error'; readonly message: string };
+
+type SessionMatchesView =
+  | { readonly state: 'idle' | 'loading' }
+  | { readonly state: 'ready'; readonly items: readonly VaingloryMatch[] }
+  | { readonly state: 'error' };
 
 @Component({
   selector: 'app-recording-sessions',
@@ -125,9 +131,13 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   submissionSession: RecordingSessionSummary | null = null;
   partHighlightCounts = new Map<number, number>();
   partHighlightCountState: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
+  sessionMatchesView: SessionMatchesView = { state: 'idle' };
+  readonly remoteMediaStatuses = new Map<number, RemoteMediaStatus>();
+  readonly remoteMediaRequestingPartIds = new Set<number>();
   private realtimeSubscription?: Subscription;
   private listSubscription?: Subscription;
   private detailSubscription?: Subscription;
+  private sessionMatchesSubscription?: Subscription;
   private retryAdmissionSubscription?: Subscription;
   private retryOperationSubscription?: Subscription;
   private readonly listRequests = new Subject<RecordingListRequest>();
@@ -136,6 +146,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   private retryOperationId: string | null = null;
   private retryProgressMessageId: string | null = null;
   private retryProgressMessage = '';
+  private readonly remoteMediaPollSubscriptions = new Map<
+    number,
+    Subscription
+  >();
 
   readonly recordingStateOptions = [
     { label: '录制中', value: 'open' },
@@ -168,6 +182,8 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     private highlights: HighlightService,
     private controlOperations: ControlOperationService,
     private mediaLibrary: MediaLibraryService,
+    private vainglory: VaingloryService,
+    private router: Router,
   ) {}
 
   ngOnInit(): void {
@@ -183,12 +199,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
           this.recordingSessions
             .listSessions(request.limit, request.offset, request.filters)
             .pipe(
-              map(
-                (response): RecordingListResult => ({
-                  kind: 'ready',
-                  response,
-                }),
-              ),
+              map((response): RecordingListResult => ({
+                kind: 'ready',
+                response,
+              })),
               catchError((error: unknown) =>
                 of<RecordingListResult>({
                   kind: 'error',
@@ -230,8 +244,13 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     this.realtimeSubscription?.unsubscribe();
     this.listSubscription?.unsubscribe();
     this.detailSubscription?.unsubscribe();
+    this.sessionMatchesSubscription?.unsubscribe();
     this.retryAdmissionSubscription?.unsubscribe();
     this.retryOperationSubscription?.unsubscribe();
+    for (const subscription of this.remoteMediaPollSubscriptions.values()) {
+      subscription.unsubscribe();
+    }
+    this.remoteMediaPollSubscriptions.clear();
     this.removeRetryProgressMessage();
   }
 
@@ -585,8 +604,11 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   uploadActionTitle(): string {
+    if (this.immediateSubmissionRetrySelected()) {
+      return '立即重试投稿';
+    }
     return {
-      retry_failed: '重试上传',
+      retry_failed: '重试失败任务',
       repair_transcode: '修复转码',
       backfill_danmaku: '回灌弹幕',
       set_upload: '设为本场上传',
@@ -601,6 +623,9 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   uploadActionDescription(): string {
+    if (this.immediateSubmissionRetrySelected()) {
+      return '系统会现在就调用 B 站投稿接口，不经过普通上传队列，也不会重传已确认的分 P；成功后解除本账号的短时频控，若仍返回 137022，则继续沿用原来的冷却截止时间。';
+    }
     return {
       retry_failed:
         '系统只会重新排队可以安全重试的失败任务；投稿或分 P 结果未知时不会自动重试。',
@@ -621,6 +646,31 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       delete_local:
         '只删除本系统中的任务记录及该场次归属的本地录像、弹幕文件；绝不会删除或修改 B 站上的稿件。',
     }[this.uploadAction ?? 'retry_failed'];
+  }
+
+  private immediateSubmissionRetrySelected(): boolean {
+    if (
+      this.uploadAction !== 'retry_failed' ||
+      this.uploadActionSessionIds.length === 0
+    ) {
+      return false;
+    }
+    return this.uploadActionSessionIds.every((sessionId) => {
+      const job = this.sessionById(sessionId)?.uploadJob;
+      const reason = job?.reviewReason ?? '';
+      return Boolean(
+        job &&
+          job.state === 'submitting' &&
+          job.submitState === 'prepared' &&
+          !job.operatorPaused &&
+          job.nextAttemptAt > 0 &&
+          job.discoveredPartCount > 0 &&
+          job.confirmedPartCount === job.discoveredPartCount &&
+          ['137022', '投稿频控冷却', '投稿过于频繁'].some((marker) =>
+            reason.includes(marker),
+          ),
+      );
+    });
   }
 
   canCutCurrentFile(session: RecordingSessionSummary): boolean {
@@ -713,9 +763,11 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   openDetails(session: RecordingSessionSummary): void {
     const sessionId = session.id;
     this.detailSubscription?.unsubscribe();
+    this.sessionMatchesSubscription?.unsubscribe();
     this.selectedSessionId = sessionId;
     this.selectedSession = null;
     this.detailVisible = true;
+    this.sessionMatchesView = { state: 'loading' };
     this.partHighlightCounts = new Map<number, number>();
     this.partHighlightCountState =
       session.sourceKind === 'live' ? 'loading' : 'idle';
@@ -757,16 +809,106 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
         this.changeDetector.markForCheck();
       },
     });
+    this.loadSessionMatches(sessionId);
   }
 
   closeDetails(): void {
     this.detailSubscription?.unsubscribe();
+    this.sessionMatchesSubscription?.unsubscribe();
     this.selectedSessionId = null;
     this.detailVisible = false;
     this.selectedSession = null;
+    this.sessionMatchesView = { state: 'idle' };
     this.partHighlightCounts = new Map<number, number>();
     this.partHighlightCountState = 'idle';
     this.changeDetector.markForCheck();
+  }
+
+  get sessionMatches(): readonly VaingloryMatch[] {
+    return this.sessionMatchesView.state === 'ready'
+      ? this.sessionMatchesView.items
+      : [];
+  }
+
+  private loadSessionMatches(sessionId: number): void {
+    this.sessionMatchesSubscription = this.vainglory
+      .listMatches(
+        {
+          playerName: '',
+          heroIds: [],
+          winnerColor: null,
+          gameMode: null,
+          sessionId,
+        },
+        100,
+      )
+      .subscribe({
+        next: (response) => {
+          if (!this.detailVisible || this.selectedSessionId !== sessionId) {
+            return;
+          }
+          this.sessionMatchesView = {
+            state: 'ready',
+            items: [...response.items].sort(
+              (left, right) =>
+                left.partIndex - right.partIndex ||
+                left.startedAtMs - right.startedAtMs ||
+                left.id - right.id,
+            ),
+          };
+          this.changeDetector.markForCheck();
+        },
+        error: () => {
+          if (!this.detailVisible || this.selectedSessionId !== sessionId) {
+            return;
+          }
+          this.sessionMatchesView = { state: 'error' };
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  matchRecordedSide(match: VaingloryMatch): 'left' | 'right' {
+    return match.leftColor === 'teal' ? 'left' : 'right';
+  }
+
+  matchOpponentSide(match: VaingloryMatch): 'left' | 'right' {
+    return this.matchRecordedSide(match) === 'left' ? 'right' : 'left';
+  }
+
+  matchPlayers(
+    match: VaingloryMatch,
+    side: 'left' | 'right',
+  ): readonly VaingloryMatchPlayer[] {
+    return match.players.filter((player) => player.side === side);
+  }
+
+  matchKills(match: VaingloryMatch, side: 'left' | 'right'): number | null {
+    return side === 'left' ? match.leftKills : match.rightKills;
+  }
+
+  matchHeroThumbnail(player: VaingloryMatchPlayer): string | null {
+    return player.heroId === null
+      ? null
+      : `/api/v1/vainglory/heroes/${player.heroId}/thumbnail`;
+  }
+
+  matchHeroName(player: VaingloryMatchPlayer): string {
+    return player.heroLabel || '未识别英雄';
+  }
+
+  matchWinnerLabel(match: VaingloryMatch): string {
+    if (match.winnerColor === 'unknown') {
+      return '胜负待核对';
+    }
+    return match.winnerColor === 'teal' ? '主人公方胜' : '对手方胜';
+  }
+
+  matchWinnerColor(match: VaingloryMatch): string {
+    if (match.winnerColor === 'unknown') {
+      return 'default';
+    }
+    return match.winnerColor === 'teal' ? 'cyan' : 'volcano';
   }
 
   partHighlightCountLabel(partId: number): string {
@@ -784,6 +926,10 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
   }
 
   openPartVideo(session: RecordingSessionDetail, part: RecordingPart): void {
+    if (!this.partMediaAvailable(part)) {
+      this.requestPartMedia(part);
+      return;
+    }
     this.videoSession = session;
     this.videoPart = part;
     this.videoVisible = true;
@@ -801,6 +947,122 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
 
   openPartDanmaku(session: RecordingSessionDetail, part: RecordingPart): void {
     this.openPartVideo(session, part);
+  }
+
+  openPartHighlight(
+    session: RecordingSessionDetail,
+    part: RecordingPart,
+  ): void {
+    if (!this.partMediaAvailable(part)) {
+      this.requestPartMedia(part);
+      return;
+    }
+    void this.router.navigate(this.highlightEditorLink(session), {
+      queryParams: { partId: part.id },
+    });
+  }
+
+  partMediaAvailable(part: RecordingPart): boolean {
+    if (part.sourceExists || part.finalExists) {
+      return true;
+    }
+    const state = this.remoteMediaStatuses.get(part.id)?.state;
+    return state === 'local' || state === 'ready';
+  }
+
+  remoteMediaStatusFor(partId: number): RemoteMediaStatus | null {
+    return this.remoteMediaStatuses.get(partId) ?? null;
+  }
+
+  remoteMediaActive(status: RemoteMediaStatus): boolean {
+    return status.state === 'pending' || status.state === 'downloading';
+  }
+
+  remoteMediaPercent(status: RemoteMediaStatus): number {
+    return Math.max(0, Math.min(100, Math.round(status.progress * 100)));
+  }
+
+  requestPartMedia(part: RecordingPart): void {
+    if (this.remoteMediaRequestingPartIds.has(part.id)) {
+      return;
+    }
+    this.remoteMediaRequestingPartIds.add(part.id);
+    this.changeDetector.markForCheck();
+    this.recordingSessions
+      .requestRemoteMedia(part.id)
+      .pipe(
+        finalize(() => {
+          this.remoteMediaRequestingPartIds.delete(part.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (status) => {
+          this.remoteMediaStatuses.set(part.id, status);
+          if (this.remoteMediaActive(status)) {
+            this.message.info('视频已在后台下载；完成后请再次点击播放或剪辑');
+            this.startRemoteMediaPolling(part.id);
+          } else if (this.partMediaAvailable(part)) {
+            this.message.success('视频已经可以播放和剪辑，请再次点击');
+          }
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.message.error(
+            `无法下载这段视频：${this.remoteMediaError(error)}`,
+          );
+        },
+      });
+  }
+
+  private startRemoteMediaPolling(partId: number): void {
+    if (this.remoteMediaPollSubscriptions.has(partId)) {
+      return;
+    }
+    const subscription = timer(1_000, 1_000)
+      .pipe(
+        switchMap(() => this.recordingSessions.getRemoteMediaStatus(partId)),
+      )
+      .subscribe({
+        next: (status) => {
+          this.remoteMediaStatuses.set(partId, status);
+          if (!this.remoteMediaActive(status)) {
+            this.stopRemoteMediaPolling(partId);
+            if (status.state === 'ready' || status.state === 'local') {
+              this.message.success('视频下载完成，可以播放或进入剪辑了');
+            } else if (status.state === 'failed') {
+              this.message.error(status.error || '视频下载失败');
+            }
+          }
+          this.changeDetector.markForCheck();
+        },
+        error: () => {
+          this.stopRemoteMediaPolling(partId);
+          this.message.warning('暂时无法读取下载进度，后台下载仍会继续');
+          this.changeDetector.markForCheck();
+        },
+      });
+    this.remoteMediaPollSubscriptions.set(partId, subscription);
+  }
+
+  private stopRemoteMediaPolling(partId: number): void {
+    this.remoteMediaPollSubscriptions.get(partId)?.unsubscribe();
+    this.remoteMediaPollSubscriptions.delete(partId);
+  }
+
+  private remoteMediaError(error: unknown): string {
+    if (typeof error === 'object' && error !== null && 'error' in error) {
+      const body = (error as { readonly error?: unknown }).error;
+      if (
+        typeof body === 'object' &&
+        body !== null &&
+        'detail' in body &&
+        typeof (body as { readonly detail?: unknown }).detail === 'string'
+      ) {
+        return (body as { readonly detail: string }).detail;
+      }
+    }
+    return this.describeError(error);
   }
 
   sessionStateLabel(state: RecordingSessionState): string {
@@ -925,8 +1187,34 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
       case 'failed':
         return '转码修复失败';
       default:
-        return this.uploadJobStateLabel(job.state);
+        break;
     }
+    if (job.operatorPaused) {
+      return this.remoteUploadOutcomeNeedsConfirmation(job)
+        ? this.remoteUploadOutcomeLabel(job)
+        : '已暂停';
+    }
+    if (job.submitState === 'unknown_outcome') {
+      return '投稿结果待确认';
+    }
+    if (job.state === 'paused') {
+      if (this.remoteUploadOutcomeNeedsConfirmation(job)) {
+        return this.remoteUploadOutcomeLabel(job);
+      }
+      if (this.submissionVerificationRequired(job)) {
+        return '需要验证';
+      }
+      if (job.submitState === 'confirmed') {
+        return '稿件核对失败';
+      }
+      return this.allUploadPartsConfirmed(job) ? '投稿失败' : '上传失败';
+    }
+    if (this.automaticUploadRetryPending(job)) {
+      return job.reviewReason?.includes('次日')
+        ? '等待次日投稿'
+        : '等待自动重试';
+    }
+    return this.uploadJobStateLabel(job.state);
   }
 
   uploadDisplayStateColor(job: UploadJobSummary): string {
@@ -950,7 +1238,54 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     if (job.repairState === 'unknown_outcome') {
       return 'warning';
     }
+    if (job.operatorPaused) {
+      return 'warning';
+    }
+    if (job.submitState === 'unknown_outcome') {
+      return 'warning';
+    }
+    if (job.state === 'paused') {
+      return this.submissionVerificationRequired(job) ? 'warning' : 'error';
+    }
+    if (this.automaticUploadRetryPending(job)) {
+      return 'processing';
+    }
     return this.uploadJobStateColor(job.state);
+  }
+
+  private allUploadPartsConfirmed(job: UploadJobSummary): boolean {
+    return (
+      job.discoveredPartCount > 0 &&
+      job.confirmedPartCount === job.discoveredPartCount
+    );
+  }
+
+  private automaticUploadRetryPending(job: UploadJobSummary): boolean {
+    return (
+      job.nextAttemptAt > 0 &&
+      (job.state === 'uploading' || job.state === 'submitting')
+    );
+  }
+
+  private submissionVerificationRequired(job: UploadJobSummary): boolean {
+    const reason = job.reviewReason ?? '';
+    return ['验证码', '人工验证', '安全验证', 'captcha', 'geetest'].some(
+      (marker) => reason.toLowerCase().includes(marker),
+    );
+  }
+
+  private remoteUploadOutcomeNeedsConfirmation(job: UploadJobSummary): boolean {
+    const reason = job.reviewReason ?? '';
+    return ['结果无法确认', '结果未知', '暂未确认'].some((marker) =>
+      reason.includes(marker),
+    );
+  }
+
+  private remoteUploadOutcomeLabel(job: UploadJobSummary): string {
+    const reason = job.reviewReason ?? '';
+    return reason.includes('投稿') || reason.includes('封面')
+      ? '投稿结果待确认'
+      : '上传结果待确认';
   }
 
   private filters(): RecordingSessionFilters {
@@ -1503,5 +1838,4 @@ export class RecordingSessionsComponent implements OnInit, OnDestroy {
     const jobs = (data as { jobs: unknown }).jobs;
     return Array.isArray(jobs) ? (jobs as RealtimeUploadJobProgress[]) : null;
   }
-
 }

@@ -1,0 +1,422 @@
+import { ChangeDetectorRef } from '@angular/core';
+import { ActivatedRoute, Router } from '@angular/router';
+
+import { NEVER, of } from 'rxjs';
+import { NzMessageService } from 'ng-zorro-antd/message';
+
+import {
+  RecordingSessionDetail,
+  RemoteMediaStatus,
+} from '../upload-tasks/shared/recording-session.model';
+import { RecordingSessionService } from '../upload-tasks/shared/recording-session.service';
+import { BiliAccount } from '../uploads/shared/bili-account.model';
+import { BiliAccountService } from '../uploads/shared/bili-account.service';
+import { VaingloryComponent } from './vainglory.component';
+import { VaingloryMatch, VaingloryMatchSession } from './vainglory.model';
+import { VaingloryService } from './vainglory.service';
+
+function match(): VaingloryMatch {
+  return {
+    id: 3,
+    sessionId: 9,
+    sessionTitle: '直播标题',
+    sessionStartedAt: 1_000,
+    partId: 7,
+    partIndex: 1,
+    title: '第一局',
+    sourceTitle: '直播标题',
+    uploadTitle: '投稿标题',
+    gameMode: '3v3',
+    teamSize: 3,
+    startedAtMs: 15_000,
+    resultAtMs: 600_000,
+    durationSeconds: 585,
+    resultText: '获胜',
+    endReason: 'normal',
+    leftColor: 'teal',
+    rightColor: 'orange',
+    winnerSide: 'left',
+    winnerColor: 'teal',
+    leftKills: 20,
+    rightKills: 10,
+    leftEconomy: 40_000,
+    rightEconomy: 30_000,
+    confidence: 0.9,
+    accountId: 2,
+    bvid: 'BV1abcdefgh',
+    archivePage: 1,
+    resultFrameUrl: '/api/v1/vainglory/matches/3/result-frame',
+    players: [],
+  };
+}
+
+function session(local: boolean): RecordingSessionDetail {
+  return {
+    id: 9,
+    roomId: 100,
+    liveStartTime: 1_000,
+    state: 'closed',
+    startedAt: 1_000,
+    endedAt: 1_600,
+    title: '直播标题',
+    coverUrl: '',
+    anchorUid: 1,
+    anchorName: '主播',
+    areaId: 2,
+    areaName: '手游',
+    parentAreaId: 3,
+    parentAreaName: '游戏',
+    liveEndTime: 1_600,
+    partCount: 1,
+    danmakuCount: 0,
+    totalFileSizeBytes: 0,
+    recordDurationSeconds: 600,
+    uploadIntent: 'upload',
+    uploadDecision: 'upload',
+    submissionInherited: false,
+    uploadResolutionState: 'job_created',
+    uploadResolutionError: null,
+    uploadSuppressed: false,
+    deletionState: 'none',
+    deletionError: null,
+    sourceKind: 'live',
+    highlightClipId: null,
+    displayState: 'completed',
+    availableActions: [],
+    uploadJob: null,
+    broadcastSessionKey: '100:1000',
+    coverPath: null,
+    parts: [
+      {
+        id: 7,
+        runId: 'run-1',
+        partIndex: 1,
+        sourcePath: '/rec/p1.mp4',
+        finalPath: null,
+        xmlPath: null,
+        recordStartTime: 1_000,
+        recordEndTime: 1_600,
+        recordDurationSeconds: 600,
+        fileSizeBytes: null,
+        danmakuCount: 0,
+        artifactState: local ? 'ready' : 'missing',
+        xmlCompleted: true,
+        sourceExists: local,
+        finalExists: false,
+        errorMessage: null,
+      },
+    ],
+  };
+}
+
+describe('VaingloryComponent remote media', () => {
+  let component: VaingloryComponent;
+  let recordings: jasmine.SpyObj<RecordingSessionService>;
+  let messages: jasmine.SpyObj<NzMessageService>;
+  let router: jasmine.SpyObj<Router>;
+  let vainglory: jasmine.SpyObj<VaingloryService>;
+  let accounts: jasmine.SpyObj<BiliAccountService>;
+
+  beforeEach(() => {
+    vainglory = jasmine.createSpyObj<VaingloryService>('VaingloryService', [
+      'listMatchSessions',
+      'listMatches',
+      'listHeroes',
+      'listAnchorStats',
+      'updateSessionTitle',
+      'updateSessionAnchor',
+      'bulkUpdateSessions',
+      'requestArchiveSync',
+      'getArchiveSync',
+      'updateArchiveSync',
+      'listArchiveContentReviews',
+    ]);
+    recordings = jasmine.createSpyObj<RecordingSessionService>(
+      'RecordingSessionService',
+      ['getSession', 'requestRemoteMedia', 'getRemoteMediaStatus'],
+    );
+    vainglory.listAnchorStats.and.returnValue(of([]));
+    vainglory.listArchiveContentReviews.and.returnValue(
+      of({ total: 0, items: [] }),
+    );
+    recordings.getSession.and.returnValue(of(session(true)));
+    messages = jasmine.createSpyObj<NzMessageService>('NzMessageService', [
+      'info',
+      'success',
+      'error',
+      'warning',
+    ]);
+    router = jasmine.createSpyObj<Router>('Router', ['navigate']);
+    router.navigate.and.resolveTo(true);
+    accounts = jasmine.createSpyObj<BiliAccountService>('BiliAccountService', [
+      'listAccounts',
+    ]);
+    accounts.listAccounts.and.returnValue(of([]));
+    const route = {
+      queryParamMap: NEVER,
+    } as Pick<ActivatedRoute, 'queryParamMap'>;
+    const changeDetector = jasmine.createSpyObj<ChangeDetectorRef>(
+      'ChangeDetectorRef',
+      ['markForCheck'],
+    );
+    component = new VaingloryComponent(
+      vainglory,
+      recordings,
+      route as ActivatedRoute,
+      messages,
+      changeDetector,
+      router,
+      accounts,
+    );
+  });
+
+  it('only downloads missing match video after an explicit request', () => {
+    const missing: RemoteMediaStatus = {
+      partId: 7,
+      state: 'missing',
+      progress: 0,
+      remoteAvailable: true,
+      accountId: 2,
+      bvid: 'BV1abcdefgh',
+      cid: 77,
+      page: 1,
+      downloadedBytes: 0,
+      totalBytes: 100,
+      cachedAt: null,
+      expiresAt: null,
+      error: null,
+    };
+    const downloading: RemoteMediaStatus = {
+      partId: 7,
+      state: 'downloading',
+      progress: 0.25,
+      remoteAvailable: true,
+      accountId: 2,
+      bvid: 'BV1abcdefgh',
+      cid: 77,
+      page: 1,
+      downloadedBytes: 25,
+      totalBytes: 100,
+      cachedAt: null,
+      expiresAt: null,
+      error: null,
+    };
+    recordings.getSession.and.returnValue(of(session(false)));
+    recordings.requestRemoteMedia.and.returnValue(of(downloading));
+    component.recordingParts.set(7, session(false).parts[0]);
+    component.remoteMediaStatuses.set(7, missing);
+
+    component.openMatch(match());
+
+    expect(recordings.requestRemoteMedia).not.toHaveBeenCalled();
+    expect(component.previewVisible).toBeFalse();
+    expect(messages.info).toHaveBeenCalled();
+
+    component.downloadMatchMedia(match());
+
+    expect(recordings.requestRemoteMedia).toHaveBeenCalledOnceWith(7);
+    expect(component.previewVisible).toBeFalse();
+    expect(component.remoteMediaPercent(7)).toBe(25);
+  });
+
+  it('opens local media and routes local clips to the match start', () => {
+    const localSession = session(true);
+    recordings.getSession.and.returnValue(of(localSession));
+    component.recordingParts.set(7, localSession.parts[0]);
+
+    component.openMatch(match());
+    component.closePreview();
+    component.openMatchClip(match());
+
+    expect(component.previewVisible).toBeFalse();
+    expect(router.navigate).toHaveBeenCalledOnceWith(
+      ['/recordings/highlights', '9'],
+      { queryParams: { partId: 7, seekMs: 15_000 } },
+    );
+    expect(recordings.requestRemoteMedia).not.toHaveBeenCalled();
+  });
+
+  it('lets the user start historical backfill for a chosen account', () => {
+    const account: BiliAccount = {
+      id: 7,
+      uid: 42,
+      displayName: '旧账号',
+      avatarUrl: '',
+      credentialVersion: 1,
+      credentialExpiresAt: 2_000,
+      createdAt: 1_000,
+      state: 'active',
+      isPrimary: false,
+    };
+    accounts.listAccounts.and.returnValue(of([account]));
+    vainglory.getArchiveSync.and.returnValue(
+      of({
+        accountId: 7,
+        state: 'ready',
+        progress: 1,
+        discoveredCount: 10,
+        completedCount: 10,
+        error: null,
+        requestedAt: 1_000,
+        startedAt: 1_001,
+        completedAt: 1_002,
+        updatedAt: 1_002,
+        operatorPaused: false,
+        dailyLimit: 20,
+        dailyUsed: 10,
+        quotaDay: '1970-01-01',
+        nextPage: 2,
+        discoveryComplete: true,
+      }),
+    );
+    vainglory.requestArchiveSync.and.returnValue(
+      of({
+        accountId: 7,
+        state: 'discovering',
+        progress: 0,
+        discoveredCount: 0,
+        completedCount: 0,
+        error: null,
+        requestedAt: 2_000,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: 2_000,
+        operatorPaused: false,
+        dailyLimit: 20,
+        dailyUsed: 0,
+        quotaDay: null,
+        nextPage: 1,
+        discoveryComplete: false,
+      }),
+    );
+
+    component.openArchiveManager();
+    component.requestArchiveSync(account);
+
+    expect(component.archiveManagerVisible).toBeTrue();
+    expect(component.archiveAccounts).toEqual([account]);
+    expect(vainglory.requestArchiveSync).toHaveBeenCalledOnceWith(7);
+    expect(component.archiveSyncs.get(7)?.state).toBe('discovering');
+  });
+
+  it('loads matches only after a recording session drawer is opened', () => {
+    const summary: VaingloryMatchSession = {
+      sessionId: 9,
+      title: '直播标题',
+      sourceTitle: '原始直播标题',
+      anchorName: '主播',
+      startedAt: 1_000,
+      matchCount: 1,
+      tealWinCount: 1,
+      orangeWinCount: 0,
+      winCount: 1,
+      lossCount: 0,
+      unknownCount: 0,
+      surrenderCount: 0,
+      durationSeconds: 585,
+      gameModes: ['3v3'],
+    };
+    vainglory.listMatches.and.returnValue(of({ total: 1, items: [match()] }));
+
+    component.openSessionDetails(summary);
+
+    expect(component.detailsDrawerVisible).toBeTrue();
+    expect(component.selectedSession).toBe(summary);
+    expect(vainglory.listMatches).toHaveBeenCalledOnceWith(
+      {
+        playerName: '',
+        heroIds: [],
+        winnerColor: null,
+        gameMode: null,
+        sessionId: 9,
+      },
+      100,
+      0,
+    );
+    expect(component.detailsFor(9)).toEqual({
+      state: 'ready',
+      items: [match()],
+    });
+  });
+
+  it('saves one title for the whole recording session', () => {
+    const summary: VaingloryMatchSession = {
+      sessionId: 9,
+      title: '旧标题',
+      sourceTitle: '原始直播标题',
+      anchorName: '主播',
+      startedAt: 1_000,
+      matchCount: 1,
+      tealWinCount: 1,
+      orangeWinCount: 0,
+      winCount: 1,
+      lossCount: 0,
+      unknownCount: 0,
+      surrenderCount: 0,
+      durationSeconds: 585,
+      gameModes: ['3v3'],
+    };
+    const saved = { ...summary, title: '整场新标题' };
+    vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));
+    vainglory.updateSessionTitle.and.returnValue(of(saved));
+    component.openSessionDetails(summary);
+    component.sessionTitleDraft = '整场新标题';
+
+    component.saveSessionTitle();
+
+    expect(vainglory.updateSessionTitle).toHaveBeenCalledOnceWith(
+      9,
+      '整场新标题',
+    );
+    expect(component.selectedSession).toEqual(saved);
+  });
+
+  it('saves a manually corrected anchor for the whole session', () => {
+    const summary: VaingloryMatchSession = {
+      sessionId: 9,
+      title: '直播标题',
+      sourceTitle: '原始直播标题',
+      anchorName: '',
+      startedAt: 1_000,
+      matchCount: 1,
+      tealWinCount: 1,
+      orangeWinCount: 0,
+      winCount: 1,
+      lossCount: 0,
+      unknownCount: 0,
+      surrenderCount: 0,
+      durationSeconds: 585,
+      gameModes: ['3v3'],
+    };
+    const saved = { ...summary, anchorName: '玩不明白' };
+    vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));
+    vainglory.updateSessionAnchor.and.returnValue(of(saved));
+    component.openSessionDetails(summary);
+    component.sessionAnchorDraft = '玩不明白';
+
+    component.saveSessionAnchor();
+
+    expect(vainglory.updateSessionAnchor).toHaveBeenCalledOnceWith(
+      9,
+      '玩不明白',
+    );
+    expect(component.selectedSession).toEqual(saved);
+  });
+
+  it('bulk excludes selected sessions from anchor statistics', () => {
+    vainglory.bulkUpdateSessions.and.returnValue(of({ updatedCount: 2 }));
+    vainglory.listMatchSessions.and.returnValue(
+      of({ total: 0, items: [] }),
+    );
+    component.selectedSessionIds.add(9);
+    component.selectedSessionIds.add(10);
+
+    component.bulkSetStatsIncluded(false);
+
+    expect(vainglory.bulkUpdateSessions).toHaveBeenCalledOnceWith([9, 10], {
+      statsIncluded: false,
+    });
+    expect(component.selectedSessionIds.size).toBe(0);
+    expect(messages.success).toHaveBeenCalledWith('已更新 2 场直播');
+  });
+});

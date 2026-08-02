@@ -8,4 +8,6 @@ webapp/.angular
 src/blrec/data/webapp
 dist
 build
+backups
+releases
 *.log

@@ -23,7 +23,7 @@ from blrec.logging.audit import audit
 
 from .archive_reads import ArchiveReadService
 from .database import BiliUploadDatabase
-from .errors import ProtocolContractError
+from .errors import BiliApiError, ProtocolContractError
 from .submission_verifier import SubmissionVerification, verify_submission
 
 __all__ = ('PostReviewBranch', 'ReviewWatcher')
@@ -86,7 +86,7 @@ class ReviewWatcher:
         comment_branch: PostReviewBranch,
         danmaku_branch: PostReviewBranch,
         collection_branch: PostReviewBranch,
-        poll_interval_seconds: int = 900,
+        poll_interval_seconds: int = 300,
         read_timeout_seconds: float = 60,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -121,8 +121,26 @@ class ReviewWatcher:
             audit('upload_review_legacy_pause_recovered', count=recovered)
         return recovered
 
+    async def recover_account_pauses(self) -> int:
+        reason = '投稿账号不可用，无法同步审核状态'
+        recovered = await self._database.execute(
+            "UPDATE upload_jobs SET state='waiting_review',review_reason=?,"
+            'next_attempt_at=0,lease_owner=NULL,lease_until=NULL,updated_at=? '
+            "WHERE state='paused' AND submit_state='confirmed' "
+            'AND operator_paused=0 AND aid IS NOT NULL '
+            "AND bvid IS NOT NULL AND bvid!='' AND review_reason=? "
+            'AND EXISTS(SELECT 1 FROM bili_accounts account '
+            'WHERE account.id=upload_jobs.account_id '
+            "AND account.state='active')",
+            ('投稿账号恢复，系统已自动继续审核', int(self._clock()), reason),
+        )
+        if recovered:
+            audit('upload_review_account_pauses_recovered', count=recovered)
+        return recovered
+
     async def run_once(self) -> int:
-        changed = await self.recover_approved_pending_branches()
+        changed = await self.recover_account_pauses()
+        changed += await self.recover_approved_pending_branches()
         rows = await self._database.fetchall(
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
             'job.comment_branch_state,job.danmaku_branch_state,'
@@ -162,6 +180,14 @@ class ReviewWatcher:
                     'upload_review_cycle_timed_out',
                     level='WARNING',
                     account_scope='redacted',
+                )
+                continue
+            except BiliApiError as error:
+                audit(
+                    'upload_review_cycle_api_failed',
+                    level='WARNING',
+                    account_scope='redacted',
+                    error_code=error.code,
                 )
                 continue
             except _ReviewMismatch as error:

@@ -268,3 +268,56 @@ async def test_health_scanner_reports_account_failure_and_recovery(
         assert 'Cookie 已失效' in sender.calls[0][1]
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_health_scanner_reports_submission_verification_required(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    sender = FakeSender()
+    settings = OperationalNotificationSettings()
+    settings.route_for('upload_failed').targets = [
+        OperationalNotificationTarget(channel='email', message_type='html')
+    ]
+    center = OperationalNotificationCenter(
+        database,
+        settings_provider=lambda: settings,
+        senders={'email': sender},
+        channel_enabled=lambda _channel: True,
+        clock=lambda: 1_000,
+    )
+    scanner = OperationalHealthScanner(database, center)
+    try:
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(1,42,'投稿账号',X'00',1,'key','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(1,100,'session-1','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'created_at,updated_at) '
+            "VALUES(1,1,1,'{}','ready','prepared',1,1)"
+        )
+        await scanner.scan()
+
+        await database.execute(
+            "UPDATE upload_jobs SET state='paused',"
+            "submit_state='failed_permanent',review_reason='"
+            'B 站要求验证码或人工验证（12015）；完成验证后请点击重新投稿'
+            "' WHERE id=1"
+        )
+        await scanner.scan()
+
+        assert [call[0] for call in sender.calls] == ['投稿需要人工验证']
+        assert '验证码或人工验证' in sender.calls[0][1]
+    finally:
+        await database.close()

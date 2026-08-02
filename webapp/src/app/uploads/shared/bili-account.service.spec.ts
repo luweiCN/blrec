@@ -103,4 +103,36 @@ describe('BiliAccountService', () => {
     });
     request.flush({ accountId: 7, state: 'archived' });
   });
+
+  it('creates and reads an archive migration', () => {
+    service
+      .requestArchiveMigration({
+        sourceUid: 100,
+        downloadAccountId: 7,
+        targetAccountId: 8,
+      })
+      .subscribe();
+    let request = http.expectOne(
+      '/api/v1/bili-accounts/archive-migrations'
+    );
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({
+      sourceUid: 100,
+      downloadAccountId: 7,
+      targetAccountId: 8,
+    });
+    request.flush({ id: 9 });
+
+    service.listArchiveMigrations().subscribe();
+    request = http.expectOne('/api/v1/bili-accounts/archive-migrations');
+    expect(request.request.method).toBe('GET');
+    request.flush([]);
+
+    service.listArchiveMigrationItems(9).subscribe();
+    request = http.expectOne(
+      '/api/v1/bili-accounts/archive-migrations/9/items'
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush([]);
+  });
 });

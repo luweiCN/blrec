@@ -41,6 +41,12 @@ from blrec.bili_upload.recording_content import (
     RecordingContentReader,
     RecordingContentUnavailable,
 )
+from blrec.bili_upload.remote_media import (
+    RemoteMediaCache,
+    RemoteMediaNotFound,
+    RemoteMediaStatus,
+    RemoteMediaUnavailable,
+)
 from blrec.bili_upload.session_submission import (
     InvalidSessionSubmission,
     RecordingSessionNotFound,
@@ -80,6 +86,7 @@ active_recording_metadata_provider: Optional[
     Callable[[MediaResource], Optional[object]]
 ] = None
 active_media_service: Optional[ActiveMediaService] = None
+remote_media_cache: Optional[RemoteMediaCache] = None
 unavailable_reason: Optional[str] = 'Recording journal is not ready'
 
 _MEDIA_ACCESS_TTL_SECONDS = 2 * 60 * 60
@@ -481,6 +488,22 @@ class MediaAccessResponse(ApiModel):
     request_id: str
 
 
+class RemoteMediaStatusResponse(ApiModel):
+    part_id: int
+    state: str
+    progress: float
+    remote_available: bool
+    account_id: Optional[int]
+    bvid: Optional[str]
+    cid: Optional[int]
+    page: Optional[int]
+    downloaded_bytes: int
+    total_bytes: Optional[int]
+    cached_at: Optional[int]
+    expires_at: Optional[int]
+    error: Optional[str]
+
+
 class MediaSnapshotStore:
     def __init__(self) -> None:
         self._items: Dict[str, Tuple[int, int, FlvMediaSnapshot]] = {}
@@ -521,6 +544,15 @@ def get_recording_journal() -> RecordingJournalBridge:
             detail=unavailable_reason or 'Recording journal is unavailable',
         )
     return journal
+
+
+def get_remote_media_cache() -> RemoteMediaCache:
+    if remote_media_cache is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or '远程视频下载当前不可用',
+        )
+    return remote_media_cache
 
 
 def get_content_reader() -> RecordingContentReader:
@@ -703,6 +735,24 @@ def _part_response(part: RecordingPart) -> RecordingPartResponse:
         media_index_state=part.media_index_state,
         media_index_error=part.media_index_error,
         media_index_progress=part.media_index_progress,
+    )
+
+
+def _remote_media_response(value: RemoteMediaStatus) -> RemoteMediaStatusResponse:
+    return RemoteMediaStatusResponse(
+        part_id=value.part_id,
+        state=value.state,
+        progress=value.progress,
+        remote_available=value.remote_available,
+        account_id=value.account_id,
+        bvid=value.bvid,
+        cid=value.cid,
+        page=value.page,
+        downloaded_bytes=value.downloaded_bytes,
+        total_bytes=value.total_bytes,
+        cached_at=value.cached_at,
+        expires_at=value.expires_at,
+        error=value.error,
     )
 
 
@@ -1329,6 +1379,44 @@ async def preview_retryable_failed_upload_jobs(
             for item in await actions.retryable_failed_jobs()
         ]
     )
+
+
+@router.get('/parts/{part_id}/remote-media', response_model=RemoteMediaStatusResponse)
+async def get_remote_media_status(
+    part_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> RemoteMediaStatusResponse:
+    try:
+        return _remote_media_response(await cache.status(part_id))
+    except RemoteMediaNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+
+
+@router.post(
+    '/parts/{part_id}/remote-media',
+    response_model=RemoteMediaStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_remote_media(
+    part_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    cache: RemoteMediaCache = Depends(get_remote_media_cache),
+) -> RemoteMediaStatusResponse:
+    try:
+        return _remote_media_response(
+            await cache.request(part_id, retain_for_playback=True)
+        )
+    except RemoteMediaNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    except RemoteMediaUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
 
 
 @router.post('/parts/{part_id}/media-access', response_model=MediaAccessResponse)

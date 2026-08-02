@@ -81,7 +81,10 @@
         nzShowIcon
         [nzMessage]="danmakuError"
       ></nz-alert>
-      <div *ngIf="danmakuLoading && danmakuItems.length === 0" class="danmaku-empty">
+      <div
+        *ngIf="danmakuLoading && danmakuItems.length === 0"
+        class="danmaku-empty"
+      >
         正在加载弹幕…
       </div>
       <div

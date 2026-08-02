@@ -78,6 +78,16 @@
   >
     {{ detail }}
   </div>
+  <ng-container *ngIf="session.uploadJob as job">
+    <div
+      *ngIf="showUploadJobReason(job)"
+      class="secondary-text"
+      data-testid="upload-job-reason"
+      [class.status-error]="!job.operatorPaused && job.state === 'paused'"
+    >
+      {{ job.reviewReason }}
+    </div>
+  </ng-container>
   <div class="secondary-text" *ngIf="session.uploadJob as job">
     <ng-container *ngIf="job.totalBytes > 0 && job.state === 'uploading'">
       <nz-progress
@@ -127,16 +137,6 @@
     详情
   </button>
   <button
-    nz-button
-    nzType="link"
-    nzDanger
-    type="button"
-    data-testid="delete-session"
-    (click)="runSessionAction('delete_local')"
-  >
-    删除
-  </button>
-  <button
     *ngIf="hasMoreActions()"
     nz-button
     nzType="text"
@@ -170,6 +170,11 @@
       >
         {{ favoriting ? "正在收藏…" : "收藏到媒体库" }}
       </li>
+      <li *ngIf="canAnalyzeMatches()" nz-menu-item>
+        <a data-testid="analyze-vainglory-matches" [attr.href]="vaingloryUrl()">
+          识别 / 查看对局
+        </a>
+      </li>
       <li
         *ngIf="hasAction('set_upload')"
         nz-menu-item
@@ -195,9 +200,10 @@
       <li
         *ngIf="hasAction('retry_failed')"
         nz-menu-item
+        data-testid="retry-submission-now"
         (click)="runSessionAction('retry_failed')"
       >
-        重试上传
+        {{ retryActionLabel(session.uploadJob) }}
       </li>
       <li
         *ngIf="hasAction('pause_upload')"
@@ -211,7 +217,7 @@
         nz-menu-item
         (click)="runSessionAction('resume_upload')"
       >
-        继续上传
+        {{ resumeActionLabel(session.uploadJob) }}
       </li>
       <li
         *ngIf="hasAction('edit_task') && session.uploadJob"
@@ -240,6 +246,15 @@
         (click)="runSessionAction('repost_as_new')"
       >
         重新投稿
+      </li>
+      <li
+        *ngIf="hasAction('delete_local')"
+        nz-menu-item
+        nzDanger
+        data-testid="delete-session"
+        (click)="runSessionAction('delete_local')"
+      >
+        删除
       </li>
     </ul>
   </nz-dropdown-menu>

@@ -65,6 +65,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
   @Input() visible = false;
   @Input() session!: RecordingSession;
   @Input() part!: RecordingPart;
+  @Input() initialSeekSeconds: number | null = null;
   @Output() visibleChange = new EventEmitter<boolean>();
 
   mediaUrl: string | null = null;
@@ -166,8 +167,18 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       }
       return;
     }
-    if (changes['visible'] || changes['part']) {
-      this.loadMedia();
+    if (
+      changes['visible'] ||
+      changes['part'] ||
+      changes['initialSeekSeconds']
+    ) {
+      const initialSeekSeconds = this.initialSeekSeconds;
+      const hasInitialSeek =
+        initialSeekSeconds !== null && Number.isFinite(initialSeekSeconds);
+      this.pendingSeekSeconds = hasInitialSeek
+        ? Math.max(0, initialSeekSeconds)
+        : null;
+      this.loadMedia(true, !hasInitialSeek);
     }
   }
 
@@ -512,7 +523,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     const activeLine =
       this.activeDanmakuIndex === null
         ? null
-        : this.danmakuItems[this.activeDanmakuIndex] ?? null;
+        : (this.danmakuItems[this.activeDanmakuIndex] ?? null);
     const state: DanmakuRecoveryState = {
       targetMs: Math.max(0, (this.videoElement?.currentTime ?? 0) * 1_000),
       follow: this.followDanmaku,
@@ -600,8 +611,8 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
     for (const item of incoming) {
       byIndex.set(item.index, item);
     }
-    const items = [...byIndex.values()].sort((left, right) =>
-      left.index - right.index,
+    const items = [...byIndex.values()].sort(
+      (left, right) => left.index - right.index,
     );
     return bounded && items.length > MAX_DANMAKU_ROWS
       ? items.slice(items.length - MAX_DANMAKU_ROWS)
@@ -756,9 +767,7 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
 
   private recoverMedia(message: string, forceResume = false): void {
     const now = Date.now();
-    if (
-      now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_DUPLICATE_WINDOW_MS
-    ) {
+    if (now - this.lastMediaRecoveryAt < MEDIA_RECOVERY_DUPLICATE_WINDOW_MS) {
       return;
     }
     if (this.mediaRecoveryAttempts >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
@@ -802,8 +811,8 @@ export class PartVideoDialogComponent implements OnChanges, OnDestroy {
       accessDuration !== null && accessDuration !== undefined
         ? accessDuration / 1_000
         : Number.isFinite(element.duration)
-        ? element.duration
-        : Number.POSITIVE_INFINITY;
+          ? element.duration
+          : Number.POSITIVE_INFINITY;
     element.currentTime = Math.max(
       0,
       Math.min(maxSeconds, element.currentTime + seconds),

@@ -18,6 +18,7 @@ from blrec.bili_upload.errors import (
 from blrec.bili_upload.protocol import (
     AiohttpProtocolTransport,
     BiliProtocolClient,
+    MultipartPart,
     ProtocolRequest,
     ProtocolResponse,
     TransportFailure,
@@ -177,6 +178,8 @@ async def test_default_wbi_signer_discovers_and_caches_remote_keys() -> None:
         ('archive_pre', 'web_cookie', '/x/vupre/web/archive/pre'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
         ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
+        ('public_archive_view', 'web_cookie', '/x/web-interface/view'),
+        ('public_archive_tags', 'web_cookie', '/x/tag/archive/tags'),
         ('web_nav', 'web_cookie', '/x/web-interface/nav'),
         ('list_replies', 'web_cookie_wbi', '/x/v2/reply/main'),
         ('reply_detail', 'web_cookie_wbi', '/x/v2/reply/detail'),
@@ -302,6 +305,12 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     await client.upload_cover(
         bundle, filename='fixture.jpg', mime_type='image/jpeg', content=b'fixture-cover'
     )
+    await client.upload_comment_picture(
+        bundle,
+        filename='result.png',
+        mime_type='image/png',
+        content=b'fixture-result-frame',
+    )
     await client.list_collections(bundle)
     await client.create_collection(
         bundle,
@@ -315,6 +324,8 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     await client.archive_pre(bundle)
     await client.list_archives(bundle, {'pn': 1})
     await client.archive_view(bundle, {'bvid': 'BVfixture'})
+    await client.public_archive_view(bundle, bvid='BVfixture')
+    await client.public_archive_tags(bundle, bvid='BVfixture')
     await client.web_nav(bundle)
     await client.list_replies(bundle, {'oid': 303, 'type': 1})
     await client.reply_detail(bundle, {'oid': 303, 'root': 101, 'type': 1})
@@ -341,9 +352,12 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'archive_pre',
         'list_archives',
         'archive_view',
+        'public_archive_view',
+        'public_archive_tags',
         'submit_archive',
         'edit_archive',
         'upload_cover',
+        'upload_comment_picture',
         'list_collections',
         'create_collection',
         'add_collection_episode',
@@ -389,6 +403,8 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'archive_pre',
         'list_archives',
         'archive_view',
+        'public_archive_view',
+        'public_archive_tags',
         'add_reply',
         'top_reply',
         'submit_archive',
@@ -432,6 +448,23 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
     assert cover_form['csrf'] == 'csrf-secret'
     assert cover_form['cover'].startswith('data:image/jpeg;base64,')
     assert 'fixture-cover' not in cover_form['cover']
+
+    picture_request = requests['upload_comment_picture']
+    assert picture_request.method == 'POST'
+    assert [part.name for part in picture_request.multipart] == [
+        'csrf',
+        'file_up',
+        'category',
+        'biz',
+    ]
+    picture_file = picture_request.multipart[1]
+    assert picture_file == MultipartPart(
+        'file_up',
+        b'fixture-result-frame',
+        filename='result.png',
+        content_type='image/png',
+    )
+    assert 'fixture-result-frame' not in repr(picture_file)
 
     collection_list = requests['list_collections']
     assert collection_list.method == 'GET'
@@ -486,6 +519,38 @@ async def test_upload_cover_returns_only_a_validated_https_url() -> None:
             filename='fixture.jpg',
             mime_type='image/jpeg',
             content=b'fixture-cover',
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_comment_picture_returns_validated_comment_metadata() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text())
+    fixtures['upload_comment_picture']['data'][
+        'image_url'
+    ] = 'http://i0.hdslb.com/bfs/new_dyn/fixture.png'
+    client = protocol_client(ScriptedTransport(fixtures))
+
+    picture = await client.upload_comment_picture(
+        credential_fixture(),
+        filename='result.png',
+        mime_type='image/png',
+        content=b'result-frame',
+    )
+
+    assert picture == {
+        'img_src': 'https://i0.hdslb.com/bfs/new_dyn/fixture.png',
+        'img_width': 1920,
+        'img_height': 1080,
+        'img_size': 1.25,
+    }
+
+    fixtures['upload_comment_picture']['data']['image_url'] = 'http://bad.invalid/x'
+    with pytest.raises(ProtocolContractError, match='picture'):
+        await protocol_client(ScriptedTransport(fixtures)).upload_comment_picture(
+            credential_fixture(),
+            filename='result.png',
+            mime_type='image/png',
+            content=b'result-frame',
         )
 
 

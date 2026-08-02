@@ -10,6 +10,7 @@ from . import (
     recording_sessions,
     room_upload_policies,
     upload_covers,
+    vainglory,
 )
 
 __all__ = (
@@ -24,4 +25,5 @@ __all__ = (
     'recording_retention',
     'room_upload_policies',
     'upload_covers',
+    'vainglory',
 )

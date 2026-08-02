@@ -1,4 +1,8 @@
-import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
+import {
+  HttpClient,
+  HttpErrorResponse,
+  HttpParams,
+} from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import { Observable } from 'rxjs';
@@ -9,6 +13,7 @@ import {
   RecordingSessionActionResponse,
   RecordingDanmakuPage,
   RecordingMediaAccess,
+  RemoteMediaStatus,
   RecordingSessionDetail,
   UploadJobRetryAdmission,
   UploadJobRetryPreviewResponse,
@@ -20,8 +25,7 @@ import {
   UploadTaskSettingsUpdateResponse,
 } from './recording-session.model';
 
-const DANMAKU_CURSOR_STALE_DETAIL =
-  '弹幕分页状态已失效，请从第一页重新加载';
+const DANMAKU_CURSOR_STALE_DETAIL = '弹幕分页状态已失效，请从第一页重新加载';
 
 @Injectable({ providedIn: 'root' })
 export class RecordingSessionService {
@@ -128,6 +132,16 @@ export class RecordingSessionService {
       this.url.makeApiUrl(path),
       null,
     );
+  }
+
+  getRemoteMediaStatus(partId: number): Observable<RemoteMediaStatus> {
+    const path = `/api/v1/recording-sessions/parts/${partId}/remote-media`;
+    return this.http.get<RemoteMediaStatus>(this.url.makeApiUrl(path));
+  }
+
+  requestRemoteMedia(partId: number): Observable<RemoteMediaStatus> {
+    const path = `/api/v1/recording-sessions/parts/${partId}/remote-media`;
+    return this.http.post<RemoteMediaStatus>(this.url.makeApiUrl(path), null);
   }
 
   mediaUrl(partId: number, access: RecordingMediaAccess): string {
