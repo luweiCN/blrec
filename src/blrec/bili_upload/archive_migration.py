@@ -215,6 +215,9 @@ class YtDlpSpaceArchiveCatalog:
             source_uid=source_uid,
             source_address=(None if selection is None else selection.source_address),
         )
+        environment = YtDlpMediaDownloader.subprocess_environment(
+            self._network_manager, selection
+        )
         process: Optional[asyncio.subprocess.Process] = None
         stderr_task: Optional[asyncio.Task[str]] = None
         failed = False
@@ -225,6 +228,7 @@ class YtDlpSpaceArchiveCatalog:
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=environment,
                 )
             except OSError:
                 raise ArchiveMigrationUnavailable(

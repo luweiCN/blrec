@@ -357,6 +357,29 @@ class NetworkSettings(BaseModel):
     bili_api: NetworkRouteSettings = NetworkRouteSettings()
     archive_download: NetworkRouteSettings = NetworkRouteSettings()
 
+    @root_validator(pre=True)
+    def _inherit_archive_download_route(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        migrated = dict(values)
+        if 'archive_download' in migrated or 'archiveDownload' in migrated:
+            return migrated
+        recording = migrated.get('recording')
+        if not isinstance(recording, dict):
+            return migrated
+        interface = recording.get('interface')
+        if interface is None:
+            interface = recording.get(
+                'primary_interface', recording.get('primaryInterface')
+            )
+        if isinstance(interface, str) and interface:
+            migrated['archive_download'] = {
+                'mode': 'fixed',
+                'interface': interface,
+                'failover_enabled': False,
+            }
+        return migrated
+
     @root_validator
     def _credential_routes_must_be_fixed(
         cls, values: Dict[str, object]

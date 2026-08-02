@@ -16,8 +16,9 @@ import {
   VaingloryMatch,
   VaingloryMatchFilters,
   VaingloryMatchList,
-  VaingloryMatchSessionList,
   VaingloryMatchSession,
+  VaingloryMatchSessionList,
+  VaingloryMatchSessionSort,
   VaingloryPlayer,
   VaingloryPlayerStats,
   VaingloryScanJob,
@@ -34,10 +35,11 @@ export class VaingloryService {
     filters: VaingloryMatchFilters,
     limit = 20,
     offset = 0,
+    sort: VaingloryMatchSessionSort = 'analyzed',
   ): Observable<VaingloryMatchSessionList> {
     return this.http.get<VaingloryMatchSessionList>(
       this.url.makeApiUrl('/api/v1/vainglory/sessions'),
-      { params: this.matchParams(filters, limit, offset) },
+      { params: this.matchParams(filters, limit, offset).set('sort', sort) },
     );
   }
 

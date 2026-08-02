@@ -41,10 +41,13 @@ def snapshot() -> Dict[str, List[Dict[str, Any]]]:
     probes = network_manager.cached_probes()
     traffic: Dict[str, Dict[str, float]] = {}
     for item in network_manager.traffic_meter.snapshot():
-        if item.interface_name is None:
+        interface_name = (
+            item.interface_name or network_manager.system_default_interface_name()
+        )
+        if interface_name is None:
             continue
         totals = traffic.setdefault(
-            item.interface_name,
+            interface_name,
             {
                 'uploadBps': 0.0,
                 'downloadBps': 0.0,

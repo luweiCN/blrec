@@ -7,6 +7,8 @@ export type MatchEndReason = (typeof MATCH_END_REASONS)[number];
 export const GAME_MODES = ['3v3', '5v5', 'aram', 'other', 'unknown'] as const;
 export type GameMode = (typeof GAME_MODES)[number];
 
+export type VaingloryMatchSessionSort = 'analyzed' | 'started';
+
 export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
 
 export type RecordedPlayerSource = 'automatic' | 'manual';

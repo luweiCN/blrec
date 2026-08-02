@@ -7,9 +7,13 @@ import secrets
 import stat
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from blrec.networking.manager import NetworkRouteManager, NetworkUnavailable
+from blrec.networking.manager import (
+    NetworkRouteManager,
+    NetworkUnavailable,
+    RouteSelection,
+)
 
 from .crypto import CookieRecord, CredentialBundle
 
@@ -73,6 +77,7 @@ class YtDlpMediaDownloader:
             source_address=(None if selection is None else selection.source_address),
             write_danmaku=danmaku_target is not None,
         )
+        environment = self.subprocess_environment(self._network_manager, selection)
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -80,6 +85,7 @@ class YtDlpMediaDownloader:
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=environment,
                 )
             except OSError:
                 raise BiliDownloadContractError('NAS 容器中没有可用的 yt-dlp') from None
@@ -152,6 +158,7 @@ class YtDlpMediaDownloader:
             page=page,
             source_address=(None if selection is None else selection.source_address),
         )
+        environment = self.subprocess_environment(self._network_manager, selection)
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -159,6 +166,7 @@ class YtDlpMediaDownloader:
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
+                    env=environment,
                 )
             except OSError:
                 raise BiliDownloadContractError('NAS 容器中没有可用的 yt-dlp') from None
@@ -251,6 +259,43 @@ class YtDlpMediaDownloader:
             command.extend(('--source-address', source_address))
         command.append('https://www.bilibili.com/video/{}?p={}'.format(bvid, int(page)))
         return tuple(command)
+
+    @staticmethod
+    def subprocess_environment(
+        network_manager: Optional[NetworkRouteManager],
+        selection: Optional[RouteSelection],
+    ) -> Optional[Dict[str, str]]:
+        if (
+            network_manager is None
+            or selection is None
+            or selection.source_address is None
+        ):
+            return None
+        interface = network_manager.interface(selection.interface_name)
+        if interface is None:
+            return None
+        dns_servers = tuple(
+            dict.fromkeys(
+                value
+                for value in (interface.gateway, *interface.dns_servers)
+                if value is not None
+            )
+        )
+        if not dns_servers:
+            return None
+        environment = dict(os.environ)
+        site_directory = str(
+            Path(__file__).resolve().parents[1] / 'networking' / 'source_bound_site'
+        )
+        python_path = environment.get('PYTHONPATH')
+        environment['PYTHONPATH'] = (
+            site_directory
+            if not python_path
+            else site_directory + os.pathsep + python_path
+        )
+        environment['BLREC_SOURCE_ADDRESS'] = selection.source_address
+        environment['BLREC_DNS_SERVERS'] = ','.join(dns_servers)
+        return environment
 
     def build_danmaku_command(
         self,
@@ -377,11 +422,7 @@ class YtDlpMediaDownloader:
                 observed = completed_bytes + phase_downloaded
                 delta = max(0, observed - traffic_observed)
                 traffic_observed = max(traffic_observed, observed)
-                if (
-                    delta
-                    and self._network_manager is not None
-                    and interface_name is not None
-                ):
+                if delta and self._network_manager is not None:
                     self._network_manager.traffic_meter.record(
                         interface_name, 'archive_download', 'down', delta
                     )

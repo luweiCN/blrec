@@ -67,6 +67,7 @@ class _ReviewDecision:
     job: _WaitingJob
     archives: Tuple[Mapping[str, Any], ...]
     detail: Optional[Mapping[str, Any]]
+    detail_error_code: Optional[int]
 
 
 class ReviewWatcher:
@@ -88,12 +89,15 @@ class ReviewWatcher:
         collection_branch: PostReviewBranch,
         poll_interval_seconds: int = 300,
         read_timeout_seconds: float = 60,
+        detail_interval_seconds: float = 0,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if poll_interval_seconds <= 0:
             raise ValueError('review poll interval must be positive')
         if read_timeout_seconds <= 0:
             raise ValueError('archive read timeout must be positive')
+        if detail_interval_seconds < 0:
+            raise ValueError('archive detail interval must not be negative')
         self._database = database
         self._bundle_loader = bundle_loader
         self._archive_reader = archive_reader or ArchiveReadService(
@@ -104,6 +108,7 @@ class ReviewWatcher:
         self._collection_branch = collection_branch
         self._poll_interval_seconds = poll_interval_seconds
         self._read_timeout_seconds = read_timeout_seconds
+        self._detail_interval_seconds = detail_interval_seconds
         self._clock = clock
         self._next_poll_at: Dict[int, int] = {}
 
@@ -140,7 +145,15 @@ class ReviewWatcher:
 
     async def run_once(self) -> int:
         changed = await self.recover_account_pauses()
-        changed += await self.recover_approved_pending_branches()
+        pending_branches = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM upload_jobs WHERE state=\'approved\' AND ('
+                "comment_branch_state='pending' OR "
+                "danmaku_branch_state='pending' OR "
+                "collection_branch_state='pending')"
+            )
+            or 0
+        )
         rows = await self._database.fetchall(
             'SELECT job.id,job.account_id,job.aid,job.bvid,'
             'job.comment_branch_state,job.danmaku_branch_state,'
@@ -188,6 +201,7 @@ class ReviewWatcher:
                     level='WARNING',
                     account_scope='redacted',
                     error_code=error.code,
+                    upstream_message=error.public_message,
                 )
                 continue
             except _ReviewMismatch as error:
@@ -198,6 +212,8 @@ class ReviewWatcher:
             for decision in decisions:
                 if await self._process_job(decision):
                     changed += 1
+        await self.recover_approved_pending_branches()
+        changed += pending_branches
         return changed
 
     async def recover_approved_pending_branches(self) -> int:
@@ -232,8 +248,10 @@ class ReviewWatcher:
             jobs=jobs,
         )
         decisions = []
+        detail_requested = False
         for job in jobs:
             detail = None
+            detail_error_code = None
             matches = [entry for entry in archives if self._matches(job, entry)]
             if len(matches) == 1:
                 archive = self._archive(matches[0])
@@ -244,13 +262,26 @@ class ReviewWatcher:
                     and self._text(archive.get('bvid')) == job.bvid
                     and archive.get('state') in self.APPROVED_STATES
                 ):
-                    detail = await self._archive_reader.detail(
-                        bundle,
-                        account_id=account_id,
-                        credential_version=credential_version,
-                        bvid=job.bvid,
-                    )
-            decisions.append(_ReviewDecision(job, archives, detail))
+                    if detail_requested and self._detail_interval_seconds:
+                        await asyncio.sleep(self._detail_interval_seconds)
+                    detail_requested = True
+                    try:
+                        detail = await self._archive_reader.detail(
+                            bundle,
+                            account_id=account_id,
+                            credential_version=credential_version,
+                            bvid=job.bvid,
+                        )
+                    except BiliApiError as error:
+                        detail_error_code = error.code
+                        audit(
+                            'upload_review_detail_api_failed',
+                            level='WARNING',
+                            job_id=job.id,
+                            error_code=error.code,
+                            upstream_message=error.public_message,
+                        )
+            decisions.append(_ReviewDecision(job, archives, detail, detail_error_code))
         return tuple(decisions)
 
     async def _load_archives(
@@ -336,6 +367,15 @@ class ReviewWatcher:
                 await self._waiting_reason(job, waiting_reason)
             return False
 
+        if decision.detail_error_code is not None:
+            await self._waiting_reason(
+                job,
+                '稿件详情暂时不可用，系统将自动重试（{}）'.format(
+                    decision.detail_error_code
+                ),
+            )
+            return False
+
         try:
             detail = decision.detail
             if detail is None:
@@ -353,7 +393,6 @@ class ReviewWatcher:
         approved = await self._approve(job, verified_parts)
         if not approved:
             return False
-        await self._create_branches(job)
         return True
 
     async def _verify_submission(

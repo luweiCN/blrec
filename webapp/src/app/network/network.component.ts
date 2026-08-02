@@ -44,8 +44,8 @@ export class NetworkComponent implements OnInit, OnDestroy {
     },
     {
       key: 'recording',
-      name: '录像下载',
-      help: '每场直播只选一次线路，整场及分段保持不变。',
+      name: '直播流录制',
+      help: '下载正在直播的直播流；每场直播只选一次线路，整场及分段保持不变。',
     },
     {
       key: 'upload',

@@ -20,6 +20,7 @@ __all__ = (
 )
 
 _TEN_DAYS_SECONDS = 10 * 24 * 60 * 60
+_DOWNLOAD_CONCURRENCY = 3
 
 
 class RemoteMediaNotFound(ValueError):
@@ -80,7 +81,7 @@ class RemoteMediaCache:
         self._bundle_loader = bundle_loader
         self._downloader = downloader
         self._clock = clock
-        self._run_lock = asyncio.Lock()
+        self._download_slots = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
         self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task[None]] = None
 
@@ -143,7 +144,7 @@ class RemoteMediaCache:
         return await self._load_status(part_id, create_source=True)
 
     async def run_once(self) -> bool:
-        async with self._run_lock:
+        async with self._download_slots:
             await self.cleanup_expired()
             claim = await self._claim()
             if claim is None:
@@ -457,6 +458,11 @@ class RemoteMediaCache:
         )
 
     async def _run(self) -> None:
+        await asyncio.gather(
+            *(self._run_worker() for _ in range(_DOWNLOAD_CONCURRENCY))
+        )
+
+    async def _run_worker(self) -> None:
         while True:
             processed = await self.run_once()
             if processed:

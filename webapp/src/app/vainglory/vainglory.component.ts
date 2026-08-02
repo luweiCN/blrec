@@ -42,6 +42,7 @@ import {
   VaingloryMatchPlayer,
   VaingloryMatchSession,
   VaingloryHeroStats,
+  VaingloryMatchSessionSort,
   VaingloryPlayer,
   VaingloryPlayerStats,
   VaingloryScanJob,
@@ -152,6 +153,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   heroIds: number[] = [];
   winnerColor: TeamColor | null = null;
   gameMode: GameMode | null = null;
+  sessionSort: VaingloryMatchSessionSort = 'analyzed';
   sessionId: number | null = null;
   pageIndex = 1;
   readonly pageSize = 20;
@@ -369,6 +371,12 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.applySearch();
   }
 
+  toggleSessionSort(): void {
+    this.sessionSort =
+      this.sessionSort === 'analyzed' ? 'started' : 'analyzed';
+    this.applySearch();
+  }
+
   pageChanged(pageIndex: number): void {
     if (pageIndex === this.pageIndex) {
       return;
@@ -400,6 +408,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         filters,
         this.pageSize,
         (this.pageIndex - 1) * this.pageSize,
+        this.sessionSort,
       )
       .pipe(takeUntil(this.destroy$))
       .subscribe({

@@ -1658,6 +1658,7 @@ class VaingloryRepository:
         source_title: str = '',
         anchor_name: Optional[str] = None,
         stats_included: Optional[bool] = None,
+        sort_by: str = 'analyzed',
         limit: int = 20,
         offset: int = 0,
     ) -> MatchSessionPage:
@@ -1665,6 +1666,8 @@ class VaingloryRepository:
             raise ValueError('limit must be between 1 and 100')
         if offset < 0:
             raise ValueError('offset must not be negative')
+        if sort_by not in ('analyzed', 'started'):
+            raise ValueError('sort_by must be analyzed or started')
         where, parameters = self._match_filters(
             player_name=player_name,
             hero_ids=hero_ids,
@@ -1707,10 +1710,19 @@ class VaingloryRepository:
                 tuple(session_parameters),
             )
         )
+        order_by = (
+            'ordering_scan.completed_at DESC,session.started_at DESC,session.id DESC'
+            if sort_by == 'analyzed'
+            else 'session.started_at DESC,session.id DESC'
+        )
         id_rows = await self._database.fetchall(
-            'SELECT session.id FROM recording_sessions session WHERE '
+            'SELECT session.id FROM recording_sessions session '
+            'LEFT JOIN vainglory_scan_jobs ordering_scan '
+            'ON ordering_scan.session_id=session.id WHERE '
             + matching
-            + ' ORDER BY session.started_at DESC,session.id DESC LIMIT ? OFFSET ?',
+            + ' ORDER BY '
+            + order_by
+            + ' LIMIT ? OFFSET ?',
             tuple(session_parameters) + (limit, offset),
         )
         session_ids = [int(row['id']) for row in id_rows]
