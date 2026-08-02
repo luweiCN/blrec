@@ -575,6 +575,7 @@ async def list_match_sessions(
     source_title: str = Query('', max_length=200, alias='sourceTitle'),
     anchor_name: Optional[str] = Query(None, max_length=200, alias='anchorName'),
     stats_included: Optional[bool] = Query(None, alias='statsIncluded'),
+    sort: Literal['analyzed', 'started'] = Query('analyzed'),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     _subject: str = Depends(authenticated_manager_subject),
@@ -595,6 +596,7 @@ async def list_match_sessions(
         source_title=source_title,
         anchor_name=anchor_name,
         stats_included=stats_included,
+        sort_by=sort,
         limit=limit,
         offset=offset,
     )

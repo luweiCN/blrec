@@ -203,6 +203,14 @@
             <nz-option nzValue="other" nzLabel="其他"></nz-option>
             <nz-option nzValue="unknown" nzLabel="待识别"></nz-option>
           </nz-select>
+          <button nz-button type="button" (click)="toggleSessionSort()">
+            <i nz-icon nzType="swap" [nzRotate]="90"></i>
+            {{
+              sessionSort === "analyzed"
+                ? "排序：最近分析"
+                : "排序：直播时间"
+            }}
+          </button>
           <button
             nz-button
             nzType="primary"
