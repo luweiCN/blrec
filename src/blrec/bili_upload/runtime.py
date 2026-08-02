@@ -21,6 +21,7 @@ from typing import (
 from loguru import logger
 
 from blrec.control.operations import ControlOperationJournal
+from blrec.logging.audit import audit
 from blrec.networking.manager import NetworkRouteManager
 from blrec.notification.operational import (
     OperationalHealthScanner,
@@ -86,6 +87,9 @@ __all__ = ('BiliAccountRuntime',)
 
 _COMMENT_ACTION_INTERVAL_SECONDS = 5
 _DANMAKU_ACTION_INTERVAL_SECONDS = 25
+_REVIEW_POLL_INTERVAL_SECONDS = 300
+_REVIEW_DETAIL_INTERVAL_SECONDS = 2.0
+_REVIEW_READ_TIMEOUT_SECONDS = 180.0
 
 
 class BiliAccountRuntime:
@@ -516,11 +520,13 @@ class BiliAccountRuntime:
                 comment_branch=comment_planner,
                 danmaku_branch=danmaku_importer,
                 collection_branch=collection_publisher,
+                poll_interval_seconds=_REVIEW_POLL_INTERVAL_SECONDS,
+                read_timeout_seconds=_REVIEW_READ_TIMEOUT_SECONDS,
+                detail_interval_seconds=_REVIEW_DETAIL_INTERVAL_SECONDS,
                 clock=self._clock,
             )
             await review_watcher.recover_legacy_page_order_pauses()
             await review_watcher.recover_account_pauses()
-            await review_watcher.recover_approved_pending_branches()
             retention_manager = (
                 None
                 if self._recording_root is None
@@ -1073,6 +1079,30 @@ class BiliAccountRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def _run_reviews(
+        self, watcher: ReviewWatcher, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            started_at = time.monotonic()
+            try:
+                changed = await watcher.run_once()
+                if changed:
+                    audit(
+                        'upload_review_cycle_completed',
+                        changed=changed,
+                        result='updated',
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Bilibili review worker iteration failed')
+            elapsed = time.monotonic() - started_at
+            delay = max(1.0, _REVIEW_POLL_INTERVAL_SECONDS - elapsed)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
     async def _run_uploads(
         self,
         journal: RecordingJournalBridge,
@@ -1098,6 +1128,9 @@ class BiliAccountRuntime:
             if collection_publisher is not None
             else None
         )
+        review_worker = asyncio.create_task(
+            self._run_reviews(review_watcher, stop_event)
+        )
         try:
             while not stop_event.is_set():
                 upload_processed = None
@@ -1109,7 +1142,6 @@ class BiliAccountRuntime:
                 try:
                     await journal.finalize_cancelled_sessions()
                     await journal.reconcile_stale_finished_parts()
-                    await review_watcher.run_once()
                     if task_actions is not None:
                         retry_processed = await task_actions.run_retry_batch_once()
                         repair_processed = await task_actions.run_once()
@@ -1154,7 +1186,7 @@ class BiliAccountRuntime:
         finally:
             workers = [
                 worker
-                for worker in (upload_pool, collection_worker)
+                for worker in (upload_pool, collection_worker, review_worker)
                 if worker is not None
             ]
             for worker in workers:
