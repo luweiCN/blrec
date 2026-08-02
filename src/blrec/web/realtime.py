@@ -16,7 +16,15 @@ from typing import (
 )
 
 REALTIME_TOPICS: FrozenSet[str] = frozenset(
-    {'tasks', 'network', 'upload_progress', 'highlight_progress'}
+    {
+        'tasks',
+        'network',
+        'upload_progress',
+        'highlight_progress',
+        'archive_migration',
+        'archive_backfill',
+        'vainglory_index',
+    }
 )
 _CONTROL_EVENT_TYPES: FrozenSet[str] = frozenset({'resync', 'heartbeat'})
 
@@ -104,6 +112,15 @@ class RealtimeSampler:
         network_provider: Callable[[], Any],
         upload_provider: Callable[[], Awaitable[Any]],
         highlight_provider: Optional[Callable[[], Awaitable[Any]]] = None,
+        archive_migration_provider: Optional[
+            Callable[[], Awaitable[Mapping[str, Any]]]
+        ] = None,
+        archive_backfill_provider: Optional[
+            Callable[[], Awaitable[Mapping[str, Any]]]
+        ] = None,
+        vainglory_index_provider: Optional[
+            Callable[[], Awaitable[Mapping[str, Any]]]
+        ] = None,
         interval_seconds: float = 1.0,
     ) -> None:
         self._broker = broker
@@ -111,6 +128,9 @@ class RealtimeSampler:
         self._network_provider = network_provider
         self._upload_provider = upload_provider
         self._highlight_provider = highlight_provider
+        self._archive_migration_provider = archive_migration_provider
+        self._archive_backfill_provider = archive_backfill_provider
+        self._vainglory_index_provider = vainglory_index_provider
         self._interval_seconds = interval_seconds
         self._last: Dict[str, str] = {}
         self._task: Optional[asyncio.Task[None]] = None
@@ -130,6 +150,23 @@ class RealtimeSampler:
         ):
             highlights = await self._highlight_provider()
             await self._publish_changed('highlight_progress', {'clips': highlights})
+        if (
+            self._archive_migration_provider is not None
+            and self._broker.has_subscribers('archive_migration')
+        ):
+            migrations = await self._archive_migration_provider()
+            await self._publish_changed('archive_migration', migrations)
+        if (
+            self._archive_backfill_provider is not None
+            and self._broker.has_subscribers('archive_backfill')
+        ):
+            backfills = await self._archive_backfill_provider()
+            await self._publish_changed('archive_backfill', backfills)
+        if self._vainglory_index_provider is not None and self._broker.has_subscribers(
+            'vainglory_index'
+        ):
+            index = await self._vainglory_index_provider()
+            await self._publish_changed('vainglory_index', index)
 
     async def _publish_changed(
         self, event_type: str, payload: Mapping[str, Any]

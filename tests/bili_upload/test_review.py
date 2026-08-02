@@ -294,6 +294,34 @@ async def test_recover_legacy_page_order_pause_is_exact_and_never_reuploads(
 
 
 @pytest.mark.asyncio
+async def test_review_pause_resumes_after_upload_account_recovers(
+    tmp_path: Path,
+) -> None:
+    database = await open_database(tmp_path / 'upload.sqlite3')
+    try:
+        await seed_waiting_job(
+            database, job_id=1, aid=301, bvid='BV1', filenames=('p1',)
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET state='paused',"
+            "review_reason='投稿账号不可用，无法同步审核状态' WHERE id=1"
+        )
+
+        assert await watcher(database, archive_response()).recover_account_pauses() == 1
+        row = await database.fetchone(
+            'SELECT state,submit_state,review_reason FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'waiting_review',
+            'submit_state': 'confirmed',
+            'review_reason': '投稿账号恢复，系统已自动继续审核',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_review_binds_cids_by_remote_filename_not_array_position(
     tmp_path: Path,
 ) -> None:

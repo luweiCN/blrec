@@ -90,6 +90,7 @@ type TimelinePopover =
 export class HighlightEditorComponent implements OnInit, OnDestroy {
   readonly sessionId: number;
   readonly initialPartId: number | null;
+  readonly initialSeekMs: number | null;
   readonly popoverPositions: ConnectedPosition[] = [
     {
       originX: 'center',
@@ -204,6 +205,10 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
     this.sessionId = Number(route.snapshot.paramMap.get('sessionId'));
     const partId = Number(route.snapshot.queryParamMap?.get('partId'));
     this.initialPartId = Number.isInteger(partId) && partId > 0 ? partId : null;
+    const rawSeekMs = route.snapshot.queryParamMap?.get('seekMs');
+    const seekMs = rawSeekMs === null ? Number.NaN : Number(rawSeekMs);
+    this.initialSeekMs =
+      Number.isFinite(seekMs) && seekMs >= 0 ? Math.floor(seekMs) : null;
     this.playbackVolume = this.playbackPreferences.volume;
     this.playbackRate = this.playbackPreferences.rate;
     this.subscriptions.add(
@@ -1982,13 +1987,20 @@ export class HighlightEditorComponent implements OnInit, OnDestroy {
             requestedPart ?? this.partAt(playhead) ?? timeline.parts[0] ?? null;
           if (part) {
             const localOffset = requestedPart
-              ? 0
+              ? this.initialSeekMs ?? 0
               : Math.max(0, playhead - part.timelineStartMs);
-            this.selectPart(part, localOffset, initial);
+            this.selectPart(
+              part,
+              localOffset,
+              initial && this.initialSeekMs === null,
+            );
             if (initial) {
-              this.startMs = part.timelineStartMs;
+              this.startMs = Math.min(
+                part.timelineStartMs + localOffset,
+                part.stableEndMs,
+              );
               this.endMs = Math.min(
-                part.timelineStartMs + 60_000,
+                this.startMs + 60_000,
                 part.stableEndMs,
                 timeline.stableEndMs,
               );

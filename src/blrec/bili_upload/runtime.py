@@ -2,10 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from loguru import logger
 
@@ -16,9 +27,22 @@ from blrec.notification.operational import (
     OperationalNotificationCenter,
 )
 from blrec.setting.models import BiliUploadSettings, OperationalNotificationSettings
+from blrec.vainglory.analyzer import VaingloryVideoAnalyzer
+from blrec.vainglory.archive_backfill import ArchiveBackfillService
+from blrec.vainglory.glm_ocr import GlmOcrClient, GlmOcrResultReader
+from blrec.vainglory.hero_recognition import SiftHeroRecognizer, load_hero_references
+from blrec.vainglory.publication import VaingloryPublicationService
+from blrec.vainglory.repository import VaingloryRepository
+from blrec.vainglory.service import VaingloryIndexService
 
 from .accounts import AccountManager, AccountWriteGate
+from .archive_migration import (
+    ArchiveMigrationService,
+    BiliPublicArchiveReader,
+    YtDlpSpaceArchiveCatalog,
+)
 from .archive_reads import ArchiveReadService
+from .bili_download import YtDlpMediaDownloader
 from .categories import (
     InvalidUploadCategoryRequest,
     UploadCategoryCatalog,
@@ -45,6 +69,7 @@ from .models import FeatureUnavailable, validate_feature_gate
 from .policies import RoomUploadPolicyCommand, RoomUploadPolicyManager
 from .protocol import AiohttpProtocolTransport, BiliProtocolClient
 from .recording_content import RecordingContentReader
+from .remote_media import RemoteMediaCache
 from .retention import RetentionManager
 from .review import ReviewWatcher
 from .session_submission import SessionSubmissionManager
@@ -140,6 +165,11 @@ class BiliAccountRuntime:
         self._media_index_worker: Optional[MediaIndexWorker] = None
         self._deletion_worker: Optional[LocalDeletionWorker] = None
         self._media_library: Optional[MediaLibrary] = None
+        self._remote_media_cache: Optional[RemoteMediaCache] = None
+        self._vainglory_service: Optional[VaingloryIndexService] = None
+        self._vainglory_publication: Optional[VaingloryPublicationService] = None
+        self._archive_backfill: Optional[ArchiveBackfillService] = None
+        self._archive_migration: Optional[ArchiveMigrationService] = None
         self._notification_scanner: Optional[OperationalHealthScanner] = None
         self._refresh_task: Optional[asyncio.Task[Any]] = None
         self._upload_task: Optional[asyncio.Task[Any]] = None
@@ -253,6 +283,22 @@ class BiliAccountRuntime:
         return self._media_library
 
     @property
+    def remote_media_cache(self) -> Optional[RemoteMediaCache]:
+        return self._remote_media_cache
+
+    @property
+    def vainglory_service(self) -> Optional[VaingloryIndexService]:
+        return self._vainglory_service
+
+    @property
+    def archive_backfill(self) -> Optional[ArchiveBackfillService]:
+        return self._archive_backfill
+
+    @property
+    def archive_migration(self) -> Optional[ArchiveMigrationService]:
+        return self._archive_migration
+
+    @property
     def unavailable_reason(self) -> Optional[str]:
         return self._unavailable_reason
 
@@ -279,6 +325,11 @@ class BiliAccountRuntime:
 
         database = BiliUploadDatabase(self._settings.database_path)
         highlight_service: Optional[HighlightService] = None
+        remote_media_cache: Optional[RemoteMediaCache] = None
+        vainglory_service: Optional[VaingloryIndexService] = None
+        vainglory_publication: Optional[VaingloryPublicationService] = None
+        archive_backfill: Optional[ArchiveBackfillService] = None
+        archive_migration: Optional[ArchiveMigrationService] = None
         try:
             await database.open()
             if self._control_operation_journal is not None:
@@ -364,6 +415,7 @@ class BiliAccountRuntime:
                 concurrency=self._settings.upload_chunk_concurrency,
                 clock=self._clock,
                 stop_requested=upload_stop_requested,
+                capacity_changed=lambda _capacity: self._wake_upload_worker(),
             )
 
             async def load_bundle(account_id: int) -> Any:
@@ -391,6 +443,7 @@ class BiliAccountRuntime:
                 stop_requested=upload_stop_requested,
             )
             await coordinator.recover_interrupted()
+            await coordinator.recover_submission_rate_limits()
             task_actions = UploadTaskActionManager(
                 database,
                 protocol,
@@ -404,6 +457,7 @@ class BiliAccountRuntime:
                 deletion_worker=deletion_worker,
                 control_journal=self._control_operation_journal,
                 wake_uploads=self._wake_upload_worker,
+                immediate_submission_retry=coordinator.retry_submission_now,
                 clock=self._clock,
             )
             await task_actions.recover_interrupted()
@@ -465,6 +519,7 @@ class BiliAccountRuntime:
                 clock=self._clock,
             )
             await review_watcher.recover_legacy_page_order_pauses()
+            await review_watcher.recover_account_pauses()
             await review_watcher.recover_approved_pending_branches()
             retention_manager = (
                 None
@@ -495,8 +550,83 @@ class BiliAccountRuntime:
                     network_route_manager=self._network_route_manager,
                 )
             await highlight_service.start()
+            remote_media_cache = RemoteMediaCache(
+                database,
+                recording_root,
+                bundle_loader=load_bundle,
+                downloader=YtDlpMediaDownloader(
+                    network_manager=self._network_route_manager, clock=self._clock
+                ),
+                clock=self._clock,
+            )
+            await remote_media_cache.start()
+            hero_recognizer: Optional[SiftHeroRecognizer]
+            try:
+                hero_recognizer = SiftHeroRecognizer(load_hero_references())
+            except (ImportError, OSError, RuntimeError, ValueError) as error:
+                hero_recognizer = None
+                logger.warning(
+                    'Vainglory hero recognizer unavailable; continuing without '
+                    'hero labels: reason={!r}',
+                    error,
+                )
+            ocr_url = os.environ.get('BLREC_VAINGLORY_OCR_URL', '').strip()
+            result_reader = (
+                None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
+            )
+            vainglory_repository = VaingloryRepository(database, clock=self._clock)
+            vainglory_publication = VaingloryPublicationService(
+                database,
+                vainglory_repository,
+                protocol,
+                bundle_loader=load_bundle,
+                account_gates=write_gates,
+                clock=self._clock,
+            )
+            await vainglory_publication.purge_excluded_remote()
+            vainglory_service = VaingloryIndexService(
+                vainglory_repository,
+                analyzer=VaingloryVideoAnalyzer(
+                    result_reader=result_reader, hero_recognizer=hero_recognizer
+                ),
+            )
+            await vainglory_service.start()
+            archive_backfill = ArchiveBackfillService(
+                database,
+                archive_reader,
+                bundle_loader=load_bundle,
+                remote_media_cache=remote_media_cache,
+                clock=self._clock,
+            )
+            await archive_backfill.start()
+            archive_migration = ArchiveMigrationService(
+                database,
+                recording_root=recording_root,
+                catalog=YtDlpSpaceArchiveCatalog(
+                    network_manager=self._network_route_manager, clock=self._clock
+                ),
+                detail_reader=BiliPublicArchiveReader(protocol),
+                downloader=YtDlpMediaDownloader(
+                    network_manager=self._network_route_manager, clock=self._clock
+                ),
+                bundle_loader=load_bundle,
+                task_creator=coordinator,
+                clock=self._clock,
+            )
+            await archive_migration.start()
+            await vainglory_publication.start()
         except Exception:
             logger.exception('Bilibili account management failed to start')
+            if vainglory_publication is not None:
+                await vainglory_publication.close()
+            if archive_migration is not None:
+                await archive_migration.close()
+            if archive_backfill is not None:
+                await archive_backfill.close()
+            if vainglory_service is not None:
+                await vainglory_service.close()
+            if remote_media_cache is not None:
+                await remote_media_cache.close()
             if highlight_service is not None:
                 await highlight_service.shutdown()
             await self._close_partial(database)
@@ -527,6 +657,11 @@ class BiliAccountRuntime:
         self._media_index_worker = media_index_worker
         self._deletion_worker = deletion_worker
         self._media_library = media_library
+        self._remote_media_cache = remote_media_cache
+        self._vainglory_service = vainglory_service
+        self._vainglory_publication = vainglory_publication
+        self._archive_backfill = archive_backfill
+        self._archive_migration = archive_migration
         self._notification_scanner = notification_scanner
         self._unavailable_reason = None
         self._refresh_task = asyncio.create_task(self._run_refresh_checks(manager))
@@ -743,6 +878,24 @@ class BiliAccountRuntime:
             cover_library.close_admission()
         if self._deletion_worker is not None:
             self._deletion_worker.stop_admission()
+        archive_migration, self._archive_migration = self._archive_migration, None
+        if archive_migration is not None:
+            await archive_migration.close()
+        archive_backfill, self._archive_backfill = self._archive_backfill, None
+        if archive_backfill is not None:
+            await archive_backfill.close()
+        vainglory_publication, self._vainglory_publication = (
+            self._vainglory_publication,
+            None,
+        )
+        if vainglory_publication is not None:
+            await vainglory_publication.close()
+        vainglory_service, self._vainglory_service = (self._vainglory_service, None)
+        if vainglory_service is not None:
+            await vainglory_service.close()
+        remote_media_cache, self._remote_media_cache = (self._remote_media_cache, None)
+        if remote_media_cache is not None:
+            await remote_media_cache.close()
         service = self._highlight_service
         if service is not None:
             await service.shutdown()
@@ -783,6 +936,7 @@ class BiliAccountRuntime:
         self._deletion_worker = None
         self._media_library = None
         self._notification_scanner = None
+        self._vainglory_publication = None
         content_reader, self._content_reader = self._content_reader, None
         if content_reader is not None:
             content_reader.close()
@@ -851,6 +1005,74 @@ class BiliAccountRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def _run_upload_task_pool(
+        self, coordinator: UploadCoordinator, stop_event: asyncio.Event
+    ) -> None:
+        active: Set[asyncio.Task[int]] = set()
+        try:
+            while not stop_event.is_set():
+                progressed = False
+                finished = [task for task in active if task.done()]
+                for task in finished:
+                    active.remove(task)
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        if not stop_event.is_set():
+                            logger.warning('Bilibili upload task was cancelled')
+                        continue
+                    except Exception:
+                        logger.exception('Bilibili upload task failed')
+                        continue
+                    progressed = True
+
+                capacity = max(1, min(5, int(coordinator.task_capacity)))
+                while len(active) < capacity and not stop_event.is_set():
+                    try:
+                        started_task = await coordinator.start_once()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception('Bilibili upload task admission failed')
+                        break
+                    if started_task is None:
+                        break
+                    active.add(started_task)
+                    started_task.add_done_callback(
+                        lambda _task: self._wake_upload_worker()
+                    )
+                    progressed = True
+
+                if progressed:
+                    await asyncio.sleep(0)
+                    continue
+                await self._wait_for_upload_delay(
+                    stop_event, min(1.0, self._upload_interval_seconds)
+                )
+        finally:
+            for task in active:
+                task.cancel()
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
+
+    async def _run_collections(
+        self, publisher: CollectionPublisher, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            try:
+                processed = await publisher.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Bilibili collection worker iteration failed')
+                processed = None
+            if processed is not None:
+                continue
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+
     async def _run_uploads(
         self,
         journal: RecordingJournalBridge,
@@ -860,59 +1082,85 @@ class BiliAccountRuntime:
         danmaku_importer: DanmakuImporter,
         danmaku_publisher: DanmakuPublisher,
         stop_event: asyncio.Event,
+        collection_publisher: Optional[CollectionPublisher] = None,
         retention_manager: Optional[RetentionManager] = None,
         task_actions: Optional[UploadTaskActionManager] = None,
         notification_scanner: Optional[OperationalHealthScanner] = None,
     ) -> None:
-        while not stop_event.is_set():
-            upload_processed = None
-            comment_processed = None
-            danmaku_imported = None
-            danmaku_published = None
-            repair_processed = None
-            retry_processed = None
-            try:
-                await journal.finalize_cancelled_sessions()
-                await journal.reconcile_stale_finished_parts()
-                await review_watcher.run_once()
-                if task_actions is not None:
-                    retry_processed = await task_actions.run_retry_batch_once()
-                    repair_processed = await task_actions.run_once()
-                await coordinator.sync_live_sessions()
-                await coordinator.prepare_waiting_jobs()
-                upload_processed = await coordinator.run_once()
-                comment_processed = await comment_publisher.run_once()
-                danmaku_imported = await danmaku_importer.run_once()
-                danmaku_published = await danmaku_publisher.run_once()
-                if retention_manager is not None:
-                    await retention_manager.run_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception('Bilibili upload worker iteration failed')
-            if notification_scanner is not None:
+        start_once = getattr(coordinator, 'start_once', None)
+        upload_pool = (
+            asyncio.create_task(self._run_upload_task_pool(coordinator, stop_event))
+            if callable(start_once)
+            else None
+        )
+        collection_worker = (
+            asyncio.create_task(self._run_collections(collection_publisher, stop_event))
+            if collection_publisher is not None
+            else None
+        )
+        try:
+            while not stop_event.is_set():
+                upload_processed = None
+                comment_processed = None
+                danmaku_imported = None
+                danmaku_published = None
+                repair_processed = None
+                retry_processed = None
                 try:
-                    await notification_scanner.scan()
+                    await journal.finalize_cancelled_sessions()
+                    await journal.reconcile_stale_finished_parts()
+                    await review_watcher.run_once()
+                    if task_actions is not None:
+                        retry_processed = await task_actions.run_retry_batch_once()
+                        repair_processed = await task_actions.run_once()
+                    synced = await coordinator.sync_live_sessions()
+                    prepared = await coordinator.prepare_waiting_jobs()
+                    if upload_pool is None:
+                        upload_processed = await coordinator.run_once()
+                    elif synced or prepared:
+                        self._wake_upload_worker()
+                    comment_processed = await comment_publisher.run_once()
+                    danmaku_imported = await danmaku_importer.run_once()
+                    danmaku_published = await danmaku_publisher.run_once()
+                    if retention_manager is not None:
+                        await retention_manager.run_once()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.exception('Operational notification scan failed')
-            delay: float
-            if comment_processed is not None:
-                delay = _COMMENT_ACTION_INTERVAL_SECONDS
-            elif danmaku_published is not None:
-                delay = _DANMAKU_ACTION_INTERVAL_SECONDS
-            elif (
-                upload_processed is not None
-                or repair_processed is not None
-                or retry_processed is not None
-            ):
-                delay = 1
-            elif danmaku_imported is not None:
-                delay = 1
-            else:
-                delay = self._upload_interval_seconds
-            await self._wait_for_upload_delay(stop_event, delay)
+                    logger.exception('Bilibili upload worker iteration failed')
+                if notification_scanner is not None:
+                    try:
+                        await notification_scanner.scan()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception('Operational notification scan failed')
+                delay: float
+                if comment_processed is not None:
+                    delay = _COMMENT_ACTION_INTERVAL_SECONDS
+                elif danmaku_published is not None:
+                    delay = _DANMAKU_ACTION_INTERVAL_SECONDS
+                elif (
+                    upload_processed is not None
+                    or repair_processed is not None
+                    or retry_processed is not None
+                ):
+                    delay = 1
+                elif danmaku_imported is not None:
+                    delay = 1
+                else:
+                    delay = self._upload_interval_seconds
+                await self._wait_for_upload_delay(stop_event, delay)
+        finally:
+            workers = [
+                worker
+                for worker in (upload_pool, collection_worker)
+                if worker is not None
+            ]
+            for worker in workers:
+                worker.cancel()
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
 
     def _wake_upload_worker(self) -> None:
         wake_event = self._upload_wake_event
@@ -970,6 +1218,7 @@ class BiliAccountRuntime:
         journal = self._journal
         coordinator = self._coordinator
         review_watcher = self._review_watcher
+        collection_publisher = self._collection_publisher
         comment_publisher = self._comment_publisher
         danmaku_importer = self._danmaku_importer
         danmaku_publisher = self._danmaku_publisher
@@ -980,6 +1229,7 @@ class BiliAccountRuntime:
                 journal,
                 coordinator,
                 review_watcher,
+                collection_publisher,
                 comment_publisher,
                 danmaku_importer,
                 danmaku_publisher,
@@ -990,6 +1240,7 @@ class BiliAccountRuntime:
         assert journal is not None
         assert coordinator is not None
         assert review_watcher is not None
+        assert collection_publisher is not None
         assert comment_publisher is not None
         assert danmaku_importer is not None
         assert danmaku_publisher is not None
@@ -1006,9 +1257,10 @@ class BiliAccountRuntime:
                 danmaku_importer,
                 danmaku_publisher,
                 stop_event,
-                self._retention_manager,
-                task_actions,
-                self._notification_scanner,
+                collection_publisher=collection_publisher,
+                retention_manager=self._retention_manager,
+                task_actions=task_actions,
+                notification_scanner=self._notification_scanner,
             )
         )
 

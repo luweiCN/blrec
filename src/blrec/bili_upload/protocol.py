@@ -46,6 +46,7 @@ from .signing import PROTOCOL_MATRIX, BiliTvSigner, WbiSigner, WebSessionBuilder
 __all__ = (
     'AiohttpProtocolTransport',
     'BiliProtocolClient',
+    'MultipartPart',
     'PreuploadResult',
     'ProtocolRequest',
     'ProtocolResponse',
@@ -76,6 +77,17 @@ def protocol_request_deadline(seconds: float) -> Iterator[None]:
 
 
 @dataclass(frozen=True, repr=False)
+class MultipartPart:
+    name: str
+    value: bytes
+    filename: Optional[str] = None
+    content_type: Optional[str] = None
+
+    def __repr__(self) -> str:
+        return '<MultipartPart name={!r} size={}>'.format(self.name, len(self.value))
+
+
+@dataclass(frozen=True, repr=False)
 class ProtocolRequest:
     operation: str
     method: str
@@ -84,6 +96,7 @@ class ProtocolRequest:
     query: Parameters = ()
     form: Parameters = ()
     body: Optional[bytes] = None
+    multipart: Tuple[MultipartPart, ...] = ()
 
     def safe_shape(self) -> Dict[str, Any]:
         target = urlsplit(self.url)
@@ -96,6 +109,7 @@ class ProtocolRequest:
             'header_names': sorted(self.headers),
             'query_names': sorted(name for name, _value in self.query),
             'form_names': sorted(name for name, _value in self.form),
+            'multipart_names': sorted(part.name for part in self.multipart),
             'body_size': 0 if self.body is None else len(self.body),
         }
 
@@ -183,7 +197,20 @@ class AiohttpProtocolTransport:
             'timeout': request_timeout,
             'trace_request_ctx': trace_context,
         }
-        if request.form:
+        if request.multipart:
+            data = aiohttp.FormData()
+            for part in request.multipart:
+                value: Any = part.value
+                if part.filename is None and part.content_type is None:
+                    value = part.value.decode('utf8')
+                data.add_field(
+                    part.name,
+                    value,
+                    filename=part.filename,
+                    content_type=part.content_type,
+                )
+            kwargs['data'] = data
+        elif request.form:
             kwargs['data'] = list(request.form)
         elif request.body is not None:
             if self._route_manager is not None and selection is not None:
@@ -560,6 +587,50 @@ class BiliProtocolClient:
             raise ProtocolContractError('cover upload response is incomplete')
         return self._https_url(data.get('url'), 'cover upload')
 
+    async def upload_comment_picture(
+        self, bundle: CredentialBundle, *, filename: str, mime_type: str, content: bytes
+    ) -> Mapping[str, Any]:
+        if (
+            not filename
+            or mime_type not in ('image/jpeg', 'image/png')
+            or not content
+            or len(content) > 20 * 1024 * 1024
+        ):
+            raise ProtocolContractError('invalid comment picture upload')
+        operation = 'upload_comment_picture'
+        url = self._url_for(operation)
+        csrf = self._web.csrf(bundle)
+        request = ProtocolRequest(
+            operation=operation,
+            method='POST',
+            url=url,
+            headers=self._web_headers(bundle, url),
+            multipart=(
+                MultipartPart('csrf', csrf.encode('utf8')),
+                MultipartPart(
+                    'file_up', content, filename=filename, content_type=mime_type
+                ),
+                MultipartPart('category', b'daily'),
+                MultipartPart('biz', b'new_dyn'),
+            ),
+        )
+        response = await self._execute(request, idempotent=False)
+        data = response.get('data')
+        if not isinstance(data, Mapping):
+            raise ProtocolContractError('comment picture upload response is incomplete')
+        image_url = self._https_url(data.get('image_url'), 'comment picture upload')
+        width = self._positive_number(data.get('image_width'))
+        height = self._positive_number(data.get('image_height'))
+        size = self._positive_number(data.get('img_size'))
+        if width is None or height is None or size is None:
+            raise ProtocolContractError('comment picture upload response is incomplete')
+        return {
+            'img_src': image_url,
+            'img_width': width,
+            'img_height': height,
+            'img_size': size,
+        }
+
     async def list_collections(self, bundle: CredentialBundle) -> Mapping[str, Any]:
         return await self._member_request(
             'list_collections',
@@ -625,6 +696,51 @@ class BiliProtocolClient:
     ) -> Mapping[str, Any]:
         return await self._web_request('archive_view', bundle, query=params)
 
+    async def archive_cards(
+        self, bundle: CredentialBundle, *, aid: int, cid: int
+    ) -> Mapping[str, Any]:
+        return await self._member_request(
+            'archive_cards', bundle, query={'aid': aid, 'cid': cid}
+        )
+
+    async def submit_archive_chapters(
+        self,
+        bundle: CredentialBundle,
+        *,
+        aid: int,
+        cid: int,
+        cards: Sequence[Mapping[str, Any]],
+        permanent: bool = True,
+    ) -> Mapping[str, Any]:
+        return await self._member_request(
+            'submit_archive_chapters',
+            bundle,
+            form={
+                'aid': aid,
+                'cid': cid,
+                'type': 2,
+                'cards': json.dumps(
+                    list(cards), ensure_ascii=False, separators=(',', ':')
+                ),
+                'permanent': 1 if permanent else 0,
+                'csrf': self._web.csrf(bundle),
+            },
+        )
+
+    async def public_archive_view(
+        self, bundle: CredentialBundle, *, bvid: str
+    ) -> Mapping[str, Any]:
+        return await self._web_request(
+            'public_archive_view', bundle, query={'bvid': bvid}
+        )
+
+    async def public_archive_tags(
+        self, bundle: CredentialBundle, *, bvid: str
+    ) -> Mapping[str, Any]:
+        return await self._web_request(
+            'public_archive_tags', bundle, query={'bvid': bvid}
+        )
+
     async def web_nav(self, bundle: CredentialBundle) -> Mapping[str, Any]:
         return await self._web_request('web_nav', bundle)
 
@@ -674,12 +790,33 @@ class BiliProtocolClient:
     async def add_reply(
         self, bundle: CredentialBundle, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        return await self._csrf_request('add_reply', bundle, params)
+        try:
+            form = {**params, 'csrf': self._web.csrf(bundle)}
+            query = await self._wbi_signer.sign(form)
+            url = self._url_for('add_reply')
+            request = ProtocolRequest(
+                operation='add_reply',
+                method='POST',
+                url=url,
+                headers=self._web_headers(bundle, url),
+                query=self._parameters(query),
+                form=self._parameters(form),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise DefinitelyNotSent('add_reply') from None
+        return await self._execute(request, idempotent=False)
 
     async def top_reply(
         self, bundle: CredentialBundle, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
         return await self._csrf_request('top_reply', bundle, params)
+
+    async def delete_reply(
+        self, bundle: CredentialBundle, params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return await self._csrf_request('delete_reply', bundle, params)
 
     async def post_danmaku(
         self,
@@ -952,9 +1089,22 @@ class BiliProtocolClient:
         if not isinstance(value, str):
             raise ProtocolContractError('{} response is incomplete'.format(context))
         parsed = urlsplit(value)
+        hostname = parsed.hostname
+        if (
+            parsed.scheme == 'http'
+            and hostname is not None
+            and (
+                hostname == 'hdslb.com'
+                or hostname.endswith('.hdslb.com')
+                or hostname == 'biliimg.com'
+                or hostname.endswith('.biliimg.com')
+            )
+        ):
+            parsed = parsed._replace(scheme='https')
+            value = urlunsplit(parsed)
         if (
             parsed.scheme != 'https'
-            or not parsed.hostname
+            or hostname is None
             or parsed.username is not None
             or parsed.password is not None
         ):
@@ -966,6 +1116,12 @@ class BiliProtocolClient:
         if values is None:
             return ()
         return tuple((str(key), str(value)) for key, value in values.items())
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        if type(value) not in (int, float) or value <= 0:
+            return None
+        return value
 
     @staticmethod
     def _safe_message(payload: Mapping[str, Any]) -> Optional[str]:

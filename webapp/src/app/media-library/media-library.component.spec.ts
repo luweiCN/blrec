@@ -233,7 +233,12 @@ describe('MediaLibraryComponent', () => {
 
     fixture.detectChanges();
 
-    expect(fixture.nativeElement.querySelector('.item-actions a')).toBeNull();
+    const analyze = fixture.nativeElement.querySelector(
+      '[data-testid="analyze-media-matches"]',
+    ) as HTMLAnchorElement | null;
+    expect(analyze?.getAttribute('href')).toContain(
+      '/vainglory?sessionId=7',
+    );
     const links = Array.from(
       fixture.nativeElement.querySelectorAll(
         '[data-testid="edit-media-part"]',

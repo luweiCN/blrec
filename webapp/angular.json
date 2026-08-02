@@ -30,6 +30,11 @@
               "src/favicon.ico",
               "src/assets",
               {
+                "glob": "*.jpg",
+                "input": "../src/blrec/data/vainglory/heroes",
+                "output": "/assets/vainglory/heroes/"
+              },
+              {
                 "glob": "**/*",
                 "input": "./node_modules/@ant-design/icons-angular/src/inline-svg/",
                 "output": "/assets/"
@@ -106,6 +111,11 @@
             "assets": [
               "src/favicon.ico",
               "src/assets",
+              {
+                "glob": "*.jpg",
+                "input": "../src/blrec/data/vainglory/heroes",
+                "output": "/assets/vainglory/heroes/"
+              },
               "src/manifest.webmanifest"
             ],
             "styles": [

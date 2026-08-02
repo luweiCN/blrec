@@ -7,7 +7,9 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from liquid import Environment
 
@@ -106,6 +108,7 @@ class _Job:
     submit_state: str
     upload_completed_at: Optional[int]
     preupload_finalized: bool
+    priority: int
     cancellation_generation: int
 
 
@@ -119,6 +122,14 @@ class _ResolvedLiveSettings:
 
 class UploadCoordinator:
     _MIN_UPLOAD_PART_DURATION_SECONDS = 60
+    _MIGRATION_PRIORITY = -100
+    _MIGRATION_SUBMISSION_INTERVAL_SECONDS = 20 * 60
+    _FREQUENT_SUBMISSION_COOLDOWN_SECONDS = 30 * 60
+    _FREQUENT_SUBMISSION_CODE = 137022
+    _FREQUENT_SUBMISSION_REASON = 'B 站投稿过于频繁（137022）'
+    _DAILY_SUBMISSION_LIMIT_CODES = frozenset((12129, 129018))
+    _SUBMISSION_CHALLENGE_CODES = frozenset((-412, -352, 412, 12015))
+    _BEIJING_TIMEZONE = ZoneInfo('Asia/Shanghai')
     _MEDIA_PROBE_MAX_FAILURES = 5
     _MEDIA_PROBE_PENDING_REASON = '录像媒体信息暂时无法读取，等待重新校验'
     _MEDIA_PROBE_FAILED_REASON = '录像媒体信息连续校验失败，已排除自动投稿'
@@ -172,7 +183,8 @@ class UploadCoordinator:
         return created
 
     async def sync_live_sessions(self) -> List[int]:
-        changed: List[int] = []
+        changed = await self._recover_account_resolution_sessions()
+        changed.extend(await self.resume_account_paused_jobs())
         provisional = await self._database.fetchall(
             'SELECT job.id,job.session_id,session.live_end_time '
             'FROM upload_jobs job JOIN recording_sessions session '
@@ -189,6 +201,11 @@ class UploadCoordinator:
                 continue
             session = await self._live_session(session_id)
             if session is None:
+                continue
+            if (
+                str(session['state']) == 'cancelled'
+                and session['live_end_time'] is None
+            ):
                 continue
             settings, resolution_state, _error = await self._resolve_live_settings(
                 session
@@ -222,6 +239,118 @@ class UploadCoordinator:
 
         changed.extend(await self.resolve_finished_sessions())
         return list(dict.fromkeys(changed))
+
+    async def _recover_account_resolution_sessions(self) -> List[int]:
+        reason = '投稿账号不可用，请在本场投稿设置中重新选择'
+        rows = await self._database.fetchall(
+            'SELECT session.id FROM recording_sessions session '
+            "WHERE session.source_kind='live' AND session.live_end_time IS NOT NULL "
+            "AND session.upload_resolution_state='configuration_required' "
+            'AND session.upload_resolution_error=? '
+            'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
+            'WHERE job.session_id=session.id) '
+            'ORDER BY session.live_end_time,session.id',
+            (reason,),
+        )
+        recovered: List[int] = []
+        for row in rows:
+            session_id = int(row['id'])
+            session = await self._live_session(session_id)
+            if session is None:
+                continue
+            settings, _state, _error = await self._resolve_live_settings(session)
+            if settings is None:
+                continue
+            reset = await self._database.execute(
+                "UPDATE recording_sessions SET upload_resolution_state='pending',"
+                'upload_resolution_error=NULL,upload_resolved_at=? WHERE id=? '
+                "AND upload_resolution_state='configuration_required' "
+                'AND upload_resolution_error=?',
+                (int(self._clock()), session_id, reason),
+            )
+            if reset != 1:
+                continue
+            job_id = await self._resolve_finished_session(session_id)
+            if job_id is not None:
+                recovered.append(job_id)
+        return recovered
+
+    async def resume_account_paused_jobs(self) -> List[int]:
+        reason = '投稿账号不可用'
+        now = int(self._clock())
+
+        def resume(connection: sqlite3.Connection) -> List[int]:
+            rows = connection.execute(
+                'SELECT job.id FROM upload_jobs job '
+                'JOIN bili_accounts account ON account.id=job.account_id '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                "WHERE job.state='paused' AND job.submit_state='prepared' "
+                'AND job.operator_paused=0 AND job.review_reason=? '
+                "AND account.state='active' AND session.deletion_state='none' "
+                "AND job.repair_state NOT IN "
+                "('queued','checking','reuploading','editing') "
+                'AND (job.lease_until IS NULL OR job.lease_until<=?) '
+                'ORDER BY job.id',
+                (reason, now),
+            ).fetchall()
+            resumed: List[int] = []
+            for row in rows:
+                job_id = int(row['id'])
+                parts = connection.execute(
+                    'SELECT id,artifact_state,upload_state FROM upload_parts '
+                    'WHERE job_id=? ORDER BY part_index',
+                    (job_id,),
+                ).fetchall()
+                if not parts or any(
+                    str(part['upload_state']) in ('completing', 'unknown_outcome')
+                    or (
+                        str(part['upload_state']) == 'failed'
+                        and str(part['artifact_state']) != 'ready'
+                    )
+                    for part in parts
+                ):
+                    continue
+                for part in parts:
+                    if str(part['upload_state']) != 'failed':
+                        continue
+                    part_id = int(part['id'])
+                    connection.execute(
+                        'DELETE FROM upload_chunks WHERE part_id=?', (part_id,)
+                    )
+                    connection.execute(
+                        "UPDATE upload_parts SET upload_state='prepared',"
+                        'remote_filename=NULL,upload_session_json=NULL WHERE id=?',
+                        (part_id,),
+                    )
+                all_confirmed = all(
+                    str(part['upload_state']) == 'confirmed'
+                    for part in connection.execute(
+                        'SELECT upload_state FROM upload_parts WHERE job_id=?',
+                        (job_id,),
+                    ).fetchall()
+                )
+                next_state = 'submitting' if all_confirmed else 'ready'
+                changed = connection.execute(
+                    'UPDATE upload_jobs SET state=?,review_reason=?,next_attempt_at=0,'
+                    'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=? '
+                    "AND state='paused' AND submit_state='prepared' "
+                    'AND operator_paused=0 AND review_reason=?',
+                    (
+                        next_state,
+                        '投稿账号恢复，系统已自动重新排队',
+                        now,
+                        job_id,
+                        reason,
+                    ),
+                ).rowcount
+                if changed == 1:
+                    resumed.append(job_id)
+            return resumed
+
+        resumed = await self._database.write(resume)
+        if resumed:
+            audit('upload_account_pauses_recovered', count=len(resumed))
+        return resumed
 
     async def resolve_finished_sessions(self) -> List[int]:
         rows = await self._database.fetchall(
@@ -865,31 +994,6 @@ class UploadCoordinator:
                 ):
                     return False, False, 'waiting_artifacts'
 
-            account_changed = int(job['account_id']) != account_id
-            if account_changed:
-                connection.execute(
-                    'DELETE FROM upload_chunks WHERE part_id IN('
-                    'SELECT id FROM upload_parts WHERE job_id=?)',
-                    (job_id,),
-                )
-                connection.execute(
-                    "UPDATE upload_parts SET upload_state='prepared',"
-                    'remote_filename=NULL,cid=NULL,upload_session_json=NULL '
-                    'WHERE job_id=?',
-                    (job_id,),
-                )
-            danmaku_backfill = bool(resolved_settings.command.danmaku_backfill)
-            part_rows_for_job = connection.execute(
-                'SELECT id,xml_path FROM upload_parts WHERE job_id=?', (job_id,)
-            ).fetchall()
-            for part in part_rows_for_job:
-                danmaku_state = 'disabled'
-                if danmaku_backfill:
-                    danmaku_state = 'pending' if part['xml_path'] else 'missing_source'
-                connection.execute(
-                    'UPDATE upload_parts SET danmaku_import_state=? WHERE id=?',
-                    (danmaku_state, int(part['id'])),
-                )
             pending_artifact = connection.execute(
                 'SELECT 1 FROM recording_parts WHERE session_id=? '
                 "AND artifact_state NOT IN ('ready','failed','missing') LIMIT 1",
@@ -917,6 +1021,34 @@ class UploadCoordinator:
                 else 'waiting_artifacts'
             )
             operator_paused = bool(job['operator_paused'])
+            if operator_paused and resume_state == 'waiting_artifacts':
+                return False, False, resume_state
+
+            account_changed = int(job['account_id']) != account_id
+            if account_changed:
+                connection.execute(
+                    'DELETE FROM upload_chunks WHERE part_id IN('
+                    'SELECT id FROM upload_parts WHERE job_id=?)',
+                    (job_id,),
+                )
+                connection.execute(
+                    "UPDATE upload_parts SET upload_state='prepared',"
+                    'remote_filename=NULL,cid=NULL,upload_session_json=NULL '
+                    'WHERE job_id=?',
+                    (job_id,),
+                )
+            danmaku_backfill = bool(resolved_settings.command.danmaku_backfill)
+            part_rows_for_job = connection.execute(
+                'SELECT id,xml_path FROM upload_parts WHERE job_id=?', (job_id,)
+            ).fetchall()
+            for part in part_rows_for_job:
+                danmaku_state = 'disabled'
+                if danmaku_backfill:
+                    danmaku_state = 'pending' if part['xml_path'] else 'missing_source'
+                connection.execute(
+                    'UPDATE upload_parts SET danmaku_import_state=? WHERE id=?',
+                    (danmaku_state, int(part['id'])),
+                )
             state = 'paused' if operator_paused else resume_state
             connection.execute(
                 'UPDATE upload_jobs SET account_id=?,policy_snapshot_json=?,'
@@ -1382,58 +1514,238 @@ class UploadCoordinator:
             raise InvalidUploadPolicy('highlight upload draft could not be created')
         return job_id
 
+    async def create_archive_migration_job(
+        self,
+        session_id: int,
+        *,
+        description: str,
+        tags: str,
+        part_titles: Tuple[str, ...],
+    ) -> int:
+        session = await self._database.fetchone(
+            'SELECT id AS session_id,room_id,broadcast_session_key,'
+            'live_start_time,live_end_time,title,cover_url,cover_path,anchor_uid,'
+            'anchor_name,area_id,area_name,parent_area_id,parent_area_name,'
+            'upload_override_json '
+            'FROM recording_sessions '
+            "WHERE id=? AND state='closed' AND source_kind='live' "
+            "AND deletion_state='none' AND broadcast_session_key LIKE "
+            "'bili-migration:%'",
+            (int(session_id),),
+        )
+        if session is None or session['upload_override_json'] is None:
+            raise InvalidUploadPolicy('archive migration session does not exist')
+        try:
+            command = decode_submission_settings(str(session['upload_override_json']))
+        except InvalidSessionSubmission as error:
+            raise InvalidUploadPolicy(
+                'archive migration submission settings are invalid'
+            ) from error
+        account = await self._resolved_account(command)
+        if account is None:
+            raise InvalidUploadPolicy('archive migration target account is unavailable')
+        normalized_titles = tuple(title.strip() for title in part_titles)
+        if (
+            len(description) > 2000
+            or not tags.strip()
+            or not normalized_titles
+            or any(not title for title in normalized_titles)
+        ):
+            raise InvalidUploadPolicy('archive migration metadata is invalid')
+        row = self._default_candidate(session, account, command)
+        row.update(
+            {
+                'archive_description': description,
+                'archive_tags': tags.strip(),
+                'archive_part_titles': normalized_titles,
+                'policy_updated_at': None,
+                'upload_override_json': session['upload_override_json'],
+            }
+        )
+        job_id = await self._create_candidate(
+            row,
+            initial_state='paused',
+            priority=self._MIGRATION_PRIORITY,
+            operator_paused=True,
+            operator_resume_state='ready',
+            review_reason='迁移一致性校验中',
+            required_source_kind='live',
+            policy_source='session',
+            require_stability=False,
+            return_existing=True,
+            refresh_existing=True,
+        )
+        if job_id is None:
+            raise InvalidUploadPolicy(
+                'archive migration upload task could not be created'
+            )
+        return job_id
+
+    @property
+    def task_capacity(self) -> int:
+        capacity = getattr(self._uploader, 'task_capacity', 1)
+        return max(1, min(5, int(capacity)))
+
+    async def start_once(self) -> Optional[asyncio.Task[int]]:
+        claim = await self._claim_next()
+        if claim is None:
+            return None
+        return asyncio.create_task(self._run_claim(claim))
+
     async def run_once(self) -> Optional[int]:
+        claim = await self._claim_next()
+        if claim is None:
+            return None
+        return await self._run_claim(claim)
+
+    async def retry_submission_now(
+        self, job_id: int, original_retry_at: int
+    ) -> str:
+        """Run one prepared submission now without waiting for the upload queue."""
+        now = int(self._clock())
+        claim = await self._database.claim_by_id(
+            'upload_jobs',
+            int(job_id),
+            ('submitting',),
+            '{}-manual'.format(self._worker_id),
+            now=now,
+        )
+        if claim is None:
+            raise ValueError('投稿任务正在执行或状态已经变化，请刷新后再试')
+        audit(
+            'upload_submission_manual_retry_started',
+            job_id=job_id,
+            original_retry_at=original_retry_at,
+        )
+        await self._run_claim(claim)
+        now = int(self._clock())
+
+        def finish(connection: sqlite3.Connection) -> Tuple[str, int]:
+            row = connection.execute(
+                'SELECT account_id,state,submit_state,review_reason,bvid,'
+                'next_attempt_at FROM upload_jobs WHERE id=?',
+                (int(job_id),),
+            ).fetchone()
+            if row is None:
+                raise ValueError('投稿任务不存在')
+            state = str(row['state'])
+            submit_state = str(row['submit_state'])
+            reason = '' if row['review_reason'] is None else str(row['review_reason'])
+            if submit_state == 'confirmed' and row['bvid']:
+                cleared = connection.execute(
+                    "UPDATE upload_jobs SET next_attempt_at=?,"
+                    "review_reason='投稿频控已解除，系统将自动重新投稿',"
+                    'updated_at=? WHERE account_id=? '
+                    "AND state='submitting' AND submit_state='prepared' "
+                    'AND next_attempt_at>? '
+                    "AND (instr(review_reason,'137022')>0 "
+                    "OR instr(review_reason,'投稿频控冷却')>0 "
+                    "OR instr(review_reason,'投稿过于频繁')>0) "
+                    'AND (lease_until IS NULL OR lease_until<=?)',
+                    (now, now, int(row['account_id']), now, now),
+                ).rowcount
+                return '投稿成功，已解除本账号的短时频控冷却', int(cleared)
+            if (
+                state == 'submitting'
+                and submit_state == 'prepared'
+                and any(
+                    marker in reason
+                    for marker in ('137022', '投稿频控冷却', '投稿过于频繁')
+                )
+            ):
+                preserved_retry_at = max(now, int(original_retry_at))
+                connection.execute(
+                    'UPDATE upload_jobs SET next_attempt_at=?,review_reason=?,'
+                    'updated_at=? WHERE id=?',
+                    (
+                        preserved_retry_at,
+                        'B 站仍返回投稿过于频繁（137022），保留原冷却截止时间',
+                        now,
+                        int(job_id),
+                    ),
+                )
+                remaining = max(0, preserved_retry_at - now)
+                if remaining == 0:
+                    return 'B 站仍在限频；原冷却已到期，系统会继续自动重试', 0
+                minutes = max(1, (remaining + 59) // 60)
+                return (
+                    'B 站仍在限频，保留原冷却时间，约 {} 分钟后自动重试'.format(
+                        minutes
+                    ),
+                    0,
+                )
+            if any(marker in reason for marker in ('12129', '129018', '当日投稿')):
+                return '已立即请求投稿，但 B 站返回当日投稿限额，将按原计划重试', 0
+            if submit_state == 'unknown_outcome':
+                return '投稿请求已经发出，结果暂时无法确认，系统正在核对远端稿件', 0
+            if state == 'paused':
+                return reason or '已立即请求投稿，但 B 站要求人工处理', 0
+            return reason or '已立即执行投稿请求，请刷新查看最新状态', 0
+
+        message, cleared = await self._database.write(finish)
+        audit(
+            'upload_submission_manual_retry_finished',
+            job_id=job_id,
+            result=message,
+            cleared_rate_limit_jobs=cleared,
+        )
+        return message
+
+    async def _claim_next(self) -> Optional[LeaseClaim]:
         if self._stop_requested():
             return None
         async with self._run_lock:
-            claim = await self._database.claim(
+            return await self._database.claim(
                 'upload_jobs',
                 ('ready', 'uploading', 'submitting'),
                 self._worker_id,
                 now=int(self._clock()),
             )
-            if claim is None:
-                return None
-            audit(
-                'upload_job_claimed',
-                level='DEBUG',
-                job_id=claim.id,
-                attempt=claim.attempt,
-            )
-            try:
-                await self._process(claim)
-            except asyncio.CancelledError:
-                await asyncio.shield(self.recover_interrupted())
-                raise
-            except _UploadDeletionRequested:
-                audit(
-                    'upload_job_cancelled',
-                    job_id=claim.id,
-                    reason='local_deletion_requested',
-                    result='cancelled_local',
-                )
-            except Exception:
-                await self.recover_interrupted()
-                raise
-            return claim.id
 
-    async def recover_interrupted(self) -> int:
+    async def _run_claim(self, claim: LeaseClaim) -> int:
+        audit(
+            'upload_job_claimed', level='DEBUG', job_id=claim.id, attempt=claim.attempt
+        )
+        try:
+            await self._process(claim)
+        except asyncio.CancelledError:
+            await asyncio.shield(self.recover_interrupted(claim))
+            raise
+        except _UploadDeletionRequested:
+            audit(
+                'upload_job_cancelled',
+                job_id=claim.id,
+                reason='local_deletion_requested',
+                result='cancelled_local',
+            )
+        except Exception:
+            await self.recover_interrupted(claim)
+            raise
+        return claim.id
+
+    async def recover_interrupted(self, claim: Optional[LeaseClaim] = None) -> int:
         now = int(self._clock())
 
         def recover(connection: sqlite3.Connection) -> int:
-            rows = connection.execute(
+            query = (
                 'SELECT job.id,job.state,job.submit_state,job.lease_owner,'
                 'job.lease_generation,session.cancellation_generation,'
                 'session.deletion_state FROM upload_jobs job '
                 'JOIN recording_sessions session ON session.id=job.session_id '
-                "WHERE job.submit_state='in_flight' "
+                "WHERE (job.submit_state='in_flight' "
                 "OR job.lease_owner LIKE 'upload-%' "
                 'OR (job.lease_owner IS NOT NULL '
                 'AND EXISTS(SELECT 1 FROM owner_handoff_outcomes outcome '
                 "WHERE outcome.owner_kind='upload' AND outcome.owner_id=job.id "
-                "AND outcome.side_effect_key='lease:' || job.lease_generation)) "
-                'ORDER BY job.id'
-            ).fetchall()
+                "AND outcome.side_effect_key='lease:' || job.lease_generation))) "
+            )
+            parameters: Tuple[Any, ...] = ()
+            if claim is not None:
+                query += (
+                    'AND job.id=? AND job.lease_owner=? AND job.lease_generation=? '
+                )
+                parameters = (claim.id, claim.lease_owner, claim.lease_generation)
+            rows = connection.execute(query + 'ORDER BY job.id', parameters).fetchall()
             recovered = 0
             for row in rows:
                 job_id = int(row['id'])
@@ -1587,6 +1899,113 @@ class UploadCoordinator:
             audit('upload_owners_recovered', count=recovered, result='terminal_handoff')
         return recovered
 
+    async def recover_submission_rate_limits(self) -> int:
+        """Resume legacy submission limits without invalidating confirmed parts."""
+        now = int(self._clock())
+        beijing_now = datetime.fromtimestamp(now, self._BEIJING_TIMEZONE)
+        today_start = int(
+            datetime(
+                beijing_now.year,
+                beijing_now.month,
+                beijing_now.day,
+                tzinfo=self._BEIJING_TIMEZONE,
+            ).timestamp()
+        )
+        next_day_retry_at = self._next_beijing_day_retry_at()
+
+        def recover(connection: sqlite3.Connection) -> Tuple[int, int, int]:
+            normalized = connection.execute(
+                'UPDATE upload_jobs SET priority=?,updated_at=? '
+                'WHERE priority!=? AND EXISTS('
+                'SELECT 1 FROM archive_migration_items item '
+                'WHERE item.upload_job_id=upload_jobs.id)',
+                (self._MIGRATION_PRIORITY, now, self._MIGRATION_PRIORITY),
+            ).rowcount
+            frequent_rows = connection.execute(
+                'SELECT id,account_id FROM upload_jobs '
+                "WHERE state='paused' AND submit_state='failed_permanent' "
+                'AND operator_paused=0 AND instr(review_reason,?)>0 '
+                'AND EXISTS(SELECT 1 FROM upload_parts part '
+                'WHERE part.job_id=upload_jobs.id) '
+                'AND NOT EXISTS(SELECT 1 FROM upload_parts part '
+                'WHERE part.job_id=upload_jobs.id '
+                "AND part.upload_state!='confirmed') "
+                'ORDER BY account_id,created_at,id',
+                (str(self._FREQUENT_SUBMISSION_CODE),),
+            ).fetchall()
+            probed_accounts: Dict[int, bool] = {}
+            frequent_resumed = 0
+            for row in frequent_rows:
+                account_id = int(row['account_id'])
+                immediate = account_id not in probed_accounts
+                probed_accounts[account_id] = True
+                retry_at = (
+                    now
+                    if immediate
+                    else now + self._FREQUENT_SUBMISSION_COOLDOWN_SECONDS
+                )
+                reason = (
+                    '此前投稿过于频繁（137022），系统将立即尝试重新投稿'
+                    if immediate
+                    else '此前投稿过于频繁（137022），等待首次探测结果后自动重新投稿'
+                )
+                frequent_resumed += connection.execute(
+                    "UPDATE upload_jobs SET state='submitting',"
+                    "submit_state='prepared',next_attempt_at=?,"
+                    'review_reason=?,lease_owner=NULL,lease_until=NULL,updated_at=? '
+                    'WHERE id=?',
+                    (retry_at, reason, now, int(row['id'])),
+                ).rowcount
+            daily_resumed = connection.execute(
+                "UPDATE upload_jobs SET state='submitting',"
+                "submit_state='prepared',next_attempt_at=CASE "
+                'WHEN updated_at>=? THEN ? ELSE ? END,'
+                'review_reason=CASE '
+                "WHEN instr(review_reason,'12129')>0 THEN ? ELSE ? END,"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? '
+                "WHERE state='paused' AND submit_state='failed_permanent' "
+                'AND operator_paused=0 '
+                "AND (instr(review_reason,'12129')>0 "
+                "OR instr(review_reason,'129018')>0) "
+                'AND EXISTS(SELECT 1 FROM upload_parts part '
+                'WHERE part.job_id=upload_jobs.id) '
+                'AND NOT EXISTS(SELECT 1 FROM upload_parts part '
+                'WHERE part.job_id=upload_jobs.id '
+                "AND part.upload_state!='confirmed')",
+                (
+                    today_start,
+                    next_day_retry_at,
+                    now,
+                    '此前达到当日投稿上限（12129），系统将在次日自动重新投稿',
+                    '此前达到当日投稿上限（129018），系统将在次日自动重新投稿',
+                    now,
+                ),
+            ).rowcount
+            return normalized, frequent_resumed, daily_resumed
+
+        normalized, frequent_resumed, daily_resumed = await self._database.write(
+            recover
+        )
+        if normalized:
+            audit(
+                'migration_upload_priorities_recovered',
+                count=normalized,
+                priority=self._MIGRATION_PRIORITY,
+            )
+        if frequent_resumed:
+            audit(
+                'upload_submission_rate_limits_recovered',
+                count=frequent_resumed,
+                error_code=self._FREQUENT_SUBMISSION_CODE,
+            )
+        if daily_resumed:
+            audit(
+                'upload_submission_daily_limits_recovered',
+                count=daily_resumed,
+                error_codes=sorted(self._DAILY_SUBMISSION_LIMIT_CODES),
+            )
+        return frequent_resumed + daily_resumed
+
     @staticmethod
     def _recover_remote_intent_in_transaction(
         connection: sqlite3.Connection,
@@ -1615,7 +2034,8 @@ class UploadCoordinator:
         row = await self._database.fetchone(
             'SELECT job.id,job.session_id,job.account_id,job.policy_snapshot_json,'
             'job.state,job.submit_state,job.upload_completed_at,'
-            'job.preupload_finalized,job.aid,session.cancellation_generation '
+            'job.preupload_finalized,job.priority,job.aid,'
+            'session.cancellation_generation '
             'FROM upload_jobs job JOIN recording_sessions session '
             'ON session.id=job.session_id WHERE job.id=?',
             (job_id,),
@@ -1638,6 +2058,7 @@ class UploadCoordinator:
                 else int(row['upload_completed_at'])
             ),
             preupload_finalized=bool(row['preupload_finalized']),
+            priority=int(row['priority']),
             cancellation_generation=int(row['cancellation_generation']),
         )
         if cover_url is not None and (
@@ -1675,12 +2096,15 @@ class UploadCoordinator:
         row: Any,
         *,
         initial_state: str = 'ready',
+        priority: int = 0,
         operator_paused: bool = False,
         operator_resume_state: Optional[str] = None,
+        review_reason: Optional[str] = None,
         required_source_kind: str = 'live',
         policy_source: str = 'room',
         require_stability: bool = True,
         return_existing: bool = False,
+        refresh_existing: bool = False,
     ) -> Optional[int]:
         part_rows = await self._database.fetchall(
             'SELECT id,part_index,source_path,final_path,xml_path,'
@@ -1755,10 +2179,11 @@ class UploadCoordinator:
                 ):
                     return None
             existing = connection.execute(
-                'SELECT id FROM upload_jobs WHERE session_id=?',
+                'SELECT id,submit_state,policy_snapshot_json,'
+                'danmaku_branch_state FROM upload_jobs WHERE session_id=?',
                 (int(row['session_id']),),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and not refresh_existing:
                 return int(existing['id']) if return_existing else None
             policy = connection.execute(
                 'SELECT account_mode,account_id,updated_at '
@@ -1839,13 +2264,67 @@ class UploadCoordinator:
             ]
             if actual_parts != expected_parts:
                 return None
+            if existing is not None:
+                if not return_existing:
+                    return None
+                job_id = int(existing['id'])
+                existing_parts = connection.execute(
+                    'SELECT id,part_index,danmaku_import_state FROM upload_parts '
+                    'WHERE job_id=? ORDER BY part_index',
+                    (job_id,),
+                ).fetchall()
+                if [int(part['part_index']) for part in existing_parts] != [
+                    part.part_index for part in parts
+                ]:
+                    return None
+                policy_snapshot_json = snapshot_json
+                if str(existing['submit_state']) != 'prepared':
+                    try:
+                        existing_snapshot = json.loads(
+                            str(existing['policy_snapshot_json'])
+                        )
+                    except (TypeError, ValueError):
+                        return None
+                    if not isinstance(existing_snapshot, dict):
+                        return None
+                    existing_snapshot['danmaku_backfill'] = True
+                    policy_snapshot_json = json.dumps(
+                        existing_snapshot,
+                        ensure_ascii=False,
+                        separators=(',', ':'),
+                        sort_keys=True,
+                    )
+                branch_state = str(existing['danmaku_branch_state'])
+                if branch_state == 'disabled':
+                    branch_state = 'pending'
+                connection.execute(
+                    'UPDATE upload_jobs SET policy_snapshot_json=?,'
+                    'danmaku_branch_state=?,priority=?,updated_at=? WHERE id=?',
+                    (policy_snapshot_json, branch_state, priority, now, job_id),
+                )
+                for upload_part, recording_part in zip(existing_parts, parts):
+                    danmaku_state = str(upload_part['danmaku_import_state'])
+                    if danmaku_state in ('disabled', 'missing_source'):
+                        danmaku_state = (
+                            'pending' if recording_part.xml_path else 'missing_source'
+                        )
+                    connection.execute(
+                        'UPDATE upload_parts SET xml_path=?,'
+                        'danmaku_import_state=? WHERE id=?',
+                        (
+                            recording_part.xml_path,
+                            danmaku_state,
+                            int(upload_part['id']),
+                        ),
+                    )
+                return job_id
             cursor = connection.execute(
                 'INSERT INTO upload_jobs('
                 'session_id,account_id,policy_snapshot_json,state,submit_state,'
                 'comment_branch_state,danmaku_branch_state,'
                 'collection_branch_state,operator_paused,operator_resume_state,'
-                'created_at,updated_at) '
-                "VALUES(?,?,?,?,'prepared',?,?,?,?,?,?,?)",
+                'priority,review_reason,created_at,updated_at) '
+                "VALUES(?,?,?,?,'prepared',?,?,?,?,?,?,?,?,?)",
                 (
                     int(row['session_id']),
                     resolved_account_id,
@@ -1860,6 +2339,8 @@ class UploadCoordinator:
                     ),
                     int(operator_paused),
                     operator_resume_state,
+                    priority,
+                    review_reason,
                     now,
                     now,
                 ),
@@ -2014,6 +2495,9 @@ class UploadCoordinator:
             'live_end_time': row['live_end_time'],
             'part_count': len(parts),
         }
+        for name in ('archive_description', 'archive_tags'):
+            if name in row:
+                context[name] = str(row[name])
         try:
             title = self._liquid.from_string(str(row['title_template'])).render(
                 **context
@@ -2027,15 +2511,28 @@ class UploadCoordinator:
             source = self._liquid.from_string(str(row['source'])).render(**context)
             tags = self._liquid.from_string(str(row['tags'])).render(**context)
             part_template = self._liquid.from_string(str(row['part_title_template']))
-            part_titles = [
-                part_template.render(**context, part_index=part.part_index).strip()
-                for part in parts
-            ]
+            archive_part_titles = row.get('archive_part_titles')
+            if archive_part_titles is None:
+                part_titles = [
+                    part_template.render(**context, part_index=part.part_index).strip()
+                    for part in parts
+                ]
+            elif (
+                isinstance(archive_part_titles, (list, tuple))
+                and len(archive_part_titles) == len(parts)
+                and all(isinstance(value, str) for value in archive_part_titles)
+            ):
+                part_titles = [value.strip() for value in archive_part_titles]
+            else:
+                raise InvalidUploadPolicy('archive migration part titles are invalid')
             filters = json.loads(str(row['filter_json']))
         except Exception as error:
             raise InvalidUploadPolicy('upload policy cannot be rendered') from error
         title = title.strip()
-        description = description.strip()
+        if 'archive_description' in row:
+            description = str(row['archive_description'])
+        else:
+            description = description.strip()
         dynamic = dynamic.strip()
         source = source.strip()
         tags = tags.strip()
@@ -2164,56 +2661,88 @@ class UploadCoordinator:
         if account is None or str(account['state']) != 'active':
             await self._pause_job(claim, '投稿账号不可用')
             return
-        credential_version = int(account['credential_version'])
         submit_started = False
         try:
-            gate = self._account_gates.for_account(job.account_id)
-            async with gate.hold(credential_version):
-                bundle = await self._bundle_loader(job.account_id)
-                if job.state != 'submitting':
-                    await self._update_job(
-                        claim, {'state': 'uploading', 'updated_at': int(self._clock())}
-                    )
-                parts = await self._database.fetchall(
-                    'SELECT id,part_index FROM upload_parts '
-                    'WHERE job_id=? ORDER BY part_index',
-                    (claim.id,),
+            if job.state != 'submitting':
+                await self._update_job(
+                    claim, {'state': 'uploading', 'updated_at': int(self._clock())}
                 )
-                if not parts:
-                    await self._pause_job(claim, '上传任务没有分 P')
-                    return
-                for part in parts:
-                    await self._uploader.upload_part(
-                        int(part['id']), bundle=bundle, claim=claim
-                    )
+            parts = await self._database.fetchall(
+                'SELECT id,part_index FROM upload_parts '
+                'WHERE job_id=? ORDER BY part_index',
+                (claim.id,),
+            )
+            if not parts:
+                await self._pause_job(claim, '上传任务没有分 P')
+                return
+            for part in parts:
+                bundle = await self._bundle_loader(job.account_id)
+                await self._uploader.upload_part(
+                    int(part['id']), bundle=bundle, claim=claim
+                )
+            audit(
+                'upload_parts_completed',
+                job_id=job.id,
+                account_id=job.account_id,
+                parts=len(parts),
+            )
+            finalized = await self._database.scalar(
+                'SELECT preupload_finalized FROM upload_jobs '
+                'WHERE id=? AND lease_owner=? AND lease_generation=?',
+                (claim.id, claim.lease_owner, claim.lease_generation),
+            )
+            if finalized == 0:
+                await self._update_job(
+                    claim,
+                    {
+                        'state': 'waiting_artifacts',
+                        'review_reason': None,
+                        'updated_at': int(self._clock()),
+                    },
+                    release=True,
+                )
                 audit(
-                    'upload_parts_completed',
+                    'upload_preupload_waiting_for_part',
                     job_id=job.id,
                     account_id=job.account_id,
                     parts=len(parts),
                 )
-                finalized = await self._database.scalar(
-                    'SELECT preupload_finalized FROM upload_jobs '
-                    'WHERE id=? AND lease_owner=? AND lease_generation=?',
-                    (claim.id, claim.lease_owner, claim.lease_generation),
-                )
-                if finalized == 0:
+                return
+            account = await self._database.fetchone(
+                'SELECT state,credential_version FROM bili_accounts WHERE id=?',
+                (job.account_id,),
+            )
+            if account is None or str(account['state']) != 'active':
+                await self._pause_job(claim, '投稿账号不可用')
+                return
+            credential_version = int(account['credential_version'])
+            gate = self._account_gates.for_account(job.account_id)
+            async with gate.hold(credential_version):
+                retry_at, retry_reason = await self._submission_admission(job)
+                if retry_at is not None:
+                    now = int(self._clock())
                     await self._update_job(
                         claim,
                         {
-                            'state': 'waiting_artifacts',
-                            'review_reason': None,
-                            'updated_at': int(self._clock()),
+                            'state': 'submitting',
+                            'submit_state': 'prepared',
+                            'upload_completed_at': job.upload_completed_at or now,
+                            'review_reason': retry_reason,
+                            'next_attempt_at': retry_at,
+                            'updated_at': now,
                         },
                         release=True,
                     )
                     audit(
-                        'upload_preupload_waiting_for_part',
+                        'upload_submission_deferred',
                         job_id=job.id,
                         account_id=job.account_id,
-                        parts=len(parts),
+                        migration=job.priority < 0,
+                        retry_at=retry_at,
+                        reason=retry_reason,
                     )
                     return
+                bundle = await self._bundle_loader(job.account_id)
                 if self._stop_requested():
                     raise UposUploadStopped('upload stopped before archive submission')
                 cover_override: Optional[str] = None
@@ -2391,7 +2920,73 @@ class UploadCoordinator:
             await self._pause_job(claim, '投稿封面无法读取或上传')
             return
         except BiliApiError as error:
+            if self._is_daily_submission_limit(error):
+                retry_at = self._next_beijing_day_retry_at()
+                values = {
+                    'state': 'submitting' if submit_started else 'uploading',
+                    'submit_state': 'prepared',
+                    'review_reason': (
+                        'B 站当日投稿数量已达上限（{}），将在次日自动重新投稿'.format(
+                            error.code
+                        )
+                    ),
+                    'next_attempt_at': retry_at,
+                    'updated_at': int(self._clock()),
+                }
+                active = True
+                if submit_started:
+                    active = await self._settle_archive_failure(
+                        claim,
+                        outcome_state='confirmed_failure',
+                        outcome={'error_code': error.code},
+                        active_values=values,
+                    )
+                else:
+                    await self._update_job(claim, values, release=True)
+                audit(
+                    'upload_submission_daily_limit',
+                    level='WARNING',
+                    job_id=claim.id,
+                    error_code=error.code,
+                    retry_at=retry_at,
+                    result='scheduled' if active else 'cancelled_local',
+                )
+                return
+            if error.code == self._FREQUENT_SUBMISSION_CODE:
+                delay = self._FREQUENT_SUBMISSION_COOLDOWN_SECONDS
+                values = {
+                    'state': 'submitting' if submit_started else 'uploading',
+                    'submit_state': 'prepared',
+                    'review_reason': '{}，将在 {} 分钟后自动重新投稿'.format(
+                        self._FREQUENT_SUBMISSION_REASON, delay // 60
+                    ),
+                    'next_attempt_at': int(self._clock()) + delay,
+                    'updated_at': int(self._clock()),
+                }
+                active = True
+                if submit_started:
+                    active = await self._settle_archive_failure(
+                        claim,
+                        outcome_state='confirmed_failure',
+                        outcome={'error_code': error.code},
+                        active_values=values,
+                    )
+                else:
+                    await self._update_job(claim, values, release=True)
+                audit(
+                    'upload_submission_rate_limited',
+                    level='WARNING',
+                    job_id=claim.id,
+                    error_code=error.code,
+                    delay_seconds=delay,
+                    result='scheduled' if active else 'cancelled_local',
+                )
+                return
             if error.code in (406, 408, 425, 429):
+                if error.code in (406, 429):
+                    rate_limited = getattr(self._uploader, 'rate_limited', None)
+                    if callable(rate_limited):
+                        rate_limited()
                 computed_delay = min(
                     15 * 60, 60 * (2 ** min(max(claim.attempt - 1, 0), 4))
                 )
@@ -2427,6 +3022,35 @@ class UploadCoordinator:
                     error_code=error.code,
                     delay_seconds=delay,
                     result='scheduled' if active else 'cancelled_local',
+                )
+                return
+            if self._is_submission_challenge(error):
+                values = {
+                    'state': 'paused',
+                    'submit_state': (
+                        'failed_permanent' if submit_started else 'prepared'
+                    ),
+                    'review_reason': (
+                        'B 站要求验证码或人工验证（{}）；完成验证后请点击重新投稿，'
+                        '已上传分 P 会保留'.format(error.code)
+                    ),
+                    'updated_at': int(self._clock()),
+                }
+                if submit_started:
+                    await self._settle_archive_failure(
+                        claim,
+                        outcome_state='confirmed_failure',
+                        outcome={'error_code': error.code},
+                        active_values=values,
+                    )
+                else:
+                    await self._update_job(claim, values, release=True)
+                audit(
+                    'upload_submission_verification_required',
+                    level='WARNING',
+                    job_id=claim.id,
+                    error_code=error.code,
+                    result='manual_action_required',
                 )
                 return
             rejection_reason = await self._bili_rejection_reason(claim.id, error)
@@ -2468,6 +3092,87 @@ class UploadCoordinator:
             account_id=job.account_id,
             aid=aid,
             bvid=bvid,
+        )
+
+    async def _submission_admission(
+        self, job: _Job
+    ) -> Tuple[Optional[int], Optional[str]]:
+        now = int(self._clock())
+        daily_block = await self._database.scalar(
+            'SELECT MAX(next_attempt_at) FROM upload_jobs '
+            'WHERE account_id=? AND next_attempt_at>? AND ('
+            'instr(review_reason,?)>0 OR instr(review_reason,?)>0)',
+            (job.account_id, now, '（12129）', '（129018）'),
+        )
+        if daily_block is not None and int(daily_block) > now:
+            return (int(daily_block), 'B 站当日投稿数量已达上限，将在次日自动重新投稿')
+        immediate_retry = await self._database.scalar(
+            'SELECT 1 FROM upload_jobs WHERE id=? '
+            "AND instr(review_reason,'管理员要求立即重试投稿')>0",
+            (job.id,),
+        )
+        if immediate_retry:
+            return None, None
+        frequent_block = await self._database.scalar(
+            'SELECT MAX(next_attempt_at) FROM upload_jobs '
+            'WHERE account_id=? AND next_attempt_at>? '
+            'AND instr(review_reason,?)>0',
+            (job.account_id, now, '（{}）'.format(self._FREQUENT_SUBMISSION_CODE)),
+        )
+        retry_at = (
+            None
+            if frequent_block is None or int(frequent_block) <= now
+            else int(frequent_block)
+        )
+        reason = (
+            None if retry_at is None else 'B 站投稿频控冷却中，将在冷却后自动重新投稿'
+        )
+        if job.priority >= 0:
+            return retry_at, reason
+        last_submission = await self._database.scalar(
+            'SELECT MAX(submitted_at) FROM upload_jobs '
+            'WHERE account_id=? AND submitted_at IS NOT NULL',
+            (job.account_id,),
+        )
+        if last_submission is not None:
+            paced_at = (
+                int(last_submission) + self._MIGRATION_SUBMISSION_INTERVAL_SECONDS
+            )
+            if paced_at > now and (retry_at is None or paced_at > retry_at):
+                retry_at = paced_at
+                reason = '历史迁移稿件限速中，将在间隔结束后自动投稿'
+        return retry_at, reason
+
+    def _next_beijing_day_retry_at(self) -> int:
+        now = datetime.fromtimestamp(self._clock(), self._BEIJING_TIMEZONE)
+        next_day = (now + timedelta(days=1)).date()
+        retry = datetime(
+            next_day.year,
+            next_day.month,
+            next_day.day,
+            0,
+            10,
+            tzinfo=self._BEIJING_TIMEZONE,
+        )
+        return int(retry.timestamp())
+
+    @classmethod
+    def _is_daily_submission_limit(cls, error: BiliApiError) -> bool:
+        if error.code in cls._DAILY_SUBMISSION_LIMIT_CODES:
+            return True
+        message = (error.public_message or '').replace(' ', '')
+        return ('当日' in message or '当天' in message) and (
+            '投稿' in message and ('上限' in message or '限额' in message)
+        )
+
+    @classmethod
+    def _is_submission_challenge(cls, error: BiliApiError) -> bool:
+        if error.code in cls._SUBMISSION_CHALLENGE_CODES:
+            return True
+        message = (error.public_message or '').lower()
+        return any(
+            marker in message
+            for marker in ('验证码', '人工验证', '安全验证', 'captcha', 'geetest')
         )
 
     async def _submit_payload(
@@ -2599,6 +3304,20 @@ class UploadCoordinator:
             'up_close_danmu': up_close_danmu,
             'creation_statement': {'id': creation_statement_id},
         }
+        if format_version == 4:
+            collection_season_id = snapshot.get('collection_season_id')
+            collection_section_id = snapshot.get('collection_section_id')
+            if (collection_season_id is None) != (collection_section_id is None):
+                raise ProtocolContractError('invalid upload policy snapshot')
+            if collection_season_id is not None:
+                if (
+                    type(collection_season_id) is not int
+                    or collection_season_id <= 0
+                    or type(collection_section_id) is not int
+                    or collection_section_id <= 0
+                ):
+                    raise ProtocolContractError('invalid upload policy snapshot')
+                payload['season_id'] = collection_season_id
         if copyright_value == 2:
             source = snapshot.get('source', '')
             if not isinstance(source, str) or not source:
@@ -2657,7 +3376,7 @@ class UploadCoordinator:
         row = await self._database.fetchone(
             'SELECT job.id,job.session_id,job.account_id,job.policy_snapshot_json,'
             'job.state,job.submit_state,job.upload_completed_at,'
-            'job.preupload_finalized,session.cancellation_generation,'
+            'job.preupload_finalized,job.priority,session.cancellation_generation,'
             'session.deletion_state FROM upload_jobs job '
             'JOIN recording_sessions session ON session.id=job.session_id '
             'WHERE job.id=? AND job.lease_owner=? AND job.lease_generation=?',
@@ -2685,6 +3404,7 @@ class UploadCoordinator:
                 else int(row['upload_completed_at'])
             ),
             preupload_finalized=bool(row['preupload_finalized']),
+            priority=int(row['priority']),
             cancellation_generation=source_generation,
         )
 

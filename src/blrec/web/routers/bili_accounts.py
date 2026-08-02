@@ -1,9 +1,9 @@
 import hashlib
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, Request, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.exceptions import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from blrec.bili_upload.account_lifecycle import (
     AccountRelationships,
@@ -23,6 +23,13 @@ from blrec.bili_upload.accounts import (
     QrSessionNotFound,
     QrSessionView,
 )
+from blrec.bili_upload.archive_migration import (
+    ArchiveMigrationItem,
+    ArchiveMigrationNotFound,
+    ArchiveMigrationService,
+    ArchiveMigrationStatus,
+    ArchiveMigrationUnavailable,
+)
 from blrec.bili_upload.errors import (
     AccountWriteBusy,
     DefinitelyNotSent,
@@ -33,6 +40,7 @@ from blrec.utils.string import camel_case
 from .. import security
 
 manager: Optional[AccountManager] = None
+archive_migration: Optional[ArchiveMigrationService] = None
 unavailable_reason: Optional[str] = 'Bilibili account management is not ready'
 
 
@@ -101,6 +109,62 @@ class AccountRemovalResponse(ApiModel):
     state: str
 
 
+class ArchiveMigrationRequest(ApiModel):
+    source_uid: int
+    download_account_id: int
+    target_account_id: int
+
+
+class ArchiveMigrationResponse(ApiModel):
+    id: int
+    source_uid: int
+    source_name: Optional[str]
+    download_account_id: int
+    target_account_id: int
+    state: str
+    progress: float
+    discovered_count: int
+    completed_count: int
+    failed_count: int
+    error: Optional[str]
+    requested_at: int
+    started_at: Optional[int]
+    completed_at: Optional[int]
+    updated_at: int
+    operator_paused: bool
+    daily_limit: int
+    daily_used: int
+    quota_day: Optional[str]
+
+
+class ArchiveMigrationControlRequest(ApiModel):
+    paused: Optional[bool] = None
+    daily_limit: Optional[int] = Field(None, ge=1, le=500)
+
+
+class ArchiveMigrationItemResponse(ApiModel):
+    id: int
+    migration_id: int
+    bvid: str
+    title: str
+    published_at: Optional[int]
+    state: str
+    progress: float
+    page_count: int
+    downloaded_page_count: int
+    attempt_count: int
+    session_id: Optional[int]
+    upload_job_id: Optional[int]
+    upload_state: Optional[str]
+    submit_state: Optional[str]
+    comment_branch_state: Optional[str]
+    danmaku_branch_state: Optional[str]
+    analysis_state: Optional[str]
+    target_bvid: Optional[str]
+    error: Optional[str]
+    updated_at: int
+
+
 def get_account_manager() -> AccountManager:
     if manager is None:
         raise HTTPException(
@@ -108,6 +172,15 @@ def get_account_manager() -> AccountManager:
             detail=unavailable_reason or 'Bilibili account management is unavailable',
         )
     return manager
+
+
+def get_archive_migration() -> ArchiveMigrationService:
+    if archive_migration is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Bilibili archive migration is unavailable',
+        )
+    return archive_migration
 
 
 async def authenticated_manager_subject(
@@ -135,6 +208,77 @@ async def list_accounts(
     account_manager: AccountManager = Depends(get_account_manager),
 ) -> List[AccountView]:
     return await account_manager.list_accounts()
+
+
+@router.get('/archive-migrations', response_model=List[ArchiveMigrationResponse])
+async def list_archive_migrations(
+    _subject: str = Depends(authenticated_manager_subject),
+    service: ArchiveMigrationService = Depends(get_archive_migration),
+) -> List[ArchiveMigrationStatus]:
+    return list(await service.list_statuses())
+
+
+@router.post(
+    '/archive-migrations',
+    response_model=ArchiveMigrationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_archive_migration(
+    payload: ArchiveMigrationRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    service: ArchiveMigrationService = Depends(get_archive_migration),
+) -> ArchiveMigrationStatus:
+    try:
+        return await service.request(
+            source_uid=payload.source_uid,
+            download_account_id=payload.download_account_id,
+            target_account_id=payload.target_account_id,
+        )
+    except ArchiveMigrationNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    except ArchiveMigrationUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+
+
+@router.patch(
+    '/archive-migrations/{migration_id}', response_model=ArchiveMigrationResponse
+)
+async def update_archive_migration(
+    migration_id: int,
+    payload: ArchiveMigrationControlRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    service: ArchiveMigrationService = Depends(get_archive_migration),
+) -> ArchiveMigrationStatus:
+    try:
+        return await service.update_control(
+            migration_id, paused=payload.paused, daily_limit=payload.daily_limit
+        )
+    except ArchiveMigrationNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+
+
+@router.get(
+    '/archive-migrations/{migration_id}/items',
+    response_model=List[ArchiveMigrationItemResponse],
+)
+async def list_archive_migration_items(
+    migration_id: int,
+    limit: int = Query(100, ge=1, le=200),
+    _subject: str = Depends(authenticated_manager_subject),
+    service: ArchiveMigrationService = Depends(get_archive_migration),
+) -> List[ArchiveMigrationItem]:
+    try:
+        return list(await service.list_items(migration_id, limit=limit))
+    except ArchiveMigrationNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
 
 
 @router.put('/{account_id}/primary', response_model=AccountResponse)

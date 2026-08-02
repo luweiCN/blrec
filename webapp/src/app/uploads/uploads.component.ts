@@ -10,11 +10,17 @@ import {
 import { Subject, from, timer } from 'rxjs';
 import { map, switchMap, takeUntil } from 'rxjs/operators';
 
+import { RealtimeService } from '../core/services/realtime.service';
+
 import {
   AccountRelationships,
   AccountRemovalRequest,
   AccountState,
   AccountsView,
+  ArchiveMigrationItem,
+  ArchiveMigrationRealtimeSnapshot,
+  ArchiveMigrationState,
+  ArchiveMigrationStatus,
   BiliAccount,
   LoginView,
   QrDisplay,
@@ -51,6 +57,17 @@ export class UploadsComponent implements OnInit, OnDestroy {
   newPrimaryAccountId: number | null = null;
   actionError: string | null = null;
   actionMessage: string | null = null;
+  archiveMigrations: readonly ArchiveMigrationStatus[] = [];
+  archiveMigrationItemsById: ReadonlyMap<
+    number,
+    readonly ArchiveMigrationItem[]
+  > = new Map();
+  archiveMigrationsLoading = true;
+  archiveMigrationError: string | null = null;
+  archiveMigrationSourceUid: number | null = null;
+  archiveDownloadAccountId: number | null = null;
+  archiveTargetAccountId: number | null = null;
+  archiveMigrationSubmitting = false;
   readonly credentialVersionTip =
     '每次成功更换登录凭据后递增，用于防止旧任务覆盖新凭据；它不是账号等级或软件版本。';
   readonly credentialExpiryTip =
@@ -62,15 +79,29 @@ export class UploadsComponent implements OnInit, OnDestroy {
   private readonly stopQrPolling$ = new Subject<void>();
   private readonly checkingAccountIds = new Set<number>();
   private readonly failedAvatarUrls = new Set<string>();
-
+  readonly archiveMigrationControlIds = new Set<number>();
+  readonly archiveMigrationDailyLimitDrafts = new Map<number, number>();
   constructor(
     private accountService: BiliAccountService,
     private changeDetector: ChangeDetectorRef,
-    private qrCodeRenderer: QrCodeRenderer
+    private qrCodeRenderer: QrCodeRenderer,
+    private realtime: RealtimeService
   ) {}
 
   ngOnInit(): void {
     this.loadAccounts();
+    this.loadArchiveMigrations();
+    this.realtime.events$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((event) => {
+        if (event.type === 'resync') {
+          this.loadArchiveMigrations();
+          return;
+        }
+        if (event.type === 'archive_migration') {
+          this.applyArchiveMigrationSnapshot(event.data);
+        }
+      });
   }
 
   ngOnDestroy(): void {
@@ -165,6 +196,35 @@ export class UploadsComponent implements OnInit, OnDestroy {
     );
   }
 
+  get activeAccounts(): readonly BiliAccount[] {
+    return this.accounts.filter((account) => account.state === 'active');
+  }
+
+  get canRequestArchiveMigration(): boolean {
+    const sourceUid = this.archiveMigrationSourceUid;
+    const downloadAccountId = this.archiveDownloadAccountId;
+    const targetAccountId = this.archiveTargetAccountId;
+    if (
+      this.archiveMigrationSubmitting ||
+      sourceUid === null ||
+      !Number.isInteger(sourceUid) ||
+      sourceUid <= 0 ||
+      downloadAccountId === null ||
+      targetAccountId === null
+    ) {
+      return false;
+    }
+    const activeIds = new Set(this.activeAccounts.map((account) => account.id));
+    const target = this.activeAccounts.find(
+      (account) => account.id === targetAccountId
+    );
+    return (
+      activeIds.has(downloadAccountId) &&
+      target !== undefined &&
+      target.uid !== sourceUid
+    );
+  }
+
   get canConfirmRemoval(): boolean {
     if (this.removalDialog.state !== 'ready') {
       return false;
@@ -193,6 +253,278 @@ export class UploadsComponent implements OnInit, OnDestroy {
 
   retryAccounts(): void {
     this.loadAccounts();
+  }
+
+  requestArchiveMigration(
+    existing: ArchiveMigrationStatus | null = null
+  ): void {
+    const sourceUid = existing?.sourceUid ?? this.archiveMigrationSourceUid;
+    const downloadAccountId =
+      existing?.downloadAccountId ?? this.archiveDownloadAccountId;
+    const targetAccountId =
+      existing?.targetAccountId ?? this.archiveTargetAccountId;
+    if (
+      sourceUid === null ||
+      !Number.isInteger(sourceUid) ||
+      sourceUid <= 0 ||
+      downloadAccountId === null ||
+      targetAccountId === null
+    ) {
+      this.archiveMigrationError = '请填写源账号 UID，并选择下载账号和目标账号';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    const target = this.activeAccounts.find(
+      (account) => account.id === targetAccountId
+    );
+    if (!target || target.uid === sourceUid) {
+      this.archiveMigrationError = '源账号和目标账号不能相同';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.archiveMigrationSubmitting = true;
+    this.archiveMigrationError = null;
+    this.changeDetector.markForCheck();
+    this.accountService
+      .requestArchiveMigration({
+        sourceUid,
+        downloadAccountId,
+        targetAccountId,
+      })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (migration) => {
+          this.archiveMigrationSubmitting = false;
+          this.upsertArchiveMigration(migration);
+          this.loadArchiveMigrationItems([migration]);
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.archiveMigrationSubmitting = false;
+          this.archiveMigrationError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  refreshArchiveMigrations(): void {
+    this.loadArchiveMigrations();
+  }
+
+  archiveMigrationDailyLimit(migration: ArchiveMigrationStatus): number {
+    return (
+      this.archiveMigrationDailyLimitDrafts.get(migration.id) ??
+      migration.dailyLimit
+    );
+  }
+
+  setArchiveMigrationDailyLimit(migrationId: number, value: number): void {
+    this.archiveMigrationDailyLimitDrafts.set(migrationId, Number(value));
+  }
+
+  updateArchiveMigrationControl(
+    migration: ArchiveMigrationStatus,
+    paused?: boolean
+  ): void {
+    if (this.archiveMigrationControlIds.has(migration.id)) {
+      return;
+    }
+    const dailyLimit = this.archiveMigrationDailyLimit(migration);
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 500) {
+      this.archiveMigrationError = '每日处理上限必须是 1 到 500 的整数';
+      this.changeDetector.markForCheck();
+      return;
+    }
+    this.archiveMigrationControlIds.add(migration.id);
+    this.accountService
+      .updateArchiveMigration(migration.id, { paused, dailyLimit })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (updated) => {
+          this.archiveMigrationControlIds.delete(migration.id);
+          this.archiveMigrationDailyLimitDrafts.delete(migration.id);
+          this.upsertArchiveMigration(updated);
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.archiveMigrationControlIds.delete(migration.id);
+          this.archiveMigrationError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  toggleArchiveMigration(migration: ArchiveMigrationStatus): void {
+    this.updateArchiveMigrationControl(migration, !migration.operatorPaused);
+  }
+
+  archiveMigrationSourceLabel(migration: ArchiveMigrationStatus): string {
+    const source = this.accounts.find(
+      (account) => account.uid === migration.sourceUid
+    );
+    const displayName = source?.displayName ?? migration.sourceName;
+    return displayName
+      ? `${displayName}（UID ${migration.sourceUid}）`
+      : `旧投稿账号（UID ${migration.sourceUid}）`;
+  }
+
+  archiveMigrationStateLabel(state: ArchiveMigrationState): string {
+    switch (state) {
+      case 'discovering':
+        return '正在读取稿件列表';
+      case 'running':
+        return '正在逐稿处理';
+      case 'completed':
+        return '本轮处理完成';
+      case 'failed':
+        return '读取失败';
+      default: {
+        const exhaustive: never = state;
+        throw new Error(`未知迁移状态：${exhaustive}`);
+      }
+    }
+  }
+
+  archiveMigrationItems(
+    migration: ArchiveMigrationStatus
+  ): readonly ArchiveMigrationItem[] {
+    return this.archiveMigrationItemsById.get(migration.id) ?? [];
+  }
+
+  archiveMigrationCurrentItem(
+    migration: ArchiveMigrationStatus
+  ): ArchiveMigrationItem | null {
+    const items = this.archiveMigrationItems(migration);
+    return (
+      items.find((item) => this.archiveMigrationItemIsActive(item)) ??
+      items[0] ??
+      null
+    );
+  }
+
+  archiveMigrationItemStateLabel(item: ArchiveMigrationItem): string {
+    switch (item.state) {
+      case 'queued':
+        return '等待迁移';
+      case 'downloading':
+        return item.pageCount > 1
+          ? `正在下载源稿件（${item.downloadedPageCount}/${item.pageCount} P）`
+          : '正在下载源稿件';
+      case 'creating_task':
+        return '正在校验并创建上传任务';
+      case 'failed':
+        return '迁移失败';
+      case 'task_created':
+        break;
+      default: {
+        const exhaustive: never = item.state;
+        throw new Error(`未知稿件迁移状态：${exhaustive}`);
+      }
+    }
+    if (item.uploadState === 'waiting_artifacts') {
+      return '等待迁移文件就绪';
+    }
+    if (item.uploadState === 'ready' || item.uploadState === 'uploading') {
+      return '正在上传';
+    }
+    if (item.uploadState === 'submitting') {
+      return '正在投稿';
+    }
+    if (item.uploadState === 'waiting_review') {
+      return '等待 B 站审核';
+    }
+    if (item.uploadState === 'paused') {
+      return '上传已暂停';
+    }
+    if (item.uploadState === 'rejected') {
+      return '稿件审核未通过';
+    }
+    if (
+      item.danmakuBranchState === 'pending' ||
+      item.danmakuBranchState === 'importing' ||
+      item.danmakuBranchState === 'publishing'
+    ) {
+      return '正在回灌分 P 弹幕';
+    }
+    if (
+      item.analysisState === 'pending' ||
+      item.analysisState === 'analyzing'
+    ) {
+      return '正在识别对局';
+    }
+    if (item.analysisState === 'failed') {
+      return '对局识别失败';
+    }
+    if (
+      item.commentBranchState === 'pending' ||
+      item.commentBranchState === 'running'
+    ) {
+      return '正在发布战绩';
+    }
+    return item.uploadState === 'approved' || item.uploadState === 'completed'
+      ? '迁移完成'
+      : '上传任务已创建';
+  }
+
+  archiveMigrationItemColor(
+    item: ArchiveMigrationItem
+  ): 'blue' | 'green' | 'gold' | 'red' | 'default' {
+    if (item.state === 'failed' || item.uploadState === 'rejected') {
+      return 'red';
+    }
+    if (item.uploadState === 'paused' || item.analysisState === 'failed') {
+      return 'gold';
+    }
+    if (
+      (item.uploadState === 'approved' || item.uploadState === 'completed') &&
+      item.analysisState !== 'pending' &&
+      item.analysisState !== 'analyzing'
+    ) {
+      return 'green';
+    }
+    return this.archiveMigrationItemIsActive(item) ? 'blue' : 'default';
+  }
+
+  archiveMigrationItemProgress(item: ArchiveMigrationItem): number {
+    return Math.max(0, Math.min(100, Math.round(item.progress * 100)));
+  }
+
+  archiveSourceUrl(item: ArchiveMigrationItem): string {
+    return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
+  }
+
+  archiveTargetUrl(item: ArchiveMigrationItem): string | null {
+    return item.targetBvid
+      ? `https://www.bilibili.com/video/${encodeURIComponent(item.targetBvid)}`
+      : null;
+  }
+
+  trackArchiveMigrationItem(_index: number, item: ArchiveMigrationItem): number {
+    return item.id;
+  }
+
+
+  archiveMigrationProgress(migration: ArchiveMigrationStatus): number {
+    return Math.max(0, Math.min(100, Math.round(migration.progress * 100)));
+  }
+
+  archiveMigrationProgressStatus(
+    migration: ArchiveMigrationStatus
+  ): 'normal' | 'active' | 'success' | 'exception' {
+    if (migration.state === 'failed' || migration.failedCount > 0) {
+      return 'exception';
+    }
+    if (migration.state === 'completed') {
+      return 'success';
+    }
+    return migration.state === 'running' ? 'active' : 'normal';
+  }
+
+  accountDisplayName(accountId: number): string {
+    const account = this.accounts.find((value) => value.id === accountId);
+    return account
+      ? `${account.displayName}（UID ${account.uid}）`
+      : `账号 #${accountId}`;
   }
 
   openLoginDialog(): void {
@@ -550,6 +882,7 @@ export class UploadsComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (accounts) => {
           this.accountsView = { state: 'ready', accounts };
+          this.ensureArchiveMigrationAccountSelection();
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
@@ -560,6 +893,128 @@ export class UploadsComponent implements OnInit, OnDestroy {
           this.changeDetector.markForCheck();
         },
       });
+  }
+
+  private loadArchiveMigrations(): void {
+    this.accountService
+      .listArchiveMigrations()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (migrations) => {
+          this.archiveMigrations = migrations;
+          this.archiveMigrationsLoading = false;
+          this.archiveMigrationError = null;
+          this.loadArchiveMigrationItems(migrations);
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.archiveMigrationsLoading = false;
+          this.archiveMigrationError = this.errorMessage(error);
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  private ensureArchiveMigrationAccountSelection(): void {
+    const active = this.activeAccounts;
+    if (
+      !active.some((account) => account.id === this.archiveDownloadAccountId)
+    ) {
+      this.archiveDownloadAccountId =
+        active.find((account) => account.isPrimary)?.id ?? active[0]?.id ?? null;
+    }
+    if (
+      !active.some((account) => account.id === this.archiveTargetAccountId)
+    ) {
+      this.archiveTargetAccountId =
+        active.find((account) => account.isPrimary)?.id ?? active[0]?.id ?? null;
+    }
+  }
+
+  private upsertArchiveMigration(migration: ArchiveMigrationStatus): void {
+    this.archiveMigrations = [
+      migration,
+      ...this.archiveMigrations.filter((value) => value.id !== migration.id),
+    ];
+  }
+
+  private loadArchiveMigrationItems(
+    migrations: readonly ArchiveMigrationStatus[]
+  ): void {
+    for (const migration of migrations) {
+      this.accountService
+        .listArchiveMigrationItems(migration.id)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
+          next: (items) => {
+            const next = new Map(this.archiveMigrationItemsById);
+            next.set(migration.id, items);
+            this.archiveMigrationItemsById = next;
+            this.changeDetector.markForCheck();
+          },
+          error: (error: unknown) => {
+            this.archiveMigrationError = this.errorMessage(error);
+            this.changeDetector.markForCheck();
+          },
+        });
+    }
+  }
+
+  private applyArchiveMigrationSnapshot(data: unknown): void {
+    const snapshot = this.archiveMigrationSnapshot(data);
+    if (snapshot === null) {
+      this.loadArchiveMigrations();
+      return;
+    }
+    const items = new Map<number, readonly ArchiveMigrationItem[]>();
+    for (const migration of snapshot.migrations) {
+      items.set(migration.id, snapshot.items[String(migration.id)] ?? []);
+    }
+    this.archiveMigrations = snapshot.migrations;
+    this.archiveMigrationItemsById = items;
+    this.archiveMigrationsLoading = false;
+    this.archiveMigrationError = null;
+    this.changeDetector.markForCheck();
+  }
+
+  private archiveMigrationSnapshot(
+    data: unknown
+  ): ArchiveMigrationRealtimeSnapshot | null {
+    if (typeof data !== 'object' || data === null) {
+      return null;
+    }
+    const migrations = Reflect.get(data, 'migrations');
+    const items = Reflect.get(data, 'items');
+    if (
+      !Array.isArray(migrations) ||
+      typeof items !== 'object' ||
+      items === null ||
+      Array.isArray(items)
+    ) {
+      return null;
+    }
+    return {
+      migrations: migrations as ArchiveMigrationStatus[],
+      items: items as Record<string, ArchiveMigrationItem[]>,
+    };
+  }
+
+  private archiveMigrationItemIsActive(item: ArchiveMigrationItem): boolean {
+    return (
+      item.state === 'downloading' ||
+      item.state === 'creating_task' ||
+      item.uploadState === 'ready' ||
+      item.uploadState === 'uploading' ||
+      item.uploadState === 'submitting' ||
+      item.uploadState === 'waiting_review' ||
+      item.analysisState === 'pending' ||
+      item.analysisState === 'analyzing' ||
+      item.danmakuBranchState === 'pending' ||
+      item.danmakuBranchState === 'importing' ||
+      item.danmakuBranchState === 'publishing' ||
+      item.commentBranchState === 'pending' ||
+      item.commentBranchState === 'running'
+    );
   }
 
   private pollQrSession(display: QrDisplay): void {

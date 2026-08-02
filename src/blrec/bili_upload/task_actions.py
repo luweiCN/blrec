@@ -143,6 +143,16 @@ class _RepairResumePlan:
     cover_url: Optional[str]
 
 
+@dataclass(frozen=True)
+class _ImmediateSubmissionRetryPlan:
+    target_id: int
+    job_id: int
+    original_retry_at: int
+
+
+_ImmediateSubmissionRetry = Callable[[int, int], Awaitable[str]]
+
+
 class UploadTaskActionManager:
     _ACTIVE_REPAIR_STATES = frozenset(('queued', 'checking', 'reuploading', 'editing'))
     _REPAIRABLE_JOB_STATES = frozenset(
@@ -163,6 +173,7 @@ class UploadTaskActionManager:
         deletion_worker: Optional[LocalDeletionWorker] = None,
         control_journal: Optional[ControlOperationJournal] = None,
         wake_uploads: Callable[[], None] = lambda: None,
+        immediate_submission_retry: Optional[_ImmediateSubmissionRetry] = None,
         worker_id: Optional[str] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -194,6 +205,7 @@ class UploadTaskActionManager:
         self._clock = clock
         self._control_journal = control_journal
         self._wake_uploads = wake_uploads
+        self._immediate_submission_retry = immediate_submission_retry
         self._run_lock = asyncio.Lock()
 
     async def retryable_failed_job_ids(self) -> Tuple[int, ...]:
@@ -479,8 +491,14 @@ class UploadTaskActionManager:
         )
         now = int(self._clock())
 
-        def run(connection: sqlite3.Connection) -> Tuple[UploadTaskBatchItem, ...]:
+        def run(
+            connection: sqlite3.Connection,
+        ) -> Tuple[
+            Tuple[UploadTaskBatchItem, ...],
+            Tuple[_ImmediateSubmissionRetryPlan, ...],
+        ]:
             results = []
+            immediate_retries: List[_ImmediateSubmissionRetryPlan] = []
             for ordinal, job_id in enumerate(normalized):
                 savepoint = 'item_{}'.format(ordinal)
                 connection.execute('SAVEPOINT {}'.format(savepoint))
@@ -491,6 +509,8 @@ class UploadTaskActionManager:
                         job_id,
                         manager_subject=manager_subject,
                         now=now,
+                        immediate_retries=immediate_retries,
+                        immediate_retry_target_id=job_id,
                     )
                 except UploadTaskActionRejected as error:
                     connection.execute('ROLLBACK TO SAVEPOINT {}'.format(savepoint))
@@ -507,9 +527,12 @@ class UploadTaskActionManager:
                             target_id=job_id, accepted=True, message=message
                         )
                     )
-            return tuple(results)
+            return tuple(results), tuple(immediate_retries)
 
-        results = await self._database.write(run)
+        results, immediate_retries = await self._database.write(run)
+        results = await self._run_immediate_submission_retries(
+            results, immediate_retries
+        )
         if any(item.accepted for item in results):
             self._wake_uploads()
         return results
@@ -534,8 +557,14 @@ class UploadTaskActionManager:
         )
         now = int(self._clock())
 
-        def run(connection: sqlite3.Connection) -> Tuple[UploadTaskBatchItem, ...]:
+        def run(
+            connection: sqlite3.Connection,
+        ) -> Tuple[
+            Tuple[UploadTaskBatchItem, ...],
+            Tuple[_ImmediateSubmissionRetryPlan, ...],
+        ]:
             results = []
+            immediate_retries: List[_ImmediateSubmissionRetryPlan] = []
             for ordinal, session_id in enumerate(normalized):
                 savepoint = 'item_{}'.format(ordinal)
                 connection.execute('SAVEPOINT {}'.format(savepoint))
@@ -546,6 +575,7 @@ class UploadTaskActionManager:
                         session_id,
                         manager_subject=manager_subject,
                         now=now,
+                        immediate_retries=immediate_retries,
                     )
                 except UploadTaskActionRejected as error:
                     connection.execute('ROLLBACK TO SAVEPOINT {}'.format(savepoint))
@@ -562,9 +592,12 @@ class UploadTaskActionManager:
                             target_id=session_id, accepted=True, message=message
                         )
                     )
-            return tuple(results)
+            return tuple(results), tuple(immediate_retries)
 
-        results = await self._database.write(run)
+        results, immediate_retries = await self._database.write(run)
+        results = await self._run_immediate_submission_retries(
+            results, immediate_retries
+        )
         if any(item.accepted for item in results):
             self._wake_uploads()
         return results
@@ -598,6 +631,7 @@ class UploadTaskActionManager:
         *,
         manager_subject: str,
         now: int,
+        immediate_retries: Optional[List[_ImmediateSubmissionRetryPlan]] = None,
     ) -> str:
         row = connection.execute(
             'SELECT session.id,job.id AS job_id FROM recording_sessions session '
@@ -633,7 +667,13 @@ class UploadTaskActionManager:
                 connection, numeric_job_id, manager_subject=manager_subject, now=now
             )
         return self._run_job_action_in_connection(
-            connection, action, numeric_job_id, manager_subject=manager_subject, now=now
+            connection,
+            action,
+            numeric_job_id,
+            manager_subject=manager_subject,
+            now=now,
+            immediate_retries=immediate_retries,
+            immediate_retry_target_id=session_id,
         )
 
     def _set_session_submission_decision_in_connection(
@@ -694,10 +734,17 @@ class UploadTaskActionManager:
         *,
         manager_subject: str,
         now: int,
+        immediate_retries: Optional[List[_ImmediateSubmissionRetryPlan]] = None,
+        immediate_retry_target_id: Optional[int] = None,
     ) -> str:
         if action == 'retry_failed':
             return self._retry_failed_in_connection(
-                connection, job_id, manager_subject=manager_subject, now=now
+                connection,
+                job_id,
+                manager_subject=manager_subject,
+                now=now,
+                immediate_retries=immediate_retries,
+                immediate_retry_target_id=immediate_retry_target_id,
             )
         if action == 'pause_upload':
             return self._pause_upload_in_connection(
@@ -951,10 +998,10 @@ class UploadTaskActionManager:
         if job is None:
             raise UploadTaskActionRejected('上传任务不存在')
         if (
-            str(job['state']) not in ('approved', 'completed')
+            str(job['state']) not in ('approved', 'rejected', 'completed')
             or str(job['submit_state']) != 'confirmed'
         ):
-            raise UploadTaskActionRejected('只有审核通过的任务可以重新投稿')
+            raise UploadTaskActionRejected('只有已提交的任务可以重新投稿')
         if job['aid'] is None or not job['bvid']:
             raise UploadTaskActionRejected('原任务缺少 AID/BVID')
         if str(job['account_state']) != 'active':
@@ -1387,14 +1434,57 @@ class UploadTaskActionManager:
         if not manager_subject:
             raise UploadTaskActionRejected('管理员身份不能为空')
         now = int(self._clock())
+        immediate_retries: List[_ImmediateSubmissionRetryPlan] = []
 
         message = await self._database.write(
             lambda connection: self._retry_failed_in_connection(
-                connection, job_id, manager_subject=manager_subject, now=now
+                connection,
+                job_id,
+                manager_subject=manager_subject,
+                now=now,
+                immediate_retries=immediate_retries,
+                immediate_retry_target_id=job_id,
             )
         )
+        if immediate_retries:
+            callback = self._immediate_submission_retry
+            assert callback is not None
+            try:
+                message = await callback(
+                    immediate_retries[0].job_id,
+                    immediate_retries[0].original_retry_at,
+                )
+            except ValueError as error:
+                raise UploadTaskActionRejected(str(error)) from None
         self._wake_uploads()
         return message
+
+    async def _run_immediate_submission_retries(
+        self,
+        results: Tuple[UploadTaskBatchItem, ...],
+        plans: Tuple[_ImmediateSubmissionRetryPlan, ...],
+    ) -> Tuple[UploadTaskBatchItem, ...]:
+        if not plans:
+            return results
+        callback = self._immediate_submission_retry
+        assert callback is not None
+        replacements: Dict[int, UploadTaskBatchItem] = {}
+        for plan in plans:
+            try:
+                message = await callback(plan.job_id, plan.original_retry_at)
+            except ValueError as error:
+                replacements[plan.target_id] = UploadTaskBatchItem(
+                    target_id=plan.target_id,
+                    accepted=False,
+                    message=str(error),
+                )
+            else:
+                replacements[plan.target_id] = UploadTaskBatchItem(
+                    target_id=plan.target_id,
+                    accepted=True,
+                    message=message,
+                )
+        return tuple(replacements.get(item.target_id, item) for item in results)
 
     def _retry_failed_in_connection(
         self,
@@ -1403,10 +1493,13 @@ class UploadTaskActionManager:
         *,
         manager_subject: str,
         now: int,
+        immediate_retries: Optional[List[_ImmediateSubmissionRetryPlan]] = None,
+        immediate_retry_target_id: Optional[int] = None,
     ) -> str:
         job = connection.execute(
             'SELECT job.state,job.submit_state,job.aid,job.bvid,'
             'job.repair_state,job.operator_paused,job.lease_until,'
+            'job.next_attempt_at,job.review_reason,'
             'account.state AS account_state '
             'FROM upload_jobs job JOIN bili_accounts account '
             'ON account.id=job.account_id WHERE job.id=?',
@@ -1414,7 +1507,21 @@ class UploadTaskActionManager:
         ).fetchone()
         if job is None:
             raise UploadTaskActionRejected('上传任务不存在')
-        if str(job['state']) != 'paused':
+        state = str(job['state'])
+        submit_state = str(job['submit_state'])
+        review_reason = (
+            '' if job['review_reason'] is None else str(job['review_reason'])
+        )
+        immediate_submission_retry = (
+            state == 'submitting'
+            and submit_state == 'prepared'
+            and int(job['next_attempt_at']) > now
+            and any(
+                marker in review_reason
+                for marker in ('137022', '投稿频控冷却', '投稿过于频繁')
+            )
+        )
+        if state != 'paused' and not immediate_submission_retry:
             raise UploadTaskActionRejected('只有已暂停的任务可以重新排队')
         if bool(job['operator_paused']):
             raise UploadTaskActionRejected('任务由管理员暂停，请使用继续上传')
@@ -1424,7 +1531,6 @@ class UploadTaskActionManager:
             raise UploadTaskActionRejected('转码修复正在执行')
         if job['lease_until'] is not None and int(job['lease_until']) > now:
             raise UploadTaskActionRejected('任务正在执行，请稍后再试')
-        submit_state = str(job['submit_state'])
         if submit_state in ('in_flight', 'unknown_outcome'):
             raise UploadTaskActionRejected('投稿结果未知，自动重试可能产生重复稿件')
         parts = connection.execute(
@@ -1442,7 +1548,47 @@ class UploadTaskActionManager:
                 '分 P 上传结果未知，自动重试可能造成重复上传'
             )
 
+        if immediate_submission_retry:
+            if (
+                self._immediate_submission_retry is None
+                or immediate_retries is None
+            ):
+                raise UploadTaskActionRejected('立即投稿服务当前不可用')
+            if any(str(part['upload_state']) != 'confirmed' for part in parts):
+                raise UploadTaskActionRejected('只有分 P 全部确认后才能立即重试投稿')
+            original_retry_at = int(job['next_attempt_at'])
+            updated = connection.execute(
+                "UPDATE upload_jobs SET review_reason='管理员要求立即重试投稿',"
+                'lease_owner=NULL,lease_until=NULL,updated_at=? WHERE id=?',
+                (now, job_id),
+            )
+            if updated.rowcount != 1:
+                raise UploadTaskActionRejected('上传任务状态已经发生变化')
+            self._audit(
+                connection,
+                manager_subject=manager_subject,
+                action='retry_submission_now',
+                job_id=job_id,
+                old_state='{}/waiting_rate_limit'.format(state),
+                new_state='submitting/prepared',
+                reason='管理员要求立即重试投稿',
+                now=now,
+            )
+            immediate_retries.append(
+                _ImmediateSubmissionRetryPlan(
+                    target_id=(
+                        job_id
+                        if immediate_retry_target_id is None
+                        else immediate_retry_target_id
+                    ),
+                    job_id=job_id,
+                    original_retry_at=original_retry_at,
+                )
+            )
+            return '正在立即请求投稿，不会重复上传已确认分 P'
+
         old_state = '{}/{}'.format(job['state'], submit_state)
+        retrying_submission = False
         if submit_state == 'confirmed':
             if job['aid'] is None or not job['bvid']:
                 raise UploadTaskActionRejected('已投稿任务缺少 AID/BVID')
@@ -1469,6 +1615,7 @@ class UploadTaskActionManager:
                 str(part['upload_state']) == 'confirmed' for part in remaining
             )
             new_state = 'submitting' if all_confirmed else 'ready'
+            retrying_submission = all_confirmed
             submit_state = 'prepared'
         else:
             raise UploadTaskActionRejected('当前投稿状态不能安全重试')
@@ -1477,7 +1624,17 @@ class UploadTaskActionManager:
             'UPDATE upload_jobs SET state=?,submit_state=?,next_attempt_at=0,'
             'review_reason=?,lease_owner=NULL,lease_until=NULL,updated_at=? '
             'WHERE id=?',
-            (new_state, submit_state, '管理员已重新排队失败任务', now, job_id),
+            (
+                new_state,
+                submit_state,
+                (
+                    '管理员已重新排队投稿'
+                    if retrying_submission
+                    else '管理员已重新排队失败任务'
+                ),
+                now,
+                job_id,
+            ),
         )
         if updated.rowcount != 1:
             raise UploadTaskActionRejected('上传任务状态已经发生变化')
@@ -1491,6 +1648,8 @@ class UploadTaskActionManager:
             reason='管理员手动重试失败任务',
             now=now,
         )
+        if retrying_submission:
+            return '投稿失败任务已重新排队，不会重复上传已确认分 P'
         return '失败任务已重新排队'
 
     async def skip_upload(self, job_id: int, *, manager_subject: str) -> str:

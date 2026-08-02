@@ -1,0 +1,51 @@
+<main class="dashboard">
+  <header class="site-header">
+    <a class="brand" routerLink="/rankings-preview" aria-label="虚荣对局榜首页">
+      <span class="brand-mark" aria-hidden="true"><span>V</span></span>
+      <span class="brand-copy">
+        <strong>虚荣对局榜</strong>
+        <small>COMMUNITY ARCHIVE</small>
+      </span>
+    </a>
+
+    <nav aria-label="榜单页面">
+      <a
+        routerLink="/rankings-preview"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+        [routerLinkActiveOptions]="{ exact: true }"
+      >
+        总览
+      </a>
+      <a
+        routerLink="/rankings-preview/players"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        玩家排行
+      </a>
+      <a
+        routerLink="/rankings-preview/heroes"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        英雄排行
+      </a>
+    </nav>
+
+    <p class="data-status">
+      <span aria-hidden="true"></span>
+      {{ currentSeason.label }} · 最后同步 02:05
+    </p>
+  </header>
+
+  <router-outlet></router-outlet>
+
+  <footer id="method">
+    <div>
+      <strong>虚荣对局榜</strong>
+      <p>赛季按北京时间直播开始时间归档 · 当前页面仅用于确认视觉与信息结构</p>
+    </div>
+    <p>MOCK DATA / 非真实排名</p>
+  </footer>
+</main>

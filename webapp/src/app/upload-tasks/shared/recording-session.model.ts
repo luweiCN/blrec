@@ -8,8 +8,7 @@ export const RECORDING_SESSION_STATES = [
   'skipped',
 ] as const;
 
-export type RecordingSessionState =
-  (typeof RECORDING_SESSION_STATES)[number];
+export type RecordingSessionState = (typeof RECORDING_SESSION_STATES)[number];
 
 export const RECORDING_ARTIFACT_STATES = [
   'recording',
@@ -20,8 +19,7 @@ export const RECORDING_ARTIFACT_STATES = [
   'manual_review',
 ] as const;
 
-export type RecordingArtifactState =
-  (typeof RECORDING_ARTIFACT_STATES)[number];
+export type RecordingArtifactState = (typeof RECORDING_ARTIFACT_STATES)[number];
 
 export type UploadJobState =
   | 'waiting_artifacts'
@@ -42,10 +40,7 @@ export type UploadSubmitState =
   | 'failed_permanent';
 
 export type UploadJobDisplayState =
-  | 'standard'
-  | 'preuploading'
-  | 'preuploaded_waiting'
-  | 'preupload_paused';
+  'standard' | 'preuploading' | 'preuploaded_waiting' | 'preupload_paused';
 
 export type CommentBranchState =
   | 'disabled'
@@ -241,6 +236,31 @@ export interface RecordingMediaAccess {
   readonly requestId: string;
 }
 
+export type RemoteMediaState =
+  | 'local'
+  | 'unavailable'
+  | 'missing'
+  | 'pending'
+  | 'downloading'
+  | 'ready'
+  | 'failed';
+
+export interface RemoteMediaStatus {
+  readonly partId: number;
+  readonly state: RemoteMediaState;
+  readonly progress: number;
+  readonly remoteAvailable: boolean;
+  readonly accountId: number | null;
+  readonly bvid: string | null;
+  readonly cid: number | null;
+  readonly page: number | null;
+  readonly downloadedBytes: number;
+  readonly totalBytes: number | null;
+  readonly cachedAt: number | null;
+  readonly expiresAt: number | null;
+  readonly error: string | null;
+}
+
 export interface RecordingDanmakuLine {
   readonly index: number;
   readonly progressMs: number;
@@ -258,11 +278,7 @@ export interface RecordingDanmakuPage {
 }
 
 export type SubmissionVerificationState =
-  | 'pending'
-  | 'passed'
-  | 'different'
-  | 'partial'
-  | 'failed';
+  'pending' | 'passed' | 'different' | 'partial' | 'failed';
 
 export interface SubmissionVerification {
   readonly state: SubmissionVerificationState;
@@ -310,11 +326,7 @@ export interface UploadJobSummary {
   readonly operatorPaused: boolean;
   readonly scheduledPublishAt: number | null;
   readonly collectionBranchState:
-    | 'disabled'
-    | 'pending'
-    | 'running'
-    | 'completed'
-    | 'failed';
+    'disabled' | 'pending' | 'running' | 'completed' | 'failed';
   readonly collectionError: string | null;
   readonly submissionVerificationState: SubmissionVerificationState;
   readonly submissionVerifiedAt: number | null;
@@ -358,11 +370,7 @@ export interface RecordingPart {
   readonly errorMessage: string | null;
   readonly uploadExcludedReason?: string | null;
   readonly mediaIndexState?:
-    | 'pending'
-    | 'indexing'
-    | 'ready'
-    | 'failed'
-    | 'not_required';
+    'pending' | 'indexing' | 'ready' | 'failed' | 'not_required';
   readonly mediaIndexError?: string | null;
   readonly mediaIndexProgress?: number;
 }
@@ -391,10 +399,7 @@ export interface RecordingSessionSummary {
   readonly uploadDecision: 'follow_room' | 'upload' | 'skip';
   readonly submissionInherited: boolean;
   readonly uploadResolutionState:
-    | 'pending'
-    | 'not_requested'
-    | 'configuration_required'
-    | 'job_created';
+    'pending' | 'not_requested' | 'configuration_required' | 'job_created';
   readonly uploadResolutionError: string | null;
   readonly uploadSuppressed: boolean;
   readonly deletionState: 'none' | 'requested' | 'deleting' | 'failed';

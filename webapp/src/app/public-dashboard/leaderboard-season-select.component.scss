@@ -1,0 +1,162 @@
+:host {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button {
+  font: inherit;
+
+  &:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+}
+
+.control-label {
+  color: var(--ink-muted);
+  font-size: 0.63rem;
+  font-weight: 700;
+}
+
+.season-select {
+  position: relative;
+}
+
+.season-trigger {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: var(--filter-control-height);
+  padding: 0 15px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+
+  & > span:first-child {
+    display: grid;
+    min-width: 0;
+  }
+
+  strong {
+    overflow: hidden;
+    font-size: 0.72rem;
+    font-weight: 720;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small {
+    margin-top: 3px;
+    overflow: hidden;
+    color: var(--ink-muted);
+    font-size: 0.57rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &:hover {
+    border-color: var(--cyan-strong);
+    background: var(--surface-3);
+  }
+}
+
+.open .season-trigger {
+  border-color: var(--cyan);
+}
+
+.chevron {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: -4px 2px 0 0;
+  border-right: 1.5px solid var(--cyan);
+  border-bottom: 1.5px solid var(--cyan);
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.open .chevron {
+  margin-top: 4px;
+  transform: rotate(225deg);
+}
+
+.season-options {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  max-height: 280px;
+  margin: 0;
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  box-shadow: 0 6px 8px oklch(6% 0.02 286 / 0.38);
+  list-style: none;
+
+  button {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 54px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--ink-soft);
+    cursor: pointer;
+    text-align: left;
+
+    & > span:first-child {
+      display: grid;
+      gap: 3px;
+    }
+
+    strong {
+      font-size: 0.7rem;
+    }
+
+    small {
+      color: var(--ink-muted);
+      font-size: 0.56rem;
+    }
+
+    &.highlighted,
+    &:hover {
+      background: oklch(79% 0.13 204 / 0.1);
+      color: var(--ink);
+    }
+  }
+}
+
+.selected-mark {
+  width: 18px;
+  color: var(--cyan);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .season-trigger,
+  .chevron {
+    transition: none;
+  }
+}

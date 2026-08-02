@@ -20,6 +20,12 @@ from blrec.bili_upload.accounts import (
     QrSessionNotFound,
     QrSessionView,
 )
+from blrec.bili_upload.archive_migration import (
+    ArchiveMigrationItem,
+    ArchiveMigrationNotFound,
+    ArchiveMigrationStatus,
+    ArchiveMigrationUnavailable,
+)
 from blrec.bili_upload.errors import AccountWriteBusy
 from blrec.web import security
 from blrec.web.routers import bili_accounts
@@ -29,6 +35,64 @@ from blrec.web.routers import bili_accounts
 class FakeRenewalCheckResult:
     credential_version: int
     refreshed: bool
+
+
+@dataclass
+class FakeArchiveMigration:
+    request_error: Optional[Exception] = None
+    requested: Optional[tuple] = None
+
+    async def request(
+        self, *, source_uid: int, download_account_id: int, target_account_id: int
+    ) -> ArchiveMigrationStatus:
+        self.requested = (source_uid, download_account_id, target_account_id)
+        if self.request_error is not None:
+            raise self.request_error
+        return self.status()
+
+    async def list_statuses(self) -> tuple:
+        return (self.status(),)
+
+    async def list_items(self, migration_id: int) -> tuple:
+        if migration_id != 9:
+            raise ArchiveMigrationNotFound('稿件迁移任务不存在')
+        return (
+            ArchiveMigrationItem(
+                id=12,
+                migration_id=9,
+                bvid='BV1wQSSBvEqY',
+                title='旧账号录播',
+                published_at=1_700_000_000,
+                state='task_created',
+                progress=1,
+                page_count=2,
+                downloaded_page_count=2,
+                attempt_count=1,
+                session_id=31,
+                upload_job_id=41,
+                error=None,
+            ),
+        )
+
+    @staticmethod
+    def status() -> ArchiveMigrationStatus:
+        return ArchiveMigrationStatus(
+            id=9,
+            source_uid=100,
+            source_name='旧投稿账号',
+            download_account_id=7,
+            target_account_id=8,
+            state='running',
+            progress=0.5,
+            discovered_count=2,
+            completed_count=1,
+            failed_count=0,
+            error=None,
+            requested_at=1000,
+            started_at=1001,
+            completed_at=None,
+            updated_at=1002,
+        )
 
 
 @dataclass
@@ -144,6 +208,7 @@ class FakeAccountManager:
 @pytest.fixture(autouse=True)
 def restore_router_state() -> Iterator[None]:
     old_manager = bili_accounts.manager
+    old_archive_migration = bili_accounts.archive_migration
     old_reason = bili_accounts.unavailable_reason
     old_key = security.api_key
     whitelist = security.whitelist.copy()
@@ -151,6 +216,7 @@ def restore_router_state() -> Iterator[None]:
     attempting = security.attempting_clients.copy()
     yield
     bili_accounts.manager = old_manager
+    bili_accounts.archive_migration = old_archive_migration
     bili_accounts.unavailable_reason = old_reason
     security.api_key = old_key
     security.whitelist.clear()
@@ -179,6 +245,13 @@ def client(manager: FakeAccountManager) -> Iterator[TestClient]:
     security.attempting_clients.clear()
     with TestClient(api) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def migration() -> FakeArchiveMigration:
+    value = FakeArchiveMigration()
+    bili_accounts.archive_migration = value  # type: ignore[assignment]
+    return value
 
 
 def auth_headers() -> dict:
@@ -259,6 +332,70 @@ def test_list_accounts_is_redacted(client: TestClient) -> None:
     ]
     assert 'token' not in response.text.lower()
     assert 'cookie' not in response.text.lower()
+
+
+def test_archive_migration_can_be_requested_and_polled(
+    client: TestClient, migration: FakeArchiveMigration
+) -> None:
+    created = client.post(
+        '/api/v1/bili-accounts/archive-migrations',
+        headers=auth_headers(),
+        json={'sourceUid': 100, 'downloadAccountId': 7, 'targetAccountId': 8},
+    )
+    statuses = client.get(
+        '/api/v1/bili-accounts/archive-migrations', headers=auth_headers()
+    )
+    items = client.get(
+        '/api/v1/bili-accounts/archive-migrations/9/items', headers=auth_headers()
+    )
+
+    assert created.status_code == 202
+    assert created.json()['id'] == 9
+    assert created.json()['sourceName'] == '旧投稿账号'
+    assert created.json()['progress'] == 0.5
+    assert migration.requested == (100, 7, 8)
+    assert statuses.status_code == 200
+    assert statuses.json()[0]['completedCount'] == 1
+    assert items.status_code == 200
+    assert items.json()[0] == {
+        'id': 12,
+        'migrationId': 9,
+        'bvid': 'BV1wQSSBvEqY',
+        'title': '旧账号录播',
+        'publishedAt': 1_700_000_000,
+        'state': 'task_created',
+        'progress': 1,
+        'pageCount': 2,
+        'downloadedPageCount': 2,
+        'attemptCount': 1,
+        'sessionId': 31,
+        'uploadJobId': 41,
+        'error': None,
+    }
+
+
+@pytest.mark.parametrize(
+    ('error', 'expected_status'),
+    [
+        (ArchiveMigrationNotFound('账号不存在'), 404),
+        (ArchiveMigrationUnavailable('源账号和目标账号不能相同'), 409),
+    ],
+)
+def test_archive_migration_maps_expected_failures(
+    error: Exception,
+    expected_status: int,
+    client: TestClient,
+    migration: FakeArchiveMigration,
+) -> None:
+    migration.request_error = error
+
+    response = client.post(
+        '/api/v1/bili-accounts/archive-migrations',
+        headers=auth_headers(),
+        json={'sourceUid': 100, 'downloadAccountId': 7, 'targetAccountId': 8},
+    )
+
+    assert response.status_code == expected_status
 
 
 def test_missing_qr_session_returns_404(

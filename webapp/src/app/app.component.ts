@@ -25,6 +25,7 @@ export class AppComponent implements OnDestroy {
   collapsed = false;
   useDrawer = false;
   authPage = false;
+  publicDashboardPage = false;
   destroyed = new Subject<void>();
 
   constructor(
@@ -34,6 +35,7 @@ export class AppComponent implements OnDestroy {
     private auth: AuthService
   ) {
     this.authPage = router.url.startsWith('/auth');
+    this.publicDashboardPage = router.url.startsWith('/rankings-preview');
     router.events.subscribe((event) => {
       if (event instanceof NavigationStart) {
         this.loading = true;
@@ -44,6 +46,9 @@ export class AppComponent implements OnDestroy {
       } else if (event instanceof NavigationEnd) {
         this.loading = false;
         this.authPage = event.urlAfterRedirects.startsWith('/auth');
+        this.publicDashboardPage = event.urlAfterRedirects.startsWith(
+          '/rankings-preview',
+        );
         changeDetector.markForCheck();
       }
     });

@@ -13,6 +13,7 @@ import {
   ScissorOutline,
   SettingOutline,
   StarOutline,
+  TrophyOutline,
   UnorderedListOutline,
   UserOutline,
   VideoCameraOutline,
@@ -40,6 +41,7 @@ describe('AppComponent', () => {
             ScissorOutline,
             SettingOutline,
             StarOutline,
+            TrophyOutline,
             UnorderedListOutline,
             UserOutline,
             VideoCameraOutline,
@@ -68,6 +70,14 @@ describe('AppComponent', () => {
     expect(compiled.querySelector('.app-title').textContent).toContain(
       'B 站直播录制',
     );
+  });
+
+  it('renders the rankings preview without the admin shell', () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    fixture.componentInstance.publicDashboardPage = true;
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.sidebar')).toBeNull();
   });
 
   it('shows recording, upload-task, and Bilibili-account navigation', () => {
@@ -133,6 +143,7 @@ describe('AppComponent', () => {
       '录制任务',
       '上传任务',
       '媒体库',
+      '对局索引',
       '投稿账号',
       '网络管理',
       '设置',

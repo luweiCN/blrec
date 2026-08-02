@@ -214,6 +214,8 @@ async def test_enabled_runtime_starts_manager_and_periodic_health_check(
         assert runtime.media_index_worker is not None
         assert runtime.deletion_worker is not None
         assert runtime.media_library is not None
+        assert runtime.vainglory_service is not None
+        assert runtime.archive_migration is not None
         assert runtime.media_library.storage_root == (tmp_path / 'favorites').resolve()
 
         for _ in range(100):
@@ -259,6 +261,8 @@ async def test_runtime_close_is_idempotent(tmp_path: Path) -> None:
     assert runtime.media_index_worker is None
     assert runtime.deletion_worker is None
     assert runtime.media_library is None
+    assert runtime.vainglory_service is None
+    assert runtime.archive_migration is None
 
 
 @pytest.mark.asyncio
@@ -650,6 +654,77 @@ async def test_upload_loop_runs_one_retry_quantum_per_iteration() -> None:
 
     task_actions.run_retry_batch_once.assert_awaited_once_with()
     task_actions.run_once.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_upload_task_pool_grows_and_shrinks_without_cancelling_active_tasks(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    runtime = BiliAccountRuntime(
+        BiliUploadSettings(database_path='/unused.sqlite3'),
+        api_key=None,
+        credential_key=None,
+        upload_interval_seconds=0.01,
+    )
+    runtime._upload_wake_event = asyncio.Event()
+    stop_event = asyncio.Event()
+    releases = [asyncio.Event() for _ in range(4)]
+    started = []
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.task_capacity = 1
+            self.next_job = 0
+
+        async def start_once(self) -> Any:
+            if self.next_job >= len(releases):
+                return None
+            self.next_job += 1
+            job_id = self.next_job
+
+            async def run() -> int:
+                started.append(job_id)
+                await releases[job_id - 1].wait()
+                return job_id
+
+            return asyncio.create_task(run())
+
+    async def wait_for_started(count: int) -> None:
+        while len(started) < count:
+            await asyncio.sleep(0)
+
+    coordinator = Coordinator()
+    pool = asyncio.create_task(runtime._run_upload_task_pool(coordinator, stop_event))
+    try:
+        await asyncio.wait_for(wait_for_started(1), timeout=1)
+        assert started == [1]
+
+        coordinator.task_capacity = 2
+        runtime._wake_upload_worker()
+        await asyncio.wait_for(wait_for_started(2), timeout=1)
+
+        coordinator.task_capacity = 3
+        runtime._wake_upload_worker()
+        await asyncio.wait_for(wait_for_started(3), timeout=1)
+
+        coordinator.task_capacity = 2
+        runtime._wake_upload_worker()
+        releases[0].set()
+        await asyncio.sleep(0.05)
+        assert started == [1, 2, 3]
+        assert not releases[1].is_set()
+        assert not releases[2].is_set()
+
+        releases[1].set()
+        await asyncio.wait_for(wait_for_started(4), timeout=1)
+        assert started == [1, 2, 3, 4]
+    finally:
+        stop_event.set()
+        runtime._wake_upload_worker()
+        for release in releases:
+            release.set()
+        await asyncio.wait_for(pool, timeout=1)
 
 
 @pytest.mark.asyncio

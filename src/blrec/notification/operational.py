@@ -230,12 +230,16 @@ class OperationalHealthScanner:
                 and not bool(row['operator_paused'])
                 and repair_state not in ('failed', 'unknown_outcome')
             )
+            verification_required = any(
+                marker in reason.lower()
+                for marker in ('验证码', '人工验证', '安全验证', 'captcha', 'geetest')
+            )
             await self._report_job_state(
                 'upload_failed',
                 job_id,
                 not upload_failed,
                 '上传任务已恢复',
-                '上传任务失败',
+                '投稿需要人工验证' if verification_required else '上传任务失败',
                 reason or state,
             )
             await self._report_job_state(

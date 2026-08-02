@@ -139,6 +139,12 @@ class RetentionManager:
             'JOIN highlight_clips clip ON clip.id=source.clip_id '
             'WHERE source.part_id=part.id '
             "AND clip.state IN ('queued','processing')) "
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs active_analysis '
+            'WHERE active_analysis.part_id=part.id '
+            "AND active_analysis.state IN ('pending','analyzing')) "
+            'AND (session.broadcast_session_key NOT LIKE \'bili-migration:%\' '
+            'OR EXISTS(SELECT 1 FROM vainglory_part_jobs analysis '
+            "WHERE analysis.part_id=part.id AND analysis.state='ready')) "
             'ORDER BY session.started_at,part.part_index,part.id'
         )
         candidates = []
@@ -187,6 +193,12 @@ class RetentionManager:
             'JOIN highlight_clips clip ON clip.id=source.clip_id '
             'WHERE source.part_id=part.id '
             "AND clip.state IN ('queued','processing')) "
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs active_analysis '
+            'WHERE active_analysis.part_id=part.id '
+            "AND active_analysis.state IN ('pending','analyzing')) "
+            'AND (session.broadcast_session_key NOT LIKE \'bili-migration:%\' '
+            'OR EXISTS(SELECT 1 FROM vainglory_part_jobs analysis '
+            "WHERE analysis.part_id=part.id AND analysis.state='ready')) "
             'ORDER BY order_at,session.started_at,part.part_index,part.id',
             (now,),
         )

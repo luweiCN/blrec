@@ -1,0 +1,486 @@
+from __future__ import annotations
+
+import json
+import os
+import select
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO, Any, Dict, Iterator, List, Optional, Sequence, Tuple
+
+from .vision import RgbFrame
+
+
+class InvalidImage(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class VideoProfile:
+    width: int
+    height: int
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class TimedFrame:
+    at_ms: int
+    frame: RgbFrame
+
+
+@dataclass(frozen=True)
+class CoarseObservation:
+    at_ms: int
+    hud_signature: Optional[str]
+    result_visible: bool
+
+
+@dataclass(frozen=True)
+class ScanWindow:
+    start_ms: int
+    end_ms: int
+
+
+def fit_frame_dimensions(
+    source_width: int, source_height: int, maximum_width: int, maximum_height: int
+) -> Tuple[int, int]:
+    if min(source_width, source_height, maximum_width, maximum_height) <= 0:
+        raise ValueError('frame dimensions must be positive')
+    scale = min(maximum_width / source_width, maximum_height / source_height)
+    return (
+        max(1, min(maximum_width, int(round(source_width * scale)))),
+        max(1, min(maximum_height, int(round(source_height * scale)))),
+    )
+
+
+def result_search_windows(
+    observations: Sequence[CoarseObservation],
+    *,
+    duration_ms: int,
+    hud_gap_ms: int = 15_000,
+    before_end_ms: int = 10_000,
+    after_end_ms: int = 60_000,
+) -> Tuple[ScanWindow, ...]:
+    if duration_ms <= 0:
+        raise ValueError('video duration must be positive')
+    if hud_gap_ms <= 0:
+        raise ValueError('HUD gap must be positive')
+    hud_times = sorted(
+        observation.at_ms
+        for observation in observations
+        if observation.hud_signature is not None
+    )
+    windows: List[ScanWindow] = []
+    if hud_times:
+        run_last = hud_times[0]
+        for at_ms in hud_times[1:]:
+            if at_ms - run_last > hud_gap_ms:
+                windows.append(
+                    _bounded_window(
+                        run_last - before_end_ms, run_last + after_end_ms, duration_ms
+                    )
+                )
+            run_last = at_ms
+        windows.append(
+            _bounded_window(
+                run_last - before_end_ms, run_last + after_end_ms, duration_ms
+            )
+        )
+    windows.extend(
+        _bounded_window(
+            observation.at_ms - 3_000, observation.at_ms + 3_000, duration_ms
+        )
+        for observation in observations
+        if observation.result_visible
+    )
+    return _merge_windows(windows)
+
+
+class FfmpegSampler:
+    def __init__(
+        self,
+        *,
+        ffmpeg: str = 'ffmpeg',
+        ffprobe: str = 'ffprobe',
+        coarse_interval_seconds: int = 5,
+        fine_frames_per_second: int = 4,
+    ) -> None:
+        if coarse_interval_seconds < 1:
+            raise ValueError('coarse interval must be positive')
+        if fine_frames_per_second < 1:
+            raise ValueError('fine frame rate must be positive')
+        self._ffmpeg = ffmpeg
+        self._ffprobe = ffprobe
+        self._coarse_interval_seconds = coarse_interval_seconds
+        self._fine_frames_per_second = fine_frames_per_second
+        self._profile_cache: Dict[str, Tuple[int, int, VideoProfile]] = {}
+
+    def probe(self, path: str) -> VideoProfile:
+        resolved = self._regular_file(path)
+        stat = Path(resolved).stat()
+        cached = self._profile_cache.get(resolved)
+        if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+            return cached[2]
+        command = [
+            self._ffprobe,
+            '-v',
+            'error',
+            '-select_streams',
+            'v:0',
+            '-show_entries',
+            'stream=width,height:format=duration',
+            '-of',
+            'json',
+            resolved,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=30,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError('未安装 FFprobe') from error
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError('FFprobe 读取视频超时') from error
+        if result.returncode != 0:
+            raise RuntimeError(_process_error('FFprobe', result))
+        try:
+            payload = json.loads(result.stdout.decode('utf8'))
+            stream = payload['streams'][0]
+            duration_ms = int(round(float(payload['format']['duration']) * 1_000))
+            width = int(stream['width'])
+            height = int(stream['height'])
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            raise RuntimeError('FFprobe 没有返回有效的视频信息') from error
+        if duration_ms <= 0 or width <= 0 or height <= 0:
+            raise RuntimeError('视频尺寸或时长无效')
+        profile = VideoProfile(width=width, height=height, duration_ms=duration_ms)
+        self._profile_cache[resolved] = (stat.st_mtime_ns, stat.st_size, profile)
+        return profile
+
+    def coarse_frames(self, path: str) -> Iterator[TimedFrame]:
+        interval = self._coarse_interval_seconds
+        profile = self.probe(path)
+        width, height = fit_frame_dimensions(profile.width, profile.height, 480, 270)
+        yield from self._frames(
+            path,
+            width=width,
+            height=height,
+            filter_value='fps=1/{},scale={}:{}:flags=fast_bilinear'.format(
+                interval, width, height
+            ),
+            frame_step_ms=interval * 1_000,
+            skip_frame='nokey',
+        )
+
+    def fine_frames(self, path: str, window: ScanWindow) -> Iterator[TimedFrame]:
+        if window.end_ms <= window.start_ms:
+            return
+        fps = self._fine_frames_per_second
+        profile = self.probe(path)
+        width, height = fit_frame_dimensions(profile.width, profile.height, 960, 540)
+        yield from self._frames(
+            path,
+            width=width,
+            height=height,
+            filter_value='fps={},scale={}:{}:flags=fast_bilinear'.format(
+                fps, width, height
+            ),
+            frame_step_ms=1_000 // fps,
+            start_ms=window.start_ms,
+            duration_ms=window.end_ms - window.start_ms,
+        )
+
+    def result_preview_frames(
+        self, path: str, window: ScanWindow, *, keyframes_only: bool
+    ) -> Iterator[TimedFrame]:
+        if window.end_ms <= window.start_ms:
+            return
+        interval = 2 if keyframes_only else 1
+        profile = self.probe(path)
+        width, height = fit_frame_dimensions(profile.width, profile.height, 480, 270)
+        yield from self._frames(
+            path,
+            width=width,
+            height=height,
+            filter_value='fps=1/{},scale={}:{}:flags=fast_bilinear'.format(
+                interval, width, height
+            ),
+            frame_step_ms=interval * 1_000,
+            skip_frame='nokey' if keyframes_only else 'bidir',
+            start_ms=window.start_ms,
+            duration_ms=window.end_ms - window.start_ms,
+        )
+
+    def frame_at(self, path: str, at_ms: int) -> RgbFrame:
+        if at_ms < 0:
+            raise ValueError('frame time must not be negative')
+        resolved = self._regular_file(path)
+        profile = self.probe(path)
+        width, height = fit_frame_dimensions(profile.width, profile.height, 1920, 1080)
+        command = [
+            self._ffmpeg,
+            '-nostdin',
+            '-v',
+            'error',
+            '-threads',
+            '1',
+            '-ss',
+            '{:.3f}'.format(at_ms / 1_000),
+            '-i',
+            resolved,
+            '-frames:v',
+            '1',
+            '-vf',
+            'scale={}:{}:flags=bicubic'.format(width, height),
+            '-an',
+            '-sn',
+            '-dn',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgb24',
+            'pipe:1',
+        ]
+        result = self._run_ffmpeg(command, timeout=60)
+        expected = width * height * 3
+        if len(result.stdout) != expected:
+            raise RuntimeError('FFmpeg 未能读取指定时间的完整画面')
+        return RgbFrame(width, height, result.stdout)
+
+    def decode_image(self, content: bytes) -> RgbFrame:
+        source_width, source_height = self._probe_image_dimensions(content)
+        width, height = fit_frame_dimensions(source_width, source_height, 1920, 1080)
+        return self._decode_image(content, width=width, height=height)
+
+    def decode_wide_result_image(self, content: bytes) -> RgbFrame:
+        return self.decode_image(content)
+
+    def _decode_image(self, content: bytes, *, width: int, height: int) -> RgbFrame:
+        if not content:
+            raise InvalidImage('截图内容为空')
+        command = [
+            self._ffmpeg,
+            '-nostdin',
+            '-v',
+            'error',
+            '-threads',
+            '1',
+            '-i',
+            'pipe:0',
+            '-frames:v',
+            '1',
+            '-vf',
+            'scale={}:{}:flags=bicubic'.format(width, height),
+            '-an',
+            '-sn',
+            '-dn',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgb24',
+            'pipe:1',
+        ]
+        try:
+            result = self._run_ffmpeg(command, timeout=30, input_data=content)
+        except RuntimeError as error:
+            raise InvalidImage('无法读取截图，请上传 PNG、JPEG 或 WebP 图片') from error
+        expected = width * height * 3
+        if len(result.stdout) != expected:
+            raise InvalidImage('截图没有完整的画面')
+        return RgbFrame(width, height, result.stdout)
+
+    def _probe_image_dimensions(self, content: bytes) -> Tuple[int, int]:
+        if not content:
+            raise InvalidImage('截图内容为空')
+        command = [
+            self._ffprobe,
+            '-v',
+            'error',
+            '-select_streams',
+            'v:0',
+            '-show_entries',
+            'stream=width,height',
+            '-of',
+            'json',
+            'pipe:0',
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                input=content,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=30,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError('未安装 FFprobe') from error
+        except subprocess.TimeoutExpired as error:
+            raise InvalidImage('读取截图尺寸超时') from error
+        if result.returncode != 0:
+            raise InvalidImage('无法读取截图，请上传 PNG、JPEG 或 WebP 图片')
+        try:
+            stream = json.loads(result.stdout.decode('utf8'))['streams'][0]
+            width = int(stream['width'])
+            height = int(stream['height'])
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            raise InvalidImage('截图没有有效的画面尺寸') from error
+        if width <= 0 or height <= 0:
+            raise InvalidImage('截图没有有效的画面尺寸')
+        return width, height
+
+    def _frames(
+        self,
+        path: str,
+        *,
+        width: int,
+        height: int,
+        filter_value: str,
+        frame_step_ms: int,
+        skip_frame: Optional[str] = None,
+        start_ms: int = 0,
+        duration_ms: Optional[int] = None,
+    ) -> Iterator[TimedFrame]:
+        resolved = self._regular_file(path)
+        command = [self._ffmpeg, '-nostdin', '-v', 'error', '-threads', '1']
+        if skip_frame is not None:
+            command.extend(('-skip_frame', skip_frame))
+        if start_ms:
+            command.extend(('-ss', '{:.3f}'.format(start_ms / 1_000)))
+        command.extend(('-i', resolved))
+        if duration_ms is not None:
+            command.extend(('-t', '{:.3f}'.format(duration_ms / 1_000)))
+        command.extend(
+            (
+                '-vf',
+                filter_value,
+                '-an',
+                '-sn',
+                '-dn',
+                '-f',
+                'rawvideo',
+                '-pix_fmt',
+                'rgb24',
+                'pipe:1',
+            )
+        )
+        frame_size = width * height * 3
+        with tempfile.TemporaryFile() as stderr:
+            try:
+                process = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=stderr
+                )
+            except FileNotFoundError as error:
+                raise RuntimeError('未安装 FFmpeg') from error
+            assert process.stdout is not None
+            index = 0
+            try:
+                while True:
+                    pixels = _read_exact(process.stdout, frame_size, timeout=60)
+                    if not pixels:
+                        break
+                    if len(pixels) != frame_size:
+                        raise RuntimeError('FFmpeg 返回了不完整的视频画面')
+                    yield TimedFrame(
+                        at_ms=start_ms + index * frame_step_ms,
+                        frame=RgbFrame(width, height, pixels),
+                    )
+                    index += 1
+                try:
+                    return_code = process.wait(timeout=30)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError('FFmpeg 读取视频超时') from error
+                if return_code != 0:
+                    stderr.seek(0)
+                    message = stderr.read().decode('utf8', errors='replace').strip()
+                    raise RuntimeError(
+                        'FFmpeg 读取视频失败：{}'.format(message or return_code)
+                    )
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+    @staticmethod
+    def _regular_file(path: str) -> str:
+        resolved = Path(path).resolve()
+        if not resolved.is_file():
+            raise ValueError('video path must be an existing regular file')
+        return str(resolved)
+
+    @staticmethod
+    def _run_ffmpeg(
+        command: Sequence[str], *, timeout: float, input_data: Optional[bytes] = None
+    ) -> subprocess.CompletedProcess[Any]:
+        try:
+            result = subprocess.run(
+                command,
+                input=input_data,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=timeout,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError('未安装 FFmpeg') from error
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError('FFmpeg 读取视频超时') from error
+        if result.returncode != 0:
+            raise RuntimeError(_process_error('FFmpeg', result))
+        return result
+
+
+def _bounded_window(start_ms: int, end_ms: int, duration_ms: int) -> ScanWindow:
+    return ScanWindow(
+        start_ms=max(0, min(duration_ms, start_ms)),
+        end_ms=max(0, min(duration_ms, end_ms)),
+    )
+
+
+def _merge_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
+    ordered = sorted(
+        (window for window in windows if window.end_ms > window.start_ms),
+        key=lambda window: (window.start_ms, window.end_ms),
+    )
+    merged: List[ScanWindow] = []
+    for window in ordered:
+        if not merged or window.start_ms > merged[-1].end_ms:
+            merged.append(window)
+            continue
+        previous = merged[-1]
+        merged[-1] = ScanWindow(
+            start_ms=previous.start_ms, end_ms=max(previous.end_ms, window.end_ms)
+        )
+    return tuple(merged)
+
+
+def _read_exact(stream: IO[bytes], size: int, *, timeout: float) -> bytes:
+    chunks = bytearray()
+    deadline = time.monotonic() + timeout
+    while len(chunks) < size:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError('FFmpeg 超过 60 秒没有返回视频画面')
+        readable, _, _ = select.select((stream,), (), (), remaining)
+        if not readable:
+            raise RuntimeError('FFmpeg 超过 60 秒没有返回视频画面')
+        try:
+            chunk = os.read(stream.fileno(), size - len(chunks))
+        except InterruptedError:
+            continue
+        if not chunk:
+            break
+        chunks.extend(chunk)
+        deadline = time.monotonic() + timeout
+    return bytes(chunks)
+
+
+def _process_error(name: str, result: subprocess.CompletedProcess[Any]) -> str:
+    message = result.stderr.decode('utf8', errors='replace').strip()
+    return '{} 执行失败：{}'.format(name, message or result.returncode)

@@ -1,0 +1,53 @@
+<span id="leaderboard-season-label" class="control-label">榜单周期</span>
+
+<div class="season-select" [class.open]="isOpen">
+  <button
+    #trigger
+    type="button"
+    class="season-trigger"
+    aria-haspopup="listbox"
+    [attr.aria-expanded]="isOpen"
+    aria-controls="leaderboard-season-options"
+    aria-labelledby="leaderboard-season-label leaderboard-season-value"
+    (click)="toggle()"
+    (keydown)="onTriggerKeydown($event)"
+  >
+    <span id="leaderboard-season-value">
+      <strong>{{ selectedOption.label }}</strong>
+      <small>{{ selectedOption.period }}</small>
+    </span>
+    <span class="chevron" aria-hidden="true"></span>
+  </button>
+
+  <ul
+    *ngIf="isOpen"
+    id="leaderboard-season-options"
+    class="season-options"
+    role="listbox"
+    aria-labelledby="leaderboard-season-label"
+  >
+    <li
+      *ngFor="let option of options; let index = index; trackBy: trackOption"
+      role="none"
+    >
+      <button
+        #optionButton
+        type="button"
+        role="option"
+        [class.highlighted]="activeIndex === index"
+        [attr.aria-selected]="value === option.key"
+        (mouseenter)="activeIndex = index"
+        (keydown)="onOptionKeydown($event, index)"
+        (click)="select(option)"
+      >
+        <span>
+          <strong>{{ option.label }}</strong>
+          <small>{{ option.period }}</small>
+        </span>
+        <span class="selected-mark" aria-hidden="true">
+          {{ value === option.key ? "✓" : "" }}
+        </span>
+      </button>
+    </li>
+  </ul>
+</div>

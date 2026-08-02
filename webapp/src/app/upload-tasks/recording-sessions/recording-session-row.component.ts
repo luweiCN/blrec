@@ -110,6 +110,19 @@ export class RecordingSessionRowComponent {
     );
   }
 
+  canAnalyzeMatches(): boolean {
+    return (
+      this.scope === 'recordings' &&
+      this.session.state === 'closed' &&
+      this.session.deletionState === 'none' &&
+      this.session.partCount > 0
+    );
+  }
+
+  vaingloryUrl(): string {
+    return `/vainglory?sessionId=${this.session.id}`;
+  }
+
   hasAction(action: RecordingSessionAction): boolean {
     return this.session.availableActions.includes(action);
   }
@@ -118,7 +131,8 @@ export class RecordingSessionRowComponent {
     return (
       this.canCutCurrentFile() ||
       this.canFavorite() ||
-      this.session.availableActions.some((action) => action !== 'delete_local')
+      this.canAnalyzeMatches() ||
+      this.session.availableActions.length > 0
     );
   }
 
@@ -208,8 +222,34 @@ export class RecordingSessionRowComponent {
       case 'failed':
         return '转码修复失败';
       default:
-        return this.uploadJobStateLabel(job.state);
+        break;
     }
+    if (job.operatorPaused) {
+      return this.remoteOutcomeNeedsConfirmation(job)
+        ? this.remoteOutcomeLabel(job)
+        : '已暂停';
+    }
+    if (job.submitState === 'unknown_outcome') {
+      return '投稿结果待确认';
+    }
+    if (job.state === 'paused') {
+      if (this.remoteOutcomeNeedsConfirmation(job)) {
+        return this.remoteOutcomeLabel(job);
+      }
+      if (this.submissionVerificationRequired(job)) {
+        return '需要验证';
+      }
+      if (job.submitState === 'confirmed') {
+        return '稿件核对失败';
+      }
+      return this.allPartsConfirmed(job) ? '投稿失败' : '上传失败';
+    }
+    if (this.automaticRetryPending(job)) {
+      return job.reviewReason?.includes('次日')
+        ? '等待次日投稿'
+        : '等待自动重试';
+    }
+    return this.uploadJobStateLabel(job.state);
   }
 
   uploadDisplayStateColor(job: UploadJobSummary): string {
@@ -233,7 +273,53 @@ export class RecordingSessionRowComponent {
     if (job.repairState === 'unknown_outcome') {
       return 'warning';
     }
+    if (job.operatorPaused) {
+      return 'warning';
+    }
+    if (job.submitState === 'unknown_outcome') {
+      return 'warning';
+    }
+    if (job.state === 'paused') {
+      return this.submissionVerificationRequired(job) ? 'warning' : 'error';
+    }
+    if (this.automaticRetryPending(job)) {
+      return 'processing';
+    }
     return this.uploadJobStateColor(job.state);
+  }
+
+  retryActionLabel(job: UploadJobSummary | null): string {
+    if (this.immediateSubmissionRetry(job)) {
+      return '立即重试';
+    }
+    if (job?.submitState === 'confirmed') {
+      return '继续核对';
+    }
+    return job && this.allPartsConfirmed(job) ? '重新投稿' : '重试上传';
+  }
+
+  resumeActionLabel(job: UploadJobSummary | null): string {
+    return job?.operatorPaused && this.remoteOutcomeNeedsConfirmation(job)
+      ? '确认后继续投稿'
+      : '继续上传';
+  }
+
+  immediateSubmissionRetry(job: UploadJobSummary | null): boolean {
+    const reason = job?.reviewReason ?? '';
+    return Boolean(
+      job &&
+        this.automaticRetryPending(job) &&
+        ['137022', '投稿频控冷却', '投稿过于频繁'].some((marker) =>
+          reason.includes(marker),
+        ),
+    );
+  }
+
+  showUploadJobReason(job: UploadJobSummary): boolean {
+    return Boolean(
+      job.reviewReason &&
+        (job.state === 'paused' || this.automaticRetryPending(job)),
+    );
   }
 
   displayStateLabel(state: RecordingSessionDisplayState): string {
@@ -332,5 +418,40 @@ export class RecordingSessionRowComponent {
       paused: 'warning',
       completed: 'success',
     }[state];
+  }
+
+  private allPartsConfirmed(job: UploadJobSummary): boolean {
+    return (
+      job.discoveredPartCount > 0 &&
+      job.confirmedPartCount === job.discoveredPartCount
+    );
+  }
+
+  private automaticRetryPending(job: UploadJobSummary): boolean {
+    return (
+      job.nextAttemptAt > 0 &&
+      (job.state === 'uploading' || job.state === 'submitting')
+    );
+  }
+
+  private submissionVerificationRequired(job: UploadJobSummary): boolean {
+    const reason = job.reviewReason ?? '';
+    return ['验证码', '人工验证', '安全验证', 'captcha', 'geetest'].some(
+      (marker) => reason.toLowerCase().includes(marker),
+    );
+  }
+
+  private remoteOutcomeNeedsConfirmation(job: UploadJobSummary): boolean {
+    const reason = job.reviewReason ?? '';
+    return ['结果无法确认', '结果未知', '暂未确认'].some((marker) =>
+      reason.includes(marker),
+    );
+  }
+
+  private remoteOutcomeLabel(job: UploadJobSummary): string {
+    const reason = job.reviewReason ?? '';
+    return reason.includes('投稿') || reason.includes('封面')
+      ? '投稿结果待确认'
+      : '上传结果待确认';
   }
 }

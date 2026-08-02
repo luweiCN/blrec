@@ -1,4 +1,4 @@
-<ng-container *ngIf="authPage; else appShell">
+<ng-container *ngIf="authPage || publicDashboardPage; else appShell">
   <router-outlet></router-outlet>
 </ng-container>
 
@@ -69,6 +69,16 @@
             >
               <i nz-icon nzType="star" nzTheme="outline"></i>
               <span><a routerLink="/media-library">媒体库</a></span>
+            </li>
+            <li
+              nz-menu-item
+              nzMatchRouter="true"
+              nz-tooltip
+              nzTooltipPlacement="right"
+              [nzTooltipTitle]="collapsed ? '对局索引' : ''"
+            >
+              <i nz-icon nzType="trophy" nzTheme="outline"></i>
+              <span><a routerLink="/vainglory">对局索引</a></span>
             </li>
             <li
               nz-menu-item

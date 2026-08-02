@@ -1,0 +1,171 @@
+<article class="leaderboard-page">
+  <nav class="breadcrumbs" aria-label="面包屑">
+    <a routerLink="/rankings-preview">总览</a>
+    <span aria-hidden="true">/</span>
+    <span aria-current="page">玩家排行</span>
+  </nav>
+
+  <header class="page-heading">
+    <div>
+      <h1>玩家综合榜</h1>
+      <p>
+        查看全部符合样本门槛的稳定玩家身份，可按展示名、游戏别名、拼音或直播间检索。
+      </p>
+    </div>
+    <p class="page-context">
+      <strong>{{ selectedSeason.shortLabel }}</strong>
+      <span>{{ selectedSeason.period }} · {{ modeLabel() }}</span>
+    </p>
+  </header>
+
+  <app-leaderboard-filters
+    [activeSeason]="activeSeason"
+    [activeMode]="activeMode"
+    (activeSeasonChange)="selectSeason($event)"
+    (activeModeChange)="selectMode($event)"
+  ></app-leaderboard-filters>
+
+  <section class="directory-panel" aria-labelledby="player-directory-title">
+    <header class="directory-toolbar">
+      <div>
+        <h2 id="player-directory-title">全部玩家</h2>
+        <p>达到当前模式 20 局门槛后进入排名。</p>
+      </div>
+
+      <label class="search-control">
+        <span>检索玩家</span>
+        <input
+          type="search"
+          [value]="searchQuery"
+          placeholder="玩家名、别名、拼音或直播间"
+          (input)="updateSearch($event)"
+        />
+      </label>
+
+      <p class="result-status" role="status" aria-live="polite">
+        {{ resultStart }}–{{ resultEnd }} / {{ filteredRows.length }} 位
+      </p>
+    </header>
+
+    <div class="directory-table-wrap">
+      <table class="directory-table player-directory-table">
+        <caption>
+          {{
+            selectedSeason.label
+          }}
+          {{
+            modeLabel()
+          }}全部玩家排名
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">排名</th>
+            <th scope="col">玩家</th>
+            <th scope="col">代表英雄</th>
+            <th scope="col">近五局</th>
+            <th scope="col">对局</th>
+            <th scope="col">胜 / 负</th>
+            <th scope="col">胜率</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            *ngFor="let row of visibleRows; trackBy: trackRow"
+            [class.podium-row]="row.rank <= 3"
+          >
+            <td class="directory-rank">
+              <strong>{{ row.rank.toString().padStart(2, "0") }}</strong>
+              <span
+                [class.up]="row.player.trend > 0"
+                [class.down]="row.player.trend < 0"
+                [attr.aria-label]="trendLabel(row.player.trend)"
+              >
+                {{
+                  row.player.trend > 0
+                    ? "↑" + row.player.trend
+                    : row.player.trend < 0
+                      ? "↓" + -row.player.trend
+                      : "—"
+                }}
+              </span>
+            </td>
+            <td>
+              <span class="directory-player">
+                <span aria-hidden="true">{{ row.player.initial }}</span>
+                <span>
+                  <strong>{{ row.player.name }}</strong>
+                  <small>{{ row.player.roomLabel }}</small>
+                </span>
+              </span>
+            </td>
+            <td>
+              <span class="directory-hero">
+                <img
+                  [src]="heroImage(playerPerformance(row.player).topHero)"
+                  alt=""
+                />
+                <span>
+                  {{ heroDisplayName(playerPerformance(row.player).topHero) }}
+                </span>
+              </span>
+            </td>
+            <td>
+              <span class="directory-form" aria-label="近五局战绩">
+                <span
+                  *ngFor="let result of row.player.form; trackBy: trackResult"
+                  [class.win]="result === 'W'"
+                  [attr.aria-label]="result === 'W' ? '胜' : '负'"
+                >
+                  {{ result }}
+                </span>
+              </span>
+            </td>
+            <td>{{ playerPerformance(row.player).matches }}</td>
+            <td>
+              {{ playerPerformance(row.player).wins }} /
+              {{
+                playerPerformance(row.player).matches -
+                  playerPerformance(row.player).wins
+              }}
+            </td>
+            <td class="directory-rate">
+              {{ winRate(playerPerformance(row.player)) | percent: "1.0-1" }}
+            </td>
+          </tr>
+          <tr *ngIf="visibleRows.length === 0">
+            <td colspan="7" class="empty-state">
+              没有找到匹配的玩家，请尝试其他名称或直播间号。
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <nav *ngIf="totalPages > 1" class="pagination" aria-label="玩家榜分页">
+      <button
+        type="button"
+        [disabled]="currentPage === 1"
+        (click)="goToPage(currentPage - 1)"
+      >
+        上一页
+      </button>
+      <button
+        *ngFor="let page of pageNumbers; trackBy: trackPage"
+        type="button"
+        [class.active]="page === currentPage"
+        [attr.aria-current]="page === currentPage ? 'page' : null"
+        [attr.aria-label]="'第 ' + page + ' 页'"
+        (click)="goToPage(page)"
+      >
+        {{ page }}
+      </button>
+      <button
+        type="button"
+        [disabled]="currentPage === totalPages"
+        (click)="goToPage(currentPage + 1)"
+      >
+        下一页
+      </button>
+    </nav>
+  </section>
+</article>

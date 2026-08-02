@@ -1054,6 +1054,145 @@ async def test_preupload_restart_reuses_confirmed_part(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_preupload_survives_cancelled_resume_window(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        job_id = int(
+            await database.scalar('SELECT id FROM upload_jobs WHERE session_id=1')
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET state='cancelled',ended_at=1000 "
+            'WHERE id=1'
+        )
+
+        assert await worker.sync_live_sessions() == []
+        job = await database.fetchone(
+            'SELECT id,state,preupload_finalized FROM upload_jobs WHERE id=?', (job_id,)
+        )
+        assert job is not None
+        assert dict(job) == {'id': job_id, 'state': 'ready', 'preupload_finalized': 0}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_keeps_preupload_job_when_live_resumes(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        clock = MutableClock(1000)
+        worker = coordinator(database, FakeProtocol(), FakeUploader(database), clock)
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        job_id = int(
+            await database.scalar('SELECT id FROM upload_jobs WHERE session_id=1')
+        )
+        journal = RecordingJournalBridge(
+            database,
+            clock=clock,
+            artifact_probe=lambda path: RecoveredArtifact(
+                path, os.path.getsize(path), 120
+            ),
+        )
+
+        await journal.reconcile_open_sessions()
+        assert (
+            await database.scalar('SELECT state FROM recording_sessions WHERE id=1')
+            == 'cancelled'
+        )
+        assert await worker.sync_live_sessions() == []
+
+        restarted_run = await journal.recording_started(100, live_start_time=800)
+        restarted_session = await journal.session_for_run(restarted_run)
+
+        assert restarted_session.id == 1
+        assert restarted_session.state == 'open'
+        assert (
+            await database.scalar('SELECT id FROM upload_jobs WHERE session_id=1')
+            == job_id
+        )
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_paused_preupload_waits_for_missing_part_before_finalizing(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        paths = await seed_ready_session(database, tmp_path)
+        await make_session_open_with_one_closed_part(database)
+        protocol = FakeProtocol()
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, MutableClock(1000))
+        await worker.sync_live_sessions()
+        await worker.prepare_waiting_jobs()
+        await database.execute(
+            "UPDATE upload_jobs SET state='paused',operator_paused=1,"
+            "operator_resume_state='ready' WHERE id=1"
+        )
+        await database.execute(
+            "UPDATE recording_parts SET artifact_state='ready',final_path=?,"
+            'record_end_time=950,record_duration_seconds=100 WHERE id=2',
+            (str(paths[1]),),
+        )
+        await database.execute(
+            "UPDATE recording_runs SET state='finished',ended_at=960 WHERE id='run'"
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET state='closed',ended_at=960,"
+            'live_end_time=960 WHERE id=1'
+        )
+
+        assert await worker.sync_live_sessions() == []
+        paused = await database.fetchone(
+            'SELECT state,preupload_finalized,operator_paused,'
+            'operator_resume_state FROM upload_jobs WHERE id=1'
+        )
+        assert paused is not None
+        assert dict(paused) == {
+            'state': 'paused',
+            'preupload_finalized': 0,
+            'operator_paused': 1,
+            'operator_resume_state': 'ready',
+        }
+        assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 1
+
+        await database.execute(
+            "UPDATE upload_jobs SET state='ready',operator_paused=0,"
+            'operator_resume_state=NULL WHERE id=1'
+        )
+        assert await worker.sync_live_sessions() == [1]
+        assert await worker.prepare_waiting_jobs() == [1]
+        assert await database.scalar('SELECT COUNT(*) FROM upload_parts') == 2
+
+        assert await worker.run_once() == 1
+        assert uploader.calls == [1, 2]
+        assert len(protocol.submit_calls) == 1
+        assert [video['filename'] for video in protocol.submit_calls[0]['videos']] == [
+            'remote-1',
+            'remote-2',
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_finalized_preupload_advances_after_online_tail_reconciliation(
     tmp_path: Path,
 ) -> None:
@@ -1524,6 +1663,71 @@ async def test_missing_upload_account_sets_actionable_resolution_error(
 
 
 @pytest.mark.asyncio
+async def test_finished_session_is_resolved_after_upload_account_recovers(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        await database.execute("UPDATE bili_accounts SET state='paused' WHERE id=1")
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        assert await worker.resolve_finished_sessions() == []
+
+        await database.execute("UPDATE bili_accounts SET state='active' WHERE id=1")
+
+        assert await worker.sync_live_sessions() == [1]
+        row = await database.fetchone(
+            'SELECT upload_resolution_state,upload_resolution_error '
+            'FROM recording_sessions WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'upload_resolution_state': 'job_created',
+            'upload_resolution_error': None,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_paused_upload_resumes_after_upload_account_recovers(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        assert await worker.create_ready_jobs() == [1]
+        await database.execute("UPDATE bili_accounts SET state='paused' WHERE id=1")
+        assert await worker.run_once() == 1
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'paused'
+        )
+
+        await database.execute("UPDATE bili_accounts SET state='active' WHERE id=1")
+
+        assert await worker.resume_account_paused_jobs() == [1]
+        row = await database.fetchone(
+            'SELECT state,submit_state,review_reason FROM upload_jobs WHERE id=1'
+        )
+        assert row is not None
+        assert dict(row) == {
+            'state': 'ready',
+            'submit_state': 'prepared',
+            'review_reason': '投稿账号恢复，系统已自动重新排队',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_unstable_file_creates_waiting_job_without_starting_upload(
     tmp_path: Path,
 ) -> None:
@@ -1795,6 +1999,7 @@ async def test_custom_cover_schedule_and_collection_are_frozen_into_job(
         assert protocol.submit_calls[0]['cover'] == (
             'https://archive.biliimg.com/custom-7-1.jpg'
         )
+        assert protocol.submit_calls[0]['season_id'] == 20
         assert protocol.submit_calls[0]['dtime'] == 8200
         assert (
             await database.scalar(
@@ -1803,6 +2008,90 @@ async def test_custom_cover_schedule_and_collection_are_frozen_into_job(
             == 8200
         )
     finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_same_account_jobs_upload_concurrently_but_submit_safely(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    release_uploads = asyncio.Event()
+
+    class BlockingUploader(FakeUploader):
+        task_capacity = 2
+
+        def __init__(self, target: BiliUploadDatabase) -> None:
+            super().__init__(target)
+            self.active_jobs = set()
+            self.started_jobs = set()
+            self.max_active_jobs = 0
+            self.two_started = asyncio.Event()
+
+        async def upload_part(
+            self, part_id: int, *, bundle: Any, claim: LeaseClaim
+        ) -> str:
+            if claim.id not in self.started_jobs:
+                self.started_jobs.add(claim.id)
+                self.active_jobs.add(claim.id)
+                self.max_active_jobs = max(self.max_active_jobs, len(self.active_jobs))
+                if len(self.started_jobs) == 2:
+                    self.two_started.set()
+                try:
+                    await release_uploads.wait()
+                finally:
+                    self.active_jobs.remove(claim.id)
+            return await super().upload_part(part_id, bundle=bundle, claim=claim)
+
+    first = None
+    second = None
+    try:
+        await seed_ready_session(database, tmp_path)
+        uploader = BlockingUploader(database)
+        worker = coordinator(database, FakeProtocol(), uploader, MutableClock(1000))
+        assert await worker.create_ready_jobs() == [1]
+        snapshot = await database.scalar(
+            'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+        )
+        second_path = tmp_path / 'second-job.flv'
+        second_path.write_bytes(b'second-job')
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,101,'101:800','closed',800)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            "created_at,updated_at) VALUES(2,2,1,?,'ready','prepared',1,1)",
+            (snapshot,),
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,final_path,artifact_state,'
+            "upload_state) VALUES(3,2,1,?,?,'ready','prepared')",
+            (str(second_path), str(second_path)),
+        )
+
+        first = asyncio.create_task(worker.run_once())
+        second = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(uploader.two_started.wait(), timeout=1)
+
+        assert uploader.max_active_jobs == 2
+        release_uploads.set()
+        assert sorted(await asyncio.gather(first, second)) == [1, 2]
+        assert [
+            str(row['state'])
+            for row in await database.fetchall(
+                'SELECT state FROM upload_jobs ORDER BY id'
+            )
+        ] == ['waiting_review', 'waiting_review']
+    finally:
+        release_uploads.set()
+        pending = [task for task in (first, second) if task is not None]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await database.close()
 
 
@@ -2390,6 +2679,50 @@ async def test_recovery_never_repeats_in_flight_upos_completion(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_claim_recovery_does_not_release_another_active_upload(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        worker = coordinator(
+            database, FakeProtocol(), FakeUploader(database), MutableClock(1000)
+        )
+        assert await worker.create_ready_jobs() == [1]
+        snapshot = await database.scalar(
+            'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,101,'101:800','closed',800)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            "created_at,updated_at) VALUES(2,2,1,?,'ready','prepared',1,1)",
+            (snapshot,),
+        )
+        first = await database.claim('upload_jobs', ('ready',), 'upload-one', now=1000)
+        second = await database.claim('upload_jobs', ('ready',), 'upload-two', now=1000)
+        assert first is not None
+        assert second is not None
+
+        assert await worker.recover_interrupted(first) == 1
+
+        rows = await database.fetchall(
+            'SELECT id,lease_owner FROM upload_jobs ORDER BY id'
+        )
+        assert [(int(row['id']), row['lease_owner']) for row in rows] == [
+            (1, None),
+            (2, 'upload-two'),
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_preserves_confirmed_remote_handoff(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
     await database.open()
@@ -2806,6 +3139,516 @@ async def test_submit_rate_limit_is_retried_automatically(tmp_path: Path) -> Non
         await worker.run_once()
 
         assert len(protocol.submit_calls) == 2
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_review'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_frequent_submission_is_retried_without_reuploading_parts(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(137022, operation='submit_archive')
+        clock = MutableClock(1_000)
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+
+        await worker.run_once()
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,review_reason '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert job['state'] == 'submitting'
+        assert job['submit_state'] == 'prepared'
+        assert int(job['next_attempt_at']) > clock.now
+        assert '137022' in str(job['review_reason'])
+        assert uploader.calls == [1, 2]
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM upload_parts WHERE job_id=1 "
+                "AND upload_state='confirmed'"
+            )
+            == 2
+        )
+
+        protocol.submit_error = None
+        clock.now = int(job['next_attempt_at'])
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 2
+        assert uploader.calls == [1, 2]
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_review'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_frequent_submission_cooldown_prevents_a_live_job_failure_cascade(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(137022, operation='submit_archive')
+        clock = MutableClock(1_000)
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+
+        await worker.run_once()
+        first_retry_at = int(
+            await database.scalar('SELECT next_attempt_at FROM upload_jobs WHERE id=1')
+        )
+        snapshot = str(
+            await database.scalar(
+                'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+            )
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,200,'live-second','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'preupload_finalized,created_at,updated_at) '
+            "VALUES(2,2,1,?,'submitting','prepared',1,1,1)",
+            (snapshot,),
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,artifact_state,upload_state,'
+            'remote_filename) '
+            "VALUES(20,2,1,'/fixture/second.mp4','ready','confirmed','remote-20')"
+        )
+
+        protocol.submit_error = None
+        await worker.run_once()
+
+        second = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,review_reason '
+            'FROM upload_jobs WHERE id=2'
+        )
+        assert second is not None
+        assert second['state'] == 'submitting'
+        assert second['submit_state'] == 'prepared'
+        assert int(second['next_attempt_at']) == first_retry_at
+        assert '频控冷却' in str(second['review_reason'])
+        assert len(protocol.submit_calls) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_immediate_retry_bypasses_frequency_cooldown_once(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        clock = MutableClock(1_000)
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+        await database.execute(
+            "UPDATE upload_parts SET upload_state='confirmed',"
+            "remote_filename='remote-' || id WHERE job_id=1"
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET state='submitting',submit_state='prepared',"
+            "next_attempt_at=?,priority=-100,"
+            "review_reason='管理员要求立即重试投稿' WHERE id=1",
+            (clock.now,),
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,200,'cooldown-blocker','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'next_attempt_at,review_reason,aid,bvid,submitted_at,priority,'
+            'created_at,updated_at) '
+            "VALUES(2,2,1,'{}','submitting','prepared',?,"
+            "'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',"
+            "2,'BVprevious',999,-100,1,1)",
+            (clock.now + 1_800,),
+        )
+
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 1
+        assert uploader.calls == []
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_review'
+        )
+        assert (
+            await database.scalar('SELECT next_attempt_at FROM upload_jobs WHERE id=2')
+            == clock.now + 1_800
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_daily_submission_limit_is_retried_next_day_without_reuploading_parts(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(
+            129018, '当日投稿数量已到达上限', operation='submit_archive'
+        )
+        clock = MutableClock(1_700_000_000)
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+
+        await worker.run_once()
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,review_reason '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert job['state'] == 'submitting'
+        assert job['submit_state'] == 'prepared'
+        assert int(job['next_attempt_at']) > clock.now
+        assert '次日自动重新投稿' in str(job['review_reason'])
+        assert uploader.calls == [1, 2]
+
+        protocol.submit_error = None
+        clock.now = int(job['next_attempt_at'])
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 2
+        assert uploader.calls == [1, 2]
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_review'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_verification_pauses_with_a_manual_action_reason(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        protocol.submit_error = BiliApiError(
+            12015, '请先完成验证码', operation='submit_archive'
+        )
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, MutableClock(1_000))
+        await worker.create_ready_jobs()
+
+        await worker.run_once()
+
+        job = await database.fetchone(
+            'SELECT state,submit_state,operator_paused,review_reason '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'paused',
+            'submit_state': 'failed_permanent',
+            'operator_paused': 0,
+            'review_reason': (
+                'B 站要求验证码或人工验证（12015）；完成验证后请点击重新投稿，'
+                '已上传分 P 会保留'
+            ),
+        }
+        assert uploader.calls == [1, 2]
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM upload_parts WHERE job_id=1 "
+                "AND upload_state='confirmed'"
+            )
+            == 2
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('error_code', (137022, 129018))
+async def test_legacy_submission_limit_pause_is_recovered_without_reuploading_parts(
+    tmp_path: Path, error_code: int
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        clock = MutableClock(1_700_000_000)
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+        await database.execute(
+            "UPDATE upload_parts SET upload_state='confirmed',"
+            "remote_filename='legacy-remote' WHERE job_id=1"
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET state='paused',"
+            "submit_state='failed_permanent',operator_paused=0,"
+            'review_reason=?,updated_at=? WHERE id=1',
+            ('B 站接口拒绝请求（{}）'.format(error_code), int(clock.now)),
+        )
+
+        assert await worker.recover_submission_rate_limits() == 1
+
+        recovered = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,review_reason '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert recovered is not None
+        assert recovered['state'] == 'submitting'
+        assert recovered['submit_state'] == 'prepared'
+        if error_code == 137022:
+            assert int(recovered['next_attempt_at']) == clock.now
+        else:
+            assert int(recovered['next_attempt_at']) > clock.now
+        assert str(error_code) in str(recovered['review_reason'])
+
+        clock.now = int(recovered['next_attempt_at'])
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 1
+        assert uploader.calls == []
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_review'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_frequency_recovery_immediately_probes_only_one_job_per_account(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        clock = MutableClock(1_000)
+        worker = coordinator(database, FakeProtocol(), FakeUploader(database), clock)
+        await worker.create_ready_jobs()
+        snapshot = str(
+            await database.scalar(
+                'SELECT policy_snapshot_json FROM upload_jobs WHERE id=1'
+            )
+        )
+        await database.execute(
+            "UPDATE upload_parts SET upload_state='confirmed',"
+            "remote_filename='legacy-remote' WHERE job_id=1"
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET state='paused',"
+            "submit_state='failed_permanent',operator_paused=0,"
+            "review_reason='B 站接口拒绝请求（137022）' WHERE id=1"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,200,'legacy-second','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'operator_paused,review_reason,created_at,updated_at) '
+            "VALUES(2,2,1,?,'paused','failed_permanent',0,"
+            "'B 站接口拒绝请求（137022）',1001,1001)",
+            (snapshot,),
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'id,job_id,part_index,source_path,artifact_state,upload_state,'
+            'remote_filename) '
+            "VALUES(20,2,1,'/fixture/second.mp4','ready','confirmed','remote-20')"
+        )
+
+        assert await worker.recover_submission_rate_limits() == 2
+
+        recovered = await database.fetchall(
+            'SELECT id,next_attempt_at,review_reason FROM upload_jobs ORDER BY id'
+        )
+        assert [int(row['next_attempt_at']) for row in recovered] == [
+            clock.now,
+            clock.now + 1_800,
+        ]
+        assert '立即尝试' in str(recovered[0]['review_reason'])
+        assert '等待首次探测' in str(recovered[1]['review_reason'])
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_migration_rate_limit_is_immediately_probed_after_priority_recovery(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        clock = MutableClock(1_700_000_000)
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+        await database.execute(
+            "UPDATE upload_parts SET upload_state='confirmed',"
+            "remote_filename='legacy-remote' WHERE job_id=1"
+        )
+        await database.execute(
+            "UPDATE upload_jobs SET state='paused',"
+            "submit_state='failed_permanent',operator_paused=0,priority=0,"
+            "review_reason='B 站接口拒绝请求（137022）',updated_at=? WHERE id=1",
+            (clock.now,),
+        )
+        await database.execute(
+            'INSERT INTO archive_migration_jobs('
+            'id,source_uid,download_account_id,target_account_id,state,'
+            'requested_at,updated_at) '
+            "VALUES(1,100,1,1,'running',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO archive_migration_items('
+            'id,migration_id,bvid,title,state,progress,page_count,'
+            'downloaded_page_count,session_id,upload_job_id,created_at,updated_at) '
+            "VALUES(1,1,'BV1234567890','测试迁移','task_created',1,1,1,1,1,1,1)"
+        )
+
+        assert await worker.recover_submission_rate_limits() == 1
+
+        recovered = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,priority '
+            'FROM upload_jobs WHERE id=1'
+        )
+        assert recovered is not None
+        assert dict(recovered) == {
+            'state': 'submitting',
+            'submit_state': 'prepared',
+            'next_attempt_at': clock.now,
+            'priority': -100,
+        }
+
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 1
+        assert uploader.calls == []
+        assert (
+            await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
+            == 'waiting_review'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_submission_waits_between_archives(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        clock = MutableClock(1_000)
+        protocol = FakeProtocol()
+        uploader = FakeUploader(database)
+        worker = coordinator(database, protocol, uploader, clock)
+        await worker.create_ready_jobs()
+        await database.execute('UPDATE upload_jobs SET priority=-100 WHERE id=1')
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,200,'bili-migration:previous','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,submitted_at,priority,created_at,updated_at) '
+            "VALUES(2,2,1,'{}','approved','confirmed',2,'BVprevious',900,-100,1,1)"
+        )
+
+        await worker.run_once()
+
+        waiting = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at FROM upload_jobs WHERE id=1'
+        )
+        assert waiting is not None
+        assert dict(waiting) == {
+            'state': 'submitting',
+            'submit_state': 'prepared',
+            'next_attempt_at': 2_100,
+        }
+        assert protocol.submit_calls == []
+        assert uploader.calls == [1, 2]
+
+        clock.now = 2_100
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 1
+        assert uploader.calls == [1, 2]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_live_submission_is_not_delayed_by_migration_pacing(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_ready_session(database, tmp_path)
+        protocol = FakeProtocol()
+        worker = coordinator(
+            database, protocol, FakeUploader(database), MutableClock(1_000)
+        )
+        await worker.create_ready_jobs()
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at) '
+            "VALUES(2,200,'bili-migration:previous','closed',1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,submitted_at,priority,created_at,updated_at) '
+            "VALUES(2,2,1,'{}','approved','confirmed',2,'BVprevious',999,-100,1,1)"
+        )
+
+        await worker.run_once()
+
+        assert len(protocol.submit_calls) == 1
         assert (
             await database.scalar('SELECT state FROM upload_jobs WHERE id=1')
             == 'waiting_review'

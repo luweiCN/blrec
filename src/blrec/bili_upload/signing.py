@@ -59,6 +59,9 @@ PROTOCOL_MATRIX = {
     'upload_cover': OperationSpec(
         'POST', 'member_api', '/x/vu/web/cover/up', 'web_cookie_csrf', False
     ),
+    'upload_comment_picture': OperationSpec(
+        'POST', 'api', '/x/dynamic/feed/draw/upload_bfs', 'web_cookie_csrf', False
+    ),
     'list_collections': OperationSpec(
         'GET', 'member_api', '/x2/creative/web/seasons', 'web_cookie', True
     ),
@@ -81,6 +84,18 @@ PROTOCOL_MATRIX = {
     'archive_view': OperationSpec(
         'GET', 'member_api', '/x/vupre/web/archive/view', 'web_cookie', True
     ),
+    'archive_cards': OperationSpec(
+        'GET', 'member', '/x/web/allcards', 'web_cookie', True
+    ),
+    'submit_archive_chapters': OperationSpec(
+        'POST', 'member', '/x/web/card/submit', 'web_cookie_csrf', False
+    ),
+    'public_archive_view': OperationSpec(
+        'GET', 'api', '/x/web-interface/view', 'web_cookie', True
+    ),
+    'public_archive_tags': OperationSpec(
+        'GET', 'api', '/x/tag/archive/tags', 'web_cookie', True
+    ),
     'web_nav': OperationSpec('GET', 'api', '/x/web-interface/nav', 'web_cookie', True),
     'list_replies': OperationSpec(
         'GET', 'api', '/x/v2/reply/main', 'web_cookie_wbi', True
@@ -89,7 +104,10 @@ PROTOCOL_MATRIX = {
         'GET', 'api', '/x/v2/reply/detail', 'web_cookie_wbi', True
     ),
     'add_reply': OperationSpec(
-        'POST', 'api', '/x/v2/reply/add', 'web_cookie_csrf', False
+        'POST', 'api', '/x/v2/reply/add', 'web_cookie_csrf_wbi', False
+    ),
+    'delete_reply': OperationSpec(
+        'POST', 'api', '/x/v2/reply/del', 'web_cookie_csrf', False
     ),
     'top_reply': OperationSpec(
         'POST', 'api', '/x/v2/reply/top', 'web_cookie_csrf', False

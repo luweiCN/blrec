@@ -1,0 +1,321 @@
+<div class="overview-page">
+  <section class="arena-hero" aria-labelledby="dashboard-title">
+    <div class="hero-copy">
+      <p class="season">
+        <span>{{ seasonLabel }}</span> {{ seasonPeriod }} · 社区排位档案
+      </p>
+      <h1 id="dashboard-title">每一局，<br />都在改写王座。</h1>
+      <p class="hero-intro">
+        汇总主播在 3V3、乱斗与 5V5
+        中的对局表现，以稳定玩家身份持续追踪，而不是按游戏昵称重复建档。
+      </p>
+
+      <div class="mode-picker" role="group" aria-label="选择比赛模式">
+        <button
+          *ngFor="let mode of modeOptions; trackBy: trackMode"
+          type="button"
+          [class.active]="activeMode === mode.key"
+          [attr.aria-pressed]="activeMode === mode.key"
+          [attr.title]="mode.description ?? null"
+          (click)="selectMode(mode.key)"
+        >
+          {{ mode.label }}
+        </button>
+      </div>
+    </div>
+
+    <aside class="podium-panel" aria-label="当前前三名">
+      <header>
+        <div>
+          <span>本期王座</span>
+          <strong>{{ modeLabel() }} TOP 3</strong>
+        </div>
+        <span class="season-id">2026 · SUMMER</span>
+      </header>
+
+      <div class="podium-grid">
+        <button
+          *ngFor="let player of podiumPlayers; trackBy: trackPlayer"
+          class="podium-slot"
+          type="button"
+          [class.first]="podiumRank(player) === 1"
+          [attr.aria-label]="
+            '查看第 ' + podiumRank(player) + ' 名玩家 ' + player.name
+          "
+          (click)="selectPlayer(player.id)"
+        >
+          <span class="podium-rank">#{{ podiumRank(player) }}</span>
+          <span class="podium-portrait">
+            <img [src]="heroImage(playerPerformance(player).topHero)" alt="" />
+            <span aria-hidden="true">{{ player.initial }}</span>
+          </span>
+          <strong class="podium-name">{{ player.name }}</strong>
+          <span class="podium-hero">
+            {{ heroDisplayName(playerPerformance(player).topHero) }} ·
+            {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
+          </span>
+        </button>
+      </div>
+    </aside>
+  </section>
+
+  <section class="summary-strip" aria-label="数据概览">
+    <div class="summary-label">
+      <span>LIVE INDEX</span>
+      <p>{{ seasonPeriod }}</p>
+    </div>
+    <dl>
+      <div>
+        <dt>收录玩家</dt>
+        <dd>{{ summary.playerCount }}</dd>
+      </div>
+      <div>
+        <dt>{{ modeLabel() }}对局</dt>
+        <dd>{{ summary.matchCount | number }}</dd>
+      </div>
+      <div>
+        <dt>样本胜率</dt>
+        <dd>{{ summary.winRate | percent: "1.0-1" }}</dd>
+      </div>
+      <div>
+        <dt>已识别英雄</dt>
+        <dd>{{ summary.heroCount }}</dd>
+      </div>
+    </dl>
+    <p class="mock-note">MOCK DATA</p>
+  </section>
+
+  <section id="players" class="players-section" aria-labelledby="players-title">
+    <div class="ranking-panel">
+      <header class="section-heading">
+        <div>
+          <p class="section-kicker">PLAYER RANKING</p>
+          <h2 id="players-title">玩家综合榜</h2>
+          <p>达到 20 局样本门槛后按胜率排序。</p>
+        </div>
+        <a class="full-ranking-link" routerLink="/rankings-preview/players">
+          Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位 →
+        </a>
+      </header>
+
+      <div class="ranking-table-wrap">
+        <table>
+          <caption>
+            {{
+              modeLabel()
+            }}玩家综合排行榜前十名
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">排名</th>
+              <th scope="col">玩家</th>
+              <th scope="col" class="optional-column">代表英雄</th>
+              <th scope="col">近五局</th>
+              <th scope="col">对局</th>
+              <th scope="col">胜率</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              *ngFor="
+                let player of overviewRankings;
+                let rank = index;
+                trackBy: trackPlayer
+              "
+              [class.selected]="selectedPlayerId === player.id"
+            >
+              <td class="rank-cell" [class.medal]="rank < 3">
+                <strong>{{ (rank + 1).toString().padStart(2, "0") }}</strong>
+                <span
+                  [class.up]="player.trend > 0"
+                  [class.down]="player.trend < 0"
+                  [attr.aria-label]="trendLabel(player.trend)"
+                >
+                  {{
+                    player.trend > 0
+                      ? "↑" + player.trend
+                      : player.trend < 0
+                        ? "↓" + -player.trend
+                        : "—"
+                  }}
+                </span>
+              </td>
+              <td>
+                <button
+                  class="player-select"
+                  type="button"
+                  [attr.aria-pressed]="selectedPlayerId === player.id"
+                  (click)="selectPlayer(player.id)"
+                >
+                  <span aria-hidden="true">{{ player.initial }}</span>
+                  <span>
+                    <strong>{{ player.name }}</strong>
+                    <small>{{ player.roomLabel }}</small>
+                  </span>
+                </button>
+              </td>
+              <td class="optional-column">
+                <span class="hero-chip">
+                  <img
+                    [src]="heroImage(playerPerformance(player).topHero)"
+                    alt=""
+                  />
+                  <span>
+                    {{ heroDisplayName(playerPerformance(player).topHero) }}
+                  </span>
+                </span>
+              </td>
+              <td>
+                <span class="recent-form" aria-label="近五局战绩">
+                  <span
+                    *ngFor="let result of player.form; trackBy: trackResult"
+                    [class.win]="result === 'W'"
+                    [attr.aria-label]="result === 'W' ? '胜' : '负'"
+                  >
+                    {{ result }}
+                  </span>
+                </span>
+              </td>
+              <td>{{ playerPerformance(player).matches }}</td>
+              <td class="win-rate">
+                {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <aside class="player-detail" aria-labelledby="player-detail-title">
+      <header class="detail-header">
+        <span>PLAYER PROFILE</span>
+        <strong>#{{ selectedPlayerRank.toString().padStart(2, "0") }}</strong>
+      </header>
+
+      <div class="detail-primary">
+        <div class="detail-identity">
+          <span class="detail-portrait">
+            <img [src]="heroImage(selectedPerformance().topHero)" alt="" />
+            <span aria-hidden="true">{{ selectedPlayer.initial }}</span>
+          </span>
+          <div>
+            <h2 id="player-detail-title">{{ selectedPlayer.name }}</h2>
+            <p>{{ selectedPlayer.roomLabel }}</p>
+            <small>
+              代表英雄 · {{ heroDisplayName(selectedPerformance().topHero) }}
+            </small>
+          </div>
+        </div>
+
+        <div
+          class="win-rate-ring"
+          [style.--win-rate]="winRate(selectedPerformance()) * 100 + '%'"
+          [attr.aria-label]="
+            '胜率 ' + (winRate(selectedPerformance()) | percent: '1.0-1')
+          "
+        >
+          <span>{{ winRate(selectedPerformance()) | percent: "1.0-0" }}</span>
+          <small>胜率</small>
+        </div>
+      </div>
+
+      <dl class="detail-record">
+        <div>
+          <dt>本期对局</dt>
+          <dd>{{ selectedPerformance().matches }}</dd>
+        </div>
+        <div>
+          <dt>胜 / 负</dt>
+          <dd>
+            {{ selectedPerformance().wins }} /
+            {{ selectedPerformance().matches - selectedPerformance().wins }}
+          </dd>
+        </div>
+      </dl>
+
+      <section class="mode-breakdown" aria-labelledby="mode-breakdown-title">
+        <div class="detail-section-heading">
+          <h3 id="mode-breakdown-title">模式构成</h3>
+          <span>本赛季全部对局</span>
+        </div>
+        <ol>
+          <li *ngFor="let mode of selectedModeBreakdown; trackBy: trackMode">
+            <div>
+              <span>{{ mode.label }}</span>
+              <strong>{{ mode.matches }} 局</strong>
+            </div>
+            <span class="mode-bar" aria-hidden="true">
+              <span [style.width.%]="mode.share * 100"></span>
+            </span>
+          </li>
+        </ol>
+      </section>
+
+      <section class="hero-pool" aria-labelledby="hero-pool-title">
+        <div class="detail-section-heading">
+          <h3 id="hero-pool-title">常用英雄</h3>
+          <span>全部模式</span>
+        </div>
+        <ol>
+          <li
+            *ngFor="
+              let hero of selectedPlayer.heroPool;
+              trackBy: trackHeroUsage
+            "
+          >
+            <img [src]="heroImage(hero.name)" alt="" />
+            <span>
+              <strong>{{ heroDisplayName(hero.name) }}</strong>
+              <small>{{ hero.matches }} 局</small>
+            </span>
+            <strong>{{ selectedHeroWinRate(hero) | percent: "1.0-1" }}</strong>
+          </li>
+        </ol>
+      </section>
+    </aside>
+  </section>
+
+  <section id="heroes" class="heroes-section" aria-labelledby="heroes-title">
+    <header class="section-heading">
+      <div>
+        <p class="section-kicker">HERO PERFORMANCE</p>
+        <h2 id="heroes-title">英雄胜率榜</h2>
+        <p>聚合所有收录玩家，只统计已确认录像主人公英雄的对局。</p>
+      </div>
+      <a class="full-ranking-link" routerLink="/rankings-preview/heroes">
+        Top {{ overviewHeroRankings.length }} / 查看全部 →
+      </a>
+    </header>
+
+    <ol class="hero-ranking">
+      <li
+        *ngFor="
+          let hero of overviewHeroRankings;
+          let rank = index;
+          trackBy: trackHero
+        "
+      >
+        <span class="hero-rank" [class.crown]="rank === 0">
+          {{ (rank + 1).toString().padStart(2, "0") }}
+        </span>
+        <img class="hero-image" [src]="heroImage(hero.name)" alt="" />
+        <div class="hero-name">
+          <strong>{{ heroDisplayName(hero.name) }}</strong>
+        </div>
+        <div class="hero-sample">
+          <span>
+            {{ heroPerformance(hero).matches }} 局 ·
+            {{ heroPerformance(hero).players }} 名玩家
+          </span>
+          <div aria-hidden="true">
+            <span [style.width.%]="winRate(heroPerformance(hero)) * 100"></span>
+          </div>
+        </div>
+        <strong class="hero-rate">
+          {{ winRate(heroPerformance(hero)) | percent: "1.0-1" }}
+          <small>WIN RATE</small>
+        </strong>
+      </li>
+    </ol>
+  </section>
+</div>

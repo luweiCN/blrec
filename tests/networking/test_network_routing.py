@@ -73,6 +73,7 @@ def test_purposes_have_independent_routes() -> None:
         recording={'interface': 'lan1'},
         upload={'interface': 'lan2'},
         bili_api={'interface': 'lan1'},
+        archive_download={'interface': 'lan2'},
     )
     manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
 
@@ -81,6 +82,7 @@ def test_purposes_have_independent_routes() -> None:
     assert manager.select('recording').interface_name == 'lan1'
     assert manager.select('upload').interface_name == 'lan2'
     assert manager.select('bili_api').interface_name == 'lan1'
+    assert manager.select('archive_download').interface_name == 'lan2'
 
 
 def test_every_route_selection_is_audited_with_replayable_context(

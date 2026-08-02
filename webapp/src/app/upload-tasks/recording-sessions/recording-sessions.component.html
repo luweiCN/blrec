@@ -135,7 +135,7 @@
       type="button"
       (click)="openSessionAction('retry_failed', selectedSessionIdsArray)"
     >
-      重试上传
+      重试失败任务
     </button>
     <button
       *ngIf="selectedSupports('pause_upload')"
@@ -414,6 +414,104 @@
         </div>
       </ng-template>
 
+      <section class="session-match-summary" aria-label="已识别对局摘要">
+        <header>
+          <div>
+            <strong>对局摘要</strong>
+            <span *ngIf="sessionMatchesView.state === 'ready'">
+              {{ sessionMatches.length }} 局
+            </span>
+          </div>
+          <a
+            [routerLink]="['/vainglory']"
+            [queryParams]="{ sessionId: session.id }"
+          >
+            打开对局索引
+          </a>
+        </header>
+        <div
+          *ngIf="sessionMatchesView.state === 'loading'"
+          class="session-match-state"
+        >
+          <nz-spin nzSimple></nz-spin>
+          <span>正在读取已识别对局…</span>
+        </div>
+        <div
+          *ngIf="sessionMatchesView.state === 'error'"
+          class="session-match-state"
+        >
+          对局摘要暂时不可用，不影响录播和后台分析
+        </div>
+        <div
+          *ngIf="
+            sessionMatchesView.state === 'ready' &&
+            sessionMatches.length === 0
+          "
+          class="session-match-state"
+        >
+          暂时没有已落库的对局
+        </div>
+        <div *ngIf="sessionMatches.length > 0" class="session-match-list">
+          <article
+            *ngFor="let match of sessionMatches; let matchIndex = index"
+            class="session-match-row"
+          >
+            <div class="session-match-index">
+              <strong>第 {{ matchIndex + 1 }} 局</strong>
+              <small>
+                P{{ match.partIndex }} ·
+                {{ formatDuration(match.startedAtMs / 1000) }}
+              </small>
+            </div>
+            <div class="session-match-team" aria-label="主人公方英雄">
+              <span
+                *ngFor="
+                  let player of matchPlayers(match, matchRecordedSide(match))
+                "
+                [attr.title]="matchHeroName(player)"
+              >
+                <img
+                  *ngIf="matchHeroThumbnail(player) as thumbnail; else noHero"
+                  [src]="thumbnail"
+                  [alt]="matchHeroName(player)"
+                  loading="lazy"
+                />
+                <ng-template #noHero>?</ng-template>
+              </span>
+            </div>
+            <strong class="session-match-kills">
+              {{ matchKills(match, matchRecordedSide(match)) ?? "—" }}
+            </strong>
+            <span class="session-match-versus">VS</span>
+            <strong class="session-match-kills">
+              {{ matchKills(match, matchOpponentSide(match)) ?? "—" }}
+            </strong>
+            <div class="session-match-team" aria-label="对手方英雄">
+              <span
+                *ngFor="
+                  let player of matchPlayers(match, matchOpponentSide(match))
+                "
+                [attr.title]="matchHeroName(player)"
+              >
+                <img
+                  *ngIf="
+                    matchHeroThumbnail(player) as thumbnail;
+                    else noOpponentHero
+                  "
+                  [src]="thumbnail"
+                  [alt]="matchHeroName(player)"
+                  loading="lazy"
+                />
+                <ng-template #noOpponentHero>?</ng-template>
+              </span>
+            </div>
+            <nz-tag [nzColor]="matchWinnerColor(match)">
+              {{ matchWinnerLabel(match) }}
+            </nz-tag>
+          </article>
+        </div>
+      </section>
+
       <div class="parts-table-wrap">
         <table class="parts-table">
           <caption>
@@ -430,7 +528,7 @@
               <th scope="col">上传</th>
               <th scope="col">CID / 回灌</th>
               <th scope="col">录制时间</th>
-              <th *ngIf="isRecordingScope" scope="col">文件</th>
+              <th scope="col">视频</th>
               <th *ngIf="isRecordingScope" scope="col">弹幕</th>
             </tr>
           </thead>
@@ -533,95 +631,96 @@
                   {{ formatDuration(part.recordDurationSeconds) }}
                 </div>
               </td>
-              <td *ngIf="isRecordingScope" class="file-list">
-                <div class="file-path-row" *ngIf="part.finalPath">
-                  <span class="file-label">成品</span>
-                  <code
-                    class="file-name"
-                    nz-tooltip
-                    [nzTooltipTitle]="part.finalPath"
-                    >{{ fileName(part.finalPath) }}</code
-                  >
-                  <button
-                    nz-button
-                    nzType="text"
-                    nzSize="small"
-                    type="button"
-                    class="copy-path-button"
-                    data-testid="copy-final-path"
-                    nz-tooltip
-                    nzTooltipTitle="复制完整路径"
-                    aria-label="复制完整路径"
-                    (click)="copyPath(part.finalPath)"
-                  >
-                    <span nz-icon nzType="copy"></span>
-                  </button>
-                </div>
-                <div class="file-path-row" *ngIf="!part.finalPath">
-                  <span class="file-label">录制</span>
-                  <code
-                    class="file-name"
-                    nz-tooltip
-                    [nzTooltipTitle]="part.sourcePath"
-                    >{{ fileName(part.sourcePath) }}</code
-                  >
-                  <button
-                    nz-button
-                    nzType="text"
-                    nzSize="small"
-                    type="button"
-                    class="copy-path-button"
-                    data-testid="copy-source-path"
-                    nz-tooltip
-                    nzTooltipTitle="复制完整路径"
-                    aria-label="复制完整路径"
-                    (click)="copyPath(part.sourcePath)"
-                  >
-                    <span nz-icon nzType="copy"></span>
-                  </button>
-                </div>
-                <div class="file-path-row" *ngIf="part.xmlPath">
-                  <span class="file-label">弹幕</span>
-                  <code
-                    class="file-name"
-                    nz-tooltip
-                    [nzTooltipTitle]="part.xmlPath"
-                    >{{ fileName(part.xmlPath) }}</code
-                  >
-                  <button
-                    nz-button
-                    nzType="text"
-                    nzSize="small"
-                    type="button"
-                    class="copy-path-button"
-                    data-testid="copy-xml-path"
-                    nz-tooltip
-                    nzTooltipTitle="复制完整路径"
-                    aria-label="复制完整路径"
-                    (click)="copyPath(part.xmlPath)"
-                  >
-                    <span nz-icon nzType="copy"></span>
-                  </button>
-                </div>
-                <div class="part-metric">
-                  大小 {{ formatBytes(part.fileSizeBytes) }}
-                </div>
+              <td class="file-list">
+                <ng-container *ngIf="isRecordingScope">
+                  <div class="file-path-row" *ngIf="part.finalPath">
+                    <span class="file-label">成品</span>
+                    <code
+                      class="file-name"
+                      nz-tooltip
+                      [nzTooltipTitle]="part.finalPath"
+                      >{{ fileName(part.finalPath) }}</code
+                    >
+                    <button
+                      nz-button
+                      nzType="text"
+                      nzSize="small"
+                      type="button"
+                      class="copy-path-button"
+                      data-testid="copy-final-path"
+                      nz-tooltip
+                      nzTooltipTitle="复制完整路径"
+                      aria-label="复制完整路径"
+                      (click)="copyPath(part.finalPath)"
+                    >
+                      <span nz-icon nzType="copy"></span>
+                    </button>
+                  </div>
+                  <div class="file-path-row" *ngIf="!part.finalPath">
+                    <span class="file-label">录制</span>
+                    <code
+                      class="file-name"
+                      nz-tooltip
+                      [nzTooltipTitle]="part.sourcePath"
+                      >{{ fileName(part.sourcePath) }}</code
+                    >
+                    <button
+                      nz-button
+                      nzType="text"
+                      nzSize="small"
+                      type="button"
+                      class="copy-path-button"
+                      data-testid="copy-source-path"
+                      nz-tooltip
+                      nzTooltipTitle="复制完整路径"
+                      aria-label="复制完整路径"
+                      (click)="copyPath(part.sourcePath)"
+                    >
+                      <span nz-icon nzType="copy"></span>
+                    </button>
+                  </div>
+                  <div class="file-path-row" *ngIf="part.xmlPath">
+                    <span class="file-label">弹幕</span>
+                    <code
+                      class="file-name"
+                      nz-tooltip
+                      [nzTooltipTitle]="part.xmlPath"
+                      >{{ fileName(part.xmlPath) }}</code
+                    >
+                    <button
+                      nz-button
+                      nzType="text"
+                      nzSize="small"
+                      type="button"
+                      class="copy-path-button"
+                      data-testid="copy-xml-path"
+                      nz-tooltip
+                      nzTooltipTitle="复制完整路径"
+                      aria-label="复制完整路径"
+                      (click)="copyPath(part.xmlPath)"
+                    >
+                      <span nz-icon nzType="copy"></span>
+                    </button>
+                  </div>
+                  <div class="part-metric">
+                    大小 {{ formatBytes(part.fileSizeBytes) }}
+                  </div>
+                </ng-container>
                 <button
                   nz-button
                   nzType="link"
                   nzSize="small"
                   type="button"
                   data-testid="open-part-video"
-                  [disabled]="!part.sourceExists && !part.finalExists"
+                  [nzLoading]="remoteMediaRequestingPartIds.has(part.id)"
                   (click)="openPartVideo(session, part)"
                 >
                   播放
                 </button>
                 <a
                   *ngIf="
-                    isRecordingScope &&
-                    session.sourceKind === 'live' &&
-                    (part.sourceExists || part.finalExists)
+                    session.sourceKind === 'live' && partMediaAvailable(part);
+                    else prepareRemoteClip
                   "
                   nz-button
                   nzType="link"
@@ -632,6 +731,40 @@
                 >
                   剪辑
                 </a>
+                <ng-template #prepareRemoteClip>
+                  <button
+                    *ngIf="session.sourceKind === 'live'"
+                    nz-button
+                    nzType="link"
+                    nzSize="small"
+                    type="button"
+                    data-testid="edit-highlight-part"
+                    [nzLoading]="remoteMediaRequestingPartIds.has(part.id)"
+                    (click)="openPartHighlight(session, part)"
+                  >
+                    剪辑
+                  </button>
+                </ng-template>
+                <ng-container
+                  *ngIf="remoteMediaStatusFor(part.id) as remoteMedia"
+                >
+                  <div
+                    *ngIf="remoteMediaActive(remoteMedia)"
+                    class="part-metric"
+                    data-testid="remote-media-progress"
+                  >
+                    <nz-progress
+                      nzSize="small"
+                      [nzPercent]="remoteMediaPercent(remoteMedia)"
+                    ></nz-progress>
+                  </div>
+                  <div
+                    *ngIf="remoteMedia.state === 'failed'"
+                    class="part-error"
+                  >
+                    {{ remoteMedia.error || "下载失败，可重试" }}
+                  </div>
+                </ng-container>
               </td>
               <td *ngIf="isRecordingScope" class="part-count">
                 <div>{{ part.danmakuCount }} 条</div>

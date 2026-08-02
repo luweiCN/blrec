@@ -31,6 +31,7 @@ export interface NetworkSettings {
   recording: NetworkRouteSettings;
   upload: NetworkRouteSettings;
   biliApi: NetworkRouteSettings;
+  archiveDownload: NetworkRouteSettings;
 }
 
 export type LiveMonitorSettingsView =

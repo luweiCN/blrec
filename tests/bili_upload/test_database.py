@@ -51,6 +51,23 @@ REQUIRED_TABLES = {
     'media_library_item_tags',
     'media_library_parts',
     'media_library_file_moves',
+    'vainglory_scan_jobs',
+    'vainglory_part_jobs',
+    'vainglory_ocr_jobs',
+    'vainglory_heroes',
+    'vainglory_matches',
+    'vainglory_match_players',
+    'vainglory_players',
+    'vainglory_player_rooms',
+    'vainglory_player_sessions',
+    'vainglory_archive_syncs',
+    'vainglory_archive_imports',
+    'vainglory_archive_parts',
+    'vainglory_video_sources',
+    'vainglory_publications',
+    'vainglory_publication_comments',
+    'archive_migration_jobs',
+    'archive_migration_items',
 }
 
 
@@ -85,7 +102,10 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert await database.scalar('PRAGMA foreign_keys') == 1
         assert await database.scalar('PRAGMA busy_timeout') == 5000
         assert await database.scalar('PRAGMA quick_check') == 'ok'
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
         assert REQUIRED_TABLES == await database.table_names()
 
         account_columns = {
@@ -107,11 +127,26 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             row['name']
             for row in await database.fetchall('PRAGMA table_info(recording_sessions)')
         }
+        vainglory_scan_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(vainglory_scan_jobs)')
+        }
+        vainglory_archive_columns = {
+            row['name']
+            for row in await database.fetchall(
+                'PRAGMA table_info(vainglory_archive_imports)'
+            )
+        }
         clip_columns = {
             row['name']
             for row in await database.fetchall('PRAGMA table_info(highlight_clips)')
         }
         assert 'cancellation_generation' in session_columns
+        assert 'stats_included' in vainglory_scan_columns
+        assert {
+            'content_classification',
+            'classification_reason',
+        } <= vainglory_archive_columns
         assert {
             'cancellation_generation',
             'deletion_state',
@@ -298,7 +333,23 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             'upload_jobs_state_session_idx',
             'highlight_clips_library_idx',
             'upload_retry_batch_items_state_idx',
+            'vainglory_part_jobs_state_idx',
+            'vainglory_archive_imports_state_idx',
+            'vainglory_video_sources_state_idx',
         } <= indexes
+
+        match_columns = {
+            row['name']
+            for row in await database.fetchall('PRAGMA table_info(vainglory_matches)')
+        }
+        assert {
+            'game_mode',
+            'team_size',
+            'started_at_ms',
+            'custom_title',
+            'result_frame_path',
+        } <= match_columns
+        assert 'result_frame_png' not in match_columns
 
         await database.execute(
             "INSERT INTO bili_accounts("
@@ -526,7 +577,201 @@ async def test_second_migration_preserves_existing_accounts(tmp_path: Path) -> N
             'anchor_name': '',
             'area_name': '',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_vainglory_schema_constraints_and_search_indexes(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            "INSERT INTO recording_sessions("
+            "id,room_id,broadcast_session_key,state,started_at,ended_at) "
+            "VALUES(1,100,'100:1','closed',1,2)"
+        )
+        await database.execute(
+            "INSERT INTO recording_runs("
+            "id,session_id,state,started_at,ended_at) "
+            "VALUES('run',1,'finished',1,2)"
+        )
+        await database.execute(
+            "INSERT INTO recording_parts("
+            "id,session_id,run_id,part_index,source_path,record_start_time,"
+            "artifact_state,created_at,updated_at) "
+            "VALUES(1,1,'run',1,'/rec/game.mp4',1,'ready',1,2)"
+        )
+        await database.execute(
+            "INSERT INTO vainglory_scan_jobs("
+            "session_id,state,progress,algorithm_version,requested_at,updated_at) "
+            "VALUES(1,'ready',1,1,2,3)"
+        )
+        await database.execute(
+            "INSERT INTO vainglory_heroes("
+            "id,fingerprint,thumbnail_png,label,created_at,updated_at) "
+            "VALUES(1,'0123456789abcdef',X'89504E47','莱拉',2,2)"
+        )
+        await database.execute(
+            "INSERT INTO vainglory_matches("
+            "id,session_id,result_part_id,result_at_ms,duration_seconds,"
+            "result_text,end_reason,left_color,right_color,winner_side,"
+            "left_kills,right_kills,left_economy,right_economy,confidence,"
+            "created_at) "
+            "VALUES(1,1,1,1000,900,'胜利','normal','teal','orange','left',"
+            "12,8,42000,39000,0.95,3)"
+        )
+        await database.execute(
+            "INSERT INTO vainglory_match_players("
+            "match_id,side,slot,player_name,normalized_name,hero_id,"
+            "kills,deaths,assists,economy,confidence) "
+            "VALUES(1,'left',1,'5555-1_甲','5555-1_甲',1,5,2,7,15000,0.9)"
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "UPDATE vainglory_matches SET winner_side='teal' WHERE id=1"
+            )
+        await database.execute(
+            "UPDATE vainglory_matches "
+            "SET result_frame_path='session-1/part-1-1000.png' WHERE id=1"
+        )
+        assert (
+            await database.scalar(
+                'SELECT result_frame_path FROM vainglory_matches WHERE id=1'
+            )
+            == 'session-1/part-1-1000.png'
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "UPDATE vainglory_matches SET result_frame_path='' WHERE id=1"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "UPDATE vainglory_matches "
+                "SET result_frame_path='../outside.png' WHERE id=1"
+            )
+
+        indexes = {
+            row['name']
+            for row in await database.fetchall(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        assert {
+            'vainglory_matches_list_idx',
+            'vainglory_match_players_name_idx',
+            'vainglory_match_players_hero_idx',
+        } <= indexes
+        plan = await database.fetchall(
+            'EXPLAIN QUERY PLAN SELECT id FROM vainglory_matches '
+            'ORDER BY created_at DESC,id DESC LIMIT 20'
+        )
+        assert any('vainglory_matches_list_idx' in str(row['detail']) for row in plan)
+
+        await database.execute('DELETE FROM recording_parts WHERE id=1')
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_matches') == 0
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_match_players') == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_forty_eighth_migration_backfills_vainglory_players(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 48):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.executescript(
+            """
+            INSERT INTO recording_sessions(
+                id,room_id,broadcast_session_key,state,started_at,
+                anchor_uid,anchor_name
+            ) VALUES
+                (1,100,'100:1','closed',1,42,'旧直播名'),
+                (2,200,'200:2','closed',2,42,'新直播名');
+            INSERT INTO recording_runs(id,session_id,state,started_at,ended_at)
+            VALUES
+                ('run-1',1,'finished',1,2),
+                ('run-2',2,'finished',2,3);
+            INSERT INTO recording_parts(
+                id,session_id,run_id,part_index,source_path,record_start_time,
+                artifact_state,created_at,updated_at
+            ) VALUES
+                (1,1,'run-1',1,'/rec/one.mp4',1,'ready',1,2),
+                (2,2,'run-2',1,'/rec/two.mp4',2,'ready',2,3);
+            INSERT INTO vainglory_scan_jobs(
+                session_id,state,progress,algorithm_version,match_count,
+                requested_at,completed_at,updated_at
+            ) VALUES
+                (1,'ready',1,13,1,1,2,2),
+                (2,'ready',1,13,1,2,3,3);
+            INSERT INTO vainglory_matches(
+                id,session_id,result_part_id,result_at_ms,result_text,end_reason,
+                left_color,right_color,winner_side,confidence,created_at
+            ) VALUES
+                (1,1,1,1000,'胜利','normal','orange','teal','right',0.9,2),
+                (2,2,2,1000,'失败','normal','orange','teal','left',0.9,3);
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        players = await database.fetchall(
+            'SELECT id,name,origin FROM vainglory_players ORDER BY id'
+        )
+        rooms = await database.fetchall(
+            'SELECT player_id,room_id FROM vainglory_player_rooms ' 'ORDER BY room_id'
+        )
+
+        assert len(players) == 1
+        assert str(players[0]['name']) == '新直播名'
+        assert str(players[0]['origin']) == 'automatic'
+        assert [(int(row['player_id']), int(row['room_id'])) for row in rooms] == [
+            (int(players[0]['id']), 100),
+            (int(players[0]['id']), 200),
+        ]
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.execute(
+                "UPDATE vainglory_players SET name='   ' WHERE id=?",
+                (int(players[0]['id']),),
+            )
+        plan = await database.fetchall(
+            'EXPLAIN QUERY PLAN SELECT room_id FROM vainglory_player_rooms '
+            'WHERE player_id=? ORDER BY room_id',
+            (int(players[0]['id']),),
+        )
+        assert any(
+            'vainglory_player_rooms_player_idx' in str(row['detail']) for row in plan
+        )
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
     finally:
         await database.close()
 
@@ -574,7 +819,10 @@ async def test_twenty_fourth_migration_preserves_legacy_highlight_clip(
             'output_video_path': '/clips/legacy.mp4',
             'file_size_bytes': None,
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
     finally:
         await database.close()
 
@@ -612,7 +860,10 @@ async def test_twenty_fifth_migration_adds_only_hot_read_indexes(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
         assert (
             await database.scalar(
                 'SELECT file_size_bytes FROM highlight_clips WHERE id=8'
@@ -676,7 +927,10 @@ async def test_twenty_sixth_migration_adds_recoverable_deletion_state(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
         sessions = await database.fetchall(
             'SELECT id,cancellation_generation FROM recording_sessions ORDER BY id'
         )
@@ -746,7 +1000,10 @@ async def test_twenty_seventh_migration_persists_safe_highlight_inspections(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
         legacy = await database.fetchone(
             'SELECT inspection_json,source_fingerprint_json,idempotency_key '
             'FROM highlight_clips WHERE id=7'
@@ -817,7 +1074,10 @@ async def test_twenty_eighth_migration_adds_repair_reupload_snapshot(
     database = BiliUploadDatabase(str(path))
     await database.open()
     try:
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 30
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
         assert (
             await database.scalar(
                 'SELECT repair_reupload_snapshot_json FROM upload_jobs WHERE id=1'

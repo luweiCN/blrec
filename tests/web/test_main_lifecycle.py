@@ -82,6 +82,7 @@ class RuntimeProbe:
     unavailable_reason = None
     journal = None
     content_reader = None
+    remote_media_cache = None
     task_actions = None
     run_recording_session_action = None
     run_recording_session_batch = None
@@ -97,6 +98,9 @@ class RuntimeProbe:
     delete_highlight_clip = None
     media_library = None
     delete_media_library_item = None
+    vainglory_service = None
+    archive_backfill = None
+    archive_migration = None
 
     def __init__(self, events) -> None:
         self.events = events

@@ -315,6 +315,18 @@ describe('RecordingSessionRowComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('已收藏');
   });
 
+  it('links completed recordings to their match index', () => {
+    host.scope = 'recordings';
+    fixture.detectChanges();
+
+    expect(row.canAnalyzeMatches()).toBeTrue();
+    expect(row.vaingloryUrl()).toBe('/vainglory?sessionId=1');
+
+    host.session = { ...host.session, state: 'open' };
+    fixture.detectChanges();
+    expect(row.canAnalyzeMatches()).toBeFalse();
+  });
+
   it('renders the active recording upload intent', () => {
     host.session = {
       ...host.session,
@@ -329,5 +341,149 @@ describe('RecordingSessionRowComponent', () => {
     host.session = { ...host.session, uploadIntent: 'skip' };
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('本场不上传');
+  });
+
+  it('distinguishes operator pause, upload failure and submission failure', () => {
+    const job = host.session.uploadJob!;
+
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'paused',
+        operatorPaused: true,
+      }),
+    ).toBe('已暂停');
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'paused',
+        submitState: 'prepared',
+        operatorPaused: false,
+        confirmedPartCount: 1,
+        discoveredPartCount: 2,
+      }),
+    ).toBe('上传失败');
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'paused',
+        submitState: 'failed_permanent',
+        operatorPaused: false,
+        confirmedPartCount: 2,
+        discoveredPartCount: 2,
+      }),
+    ).toBe('投稿失败');
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'paused',
+        submitState: 'confirmed',
+        operatorPaused: false,
+        confirmedPartCount: 2,
+        discoveredPartCount: 2,
+      }),
+    ).toBe('稿件核对失败');
+    expect(
+      row.retryActionLabel({
+        ...job,
+        state: 'paused',
+        submitState: 'confirmed',
+      }),
+    ).toBe('继续核对');
+  });
+
+  it('shows verification and automatic retry states with the matching action', () => {
+    const job = host.session.uploadJob!;
+    const verificationJob = {
+      ...job,
+      state: 'paused' as const,
+      submitState: 'failed_permanent' as const,
+      operatorPaused: false,
+      reviewReason:
+        'B 站要求验证码或人工验证（12015）；完成验证后请点击重新投稿',
+      confirmedPartCount: 2,
+      discoveredPartCount: 2,
+    };
+
+    expect(row.uploadDisplayStateLabel(verificationJob)).toBe('需要验证');
+    expect(row.uploadDisplayStateColor(verificationJob)).toBe('warning');
+    expect(row.retryActionLabel(verificationJob)).toBe('重新投稿');
+
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'submitting',
+        nextAttemptAt: 2_000,
+        reviewReason: 'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',
+      }),
+    ).toBe('等待自动重试');
+    expect(
+      row.retryActionLabel({
+        ...job,
+        state: 'submitting',
+        nextAttemptAt: 2_000,
+        reviewReason: 'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',
+      }),
+    ).toBe('立即重试');
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'submitting',
+        nextAttemptAt: 2_000,
+        reviewReason: 'B 站当日投稿数量已达上限（129018），将在次日自动重新投稿',
+      }),
+    ).toBe('等待次日投稿');
+    expect(
+      row.uploadDisplayStateLabel({
+        ...job,
+        state: 'paused',
+        submitState: 'prepared',
+        operatorPaused: false,
+        reviewReason: 'UPOS 分 P 完成结果无法确认，已停止自动重试',
+        confirmedPartCount: 1,
+        discoveredPartCount: 2,
+      }),
+    ).toBe('上传结果待确认');
+
+    host.session = { ...host.session, uploadJob: verificationJob };
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="upload-job-reason"]')
+      ?.textContent,
+    ).toContain('验证码或人工验证');
+  });
+
+  it('renders a direct immediate retry button for a safe frequency wait', () => {
+    const events: RecordingSessionRowAction[] = [];
+    host.session = {
+      ...host.session,
+      availableActions: ['retry_failed', 'delete_local'],
+      uploadJob: {
+        ...host.session.uploadJob!,
+        state: 'submitting',
+        submitState: 'prepared',
+        nextAttemptAt: 2_800,
+        reviewReason:
+          'B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿',
+        confirmedPartCount: 2,
+        discoveredPartCount: 2,
+      },
+    };
+    fixture.detectChanges();
+    row.rowAction.subscribe((event: RecordingSessionRowAction) =>
+      events.push(event),
+    );
+
+    const button = fixture.nativeElement.querySelector(
+      '[data-testid="retry-submission-now"]',
+    ) as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+    expect(button?.textContent).toContain('立即重试');
+
+    button?.click();
+
+    expect(events).toEqual([
+      { type: 'session-action', sessionId: 1, action: 'retry_failed' },
+    ]);
   });
 });

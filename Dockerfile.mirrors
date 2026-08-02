@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim-buster
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 VOLUME ["/cfg", "/log", "/rec", "/clips"]
@@ -8,10 +8,16 @@ VOLUME ["/cfg", "/log", "/rec", "/clips"]
 COPY src src/
 COPY setup.py setup.cfg ./
 
-RUN sed -i "s/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g" /etc/apt/sources.list && \
-    sed -i "s/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g" /etc/apt/sources.list && \
+RUN sed -i "s#deb.debian.org#mirrors.tuna.tsinghua.edu.cn#g" \
+        /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg iproute2 build-essential python3-dev && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        iproute2 \
+        tesseract-ocr \
+        tesseract-ocr-chi-sim \
+        build-essential \
+        python3-dev && \
     rm -rf /var/lib/apt/lists/* && \
     pip3 install -i https://mirrors.aliyun.com/pypi/simple --no-cache-dir -e . && \
     apt-get purge -y --auto-remove build-essential python3-dev

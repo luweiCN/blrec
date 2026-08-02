@@ -10,6 +10,9 @@ const REALTIME_TOPICS = [
   'network',
   'upload_progress',
   'highlight_progress',
+  'archive_migration',
+  'archive_backfill',
+  'vainglory_index',
 ] as const;
 
 const CONTROL_EVENT_TYPES = [
@@ -31,6 +34,8 @@ const ROUTE_TOPICS: ReadonlyArray<
   ['/clips/highlights', ['upload_progress', 'highlight_progress']],
   ['/tasks', ['tasks']],
   ['/network', ['network']],
+  ['/uploads', ['archive_migration']],
+  ['/vainglory', ['archive_backfill', 'vainglory_index']],
   ['/recordings', ['upload_progress']],
   ['/upload-tasks', ['upload_progress']],
   ['/clips', ['upload_progress', 'highlight_progress']],

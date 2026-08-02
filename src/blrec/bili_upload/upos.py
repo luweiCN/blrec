@@ -57,12 +57,20 @@ class _PreuploadAdmissionWindow:
     _MAX_CAPACITY = 5
     _MAX_COOLDOWN_SECONDS = 15 * 60
 
-    def __init__(self, clock: Callable[[], float]) -> None:
+    def __init__(
+        self, clock: Callable[[], float], capacity_changed: Callable[[int], None]
+    ) -> None:
         self._clock = clock
+        self._capacity_changed = capacity_changed
         self._capacity = 1
+        self._growth_ceiling = self._MAX_CAPACITY
         self._starts: Deque[float] = deque()
         self._cooldown_until = 0.0
         self._consecutive_rate_limits = 0
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
 
     def reserve(self) -> int:
         now = float(self._clock())
@@ -77,11 +85,15 @@ class _PreuploadAdmissionWindow:
         return 0
 
     def succeeded(self) -> None:
-        self._capacity = min(self._MAX_CAPACITY, self._capacity + 1)
+        self._set_capacity(
+            min(self._growth_ceiling, self._capacity + 1), reason='success'
+        )
         self._consecutive_rate_limits = 0
 
     def rate_limited(self) -> int:
-        self._capacity = max(1, self._capacity // 2)
+        reduced_capacity = max(1, self._capacity - 1)
+        self._growth_ceiling = min(self._growth_ceiling, reduced_capacity)
+        self._set_capacity(reduced_capacity, reason='rate_limited')
         self._consecutive_rate_limits += 1
         delay = min(
             self._MAX_COOLDOWN_SECONDS,
@@ -89,6 +101,19 @@ class _PreuploadAdmissionWindow:
         )
         self._cooldown_until = max(self._cooldown_until, float(self._clock()) + delay)
         return delay
+
+    def _set_capacity(self, capacity: int, *, reason: str) -> None:
+        if capacity == self._capacity:
+            return
+        previous = self._capacity
+        self._capacity = capacity
+        audit(
+            'upload_task_capacity_changed',
+            previous_capacity=previous,
+            capacity=capacity,
+            reason=reason,
+        )
+        self._capacity_changed(capacity)
 
 
 @dataclass(frozen=True)
@@ -182,6 +207,7 @@ class UposUploader:
         stop_requested: Callable[[], bool] = lambda: False,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[float, float], float] = random.uniform,
+        capacity_changed: Callable[[int], None] = lambda _capacity: None,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError('chunk size must be positive')
@@ -199,7 +225,14 @@ class UposUploader:
         self._sleeper = sleeper
         self._jitter = jitter
         self._progress_milestones: Dict[int, int] = {}
-        self._preupload_admission = _PreuploadAdmissionWindow(clock)
+        self._preupload_admission = _PreuploadAdmissionWindow(clock, capacity_changed)
+
+    @property
+    def task_capacity(self) -> int:
+        return self._preupload_admission.capacity
+
+    def rate_limited(self) -> int:
+        return self._preupload_admission.rate_limited()
 
     async def upload_part(
         self, part_id: int, *, bundle: CredentialBundle, claim: LeaseClaim

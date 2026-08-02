@@ -57,6 +57,11 @@ export class NetworkComponent implements OnInit, OnDestroy {
       name: '其他 B 站请求',
       help: '账号、投稿、审核、评论和回灌固定使用所选线路。',
     },
+    {
+      key: 'archiveDownload',
+      name: '历史稿件下载',
+      help: '稿件列表、高清播放地址和媒体分片固定使用同一线路。',
+    },
   ];
 
   interfaces: NetworkInterface[] = [];
@@ -205,7 +210,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
   }
 
   supportsRoundRobin(purpose: NetworkPurpose): boolean {
-    return purpose !== 'upload' && purpose !== 'biliApi';
+    return !['upload', 'biliApi', 'archiveDownload'].includes(purpose);
   }
 
   formatRate(bytesPerSecond: number): string {
@@ -286,6 +291,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
   private copySettings(settings: NetworkSettings): NetworkSettings {
     const copied = JSON.parse(JSON.stringify(settings)) as NetworkSettings;
     copied.upload.failoverEnabled = false;
+    copied.archiveDownload.failoverEnabled = false;
     return copied;
   }
 }

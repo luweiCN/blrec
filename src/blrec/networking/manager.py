@@ -29,7 +29,9 @@ from .traffic import TrafficMeter
 if TYPE_CHECKING:
     from blrec.setting.models import NetworkRouteSettings, NetworkSettings
 
-NetworkPurpose = Literal['room_status', 'danmaku', 'recording', 'upload', 'bili_api']
+NetworkPurpose = Literal[
+    'room_status', 'danmaku', 'recording', 'upload', 'bili_api', 'archive_download'
+]
 
 _PROBE_HEADERS = {
     'Accept': 'application/json',
@@ -241,6 +243,7 @@ class NetworkRouteManager:
             'recording',
             'upload',
             'bili_api',
+            'archive_download',
         )
         for purpose in purposes:
             route = self._route_settings(purpose)
@@ -251,7 +254,7 @@ class NetworkRouteManager:
                 selection = self.select(purpose)
             except NetworkUnavailable:
                 selection = None
-            if route.failover_enabled and purpose != 'upload':
+            if route.failover_enabled and purpose not in ('upload', 'archive_download'):
                 states.append(
                     NetworkNotificationState(
                         event='network_failover',
@@ -338,6 +341,7 @@ class NetworkRouteManager:
             'recording',
             'upload',
             'bili_api',
+            'archive_download',
         )
         for purpose in purposes:
             if result.reachable:
@@ -371,7 +375,7 @@ class NetworkRouteManager:
                         and (
                             self._is_healthy(purpose, name)
                             or not route.failover_enabled
-                            or purpose == 'upload'
+                            or purpose in ('upload', 'archive_download')
                         )
                     ):
                         return self._audited_selection(
@@ -417,7 +421,10 @@ class NetworkRouteManager:
                     affinity_key=affinity_key,
                 )
 
-            allow_failover = route.failover_enabled and purpose != 'upload'
+            allow_failover = route.failover_enabled and purpose not in (
+                'upload',
+                'archive_download',
+            )
             if allow_failover:
                 fallback = next(
                     (

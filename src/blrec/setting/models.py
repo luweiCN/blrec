@@ -355,17 +355,18 @@ class NetworkSettings(BaseModel):
     recording: NetworkRouteSettings = NetworkRouteSettings()
     upload: NetworkRouteSettings = NetworkRouteSettings()
     bili_api: NetworkRouteSettings = NetworkRouteSettings()
+    archive_download: NetworkRouteSettings = NetworkRouteSettings()
 
     @root_validator
     def _credential_routes_must_be_fixed(
         cls, values: Dict[str, object]
     ) -> Dict[str, object]:
-        for field in ('upload', 'bili_api'):
+        for field in ('upload', 'bili_api', 'archive_download'):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.mode != 'fixed':
                 raise ValueError('{} network route must use fixed mode'.format(field))
             if (
-                field == 'upload'
+                field in ('upload', 'archive_download')
                 and isinstance(route, NetworkRouteSettings)
                 and route.failover_enabled
             ):

@@ -1,0 +1,133 @@
+<article class="leaderboard-page">
+  <nav class="breadcrumbs" aria-label="面包屑">
+    <a routerLink="/rankings-preview">总览</a>
+    <span aria-hidden="true">/</span>
+    <span aria-current="page">英雄排行</span>
+  </nav>
+
+  <header class="page-heading">
+    <div>
+      <h1>英雄胜率榜</h1>
+      <p>
+        查看全部达到样本门槛的英雄，按当前赛季与模式聚合所有已确认主人公对局。
+      </p>
+    </div>
+    <p class="page-context">
+      <strong>{{ selectedSeason.shortLabel }}</strong>
+      <span>{{ selectedSeason.period }} · {{ modeLabel() }}</span>
+    </p>
+  </header>
+
+  <app-leaderboard-filters
+    [activeSeason]="activeSeason"
+    [activeMode]="activeMode"
+    (activeSeasonChange)="selectSeason($event)"
+    (activeModeChange)="selectMode($event)"
+  ></app-leaderboard-filters>
+
+  <section class="directory-panel" aria-labelledby="hero-directory-title">
+    <header class="directory-toolbar">
+      <div>
+        <h2 id="hero-directory-title">全部英雄</h2>
+        <p>当前模式至少 20 局后进入胜率排名。</p>
+      </div>
+
+      <label class="search-control">
+        <span>检索英雄</span>
+        <input
+          type="search"
+          [value]="searchQuery"
+          placeholder="中文名、别名、拼音或英文名"
+          (input)="updateSearch($event)"
+        />
+      </label>
+
+      <p class="result-status" role="status" aria-live="polite">
+        {{ resultStart }}–{{ resultEnd }} / {{ filteredRows.length }} 名
+      </p>
+    </header>
+
+    <div class="directory-table-wrap">
+      <table class="directory-table hero-directory-table">
+        <caption>
+          {{
+            selectedSeason.label
+          }}
+          {{
+            modeLabel()
+          }}全部英雄胜率排名
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">排名</th>
+            <th scope="col">英雄</th>
+            <th scope="col">对局</th>
+            <th scope="col">胜 / 负</th>
+            <th scope="col">使用玩家</th>
+            <th scope="col">胜率</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            *ngFor="let row of visibleRows; trackBy: trackRow"
+            [class.podium-row]="row.rank <= 3"
+          >
+            <td class="directory-rank">
+              <strong>{{ row.rank.toString().padStart(2, "0") }}</strong>
+            </td>
+            <td>
+              <span class="directory-hero hero-identity">
+                <img [src]="heroImage(row.hero.name)" alt="" />
+                <strong>{{ heroDisplayName(row.hero.name) }}</strong>
+              </span>
+            </td>
+            <td>{{ heroPerformance(row.hero).matches }}</td>
+            <td>
+              {{ heroPerformance(row.hero).wins }} /
+              {{
+                heroPerformance(row.hero).matches -
+                  heroPerformance(row.hero).wins
+              }}
+            </td>
+            <td>{{ heroPerformance(row.hero).players }}</td>
+            <td class="directory-rate">
+              {{ winRate(heroPerformance(row.hero)) | percent: "1.0-1" }}
+            </td>
+          </tr>
+          <tr *ngIf="visibleRows.length === 0">
+            <td colspan="6" class="empty-state">
+              没有找到匹配的英雄，请尝试中文名、别名、拼音或英文名。
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <nav *ngIf="totalPages > 1" class="pagination" aria-label="英雄榜分页">
+      <button
+        type="button"
+        [disabled]="currentPage === 1"
+        (click)="goToPage(currentPage - 1)"
+      >
+        上一页
+      </button>
+      <button
+        *ngFor="let page of pageNumbers; trackBy: trackPage"
+        type="button"
+        [class.active]="page === currentPage"
+        [attr.aria-current]="page === currentPage ? 'page' : null"
+        [attr.aria-label]="'第 ' + page + ' 页'"
+        (click)="goToPage(page)"
+      >
+        {{ page }}
+      </button>
+      <button
+        type="button"
+        [disabled]="currentPage === totalPages"
+        (click)="goToPage(currentPage + 1)"
+      >
+        下一页
+      </button>
+    </nav>
+  </section>
+</article>

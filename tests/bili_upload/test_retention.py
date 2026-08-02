@@ -153,6 +153,51 @@ async def test_event_retention_deletes_only_video_and_preserves_danmaku(
 
 
 @pytest.mark.asyncio
+async def test_migration_video_is_kept_until_match_analysis_is_ready(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'records'
+    root.mkdir()
+    database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        video, _xml = await seed_recording(
+            database,
+            root,
+            identifier=1,
+            room_id=100,
+            retention_mode='submitted',
+            retention_days=0,
+            submitted_at=1_000,
+        )
+        await database.execute(
+            "UPDATE recording_sessions SET broadcast_session_key='bili-migration:1:1:BV1test' "
+            'WHERE id=1'
+        )
+        await database.execute(
+            'INSERT INTO vainglory_part_jobs('
+            'part_id,session_id,state,request_kind,progress,algorithm_version,'
+            'match_count,error,requested_at,started_at,completed_at,updated_at) '
+            "VALUES(1,1,'pending','automatic',0,1,0,NULL,1,NULL,NULL,1)"
+        )
+        manager = RetentionManager(database, root, clock=lambda: 1_000)
+
+        assert await manager.run_once() == 0
+        assert video.exists()
+
+        await database.execute(
+            "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
+            'completed_at=1,updated_at=1 WHERE part_id=1'
+        )
+
+        assert await manager.run_once() == 1
+        assert not video.exists()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_clip_library_files_do_not_count_toward_recording_capacity(
     tmp_path: Path,
 ) -> None:

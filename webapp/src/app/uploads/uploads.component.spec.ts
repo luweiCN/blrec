@@ -11,8 +11,10 @@ import { NzButtonModule } from 'ng-zorro-antd/button';
 import { NzCardModule } from 'ng-zorro-antd/card';
 import { NzCollapseModule } from 'ng-zorro-antd/collapse';
 import { NzEmptyModule } from 'ng-zorro-antd/empty';
+import { NzInputModule } from 'ng-zorro-antd/input';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
+import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzRadioModule } from 'ng-zorro-antd/radio';
 import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
@@ -50,6 +52,10 @@ describe('UploadsComponent', () => {
         'setPrimaryAccount',
         'getRelationships',
         'removeAccount',
+        'listArchiveMigrations',
+        'requestArchiveMigration',
+        'listArchiveMigrationItems',
+        'updateArchiveMigration',
       ]
     );
     qrRenderer = jasmine.createSpyObj<QrCodeRenderer>('QrCodeRenderer', [
@@ -91,6 +97,31 @@ describe('UploadsComponent', () => {
     accountService.removeAccount.and.returnValue(
       of({ accountId: 7, state: 'archived' })
     );
+    accountService.listArchiveMigrations.and.returnValue(of([]));
+    accountService.requestArchiveMigration.and.returnValue(
+      of({
+        id: 9,
+        sourceUid: 100,
+        sourceName: '历史大号',
+        downloadAccountId: 7,
+        targetAccountId: 8,
+        state: 'discovering',
+        progress: 0,
+        discoveredCount: 0,
+        completedCount: 0,
+        failedCount: 0,
+        error: null,
+        requestedAt: 1000,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: 1000,
+        operatorPaused: false,
+        dailyLimit: 20,
+        dailyUsed: 0,
+        quotaDay: null,
+      })
+    );
+    accountService.listArchiveMigrationItems.and.returnValue(of([]));
     qrRenderer.toDataUrl.and.resolveTo('data:image/png;base64,fixture');
 
     await TestBed.configureTestingModule({
@@ -105,8 +136,10 @@ describe('UploadsComponent', () => {
         NzCardModule,
         NzCollapseModule,
         NzEmptyModule,
+        NzInputModule,
         NzModalModule,
         NzPageHeaderModule,
+        NzProgressModule,
         NzRadioModule,
         NzSelectModule,
         NzSpinModule,
@@ -556,6 +589,137 @@ describe('UploadsComponent', () => {
     expect(
       fixture.nativeElement.querySelector('[data-testid="retry-accounts"]')
     ).not.toBeNull();
+  });
+
+  it('creates an old-account archive migration for a selected target', () => {
+    accountService.listAccounts.and.returnValue(
+      of([
+        {
+          id: 7,
+          uid: 70,
+          displayName: '下载账号',
+          avatarUrl: '',
+          credentialVersion: 1,
+          credentialExpiresAt: 1_800_000_000,
+          createdAt: 1_700_000_000,
+          state: 'active',
+          isPrimary: true,
+        },
+        {
+          id: 8,
+          uid: 80,
+          displayName: '投稿小号',
+          avatarUrl: '',
+          credentialVersion: 1,
+          credentialExpiresAt: 1_800_000_000,
+          createdAt: 1_700_000_000,
+          state: 'active',
+          isPrimary: false,
+        },
+      ])
+    );
+    accountService.requestArchiveMigration.and.returnValue(
+      of({
+        id: 9,
+        sourceUid: 100,
+        sourceName: '历史大号',
+        downloadAccountId: 7,
+        targetAccountId: 8,
+        state: 'completed',
+        progress: 1,
+        discoveredCount: 2,
+        completedCount: 2,
+        failedCount: 0,
+        error: null,
+        requestedAt: 1000,
+        startedAt: 1001,
+        completedAt: 1002,
+        updatedAt: 1002,
+        operatorPaused: false,
+        dailyLimit: 20,
+        dailyUsed: 2,
+        quotaDay: '1970-01-01',
+      })
+    );
+    fixture.detectChanges();
+    component.archiveMigrationSourceUid = 100;
+    component.archiveDownloadAccountId = 7;
+    component.archiveTargetAccountId = 8;
+    fixture.changeDetectorRef.markForCheck();
+    fixture.detectChanges();
+    expect(component.canRequestArchiveMigration).toBeTrue();
+
+    const start = fixture.nativeElement.querySelector(
+      '[data-testid="start-archive-migration"]'
+    ) as HTMLButtonElement;
+    expect(start).not.toBeNull();
+    component.requestArchiveMigration();
+    fixture.detectChanges();
+
+    expect(accountService.requestArchiveMigration).toHaveBeenCalledOnceWith({
+      sourceUid: 100,
+      downloadAccountId: 7,
+      targetAccountId: 8,
+    });
+    expect(fixture.nativeElement.textContent).toContain('账号稿件迁移');
+    expect(fixture.nativeElement.textContent).toContain(
+      '历史大号（UID 100）'
+    );
+    expect(fixture.nativeElement.textContent).toContain('投稿小号');
+    expect(fixture.nativeElement.textContent).toContain('已处理 2/2');
+    expect(fixture.nativeElement.textContent).toContain('100%');
+  });
+
+  it('keeps migration pause and daily limit controls always visible', () => {
+    const migration = {
+      id: 9,
+      sourceUid: 100,
+      sourceName: '历史大号',
+      downloadAccountId: 7,
+      targetAccountId: 8,
+      state: 'running' as const,
+      progress: 0.25,
+      discoveredCount: 20,
+      completedCount: 5,
+      failedCount: 0,
+      error: null,
+      requestedAt: 1000,
+      startedAt: 1001,
+      completedAt: null,
+      updatedAt: 1002,
+      operatorPaused: false,
+      dailyLimit: 20,
+      dailyUsed: 5,
+      quotaDay: '1970-01-01',
+    };
+    accountService.listArchiveMigrations.and.returnValue(of([migration]));
+    accountService.updateArchiveMigration.and.returnValue(
+      of({ ...migration, operatorPaused: true })
+    );
+
+    fixture.detectChanges();
+    const pause = fixture.nativeElement.querySelector(
+      '[data-testid="toggle-archive-migration-9"]'
+    ) as HTMLButtonElement;
+
+    expect(pause).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="archive-migration-daily-limit-9"]'
+      )
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="save-archive-migration-daily-limit-9"]'
+      )
+    ).not.toBeNull();
+    expect(pause.textContent).toContain('暂停迁移');
+    pause.click();
+
+    expect(accountService.updateArchiveMigration).toHaveBeenCalledOnceWith(9, {
+      paused: true,
+      dailyLimit: 20,
+    });
   });
 
   it('stops local status polling on destroy', fakeAsync(() => {

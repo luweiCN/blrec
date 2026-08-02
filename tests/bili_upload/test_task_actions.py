@@ -595,6 +595,107 @@ async def test_retry_failed_resets_only_safe_failed_parts(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_retry_failed_submission_preserves_confirmed_parts(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='paused',
+            submit_state='failed_permanent',
+            second_upload_state='confirmed',
+        )
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        message = await manager.retry_failed(9, manager_subject='manager')
+
+        assert message == '投稿失败任务已重新排队，不会重复上传已确认分 P'
+        job = await database.fetchone(
+            'SELECT state,submit_state FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {'state': 'submitting', 'submit_state': 'prepared'}
+        parts = await database.fetchall(
+            'SELECT upload_state,remote_filename FROM upload_parts '
+            'WHERE job_id=9 ORDER BY part_index'
+        )
+        assert [dict(row) for row in parts] == [
+            {'upload_state': 'confirmed', 'remote_filename': 'remote-11'},
+            {'upload_state': 'confirmed', 'remote_filename': 'remote-12'},
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_can_immediately_probe_a_safe_frequency_wait(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    wakeups: List[str] = []
+    try:
+        await seed_job(
+            database,
+            tmp_path,
+            state='submitting',
+            submit_state='prepared',
+            second_upload_state='confirmed',
+        )
+        await database.execute(
+            'UPDATE upload_jobs SET next_attempt_at=2_800,'
+            "review_reason='B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿' "
+            'WHERE id=9'
+        )
+        manager, _, _ = make_manager(
+            database,
+            FakeProtocol(archive_response()),
+            tmp_path,
+            wake_uploads=lambda: wakeups.append('wake'),
+        )
+
+        message = await manager.retry_failed(9, manager_subject='manager')
+
+        assert message == '已立即重新排队投稿，不会重复上传已确认分 P'
+        job = await database.fetchone(
+            'SELECT state,submit_state,next_attempt_at,review_reason '
+            'FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'submitting',
+            'submit_state': 'prepared',
+            'next_attempt_at': 1_000,
+            'review_reason': '管理员要求立即重试投稿',
+        }
+        assert wakeups == ['wake']
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM upload_parts WHERE job_id=9 "
+                "AND upload_state!='confirmed'"
+            )
+            == 0
+        )
+        audit = await database.fetchone(
+            "SELECT action,old_state,new_state FROM management_audit "
+            "WHERE action='retry_submission_now'"
+        )
+        assert audit is not None
+        assert dict(audit) == {
+            'action': 'retry_submission_now',
+            'old_state': 'submitting/waiting_rate_limit',
+            'new_state': 'submitting/prepared',
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_job_batch_uses_one_transaction_and_isolates_rejected_items(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2557,6 +2658,35 @@ async def test_repost_archives_old_bvid_and_resets_job_without_remote_delete(
                 'SELECT upload_state FROM upload_parts WHERE job_id=9'
             )
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_archive_can_be_reposted_as_a_new_archive(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
+    await database.open()
+    try:
+        await seed_job(database, tmp_path, state='rejected')
+        manager, _, _ = make_manager(
+            database, FakeProtocol(archive_response()), tmp_path
+        )
+
+        message = await manager.repost_as_new(9, manager_subject='manager')
+
+        assert message == '已保留原稿件记录，并重新排队投稿为新稿件'
+        job = await database.fetchone(
+            'SELECT state,submit_state,aid,bvid FROM upload_jobs WHERE id=9'
+        )
+        assert job is not None
+        assert dict(job) == {
+            'state': 'ready',
+            'submit_state': 'prepared',
+            'aid': None,
+            'bvid': None,
+        }
     finally:
         await database.close()
 

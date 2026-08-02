@@ -11,6 +11,13 @@ const routes: Routes = [
     loadChildren: () => import('./auth/auth.module').then((m) => m.AuthModule),
   },
   {
+    path: 'rankings-preview',
+    loadChildren: () =>
+      import('./public-dashboard/public-dashboard.module').then(
+        (m) => m.PublicDashboardModule,
+      ),
+  },
+  {
     path: 'tasks',
     canActivate: [AuthGuard],
     loadChildren: () =>
@@ -96,6 +103,12 @@ const routes: Routes = [
       import('./media-library/media-library.module').then(
         (m) => m.MediaLibraryModule,
       ),
+  },
+  {
+    path: 'vainglory',
+    canActivate: [AuthGuard],
+    loadChildren: () =>
+      import('./vainglory/vainglory.module').then((m) => m.VaingloryModule),
   },
   {
     path: 'upload-policies',

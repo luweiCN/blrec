@@ -548,9 +548,14 @@ async def test_session_summary_dto_matches_full_projection_scalars_and_actions(
         assert summary_payload == full_payload
 
     assert summary_by_id[1].upload_job is not None
-    assert summary_by_id[1].upload_job.can_retry is True
+    assert summary_by_id[1].upload_job.can_retry is False
     assert summary_by_id[1].upload_job.can_resume is True
     assert summary_by_id[1].upload_job.can_edit is True
+    operator_paused_actions = recording_sessions._session_summary_response(
+        summary_by_id[1]
+    ).available_actions
+    assert 'resume_upload' in operator_paused_actions
+    assert 'retry_failed' not in operator_paused_actions
     assert summary_by_id[2].upload_job is not None
     assert summary_by_id[2].upload_job.can_repair is True
     assert (
@@ -565,6 +570,83 @@ async def test_session_summary_dto_matches_full_projection_scalars_and_actions(
     assert summary_by_id[5].upload_job.discovered_part_count == 0
     assert summary_by_id[5].upload_job.display_state == 'preuploading'
     assert summary_by_id[6].title == 'final highlight title'
+
+
+@pytest.mark.asyncio
+async def test_unknown_part_outcome_exposes_no_unsafe_retry_or_resume_action(
+    database: BiliUploadDatabase,
+) -> None:
+    await database.write(
+        lambda connection: _seed_summary_sessions(connection, ((1, 1_000), (2, 2_000)))
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET state='paused',operator_paused=0,"
+        "review_reason='UPOS 分 P 完成结果无法确认' WHERE id=1"
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET state='paused',operator_paused=1,"
+        "review_reason='UPOS 分 P 完成结果无法确认' WHERE id=2"
+    )
+    await database.execute(
+        "UPDATE upload_parts SET upload_state='unknown_outcome' "
+        'WHERE job_id IN (1,2) AND part_index=1'
+    )
+    journal = RecordingJournalBridge(database, clock=lambda: 20_000)
+
+    full_sessions = await journal.list_sessions(sort_order='oldest')
+    full_jobs = await journal.upload_jobs_for_sessions((1, 2))
+    summaries = await journal.list_session_summaries(sort_order='oldest')
+
+    full_actions = {
+        session.id: recording_sessions._session_response(
+            session, full_jobs[session.id]
+        ).available_actions
+        for session in full_sessions
+    }
+    summary_actions = {
+        summary.id: recording_sessions._session_summary_response(
+            summary
+        ).available_actions
+        for summary in summaries
+    }
+    assert full_actions == summary_actions
+    assert 'retry_failed' not in summary_actions[1]
+    assert 'resume_upload' not in summary_actions[2]
+
+
+@pytest.mark.asyncio
+async def test_frequency_wait_exposes_safe_immediate_retry_action(
+    database: BiliUploadDatabase,
+) -> None:
+    await database.write(
+        lambda connection: _seed_summary_sessions(connection, ((1, 1_000),))
+    )
+    await database.execute(
+        "UPDATE upload_jobs SET state='submitting',submit_state='prepared',"
+        "next_attempt_at=21_800,operator_paused=0,"
+        "review_reason='B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿' "
+        'WHERE id=1'
+    )
+    await database.execute(
+        "UPDATE upload_parts SET upload_state='confirmed' WHERE job_id=1"
+    )
+    journal = RecordingJournalBridge(database, clock=lambda: 20_000)
+
+    full_session = (await journal.list_sessions())[0]
+    full_job = (await journal.upload_jobs_for_sessions((1,)))[1]
+    summary = (await journal.list_session_summaries())[0]
+    full_actions = recording_sessions._session_response(
+        full_session, full_job
+    ).available_actions
+    summary_actions = recording_sessions._session_summary_response(
+        summary
+    ).available_actions
+
+    assert full_job.can_retry is True
+    assert summary.upload_job is not None
+    assert summary.upload_job.can_retry is True
+    assert summary_actions == full_actions
+    assert 'retry_failed' in summary_actions
 
 
 @pytest.mark.parametrize('xml_path', ('', None), ids=('empty', 'missing'))
@@ -751,6 +833,44 @@ async def test_restart_of_same_live_reuses_session_and_continues_part_numbers(
     assert [(part.part_index, part.source_path) for part in restarted_parts] == [
         (2, '/rec/p2.flv')
     ]
+
+
+@pytest.mark.asyncio
+async def test_restart_of_same_live_keeps_provisional_upload_job_and_session(
+    database,
+) -> None:
+    await seed_upload_policy(database)
+    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    first_run = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(first_run, '/rec/p1.flv', record_start_time=901)
+    await journal.video_completed(first_run, '/rec/p1.flv')
+    await journal.video_postprocessed(first_run, '/rec/p1.flv', '/rec/p1.flv')
+    await journal.recording_cancelled(first_run)
+    first_session = await journal.session_for_run(first_run)
+    await database.execute(
+        'INSERT INTO upload_jobs('
+        'session_id,account_id,policy_snapshot_json,state,submit_state,'
+        'preupload_finalized,created_at,updated_at) '
+        "VALUES(?,1,'{}','waiting_artifacts','prepared',0,1,1)",
+        (first_session.id,),
+    )
+
+    restarted_run = await journal.recording_started(100, live_start_time=900)
+    await journal.video_created(restarted_run, '/rec/p2.flv', record_start_time=902)
+
+    restarted_session = await journal.session_for_run(restarted_run)
+    assert restarted_session.id == first_session.id
+    assert restarted_session.state == 'open'
+    assert (
+        await database.scalar(
+            'SELECT COUNT(*) FROM upload_jobs WHERE session_id=?', (first_session.id,)
+        )
+        == 1
+    )
+    assert [
+        (part.part_index, part.source_path)
+        for part in await journal.parts_for_run(restarted_run)
+    ] == [(2, '/rec/p2.flv')]
 
 
 @pytest.mark.asyncio
