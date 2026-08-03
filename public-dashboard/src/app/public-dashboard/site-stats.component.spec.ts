@@ -33,9 +33,10 @@ describe('SiteStatsComponent', () => {
 
     const page = fixture.nativeElement as HTMLElement;
     expect(page.querySelectorAll('dl > div').length).toBe(4);
+    expect(page.textContent).toContain('站点动态');
     expect(page.textContent).toContain('今日访客');
-    expect(page.textContent).toContain('近 5 分钟活跃');
-    expect(page.textContent).toContain('近似统计');
+    expect(page.textContent).toContain('近 5 分钟');
+    expect(page.textContent).toContain('4 人活跃');
     expect(page.textContent).toContain('126');
   });
 
@@ -46,6 +47,6 @@ describe('SiteStatsComponent', () => {
 
     const page = fixture.nativeElement as HTMLElement;
     expect(page.querySelector('dl')).toBeNull();
-    expect(page.textContent).toContain('正在初始化');
+    expect(page.textContent).toContain('初始化中');
   });
 });

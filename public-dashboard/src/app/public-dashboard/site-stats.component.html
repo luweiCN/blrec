@@ -3,50 +3,47 @@
   aria-labelledby="site-pulse-title"
   [attr.aria-busy]="state.kind === 'loading'"
 >
-  <header>
-    <div>
-      <p>SITE PULSE</p>
-      <h2 id="site-pulse-title">站点热度</h2>
-    </div>
-    <p *ngIf="stats as currentStats" class="stats-updated">
-      约每 5 分钟更新 ·
-      <time [attr.datetime]="currentStats.generatedAt">
-        {{ generatedAtLabel }}
-      </time>
-    </p>
+  <header class="pulse-label">
+    <span class="pulse-dot" aria-hidden="true"></span>
+    <h2 id="site-pulse-title">站点动态</h2>
   </header>
 
   <ng-container *ngIf="stats as currentStats; else statsStatus">
     <dl>
       <div>
+        <dt>近 5 分钟</dt>
+        <dd>
+          <strong>{{ currentStats.activeVisitors | number }}</strong> 人活跃
+        </dd>
+      </div>
+      <div>
         <dt>今日访客</dt>
-        <dd>{{ currentStats.today.visitors | number }}</dd>
-        <small>匿名浏览器</small>
+        <dd><strong>{{ currentStats.today.visitors | number }}</strong> 人</dd>
       </div>
       <div>
         <dt>今日浏览</dt>
-        <dd>{{ currentStats.today.pageViews | number }}</dd>
-        <small>页面访问</small>
-      </div>
-      <div>
-        <dt>近 5 分钟活跃</dt>
-        <dd>{{ currentStats.activeVisitors | number }}</dd>
-        <small>近似统计</small>
+        <dd><strong>{{ currentStats.today.pageViews | number }}</strong> 次</dd>
       </div>
       <div>
         <dt>累计浏览</dt>
-        <dd>{{ currentStats.totalPageViews | number }}</dd>
-        <small>自统计启用起</small>
+        <dd><strong>{{ currentStats.totalPageViews | number }}</strong> 次</dd>
       </div>
     </dl>
+
+    <p class="stats-updated">
+      约 5 分钟更新 ·
+      <time [attr.datetime]="currentStats.generatedAt">
+        {{ generatedAtLabel }}
+      </time>
+    </p>
   </ng-container>
 
   <ng-template #statsStatus>
     <p class="stats-status" role="status">
       {{
         state.kind === "loading"
-          ? "访问统计正在载入"
-          : "访问统计正在初始化，请稍后再看"
+          ? "统计载入中"
+          : "统计初始化中"
       }}
     </p>
   </ng-template>

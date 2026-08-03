@@ -86,17 +86,21 @@
   </section>
 
   <footer id="method">
-    <div>
-      <strong>虚荣对局榜</strong>
-      <p>赛季按北京时间直播开始时间归档 · 每日发布只读数据快照</p>
-      <nav class="footer-links" aria-label="站点说明">
-        <a routerLink="/guide/rankings">榜单说明</a>
-        <a routerLink="/guide/play">如何游玩</a>
-        <a routerLink="/guide/download">下载指南</a>
-      </nav>
+    <app-site-stats [state]="siteStatsState"></app-site-stats>
+
+    <div class="footer-meta">
+      <div>
+        <strong>虚荣对局榜</strong>
+        <p>赛季按北京时间直播开始时间归档 · 每日发布只读数据快照</p>
+        <nav class="footer-links" aria-label="站点说明">
+          <a routerLink="/guide/rankings">榜单说明</a>
+          <a routerLink="/guide/play">如何游玩</a>
+          <a routerLink="/guide/download">下载指南</a>
+        </nav>
+      </div>
+      <p *ngIf="data.snapshotOrNull as snapshot">
+        DATA SNAPSHOT / {{ snapshot.publicationDate }}
+      </p>
     </div>
-    <p *ngIf="data.snapshotOrNull as snapshot">
-      DATA SNAPSHOT / {{ snapshot.publicationDate }}
-    </p>
   </footer>
 </main>

@@ -33,8 +33,6 @@ import {
   PlayerStanding,
   SeasonKey,
 } from './public-dashboard.models';
-import { SiteStatsState } from './site-stats.models';
-import { SiteStatsService } from './site-stats.service';
 
 const EMPTY_PERFORMANCE: Performance = {
   matches: 0,
@@ -61,16 +59,13 @@ export class PublicDashboardComponent implements OnDestroy {
   readonly activeSeason: SeasonKey;
 
   activeMode: ModeFilter;
-  siteStatsState: SiteStatsState = { kind: 'loading' };
 
-  private destroyed = false;
   private readonly modeSubscription: Subscription;
 
   constructor(
     private readonly data: DashboardDataService,
     dashboardMode: DashboardModeService,
     changeDetector: ChangeDetectorRef,
-    siteStats: SiteStatsService,
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
@@ -81,17 +76,9 @@ export class PublicDashboardComponent implements OnDestroy {
       this.activeMode = mode;
       changeDetector.markForCheck();
     });
-    void siteStats.load().then((state) => {
-      if (this.destroyed) {
-        return;
-      }
-      this.siteStatsState = state;
-      changeDetector.markForCheck();
-    });
   }
 
   ngOnDestroy(): void {
-    this.destroyed = true;
     this.modeSubscription.unsubscribe();
   }
 

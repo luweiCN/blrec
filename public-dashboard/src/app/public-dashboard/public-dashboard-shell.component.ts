@@ -1,5 +1,6 @@
 import {
   ChangeDetectionStrategy,
+  ChangeDetectorRef,
   Component,
   OnDestroy,
   OnInit,
@@ -10,6 +11,8 @@ import { seasonOption } from './public-dashboard.data';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardModeService } from './dashboard-mode.service';
 import { SiteAnalyticsService } from './site-analytics.service';
+import { SiteStatsState } from './site-stats.models';
+import { SiteStatsService } from './site-stats.service';
 
 @Component({
   selector: 'app-public-dashboard-shell',
@@ -18,18 +21,32 @@ import { SiteAnalyticsService } from './site-analytics.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PublicDashboardShellComponent implements OnInit, OnDestroy {
+  siteStatsState: SiteStatsState = { kind: 'loading' };
+
+  private destroyed = false;
+
   constructor(
     readonly data: DashboardDataService,
     readonly dashboardMode: DashboardModeService,
     private readonly router: Router,
     private readonly siteAnalytics: SiteAnalyticsService,
+    private readonly siteStats: SiteStatsService,
+    private readonly changeDetector: ChangeDetectorRef,
   ) {}
 
   ngOnInit(): void {
     this.siteAnalytics.start();
+    void this.siteStats.load().then((state) => {
+      if (this.destroyed) {
+        return;
+      }
+      this.siteStatsState = state;
+      this.changeDetector.markForCheck();
+    });
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.siteAnalytics.stop();
   }
 

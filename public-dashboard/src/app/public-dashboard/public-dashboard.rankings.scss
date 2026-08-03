@@ -510,18 +510,21 @@ table {
       object-fit: cover;
     }
 
-    & > span {
+    .detail-hero-link > span {
       display: grid;
-      gap: 3px;
+      gap: 2px;
 
       strong {
         color: var(--ink-soft);
-        font-size: 0.67rem;
+        font-size: 0.63rem;
+        font-weight: 650;
+        line-height: 1.25;
       }
 
       small {
         color: var(--ink-muted);
-        font-size: 0.55rem;
+        font-size: 0.49rem;
+        line-height: 1.3;
       }
     }
 
