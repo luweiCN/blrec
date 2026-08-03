@@ -55,7 +55,6 @@ export class PublicDashboardComponent implements OnDestroy {
   readonly activeSeason: SeasonKey;
 
   activeMode: ModeFilter;
-  selectedPlayerId: number | null;
   private readonly modeSubscription: Subscription;
 
   constructor(
@@ -65,15 +64,11 @@ export class PublicDashboardComponent implements OnDestroy {
   ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
     this.activeMode = dashboardMode.mode;
-    this.selectedPlayerId =
-      getPlayerRankings(data.snapshot, this.activeSeason, this.activeMode)[0]
-        ?.id ?? null;
     this.modeSubscription = dashboardMode.mode$.subscribe((mode) => {
       if (mode === this.activeMode) {
         return;
       }
       this.activeMode = mode;
-      this.selectedPlayerId = this.rankings[0]?.id ?? null;
       changeDetector.markForCheck();
     });
   }
@@ -95,17 +90,11 @@ export class PublicDashboardComponent implements OnDestroy {
   }
 
   get selectedPlayer(): PlayerStanding | undefined {
-    return (
-      this.rankings.find((player) => player.id === this.selectedPlayerId) ??
-      this.rankings[0]
-    );
+    return this.rankings[0];
   }
 
   get selectedPlayerRank(): number {
-    const index = this.rankings.findIndex(
-      (player) => player.id === this.selectedPlayerId,
-    );
-    return index < 0 ? 0 : index + 1;
+    return this.selectedPlayer === undefined ? 0 : 1;
   }
 
   get topPlayer(): PlayerStanding | undefined {
@@ -154,10 +143,6 @@ export class PublicDashboardComponent implements OnDestroy {
 
   get seasonCode(): string {
     return this.activeSeason.replace('-', ' · ').toLocaleUpperCase();
-  }
-
-  selectPlayer(playerId: number): void {
-    this.selectedPlayerId = playerId;
   }
 
   playerPerformance(player: PlayerStanding): Performance {

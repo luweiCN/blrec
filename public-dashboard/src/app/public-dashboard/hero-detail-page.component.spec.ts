@@ -7,6 +7,7 @@ import { DASHBOARD_MODE_STORAGE } from './dashboard-mode.service';
 import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { PlayerAvatarComponent } from './player-avatar.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
@@ -20,6 +21,7 @@ describe('HeroDetailPageComponent', () => {
         HeroDetailPageComponent,
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
+        PlayerAvatarComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [

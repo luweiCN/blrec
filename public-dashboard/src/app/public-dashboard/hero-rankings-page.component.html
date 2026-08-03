@@ -71,10 +71,10 @@
             *ngFor="let row of visibleRows; trackBy: trackRow"
             [class.podium-row]="row.rank <= 3"
           >
-            <td class="directory-rank">
+            <td class="directory-rank" data-label="排名">
               <strong>{{ row.rank.toString().padStart(2, "0") }}</strong>
             </td>
-            <td>
+            <td data-label="英雄">
               <a
                 class="directory-hero hero-identity"
                 [routerLink]="['/heroes', row.hero.id]"
@@ -83,16 +83,16 @@
                 <strong>{{ heroDisplayName(row.hero.name) }}</strong>
               </a>
             </td>
-            <td>{{ heroPerformance(row.hero).matches }}</td>
-            <td>
+            <td data-label="对局">{{ heroPerformance(row.hero).matches }}</td>
+            <td data-label="胜 / 负">
               {{ heroPerformance(row.hero).wins }} /
               {{
                 heroPerformance(row.hero).matches -
                   heroPerformance(row.hero).wins
               }}
             </td>
-            <td>{{ heroPerformance(row.hero).players }}</td>
-            <td class="directory-rate">
+            <td data-label="使用玩家">{{ heroPerformance(row.hero).players }}</td>
+            <td class="directory-rate" data-label="胜率">
               {{ winRate(heroPerformance(row.hero)) | percent: "1.0-1" }}
             </td>
           </tr>

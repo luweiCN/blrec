@@ -209,46 +209,33 @@ a {
   transition:
     background 160ms ease,
     transform 160ms ease;
-
-  img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    clip-path: inherit;
-    filter: saturate(0.92) contrast(1.04);
-  }
-
-  span {
-    position: absolute;
-    right: 2px;
-    bottom: 5px;
-    display: grid;
-    width: 26px;
-    height: 26px;
-    place-items: center;
-    border: 2px solid var(--surface-1);
-    border-radius: 50%;
-    background: var(--cyan-strong);
-    color: var(--void);
-    font-size: 0.7rem;
-    font-weight: 850;
-  }
 }
 
 .podium-name {
+  max-width: 100%;
   margin-top: 12px;
+  overflow: hidden;
   font-size: 0.9rem;
+  text-overflow: ellipsis;
   transition: color 160ms ease;
+  white-space: nowrap;
 }
 
 .podium-hero {
-  max-width: 100%;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
   margin-top: 4px;
-  overflow: hidden;
   color: var(--ink-muted);
   font-size: 0.62rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+
+  img {
+    width: 18px;
+    height: 18px;
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;
+    object-fit: cover;
+  }
 }
 
 .summary-strip {

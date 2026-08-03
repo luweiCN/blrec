@@ -9,6 +9,7 @@ import {
 } from './dashboard-mode.service';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
@@ -24,6 +25,7 @@ describe('PlayerDetailPageComponent', () => {
         PlayerDetailPageComponent,
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
+        PlayerAvatarComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [

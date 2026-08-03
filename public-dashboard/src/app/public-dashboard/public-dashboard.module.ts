@@ -6,6 +6,7 @@ import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { PublicDashboardRoutingModule } from './public-dashboard-routing.module';
@@ -19,6 +20,7 @@ import { PublicDashboardShellComponent } from './public-dashboard-shell.componen
     DashboardModeSwitcherComponent,
     LeaderboardFiltersComponent,
     LeaderboardSeasonSelectComponent,
+    PlayerAvatarComponent,
     PlayerRankingsPageComponent,
     HeroRankingsPageComponent,
     PlayerDetailPageComponent,

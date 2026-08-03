@@ -6,6 +6,7 @@ import {
   DASHBOARD_MODE_STORAGE,
   DashboardModeService,
 } from './dashboard-mode.service';
+import { PlayerAvatarComponent } from './player-avatar.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
@@ -17,7 +18,7 @@ describe('PublicDashboardComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [PublicDashboardComponent],
+      declarations: [PublicDashboardComponent, PlayerAvatarComponent],
       imports: [CommonModule, RouterTestingModule],
       providers: [
         {
@@ -65,28 +66,16 @@ describe('PublicDashboardComponent', () => {
     expect(component.topPlayer?.name).toBe('洛川');
   });
 
-  it('shows the selected player profile', () => {
-    const playerButtons = Array.from(
-      fixture.nativeElement.querySelectorAll('.player-select'),
-    ) as HTMLButtonElement[];
-
-    playerButtons[1].click();
-    fixture.detectChanges();
-
-    expect(component.selectedPlayer?.name).toBe('洛川');
-    expect(
-      fixture.nativeElement.querySelector('#player-detail-title')?.textContent,
-    ).toContain('洛川');
-  });
-
-  it('links players and heroes to their detail pages', () => {
+  it('links player names and hero names without separate arrow controls', () => {
     const page = fixture.nativeElement as HTMLElement;
 
-    expect(page.querySelector<HTMLAnchorElement>('.row-detail-link')?.href).toContain(
+    expect(page.querySelector<HTMLAnchorElement>('.player-select')?.href).toContain(
       '/players/',
     );
     expect(page.querySelector<HTMLAnchorElement>('.hero-name a')?.href).toContain(
       '/heroes/',
     );
+    expect(page.querySelector('.row-detail-link')).toBeNull();
+    expect(page.textContent).not.toContain('→');
   });
 });

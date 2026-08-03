@@ -505,6 +505,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--database', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument(
+        '--skip-player-avatars',
+        action='store_true',
+        help='只导出排行榜 JSON，不从绑定的 B 站直播间同步玩家头像',
+    )
     return parser.parse_args()
 
 
@@ -516,6 +521,15 @@ def main() -> None:
             result.manifest['snapshotId'], result.manifest_path
         )
     )
+    if not arguments.skip_player_avatars:
+        from .dashboard_avatars import sync_player_avatars
+
+        avatar_result = sync_player_avatars(result.snapshot_path, arguments.output)
+        print(
+            'player avatars synced: {}/{}'.format(
+                avatar_result.downloaded, avatar_result.attempted
+            )
+        )
 
 
 if __name__ == '__main__':

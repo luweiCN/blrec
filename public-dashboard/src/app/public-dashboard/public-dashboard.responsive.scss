@@ -243,7 +243,7 @@
     width: 100%;
     min-width: 0;
 
-    & > span:first-child {
+    .row-player-avatar {
       width: 30px;
       height: 30px;
     }
@@ -267,5 +267,11 @@
 
   .hero-sample {
     display: none;
+  }
+}
+
+@media (max-width: 360px) {
+  .hero-copy h1 {
+    font-size: 2.45rem;
   }
 }

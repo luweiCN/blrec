@@ -10,9 +10,14 @@
   <ng-container *ngIf="player as profile; else playerNotFound">
     <header class="profile-heading">
       <div class="profile-player-identity">
-        <span class="profile-avatar" aria-hidden="true">
-          {{ profile.initial }}
-        </span>
+        <app-player-avatar
+          class="profile-avatar"
+          [playerId]="profile.id"
+          [heroName]="
+            performance.topHero ||
+            (profile.heroPool.length > 0 ? profile.heroPool[0].name : '')
+          "
+        ></app-player-avatar>
         <div>
           <p>PLAYER ARCHIVE</p>
           <h1>{{ profile.name }}</h1>
@@ -32,6 +37,7 @@
     </header>
 
     <app-leaderboard-filters
+      class="profile-filters"
       [activeSeason]="activeSeason"
       [seasonOptions]="seasonOptions"
       (activeSeasonChange)="selectSeason($event)"
@@ -142,15 +148,15 @@
           </thead>
           <tbody>
             <tr *ngFor="let hero of heroPool; trackBy: trackHero">
-              <td>
+              <td data-label="英雄">
                 <a class="profile-hero-link" [routerLink]="['/heroes', hero.name]">
                   <img [src]="heroImage(hero.name)" alt="" />
                   <strong>{{ heroDisplayName(hero.name) }}</strong>
                 </a>
               </td>
-              <td>{{ hero.matches }}</td>
-              <td>{{ hero.wins }} / {{ hero.matches - hero.wins }}</td>
-              <td class="table-rate">{{ winRate(hero) | percent: "1.0-1" }}</td>
+              <td data-label="对局">{{ hero.matches }}</td>
+              <td data-label="胜 / 负">{{ hero.wins }} / {{ hero.matches - hero.wins }}</td>
+              <td class="table-rate" data-label="胜率">{{ winRate(hero) | percent: "1.0-1" }}</td>
             </tr>
             <tr *ngIf="heroPool.length === 0">
               <td colspan="4" class="profile-empty">该赛季暂无已识别英雄数据。</td>
@@ -182,14 +188,14 @@
           </thead>
           <tbody>
             <tr *ngFor="let record of seasonHistory; trackBy: trackSeason">
-              <td><strong>{{ record.season.label }}</strong></td>
-              <td>{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
-              <td>{{ record.performance.matches }}</td>
-              <td>
+              <td data-label="榜单周期"><strong>{{ record.season.label }}</strong></td>
+              <td data-label="排名">{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
+              <td data-label="对局">{{ record.performance.matches }}</td>
+              <td data-label="胜 / 负">
                 {{ record.performance.wins }} /
                 {{ record.performance.matches - record.performance.wins }}
               </td>
-              <td class="table-rate">{{ winRate(record.performance) | percent: "1.0-1" }}</td>
+              <td class="table-rate" data-label="胜率">{{ winRate(record.performance) | percent: "1.0-1" }}</td>
             </tr>
             <tr *ngIf="seasonHistory.length === 0">
               <td colspan="5" class="profile-empty">当前模式暂无赛季记录。</td>
@@ -204,7 +210,7 @@
     <section class="profile-not-found" role="alert">
       <p>PLAYER NOT FOUND</p>
       <h1>没有找到这个玩家档案</h1>
-      <a routerLink="/players">返回玩家排行 →</a>
+      <a routerLink="/players">返回玩家排行</a>
     </section>
   </ng-template>
 </article>

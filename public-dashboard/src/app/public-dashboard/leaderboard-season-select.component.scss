@@ -34,8 +34,8 @@ button {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  height: var(--filter-control-height);
-  padding: 0 15px;
+  min-height: 54px;
+  padding: 7px 15px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--surface-2);
@@ -53,7 +53,7 @@ button {
 
   strong {
     overflow: hidden;
-    font-size: 0.72rem;
+    font-size: 0.74rem;
     font-weight: 720;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -63,7 +63,7 @@ button {
     margin-top: 3px;
     overflow: hidden;
     color: var(--ink-muted);
-    font-size: 0.57rem;
+    font-size: 0.59rem;
     text-overflow: ellipsis;
     white-space: nowrap;
   }

@@ -7,26 +7,11 @@
 }
 
 .leaderboard-filters {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
-  gap: 16px 26px;
-  align-items: end;
-  padding: 18px 20px;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: var(--surface-1);
-
-  & > p {
-    align-self: end;
-    margin: 0 0 2px;
-    color: var(--ink-muted);
-    font-size: 0.61rem;
-    line-height: 1.5;
-  }
+  width: min(100%, 420px);
 }
 
 @media (max-width: 760px) {
   .leaderboard-filters {
-    grid-template-columns: 1fr;
+    width: 100%;
   }
 }

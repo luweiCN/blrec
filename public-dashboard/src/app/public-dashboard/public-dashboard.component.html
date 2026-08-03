@@ -9,7 +9,6 @@
         汇总主播在 3V3、乱斗与 5V5
         中的对局表现，以稳定玩家身份持续追踪，而不是按游戏昵称重复建档。
       </p>
-
     </div>
 
     <aside class="podium-panel" aria-label="当前前三名">
@@ -32,14 +31,22 @@
           "
         >
           <span class="podium-rank">#{{ podiumRank(player) }}</span>
-          <span class="podium-portrait">
-            <img [src]="heroImage(playerPerformance(player).topHero)" alt="" />
-            <span aria-hidden="true">{{ player.initial }}</span>
-          </span>
+          <app-player-avatar
+            class="podium-portrait"
+            [playerId]="player.id"
+            [heroName]="playerPerformance(player).topHero"
+          ></app-player-avatar>
           <strong class="podium-name">{{ player.name }}</strong>
           <span class="podium-hero">
-            {{ heroDisplayName(playerPerformance(player).topHero) }} ·
-            {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
+            <img
+              [src]="heroImage(playerPerformance(player).topHero)"
+              [alt]="heroDisplayName(playerPerformance(player).topHero)"
+              [title]="
+                '代表英雄：' +
+                heroDisplayName(playerPerformance(player).topHero)
+              "
+            />
+            <span>{{ winRate(playerPerformance(player)) | percent: "1.0-1" }}</span>
           </span>
         </a>
         <p *ngIf="podiumPlayers.length === 0" class="ranking-empty">
@@ -84,7 +91,7 @@
           <p>达到 20 局样本门槛后按胜率排序。</p>
         </div>
         <a class="full-ranking-link" routerLink="/players">
-          Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位 →
+          Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位
         </a>
       </header>
 
@@ -112,7 +119,6 @@
                 let rank = index;
                 trackBy: trackPlayer
               "
-              [class.selected]="selectedPlayerId === player.id"
             >
               <td class="rank-cell" [class.medal]="rank < 3">
                 <strong>{{ (rank + 1).toString().padStart(2, "0") }}</strong>
@@ -131,28 +137,21 @@
                 </span>
               </td>
               <td>
-                <span class="player-cell-actions">
-                  <button
-                    class="player-select"
-                    type="button"
-                    [attr.aria-pressed]="selectedPlayerId === player.id"
-                    (click)="selectPlayer(player.id)"
-                  >
-                    <span aria-hidden="true">{{ player.initial }}</span>
-                    <span>
-                      <strong>{{ player.name }}</strong>
-                      <small>{{ player.roomLabel }}</small>
-                    </span>
-                  </button>
-                  <a
-                    class="row-detail-link"
-                    [routerLink]="['/players', player.id]"
-                    [attr.aria-label]="'查看玩家 ' + player.name + ' 的详情'"
-                    title="查看详情"
-                  >
-                    →
-                  </a>
-                </span>
+                <a
+                  class="player-select"
+                  [routerLink]="['/players', player.id]"
+                  [attr.aria-label]="'查看玩家 ' + player.name + ' 的详情'"
+                >
+                  <app-player-avatar
+                    class="row-player-avatar"
+                    [playerId]="player.id"
+                    [heroName]="playerPerformance(player).topHero"
+                  ></app-player-avatar>
+                  <span>
+                    <strong>{{ player.name }}</strong>
+                    <small>{{ player.roomLabel }}</small>
+                  </span>
+                </a>
               </td>
               <td class="optional-column">
                 <a
@@ -206,15 +205,23 @@
 
       <div class="detail-primary">
         <div class="detail-identity">
-          <span class="detail-portrait">
-            <img [src]="heroImage(selectedPerformance().topHero)" alt="" />
-            <span aria-hidden="true">{{ selected.initial }}</span>
-          </span>
+          <app-player-avatar
+            class="detail-portrait"
+            [playerId]="selected.id"
+            [heroName]="selectedPerformance().topHero"
+          ></app-player-avatar>
           <div>
             <h2 id="player-detail-title">{{ selected.name }}</h2>
             <p>{{ selected.roomLabel }}</p>
-            <small>
-              代表英雄 · {{ heroDisplayName(selectedPerformance().topHero) }}
+            <small class="detail-top-hero">
+              <img
+                [src]="heroImage(selectedPerformance().topHero)"
+                [alt]="heroDisplayName(selectedPerformance().topHero)"
+                [title]="
+                  '代表英雄：' + heroDisplayName(selectedPerformance().topHero)
+                "
+              />
+              代表英雄
             </small>
           </div>
         </div>
@@ -246,7 +253,7 @@
       </dl>
 
       <a class="profile-detail-link" [routerLink]="['/players', selected.id]">
-        查看完整玩家档案 →
+        查看完整玩家档案
       </a>
 
       <section class="mode-breakdown" aria-labelledby="mode-breakdown-title">
@@ -295,7 +302,7 @@
     <ng-template #noEligiblePlayer>
       <aside class="player-detail player-detail-empty">
         <p>当前模式暂无符合 20 局门槛的玩家。</p>
-        <a routerLink="/players">查看其他赛季或模式 →</a>
+        <a routerLink="/players">查看其他赛季或模式</a>
       </aside>
     </ng-template>
   </section>
@@ -308,7 +315,7 @@
         <p>聚合所有收录玩家，只统计已确认录像主人公英雄的对局。</p>
       </div>
       <a class="full-ranking-link" routerLink="/heroes">
-        Top {{ overviewHeroRankings.length }} / 查看全部 →
+        Top {{ overviewHeroRankings.length }} / 查看全部
       </a>
     </header>
 

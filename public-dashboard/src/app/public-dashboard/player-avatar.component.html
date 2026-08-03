@@ -1,0 +1,9 @@
+<img
+  *ngIf="source !== 'none'"
+  [src]="imageSource"
+  alt=""
+  (error)="handleImageError()"
+/>
+<span *ngIf="source === 'none'" class="avatar-fallback" aria-hidden="true">
+  V
+</span>

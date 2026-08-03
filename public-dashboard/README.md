@@ -10,7 +10,11 @@ PYTHONPATH=../src python -m blrec.vainglory.dashboard_snapshot \
   --output public-data
 ```
 
-`public-data/manifest.json` 和 `public-data/snapshots/` 是包含真实榜单的本地生成产物，已被 Git 忽略。导出器使用 SQLite 只读事务，不会修改正在更新的业务数据库。
+`public-data/manifest.json`、`public-data/snapshots/` 和
+`public-data/avatars/` 是包含真实榜单及玩家头像的本地生成产物，已被 Git
+忽略。导出器使用 SQLite 只读事务，不会修改正在更新的业务数据库；JSON
+生成完成后，会按玩家绑定的直播间从 B 站公开接口同步头像并压缩为 256px
+JPEG。临时离线导出时可以追加 `--skip-player-avatars`。
 
 开发与验证：
 
@@ -22,7 +26,9 @@ npm run lint
 npm run build
 ```
 
-生产构建位于 `dist/`，其中已包含当次构建使用的 `/data/` 快照。部署时将该目录上传到阿里云 OSS；日常数据发布只替换 `/data/manifest.json` 并新增不可变快照，无需重新发布站点代码。
+生产构建位于 `dist/`，其中已包含当次构建使用的 `/data/` 快照和头像。部署时
+将该目录上传到阿里云 OSS；日常数据发布只替换 `/data/manifest.json`、新增
+不可变快照并同步 `/data/avatars/`，无需重新发布站点代码。
 
 站点 `favicon.ico` 使用《虚荣》官方网站提供的多尺寸品牌图标，来源为
 `https://www.vainglorygame.com/wp-content/themes/vainglory/images/favicon.ico`。

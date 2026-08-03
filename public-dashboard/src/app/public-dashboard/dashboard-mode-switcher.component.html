@@ -1,15 +1,13 @@
-<div class="mode-switcher">
-  <span id="global-mode-label">比赛模式</span>
-  <div role="group" aria-labelledby="global-mode-label">
-    <button
-      *ngFor="let mode of options; trackBy: trackMode"
-      type="button"
-      [class.active]="value === mode.key"
-      [attr.aria-pressed]="value === mode.key"
-      [attr.title]="mode.description ?? null"
-      (click)="selectMode(mode.key)"
-    >
-      {{ mode.label }}
-    </button>
-  </div>
+<div class="mode-switcher" role="group" aria-label="比赛模式">
+  <span class="mode-label" aria-hidden="true">模式</span>
+  <button
+    *ngFor="let mode of options; trackBy: trackMode"
+    type="button"
+    [class.active]="value === mode.key"
+    [attr.aria-pressed]="value === mode.key"
+    [attr.title]="mode.description ?? null"
+    (click)="selectMode(mode.key)"
+  >
+    {{ mode.label }}
+  </button>
 </div>

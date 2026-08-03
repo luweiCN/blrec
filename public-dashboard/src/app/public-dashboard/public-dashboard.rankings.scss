@@ -147,14 +147,6 @@ table {
       background: var(--surface-2);
     }
 
-    &.selected {
-      background: oklch(79% 0.13 204 / 0.08);
-
-      td:first-child {
-        box-shadow: inset 1px 0 var(--cyan);
-      }
-    }
-
     &:last-child td {
       border-bottom: 0;
     }
@@ -209,22 +201,19 @@ table {
   color: var(--ink);
   cursor: pointer;
   text-align: left;
+  text-decoration: none;
 
-  & > span:first-child {
-    display: grid;
+  .row-player-avatar {
     flex: none;
     width: 34px;
     height: 34px;
-    place-items: center;
     border: 1px solid var(--line);
     border-radius: 5px;
-    background: var(--surface-2);
-    color: var(--cyan);
-    font-weight: 780;
   }
 
   & > span:last-child {
     display: grid;
+    min-width: 0;
   }
 
   strong {
@@ -367,28 +356,19 @@ table {
   padding: 1px;
   background: var(--cyan);
   clip-path: polygon(18% 0, 82% 0, 100% 18%, 92% 84%, 50% 100%, 8% 84%, 0 18%);
+}
+
+.detail-identity .detail-top-hero {
+  display: flex;
+  gap: 6px;
+  align-items: center;
 
   img {
-    width: 100%;
-    height: 100%;
+    width: 21px;
+    height: 21px;
+    border: 1px solid var(--line-soft);
+    border-radius: 3px;
     object-fit: cover;
-    clip-path: inherit;
-  }
-
-  span {
-    position: absolute;
-    right: 0;
-    bottom: 3px;
-    display: grid;
-    width: 22px;
-    height: 22px;
-    place-items: center;
-    border: 2px solid var(--surface-2);
-    border-radius: 50%;
-    background: var(--cyan-strong);
-    color: var(--void);
-    font-size: 0.62rem;
-    font-weight: 850;
   }
 }
 

@@ -130,6 +130,7 @@ LIVE INDEX 不是排名分数，而是当前公开快照的状态区，固定展
         ├── index.html / 带哈希的站点资源
         └── data
              ├── manifest.json                    当前版本指针
+             ├── avatars/<playerId>.jpg           绑定直播间头像
              └── snapshots/<snapshotId>.json      不可变快照
                     │
                     ▼
@@ -144,6 +145,7 @@ LIVE INDEX 不是排名分数，而是当前公开快照的状态区，固定展
 
 - `index.html` 和 `data/manifest.json`：不缓存，每次回源校验。
 - `data/snapshots/*` 与带哈希的 JS/CSS/图片：一年缓存并标记 `immutable`。
+- `data/avatars/*`：缓存一天；每日发布时按稳定玩家 ID 覆盖，页面失败时回退到代表英雄头像。
 - SPA 未命中路径回退到 `/index.html`。
 - HTTP 请求使用 301 跳转到相同路径的 HTTPS 地址。
 - HTTPS 证书由现有 Nginx UI 签发和续期；云服务器每小时比较叶证书指纹，变化时才通过阿里云 CDN API 上传并启用，私钥不进入命令行、日志、NAS 日常发布账号或仓库。

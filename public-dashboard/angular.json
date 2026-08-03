@@ -34,7 +34,7 @@
                 "output": "/assets/vainglory/heroes/"
               },
               {
-                "glob": "**/*.json",
+                "glob": "**/*",
                 "input": "public-data",
                 "output": "/data/"
               }
@@ -103,7 +103,7 @@
                 "output": "/assets/vainglory/heroes/"
               },
               {
-                "glob": "**/*.json",
+                "glob": "**/*",
                 "input": "public-data",
                 "output": "/data/"
               }

@@ -62,17 +62,12 @@
 }
 
 .profile-avatar {
-  display: grid;
   flex: none;
   width: 78px;
   height: 86px;
-  place-items: center;
   border: 1px solid var(--cyan);
   background: oklch(79% 0.13 204 / 0.1);
-  color: var(--cyan);
   clip-path: polygon(18% 0, 82% 0, 100% 18%, 92% 84%, 50% 100%, 8% 84%, 0 18%);
-  font-size: 1.45rem;
-  font-weight: 850;
 }
 
 .profile-hero-image {
@@ -419,16 +414,11 @@
 }
 
 .profile-player-link {
-  & > span:first-child {
-    display: grid;
+  .profile-player-avatar {
     width: 34px;
     height: 34px;
-    place-items: center;
     border: 1px solid var(--line);
     border-radius: 4px;
-    background: var(--surface-2);
-    color: var(--cyan);
-    font-weight: 780;
   }
 
   & > span:last-child {
