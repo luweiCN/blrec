@@ -2,6 +2,10 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import {
+  DASHBOARD_MODE_STORAGE,
+  DashboardModeService,
+} from './dashboard-mode.service';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
@@ -9,6 +13,7 @@ import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 describe('PublicDashboardComponent', () => {
   let fixture: ComponentFixture<PublicDashboardComponent>;
   let component: PublicDashboardComponent;
+  let dashboardMode: DashboardModeService;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -19,11 +24,16 @@ describe('PublicDashboardComponent', () => {
           provide: DashboardDataService,
           useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
         },
+        {
+          provide: DASHBOARD_MODE_STORAGE,
+          useValue: { getItem: () => null, setItem: () => undefined },
+        },
       ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(PublicDashboardComponent);
     component = fixture.componentInstance;
+    dashboardMode = TestBed.inject(DashboardModeService);
     fixture.detectChanges();
   });
 
@@ -47,20 +57,12 @@ describe('PublicDashboardComponent', () => {
     expect(page.textContent).not.toContain('综合积分');
   });
 
-  it('updates the ranking when a game mode is selected', () => {
-    const buttons = Array.from(
-      fixture.nativeElement.querySelectorAll('.mode-picker button'),
-    ) as HTMLButtonElement[];
-    const brawl = buttons.find((button) =>
-      button.textContent?.includes('乱斗'),
-    );
-
-    brawl?.click();
+  it('updates the ranking when the global game mode changes', () => {
+    dashboardMode.selectMode('brawl');
     fixture.detectChanges();
 
     expect(component.activeMode).toBe('brawl');
     expect(component.topPlayer?.name).toBe('洛川');
-    expect(brawl?.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('shows the selected player profile', () => {
@@ -75,5 +77,16 @@ describe('PublicDashboardComponent', () => {
     expect(
       fixture.nativeElement.querySelector('#player-detail-title')?.textContent,
     ).toContain('洛川');
+  });
+
+  it('links players and heroes to their detail pages', () => {
+    const page = fixture.nativeElement as HTMLElement;
+
+    expect(page.querySelector<HTMLAnchorElement>('.row-detail-link')?.href).toContain(
+      '/players/',
+    );
+    expect(page.querySelector<HTMLAnchorElement>('.hero-name a')?.href).toContain(
+      '/heroes/',
+    );
   });
 });

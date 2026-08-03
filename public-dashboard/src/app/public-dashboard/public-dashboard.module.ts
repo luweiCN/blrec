@@ -1,10 +1,13 @@
 import { CommonModule } from '@angular/common';
 import { NgModule } from '@angular/core';
 
+import { DashboardModeSwitcherComponent } from './dashboard-mode-switcher.component';
+import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
+import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { PublicDashboardRoutingModule } from './public-dashboard-routing.module';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
@@ -13,10 +16,13 @@ import { PublicDashboardShellComponent } from './public-dashboard-shell.componen
   declarations: [
     PublicDashboardComponent,
     PublicDashboardShellComponent,
+    DashboardModeSwitcherComponent,
     LeaderboardFiltersComponent,
     LeaderboardSeasonSelectComponent,
     PlayerRankingsPageComponent,
     HeroRankingsPageComponent,
+    PlayerDetailPageComponent,
+    HeroDetailPageComponent,
   ],
   imports: [CommonModule, PublicDashboardRoutingModule],
 })

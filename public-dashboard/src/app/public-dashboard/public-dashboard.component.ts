@@ -1,5 +1,12 @@
-import { ChangeDetectionStrategy, Component } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  OnDestroy,
+} from '@angular/core';
+import { Subscription } from 'rxjs';
 
+import { DashboardModeService } from './dashboard-mode.service';
 import {
   getDashboardSummary,
   getHeroRankings,
@@ -22,8 +29,6 @@ import {
   MatchResult,
   ModeBreakdown,
   ModeFilter,
-  ModeOption,
-  MODE_OPTIONS,
   Performance,
   PlayerStanding,
   SeasonKey,
@@ -41,22 +46,40 @@ const EMPTY_PERFORMANCE: Performance = {
   styleUrls: [
     './public-dashboard.component.scss',
     './public-dashboard.rankings.scss',
+    './public-dashboard-detail-links.scss',
     './public-dashboard.responsive.scss',
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class PublicDashboardComponent {
-  readonly modeOptions: readonly ModeOption[] = MODE_OPTIONS;
+export class PublicDashboardComponent implements OnDestroy {
   readonly activeSeason: SeasonKey;
 
-  activeMode: ModeFilter = 'all';
+  activeMode: ModeFilter;
   selectedPlayerId: number | null;
+  private readonly modeSubscription: Subscription;
 
-  constructor(private readonly data: DashboardDataService) {
+  constructor(
+    private readonly data: DashboardDataService,
+    dashboardMode: DashboardModeService,
+    changeDetector: ChangeDetectorRef,
+  ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
+    this.activeMode = dashboardMode.mode;
     this.selectedPlayerId =
       getPlayerRankings(data.snapshot, this.activeSeason, this.activeMode)[0]
         ?.id ?? null;
+    this.modeSubscription = dashboardMode.mode$.subscribe((mode) => {
+      if (mode === this.activeMode) {
+        return;
+      }
+      this.activeMode = mode;
+      this.selectedPlayerId = this.rankings[0]?.id ?? null;
+      changeDetector.markForCheck();
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.modeSubscription.unsubscribe();
   }
 
   get rankings(): readonly PlayerStanding[] {
@@ -133,11 +156,6 @@ export class PublicDashboardComponent {
     return this.activeSeason.replace('-', ' · ').toLocaleUpperCase();
   }
 
-  selectMode(mode: ModeFilter): void {
-    this.activeMode = mode;
-    this.selectedPlayerId = this.rankings[0]?.id ?? null;
-  }
-
   selectPlayer(playerId: number): void {
     this.selectedPlayerId = playerId;
   }
@@ -190,7 +208,7 @@ export class PublicDashboardComponent {
     return this.rankings.findIndex((standing) => standing.id === player.id) + 1;
   }
 
-  trackMode(_index: number, mode: ModeOption): ModeFilter {
+  trackMode(_index: number, mode: { readonly key: ModeFilter }): ModeFilter {
     return mode.key;
   }
 

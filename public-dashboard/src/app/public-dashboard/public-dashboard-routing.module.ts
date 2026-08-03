@@ -1,7 +1,9 @@
 import { NgModule } from '@angular/core';
 import { RouterModule, Routes } from '@angular/router';
 
+import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
+import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
@@ -23,9 +25,19 @@ const routes: Routes = [
         title: '玩家综合榜 · 虚荣对局榜',
       },
       {
+        path: 'players/:playerId',
+        component: PlayerDetailPageComponent,
+        title: '玩家详情 · 虚荣对局榜',
+      },
+      {
         path: 'heroes',
         component: HeroRankingsPageComponent,
         title: '英雄胜率榜 · 虚荣对局榜',
+      },
+      {
+        path: 'heroes/:heroId',
+        component: HeroDetailPageComponent,
+        title: '英雄详情 · 虚荣对局榜',
       },
     ],
   },

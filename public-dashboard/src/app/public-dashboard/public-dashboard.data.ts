@@ -160,11 +160,60 @@ export function playersForSeason(
   return snapshot.standings[season]?.players ?? [];
 }
 
+export function playerForSeason(
+  snapshot: DashboardSnapshot,
+  season: SeasonKey,
+  playerId: number,
+): PlayerStanding | undefined {
+  return playersForSeason(snapshot, season).find(
+    (player) => player.id === playerId,
+  );
+}
+
+export function findPlayer(
+  snapshot: DashboardSnapshot,
+  playerId: number,
+): PlayerStanding | undefined {
+  for (const season of snapshot.seasons) {
+    const player = playerForSeason(snapshot, season.key, playerId);
+    if (player !== undefined) {
+      return player;
+    }
+  }
+  return undefined;
+}
+
 export function heroesForSeason(
   snapshot: DashboardSnapshot,
   season: SeasonKey,
 ): readonly HeroStanding[] {
   return snapshot.standings[season]?.heroes ?? [];
+}
+
+export function heroForSeason(
+  snapshot: DashboardSnapshot,
+  season: SeasonKey,
+  heroId: string,
+): HeroStanding | undefined {
+  const normalizedId = heroId.toLocaleLowerCase();
+  return heroesForSeason(snapshot, season).find(
+    (hero) =>
+      hero.id.toLocaleLowerCase() === normalizedId ||
+      hero.name.toLocaleLowerCase() === normalizedId,
+  );
+}
+
+export function findHero(
+  snapshot: DashboardSnapshot,
+  heroId: string,
+): HeroStanding | undefined {
+  for (const season of snapshot.seasons) {
+    const hero = heroForSeason(snapshot, season.key, heroId);
+    if (hero !== undefined) {
+      return hero;
+    }
+  }
+  return undefined;
 }
 
 export function selectedHeroWinRate(hero: HeroUsage): number {

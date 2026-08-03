@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component } from '@angular/core';
 
 import { seasonOption } from './public-dashboard.data';
 import { DashboardDataService } from './public-dashboard-data.service';
+import { DashboardModeService } from './dashboard-mode.service';
 
 @Component({
   selector: 'app-public-dashboard-shell',
@@ -10,7 +11,10 @@ import { DashboardDataService } from './public-dashboard-data.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PublicDashboardShellComponent {
-  constructor(readonly data: DashboardDataService) {}
+  constructor(
+    readonly data: DashboardDataService,
+    readonly dashboardMode: DashboardModeService,
+  ) {}
 
   get currentSeasonLabel(): string {
     const snapshot = this.data.snapshotOrNull;

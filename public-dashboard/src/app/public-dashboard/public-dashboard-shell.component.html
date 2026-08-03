@@ -33,9 +33,19 @@
       </a>
     </nav>
 
+    <app-dashboard-mode-switcher
+      class="header-mode"
+      [value]="dashboardMode.mode"
+      (valueChange)="dashboardMode.selectMode($event)"
+    ></app-dashboard-mode-switcher>
+
     <p *ngIf="data.state.kind === 'ready'" class="data-status">
       <span aria-hidden="true"></span>
-      {{ currentSeasonLabel }} · 最后同步 {{ lastUpdatedLabel }}
+      <span class="status-season">{{ currentSeasonLabel }}</span>
+      <span aria-hidden="true">·</span>
+      <span class="status-time">
+        <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
+      </span>
     </p>
   </header>
 

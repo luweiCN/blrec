@@ -5,21 +5,5 @@
     (valueChange)="selectSeason($event)"
   ></app-leaderboard-season-select>
 
-  <div class="mode-control">
-    <span id="detail-mode-label">比赛模式</span>
-    <div role="group" aria-labelledby="detail-mode-label">
-      <button
-        *ngFor="let mode of modeOptions; trackBy: trackMode"
-        type="button"
-        [class.active]="activeMode === mode.key"
-        [attr.aria-pressed]="activeMode === mode.key"
-        [attr.title]="mode.description ?? null"
-        (click)="selectMode(mode.key)"
-      >
-        {{ mode.label }}
-      </button>
-    </div>
-  </div>
-
-  <p>乱斗包含大乱斗与闪电战；两种原始模式继续保留，待识别稳定后可重新拆分。</p>
+  <p>比赛模式由页面顶部统一控制；乱斗包含大乱斗与闪电战。</p>
 </section>

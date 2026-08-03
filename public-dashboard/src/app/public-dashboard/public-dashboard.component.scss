@@ -70,37 +70,6 @@ a {
   text-wrap: pretty;
 }
 
-.mode-picker {
-  display: inline-grid;
-  grid-template-columns: repeat(4, auto);
-  padding: 4px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  background: var(--void);
-
-  button {
-    min-height: 42px;
-    padding: 0 17px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--ink-muted);
-    cursor: pointer;
-    font-size: 0.76rem;
-    font-weight: 700;
-
-    &:hover {
-      color: var(--ink);
-    }
-
-    &.active {
-      border-color: oklch(79% 0.13 204 / 0.42);
-      background: oklch(79% 0.13 204 / 0.12);
-      color: var(--cyan);
-    }
-  }
-}
-
 .podium-panel {
   position: relative;
   min-height: 388px;
@@ -188,6 +157,7 @@ a {
   background: transparent;
   color: var(--ink);
   cursor: pointer;
+  text-decoration: none;
 
   &:hover {
     .podium-portrait {

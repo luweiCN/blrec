@@ -1,0 +1,144 @@
+@media (max-width: 860px) {
+  .profile-heading {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  .identity-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 20px 0 0;
+    border-top: 1px solid var(--line-soft);
+    border-left: 0;
+  }
+
+  .profile-summary {
+    grid-template-columns: 1fr;
+
+    dl div:first-child {
+      border-left: 0;
+    }
+  }
+
+  .profile-context {
+    grid-template-columns: auto auto 1fr;
+    align-items: center;
+
+    small {
+      justify-self: end;
+    }
+  }
+}
+
+@media (max-width: 760px) {
+  .profile-page {
+    gap: 16px;
+  }
+
+  .profile-heading {
+    margin-top: 0;
+    padding: 24px;
+  }
+
+  .profile-player-identity h1 {
+    font-size: 2rem;
+  }
+
+  .profile-summary dl {
+    grid-template-columns: repeat(2, 1fr);
+
+    div {
+      min-height: 82px;
+    }
+
+    div:nth-child(3) {
+      border-top: 1px solid var(--line-soft);
+      border-left: 0;
+    }
+
+    div:nth-child(4) {
+      border-top: 1px solid var(--line-soft);
+    }
+  }
+
+  .profile-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mode-stat-grid {
+    grid-template-columns: 1fr;
+
+    li {
+      min-height: 92px;
+    }
+  }
+}
+
+@media (max-width: 480px) {
+  .profile-heading {
+    padding: 20px;
+  }
+
+  .profile-player-identity {
+    gap: 14px;
+
+    h1 {
+      font-size: 1.65rem;
+    }
+  }
+
+  .profile-avatar {
+    width: 62px;
+    height: 70px;
+  }
+
+  .profile-hero-image {
+    width: 70px;
+    height: 70px;
+  }
+
+  .identity-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .profile-context {
+    grid-template-columns: 1fr auto;
+
+    small {
+      display: none;
+    }
+  }
+
+  .profile-summary dl div {
+    padding: 14px 18px;
+  }
+
+  .profile-card {
+    padding: 20px;
+
+    & > header {
+      display: block;
+
+      & > span {
+        display: block;
+        margin-top: 7px;
+        text-align: left;
+      }
+    }
+  }
+
+  .profile-table-card {
+    padding: 0;
+
+    & > header {
+      padding: 20px;
+    }
+  }
+
+  .large-form {
+    gap: 5px;
+
+    & > span {
+      min-height: 58px;
+    }
+  }
+}

@@ -2,6 +2,10 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import {
+  DASHBOARD_MODE_STORAGE,
+  DashboardModeService,
+} from './dashboard-mode.service';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
@@ -11,6 +15,7 @@ import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 describe('PlayerRankingsPageComponent', () => {
   let fixture: ComponentFixture<PlayerRankingsPageComponent>;
   let component: PlayerRankingsPageComponent;
+  let dashboardMode: DashboardModeService;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -25,11 +30,16 @@ describe('PlayerRankingsPageComponent', () => {
           provide: DashboardDataService,
           useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
         },
+        {
+          provide: DASHBOARD_MODE_STORAGE,
+          useValue: { getItem: () => null, setItem: () => undefined },
+        },
       ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(PlayerRankingsPageComponent);
     component = fixture.componentInstance;
+    dashboardMode = TestBed.inject(DashboardModeService);
     fixture.detectChanges();
   });
 
@@ -83,7 +93,16 @@ describe('PlayerRankingsPageComponent', () => {
     expect(component.currentPage).toBe(1);
 
     component.goToPage(2);
-    component.selectMode('brawl');
+    dashboardMode.selectMode('brawl');
     expect(component.currentPage).toBe(1);
+  });
+
+  it('links every visible player to a stable detail route', () => {
+    const links = fixture.nativeElement.querySelectorAll(
+      '.directory-player[href]',
+    ) as NodeListOf<HTMLAnchorElement>;
+
+    expect(links.length).toBe(component.visibleRows.length);
+    expect(links[0].href).toContain('/players/');
   });
 });

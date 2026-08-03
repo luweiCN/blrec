@@ -1,5 +1,12 @@
-import { ChangeDetectionStrategy, Component } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  OnDestroy,
+} from '@angular/core';
+import { Subscription } from 'rxjs';
 
+import { DashboardModeService } from './dashboard-mode.service';
 import {
   DETAIL_PAGE_SIZE,
   getPlayerRankingRows,
@@ -30,14 +37,32 @@ import {
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class PlayerRankingsPageComponent {
+export class PlayerRankingsPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
-  activeMode: ModeFilter = 'all';
+  activeMode: ModeFilter;
   searchQuery = '';
   currentPage = 1;
+  private readonly modeSubscription: Subscription;
 
-  constructor(private readonly data: DashboardDataService) {
+  constructor(
+    private readonly data: DashboardDataService,
+    dashboardMode: DashboardModeService,
+    changeDetector: ChangeDetectorRef,
+  ) {
     this.activeSeason = data.snapshot.currentSeasonKey;
+    this.activeMode = dashboardMode.mode;
+    this.modeSubscription = dashboardMode.mode$.subscribe((mode) => {
+      if (mode === this.activeMode) {
+        return;
+      }
+      this.activeMode = mode;
+      this.currentPage = 1;
+      changeDetector.markForCheck();
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.modeSubscription.unsubscribe();
   }
 
   get seasonOptions(): readonly SeasonOption[] {
@@ -93,11 +118,6 @@ export class PlayerRankingsPageComponent {
 
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
-    this.currentPage = 1;
-  }
-
-  selectMode(mode: ModeFilter): void {
-    this.activeMode = mode;
     this.currentPage = 1;
   }
 

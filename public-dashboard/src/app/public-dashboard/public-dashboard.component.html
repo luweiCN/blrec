@@ -10,18 +10,6 @@
         中的对局表现，以稳定玩家身份持续追踪，而不是按游戏昵称重复建档。
       </p>
 
-      <div class="mode-picker" role="group" aria-label="选择比赛模式">
-        <button
-          *ngFor="let mode of modeOptions; trackBy: trackMode"
-          type="button"
-          [class.active]="activeMode === mode.key"
-          [attr.aria-pressed]="activeMode === mode.key"
-          [attr.title]="mode.description ?? null"
-          (click)="selectMode(mode.key)"
-        >
-          {{ mode.label }}
-        </button>
-      </div>
     </div>
 
     <aside class="podium-panel" aria-label="当前前三名">
@@ -34,15 +22,14 @@
       </header>
 
       <div class="podium-grid">
-        <button
+        <a
           *ngFor="let player of podiumPlayers; trackBy: trackPlayer"
           class="podium-slot"
-          type="button"
+          [routerLink]="['/players', player.id]"
           [class.first]="podiumRank(player) === 1"
           [attr.aria-label]="
-            '查看第 ' + podiumRank(player) + ' 名玩家 ' + player.name
+            '查看第 ' + podiumRank(player) + ' 名玩家 ' + player.name + ' 的详情'
           "
-          (click)="selectPlayer(player.id)"
         >
           <span class="podium-rank">#{{ podiumRank(player) }}</span>
           <span class="podium-portrait">
@@ -54,7 +41,7 @@
             {{ heroDisplayName(playerPerformance(player).topHero) }} ·
             {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
           </span>
-        </button>
+        </a>
         <p *ngIf="podiumPlayers.length === 0" class="ranking-empty">
           当前模式还没有玩家达到 20 局门槛。
         </p>
@@ -144,21 +131,34 @@
                 </span>
               </td>
               <td>
-                <button
-                  class="player-select"
-                  type="button"
-                  [attr.aria-pressed]="selectedPlayerId === player.id"
-                  (click)="selectPlayer(player.id)"
-                >
-                  <span aria-hidden="true">{{ player.initial }}</span>
-                  <span>
-                    <strong>{{ player.name }}</strong>
-                    <small>{{ player.roomLabel }}</small>
-                  </span>
-                </button>
+                <span class="player-cell-actions">
+                  <button
+                    class="player-select"
+                    type="button"
+                    [attr.aria-pressed]="selectedPlayerId === player.id"
+                    (click)="selectPlayer(player.id)"
+                  >
+                    <span aria-hidden="true">{{ player.initial }}</span>
+                    <span>
+                      <strong>{{ player.name }}</strong>
+                      <small>{{ player.roomLabel }}</small>
+                    </span>
+                  </button>
+                  <a
+                    class="row-detail-link"
+                    [routerLink]="['/players', player.id]"
+                    [attr.aria-label]="'查看玩家 ' + player.name + ' 的详情'"
+                    title="查看详情"
+                  >
+                    →
+                  </a>
+                </span>
               </td>
               <td class="optional-column">
-                <span class="hero-chip">
+                <a
+                  class="hero-chip"
+                  [routerLink]="['/heroes', playerPerformance(player).topHero]"
+                >
                   <img
                     [src]="heroImage(playerPerformance(player).topHero)"
                     alt=""
@@ -166,7 +166,7 @@
                   <span>
                     {{ heroDisplayName(playerPerformance(player).topHero) }}
                   </span>
-                </span>
+                </a>
               </td>
               <td>
                 <span class="recent-form" aria-label="近五局战绩">
@@ -245,6 +245,10 @@
         </div>
       </dl>
 
+      <a class="profile-detail-link" [routerLink]="['/players', selected.id]">
+        查看完整玩家档案 →
+      </a>
+
       <section class="mode-breakdown" aria-labelledby="mode-breakdown-title">
         <div class="detail-section-heading">
           <h3 id="mode-breakdown-title">模式构成</h3>
@@ -275,11 +279,13 @@
               trackBy: trackHeroUsage
             "
           >
-            <img [src]="heroImage(hero.name)" alt="" />
-            <span>
-              <strong>{{ heroDisplayName(hero.name) }}</strong>
-              <small>{{ hero.matches }} 局</small>
-            </span>
+            <a class="detail-hero-link" [routerLink]="['/heroes', hero.name]">
+              <img [src]="heroImage(hero.name)" alt="" />
+              <span>
+                <strong>{{ heroDisplayName(hero.name) }}</strong>
+                <small>{{ hero.matches }} 局</small>
+              </span>
+            </a>
             <strong>{{ selectedHeroWinRate(hero) | percent: "1.0-1" }}</strong>
           </li>
         </ol>
@@ -319,7 +325,9 @@
         </span>
         <img class="hero-image" [src]="heroImage(hero.name)" alt="" />
         <div class="hero-name">
-          <strong>{{ heroDisplayName(hero.name) }}</strong>
+          <a [routerLink]="['/heroes', hero.id]">
+            <strong>{{ heroDisplayName(hero.name) }}</strong>
+          </a>
         </div>
         <div class="hero-sample">
           <span>

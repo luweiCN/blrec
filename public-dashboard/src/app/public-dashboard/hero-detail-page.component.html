@@ -1,0 +1,173 @@
+<article class="leaderboard-page profile-page">
+  <nav class="breadcrumbs" aria-label="面包屑">
+    <a routerLink="/">总览</a>
+    <span aria-hidden="true">/</span>
+    <a routerLink="/heroes">英雄排行</a>
+    <span aria-hidden="true">/</span>
+    <span aria-current="page">英雄详情</span>
+  </nav>
+
+  <ng-container *ngIf="hero as profile; else heroNotFound">
+    <header class="profile-heading hero-profile-heading">
+      <div class="profile-player-identity">
+        <img class="profile-hero-image" [src]="heroImage(profile.name)" alt="" />
+        <div>
+          <p>HERO ARCHIVE</p>
+          <h1>{{ identity?.aliases?.[0] || identity?.officialName || profile.name }}</h1>
+          <span>{{ identity?.officialName || profile.name }} · {{ profile.name }}</span>
+        </div>
+      </div>
+      <dl class="identity-meta">
+        <div>
+          <dt>中文名</dt>
+          <dd>{{ identity?.officialName || "暂无中文名" }}</dd>
+        </div>
+        <div>
+          <dt>常用别名</dt>
+          <dd>{{ identity?.aliases?.join(" / ") || "暂无别名" }}</dd>
+        </div>
+      </dl>
+    </header>
+
+    <app-leaderboard-filters
+      [activeSeason]="activeSeason"
+      [seasonOptions]="seasonOptions"
+      (activeSeasonChange)="selectSeason($event)"
+    ></app-leaderboard-filters>
+
+    <section class="profile-summary" aria-label="英雄当前数据">
+      <div class="profile-context">
+        <span>{{ selectedSeason.shortLabel }}</span>
+        <strong>{{ modeLabel() }}</strong>
+        <small>{{ selectedSeason.period }}</small>
+      </div>
+      <dl>
+        <div>
+          <dt>当前排名</dt>
+          <dd>{{ rank === null ? "未入榜" : "#" + rank }}</dd>
+        </div>
+        <div>
+          <dt>对局</dt>
+          <dd>{{ performance.matches }}</dd>
+        </div>
+        <div>
+          <dt>使用玩家</dt>
+          <dd>{{ performance.players }}</dd>
+        </div>
+        <div>
+          <dt>胜率</dt>
+          <dd class="accent">{{ winRate(performance) | percent: "1.0-1" }}</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="profile-card" aria-labelledby="hero-mode-title">
+      <header>
+        <div>
+          <p>MODE PERFORMANCE</p>
+          <h2 id="hero-mode-title">各模式表现</h2>
+        </div>
+        <span>{{ selectedSeason.label }}</span>
+      </header>
+      <ol class="mode-stat-grid">
+        <li *ngFor="let record of modeRecords; trackBy: trackMode">
+          <span>{{ record.label }}</span>
+          <strong>{{ winRate(record.performance) | percent: "1.0-1" }}</strong>
+          <small>
+            {{ record.performance.matches }} 局 · {{ record.performance.wins }} 胜 ·
+            {{ record.performance.players }} 名玩家
+          </small>
+        </li>
+      </ol>
+      <p *ngIf="modeRecords.length === 0" class="profile-empty">
+        该赛季还没有这个英雄的对局记录。
+      </p>
+    </section>
+
+    <section class="profile-card profile-table-card" aria-labelledby="hero-players-title">
+      <header>
+        <div>
+          <p>PLAYER SPECIALISTS</p>
+          <h2 id="hero-players-title">常用该英雄的玩家</h2>
+        </div>
+        <span>{{ selectedSeason.label }} · 玩家英雄池为全部模式</span>
+      </header>
+      <div class="profile-table-wrap">
+        <table>
+          <caption>{{ profile.name }}在{{ selectedSeason.label }}的玩家使用记录</caption>
+          <thead>
+            <tr>
+              <th scope="col">玩家</th>
+              <th scope="col">对局</th>
+              <th scope="col">胜 / 负</th>
+              <th scope="col">胜率</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let record of playerRecords; trackBy: trackPlayer">
+              <td>
+                <a class="profile-player-link" [routerLink]="['/players', record.player.id]">
+                  <span aria-hidden="true">{{ record.player.initial }}</span>
+                  <span>
+                    <strong>{{ record.player.name }}</strong>
+                    <small>{{ record.player.roomLabel }}</small>
+                  </span>
+                </a>
+              </td>
+              <td>{{ record.usage.matches }}</td>
+              <td>{{ record.usage.wins }} / {{ record.usage.matches - record.usage.wins }}</td>
+              <td class="table-rate">{{ winRate(record.usage) | percent: "1.0-1" }}</td>
+            </tr>
+            <tr *ngIf="playerRecords.length === 0">
+              <td colspan="4" class="profile-empty">该赛季暂无玩家英雄池记录。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="profile-card profile-table-card" aria-labelledby="hero-history-title">
+      <header>
+        <div>
+          <p>SEASON HISTORY</p>
+          <h2 id="hero-history-title">赛季记录</h2>
+        </div>
+        <span>{{ modeLabel() }} · 随顶部模式同步</span>
+      </header>
+      <div class="profile-table-wrap">
+        <table>
+          <caption>{{ profile.name }}的跨赛季表现</caption>
+          <thead>
+            <tr>
+              <th scope="col">榜单周期</th>
+              <th scope="col">排名</th>
+              <th scope="col">对局</th>
+              <th scope="col">使用玩家</th>
+              <th scope="col">胜率</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let record of seasonHistory; trackBy: trackSeason">
+              <td><strong>{{ record.season.label }}</strong></td>
+              <td>{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
+              <td>{{ record.performance.matches }}</td>
+              <td>{{ record.performance.players }}</td>
+              <td class="table-rate">{{ winRate(record.performance) | percent: "1.0-1" }}</td>
+            </tr>
+            <tr *ngIf="seasonHistory.length === 0">
+              <td colspan="5" class="profile-empty">当前模式暂无赛季记录。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </ng-container>
+
+  <ng-template #heroNotFound>
+    <section class="profile-not-found" role="alert">
+      <p>HERO NOT FOUND</p>
+      <h1>没有找到这个英雄档案</h1>
+      <a routerLink="/heroes">返回英雄排行 →</a>
+    </section>
+  </ng-template>
+</article>

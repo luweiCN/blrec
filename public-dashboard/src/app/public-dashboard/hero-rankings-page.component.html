@@ -20,10 +20,8 @@
 
   <app-leaderboard-filters
     [activeSeason]="activeSeason"
-    [activeMode]="activeMode"
     [seasonOptions]="seasonOptions"
     (activeSeasonChange)="selectSeason($event)"
-    (activeModeChange)="selectMode($event)"
   ></app-leaderboard-filters>
 
   <section class="directory-panel" aria-labelledby="hero-directory-title">
@@ -77,10 +75,13 @@
               <strong>{{ row.rank.toString().padStart(2, "0") }}</strong>
             </td>
             <td>
-              <span class="directory-hero hero-identity">
+              <a
+                class="directory-hero hero-identity"
+                [routerLink]="['/heroes', row.hero.id]"
+              >
                 <img [src]="heroImage(row.hero.name)" alt="" />
                 <strong>{{ heroDisplayName(row.hero.name) }}</strong>
-              </span>
+              </a>
             </td>
             <td>{{ heroPerformance(row.hero).matches }}</td>
             <td>

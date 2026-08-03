@@ -20,10 +20,8 @@
 
   <app-leaderboard-filters
     [activeSeason]="activeSeason"
-    [activeMode]="activeMode"
     [seasonOptions]="seasonOptions"
     (activeSeasonChange)="selectSeason($event)"
-    (activeModeChange)="selectMode($event)"
   ></app-leaderboard-filters>
 
   <section class="directory-panel" aria-labelledby="player-directory-title">
@@ -91,16 +89,25 @@
               </span>
             </td>
             <td>
-              <span class="directory-player">
+              <a
+                class="directory-player"
+                [routerLink]="['/players', row.player.id]"
+              >
                 <span aria-hidden="true">{{ row.player.initial }}</span>
                 <span>
                   <strong>{{ row.player.name }}</strong>
                   <small>{{ row.player.roomLabel }}</small>
                 </span>
-              </span>
+              </a>
             </td>
             <td>
-              <span class="directory-hero">
+              <a
+                class="directory-hero"
+                [routerLink]="[
+                  '/heroes',
+                  playerPerformance(row.player).topHero
+                ]"
+              >
                 <img
                   [src]="heroImage(playerPerformance(row.player).topHero)"
                   alt=""
@@ -108,7 +115,7 @@
                 <span>
                   {{ heroDisplayName(playerPerformance(row.player).topHero) }}
                 </span>
-              </span>
+              </a>
             </td>
             <td>
               <span class="directory-form" aria-label="近五局战绩">

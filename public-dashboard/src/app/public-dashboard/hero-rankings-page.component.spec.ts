@@ -2,6 +2,7 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import { DASHBOARD_MODE_STORAGE } from './dashboard-mode.service';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
@@ -24,6 +25,10 @@ describe('HeroRankingsPageComponent', () => {
         {
           provide: DashboardDataService,
           useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+        },
+        {
+          provide: DASHBOARD_MODE_STORAGE,
+          useValue: { getItem: () => null, setItem: () => undefined },
         },
       ],
     }).compileComponents();
@@ -65,5 +70,14 @@ describe('HeroRankingsPageComponent', () => {
     );
 
     expect(headers).not.toContain('定位');
+  });
+
+  it('links every visible hero to its detail page', () => {
+    const links = fixture.nativeElement.querySelectorAll(
+      '.hero-identity[href]',
+    ) as NodeListOf<HTMLAnchorElement>;
+
+    expect(links.length).toBe(component.visibleRows.length);
+    expect(links[0].href).toContain('/heroes/');
   });
 });

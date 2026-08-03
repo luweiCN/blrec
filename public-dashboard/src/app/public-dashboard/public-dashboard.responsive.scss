@@ -86,6 +86,10 @@
     margin-bottom: 32px;
   }
 
+  .player-detail {
+    display: none;
+  }
+
   .section-heading {
     align-items: flex-start;
     padding: 22px 20px 18px;
@@ -142,16 +146,6 @@
   .hero-intro {
     margin: 20px 0 24px;
     line-height: 1.7;
-  }
-
-  .mode-picker {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    width: 100%;
-
-    button {
-      padding: 0 12px;
-    }
   }
 
   .podium-panel {
@@ -256,16 +250,6 @@
 
     small {
       display: none;
-    }
-  }
-
-  .player-detail {
-    padding: 20px;
-  }
-
-  .detail-record {
-    div + div {
-      padding-left: 10px;
     }
   }
 
