@@ -43,9 +43,14 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('排位通常全天都有机会匹配到人');
     expect(page.textContent).toContain('5V5 内战');
     expect(page.textContent).toContain('需要路人补位');
+    expect(page.textContent).toContain('低于 1600');
+    expect(page.textContent).toContain('高于 1600');
+    expect(page.textContent).toContain('征召 BP');
+    expect(page.textContent).toContain('两条线各管一件事');
     expect(page.textContent).toContain('使用低于 3000 的数字');
     expect(page.textContent).toContain('使用高于 3000 的数字');
     expect(page.textContent).toContain('点首页右上角的玩家名或 Guest');
+    expect(page.textContent).toContain('1200-1_各自昵称');
     expect(page.textContent).toContain('2000-1_各自昵称');
     expect(page.textContent).toContain('6666-1_小明');
     expect(page.textContent).toContain('6666-2_小王');

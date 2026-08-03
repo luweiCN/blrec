@@ -255,22 +255,39 @@
         <div class="key-statement">
           <strong>组队码不是一个单独的输入框，而是写在每个人游戏昵称前面的数字。</strong>
           <p>
-            这个数字会被当作过去的排位分参与匹配：低于 3000 仍会进入普通玩家的匹配范围，高于 3000 则几乎没有路人。加上 <code>-1</code> 或 <code>-2</code> 后，还可以指定进入地图的哪一边。
+            这个数字会被当作过去的排位分参与匹配，同时决定选人界面和匹配范围。加上 <code>-1</code> 或 <code>-2</code> 后，还可以指定进入地图的哪一边。
           </p>
         </div>
 
+        <h3 class="subsection-title party-code-heading">先看 1600：决定选人界面</h3>
+        <div class="rule-lines party-code-thresholds" aria-label="组队码选人界面阈值">
+          <div>
+            <strong>低于 1600 · 盲选</strong>
+            <p>不会进入征召流程，直接使用盲选英雄界面。</p>
+          </div>
+          <div>
+            <strong>高于 1600 · 征召 BP</strong>
+            <p>进入带 Ban / Pick 流程的征召选人界面。</p>
+          </div>
+        </div>
+        <p class="party-code-threshold-note">
+          <strong>两条线各管一件事：</strong>1600 决定盲选还是征召 BP，3000 决定能否由路人补齐空位。
+        </p>
+
+        <h3 class="subsection-title">再看 3000：决定是否匹配路人</h3>
         <div class="party-code-modes">
           <section>
             <span>日常组队 · 需要路人补位</span>
             <strong>使用低于 3000 的数字</strong>
-            <code>2000-1_各自昵称</code>
+            <code>1200-1_各自昵称 · 盲选</code>
+            <code>2000-1_各自昵称 · 征召 BP</code>
             <p>例如两位朋友想排 3V3 并在同一边，就使用同一个低于 3000 的数字；系统再匹配一名队友和三名对手。</p>
           </section>
           <section>
             <span>满员内战 · 不要匹配路人</span>
             <strong>使用高于 3000 的数字</strong>
             <code>6666-1_各自昵称</code>
-            <p>只有已经凑齐 3V3 六人或 5V5 十人时才这样做。人数不满时，队列里几乎没有路人可以补位。</p>
+            <p>只有已经凑齐 3V3 六人或 5V5 十人时才这样做。人数不满时，队列里几乎没有路人可以补位；高于 3000 也一定会进入征召 BP。</p>
           </section>
         </div>
 
@@ -278,15 +295,15 @@
           <li>
             <span>1</span>
             <div>
-              <strong>先决定要不要匹配路人</strong>
-              <p>队伍没有凑满、还要系统补人，就选低于 3000；只打满员内战、不想遇到路人，才选高于 3000。</p>
+              <strong>先决定选人界面和是否需要路人</strong>
+              <p>盲选并补路人用低于 1600；征召 BP 并补路人用高于 1600、低于 3000；满员内战则用高于 3000。</p>
             </div>
           </li>
           <li>
             <span>2</span>
             <div>
               <strong>选一个最多四位的数字并约定分边</strong>
-              <p>补路人可以用 <code>2000</code>，满员内战可以用 <code>6666</code>。同一时间尽量使用群里临时约定的码，降低与其他队伍撞码的概率。</p>
+              <p>盲选补路人可以用 <code>1200</code>，征召 BP 补路人可以用 <code>2000</code>，满员内战可以用 <code>6666</code>。同一时间尽量使用群里临时约定的码，降低与其他队伍撞码的概率。</p>
             </div>
           </li>
           <li>
@@ -377,6 +394,10 @@
           <details>
             <summary>为什么 5V5 一个人排不到？</summary>
             <p>目前两个亚洲地区的 5V5 都主要依靠社区内战。先去群里凑齐十人，再统一使用组队码，不建议持续盲排。</p>
+          </details>
+          <details>
+            <summary>为什么这次是盲选，上次却进入了征召 BP？</summary>
+            <p>检查昵称前面的数字：低于 1600 会进入盲选，高于 1600 会进入征召 BP。1600 只控制选人界面，是否匹配路人还要继续看 3000 这条线。</p>
           </details>
           <details>
             <summary>组队码正确，为什么仍然没有进同一局？</summary>

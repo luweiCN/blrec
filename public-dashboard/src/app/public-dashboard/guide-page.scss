@@ -817,6 +817,31 @@ app-download-guide-page {
   }
 }
 
+.party-code-heading {
+  margin-top: 0;
+}
+
+.party-code-thresholds {
+  margin-top: 18px;
+
+  & > div:first-child strong {
+    color: var(--cyan);
+  }
+
+  & > div:last-child strong {
+    color: var(--gold);
+  }
+}
+
+.party-code-threshold-note {
+  margin: 14px 0 0;
+  font-size: 0.7rem;
+
+  strong {
+    color: var(--ink-soft);
+  }
+}
+
 .region-grid > section {
   padding: 22px;
   border: 1px solid var(--line);
