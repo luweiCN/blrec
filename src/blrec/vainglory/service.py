@@ -76,7 +76,6 @@ class VaingloryIndexService:
             return
         await self._repository.purge_excluded_content()
         await self._repository.recover_interrupted()
-        await self._repository.invalidate_outdated_results()
         await self._repository.apply_builtin_hero_labels()
         await self._repository.consolidate_hero_catalog()
         references = load_hero_references()
