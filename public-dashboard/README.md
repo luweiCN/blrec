@@ -23,3 +23,8 @@ npm run build
 ```
 
 生产构建位于 `dist/`，其中已包含当次构建使用的 `/data/` 快照。部署时将该目录上传到阿里云 OSS；日常数据发布只替换 `/data/manifest.json` 并新增不可变快照，无需重新发布站点代码。
+
+`vg.luwei.host` 的 HTTPS 使用现有 Nginx UI 签发的 `*.luwei.host` 通配符
+证书。`deploy/aliyun/` 中的服务器定时任务会在证书续期后自动、幂等地同步
+到阿里云 CDN，HTTP 请求由 CDN 使用 301 跳转到 HTTPS；站点发布和 NAS
+数据发布都不接触证书私钥。

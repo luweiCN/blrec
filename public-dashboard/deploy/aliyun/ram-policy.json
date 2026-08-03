@@ -1,0 +1,15 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cdn:BatchSetCdnDomainConfig",
+        "cdn:DescribeCdnDomainConfigs",
+        "cdn:DescribeDomainCertificateInfo",
+        "cdn:SetCdnDomainSSLCertificate"
+      ],
+      "Resource": "acs:cdn:*:*:domain/vg.luwei.host"
+    }
+  ]
+}

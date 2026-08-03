@@ -1,0 +1,27 @@
+[Unit]
+Description=Synchronize the Nginx UI certificate to Alibaba Cloud CDN
+After=network-online.target nginx-ui.service
+Wants=network-online.target
+ConditionPathExists=/etc/nginx/ssl/*.luwei.host_luwei.host_2048/fullchain.cer
+ConditionPathExists=/etc/nginx/ssl/*.luwei.host_luwei.host_2048/private.key
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/blrec-dashboard/aliyun-cdn.env
+ExecStartPre=/usr/bin/chmod 0600 /etc/nginx/ssl/*.luwei.host_luwei.host_2048/private.key
+ExecStart=/opt/blrec-dashboard-cdn-sync/venv/bin/python /opt/blrec-dashboard-cdn-sync/sync_cdn_certificate.py --domain vg.luwei.host --certificate /etc/nginx/ssl/*.luwei.host_luwei.host_2048/fullchain.cer --private-key /etc/nginx/ssl/*.luwei.host_luwei.host_2048/private.key
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/nginx/ssl/*.luwei.host_luwei.host_2048/private.key
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitCORE=0
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target
