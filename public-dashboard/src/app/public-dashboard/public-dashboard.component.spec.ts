@@ -10,6 +10,8 @@ import { PlayerAvatarComponent } from './player-avatar.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
+import { SiteStatsComponent } from './site-stats.component';
+import { SiteStatsService } from './site-stats.service';
 
 describe('PublicDashboardComponent', () => {
   let fixture: ComponentFixture<PublicDashboardComponent>;
@@ -18,7 +20,11 @@ describe('PublicDashboardComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [PublicDashboardComponent, PlayerAvatarComponent],
+      declarations: [
+        PublicDashboardComponent,
+        PlayerAvatarComponent,
+        SiteStatsComponent,
+      ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
         {
@@ -28,6 +34,10 @@ describe('PublicDashboardComponent', () => {
         {
           provide: DASHBOARD_MODE_STORAGE,
           useValue: { getItem: () => null, setItem: () => undefined },
+        },
+        {
+          provide: SiteStatsService,
+          useValue: { load: () => Promise.resolve({ kind: 'unavailable' }) },
         },
       ],
     }).compileComponents();

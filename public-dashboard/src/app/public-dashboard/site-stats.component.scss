@@ -1,0 +1,147 @@
+:host {
+  display: block;
+  width: min(100% - 64px, 1240px);
+  margin: 16px auto 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.site-pulse {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+  min-height: 104px;
+  padding: 17px 24px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, oklch(79% 0.13 204 / 0.055), transparent 35%),
+    var(--surface-1);
+
+  & > header {
+    display: grid;
+    gap: 8px;
+
+    p,
+    h2 {
+      margin: 0;
+    }
+
+    & > div > p {
+      color: var(--cyan);
+      font-size: 0.62rem;
+      font-weight: 800;
+      letter-spacing: 0.13em;
+    }
+
+    h2 {
+      margin-top: 5px;
+      color: var(--ink);
+      font-size: 0.88rem;
+      letter-spacing: 0.02em;
+    }
+  }
+}
+
+.stats-updated {
+  color: var(--ink-muted);
+  font-size: 0.58rem;
+  line-height: 1.5;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+
+  div {
+    min-width: 0;
+    padding: 2px 26px;
+    border-left: 1px solid var(--line-soft);
+  }
+}
+
+dt,
+small {
+  color: var(--ink-muted);
+  font-size: 0.62rem;
+}
+
+dd {
+  margin: 4px 0 2px;
+  color: var(--ink);
+  font-size: 1.25rem;
+  font-weight: 730;
+  letter-spacing: -0.025em;
+}
+
+small {
+  display: block;
+  font-size: 0.56rem;
+}
+
+.stats-status {
+  margin: 0;
+  padding-left: 26px;
+  border-left: 1px solid var(--line-soft);
+  color: var(--ink-muted);
+  font-size: 0.76rem;
+}
+
+@media (max-width: 760px) {
+  :host {
+    width: min(100% - 32px, 1240px);
+  }
+
+  .site-pulse {
+    grid-template-columns: 1fr;
+    gap: 15px;
+    padding: 18px 16px 14px;
+
+    & > header {
+      display: flex;
+      gap: 16px;
+      align-items: flex-end;
+      justify-content: space-between;
+    }
+  }
+
+  .stats-updated {
+    text-align: right;
+  }
+
+  dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    div {
+      padding: 12px 18px;
+    }
+
+    div:nth-child(odd) {
+      border-left: 0;
+    }
+
+    div:nth-child(n + 3) {
+      border-top: 1px solid var(--line-soft);
+    }
+  }
+
+  .stats-status {
+    padding: 16px 0 4px;
+    border-top: 1px solid var(--line-soft);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .site-pulse > header {
+    display: grid;
+  }
+
+  .stats-updated {
+    text-align: left;
+  }
+}

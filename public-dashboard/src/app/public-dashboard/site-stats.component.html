@@ -1,0 +1,53 @@
+<section
+  class="site-pulse"
+  aria-labelledby="site-pulse-title"
+  [attr.aria-busy]="state.kind === 'loading'"
+>
+  <header>
+    <div>
+      <p>SITE PULSE</p>
+      <h2 id="site-pulse-title">站点热度</h2>
+    </div>
+    <p *ngIf="stats as currentStats" class="stats-updated">
+      约每 5 分钟更新 ·
+      <time [attr.datetime]="currentStats.generatedAt">
+        {{ generatedAtLabel }}
+      </time>
+    </p>
+  </header>
+
+  <ng-container *ngIf="stats as currentStats; else statsStatus">
+    <dl>
+      <div>
+        <dt>今日访客</dt>
+        <dd>{{ currentStats.today.visitors | number }}</dd>
+        <small>匿名浏览器</small>
+      </div>
+      <div>
+        <dt>今日浏览</dt>
+        <dd>{{ currentStats.today.pageViews | number }}</dd>
+        <small>页面访问</small>
+      </div>
+      <div>
+        <dt>近 5 分钟活跃</dt>
+        <dd>{{ currentStats.activeVisitors | number }}</dd>
+        <small>近似统计</small>
+      </div>
+      <div>
+        <dt>累计浏览</dt>
+        <dd>{{ currentStats.totalPageViews | number }}</dd>
+        <small>自统计启用起</small>
+      </div>
+    </dl>
+  </ng-container>
+
+  <ng-template #statsStatus>
+    <p class="stats-status" role="status">
+      {{
+        state.kind === "loading"
+          ? "访问统计正在载入"
+          : "访问统计正在初始化，请稍后再看"
+      }}
+    </p>
+  </ng-template>
+</section>

@@ -29,6 +29,11 @@
             "assets": [
               "src/favicon.ico",
               {
+                "glob": "**/*",
+                "input": "src/assets/analytics",
+                "output": "/analytics/"
+              },
+              {
                 "glob": "*.jpg",
                 "input": "../src/blrec/data/vainglory/heroes",
                 "output": "/assets/vainglory/heroes/"
@@ -97,6 +102,11 @@
             "inlineStyleLanguage": "scss",
             "assets": [
               "src/favicon.ico",
+              {
+                "glob": "**/*",
+                "input": "src/assets/analytics",
+                "output": "/analytics/"
+              },
               {
                 "glob": "*.jpg",
                 "input": "../src/blrec/data/vainglory/heroes",

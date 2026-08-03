@@ -15,6 +15,7 @@ import { PublicDashboardRoutingModule } from './public-dashboard-routing.module'
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
 import { RankingGuidePageComponent } from './ranking-guide-page.component';
+import { SiteStatsComponent } from './site-stats.component';
 
 @NgModule({
   declarations: [
@@ -31,6 +32,7 @@ import { RankingGuidePageComponent } from './ranking-guide-page.component';
     RankingGuidePageComponent,
     PlayGuidePageComponent,
     DownloadGuidePageComponent,
+    SiteStatsComponent,
   ],
   imports: [CommonModule, PublicDashboardRoutingModule],
 })

@@ -1,0 +1,26 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "cdn:DescribeDomainRealtimeLogDelivery",
+      "Resource": "acs:cdn:*:*:domain/vg.luwei.host"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "log:GetLogStoreLogs",
+      "Resource": "acs:log:REPLACE_REGION:*:project/REPLACE_PROJECT/logstore/REPLACE_LOGSTORE"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject"
+      ],
+      "Resource": [
+        "acs:oss:*:*:luwei-vainglory/data/site-stats.json",
+        "acs:oss:*:*:luwei-vainglory/data/site-stats-history.json"
+      ]
+    }
+  ]
+}

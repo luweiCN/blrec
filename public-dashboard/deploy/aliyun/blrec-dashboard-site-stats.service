@@ -1,0 +1,23 @@
+[Unit]
+Description=Publish anonymized public dashboard visit statistics
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/blrec-dashboard/site-stats.env
+ExecStart=/opt/blrec-dashboard-site-stats/venv/bin/python /opt/blrec-dashboard-site-stats/publish_site_stats.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitCORE=0
+TimeoutStartSec=3min
+
+[Install]
+WantedBy=multi-user.target

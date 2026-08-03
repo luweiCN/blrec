@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh public dashboard visit statistics every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=20s
+AccuracySec=20s
+Unit=blrec-dashboard-site-stats.service
+
+[Install]
+WantedBy=timers.target

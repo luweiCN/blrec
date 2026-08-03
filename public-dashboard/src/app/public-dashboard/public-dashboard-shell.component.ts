@@ -1,9 +1,15 @@
-import { ChangeDetectionStrategy, Component } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  OnInit,
+} from '@angular/core';
 import { Router } from '@angular/router';
 
 import { seasonOption } from './public-dashboard.data';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { DashboardModeService } from './dashboard-mode.service';
+import { SiteAnalyticsService } from './site-analytics.service';
 
 @Component({
   selector: 'app-public-dashboard-shell',
@@ -11,12 +17,21 @@ import { DashboardModeService } from './dashboard-mode.service';
   styleUrls: ['./public-dashboard-shell.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class PublicDashboardShellComponent {
+export class PublicDashboardShellComponent implements OnInit, OnDestroy {
   constructor(
     readonly data: DashboardDataService,
     readonly dashboardMode: DashboardModeService,
     private readonly router: Router,
+    private readonly siteAnalytics: SiteAnalyticsService,
   ) {}
+
+  ngOnInit(): void {
+    this.siteAnalytics.start();
+  }
+
+  ngOnDestroy(): void {
+    this.siteAnalytics.stop();
+  }
 
   get isGameGuideActive(): boolean {
     return (

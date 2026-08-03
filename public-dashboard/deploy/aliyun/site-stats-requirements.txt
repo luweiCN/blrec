@@ -1,0 +1,2 @@
+aliyun-log-python-sdk==0.9.48
+oss2==2.19.1
