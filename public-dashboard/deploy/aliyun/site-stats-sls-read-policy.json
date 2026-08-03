@@ -1,0 +1,10 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "log:GetLogStoreLogs",
+      "Resource": "acs:log:cn-beijing:*:project/vainglory/logstore/vainglory-dashboard"
+    }
+  ]
+}

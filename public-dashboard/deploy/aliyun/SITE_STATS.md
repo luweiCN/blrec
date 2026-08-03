@@ -12,9 +12,9 @@ CDN 将这些请求投递到 SLS；服务器每五分钟执行一次
 
 ## RAM 最小权限
 
-复制 `site-stats-ram-policy.template.json`，将 `REPLACE_REGION`、
-`REPLACE_PROJECT` 和 `REPLACE_LOGSTORE` 替换为 CDN 实时日志页面中的实际值，
-再把策略附加到站点发布 RAM 用户。浏览器和公开 JSON 中都不得出现 AccessKey。
+把 `site-stats-sls-read-policy.json` 附加到站点发布 RAM 用户。策略只允许
+执行 `log:GetLogStoreLogs`，且资源被限定为北京区域 `vainglory` Project 下的
+`vainglory-dashboard` Logstore。浏览器和公开 JSON 中都不得出现 AccessKey。
 
 ## 服务器安装
 
