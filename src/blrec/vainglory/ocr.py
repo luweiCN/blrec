@@ -29,6 +29,7 @@ _PLAYER_NAME_KDA_SUFFIX_PATTERN = re.compile(
     r'(?<!\d)\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{1,2}\s*$'
 )
 _KDA_MISSING_SLASH_PATTERN = re.compile(r'(?<!\d)(\d{1,2})\s*/\s*(\d{3,5})(?!\d)')
+_HEADER_NUMERIC_TOKEN_PATTERN = re.compile(r'(?<!\w)[0-9OoBbQq]+(?!\w)')
 _NUMERIC_TRANSLATION = {
     ord('I'): '1',
     ord('l'): '1',
@@ -112,6 +113,7 @@ class TesseractResultReader:
     _REFERENCE_WIDTH = 1920
     _REFERENCE_HEIGHT = 1080
     _ROW_Y = (330, 464, 598)
+    _FIVE_PLAYER_ROW_Y = (205, 339, 473, 607, 741)
     _SIDE_X = (('left', 210), ('right', 1110))
 
     def __init__(
@@ -148,6 +150,7 @@ class TesseractResultReader:
         header: Optional[ResultHeader] = None,
         viewport: ViewportTransform = STANDARD_VIEWPORT,
         name_frames: Sequence[RgbFrame] = (),
+        team_size: int = 3,
     ) -> ResultOcr:
         return self._read_result(
             frame,
@@ -155,6 +158,7 @@ class TesseractResultReader:
             wide_screenshot=False,
             viewport=viewport,
             name_frames=name_frames,
+            team_size=team_size,
         )
 
     def read_wide_screenshot(
@@ -164,6 +168,7 @@ class TesseractResultReader:
         header: Optional[ResultHeader] = None,
         viewport: ViewportTransform = STANDARD_VIEWPORT,
         name_frames: Sequence[RgbFrame] = (),
+        team_size: int = 3,
     ) -> ResultOcr:
         return self._read_result(
             frame,
@@ -171,6 +176,7 @@ class TesseractResultReader:
             wide_screenshot=True,
             viewport=viewport,
             name_frames=name_frames,
+            team_size=team_size,
         )
 
     def _read_result(
@@ -181,19 +187,59 @@ class TesseractResultReader:
         wide_screenshot: bool,
         viewport: ViewportTransform,
         name_frames: Sequence[RgbFrame],
+        team_size: int,
     ) -> ResultOcr:
+        if team_size not in (3, 5):
+            raise ValueError('team size must be 3 or 5')
         if header is None:
-            header = self.read_header(frame, viewport=viewport)
+            header = self.read_header(frame, viewport=viewport, team_size=team_size)
 
         raw_players: List[Tuple[str, int, str, float]] = []
         stats_candidates: List[List[PlayerStats]] = []
         stats_frames: List[RgbFrame] = []
         kda_frames: List[RgbFrame] = []
+        row_y = self._FIVE_PLAYER_ROW_Y if team_size == 5 else self._ROW_Y
         for side_index, (side, x) in enumerate(self._SIDE_X):
-            for slot, y in enumerate(self._ROW_Y, 1):
+            for slot, y in enumerate(row_y, 1):
                 name_thresholds: Tuple[Optional[int], ...]
                 stats_thresholds: Tuple[Optional[int], ...]
-                if wide_screenshot:
+                if team_size == 5:
+                    name_left, name_right = ((40, 330), (1150, 1450))[side_index]
+                    stats_left, stats_right = ((300, 720), (1410, 1810))[side_index]
+                    kda_left, kda_right = ((300, 560), (1410, 1660))[side_index]
+                    name_frame = self._crop_reference(
+                        frame,
+                        PixelRect(name_left, y, name_right, y + 64),
+                        (name_right - name_left) * 3,
+                        192,
+                        viewport=viewport,
+                    )
+                    stats_frame = self._crop_reference(
+                        frame,
+                        PixelRect(stats_left, y, stats_right, y + 64),
+                        (stats_right - stats_left) * 3,
+                        192,
+                        viewport=viewport,
+                    )
+                    kda_frames.append(
+                        self._crop_reference(
+                            frame,
+                            PixelRect(kda_left, y, kda_right, y + 64),
+                            (kda_right - kda_left) * 4,
+                            256,
+                            viewport=viewport,
+                        )
+                    )
+                    name_thresholds = (None, 55, 70, 85)
+                    name_psm = 6
+                    stats_thresholds = (None, 70, 110)
+                    stats_psm = 6
+                    extra_name_left, extra_name_right = name_left, name_right
+                    extra_name_width, extra_name_height = (
+                        (name_right - name_left) * 3,
+                        192,
+                    )
+                elif wide_screenshot:
                     name_left, name_right = ((100, 480), (1080, 1350))[side_index]
                     stats_left, stats_right = ((360, 750), (1300, 1630))[side_index]
                     kda_left, kda_right = ((360, 625), (1300, 1505))[side_index]
@@ -224,6 +270,11 @@ class TesseractResultReader:
                     name_psm = 6
                     stats_thresholds = (None, 70, 110)
                     stats_psm = 6
+                    extra_name_left, extra_name_right = name_left, name_right
+                    extra_name_width, extra_name_height = (
+                        (name_right - name_left) * 3,
+                        192,
+                    )
                 else:
                     name_frame = self._crop_reference(
                         frame,
@@ -244,6 +295,8 @@ class TesseractResultReader:
                     name_psm = 7
                     stats_thresholds = (60, 80, 110)
                     stats_psm = 7
+                    extra_name_left, extra_name_right = x, x + 240
+                    extra_name_width, extra_name_height = 480, 128
                 rapid_candidates: Tuple[_OcrText, ...] = ()
                 if self._name_reader is not None:
                     try:
@@ -255,21 +308,10 @@ class TesseractResultReader:
                                     self._crop_reference(
                                         extra,
                                         PixelRect(
-                                            name_left if wide_screenshot else x,
-                                            y,
-                                            (
-                                                name_right
-                                                if wide_screenshot
-                                                else x + 240
-                                            ),
-                                            y + 64,
+                                            extra_name_left, y, extra_name_right, y + 64
                                         ),
-                                        (
-                                            (name_right - name_left) * 3
-                                            if wide_screenshot
-                                            else 480
-                                        ),
-                                        192 if wide_screenshot else 128,
+                                        extra_name_width,
+                                        extra_name_height,
                                         viewport=viewport,
                                     )
                                     for extra in name_frames
@@ -386,10 +428,22 @@ class TesseractResultReader:
         return ResultOcr(header=header, players=tuple(players))
 
     def read_header(
-        self, frame: RgbFrame, *, viewport: ViewportTransform = STANDARD_VIEWPORT
+        self,
+        frame: RgbFrame,
+        *,
+        viewport: ViewportTransform = STANDARD_VIEWPORT,
+        team_size: int = 3,
     ) -> ResultHeader:
+        if team_size == 5:
+            header_rect = PixelRect(350, 100, 1570, 235)
+            output_width, output_height = 1220, 135
+        elif team_size == 3:
+            header_rect = PixelRect(570, 240, 1350, 344)
+            output_width, output_height = 780, 104
+        else:
+            raise ValueError('team size must be 3 or 5')
         header_frame = self._crop_reference(
-            frame, PixelRect(570, 240, 1350, 344), 780, 104, viewport=viewport
+            frame, header_rect, output_width, output_height, viewport=viewport
         )
         header_candidates = tuple(
             (parse_result_header(value.text), value.confidence)
@@ -483,6 +537,19 @@ class TesseractResultReader:
 
 def parse_result_header(text: str) -> ResultHeader:
     normalized = _normalize_numeric_ocr(text)
+    normalized = _HEADER_NUMERIC_TOKEN_PATTERN.sub(
+        lambda match: match.group(0).translate(
+            {
+                ord('O'): '0',
+                ord('o'): '0',
+                ord('B'): '8',
+                ord('b'): '8',
+                ord('Q'): '9',
+                ord('q'): '9',
+            }
+        ),
+        normalized,
+    )
     result_match = _RESULT_PATTERN.search(normalized)
     result_text = '' if result_match is None else result_match.group(0)
     duration_match = _DURATION_PATTERN.search(normalized)
@@ -565,12 +632,16 @@ def resolve_player_stats(
     *,
     header: Optional[ResultHeader] = None,
 ) -> Tuple[PlayerStats, ...]:
-    if len(candidates) != 6:
-        raise ValueError('exactly six player rows are required')
+    if len(candidates) not in (6, 10):
+        raise ValueError('exactly six or ten player rows are required')
     if any(not row for row in candidates):
         raise ValueError('each player row requires at least one OCR candidate')
 
-    choices = [_kda_choices(row) for row in candidates]
+    team_size = len(candidates) // 2
+    choices = [
+        _kda_choices(row)[:3] if team_size == 5 else _kda_choices(row)
+        for row in candidates
+    ]
     best = min(
         product(*choices), key=lambda values: _score_kda(values, choices, header=header)
     )
@@ -684,11 +755,11 @@ def merge_result_headers(
         tuple((item.duration_seconds, confidence) for item, confidence in candidates),
         None,
     )
-    left_kills = _choose_candidate_value(
-        tuple((item.left_kills, confidence) for item, confidence in candidates), None
+    left_kills = _choose_kill_value(
+        tuple((item.left_kills, confidence) for item, confidence in candidates)
     )
-    right_kills = _choose_candidate_value(
-        tuple((item.right_kills, confidence) for item, confidence in candidates), None
+    right_kills = _choose_kill_value(
+        tuple((item.right_kills, confidence) for item, confidence in candidates)
     )
     left_economy = _choose_candidate_value(
         tuple(
@@ -747,6 +818,26 @@ def _choose_candidate_value(
     )
 
 
+def _choose_kill_value(values: Sequence[Tuple[Optional[int], float]]) -> Optional[int]:
+    present = [
+        (value, confidence)
+        for value, confidence in values
+        if value is not None and 0 <= value <= 99
+    ]
+    if not present:
+        return None
+    counts = Counter(value for value, _ in present)
+    first_index: Dict[int, int] = {}
+    confidence_sums: Dict[int, float] = {}
+    for index, (value, confidence) in enumerate(present):
+        first_index.setdefault(value, index)
+        confidence_sums[value] = confidence_sums.get(value, 0.0) + confidence
+    return max(
+        counts,
+        key=lambda value: (counts[value], -first_index[value], confidence_sums[value]),
+    )
+
+
 def _select_player_name(candidates: Sequence[_OcrText]) -> Tuple[str, float]:
     present = [
         (clean_player_name(candidate.text), candidate.confidence)
@@ -797,10 +888,19 @@ def _stats_agreement(selected: PlayerStats, candidates: Sequence[PlayerStats]) -
 def _header_with_resolved_team_totals(
     header: ResultHeader, players: Sequence[PlayerStats]
 ) -> ResultHeader:
-    left = players[:3]
-    right = players[3:]
-    left_kills = _sum_complete(left, 'kills')
-    right_kills = _sum_complete(right, 'kills')
+    team_size = len(players) // 2
+    left = players[:team_size]
+    right = players[team_size:]
+    left_kills = (
+        header.left_kills
+        if header.left_kills is not None
+        else _sum_complete(left, 'kills')
+    )
+    right_kills = (
+        header.right_kills
+        if header.right_kills is not None
+        else _sum_complete(right, 'kills')
+    )
     left_economy = _prefer_close_total(
         header.left_economy, _sum_complete(left, 'economy')
     )
@@ -877,8 +977,9 @@ def _score_kda(
         if kills is None or deaths is None or assists is None:
             continue
         complete.append((kills, deaths, assists))
-    left = complete[:3]
-    right = complete[3:]
+    team_size = len(values) // 2
+    left = complete[:team_size]
+    right = complete[team_size:]
     left_kills = sum(value[0] for value in left)
     right_kills = sum(value[0] for value in right)
     mismatch = max(0, abs(left_kills - sum(value[1] for value in right)) - 1)
@@ -901,10 +1002,12 @@ def _validate_player_stats(
     if header is None:
         return tuple(players)
     validated = list(players)
-    for start, expected_kills in ((0, header.left_kills), (3, header.right_kills)):
+    team_size = len(players) // 2
+    teams = ((0, header.left_kills), (team_size, header.right_kills))
+    for start, expected_kills in teams:
         if expected_kills is None:
             continue
-        indexes = tuple(range(start, start + 3))
+        indexes = tuple(range(start, start + team_size))
         values = [validated[index].kills for index in indexes]
         if (
             all(value is not None for value in values)
@@ -913,10 +1016,13 @@ def _validate_player_stats(
         ):
             for index in indexes:
                 validated[index] = replace(validated[index], kills=None)
-    for start, opposing_kills in ((0, header.right_kills), (3, header.left_kills)):
+    for start, opposing_kills in (
+        (0, header.right_kills),
+        (team_size, header.left_kills),
+    ):
         if opposing_kills is None:
             continue
-        indexes = tuple(range(start, start + 3))
+        indexes = tuple(range(start, start + team_size))
         values = [validated[index].deaths for index in indexes]
         if (
             all(value is not None for value in values)
@@ -928,10 +1034,10 @@ def _validate_player_stats(
         ):
             for index in indexes:
                 validated[index] = replace(validated[index], deaths=None)
-    for start, expected_kills in ((0, header.left_kills), (3, header.right_kills)):
+    for start, expected_kills in teams:
         if expected_kills is None:
             continue
-        for index in range(start, start + 3):
+        for index in range(start, start + team_size):
             stats = validated[index]
             if stats.assists is not None and (
                 stats.assists > expected_kills
@@ -941,10 +1047,13 @@ def _validate_player_stats(
                 )
             ):
                 validated[index] = replace(stats, assists=None)
-    for start, team_economy in ((0, header.left_economy), (3, header.right_economy)):
+    for start, team_economy in (
+        (0, header.left_economy),
+        (team_size, header.right_economy),
+    ):
         if team_economy is None:
             continue
-        indexes = tuple(range(start, start + 3))
+        indexes = tuple(range(start, start + team_size))
         economies = [validated[index].economy for index in indexes]
         if (
             any(value is None for value in economies)
@@ -968,7 +1077,9 @@ def _has_complete_kda(stats: PlayerStats) -> bool:
 
 
 def _assist_overflow(team: Sequence[Tuple[int, int, int]], team_kills: int) -> int:
-    overflow = max(0, sum(value[2] for value in team) - team_kills * 2)
+    overflow = max(
+        0, sum(value[2] for value in team) - team_kills * max(0, len(team) - 1)
+    )
     for kills, _, assists in team:
         overflow += max(0, assists - max(0, team_kills - kills))
     return overflow

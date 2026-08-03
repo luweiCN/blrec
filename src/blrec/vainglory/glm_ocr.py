@@ -205,9 +205,13 @@ class GlmOcrResultReader:
         self._maximum_remote_frames = maximum_remote_frames
 
     def read_header(
-        self, frame: RgbFrame, *, viewport: ViewportTransform = STANDARD_VIEWPORT
+        self,
+        frame: RgbFrame,
+        *,
+        viewport: ViewportTransform = STANDARD_VIEWPORT,
+        team_size: int = 3,
     ) -> ResultHeader:
-        return self._fallback.read_header(frame, viewport=viewport)
+        return self._fallback.read_header(frame, viewport=viewport, team_size=team_size)
 
     def read(
         self,
@@ -216,6 +220,7 @@ class GlmOcrResultReader:
         header: Optional[ResultHeader] = None,
         viewport: ViewportTransform = STANDARD_VIEWPORT,
         name_frames: Sequence[RgbFrame] = (),
+        team_size: int = 3,
     ) -> ResultOcr:
         return self._read_result(
             frame,
@@ -223,6 +228,7 @@ class GlmOcrResultReader:
             viewport=viewport,
             name_frames=name_frames,
             wide_screenshot=False,
+            team_size=team_size,
         )
 
     def read_wide_screenshot(
@@ -232,6 +238,7 @@ class GlmOcrResultReader:
         header: Optional[ResultHeader] = None,
         viewport: ViewportTransform = STANDARD_VIEWPORT,
         name_frames: Sequence[RgbFrame] = (),
+        team_size: int = 3,
     ) -> ResultOcr:
         return self._read_result(
             frame,
@@ -239,6 +246,7 @@ class GlmOcrResultReader:
             viewport=viewport,
             name_frames=name_frames,
             wide_screenshot=True,
+            team_size=team_size,
         )
 
     def _read_result(
@@ -249,18 +257,25 @@ class GlmOcrResultReader:
         viewport: ViewportTransform,
         name_frames: Sequence[RgbFrame],
         wide_screenshot: bool,
+        team_size: int,
     ) -> ResultOcr:
-        local_header = header or self.read_header(frame, viewport=viewport)
+        local_header = header or self.read_header(
+            frame, viewport=viewport, team_size=team_size
+        )
         remote_results: List[ResultOcr] = []
         candidates = (frame, *name_frames)[: self._maximum_remote_frames]
         for index, candidate in enumerate(candidates, 1):
             try:
-                remote = parse_glm_result(self._client.recognize(candidate).text)
+                remote = parse_glm_result(
+                    self._client.recognize(candidate).text, team_size=team_size
+                )
             except GlmOcrError as error:
                 logger.warning('Vainglory GLM-OCR frame failed: reason={!r}', error)
                 continue
             remote_results.append(remote)
-            if _result_is_reliable(remote, fallback_header=local_header):
+            if _result_is_reliable(
+                remote, fallback_header=local_header, team_size=team_size
+            ):
                 break
             logger.warning(
                 'Vainglory GLM-OCR result failed consistency validation: '
@@ -275,18 +290,31 @@ class GlmOcrResultReader:
             for result in remote_results
             for player in result.players
         ):
-            return merge_glm_results(remote_results, header=local_header)
+            return merge_glm_results(
+                remote_results, header=local_header, team_size=team_size
+            )
         logger.warning('Vainglory GLM-OCR yielded no player data; using local fallback')
         if wide_screenshot:
             return self._fallback.read_wide_screenshot(
-                frame, header=local_header, viewport=viewport, name_frames=name_frames
+                frame,
+                header=local_header,
+                viewport=viewport,
+                name_frames=name_frames,
+                team_size=team_size,
             )
         return self._fallback.read(
-            frame, header=local_header, viewport=viewport, name_frames=name_frames
+            frame,
+            header=local_header,
+            viewport=viewport,
+            name_frames=name_frames,
+            team_size=team_size,
         )
 
 
-def parse_glm_result(text: str) -> ResultOcr:
+def parse_glm_result(text: str, *, team_size: int = 3) -> ResultOcr:
+    if team_size not in (3, 5):
+        raise ValueError('team size must be 3 or 5')
+    expected_players = team_size * 2
     header = parse_result_header(text)
     parsed_rows: List[List[OcrPlayer]] = []
     flat_entries: List[OcrPlayer] = []
@@ -298,7 +326,7 @@ def parse_glm_result(text: str) -> ResultOcr:
             raw_rows.append(' '.join(lines))
         else:
             raw_rows.extend(lines)
-    if len(raw_rows) >= 6 and all(
+    if len(raw_rows) >= expected_players and all(
         len(_KDA_PATTERN.findall(row)) == 1 for row in raw_rows
     ):
         raw_rows = [
@@ -335,24 +363,24 @@ def parse_glm_result(text: str) -> ResultOcr:
     positioned: Dict[Tuple[str, int], OcrPlayer] = {}
     paired_rows = [row for row in parsed_rows if len(row) >= 2]
     if len(paired_rows) >= 2:
-        for slot, row in enumerate(parsed_rows[:3], 1):
+        for slot, row in enumerate(parsed_rows[:team_size], 1):
             if row:
                 positioned[('left', slot)] = _position_player(row[0], 'left', slot)
             if len(row) >= 2:
                 positioned[('right', slot)] = _position_player(row[1], 'right', slot)
-    elif len(flat_entries) >= 6:
-        for index, player in enumerate(flat_entries[:6]):
+    elif len(flat_entries) >= expected_players:
+        for index, player in enumerate(flat_entries[:expected_players]):
             side = 'left' if index % 2 == 0 else 'right'
             slot = index // 2 + 1
             positioned[(side, slot)] = _position_player(player, side, slot)
     else:
-        for slot, row in enumerate(parsed_rows[:3], 1):
+        for slot, row in enumerate(parsed_rows[:team_size], 1):
             if row:
                 positioned[('left', slot)] = _position_player(row[0], 'left', slot)
 
     players: List[OcrPlayer] = []
     for side in ('left', 'right'):
-        for slot in range(1, 4):
+        for slot in range(1, team_size + 1):
             players.append(
                 positioned.get(
                     (side, slot),
@@ -370,7 +398,7 @@ def parse_glm_result(text: str) -> ResultOcr:
 
 
 def merge_glm_results(
-    candidates: Sequence[ResultOcr], *, header: ResultHeader
+    candidates: Sequence[ResultOcr], *, header: ResultHeader, team_size: int = 3
 ) -> ResultOcr:
     if not candidates:
         return ResultOcr(header=header, players=())
@@ -379,7 +407,7 @@ def merge_glm_results(
         for player in candidate.players:
             by_position.setdefault((player.side, player.slot), []).append(player)
     positions = tuple(
-        (side, slot) for side in ('left', 'right') for slot in range(1, 4)
+        (side, slot) for side in ('left', 'right') for slot in range(1, team_size + 1)
     )
     stats_candidates = tuple(
         tuple(item.stats for item in by_position.get(position, ()))
@@ -629,21 +657,28 @@ def _with_team_totals(base: ResultHeader, totals: ResultHeader) -> ResultHeader:
     )
 
 
-def _result_is_reliable(result: ResultOcr, *, fallback_header: ResultHeader) -> bool:
+def _result_is_reliable(
+    result: ResultOcr, *, fallback_header: ResultHeader, team_size: int = 3
+) -> bool:
     names = sum(bool(player.name) for player in result.players)
-    if names != 6 or len(result.players) != 6:
+    if names != team_size * 2 or len(result.players) != team_size * 2:
         return False
     if any(not _has_complete_stats(player.stats) for player in result.players):
         return False
     local_first = _prefer_header(fallback_header, result.header)
     remote_first = _prefer_header(result.header, fallback_header)
     headers = (local_first, _with_team_totals(local_first, remote_first))
-    return any(_result_matches_header(result, header) for header in headers)
+    return any(
+        _result_matches_header(result, header, team_size=team_size)
+        for header in headers
+    )
 
 
-def _result_matches_header(result: ResultOcr, header: ResultHeader) -> bool:
-    left = result.players[:3]
-    right = result.players[3:]
+def _result_matches_header(
+    result: ResultOcr, header: ResultHeader, *, team_size: int = 3
+) -> bool:
+    left = result.players[:team_size]
+    right = result.players[team_size:]
     left_kills = sum(int(player.stats.kills or 0) for player in left)
     right_kills = sum(int(player.stats.kills or 0) for player in right)
     left_deaths = sum(int(player.stats.deaths or 0) for player in left)

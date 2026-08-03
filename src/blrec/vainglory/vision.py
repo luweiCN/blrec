@@ -11,6 +11,7 @@ from loguru import logger
 
 TeamColor = Literal['teal', 'orange']
 TeamSide = Literal['left', 'right']
+TeamSize = Literal[3, 5]
 
 _MINIMUM_RESULT_ACTION_CONTRAST = 35
 
@@ -151,6 +152,7 @@ class ResultLayout:
     winner_color: TeamColor
     winner_side: TeamSide
     confidence: float
+    team_size: TeamSize = 3
     viewport: ViewportTransform = STANDARD_VIEWPORT
 
 
@@ -178,40 +180,59 @@ def detect_result_layout(frame: RgbFrame) -> Optional[ResultLayout]:
 def detect_result_layouts(frame: RgbFrame) -> Tuple[ResultLayout, ...]:
     if detect_gameplay_hud(frame) is not None:
         return ()
-    standard_action_contrasts = _result_action_contrasts(frame, STANDARD_VIEWPORT)
     layouts: List[ResultLayout] = []
     for viewport in _result_viewports(frame.width / frame.height):
-        action_contrasts = _result_action_contrasts(frame, viewport)
-        if (
-            min(standard_action_contrasts) < _MINIMUM_RESULT_ACTION_CONTRAST
-            and min(action_contrasts) < _MINIMUM_RESULT_ACTION_CONTRAST
-        ):
-            _log_layout_attempt(
-                frame,
-                viewport,
-                'result_actions',
-                standard_contrasts=tuple(
-                    round(value, 2) for value in standard_action_contrasts
-                ),
-                viewport_contrasts=tuple(round(value, 2) for value in action_contrasts),
+        for team_size in (3, 5):
+            standard_action_contrasts = _result_action_contrasts(
+                frame, STANDARD_VIEWPORT, team_size=team_size
             )
-            continue
-        layout = _detect_result_layout(frame, viewport)
-        if layout is not None:
-            layouts.append(layout)
+            action_contrasts = _result_action_contrasts(
+                frame, viewport, team_size=team_size
+            )
+            if min(action_contrasts) < _MINIMUM_RESULT_ACTION_CONTRAST:
+                _log_layout_attempt(
+                    frame,
+                    viewport,
+                    'result_actions',
+                    team_size=team_size,
+                    standard_contrasts=tuple(
+                        round(value, 2) for value in standard_action_contrasts
+                    ),
+                    viewport_contrasts=tuple(
+                        round(value, 2) for value in action_contrasts
+                    ),
+                )
+                continue
+            layout = _detect_result_layout(frame, viewport, team_size=team_size)
+            if layout is not None:
+                layouts.append(layout)
     return tuple(layouts)
 
 
 def _detect_result_layout(
-    frame: RgbFrame, viewport: ViewportTransform
+    frame: RgbFrame, viewport: ViewportTransform, *, team_size: TeamSize
 ) -> Optional[ResultLayout]:
+    if team_size == 5:
+        result_rect = (0.48, 0.10, 0.52, 0.20)
+        defeat_rect = (0.42, 0.10, 0.58, 0.20)
+        panel_rect = (0.01, 0.09, 0.99, 0.905)
+        header_rect = (0.02, 0.095, 0.98, 0.205)
+        left_team_rect = (0.02, 0.20, 0.44, 0.81)
+        right_team_rect = (0.56, 0.20, 0.98, 0.81)
+    else:
+        result_rect = (0.48, 0.24, 0.52, 0.31)
+        defeat_rect = (0.45, 0.225, 0.55, 0.315)
+        panel_rect = (0.09, 0.22, 0.91, 0.78)
+        header_rect = (0.1, 0.225, 0.9, 0.315)
+        left_team_rect = (0.11, 0.30, 0.43, 0.68)
+        right_team_rect = (0.57, 0.30, 0.89, 0.68)
     result_votes = _bright_theme_votes(
-        frame, viewport.source_rect(frame, 0.48, 0.24, 0.52, 0.31), step=1
+        frame, viewport.source_rect(frame, *result_rect), step=1
     )
     winner_color = _dominant_theme(result_votes, minimum=8)
     if winner_color is None:
         defeat_fraction = _dark_defeat_fraction(
-            frame, viewport.source_rect(frame, 0.45, 0.225, 0.55, 0.315), step=1
+            frame, viewport.source_rect(frame, *defeat_rect), step=1
         )
         if defeat_fraction < 0.04:
             _log_layout_attempt(
@@ -238,7 +259,7 @@ def _detect_result_layout(
             )
             return None
 
-    panel = viewport.source_rect(frame, 0.09, 0.22, 0.91, 0.78)
+    panel = viewport.source_rect(frame, *panel_rect)
     panel_dark = _dark_fraction(frame, panel, step=4)
     if panel_dark < 0.6:
         _log_layout_attempt(
@@ -250,7 +271,7 @@ def _detect_result_layout(
             panel_dark=panel_dark,
         )
         return None
-    header = viewport.source_rect(frame, 0.1, 0.225, 0.9, 0.315)
+    header = viewport.source_rect(frame, *header_rect)
     header_dark = _dark_fraction(frame, header, step=3)
     if header_dark < 0.95:
         _log_layout_attempt(
@@ -264,10 +285,10 @@ def _detect_result_layout(
         )
         return None
     left_votes = _theme_votes(
-        frame, viewport.source_rect(frame, 0.11, 0.30, 0.43, 0.68), step=3
+        frame, viewport.source_rect(frame, *left_team_rect), step=3
     )
     right_votes = _theme_votes(
-        frame, viewport.source_rect(frame, 0.57, 0.30, 0.89, 0.68), step=3
+        frame, viewport.source_rect(frame, *right_team_rect), step=3
     )
     left_color = _dominant_theme(left_votes)
     right_color = _dominant_theme(right_votes)
@@ -303,6 +324,7 @@ def _detect_result_layout(
         winner_color=winner_color,
         winner_side=winner_side,
         confidence=confidence,
+        team_size=team_size,
         viewport=viewport,
     )
 
@@ -330,22 +352,31 @@ def extract_result_heroes(
     frame: RgbFrame,
     *,
     viewport: ViewportTransform = STANDARD_VIEWPORT,
+    team_size: TeamSize = 3,
     center_shift: float = 0.0,
 ) -> Tuple[HeroFrame, ...]:
     result: List[HeroFrame] = []
     separator = 0.5 + center_shift
+    if team_size == 5:
+        center_offset = 0.046
+        row_centers = (0.255, 0.379, 0.503, 0.627, 0.750)
+        half_width = 0.038
+    else:
+        center_offset = 0.039
+        row_centers = (0.375, 0.5, 0.625)
+        half_width = 0.032
     sides: Tuple[Tuple[TeamSide, float], ...] = (
-        ('left', separator - 0.039),
-        ('right', separator + 0.039),
+        ('left', separator - center_offset),
+        ('right', separator + center_offset),
     )
     for side, center_x in sides:
-        for slot, center_y in enumerate((0.375, 0.5, 0.625), 1):
+        for slot, center_y in enumerate(row_centers, 1):
             crop = frame.crop(
                 viewport.source_rect(
                     frame,
-                    center_x - 0.032,
+                    center_x - half_width,
                     center_y - 0.057,
-                    center_x + 0.032,
+                    center_x + half_width,
                     center_y + 0.057,
                 )
             ).resize_nearest(96, 96)
@@ -357,15 +388,22 @@ def detect_recorded_player(
     frame: RgbFrame, layout: ResultLayout
 ) -> Optional[RecordedPlayer]:
     side: TeamSide = 'left' if layout.left_color == 'teal' else 'right'
-    left, right = (0.10, 0.43) if side == 'left' else (0.57, 0.90)
+    if layout.team_size == 5:
+        left, right = (0.08, 0.44) if side == 'left' else (0.56, 0.92)
+        row_centers = (0.255, 0.379, 0.503, 0.627, 0.750)
+        half_height = 0.045
+    else:
+        left, right = (0.10, 0.43) if side == 'left' else (0.57, 0.90)
+        row_centers = (0.375, 0.5, 0.625)
+        half_height = 0.047
     scores = tuple(
         _teal_row_highlight_score(
             frame,
             layout.viewport.source_rect(
-                frame, left, center_y - 0.047, right, center_y + 0.047
+                frame, left, center_y - half_height, right, center_y + half_height
             ),
         )
-        for center_y in (0.375, 0.5, 0.625)
+        for center_y in row_centers
     )
     ranked = sorted(enumerate(scores, 1), key=lambda item: item[1], reverse=True)
     (slot, best), (_, second) = ranked[:2]
@@ -401,16 +439,35 @@ def detect_recorded_player(
 
 
 def result_frame_quality(frame: RgbFrame, layout: ResultLayout) -> float:
+    if layout.team_size == 5:
+        team_top, team_bottom = 0.20, 0.81
+        left_right = (0.02, 0.44)
+        right_left_right = (0.56, 0.98)
+    else:
+        team_top, team_bottom = 0.29, 0.69
+        left_right = (0.08, 0.43)
+        right_left_right = (0.57, 0.92)
     regions = (
-        (layout.left_color, layout.viewport.source_rect(frame, 0.08, 0.29, 0.43, 0.69)),
+        (
+            layout.left_color,
+            layout.viewport.source_rect(
+                frame, left_right[0], team_top, left_right[1], team_bottom
+            ),
+        ),
         (
             layout.right_color,
-            layout.viewport.source_rect(frame, 0.57, 0.29, 0.92, 0.69),
+            layout.viewport.source_rect(
+                frame, right_left_right[0], team_top, right_left_right[1], team_bottom
+            ),
         ),
     )
     step = max(1, min(frame.width // 640, frame.height // 360))
-    standard_action_contrasts = _result_action_contrasts(frame, STANDARD_VIEWPORT)
-    viewport_action_contrasts = _result_action_contrasts(frame, layout.viewport)
+    standard_action_contrasts = _result_action_contrasts(
+        frame, STANDARD_VIEWPORT, team_size=layout.team_size
+    )
+    viewport_action_contrasts = _result_action_contrasts(
+        frame, layout.viewport, team_size=layout.team_size
+    )
     action_contrast = max(
         min(standard_action_contrasts), min(viewport_action_contrasts)
     )
@@ -608,8 +665,17 @@ def _looks_like_portrait(frame: RgbFrame) -> bool:
 
 
 def _result_action_contrasts(
-    frame: RgbFrame, viewport: ViewportTransform
-) -> Tuple[float, float]:
+    frame: RgbFrame, viewport: ViewportTransform, *, team_size: TeamSize = 3
+) -> Tuple[float, ...]:
+    if team_size == 5:
+        top, bottom = 0.815, 0.905
+        spans = ((0.01, 0.205), (0.215, 0.405), (0.595, 0.79), (0.80, 0.99))
+        return tuple(
+            _horizontal_border_contrast(
+                frame, viewport.source_rect(frame, left, top, right, bottom)
+            )
+            for left, right in spans
+        )
     contrasts = tuple(
         min(
             _horizontal_border_contrast(
@@ -621,7 +687,7 @@ def _result_action_contrasts(
         )
         for left, right in ((0.01, 0.265), (0.175, 0.43))
     )
-    return contrasts[0], contrasts[1]
+    return contrasts
 
 
 def _horizontal_border_contrast(frame: RgbFrame, rect: PixelRect) -> float:

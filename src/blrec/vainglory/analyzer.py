@@ -22,6 +22,7 @@ from .vision import (
     ResultLayout,
     RgbFrame,
     TeamSide,
+    TeamSize,
     ViewportTransform,
     detect_gameplay_hud,
     detect_recorded_player,
@@ -40,7 +41,11 @@ class AnalysisCancelled(RuntimeError):
 
 class ResultReader(Protocol):
     def read_header(  # noqa: E704
-        self, frame: RgbFrame, *, viewport: ViewportTransform = ...
+        self,
+        frame: RgbFrame,
+        *,
+        viewport: ViewportTransform = ...,
+        team_size: int = ...,
     ) -> ResultHeader: ...  # noqa: E704
 
     def read(  # noqa: E704
@@ -50,6 +55,7 @@ class ResultReader(Protocol):
         header: Optional[ResultHeader] = ...,
         viewport: ViewportTransform = ...,
         name_frames: Sequence[RgbFrame] = ...,
+        team_size: int = ...,
     ) -> ResultOcr: ...  # noqa: E704
 
     def read_wide_screenshot(  # noqa: E704
@@ -59,6 +65,7 @@ class ResultReader(Protocol):
         header: Optional[ResultHeader] = ...,
         viewport: ViewportTransform = ...,
         name_frames: Sequence[RgbFrame] = ...,
+        team_size: int = ...,
     ) -> ResultOcr: ...  # noqa: E704
 
 
@@ -574,11 +581,19 @@ class VaingloryVideoAnalyzer:
         ocr_started = time.monotonic()
         if layout.viewport.ocr_profile == 'wide':
             recognized = self._result_reader.read_wide_screenshot(
-                frame, header=header, viewport=layout.viewport, name_frames=name_frames
+                frame,
+                header=header,
+                viewport=layout.viewport,
+                name_frames=name_frames,
+                team_size=layout.team_size,
             )
         else:
             recognized = self._result_reader.read(
-                frame, header=header, viewport=layout.viewport, name_frames=name_frames
+                frame,
+                header=header,
+                viewport=layout.viewport,
+                name_frames=name_frames,
+                team_size=layout.team_size,
             )
         ocr_seconds = time.monotonic() - ocr_started
         heroes_started = time.monotonic()
@@ -615,6 +630,7 @@ class VaingloryVideoAnalyzer:
                 result_at_ms=at_ms,
                 duration_seconds=recognized.header.duration_seconds,
                 video_duration_ms=video_duration_ms,
+                team_size=layout.team_size,
             ),
             recorded_player=recorded_player,
         )
@@ -626,7 +642,10 @@ class VaingloryVideoAnalyzer:
         result_at_ms: int,
         duration_seconds: Optional[int],
         video_duration_ms: int,
+        team_size: TeamSize,
     ) -> str:
+        if team_size == 5:
+            return '5v5'
         if duration_seconds is None:
             return 'unknown'
         estimated_start_ms = result_at_ms - duration_seconds * 1_000
@@ -653,7 +672,7 @@ class VaingloryVideoAnalyzer:
                     'Vainglory ARAM talent selector recognized: at_ms={}', at_ms
                 )
                 return 'aram'
-        return 'unknown'
+        return '3v3'
 
     def _recognize_heroes(
         self,
@@ -666,7 +685,10 @@ class VaingloryVideoAnalyzer:
             (
                 0.0,
                 self._recognize_hero_variant(
-                    frame, viewport=layout.viewport, center_shift=0.0
+                    frame,
+                    viewport=layout.viewport,
+                    team_size=layout.team_size,
+                    center_shift=0.0,
                 ),
             )
         ]
@@ -678,7 +700,10 @@ class VaingloryVideoAnalyzer:
                     (
                         center_shift,
                         self._recognize_hero_variant(
-                            frame, viewport=layout.viewport, center_shift=center_shift
+                            frame,
+                            viewport=layout.viewport,
+                            team_size=layout.team_size,
+                            center_shift=center_shift,
                         ),
                     )
                 )
@@ -688,15 +713,18 @@ class VaingloryVideoAnalyzer:
         )
         logger.debug(
             'Vainglory hero layout selected: viewport={} center_shift={:.3f} '
-            'recognized={}/6',
+            'recognized={}/{}',
             layout.viewport.name,
             center_shift,
             sum(match is not None for _, match in selected),
+            layout.team_size * 2,
         )
         unresolved = {
             (hero.side, hero.slot) for hero, match in selected if match is None
         }
-        nearby_matches = self._recognize_nearby_heroes(nearby_frames, unresolved)
+        nearby_matches = self._recognize_nearby_heroes(
+            nearby_frames, unresolved, team_size=layout.team_size
+        )
         if nearby_matches:
             logger.info(
                 'Vainglory nearby frames filled hero positions: filled={} '
@@ -725,7 +753,11 @@ class VaingloryVideoAnalyzer:
         )
 
     def _recognize_nearby_heroes(
-        self, frames: Sequence[RgbFrame], positions: Set[Tuple[TeamSide, int]]
+        self,
+        frames: Sequence[RgbFrame],
+        positions: Set[Tuple[TeamSide, int]],
+        *,
+        team_size: TeamSize,
     ) -> Dict[Tuple[TeamSide, int], Tuple[HeroFrame, HeroMatch]]:
         if self._hero_recognizer is None or not frames or not positions:
             return {}
@@ -734,14 +766,17 @@ class VaingloryVideoAnalyzer:
         }
         for frame in frames:
             layout = detect_result_layout(frame)
-            if layout is None:
+            if layout is None or layout.team_size != team_size:
                 continue
             best_in_frame: Dict[
                 Tuple[TeamSide, int], Tuple[HeroFrame, HeroMatch, float]
             ] = {}
             for center_shift in (0.0, -0.01, 0.01, -0.02, 0.02):
                 for hero in extract_result_heroes(
-                    frame, viewport=layout.viewport, center_shift=center_shift
+                    frame,
+                    viewport=layout.viewport,
+                    team_size=layout.team_size,
+                    center_shift=center_shift,
                 ):
                     position = (hero.side, hero.slot)
                     if position not in positions:
@@ -823,7 +858,12 @@ class VaingloryVideoAnalyzer:
         return detect_recorded_player(frame, layout)
 
     def _recognize_hero_variant(
-        self, frame: RgbFrame, *, viewport: ViewportTransform, center_shift: float
+        self,
+        frame: RgbFrame,
+        *,
+        viewport: ViewportTransform,
+        team_size: TeamSize,
+        center_shift: float,
     ) -> Tuple[Tuple[HeroFrame, Optional[HeroMatch]], ...]:
         return tuple(
             (
@@ -835,7 +875,7 @@ class VaingloryVideoAnalyzer:
                 ),
             )
             for hero in extract_result_heroes(
-                frame, viewport=viewport, center_shift=center_shift
+                frame, viewport=viewport, team_size=team_size, center_shift=center_shift
             )
         )
 
@@ -897,14 +937,17 @@ class VaingloryVideoAnalyzer:
     ) -> Tuple[Tuple[ResultLayout, ResultHeader], ...]:
         attempts: List[Tuple[ResultLayout, ResultHeader]] = []
         for layout in layouts:
-            header = self._result_reader.read_header(frame, viewport=layout.viewport)
+            header = self._result_reader.read_header(
+                frame, viewport=layout.viewport, team_size=layout.team_size
+            )
             attempts.append((layout, header))
             logger.debug(
                 'Vainglory result OCR attempt: part_id={} at_ms={} viewport={} '
-                'result_text={!r} duration={}',
+                'team_size={} result_text={!r} duration={}',
                 part_id,
                 at_ms,
                 layout.viewport.name,
+                layout.team_size,
                 header.result_text,
                 header.duration_seconds,
             )
@@ -929,13 +972,21 @@ class VaingloryVideoAnalyzer:
         layouts: Sequence[ResultLayout],
         attempts: Sequence[Tuple[ResultLayout, ResultHeader]],
     ) -> Tuple[ResultLayout, Optional[ResultHeader]]:
-        layout = layouts[0]
-        if not any(self._is_completed_match(header) for _, header in attempts):
-            return layout, None
+        primary_layout = layouts[0]
+        accepted = tuple(
+            (attempt_layout, header)
+            for attempt_layout, header in attempts
+            if self._is_completed_match(header)
+        )
+        if not accepted:
+            return primary_layout, None
+        accepted_team_size = accepted[0][0].team_size
+        layout = next(item for item in layouts if item.team_size == accepted_team_size)
         header = merge_result_headers(
             tuple(
                 (attempt_header, attempt_layout.confidence)
-                for attempt_layout, attempt_header in attempts
+                for attempt_layout, attempt_header in accepted
+                if attempt_layout.team_size == accepted_team_size
             )
         )
         return layout, header

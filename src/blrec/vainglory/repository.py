@@ -1566,7 +1566,7 @@ class VaingloryRepository:
                 )
                 normalized_team_size = team_size if 1 <= team_size <= 5 else None
                 recorded_player = (
-                    match.recorded_player if normalized_team_size == 3 else None
+                    match.recorded_player if normalized_team_size in (3, 5) else None
                 )
                 game_mode = (
                     match.game_mode
@@ -1914,7 +1914,7 @@ class VaingloryRepository:
         if offset < 0:
             raise ValueError('offset must not be negative')
         condition = (
-            'match.team_size=3 AND match.result_frame_path IS NOT NULL '
+            'match.team_size IN (3,5) AND match.result_frame_path IS NOT NULL '
             'AND match.recorded_player_detection_version>=? '
             'AND match.recorded_player_side IS NULL'
         )
@@ -2065,7 +2065,7 @@ class VaingloryRepository:
             if str(match['recorded_player_source']) == 'manual':
                 return match['recorded_player_side'] is not None
             selected = player
-            if match['team_size'] is not None and int(match['team_size']) != 3:
+            if match['team_size'] is not None and int(match['team_size']) not in (3, 5):
                 selected = None
             if selected is not None:
                 exists = connection.execute(
@@ -2078,7 +2078,8 @@ class VaingloryRepository:
             connection.execute(
                 'UPDATE vainglory_matches SET recorded_player_side=?,'
                 'recorded_player_slot=?,recorded_player_confidence=?,'
-                "recorded_player_detection_version=?,recorded_player_source='automatic' "
+                'recorded_player_detection_version=?,'
+                "recorded_player_source='automatic' "
                 'WHERE id=?',
                 (
                     None if selected is None else selected.side,
@@ -2113,8 +2114,8 @@ class VaingloryRepository:
             ).fetchone()
             if match is None:
                 raise VaingloryNotFound('对局不存在')
-            if match['team_size'] is None or int(match['team_size']) != 3:
-                raise VaingloryConflict('当前只支持确认 3V3 或大乱斗的主播英雄')
+            if match['team_size'] is None or int(match['team_size']) not in (3, 5):
+                raise VaingloryConflict('当前对局不支持确认主播英雄')
             teal_side = (
                 'left'
                 if str(match['left_color']) == 'teal'
@@ -3251,7 +3252,7 @@ class VaingloryRepository:
         recorded_player = next(
             (player for player in players if player.is_recorded_player), None
         )
-        if row['team_size'] is None or int(row['team_size']) != 3:
+        if row['team_size'] is None or int(row['team_size']) not in (3, 5):
             recorded_player_state = 'unsupported'
         elif recorded_player is not None:
             recorded_player_state = (
