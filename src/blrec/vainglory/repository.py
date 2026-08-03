@@ -1806,9 +1806,6 @@ class VaingloryRepository:
             session_id=session_id,
         )
         conditions = [
-            'EXISTS(SELECT 1 FROM vainglory_scan_jobs completed_scan '
-            'WHERE completed_scan.session_id=session.id '
-            "AND completed_scan.state='ready')",
             'EXISTS(SELECT 1 FROM vainglory_matches match '
             'WHERE match.session_id=session.id AND ' + ' AND '.join(where) + ')'
         ]
