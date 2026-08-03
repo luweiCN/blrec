@@ -4,7 +4,7 @@
     {
       "Effect": "Allow",
       "Action": "log:GetLogStoreLogs",
-      "Resource": "acs:log:cn-beijing:*:project/vainglory/logstore/vainglory-dashboard"
+      "Resource": "acs:log:cn-beijing:1159986474652925:project/vainglory/logstore/vainglory-dashboard"
     }
   ]
 }
