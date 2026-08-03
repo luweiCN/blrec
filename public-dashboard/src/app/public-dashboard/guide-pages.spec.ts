@@ -29,6 +29,7 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('历史数据正在持续同步中');
     expect(page.textContent).toContain('当前公开数据的主体');
     expect(page.textContent).toContain('5V5 战绩匹配尚未完成');
+    expect(page.querySelector('.guide-switcher')).toBeNull();
   });
 
   it('documents acceleration, regional queues, and the full party-code flow', () => {
@@ -49,6 +50,10 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('6666-1_小明');
     expect(page.textContent).toContain('6666-2_小王');
     expect(page.textContent).not.toContain('APKPure 不是官方商店');
+    expect(page.querySelectorAll('.guide-switcher a').length).toBe(2);
+    expect(page.querySelector('.guide-switcher')?.textContent).not.toContain(
+      '榜单说明',
+    );
   });
 
   it('keeps official, archived, and VGNA download paths separate', () => {
@@ -66,6 +71,10 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('VGNA 是社区增强版，不是官方续作');
     expect(page.textContent).toContain('玩家不需要自己购买 Apple Developer 账号');
     expect(page.textContent).toContain('会绑定 Discord');
+    expect(page.querySelectorAll('.guide-switcher a').length).toBe(2);
+    expect(page.querySelector('.guide-switcher')?.textContent).not.toContain(
+      '榜单说明',
+    );
     expect(
       page.querySelector<HTMLAnchorElement>(
         'a[href^="https://apps.apple.com/us/"]',
