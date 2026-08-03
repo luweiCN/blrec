@@ -15,6 +15,7 @@ from blrec.bili_upload.errors import BiliApiError
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title
 from .repository import refresh_session_scan_job
+from .title_time import resolve_recording_started_at
 
 
 class ArchiveBackfillNotFound(ValueError):
@@ -436,7 +437,7 @@ class ArchiveBackfillService:
                     bundle,
                     account_id=account_id,
                     credential_version=int(account['credential_version']),
-                    status='pubed',
+                    status='is_pubing,pubed,not_pubed',
                     page_number=page_number,
                     page_size=self.PAGE_SIZE,
                 )
@@ -672,7 +673,15 @@ class ArchiveBackfillService:
         def persist(connection: sqlite3.Connection) -> None:
             import_id = int(imported['id'])
             session_id = imported['session_id']
-            started_at = int(imported['published_at'] or now)
+            started_at = resolve_recording_started_at(
+                detail_title,
+                published_at=(
+                    None
+                    if imported['published_at'] is None
+                    else int(imported['published_at'])
+                ),
+                fallback=now,
+            )
             duration = sum(page.duration_seconds or 0 for page in pages)
             if session_id is None:
                 account = connection.execute(

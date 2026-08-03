@@ -5,7 +5,7 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 from loguru import logger
@@ -320,7 +320,19 @@ def parse_glm_result(text: str, *, team_size: int = 3) -> ResultOcr:
     flat_entries: List[OcrPlayer] = []
     raw_rows: List[str] = []
     for paragraph in re.split(r'(?:\r?\n){2,}', text):
-        lines = [line for line in paragraph.splitlines() if _KDA_PATTERN.search(line)]
+        lines: List[str] = []
+        pending_name = ''
+        for raw_line in paragraph.splitlines():
+            line = ' '.join(raw_line.split())
+            match = _KDA_PATTERN.search(line)
+            if match is None:
+                tokens = line.split()
+                pending_name = _valid_player_name(tokens[-1]) if tokens else ''
+                continue
+            if pending_name and not _name_before_kda(line[: match.start()]):
+                line = '{} {}'.format(pending_name, line)
+            pending_name = ''
+            lines.append(line)
         match_count = sum(len(_KDA_PATTERN.findall(line)) for line in lines)
         if 0 < match_count <= 2:
             raw_rows.append(' '.join(lines))
@@ -378,6 +390,33 @@ def parse_glm_result(text: str, *, team_size: int = 3) -> ResultOcr:
             if row:
                 positioned[('left', slot)] = _position_player(row[0], 'left', slot)
 
+    if len(flat_entries) >= expected_players:
+        column_positioned: Dict[Tuple[str, int], OcrPlayer] = {}
+        for index, player in enumerate(flat_entries[:expected_players]):
+            side = 'left' if index < team_size else 'right'
+            slot = index + 1 if side == 'left' else index - team_size + 1
+            column_positioned[(side, slot)] = _position_player(player, side, slot)
+        current_result = ResultOcr(
+            header=header,
+            players=_players_from_positions(positioned, team_size=team_size),
+        )
+        column_result = ResultOcr(
+            header=header,
+            players=_players_from_positions(column_positioned, team_size=team_size),
+        )
+        if not _result_matches_header(
+            current_result, header, team_size=team_size
+        ) and _result_matches_header(column_result, header, team_size=team_size):
+            positioned = column_positioned
+
+    return ResultOcr(
+        header=header, players=_players_from_positions(positioned, team_size=team_size)
+    )
+
+
+def _players_from_positions(
+    positioned: Mapping[Tuple[str, int], OcrPlayer], *, team_size: int
+) -> Tuple[OcrPlayer, ...]:
     players: List[OcrPlayer] = []
     for side in ('left', 'right'):
         for slot in range(1, team_size + 1):
@@ -394,7 +433,7 @@ def parse_glm_result(text: str, *, team_size: int = 3) -> ResultOcr:
                     ),
                 )
             )
-    return ResultOcr(header=header, players=tuple(players))
+    return tuple(players)
 
 
 def merge_glm_results(
@@ -660,6 +699,11 @@ def _with_team_totals(base: ResultHeader, totals: ResultHeader) -> ResultHeader:
 def _result_is_reliable(
     result: ResultOcr, *, fallback_header: ResultHeader, team_size: int = 3
 ) -> bool:
+    if (
+        result.header.duration_seconds is None
+        and fallback_header.duration_seconds is None
+    ):
+        return False
     names = sum(bool(player.name) for player in result.players)
     if names != team_size * 2 or len(result.players) != team_size * 2:
         return False

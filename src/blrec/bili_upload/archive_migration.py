@@ -28,6 +28,7 @@ from loguru import logger
 
 from blrec.networking.manager import NetworkRouteManager, NetworkUnavailable
 from blrec.vainglory.anchor_identity import infer_recorded_anchor
+from blrec.vainglory.title_time import resolve_recording_started_at
 
 from .bili_download import YtDlpMediaDownloader
 from .crypto import CredentialBundle
@@ -1101,7 +1102,9 @@ class ArchiveMigrationService:
         self, item: sqlite3.Row, detail: ArchiveDetail, paths: Tuple[Path, ...]
     ) -> int:
         now = self._now()
-        started_at = int(detail.published_at or now)
+        started_at = resolve_recording_started_at(
+            detail.title, published_at=detail.published_at, fallback=now
+        )
         duration = sum(page.duration_seconds or 0 for page in detail.pages)
         command = replace(
             default_room_upload_policy(),

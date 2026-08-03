@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass
 from statistics import mean
 from typing import Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
@@ -10,6 +11,7 @@ from loguru import logger
 from .hero_recognition import HeroMatch, SiftHeroRecognizer
 from .mode_recognition import AramDetector, AramTalentSelectionDetector
 from .ocr import ResultHeader, ResultOcr, TesseractResultReader, merge_result_headers
+from .result_detection import ResultPanelDetector
 from .sampling import (
     CoarseObservation,
     FfmpegSampler,
@@ -26,12 +28,13 @@ from .vision import (
     ViewportTransform,
     detect_gameplay_hud,
     detect_recorded_player,
-    detect_result_layout,
     detect_result_layouts,
+    extract_gameplay_hud_heroes,
     extract_result_heroes,
     hero_fingerprint,
     png_bytes,
     result_frame_quality,
+    select_gameplay_hud_centers,
 )
 
 
@@ -212,6 +215,7 @@ class VaingloryVideoAnalyzer:
         result_reader: Optional[ResultReader] = None,
         hero_recognizer: Optional[SiftHeroRecognizer] = None,
         aram_detector: Optional[AramDetector] = None,
+        result_panel_detector: Optional[ResultPanelDetector] = None,
         minimum_match_seconds: int = 300,
     ) -> None:
         if minimum_match_seconds < 0:
@@ -220,6 +224,7 @@ class VaingloryVideoAnalyzer:
         self._result_reader = result_reader or TesseractResultReader()
         self._hero_recognizer = hero_recognizer
         self._aram_detector = aram_detector or AramTalentSelectionDetector()
+        self._result_panel_detector = result_panel_detector
         self._minimum_match_seconds = minimum_match_seconds
 
     def analyze_part(
@@ -274,7 +279,7 @@ class VaingloryVideoAnalyzer:
                     hud_signature=hud_signature,
                     result_visible=(
                         hud_signature is None
-                        and detect_result_layout(timed.frame) is not None
+                        and self._detect_result_layout(timed.frame) is not None
                     ),
                 )
             )
@@ -379,7 +384,7 @@ class VaingloryVideoAnalyzer:
                 progress(index / max(1, len(candidates)))
             frame_started = time.monotonic()
             frame = self._sampler.frame_at(part.path, candidate_at_ms)
-            layouts = detect_result_layouts(frame)
+            layouts = self._detect_result_layouts(frame)
             candidate_frame_seconds += time.monotonic() - frame_started
             if not layouts:
                 rejected_layout += 1
@@ -541,7 +546,7 @@ class VaingloryVideoAnalyzer:
         ):
             self._raise_if_cancelled(cancelled)
             frame_count += 1
-            layout = detect_result_layout(timed.frame)
+            layout = self._detect_result_layout(timed.frame)
             if layout is not None:
                 hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
         return tuple(hits), frame_count
@@ -561,7 +566,7 @@ class VaingloryVideoAnalyzer:
             for timed in self._sampler.fine_frames(path, window):
                 self._raise_if_cancelled(cancelled)
                 frame_count += 1
-                layout = detect_result_layout(timed.frame)
+                layout = self._detect_result_layout(timed.frame)
                 if layout is not None:
                     hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
         return collapse_result_hits(hits), frame_count, len(windows)
@@ -599,6 +604,24 @@ class VaingloryVideoAnalyzer:
         heroes_started = time.monotonic()
         heroes = self._recognize_heroes(frame, layout, nearby_frames=hero_frames)
         recorded_player = detect_recorded_player(frame, layout)
+        if self._hero_recognizer is not None and (
+            any(not hero.label for hero in heroes) or recorded_player is None
+        ):
+            gameplay_frames = self._sample_gameplay_hud_frames(
+                part.path,
+                result_at_ms=at_ms,
+                duration_seconds=recognized.header.duration_seconds,
+                video_duration_ms=video_duration_ms,
+            )
+            if gameplay_frames:
+                heroes, fallback_player = self._apply_gameplay_hud_fallback(
+                    heroes,
+                    layout=layout,
+                    frames=gameplay_frames,
+                    team_size=layout.team_size,
+                )
+                if recorded_player is None:
+                    recorded_player = fallback_player
         hero_seconds = time.monotonic() - heroes_started
         frame_encode_started = time.monotonic()
         result_frame_png = png_bytes(frame)
@@ -765,7 +788,7 @@ class VaingloryVideoAnalyzer:
             position: [] for position in positions
         }
         for frame in frames:
-            layout = detect_result_layout(frame)
+            layout = self._detect_result_layout(frame)
             if layout is None or layout.team_size != team_size:
                 continue
             best_in_frame: Dict[
@@ -843,16 +866,240 @@ class VaingloryVideoAnalyzer:
                 resolved[position] = strongest
         return resolved
 
+    def _sample_gameplay_hud_frames(
+        self,
+        path: str,
+        *,
+        result_at_ms: int,
+        duration_seconds: Optional[int],
+        video_duration_ms: int,
+    ) -> Tuple[RgbFrame, ...]:
+        if duration_seconds is None:
+            return ()
+        estimated_start_ms = result_at_ms - duration_seconds * 1_000
+        if estimated_start_ms < 0:
+            return ()
+        frames: List[RgbFrame] = []
+        accepted_at: List[int] = []
+        for offset_ms in (
+            5_000,
+            10_000,
+            15_000,
+            20_000,
+            25_000,
+            30_000,
+            35_000,
+            40_000,
+        ):
+            at_ms = estimated_start_ms + offset_ms
+            if at_ms < 0 or at_ms >= video_duration_ms:
+                continue
+            try:
+                frame = self._sampler.frame_at(path, at_ms)
+            except RuntimeError as error:
+                logger.warning(
+                    'Skipped unreadable Vainglory gameplay HUD frame: '
+                    'at_ms={} error={}',
+                    at_ms,
+                    error,
+                )
+                continue
+            if detect_gameplay_hud(frame) is None:
+                continue
+            frames.append(frame)
+            accepted_at.append(at_ms)
+        logger.debug(
+            'Vainglory gameplay HUD fallback frames: result_at_ms={} accepted={}',
+            result_at_ms,
+            tuple(accepted_at),
+        )
+        return tuple(frames)
+
+    def _apply_gameplay_hud_fallback(
+        self,
+        heroes: Sequence[AnalyzedHero],
+        *,
+        layout: ResultLayout,
+        frames: Sequence[RgbFrame],
+        team_size: TeamSize,
+    ) -> Tuple[Tuple[AnalyzedHero, ...], Optional[RecordedPlayer]]:
+        hud = self._recognize_gameplay_hud_heroes(frames, team_size=team_size)
+        side_map = self._map_gameplay_hud_sides(heroes, hud)
+        if not side_map:
+            return tuple(heroes), None
+        updated = list(heroes)
+        for hud_side, result_side in side_map.items():
+            resolved_labels = Counter(
+                hero.label
+                for hero in updated
+                if hero.side == result_side and hero.label
+            )
+            available = []
+            for slot in range(1, team_size + 1):
+                candidate = hud.get((hud_side, slot))
+                if candidate is None:
+                    continue
+                label = candidate[1].label
+                if resolved_labels[label] > 0:
+                    resolved_labels[label] -= 1
+                else:
+                    available.append(candidate)
+            unresolved = [
+                index
+                for index, hero in enumerate(updated)
+                if hero.side == result_side and not hero.label
+            ]
+            if len(unresolved) != 1 or len(available) != 1:
+                continue
+            index = unresolved[0]
+            previous = updated[index]
+            match = available[0][1]
+            updated[index] = AnalyzedHero(
+                side=previous.side,
+                slot=previous.slot,
+                fingerprint=previous.fingerprint,
+                thumbnail_png=previous.thumbnail_png,
+                label=match.label,
+                confidence=min(0.89, match.confidence * 0.9),
+            )
+            logger.info(
+                'Vainglory gameplay HUD filled result hero: side={} slot={} '
+                'label={} confidence={:.3f}',
+                previous.side,
+                previous.slot,
+                match.label,
+                match.confidence,
+            )
+
+        teal_side: TeamSide = 'left' if layout.left_color == 'teal' else 'right'
+        hud_teal_side = next(
+            (hud_side for hud_side, side in side_map.items() if side == teal_side), None
+        )
+        if hud_teal_side is None:
+            return tuple(updated), None
+        local_slot = team_size if hud_teal_side == 'left' else 1
+        local = hud.get((hud_teal_side, local_slot))
+        if local is None:
+            return tuple(updated), None
+        matching = [
+            hero
+            for hero in updated
+            if hero.side == teal_side and hero.label == local[1].label
+        ]
+        if len(matching) != 1:
+            return tuple(updated), None
+        player = RecordedPlayer(
+            side=matching[0].side,
+            slot=matching[0].slot,
+            confidence=min(0.89, 0.68 + local[1].confidence * 0.2),
+        )
+        logger.info(
+            'Vainglory gameplay HUD identified recorded player: side={} slot={} '
+            'hero={} confidence={:.3f}',
+            player.side,
+            player.slot,
+            local[1].label,
+            player.confidence,
+        )
+        return tuple(updated), player
+
+    def _recognize_gameplay_hud_heroes(
+        self, frames: Sequence[RgbFrame], *, team_size: TeamSize
+    ) -> Dict[Tuple[TeamSide, int], Tuple[HeroFrame, HeroMatch]]:
+        if self._hero_recognizer is None:
+            return {}
+        candidates: Dict[Tuple[TeamSide, int], List[Tuple[HeroFrame, HeroMatch]]] = {}
+        for frame in frames:
+            centers = select_gameplay_hud_centers(frame, team_size=team_size)
+            if centers is None:
+                continue
+            selected = tuple(
+                (hero, self._hero_recognizer.recognize(hero.frame))
+                for hero in extract_gameplay_hud_heroes(
+                    frame, team_size=team_size, centers=centers
+                )
+            )
+            for hero, match in selected:
+                if match is None:
+                    continue
+                candidates.setdefault((hero.side, hero.slot), []).append((hero, match))
+        result: Dict[Tuple[TeamSide, int], Tuple[HeroFrame, HeroMatch]] = {}
+        for position, values in candidates.items():
+            grouped: Dict[str, List[Tuple[HeroFrame, HeroMatch]]] = {}
+            for value in values:
+                grouped.setdefault(value[1].label, []).append(value)
+            ordered = sorted(
+                grouped.values(),
+                key=lambda group: (
+                    len(group),
+                    max(item[1].confidence for item in group),
+                    sum(item[1].inliers for item in group),
+                ),
+                reverse=True,
+            )
+            if not ordered:
+                continue
+            winner = ordered[0]
+            strongest = max(
+                winner, key=lambda item: (item[1].confidence, item[1].inliers)
+            )
+            stable = len(winner) >= 2 and (
+                len(ordered) == 1 or len(winner) > len(ordered[1])
+            )
+            strong = (
+                len(grouped) == 1
+                and strongest[1].confidence >= 0.85
+                and strongest[1].inliers >= 10
+            )
+            if stable or strong:
+                result[position] = strongest
+        return result
+
+    @staticmethod
+    def _map_gameplay_hud_sides(
+        heroes: Sequence[AnalyzedHero],
+        hud: Dict[Tuple[TeamSide, int], Tuple[HeroFrame, HeroMatch]],
+    ) -> Dict[TeamSide, TeamSide]:
+        result_labels = {
+            side: Counter(
+                hero.label for hero in heroes if hero.side == side and hero.label
+            )
+            for side in ('left', 'right')
+        }
+        hud_labels = {
+            side: Counter(
+                match.label
+                for (candidate_side, _), (_, match) in hud.items()
+                if candidate_side == side
+            )
+            for side in ('left', 'right')
+        }
+
+        def overlap(first: Counter[str], second: Counter[str]) -> int:
+            return sum((first & second).values())
+
+        same = overlap(hud_labels['left'], result_labels['left']) + overlap(
+            hud_labels['right'], result_labels['right']
+        )
+        swapped = overlap(hud_labels['left'], result_labels['right']) + overlap(
+            hud_labels['right'], result_labels['left']
+        )
+        if max(same, swapped) < 2 or same == swapped:
+            return {}
+        if same > swapped:
+            return {'left': 'left', 'right': 'right'}
+        return {'left': 'right', 'right': 'left'}
+
     def recognize_saved_heroes(self, content: bytes) -> Tuple[AnalyzedHero, ...]:
         frame = self._sampler.decode_image(content)
-        layout = detect_result_layout(frame)
+        layout = self._detect_result_layout(frame)
         if layout is None:
             raise ValueError('保存的图片不是可识别的结算画面')
         return self._recognize_heroes(frame, layout)
 
     def detect_saved_recorded_player(self, content: bytes) -> Optional[RecordedPlayer]:
         frame = self._sampler.decode_image(content)
-        layout = detect_result_layout(frame)
+        layout = self._detect_result_layout(frame)
         if layout is None:
             raise ValueError('保存的图片不是可识别的结算画面')
         return detect_recorded_player(frame, layout)
@@ -897,7 +1144,18 @@ class VaingloryVideoAnalyzer:
         frames: List[Tuple[RgbFrame, ResultLayout]] = []
         attempted_at: List[int] = []
         accepted_at: List[int] = []
-        offsets_ms = (-5_000, -3_000, -1_000, 1_000, 3_000, 5_000)
+        offsets_ms = (
+            -5_000,
+            -3_000,
+            -2_000,
+            -1_000,
+            -500,
+            500,
+            1_000,
+            2_000,
+            3_000,
+            5_000,
+        )
         for offset_ms in offsets_ms:
             candidate_at = max(0, min(duration_ms - 1, at_ms + offset_ms))
             if candidate_at == at_ms or candidate_at in attempted_at:
@@ -913,7 +1171,7 @@ class VaingloryVideoAnalyzer:
                     error,
                 )
                 continue
-            layout = detect_result_layout(frame)
+            layout = self._detect_result_layout(frame)
             if layout is None:
                 continue
             frames.append((frame, layout))
@@ -925,6 +1183,28 @@ class VaingloryVideoAnalyzer:
             tuple(accepted_at),
         )
         return tuple(frames)
+
+    def _detect_result_layout(self, frame: RgbFrame) -> Optional[ResultLayout]:
+        layouts = self._detect_result_layouts(frame)
+        if not layouts:
+            return None
+        return max(layouts, key=lambda layout: layout.confidence)
+
+    def _detect_result_layouts(self, frame: RgbFrame) -> Tuple[ResultLayout, ...]:
+        detector = self._result_panel_detector
+        if detector is None:
+            return detect_result_layouts(frame)
+        try:
+            detection = detector.detect(frame)
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            logger.error(
+                'Vainglory result panel detector disabled after failure: {!r}', error
+            )
+            self._result_panel_detector = None
+            return detect_result_layouts(frame)
+        if detection is None:
+            return ()
+        return detect_result_layouts(frame, panel_detection=detection)
 
     def _read_layout_headers(
         self,

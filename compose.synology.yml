@@ -12,9 +12,11 @@ services:
       BLREC_API_KEY: ${BLREC_API_KEY:?请设置初始化安全码}
       BLREC_FORWARDED_ALLOW_IPS: ${BLREC_FORWARDED_ALLOW_IPS:-127.0.0.1}
       BLREC_CREDENTIAL_KEY_FILE: /cfg/credential.key
+      BLREC_VAINGLORY_RESULT_FRAME_ROOT: /result-frames
     volumes:
       - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg
       - ${BLREC_LOG_DIR:-/volume1/docker/blrec-next/log}:/log
       - ${BLREC_RECORDING_DIR:-/volume1/docker/blrec-next/rec}:/rec
       - ${BLREC_FAVORITES_DIR:-/volume1/docker/blrec-next/favorites}:/favorites
       - ${BLREC_CLIP_DIR:-/volume1/docker/blrec-next/clips}:/clips
+      - ${BLREC_VAINGLORY_RESULT_FRAME_DIR:-/volume1/docker/blrec-next/vainglory-result-frames}:/result-frames

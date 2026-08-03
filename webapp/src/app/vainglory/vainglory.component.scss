@@ -900,7 +900,7 @@
 .player-name-editor,
 .player-room-editor {
   display: grid;
-  grid-template-columns: minmax(160px, 0.7fr) minmax(220px, 1.4fr) auto;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(0, 1.4fr) auto;
   align-items: center;
   gap: 12px;
 }
@@ -928,7 +928,7 @@
 
 .player-library-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
   gap: 12px;
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -436,9 +437,9 @@ def refresh_session_scan_job(
 
 
 class VaingloryRepository:
-    ALGORITHM_VERSION = 14
-    HERO_RECOGNITION_VERSION = 4
-    RECORDED_PLAYER_DETECTION_VERSION = 2
+    ALGORITHM_VERSION = 15
+    HERO_RECOGNITION_VERSION = 5
+    RECORDED_PLAYER_DETECTION_VERSION = 3
     _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
     _MATCH_SELECT = (
         'SELECT match.id,match.session_id,match.result_part_id,'
@@ -578,9 +579,7 @@ class VaingloryRepository:
         return await self._database.write(recover)
 
     async def purge_excluded_content(self) -> int:
-        def purge(
-            connection: sqlite3.Connection,
-        ) -> Tuple[Dict[str, int], Tuple[str, ...]]:
+        def purge(connection: sqlite3.Connection) -> Dict[str, int]:
             session_ids = set()
             rows = connection.execute(
                 'SELECT session.id,session.title,job.policy_snapshot_json,'
@@ -612,7 +611,6 @@ class VaingloryRepository:
                 for row in import_rows
                 if row['session_id'] is not None
             )
-            paths: Tuple[str, ...] = ()
             counts = {
                 'sessions': len(session_ids),
                 'imports': len(import_ids),
@@ -623,15 +621,6 @@ class VaingloryRepository:
             if session_ids:
                 ordered_ids = tuple(sorted(session_ids))
                 placeholders = ','.join('?' for _value in ordered_ids)
-                paths = tuple(
-                    str(row['result_frame_path'])
-                    for row in connection.execute(
-                        'SELECT result_frame_path FROM vainglory_matches '
-                        'WHERE session_id IN ({}) '
-                        'AND result_frame_path IS NOT NULL'.format(placeholders),
-                        ordered_ids,
-                    ).fetchall()
-                )
                 counts['matches'] = int(
                     connection.execute(
                         'SELECT COUNT(*) FROM vainglory_matches '
@@ -708,18 +697,9 @@ class VaingloryRepository:
                     'discovered_count=?,completed_count=? WHERE account_id=?',
                     (progress, total, completed, account_id),
                 )
-            return counts, paths
+            return counts
 
-        counts, paths = await self._database.write(purge)
-        for relative_path in paths:
-            try:
-                path = self._resolve_result_frame_path(relative_path)
-            except ValueError:
-                logger.warning(
-                    'Ignored unsafe excluded Vainglory frame path: {!r}', relative_path
-                )
-                continue
-            self._unlink_result_frame(path)
+        counts = await self._database.write(purge)
         removed = sum(
             counts[name] for name in ('imports', 'part_jobs', 'ocr_jobs', 'matches')
         )
@@ -734,19 +714,7 @@ class VaingloryRepository:
     async def invalidate_outdated_results(self) -> int:
         now = self._now()
 
-        def invalidate(connection: sqlite3.Connection) -> Tuple[int, Tuple[str, ...]]:
-            paths = tuple(
-                str(row['result_frame_path'])
-                for row in connection.execute(
-                    'SELECT match.result_frame_path '
-                    'FROM vainglory_matches match '
-                    'LEFT JOIN vainglory_part_jobs job '
-                    'ON job.part_id=match.result_part_id '
-                    'WHERE match.result_frame_path IS NOT NULL '
-                    'AND (job.part_id IS NULL OR job.algorithm_version<?)',
-                    (self.ALGORITHM_VERSION,),
-                ).fetchall()
-            )
+        def invalidate(connection: sqlite3.Connection) -> int:
             session_rows = connection.execute(
                 'SELECT DISTINCT match.session_id '
                 'FROM vainglory_matches match '
@@ -757,6 +725,13 @@ class VaingloryRepository:
                 'SELECT DISTINCT session_id FROM vainglory_part_jobs '
                 'WHERE algorithm_version<?',
                 (self.ALGORITHM_VERSION, self.ALGORITHM_VERSION),
+            ).fetchall()
+            import_rows = connection.execute(
+                'SELECT DISTINCT import_id FROM vainglory_archive_parts '
+                'WHERE recording_part_id IN('
+                'SELECT part_id FROM vainglory_part_jobs '
+                'WHERE algorithm_version<?)',
+                (self.ALGORITHM_VERSION,),
             ).fetchall()
             deleted = connection.execute(
                 'DELETE FROM vainglory_matches WHERE NOT EXISTS('
@@ -771,28 +746,57 @@ class VaingloryRepository:
                 (self.ALGORITHM_VERSION,),
             )
             connection.execute(
+                "UPDATE vainglory_archive_parts SET state='queued',progress=0,"
+                'error=NULL,updated_at=? WHERE recording_part_id IN('
+                'SELECT part_id FROM vainglory_part_jobs '
+                'WHERE algorithm_version<?)',
+                (now, self.ALGORITHM_VERSION),
+            )
+            connection.execute(
                 "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
                 'algorithm_version=?,match_count=0,error=NULL,started_at=NULL,'
                 'completed_at=NULL,updated_at=? WHERE algorithm_version<?',
                 (self.ALGORITHM_VERSION, now, self.ALGORITHM_VERSION),
             )
+            for import_row in import_rows:
+                import_id = int(import_row['import_id'])
+                completed = int(
+                    connection.execute(
+                        'SELECT COUNT(*) FROM vainglory_archive_parts '
+                        "WHERE import_id=? AND state='ready'",
+                        (import_id,),
+                    ).fetchone()[0]
+                )
+                page_count = int(
+                    connection.execute(
+                        'SELECT COUNT(*) FROM vainglory_archive_parts '
+                        'WHERE import_id=?',
+                        (import_id,),
+                    ).fetchone()[0]
+                )
+                connection.execute(
+                    "UPDATE vainglory_archive_imports SET state='analyzing',"
+                    'progress=?,completed_page_count=?,error=NULL,'
+                    "content_classification='unknown',classification_reason=NULL,"
+                    'retryable=0,next_retry_at=NULL,updated_at=? WHERE id=?',
+                    (
+                        float(completed) / float(max(1, page_count)),
+                        completed,
+                        now,
+                        import_id,
+                    ),
+                )
             for row in session_rows:
                 self._ensure_scan_job(connection, int(row['session_id']), now)
                 self._refresh_session_job(connection, int(row['session_id']), now)
-            return deleted, paths
-
-        deleted, paths = await self._database.write(invalidate)
-        for relative_path in paths:
-            try:
-                path = self._resolve_result_frame_path(relative_path)
-            except ValueError:
-                logger.warning(
-                    'Ignored unsafe Vainglory result frame path during '
-                    'algorithm invalidation: {!r}',
-                    relative_path,
+                connection.execute(
+                    'UPDATE vainglory_publications SET needs_refresh=1 '
+                    'WHERE session_id=?',
+                    (int(row['session_id']),),
                 )
-                continue
-            self._unlink_result_frame(path)
+            return deleted
+
+        deleted = await self._database.write(invalidate)
         if deleted:
             logger.info(
                 'Invalidated outdated Vainglory results: matches={} algorithm={}',
@@ -1046,7 +1050,7 @@ class VaingloryRepository:
                 'CASE WHEN priority>=3 THEN COALESCE('
                 'archive_import.published_at,migration_item.published_at,'
                 'session.started_at) END DESC,'
-                'part.created_at,job.part_id LIMIT 1',
+                'job.session_id,part.part_index,part.created_at,job.part_id LIMIT 1',
                 (recent_cutoff,),
             ).fetchone()
             if row is None:
@@ -1169,7 +1173,7 @@ class VaingloryRepository:
                 'CASE WHEN priority>=3 THEN COALESCE('
                 'archive_import.published_at,migration_item.published_at,'
                 'session.started_at) END DESC,'
-                'ocr.requested_at,ocr.part_id LIMIT 1',
+                'ocr.session_id,part.part_index,ocr.requested_at,ocr.part_id LIMIT 1',
                 (recent_cutoff,),
             ).fetchone()
             if row is None:
@@ -1509,11 +1513,9 @@ class VaingloryRepository:
         self, part_id: int, matches: Sequence[AnalyzedMatch]
     ) -> None:
         now = self._now()
-        written_paths: List[Tuple[Path, bool]] = []
+        written_paths: List[Path] = []
 
-        def complete(
-            connection: sqlite3.Connection,
-        ) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+        def complete(connection: sqlite3.Connection) -> None:
             job = connection.execute(
                 'SELECT state,session_id FROM vainglory_part_jobs WHERE part_id=?',
                 (int(part_id),),
@@ -1539,19 +1541,10 @@ class VaingloryRepository:
                 ).fetchall()
             }
             used_manual_overrides: Set[Tuple[int, str, int]] = set()
-            old_result_paths = tuple(
-                str(row['result_frame_path'])
-                for row in connection.execute(
-                    'SELECT result_frame_path FROM vainglory_matches '
-                    'WHERE result_part_id=? AND result_frame_path IS NOT NULL',
-                    (int(part_id),),
-                ).fetchall()
-            )
             connection.execute(
                 'DELETE FROM vainglory_matches WHERE result_part_id=?', (int(part_id),)
             )
             heroes = self._existing_heroes(connection)
-            new_result_paths: List[str] = []
             for match in matches:
                 if int(match.part_id) != int(part_id):
                     raise VaingloryConflict('结算页不属于当前分 P')
@@ -1586,12 +1579,11 @@ class VaingloryRepository:
                         session_id=session_id,
                         part_id=part_id,
                         result_at_ms=match.result_at_ms,
+                        content=match.result_frame_png,
                     )
                     destination = self._resolve_result_frame_path(result_frame_path)
-                    existed = destination.is_file()
                     self._write_result_frame(destination, match.result_frame_png)
-                    written_paths.append((destination, existed))
-                    new_result_paths.append(result_frame_path)
+                    written_paths.append(destination)
                 cursor = connection.execute(
                     'INSERT INTO vainglory_matches('
                     'session_id,result_part_id,result_at_ms,duration_seconds,'
@@ -1701,15 +1693,8 @@ class VaingloryRepository:
             )
             self._consolidate_heroes(connection, now)
             self._refresh_session_job(connection, session_id, now)
-            return old_result_paths, tuple(new_result_paths)
 
-        try:
-            old_result_paths, new_result_paths = await self._database.write(complete)
-        except BaseException:
-            for path, existed in written_paths:
-                if not existed:
-                    self._unlink_result_frame(path)
-            raise
+        await self._database.write(complete)
         if written_paths:
             logger.info(
                 'Vainglory result frames stored: part_id={} frames={} directory={}',
@@ -1717,16 +1702,6 @@ class VaingloryRepository:
                 len(written_paths),
                 self._result_frame_root,
             )
-        for relative_path in set(old_result_paths).difference(new_result_paths):
-            try:
-                path = self._resolve_result_frame_path(relative_path)
-            except ValueError:
-                logger.warning(
-                    'Ignored unsafe Vainglory result frame path during cleanup: {!r}',
-                    relative_path,
-                )
-                continue
-            self._unlink_result_frame(path)
 
     async def get_job(self, session_id: int) -> Optional[ScanJob]:
         row = await self._database.fetchone(
@@ -2794,9 +2769,12 @@ class VaingloryRepository:
 
     @staticmethod
     def _result_frame_relative_path(
-        *, session_id: int, part_id: int, result_at_ms: int
+        *, session_id: int, part_id: int, result_at_ms: int, content: bytes
     ) -> str:
-        return 'session-{}/part-{}-{}.png'.format(session_id, part_id, result_at_ms)
+        digest = hashlib.sha256(content).hexdigest()[:16]
+        return 'session-{}/part-{}-{}-{}.png'.format(
+            session_id, part_id, result_at_ms, digest
+        )
 
     def _resolve_result_frame_path(self, relative_path: str) -> Path:
         candidate = Path(relative_path)
@@ -2815,6 +2793,8 @@ class VaingloryRepository:
         destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         os.chmod(self._result_frame_root, 0o700)
         os.chmod(destination.parent, 0o700)
+        if destination.is_file():
+            return
         temporary_path: Optional[Path] = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -2833,17 +2813,6 @@ class VaingloryRepository:
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
-
-    @staticmethod
-    def _unlink_result_frame(path: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as error:
-            logger.warning(
-                'Unable to remove stale Vainglory result frame: path={} error={!r}',
-                path,
-                error,
-            )
 
     def _resolve_hero(
         self,

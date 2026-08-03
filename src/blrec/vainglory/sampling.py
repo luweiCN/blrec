@@ -212,7 +212,7 @@ class FfmpegSampler:
                 interval, width, height
             ),
             frame_step_ms=interval * 1_000,
-            skip_frame='nokey' if keyframes_only else 'bidir',
+            skip_frame='nokey' if keyframes_only else None,
             start_ms=window.start_ms,
             duration_ms=window.end_ms - window.start_ms,
         )

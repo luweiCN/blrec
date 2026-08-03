@@ -184,6 +184,7 @@ def build_publication_plan(matches: Sequence[MatchRecord]) -> PublicationPlan:
                     'start': match.started_at_ms,
                     'result': match.result_at_ms,
                     'winner': match.winner_color,
+                    'game_mode': match.game_mode,
                     'players': [
                         [
                             player.side,
@@ -197,7 +198,7 @@ def build_publication_plan(matches: Sequence[MatchRecord]) -> PublicationPlan:
                 for match in ordered
             ],
             'summary': summary,
-            'version': 9,
+            'version': 10,
         },
         ensure_ascii=False,
         separators=(',', ':'),
@@ -271,6 +272,7 @@ def remove_generated_description(current: str, block: str) -> str:
 
 class VaingloryPublicationService:
     _RETRYABLE_CODES = frozenset((-412, -352, 412, 429, 12015, 12051))
+    _MISSING_REPLY_CODES = frozenset((-404, 404, 12002))
     _PERMANENT_CODES = frozenset(
         (-403, 403, 12002, 12003, 12009, 12016, 12025, 12035, 12045, 12052)
     )
@@ -329,6 +331,13 @@ class VaingloryPublicationService:
             changed = connection.execute(
                 "UPDATE vainglory_publication_comments SET state='unknown_outcome',"
                 "error='进程中断后需要远端对账',updated_at=? "
+                "WHERE state='in_flight'",
+                (now,),
+            ).rowcount
+            changed += connection.execute(
+                'UPDATE vainglory_publication_stale_comments '
+                "SET state='unknown_outcome',"
+                "error='进程中断后需要确认旧评论是否已删除',updated_at=? "
                 "WHERE state='in_flight'",
                 (now,),
             ).rowcount
@@ -543,6 +552,19 @@ class VaingloryPublicationService:
                     )
                     return True
                 connection.execute(
+                    'INSERT INTO vainglory_publication_stale_comments('
+                    'publication_id,ordinal,content,rpid,state,attempt_count,'
+                    'next_attempt_at,error,created_at,updated_at) '
+                    'SELECT publication_id,ordinal,content,rpid,'
+                    "CASE WHEN rpid IS NULL THEN 'unknown_outcome' "
+                    "ELSE 'prepared' END,0,0,NULL,?,? "
+                    'FROM vainglory_publication_comments '
+                    'WHERE publication_id=? AND ('
+                    'rpid IS NOT NULL OR state IN ('
+                    "'in_flight','unknown_outcome'))",
+                    (now, now, publication_id),
+                )
+                connection.execute(
                     'DELETE FROM vainglory_publication_comments '
                     'WHERE publication_id=?',
                     (publication_id,),
@@ -729,6 +751,17 @@ class VaingloryPublicationService:
                     'attempt_count=attempt_count+1,error=NULL,updated_at=? WHERE id=?',
                     (self._now(), publication_id),
                 )
+                stale_comment = await self._next_stale_comment(publication_id)
+                if stale_comment is not None:
+                    if int(stale_comment['next_attempt_at']) > self._now():
+                        await self._database.execute(
+                            'UPDATE vainglory_publications SET next_attempt_at=? '
+                            'WHERE id=?',
+                            (int(stale_comment['next_attempt_at']), publication_id),
+                        )
+                        return
+                    await self._remove_stale_comment(publication, stale_comment, bundle)
+                    return
                 if str(publication['chapter_state']) not in ('confirmed', 'skipped'):
                     await self._publish_chapters(publication, bundle)
                     return
@@ -941,6 +974,197 @@ class VaingloryPublicationService:
             await self._fail(publication_id, '简介更新响应不符合预期')
         else:
             await self._set_description_state(publication_id, 'confirmed')
+
+    async def _next_stale_comment(
+        self, publication_id: int
+    ) -> Optional[Mapping[str, Any]]:
+        row = await self._database.fetchone(
+            'SELECT * FROM vainglory_publication_stale_comments '
+            'WHERE publication_id=? ORDER BY ordinal DESC,id LIMIT 1',
+            (publication_id,),
+        )
+        return None if row is None else dict(row)
+
+    async def _remove_stale_comment(
+        self,
+        publication: Mapping[str, Any],
+        comment: Mapping[str, Any],
+        bundle: CredentialBundle,
+    ) -> None:
+        if str(comment['state']) == 'unknown_outcome':
+            await self._reconcile_stale_comment(publication, comment, bundle)
+            return
+        rpid = _positive_int(comment.get('rpid'))
+        if rpid is None:
+            await self._forget_stale_comment(int(comment['id']))
+            return
+        await self._database.execute(
+            'UPDATE vainglory_publication_stale_comments '
+            "SET state='in_flight',attempt_count=attempt_count+1,error=NULL,"
+            'updated_at=? WHERE id=?',
+            (self._now(), int(comment['id'])),
+        )
+        try:
+            await self._protocol.delete_reply(
+                bundle, {'type': 1, 'oid': int(publication['aid']), 'rpid': rpid}
+            )
+        except DefinitelyNotSent:
+            await self._retry_stale_comment(
+                publication,
+                comment,
+                '旧评论删除请求未发出，将自动重试',
+                state='prepared',
+            )
+        except RemoteOutcomeUnknown:
+            await self._retry_stale_comment(
+                publication,
+                comment,
+                '旧评论删除结果未知，下次先远端确认',
+                state='unknown_outcome',
+            )
+        except BiliApiError as error:
+            if error.code in self._MISSING_REPLY_CODES:
+                await self._forget_stale_comment(int(comment['id']))
+            else:
+                await self._handle_api_error(int(publication['id']), publication, error)
+        except ProtocolContractError:
+            await self._retry_stale_comment(
+                publication,
+                comment,
+                '旧评论删除响应异常，将自动重试',
+                state='unknown_outcome',
+                minimum_delay=3600,
+            )
+        else:
+            await self._forget_stale_comment(int(comment['id']))
+
+    async def _reconcile_stale_comment(
+        self,
+        publication: Mapping[str, Any],
+        comment: Mapping[str, Any],
+        bundle: CredentialBundle,
+    ) -> None:
+        rpid = _positive_int(comment.get('rpid'))
+        try:
+            if rpid is not None:
+                response = await self._protocol.reply_detail(
+                    bundle,
+                    {
+                        'type': 1,
+                        'oid': int(publication['aid']),
+                        'root': rpid,
+                        'pn': 1,
+                        'ps': 20,
+                    },
+                )
+                data = response.get('data')
+                root = data.get('root') if isinstance(data, Mapping) else None
+                if root is None:
+                    await self._forget_stale_comment(int(comment['id']))
+                    return
+                if (
+                    not isinstance(root, Mapping)
+                    or _positive_int(root.get('rpid')) != rpid
+                ):
+                    raise ProtocolContractError('old comment identity is inconsistent')
+            else:
+                response = await self._protocol.list_replies(
+                    bundle,
+                    {
+                        'type': 1,
+                        'oid': int(publication['aid']),
+                        'mode': 2,
+                        'next': 0,
+                        'ps': 20,
+                    },
+                )
+                matches = [
+                    reply
+                    for reply in _reply_entries(response)
+                    if _reply_matches(
+                        reply,
+                        content=str(comment['content']),
+                        account_uid=int(publication['account_uid']),
+                        aid=int(publication['aid']),
+                        root_rpid=None,
+                        is_root=True,
+                    )
+                ]
+                if len(matches) != 1:
+                    await self._retry_stale_comment(
+                        publication,
+                        comment,
+                        '无法唯一确认旧评论是否存在，已停止发布新评论',
+                        state='unknown_outcome',
+                        minimum_delay=3600,
+                    )
+                    return
+                rpid = _positive_int(matches[0].get('rpid'))
+                if rpid is None:
+                    raise ProtocolContractError('old comment has no RPID')
+        except BiliApiError as error:
+            if error.code in self._MISSING_REPLY_CODES:
+                await self._forget_stale_comment(int(comment['id']))
+            else:
+                await self._handle_api_error(int(publication['id']), publication, error)
+            return
+        except (DefinitelyNotSent, RemoteOutcomeUnknown):
+            await self._retry_stale_comment(
+                publication,
+                comment,
+                '旧评论远端确认失败，将自动重试',
+                state='unknown_outcome',
+            )
+            return
+        except ProtocolContractError:
+            await self._retry_stale_comment(
+                publication,
+                comment,
+                '旧评论远端数据异常，将自动重试',
+                state='unknown_outcome',
+                minimum_delay=3600,
+            )
+            return
+        await self._database.execute(
+            'UPDATE vainglory_publication_stale_comments '
+            "SET rpid=?,state='prepared',error=NULL,next_attempt_at=0,"
+            'updated_at=? WHERE id=?',
+            (rpid, self._now(), int(comment['id'])),
+        )
+
+    async def _retry_stale_comment(
+        self,
+        publication: Mapping[str, Any],
+        comment: Mapping[str, Any],
+        message: str,
+        *,
+        state: str,
+        minimum_delay: int = 5,
+    ) -> None:
+        delay = min(
+            3600, max(minimum_delay, 2 ** min(int(comment['attempt_count']) + 1, 11))
+        )
+        now = self._now()
+        next_attempt_at = now + delay
+
+        def retry(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                'UPDATE vainglory_publication_stale_comments '
+                'SET state=?,next_attempt_at=?,error=?,updated_at=? WHERE id=?',
+                (state, next_attempt_at, message[:500], now, int(comment['id'])),
+            )
+            connection.execute(
+                "UPDATE vainglory_publications SET state='paused',"
+                'next_attempt_at=?,error=?,updated_at=? WHERE id=?',
+                (next_attempt_at, message[:500], now, int(publication['id'])),
+            )
+
+        await self._database.write(retry)
+
+    async def _forget_stale_comment(self, comment_id: int) -> None:
+        await self._database.execute(
+            'DELETE FROM vainglory_publication_stale_comments WHERE id=?', (comment_id,)
+        )
 
     async def _next_comment(self, publication_id: int) -> Optional[Mapping[str, Any]]:
         row = await self._database.fetchone(
@@ -1633,7 +1857,7 @@ def _build_chapter_cards(
 
 def _chapter_content(index: int, match: MatchRecord) -> str:
     result = {'teal': '胜', 'orange': '负'}.get(match.winner_color, '未定')
-    content = '第{}局|{}'.format(index, result)
+    parts = ['第{}局'.format(_chinese_number(index)), result]
     recorded = next(
         (
             player
@@ -1646,10 +1870,31 @@ def _chapter_content(index: int, match: MatchRecord) -> str:
         ),
         None,
     )
-    if recorded is None or not recorded.hero_label:
-        return content
-    hero = '|{}'.format(hero_chinese_name(recorded.hero_label))
-    return content + hero if len(content + hero) <= _CHAPTER_CONTENT_LIMIT else content
+    if recorded is not None and recorded.hero_label:
+        parts.append(hero_chinese_name(recorded.hero_label))
+    mode = {'3v3': '3V3', '5v5': '5V5', 'aram': '大乱斗'}.get(match.game_mode)
+    if mode is not None:
+        parts.append(mode)
+    while parts:
+        content = '｜'.join(parts)
+        if len(content) <= _CHAPTER_CONTENT_LIMIT:
+            return content
+        if len(parts) > 3:
+            parts.pop(2)
+        else:
+            parts.pop()
+    return result
+
+
+def _chinese_number(value: int) -> str:
+    if value <= 0 or value > 99:
+        return str(value)
+    digits = '零一二三四五六七八九'
+    if value < 10:
+        return digits[value]
+    tens, ones = divmod(value, 10)
+    prefix = '十' if tens == 1 else digits[tens] + '十'
+    return prefix if ones == 0 else prefix + digits[ones]
 
 
 def _existing_chapter_cards(
@@ -1678,7 +1923,9 @@ def _automatic_chapter_cards(cards: Sequence[Mapping[str, Any]]) -> bool:
     return all(
         str(card.get('content') or '') == '直播开始'
         or re.fullmatch(
-            r'(?:第\d+局(?:\|(?:胜|负|未定)(?:\|[^|\r\n]{1,8})?)?'
+            r'(?:第(?:\d+|[一二三四五六七八九十]{1,3})局'
+            r'(?:[|｜](?:胜|负|未定)'
+            r'(?:[|｜][^|｜\r\n]{1,8})?(?:[|｜](?:3V3|5V5|大乱斗))?)?'
             r'|\d+(?:胜|负|未定)'
             r'(?:(?:\[[^\[\]\r\n]{1,8}\])|(?:\|[^|\r\n]{1,8}))?)',
             str(card.get('content') or ''),

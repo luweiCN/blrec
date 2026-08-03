@@ -34,6 +34,7 @@ from blrec.vainglory.glm_ocr import GlmOcrClient, GlmOcrResultReader
 from blrec.vainglory.hero_recognition import SiftHeroRecognizer, load_hero_references
 from blrec.vainglory.publication import VaingloryPublicationService
 from blrec.vainglory.repository import VaingloryRepository
+from blrec.vainglory.result_detection import load_result_panel_detector
 from blrec.vainglory.service import VaingloryIndexService
 
 from .accounts import AccountManager, AccountWriteGate
@@ -588,7 +589,25 @@ class BiliAccountRuntime:
             result_reader = (
                 None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
             )
-            vainglory_repository = VaingloryRepository(database, clock=self._clock)
+            try:
+                result_panel_detector = load_result_panel_detector()
+            except (ImportError, OSError, RuntimeError, ValueError) as error:
+                result_panel_detector = None
+                logger.warning(
+                    'Vainglory result panel detector unavailable; using legacy '
+                    'layout rules: reason={!r}',
+                    error,
+                )
+            result_frame_root = os.environ.get(
+                'BLREC_VAINGLORY_RESULT_FRAME_ROOT', ''
+            ).strip()
+            vainglory_repository = VaingloryRepository(
+                database,
+                result_frame_root=(
+                    None if not result_frame_root else Path(result_frame_root)
+                ),
+                clock=self._clock,
+            )
             vainglory_publication = VaingloryPublicationService(
                 database,
                 vainglory_repository,
@@ -601,7 +620,9 @@ class BiliAccountRuntime:
             vainglory_service = VaingloryIndexService(
                 vainglory_repository,
                 analyzer=VaingloryVideoAnalyzer(
-                    result_reader=result_reader, hero_recognizer=hero_recognizer
+                    result_reader=result_reader,
+                    hero_recognizer=hero_recognizer,
+                    result_panel_detector=result_panel_detector,
                 ),
             )
             await vainglory_service.start()
