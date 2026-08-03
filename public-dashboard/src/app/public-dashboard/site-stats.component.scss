@@ -110,6 +110,11 @@ dd {
       border-left: 0;
     }
   }
+
+  .stats-updated {
+    grid-row: 1;
+    grid-column: 2;
+  }
 }
 
 @media (max-width: 420px) {
