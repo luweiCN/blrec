@@ -25,7 +25,13 @@ function performance(
   wins: number,
   topHero: string,
 ): Performance {
-  return { matches, wins, topHero };
+  return {
+    matches,
+    wins,
+    topHero,
+    ratingScore: matches === 0 ? null : Math.round((wins / matches) * 1000),
+    provisional: matches > 0 && matches < 5,
+  };
 }
 
 function heroPerformance(
@@ -534,11 +540,7 @@ function scaledPerformance(
     0.78,
     Math.max(0.34, value.wins / value.matches + seasonVariance(seed, season)),
   );
-  return {
-    ...value,
-    matches,
-    wins: Math.round(matches * rate),
-  };
+  return performance(matches, Math.round(matches * rate), value.topHero);
 }
 
 function scaledPlayer(
@@ -551,14 +553,12 @@ function scaledPlayer(
   const three = scaledPerformance(value.modes['3v3'], season, value.id + 1);
   const brawl = scaledPerformance(value.modes.brawl, season, value.id + 2);
   const five = scaledPerformance(value.modes['5v5'], season, value.id + 3);
+  const allMatches = three.matches + brawl.matches + five.matches;
+  const allWins = three.wins + brawl.wins + five.wins;
   return {
     ...value,
     modes: {
-      all: {
-        matches: three.matches + brawl.matches + five.matches,
-        wins: three.wins + brawl.wins + five.wins,
-        topHero: value.modes.all.topHero,
-      },
+      all: performance(allMatches, allWins, value.modes.all.topHero),
       '3v3': three,
       brawl,
       '5v5': five,

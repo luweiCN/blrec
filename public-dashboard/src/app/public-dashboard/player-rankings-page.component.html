@@ -9,7 +9,7 @@
     <div>
       <h1>玩家综合榜</h1>
       <p>
-        查看全部符合样本门槛的稳定玩家身份，可按展示名、游戏别名、拼音或直播间检索。
+        查看全部已收录的稳定玩家身份，可按展示名、游戏别名、拼音或直播间检索。
       </p>
     </div>
     <p class="page-context">
@@ -28,7 +28,7 @@
     <header class="directory-toolbar">
       <div>
         <h2 id="player-directory-title">全部玩家</h2>
-        <p>达到当前模式 20 局门槛后进入排名。</p>
+        <p>按榜单分从高到低排列。</p>
       </div>
 
       <label class="search-control">
@@ -64,6 +64,7 @@
             <th scope="col">近五局</th>
             <th scope="col">对局</th>
             <th scope="col">胜 / 负</th>
+            <th scope="col">榜单分</th>
             <th scope="col">胜率</th>
           </tr>
         </thead>
@@ -74,19 +75,6 @@
           >
             <td class="directory-rank" data-label="排名">
               <strong>{{ row.rank.toString().padStart(2, "0") }}</strong>
-              <span
-                [class.up]="row.player.trend > 0"
-                [class.down]="row.player.trend < 0"
-                [attr.aria-label]="trendLabel(row.player.trend)"
-              >
-                {{
-                  row.player.trend > 0
-                    ? "↑" + row.player.trend
-                    : row.player.trend < 0
-                      ? "↓" + -row.player.trend
-                      : "—"
-                }}
-              </span>
             </td>
             <td data-label="玩家">
               <a
@@ -140,12 +128,16 @@
                   playerPerformance(row.player).wins
               }}
             </td>
+            <td class="directory-score" data-label="榜单分">
+              <strong>{{ playerPerformance(row.player).ratingScore }}</strong>
+              <small *ngIf="playerPerformance(row.player).provisional">定位中</small>
+            </td>
             <td class="directory-rate" data-label="胜率">
               {{ winRate(playerPerformance(row.player)) | percent: "1.0-1" }}
             </td>
           </tr>
           <tr *ngIf="visibleRows.length === 0">
-            <td colspan="7" class="empty-state">
+            <td colspan="8" class="empty-state">
               没有找到匹配的玩家，请尝试其他名称或直播间号。
             </td>
           </tr>

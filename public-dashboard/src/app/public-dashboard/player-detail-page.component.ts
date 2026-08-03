@@ -41,6 +41,8 @@ const EMPTY_PERFORMANCE: Performance = {
   matches: 0,
   wins: 0,
   topHero: '',
+  ratingScore: null,
+  provisional: false,
 };
 
 @Component({

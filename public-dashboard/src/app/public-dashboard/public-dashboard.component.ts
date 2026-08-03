@@ -38,6 +38,8 @@ const EMPTY_PERFORMANCE: Performance = {
   matches: 0,
   wins: 0,
   topHero: '',
+  ratingScore: null,
+  provisional: false,
 };
 
 @Component({
@@ -175,18 +177,12 @@ export class PublicDashboardComponent implements OnDestroy {
     return winRate(value);
   }
 
-  modeLabel(): string {
-    return modeLabel(this.activeMode);
+  ratingScore(value: Performance): number {
+    return value.ratingScore ?? 0;
   }
 
-  trendLabel(trend: number): string {
-    if (trend > 0) {
-      return '上升 ' + trend + ' 名';
-    }
-    if (trend < 0) {
-      return '下降 ' + Math.abs(trend) + ' 名';
-    }
-    return '暂无历史趋势';
+  modeLabel(): string {
+    return modeLabel(this.activeMode);
   }
 
   podiumRank(player: PlayerStanding): number {

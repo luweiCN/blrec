@@ -11,6 +11,7 @@ import {
   MODE_FILTERS,
   Performance,
   PlayerStanding,
+  RatingModel,
   SeasonOption,
 } from './public-dashboard.models';
 
@@ -116,7 +117,25 @@ function isPerformance(value: unknown): value is Performance {
     isNonNegativeInteger(value['matches']) &&
     isNonNegativeInteger(value['wins']) &&
     value['wins'] <= value['matches'] &&
-    typeof value['topHero'] === 'string'
+    typeof value['topHero'] === 'string' &&
+    (value['ratingScore'] === null ||
+      (isNonNegativeInteger(value['ratingScore']) &&
+        value['ratingScore'] <= 1000)) &&
+    typeof value['provisional'] === 'boolean' &&
+    (value['matches'] === 0) === (value['ratingScore'] === null)
+  );
+}
+
+function isRatingModel(value: unknown): value is RatingModel {
+  if (!isObject(value)) {
+    return false;
+  }
+  return (
+    value['version'] === 1 &&
+    value['priorMatches'] === 20 &&
+    value['carryoverRate'] === 0.25 &&
+    value['credibleLevel'] === 0.9 &&
+    value['provisionalMatches'] === 5
   );
 }
 
@@ -212,6 +231,7 @@ function parseSnapshot(value: unknown): DashboardSnapshot {
     typeof value['generatedAt'] !== 'string' ||
     !isNonNegativeInteger(value['sourceLastMatchId']) ||
     !isNonNegativeInteger(value['sourceMatchCount']) ||
+    !isRatingModel(value['ratingModel']) ||
     typeof value['currentSeasonKey'] !== 'string' ||
     !isSeasonKey(value['currentSeasonKey']) ||
     !Array.isArray(value['seasons']) ||

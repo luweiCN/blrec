@@ -11,6 +11,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Set, Tuple
 
+from .dashboard_rating import (
+    CARRYOVER_RATE,
+    CREDIBLE_LEVEL,
+    PRIOR_MATCHES,
+    PROVISIONAL_MATCHES,
+    BayesianRating,
+    calculate_bayesian_rating,
+)
+
 __all__ = (
     'DashboardExportResult',
     'build_dashboard_snapshot',
@@ -53,6 +62,12 @@ class _Season:
     ends_at: datetime
 
 
+@dataclass(frozen=True)
+class _PreviousAbility:
+    ability: float
+    season_index: int
+
+
 @dataclass
 class _Performance:
     matches: int = 0
@@ -90,12 +105,16 @@ class _Performance:
             ),
         )
 
-    def public_value(self) -> Mapping[str, Any]:
+    def public_value(
+        self, rating: Optional[BayesianRating] = None
+    ) -> Mapping[str, Any]:
         return {
             'matches': self.matches,
             'wins': self.wins,
             'topHero': self.top_hero(),
             'form': list((self.results or [])[-5:]),
+            'ratingScore': rating.score if rating is not None else None,
+            'provisional': rating.provisional if rating is not None else False,
         }
 
 
@@ -162,6 +181,11 @@ def _format_period(season: _Season) -> str:
         final_day.month,
         final_day.day,
     )
+
+
+def _season_index(season: _Season) -> int:
+    position = {'spring': 0, 'summer': 1, 'autumn': 2}[season.name]
+    return season.year * 3 + position
 
 
 def _season_option(season: _Season, current_key: str) -> Mapping[str, Any]:
@@ -288,10 +312,40 @@ def _room_label(rooms: List[int]) -> str:
     return '直播间 ' + ' / '.join(str(room_id) for room_id in rooms)
 
 
+def _league_baselines(rows: List[sqlite3.Row]) -> Mapping[str, float]:
+    totals: Dict[str, List[int]] = {mode: [0, 0] for mode in PUBLIC_MODES}
+    for row in rows:
+        public_mode = RAW_MODE_TO_PUBLIC[str(row['game_mode'])]
+        won = str(row['winner_color']) == 'teal'
+        for mode in ('all', public_mode):
+            totals[mode][0] += 1
+            if won:
+                totals[mode][1] += 1
+    return {
+        mode: (wins + 1.0) / (matches + 2.0) for mode, (matches, wins) in totals.items()
+    }
+
+
+def _carryover_for(
+    previous: Optional[_PreviousAbility], season_index: int
+) -> Tuple[Optional[float], float]:
+    if previous is None:
+        return None, 0.0
+    gap = season_index - previous.season_index
+    if gap == 1:
+        return previous.ability, CARRYOVER_RATE
+    if gap == 2:
+        return previous.ability, CARRYOVER_RATE / 2.0
+    return None, 0.0
+
+
 def _standings_for_rows(
     rows: List[sqlite3.Row],
     players: Mapping[int, Mapping[str, Any]],
     aliases: Mapping[int, List[str]],
+    baselines: Mapping[str, float],
+    previous_abilities: MutableMapping[Tuple[int, str], _PreviousAbility],
+    season_index: int,
 ) -> Mapping[str, Any]:
     player_modes: Dict[int, Dict[str, _Performance]] = {}
     hero_modes: Dict[str, Dict[str, _HeroPerformance]] = {}
@@ -313,6 +367,24 @@ def _standings_for_rows(
     for player_id in sorted(player_modes):
         metadata = players[player_id]
         modes = player_modes[player_id]
+        ratings: Dict[str, Optional[BayesianRating]] = {}
+        for mode in PUBLIC_MODES:
+            previous_ability, carryover_rate = _carryover_for(
+                previous_abilities.get((player_id, mode)), season_index
+            )
+            performance = modes[mode]
+            rating = calculate_bayesian_rating(
+                wins=performance.wins,
+                matches=performance.matches,
+                baseline=baselines[mode],
+                previous_ability=previous_ability,
+                carryover_rate=carryover_rate,
+            )
+            ratings[mode] = rating
+            if rating is not None:
+                previous_abilities[(player_id, mode)] = _PreviousAbility(
+                    ability=rating.ability, season_index=season_index
+                )
         name = str(metadata['name'])
         all_heroes = modes['all'].heroes or {}
         hero_pool = [
@@ -336,7 +408,10 @@ def _standings_for_rows(
                 'aliases': list(aliases.get(player_id, ())),
                 'trend': 0,
                 'form': list((modes['all'].results or [])[-5:]),
-                'modes': {mode: modes[mode].public_value() for mode in PUBLIC_MODES},
+                'modes': {
+                    mode: modes[mode].public_value(ratings[mode])
+                    for mode in PUBLIC_MODES
+                },
                 'heroPool': hero_pool,
             }
         )
@@ -369,6 +444,7 @@ def build_dashboard_snapshot(
     current_season = _season_for(generated_at)
     players, aliases = _player_metadata(connection)
     rows = _match_rows(connection)
+    baselines = _league_baselines(rows)
 
     seasons_by_key: Dict[str, _Season] = {current_season.key: current_season}
     rows_by_season: Dict[str, List[sqlite3.Row]] = {}
@@ -378,16 +454,24 @@ def build_dashboard_snapshot(
         )
         seasons_by_key[season.key] = season
         rows_by_season.setdefault(season.key, []).append(row)
-    seasons = sorted(
-        seasons_by_key.values(), key=lambda value: value.starts_at, reverse=True
+    chronological_seasons = sorted(
+        seasons_by_key.values(), key=lambda value: value.starts_at
     )
-    standings = {
-        season.key: _standings_for_rows(
-            rows_by_season.get(season.key, []), players, aliases
+    previous_abilities: Dict[Tuple[int, str], _PreviousAbility] = {}
+    standings = {}
+    for season in chronological_seasons:
+        standings[season.key] = _standings_for_rows(
+            rows_by_season.get(season.key, []),
+            players,
+            aliases,
+            baselines,
+            previous_abilities,
+            _season_index(season),
         )
-        for season in seasons
-    }
-    standings['all-time'] = _standings_for_rows(rows, players, aliases)
+    seasons = list(reversed(chronological_seasons))
+    standings['all-time'] = _standings_for_rows(
+        rows, players, aliases, baselines, {}, _season_index(current_season)
+    )
     publication_date = generated_at.astimezone(SHANGHAI).date().isoformat()
     source_last_match_id = max((int(row['match_id']) for row in rows), default=0)
     body: Dict[str, Any] = {
@@ -396,6 +480,13 @@ def build_dashboard_snapshot(
         'generatedAt': _utc_iso(generated_at),
         'sourceLastMatchId': source_last_match_id,
         'sourceMatchCount': len(rows),
+        'ratingModel': {
+            'version': 1,
+            'priorMatches': PRIOR_MATCHES,
+            'carryoverRate': CARRYOVER_RATE,
+            'credibleLevel': CREDIBLE_LEVEL,
+            'provisionalMatches': PROVISIONAL_MATCHES,
+        },
         'currentSeasonKey': current_season.key,
         'seasons': [_season_option(season, current_season.key) for season in seasons]
         + [

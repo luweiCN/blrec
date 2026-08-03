@@ -17,7 +17,6 @@ import {
 } from './public-dashboard.models';
 import { matchesSearchSegments } from './public-dashboard.search';
 
-export const PLAYER_MIN_MATCHES = 20;
 export const HERO_MIN_MATCHES = 20;
 export const OVERVIEW_LIMIT = 10;
 export const DETAIL_PAGE_SIZE = 10;
@@ -35,12 +34,13 @@ export function getPlayerRankings(
   mode: ModeFilter,
 ): readonly PlayerStanding[] {
   return playersForSeason(snapshot, season)
-    .filter((player) => player.modes[mode].matches >= PLAYER_MIN_MATCHES)
+    .filter((player) => player.modes[mode].ratingScore !== null)
     .sort(
       (left, right) =>
-        winRate(right.modes[mode]) - winRate(left.modes[mode]) ||
-        right.modes[mode].wins - left.modes[mode].wins ||
+        (right.modes[mode].ratingScore ?? 0) -
+          (left.modes[mode].ratingScore ?? 0) ||
         right.modes[mode].matches - left.modes[mode].matches ||
+        winRate(right.modes[mode]) - winRate(left.modes[mode]) ||
         left.id - right.id,
     );
 }

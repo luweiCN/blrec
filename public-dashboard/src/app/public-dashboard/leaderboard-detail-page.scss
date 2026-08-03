@@ -161,7 +161,7 @@ a {
   border-collapse: collapse;
 
   &.player-directory-table {
-    min-width: 840px;
+    min-width: 920px;
   }
 
   &.hero-directory-table {
@@ -230,18 +230,6 @@ a {
     font-size: 0.8rem;
   }
 
-  span {
-    color: var(--ink-muted);
-    font-size: 0.58rem;
-
-    &.up {
-      color: var(--cyan);
-    }
-
-    &.down {
-      color: var(--rose);
-    }
-  }
 }
 
 .directory-player {
@@ -341,6 +329,24 @@ a {
 .directory-rate {
   color: var(--ink) !important;
   font-weight: 720;
+}
+
+.directory-score {
+  strong,
+  small {
+    display: block;
+  }
+
+  strong {
+    color: var(--cyan);
+    font-size: 0.8rem;
+  }
+
+  small {
+    margin-top: 3px;
+    color: var(--gold);
+    font-size: 0.5rem;
+  }
 }
 
 .empty-state {

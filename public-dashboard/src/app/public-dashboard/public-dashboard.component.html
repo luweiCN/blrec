@@ -46,11 +46,11 @@
                 heroDisplayName(playerPerformance(player).topHero)
               "
             />
-            <span>{{ winRate(playerPerformance(player)) | percent: "1.0-1" }}</span>
+            <span>{{ ratingScore(playerPerformance(player)) }} 分</span>
           </span>
         </a>
         <p *ngIf="podiumPlayers.length === 0" class="ranking-empty">
-          当前模式还没有玩家达到 20 局门槛。
+          当前模式还没有已收录玩家。
         </p>
       </div>
     </aside>
@@ -88,7 +88,7 @@
         <div>
           <p class="section-kicker">PLAYER RANKING</p>
           <h2 id="players-title">玩家综合榜</h2>
-          <p>达到 20 局样本门槛后按胜率排序。</p>
+          <p>按榜单分展示当前模式下的玩家表现。</p>
         </div>
         <a class="full-ranking-link" routerLink="/players">
           Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位
@@ -109,6 +109,7 @@
               <th scope="col" class="optional-column">代表英雄</th>
               <th scope="col">近五局</th>
               <th scope="col">对局</th>
+              <th scope="col">榜单分</th>
               <th scope="col">胜率</th>
             </tr>
           </thead>
@@ -122,19 +123,6 @@
             >
               <td class="rank-cell" [class.medal]="rank < 3">
                 <strong>{{ (rank + 1).toString().padStart(2, "0") }}</strong>
-                <span
-                  [class.up]="player.trend > 0"
-                  [class.down]="player.trend < 0"
-                  [attr.aria-label]="trendLabel(player.trend)"
-                >
-                  {{
-                    player.trend > 0
-                      ? "↑" + player.trend
-                      : player.trend < 0
-                        ? "↓" + -player.trend
-                        : "—"
-                  }}
-                </span>
               </td>
               <td>
                 <a
@@ -179,13 +167,17 @@
                 </span>
               </td>
               <td>{{ playerPerformance(player).matches }}</td>
+              <td class="rating-score-cell">
+                <strong>{{ ratingScore(playerPerformance(player)) }}</strong>
+                <small *ngIf="playerPerformance(player).provisional">定位中</small>
+              </td>
               <td class="win-rate">
                 {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
               </td>
             </tr>
             <tr *ngIf="overviewRankings.length === 0">
-              <td colspan="6" class="ranking-empty">
-                当前模式还没有玩家达到 20 局门槛。
+              <td colspan="7" class="ranking-empty">
+                当前模式还没有已收录玩家。
               </td>
             </tr>
           </tbody>
@@ -226,15 +218,9 @@
           </div>
         </div>
 
-        <div
-          class="win-rate-ring"
-          [style.--win-rate]="winRate(selectedPerformance()) * 100 + '%'"
-          [attr.aria-label]="
-            '胜率 ' + (winRate(selectedPerformance()) | percent: '1.0-1')
-          "
-        >
-          <span>{{ winRate(selectedPerformance()) | percent: "1.0-0" }}</span>
-          <small>胜率</small>
+        <div class="rating-score" [attr.aria-label]="'榜单分 ' + ratingScore(selectedPerformance())">
+          <span>{{ ratingScore(selectedPerformance()) }}</span>
+          <small>榜单分</small>
         </div>
       </div>
 
@@ -249,6 +235,10 @@
             {{ selectedPerformance().wins }} /
             {{ selectedPerformance().matches - selectedPerformance().wins }}
           </dd>
+        </div>
+        <div>
+          <dt>胜率</dt>
+          <dd>{{ winRate(selectedPerformance()) | percent: "1.0-1" }}</dd>
         </div>
       </dl>
 
@@ -301,7 +291,7 @@
 
     <ng-template #noEligiblePlayer>
       <aside class="player-detail player-detail-empty">
-        <p>当前模式暂无符合 20 局门槛的玩家。</p>
+        <p>当前模式暂无已收录玩家。</p>
         <a routerLink="/players">查看其他赛季或模式</a>
       </aside>
     </ng-template>

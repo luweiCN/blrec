@@ -19,16 +19,25 @@ describe('DashboardModeSwitcherComponent', () => {
     const emittedModes: string[] = [];
     component.valueChange.subscribe((mode) => emittedModes.push(mode));
     const page = fixture.nativeElement as HTMLElement;
-    const buttons = Array.from(page.querySelectorAll<HTMLButtonElement>('button'));
-    const selected = buttons.find(
-      (button) => button.getAttribute('aria-pressed') === 'true',
+    const trigger = page.querySelector<HTMLButtonElement>('.mode-trigger');
+    expect(trigger?.textContent).toContain('3V3');
+
+    trigger?.click();
+    fixture.detectChanges();
+
+    const options = Array.from(
+      page.querySelectorAll<HTMLButtonElement>('[role="option"]'),
     );
-    const brawl = buttons.find((button) =>
+    const selected = options.find(
+      (button) => button.getAttribute('aria-selected') === 'true',
+    );
+    const brawl = options.find((button) =>
       button.textContent?.includes('乱斗'),
     );
 
     expect(selected?.textContent).toContain('3V3');
     brawl?.click();
     expect(emittedModes).toEqual(['brawl']);
+    expect(component.isOpen).toBeFalse();
   });
 });

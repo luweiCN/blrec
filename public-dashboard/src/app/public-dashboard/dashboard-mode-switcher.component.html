@@ -1,13 +1,49 @@
-<div class="mode-switcher" role="group" aria-label="比赛模式">
-  <span class="mode-label" aria-hidden="true">模式</span>
+<div class="mode-picker" [class.open]="isOpen">
   <button
-    *ngFor="let mode of options; trackBy: trackMode"
+    #trigger
+    class="mode-trigger"
     type="button"
-    [class.active]="value === mode.key"
-    [attr.aria-pressed]="value === mode.key"
-    [attr.title]="mode.description ?? null"
-    (click)="selectMode(mode.key)"
+    aria-haspopup="listbox"
+    aria-controls="dashboard-mode-options"
+    [attr.aria-expanded]="isOpen"
+    (click)="toggleMenu()"
   >
-    {{ mode.label }}
+    <span class="trigger-copy">
+      <small>当前模式</small>
+      <strong>{{ selectedOption.label }}</strong>
+    </span>
+    <span class="mode-chevron" aria-hidden="true"></span>
   </button>
+
+  <button
+    *ngIf="isOpen"
+    class="mode-backdrop"
+    type="button"
+    tabindex="-1"
+    aria-hidden="true"
+    (click)="closeMenu(true)"
+  ></button>
+
+  <div
+    *ngIf="isOpen"
+    id="dashboard-mode-options"
+    class="mode-menu"
+    role="listbox"
+    aria-label="选择比赛模式"
+  >
+    <button
+      *ngFor="let mode of options; trackBy: trackMode"
+      type="button"
+      role="option"
+      [class.selected]="value === mode.key"
+      [attr.aria-selected]="value === mode.key"
+      (click)="selectMode(mode.key)"
+    >
+      <span class="option-copy">
+        <strong>{{ mode.label }}</strong>
+        <small>{{ mode.description }}</small>
+      </span>
+      <span class="option-marker" aria-hidden="true"></span>
+    </button>
+  </div>
 </div>

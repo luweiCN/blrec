@@ -149,6 +149,8 @@
   }
 
   .podium-panel {
+    width: 100%;
+    min-width: 0;
     min-height: 326px;
 
     & > header {
@@ -166,6 +168,7 @@
   }
 
   .podium-slot {
+    min-width: 0;
     padding: 0 3px;
 
     &.first {
@@ -188,7 +191,13 @@
   }
 
   .podium-hero {
+    max-width: 100%;
     font-size: 0.54rem;
+  }
+
+  .podium-name {
+    width: 100%;
+    text-align: center;
   }
 
   .summary-strip {

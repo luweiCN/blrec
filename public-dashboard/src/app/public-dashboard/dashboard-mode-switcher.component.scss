@@ -1,4 +1,5 @@
 :host {
+  position: relative;
   display: block;
 }
 
@@ -6,71 +7,190 @@
   box-sizing: border-box;
 }
 
-.mode-switcher {
-  display: flex;
-  align-items: center;
-  min-height: 40px;
-  padding: 3px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  background: var(--surface-1);
-}
-
-.mode-label {
-  flex: none;
-  padding: 0 11px 0 9px;
-  border-right: 1px solid var(--line-soft);
-  color: var(--gold);
-  font-size: 0.6rem;
-  font-weight: 750;
-  letter-spacing: 0.04em;
-}
-
 button {
-  min-height: 32px;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--ink-muted);
-  cursor: pointer;
   font: inherit;
-  font-size: 0.64rem;
-  font-weight: 720;
-  white-space: nowrap;
-  transition:
-    background 160ms ease,
-    color 160ms ease;
+}
+
+.mode-picker {
+  position: relative;
+}
+
+.mode-trigger {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 154px;
+  min-height: 38px;
+  padding: 6px 11px 6px 13px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-1);
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
 
   &:hover {
-    color: var(--ink);
+    border-color: var(--cyan-strong);
+    background: var(--surface-2);
   }
 
   &:focus-visible {
     outline: 2px solid var(--focus);
-    outline-offset: 1px;
-  }
-
-  &.active {
-    background: var(--cyan);
-    color: var(--void);
+    outline-offset: 2px;
   }
 }
 
-@media (max-width: 900px) {
-  .mode-switcher {
-    width: min(100%, 420px);
+.trigger-copy {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.57rem;
+    white-space: nowrap;
   }
 
+  strong {
+    color: var(--cyan);
+    font-size: 0.7rem;
+    white-space: nowrap;
+  }
+}
+
+.mode-chevron {
+  width: 7px;
+  height: 7px;
+  margin: -3px 2px 0 0;
+  border-right: 1px solid var(--ink-muted);
+  border-bottom: 1px solid var(--ink-muted);
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.open .mode-chevron {
+  margin-top: 3px;
+  transform: rotate(225deg);
+}
+
+.mode-backdrop {
+  position: fixed;
+  z-index: 1;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+
+.mode-menu {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 260px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+
   button {
-    flex: 1;
-    min-height: 38px;
-    padding: 0 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 16px;
+    align-items: center;
+    width: 100%;
+    min-height: 50px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    text-align: left;
+
+    &:hover,
+    &:focus-visible {
+      background: var(--surface-3);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: -2px;
+    }
+
+    &.selected {
+      background: oklch(79% 0.13 204 / 0.09);
+
+      strong {
+        color: var(--cyan);
+      }
+
+      .option-marker {
+        border-color: var(--cyan);
+        background: var(--cyan);
+      }
+    }
+  }
+}
+
+.option-copy {
+  display: grid;
+  gap: 4px;
+
+  strong {
+    font-size: 0.72rem;
+  }
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.56rem;
+  }
+}
+
+.option-marker {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+}
+
+@media (max-width: 680px) {
+  :host,
+  .mode-trigger {
+    width: 100%;
+  }
+
+  .mode-trigger {
+    min-height: 44px;
+  }
+
+  .mode-backdrop {
+    background: oklch(8% 0.025 286 / 0.72);
+  }
+
+  .mode-menu {
+    position: fixed;
+    z-index: 4;
+    top: auto;
+    right: 16px;
+    bottom: 16px;
+    left: 16px;
+    width: auto;
+    padding: 8px;
+
+    button {
+      min-height: 58px;
+      padding: 9px 12px;
+    }
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  button {
+  .mode-chevron {
     transition: none;
   }
 }

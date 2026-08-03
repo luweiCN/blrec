@@ -116,7 +116,7 @@
 
   dl {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     margin: 0;
 
     div {
@@ -280,20 +280,6 @@
     margin-top: 4px;
     font-size: 0.52rem;
     font-weight: 800;
-  }
-}
-
-.trend-copy {
-  margin: 20px 0 0;
-  color: var(--ink-muted);
-  font-size: 0.62rem;
-
-  strong {
-    color: var(--cyan);
-
-    &.negative {
-      color: var(--rose);
-    }
   }
 }
 

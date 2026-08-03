@@ -150,16 +150,6 @@ export class PlayerRankingsPageComponent implements OnDestroy {
     return modeLabel(this.activeMode);
   }
 
-  trendLabel(trend: number): string {
-    if (trend > 0) {
-      return '上升 ' + trend + ' 名';
-    }
-    if (trend < 0) {
-      return '下降 ' + Math.abs(trend) + ' 名';
-    }
-    return '暂无历史趋势';
-  }
-
   trackRow(_index: number, row: PlayerRankingRow): number {
     return row.player.id;
   }

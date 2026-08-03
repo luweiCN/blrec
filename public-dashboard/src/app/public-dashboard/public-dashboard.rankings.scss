@@ -176,18 +176,6 @@ table {
     letter-spacing: 0.03em;
   }
 
-  span {
-    color: var(--ink-muted);
-    font-size: 0.6rem;
-  }
-
-  .up {
-    color: var(--cyan);
-  }
-
-  .down {
-    color: var(--rose);
-  }
 }
 
 .player-select {
@@ -277,6 +265,24 @@ table {
 .win-rate {
   color: var(--ink) !important;
   font-weight: 700;
+}
+
+.rating-score-cell {
+  strong,
+  small {
+    display: block;
+  }
+
+  strong {
+    color: var(--cyan);
+    font-size: 0.8rem;
+  }
+
+  small {
+    margin-top: 2px;
+    color: var(--gold);
+    font-size: 0.5rem;
+  }
 }
 
 .player-detail {
@@ -372,34 +378,19 @@ table {
   }
 }
 
-.win-rate-ring {
-  --win-rate: 0%;
-
-  position: relative;
+.rating-score {
   display: grid;
-  width: 64px;
+  width: 70px;
   height: 64px;
   place-content: center;
-  border-radius: 50%;
-  background: conic-gradient(var(--cyan) var(--win-rate), var(--surface-3) 0);
+  border: 1px solid var(--cyan);
+  border-radius: 6px;
+  background: var(--surface-3);
   text-align: center;
 
-  &::before {
-    position: absolute;
-    inset: 5px;
-    border-radius: inherit;
-    background: var(--surface-2);
-    content: "";
-  }
-
-  span,
-  small {
-    position: relative;
-  }
-
   span {
-    color: var(--ink);
-    font-size: 0.8rem;
+    color: var(--cyan);
+    font-size: 1rem;
     font-weight: 760;
   }
 
@@ -412,13 +403,13 @@ table {
 
 .detail-record {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   margin: 22px 0 0;
   padding: 15px 0;
   border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
 
-  div + div {
+  div:not(:first-child) {
     padding-left: 14px;
     border-left: 1px solid var(--line-soft);
   }

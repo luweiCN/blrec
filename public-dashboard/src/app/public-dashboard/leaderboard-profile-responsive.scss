@@ -50,13 +50,12 @@
       min-height: 82px;
     }
 
-    div:nth-child(3) {
+    div:nth-child(n + 3) {
       border-top: 1px solid var(--line-soft);
-      border-left: 0;
     }
 
-    div:nth-child(4) {
-      border-top: 1px solid var(--line-soft);
+    div:nth-child(odd) {
+      border-left: 0;
     }
   }
 
@@ -149,6 +148,10 @@
         display: none;
       }
     }
+  }
+
+  .season-history-table tr {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

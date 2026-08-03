@@ -55,6 +55,13 @@ export const TEST_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   generatedAt: '2026-08-03T02:05:00Z',
   sourceLastMatchId: 12345,
   sourceMatchCount: 2468,
+  ratingModel: {
+    version: 1,
+    priorMatches: 20,
+    carryoverRate: 0.25,
+    credibleLevel: 0.9,
+    provisionalMatches: 5,
+  },
   currentSeasonKey: '2026-summer',
   seasons: SEASONS,
   standings,

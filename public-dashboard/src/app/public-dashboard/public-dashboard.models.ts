@@ -36,6 +36,16 @@ export interface Performance {
   readonly matches: number;
   readonly wins: number;
   readonly topHero: string;
+  readonly ratingScore: number | null;
+  readonly provisional: boolean;
+}
+
+export interface RatingModel {
+  readonly version: 1;
+  readonly priorMatches: 20;
+  readonly carryoverRate: 0.25;
+  readonly credibleLevel: 0.9;
+  readonly provisionalMatches: 5;
 }
 
 export interface HeroUsage {
@@ -80,6 +90,7 @@ export interface DashboardSnapshot {
   readonly generatedAt: string;
   readonly sourceLastMatchId: number;
   readonly sourceMatchCount: number;
+  readonly ratingModel: RatingModel;
   readonly currentSeasonKey: SeasonKey;
   readonly seasons: readonly SeasonOption[];
   readonly standings: Readonly<Record<string, SeasonStandings>>;
@@ -110,14 +121,14 @@ export interface HeroRankingRow {
 }
 
 export const MODE_OPTIONS: readonly ModeOption[] = [
-  { key: 'all', label: '全部模式' },
-  { key: '3v3', label: '3V3' },
+  { key: 'all', label: '全部模式', description: '汇总所有已收录模式' },
+  { key: '3v3', label: '3V3', description: '三人峡谷对局' },
   {
     key: 'brawl',
     label: '乱斗',
     description: '大乱斗与闪电战合并统计',
   },
-  { key: '5v5', label: '5V5' },
+  { key: '5v5', label: '5V5', description: '五人战场对局' },
 ];
 
 export const COMPETITIVE_MODE_OPTIONS: readonly {

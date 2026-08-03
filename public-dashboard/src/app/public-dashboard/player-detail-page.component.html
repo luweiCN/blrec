@@ -55,6 +55,10 @@
           <dd>{{ rank === null ? "未入榜" : "#" + rank }}</dd>
         </div>
         <div>
+          <dt>榜单分</dt>
+          <dd class="accent">{{ performance.ratingScore === null ? "—" : performance.ratingScore }}</dd>
+        </div>
+        <div>
           <dt>对局</dt>
           <dd>{{ performance.matches }}</dd>
         </div>
@@ -112,18 +116,6 @@
         <ng-template #noRecentForm>
           <p class="profile-empty">该赛季暂无近期战绩。</p>
         </ng-template>
-        <p class="trend-copy">
-          排名趋势：
-          <strong [class.negative]="profile.trend < 0">
-            {{
-              profile.trend > 0
-                ? "上升 " + profile.trend + " 名"
-                : profile.trend < 0
-                  ? "下降 " + -profile.trend + " 名"
-                  : "暂无变化"
-            }}
-          </strong>
-        </p>
       </section>
     </div>
 
@@ -175,12 +167,13 @@
         <span>{{ modeLabel() }} · 随顶部模式同步</span>
       </header>
       <div class="profile-table-wrap">
-        <table>
+        <table class="season-history-table">
           <caption>{{ profile.name }}的跨赛季表现</caption>
           <thead>
             <tr>
               <th scope="col">榜单周期</th>
               <th scope="col">排名</th>
+              <th scope="col">榜单分</th>
               <th scope="col">对局</th>
               <th scope="col">胜 / 负</th>
               <th scope="col">胜率</th>
@@ -190,6 +183,9 @@
             <tr *ngFor="let record of seasonHistory; trackBy: trackSeason">
               <td data-label="榜单周期"><strong>{{ record.season.label }}</strong></td>
               <td data-label="排名">{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
+              <td class="table-rate" data-label="榜单分">
+                {{ record.performance.ratingScore }}
+              </td>
               <td data-label="对局">{{ record.performance.matches }}</td>
               <td data-label="胜 / 负">
                 {{ record.performance.wins }} /
@@ -198,7 +194,7 @@
               <td class="table-rate" data-label="胜率">{{ winRate(record.performance) | percent: "1.0-1" }}</td>
             </tr>
             <tr *ngIf="seasonHistory.length === 0">
-              <td colspan="5" class="profile-empty">当前模式暂无赛季记录。</td>
+              <td colspan="6" class="profile-empty">当前模式暂无赛季记录。</td>
             </tr>
           </tbody>
         </table>

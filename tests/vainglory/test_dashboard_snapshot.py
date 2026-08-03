@@ -231,6 +231,9 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         assert first['modes']['all']['topHero'] == 'Caine'
         assert first['modes']['all']['form'] == ['W', 'L']
         assert first['modes']['3v3']['matches'] == 1
+        assert isinstance(first['modes']['3v3']['ratingScore'], int)
+        assert first['modes']['3v3']['provisional'] is True
+        assert first['modes']['5v5']['ratingScore'] is None
         assert first['modes']['brawl']['matches'] == 1
         assert first['modes']['5v5']['matches'] == 0
         assert first['heroPool'] == [
@@ -245,6 +248,79 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             '游戏昵称'
         )
         assert snapshot['sourceLastMatchId'] == 4
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_historical_backfill_recalculates_every_later_season(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_player(database, 10, '稳定强者', 100)
+        await seed_player(database, 20, '对照玩家', 200)
+        match_id = 1
+
+        async def add_results(room_id: int, started_at: int, results: list) -> None:
+            nonlocal match_id
+            for won in results:
+                await seed_match(
+                    database,
+                    tmp_path,
+                    match_id=match_id,
+                    room_id=room_id,
+                    started_at=started_at + match_id,
+                    game_mode='3v3',
+                    won=won,
+                    hero_id=None,
+                    anchor_name='主播',
+                )
+                match_id += 1
+
+        await add_results(100, timestamp(2026, 7, 1), [True, False])
+        await add_results(200, timestamp(2026, 7, 1), [True, False])
+
+        def rating(snapshot: object, season: str, player_id: int) -> int:
+            players = snapshot['standings'][season]['players']
+            player = next(value for value in players if value['id'] == player_id)
+            return player['modes']['3v3']['ratingScore']
+
+        now = datetime(2026, 8, 3, 10, 30, tzinfo=SHANGHAI)
+        without_history = await database.read(
+            lambda connection: build_dashboard_snapshot(connection, now=now)
+        )
+        initial_strong = rating(without_history, '2026-summer', 10)
+        initial_control = rating(without_history, '2026-summer', 20)
+        assert initial_strong == initial_control
+
+        await add_results(100, timestamp(2026, 3, 1), [True] * 5)
+        await add_results(200, timestamp(2026, 3, 1), [False] * 5)
+        with_spring = await database.read(
+            lambda connection: build_dashboard_snapshot(connection, now=now)
+        )
+        spring_strong = rating(with_spring, '2026-summer', 10)
+        spring_control = rating(with_spring, '2026-summer', 20)
+        assert spring_strong > initial_strong
+        assert spring_control < initial_control
+
+        await add_results(100, timestamp(2025, 10, 1), [True] * 5)
+        await add_results(200, timestamp(2025, 10, 1), [False] * 5)
+        with_autumn = await database.read(
+            lambda connection: build_dashboard_snapshot(connection, now=now)
+        )
+        assert rating(with_autumn, '2026-spring', 10) > rating(
+            with_spring, '2026-spring', 10
+        )
+        assert rating(with_autumn, '2026-summer', 10) > spring_strong
+        assert with_autumn['ratingModel'] == {
+            'carryoverRate': 0.25,
+            'credibleLevel': 0.9,
+            'priorMatches': 20,
+            'provisionalMatches': 5,
+            'version': 1,
+        }
     finally:
         await database.close()
 

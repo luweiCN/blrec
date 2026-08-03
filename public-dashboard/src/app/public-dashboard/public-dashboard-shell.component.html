@@ -1,52 +1,56 @@
 <main class="dashboard">
   <header class="site-header">
-    <a class="brand" routerLink="/" aria-label="虚荣对局榜首页">
-      <span class="brand-mark" aria-hidden="true"><span>V</span></span>
-      <span class="brand-copy">
-        <strong>虚荣对局榜</strong>
-        <small>COMMUNITY ARCHIVE</small>
-      </span>
-    </a>
-
-    <nav aria-label="榜单页面">
-      <a
-        routerLink="/"
-        routerLinkActive="active"
-        ariaCurrentWhenActive="page"
-        [routerLinkActiveOptions]="{ exact: true }"
-      >
-        总览
+    <div class="header-primary">
+      <a class="brand" routerLink="/" aria-label="虚荣对局榜首页">
+        <span class="brand-mark" aria-hidden="true"><span>V</span></span>
+        <span class="brand-copy">
+          <strong>虚荣对局榜</strong>
+          <small>COMMUNITY ARCHIVE</small>
+        </span>
       </a>
-      <a
-        routerLink="/players"
-        routerLinkActive="active"
-        ariaCurrentWhenActive="page"
-      >
-        玩家排行
-      </a>
-      <a
-        routerLink="/heroes"
-        routerLinkActive="active"
-        ariaCurrentWhenActive="page"
-      >
-        英雄排行
-      </a>
-    </nav>
 
-    <app-dashboard-mode-switcher
-      class="header-mode"
-      [value]="dashboardMode.mode"
-      (valueChange)="dashboardMode.selectMode($event)"
-    ></app-dashboard-mode-switcher>
+      <p *ngIf="data.state.kind === 'ready'" class="data-status">
+        <span aria-hidden="true"></span>
+        <span class="status-season">{{ currentSeasonLabel }}</span>
+        <span aria-hidden="true">·</span>
+        <span class="status-time">
+          <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
+        </span>
+      </p>
+    </div>
 
-    <p *ngIf="data.state.kind === 'ready'" class="data-status">
-      <span aria-hidden="true"></span>
-      <span class="status-season">{{ currentSeasonLabel }}</span>
-      <span aria-hidden="true">·</span>
-      <span class="status-time">
-        <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
-      </span>
-    </p>
+    <div class="header-controls">
+      <nav aria-label="榜单页面">
+        <a
+          routerLink="/"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+          [routerLinkActiveOptions]="{ exact: true }"
+        >
+          总览
+        </a>
+        <a
+          routerLink="/players"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+        >
+          玩家排行
+        </a>
+        <a
+          routerLink="/heroes"
+          routerLinkActive="active"
+          ariaCurrentWhenActive="page"
+        >
+          英雄排行
+        </a>
+      </nav>
+
+      <app-dashboard-mode-switcher
+        class="header-mode"
+        [value]="dashboardMode.mode"
+        (valueChange)="dashboardMode.selectMode($event)"
+      ></app-dashboard-mode-switcher>
+    </div>
   </header>
 
   <router-outlet *ngIf="data.state.kind === 'ready'"></router-outlet>
