@@ -42,6 +42,8 @@ const EMPTY_PERFORMANCE: Performance = {
   provisional: false,
 };
 
+const OVERVIEW_HERO_POOL_LIMIT = 6;
+
 @Component({
   selector: 'app-public-dashboard',
   templateUrl: './public-dashboard.component.html',
@@ -93,6 +95,12 @@ export class PublicDashboardComponent implements OnDestroy {
 
   get selectedPlayer(): PlayerStanding | undefined {
     return this.rankings[0];
+  }
+
+  get selectedHeroPool(): readonly HeroUsage[] {
+    return (
+      this.selectedPlayer?.heroPool.slice(0, OVERVIEW_HERO_POOL_LIMIT) ?? []
+    );
   }
 
   get selectedPlayerRank(): number {

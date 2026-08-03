@@ -57,7 +57,7 @@ describe('PlayerDetailPageComponent', () => {
 
     expect(component.player?.name).toBe('星河');
     expect(component.performance.matches).toBe(102);
-    expect(component.heroPool.length).toBe(3);
+    expect(component.heroPool.length).toBe(7);
     expect(component.seasonHistory.length).toBeGreaterThan(1);
     expect(page.querySelector('h1')?.textContent).toContain('星河');
     expect(page.querySelector('.profile-hero-link')?.textContent).toContain(

@@ -84,4 +84,11 @@ describe('PublicDashboardComponent', () => {
     expect(page.querySelector('.row-detail-link')).toBeNull();
     expect(page.textContent).not.toContain('→');
   });
+
+  it('limits the featured player hero pool to six heroes', () => {
+    const page = fixture.nativeElement as HTMLElement;
+    expect(component.selectedPlayer?.heroPool.length).toBe(7);
+    expect(component.selectedHeroPool.length).toBe(6);
+    expect(page.querySelectorAll('.hero-pool li').length).toBe(6);
+  });
 });

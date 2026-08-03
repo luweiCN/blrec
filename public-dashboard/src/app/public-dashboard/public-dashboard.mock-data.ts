@@ -74,6 +74,10 @@ const CURRENT_PLAYERS: readonly PlayerStanding[] = [
       { name: 'Caine', matches: 42, wins: 31 },
       { name: 'Vox', matches: 28, wins: 18 },
       { name: 'Celeste', matches: 21, wins: 13 },
+      { name: 'Grace', matches: 18, wins: 11 },
+      { name: 'Gwen', matches: 15, wins: 9 },
+      { name: 'Taka', matches: 12, wins: 7 },
+      { name: 'Skye', matches: 9, wins: 5 },
     ],
   }),
   player({
