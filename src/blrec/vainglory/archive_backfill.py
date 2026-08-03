@@ -981,7 +981,7 @@ class ArchiveBackfillService:
                 'ON analysis.part_id=archive.recording_part_id '
                 "WHERE archive.state IN ('downloading','analyzing') OR ("
                 "archive.state='queued' AND (analysis.state IS NOT NULL "
-                "OR source.state!='missing'))"
+                "OR source.state IN ('pending','downloading','ready')))"
             ).fetchall()
             for row in rows:
                 state, progress, error = self._derived_part_state(row)

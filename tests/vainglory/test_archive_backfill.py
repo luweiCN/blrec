@@ -267,6 +267,54 @@ async def test_retryable_metadata_failure_is_not_counted_as_complete(
 
 
 @pytest.mark.asyncio
+async def test_retryable_failed_download_is_requested_again(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    cache = FakeRemoteMediaCache()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=cache,
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        for _index in range(4):
+            assert await service.run_once() is True
+        part_id = int(
+            await database.scalar(
+                'SELECT recording_part_id FROM vainglory_archive_parts '
+                'ORDER BY page LIMIT 1'
+            )
+        )
+        await database.execute(
+            "UPDATE vainglory_video_sources SET state='failed',"
+            "error='下载中断' WHERE part_id=?",
+            (part_id,),
+        )
+        await database.execute(
+            "UPDATE vainglory_archive_parts SET state='failed',progress=1,"
+            "error='下载中断' WHERE recording_part_id=?",
+            (part_id,),
+        )
+        await database.execute(
+            "UPDATE vainglory_archive_imports SET state='failed',retryable=1,"
+            "next_retry_at=1000,error='下载中断'"
+        )
+        request_count = len(cache.requests)
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        assert len(cache.requests) == request_count + 1
+        assert cache.requests[-1] == part_id
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_existing_uploaded_archive_reuses_its_recording_parts(
     tmp_path: Path,
 ) -> None:
