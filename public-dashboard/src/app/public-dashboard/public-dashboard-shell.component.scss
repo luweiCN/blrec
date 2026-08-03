@@ -269,6 +269,22 @@ footer {
   }
 }
 
+.footer-links {
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
+
+  a {
+    color: var(--ink-muted);
+    font-size: 0.64rem;
+    text-underline-offset: 3px;
+
+    &:hover {
+      color: var(--cyan);
+    }
+  }
+}
+
 @media (max-width: 980px) {
   .site-header {
     width: min(100% - 32px, 1240px);
@@ -303,7 +319,8 @@ footer {
     a {
       flex: 1;
       justify-items: center;
-      padding: 0 4px;
+      padding: 0 3px;
+      font-size: 0.72rem;
       text-align: center;
     }
   }
@@ -347,5 +364,12 @@ footer {
     & > p {
       margin-top: 14px;
     }
+  }
+}
+
+@media (max-width: 360px) {
+  .header-controls nav a {
+    font-size: 0.66rem;
+    letter-spacing: 0.01em;
   }
 }

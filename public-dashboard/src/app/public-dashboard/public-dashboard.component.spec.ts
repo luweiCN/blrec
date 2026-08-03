@@ -56,6 +56,12 @@ describe('PublicDashboardComponent', () => {
     ).toBe('assets/vainglory/heroes/caine.jpg');
     expect(page.querySelector('.hero-chip')?.textContent).toContain('凯恩');
     expect(page.textContent).not.toContain('综合积分');
+    expect(page.querySelector('.hero-intro')?.textContent).toContain(
+      '历史数据正在持续同步中',
+    );
+    expect(page.querySelector('.hero-intro')?.textContent).not.toContain(
+      '重复建档',
+    );
   });
 
   it('updates the ranking when the global game mode changes', () => {

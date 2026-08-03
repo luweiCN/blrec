@@ -1,0 +1,285 @@
+<article class="guide-page">
+  <header class="guide-hero">
+    <div>
+      <p class="guide-kicker">RANKING METHODOLOGY</p>
+      <h1>这份榜单，<br />记录的是什么？</h1>
+      <p class="guide-lead">
+        它是一份基于主播公开直播与录播生成的“直播样本榜”，不是《虚荣》官方全服榜。这里说明数据从哪里来、谁会进入排名，以及榜单分为何不同于原始胜率。
+      </p>
+    </div>
+    <div class="guide-meta" aria-label="说明版本">
+      <span>规则版本</span>
+      <strong>RANKING / 01</strong>
+      <small>更新于 2026-08-03</small>
+    </div>
+  </header>
+
+  <nav class="guide-switcher" aria-label="说明与指南">
+    <a
+      routerLink="/guide/rankings"
+      routerLinkActive="active"
+      [routerLinkActiveOptions]="{ exact: true }"
+      ariaCurrentWhenActive="page"
+    >
+      榜单说明
+    </a>
+    <a
+      routerLink="/guide/play"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+    >
+      如何游玩
+    </a>
+  </nav>
+
+  <div class="guide-layout">
+    <aside class="guide-rail">
+      <p>本页目录</p>
+      <nav aria-label="榜单说明目录">
+        <a [routerLink]="[]" fragment="source">数据从哪里来</a>
+        <a [routerLink]="[]" fragment="scope">谁会进入榜单</a>
+        <a [routerLink]="[]" fragment="period">赛季与模式</a>
+        <a [routerLink]="[]" fragment="rating">榜单分算法</a>
+        <a [routerLink]="[]" fragment="limits">误差与变化</a>
+        <a [routerLink]="[]" fragment="faq">常见问题</a>
+      </nav>
+      <span class="rail-note">历史数据持续同步中</span>
+    </aside>
+
+    <div class="guide-content">
+      <section id="source" class="content-section">
+        <p class="section-index">01 / DATA SOURCE</p>
+        <h2>数据来自公开直播画面</h2>
+        <div class="key-statement">
+          <strong>本站没有读取游戏服务器的完整战绩。</strong>
+          <p>
+            榜单只分析已收录主播的公开直播与录播，通过结算画面识别比赛模式、胜负和英雄，再绑定到站内的稳定玩家身份。
+          </p>
+        </div>
+
+        <ol class="data-flow" aria-label="从直播到榜单的数据流程">
+          <li>
+            <span>01</span>
+            <strong>公开直播</strong>
+            <small>收录已配置直播间</small>
+          </li>
+          <li>
+            <span>02</span>
+            <strong>录像入库</strong>
+            <small>按直播时间归档</small>
+          </li>
+          <li>
+            <span>03</span>
+            <strong>画面识别</strong>
+            <small>提取模式、胜负与英雄</small>
+          </li>
+          <li>
+            <span>04</span>
+            <strong>玩家绑定</strong>
+            <small>合并同一主播的稳定身份</small>
+          </li>
+          <li>
+            <span>05</span>
+            <strong>每日快照</strong>
+            <small>聚合后发布只读数据</small>
+          </li>
+        </ol>
+
+        <p class="fine-print">
+          因此，页面里的“对局数”是已收录玩家的对局样本数，不等于游戏服务器上的唯一对局总数。同一场比赛若有多名已收录主播分别直播，会分别计入各自的玩家样本。
+        </p>
+      </section>
+
+      <section id="scope" class="content-section">
+        <p class="section-index">02 / SAMPLE BOUNDARY</p>
+        <h2>看见了，不代表会进入玩家榜</h2>
+        <div class="scope-grid">
+          <div class="scope-block included">
+            <span>会计入</span>
+            <h3>被收录并绑定的主播玩家</h3>
+            <ul>
+              <li>直播间已绑定到站内玩家</li>
+              <li>录像中识别出有效模式与胜负</li>
+              <li>该场对局未被人工排除</li>
+              <li>同一玩家的多个直播间合并统计</li>
+            </ul>
+          </div>
+          <div class="scope-block excluded">
+            <span>不会自动计入</span>
+            <h3>只出现在同场比赛里的其他人</h3>
+            <ul>
+              <li>没有自己的已收录直播或录播</li>
+              <li>只在队友或对手画面中出现</li>
+              <li>只识别到一次游戏昵称</li>
+              <li>结算画面缺失或结果无法确认</li>
+            </ul>
+          </div>
+        </div>
+        <p class="plain-callout">
+          例如：你与一位主播打了同一局，但你自己没有被本站作为主播玩家收录，那么这局只会进入该主播的统计，你不会因此自动进入玩家排行榜。
+        </p>
+      </section>
+
+      <section id="period" class="content-section">
+        <p class="section-index">03 / PERIOD &amp; MODE</p>
+        <h2>赛季是本站的统计周期</h2>
+        <p>
+          《虚荣》社区版已没有官方赛季。为了让近期表现可比较，本站按北京时间的直播开始时间重新划分三个周期；迟到导入的录像仍会回填到它实际发生的赛季。
+        </p>
+
+        <dl class="season-rules">
+          <div>
+            <dt>春季赛</dt>
+            <dd>1 月 1 日—4 月 30 日</dd>
+          </div>
+          <div>
+            <dt>夏季赛</dt>
+            <dd>5 月 1 日—8 月 31 日</dd>
+          </div>
+          <div>
+            <dt>秋季赛</dt>
+            <dd>9 月 1 日—12 月 31 日</dd>
+          </div>
+        </dl>
+
+        <div class="rule-lines">
+          <div>
+            <strong>3V3</strong>
+            <p>三人峡谷对局，默认展示模式。</p>
+          </div>
+          <div>
+            <strong>乱斗</strong>
+            <p>大乱斗与闪电战目前合并，历史画面暂时无法稳定区分两者。</p>
+          </div>
+          <div>
+            <strong>5V5</strong>
+            <p>五人战场对局，独立聚合。</p>
+          </div>
+          <div>
+            <strong>跨赛季总榜</strong>
+            <p>用全部已收录对局重新计算，不叠加各赛季名次。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="rating" class="content-section">
+        <p class="section-index">04 / BAYESIAN RATING</p>
+        <h2>玩家按“可信下界”排名</h2>
+        <p>
+          单看胜率会让少量连胜的玩家长期占据榜首。玩家榜采用 Beta-Binomial
+          贝叶斯模型，把样本数量和不确定性一起纳入评分。
+        </p>
+
+        <div class="formula-panel">
+          <div>
+            <span>先验中心</span>
+            <strong>75% 本模式整体水平 + 25% 上赛季能力</strong>
+          </div>
+          <div>
+            <span>等效样本</span>
+            <strong>先加入 20 场，再加入本赛季实际胜负</strong>
+          </div>
+          <div>
+            <span>榜单分</span>
+            <strong>后验分布的 90% 可信下界 × 1000</strong>
+          </div>
+        </div>
+
+        <ul class="numbered-notes">
+          <li>
+            <span>01</span>
+            <p>连续参赛时继承上赛季能力的 25%；空缺一季后降为 12.5%，更久则回到本模式统一基线。</p>
+          </li>
+          <li>
+            <span>02</span>
+            <p>玩家只要有有效对局就进入榜单；少于 5 局会标记为“定位中”，但不被硬性排除。</p>
+          </li>
+          <li>
+            <span>03</span>
+            <p>同分时依次比较对局数、原始胜率和稳定玩家 ID，保证结果可重复。</p>
+          </li>
+          <li>
+            <span>04</span>
+            <p>英雄榜采用另一套规则：至少 20 场有效英雄样本后，按原始胜率和样本数排序。</p>
+          </li>
+        </ul>
+
+        <div class="plain-callout">
+          胜率高但场次少的玩家，榜单分可能低于胜率略低但样本稳定的玩家。这不是扣分，而是模型对不确定性的保守处理。
+        </div>
+      </section>
+
+      <section id="limits" class="content-section">
+        <p class="section-index">05 / LIMITATIONS</p>
+        <h2>为什么排名会变，也可能不准</h2>
+        <div class="limitation-list">
+          <div>
+            <strong>样本不是全体玩家</strong>
+            <p>榜单只覆盖已收录主播，不能代表整个服务器或所有高水平玩家。</p>
+          </div>
+          <div>
+            <strong>历史数据仍在回填</strong>
+            <p>旧录像加入后会重算对应赛季、后续继承分和总榜，因此过去与当前排名都可能变化。</p>
+          </div>
+          <div>
+            <strong>画面识别存在误差</strong>
+            <p>缺失结算画面、遮挡、低清晰度或直播中断，都可能导致对局未收录或识别错误。</p>
+          </div>
+          <div>
+            <strong>英雄样本暂不完整</strong>
+            <p>目前录像主人公与英雄识别以 3V3 最可靠；乱斗和 5V5 的胜负可统计，但英雄数据可能缺失。</p>
+          </div>
+          <div>
+            <strong>玩家绑定需要维护</strong>
+            <p>直播名、游戏名和多个直播间不一定一致；绑定被修正后，历史统计会随稳定玩家身份重新归集。</p>
+          </div>
+        </div>
+        <p class="history-warning">
+          历史数据正在持续同步中，因此排名可能随时发生变化。页面展示的是最近一次已发布快照，而不是实时游戏服务器状态。
+        </p>
+      </section>
+
+      <section id="faq" class="content-section last-section">
+        <p class="section-index">06 / FAQ</p>
+        <h2>常见问题</h2>
+        <div class="faq-list">
+          <details>
+            <summary>我和主播同一场，为什么没有进入榜单？</summary>
+            <p>同场出现只证明你参加了这局。玩家榜只统计有自己已收录直播来源并完成玩家绑定的人，不会根据结算页上的每个昵称自动建档。</p>
+          </details>
+          <details>
+            <summary>我的胜率更高，为什么排名更低？</summary>
+            <p>玩家榜看的是贝叶斯可信下界，不是只看原始胜率。场次、整体基线、上赛季继承和当前样本稳定度都会影响榜单分。</p>
+          </details>
+          <details>
+            <summary>为什么找不到某个英雄或英雄数据很少？</summary>
+            <p>英雄需达到 20 场有效主人公样本才进入英雄榜；未识别主人公、未识别英雄和当前暂不完整的模式不会进入英雄分母。</p>
+          </details>
+          <details>
+            <summary>发现数据错误，反馈时需要什么？</summary>
+            <p>请尽量提供站内玩家名、直播间、对局日期、比赛模式和结算画面。信息越完整，越容易定位对应录像并在下一次快照中修正。</p>
+          </details>
+        </div>
+
+        <div class="source-block">
+          <p>相关背景</p>
+          <a
+            href="https://www.vainglorygame.com/news/a-word-on-the-api-and-vainglory-esports/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            官方：Vainglory API 与电竞说明（2019）
+          </a>
+          <a
+            href="https://www.vainglorygame.com/news/vainglory-community-edition-update-edtheshred/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            官方：Community Edition 状态说明（2020）
+          </a>
+          <small>本站是社区数据项目，与 Super Evil Megacorp 及哔哩哔哩无隶属或授权关系。</small>
+        </div>
+      </section>
+    </div>
+  </div>
+</article>

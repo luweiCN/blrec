@@ -3,10 +3,12 @@ import { RouterModule, Routes } from '@angular/router';
 
 import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
+import { PlayGuidePageComponent } from './play-guide-page.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
+import { RankingGuidePageComponent } from './ranking-guide-page.component';
 
 const routes: Routes = [
   {
@@ -39,6 +41,21 @@ const routes: Routes = [
         component: HeroDetailPageComponent,
         title: '英雄详情 · 虚荣对局榜',
       },
+      {
+        path: 'guide',
+        pathMatch: 'full',
+        redirectTo: 'guide/rankings',
+      },
+      {
+        path: 'guide/rankings',
+        component: RankingGuidePageComponent,
+        title: '榜单说明 · 虚荣对局榜',
+      },
+      {
+        path: 'guide/play',
+        component: PlayGuidePageComponent,
+        title: '如何游玩虚荣 · 虚荣对局榜',
+      },
     ],
   },
 ];
@@ -46,6 +63,7 @@ const routes: Routes = [
 @NgModule({
   imports: [
     RouterModule.forRoot(routes, {
+      anchorScrolling: 'enabled',
       scrollPositionRestoration: 'enabled',
     }),
   ],
