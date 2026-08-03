@@ -6,6 +6,7 @@ from typing import Any, List, Mapping, Optional
 import pytest
 
 from blrec.bili_upload.archive_reads import ArchiveReadService
+from blrec.bili_upload.errors import BiliApiError
 
 
 class MutableClock:
@@ -20,6 +21,8 @@ class FakeProtocol:
     def __init__(self) -> None:
         self.list_calls: List[Mapping[str, Any]] = []
         self.detail_calls: List[str] = []
+        self.viewer_detail_calls: List[str] = []
+        self.viewer_detail_errors: List[BaseException] = []
         self.list_gate: Optional[asyncio.Event] = None
         self.detail_gate: Optional[asyncio.Event] = None
         self.list_started = asyncio.Event()
@@ -58,6 +61,14 @@ class FakeProtocol:
         if self.detail_gate is not None:
             await self.detail_gate.wait()
         return {'code': 0, 'data': {'archive': {'aid': 1, 'bvid': bvid}}}
+
+    async def public_archive_view(
+        self, _bundle: Any, *, bvid: str
+    ) -> Mapping[str, Any]:
+        self.viewer_detail_calls.append(bvid)
+        if self.viewer_detail_errors:
+            raise self.viewer_detail_errors.pop(0)
+        return {'code': 0, 'data': {'aid': 1, 'bvid': bvid}}
 
 
 async def list_page(
@@ -158,6 +169,39 @@ async def test_detail_reads_singleflight_by_account_version_and_bvid() -> None:
         )
         await reader.detail(object(), account_id=7, credential_version=3, bvid='BV2')
         assert protocol.detail_calls == ['BVfixture', 'BVfixture', 'BVfixture', 'BV2']
+    finally:
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_viewer_detail_prefers_the_regular_viewing_api() -> None:
+    protocol = FakeProtocol()
+    reader = ArchiveReadService(protocol)
+    try:
+        detail = await reader.viewer_detail(
+            object(), account_id=7, credential_version=3, bvid='BVfixture'
+        )
+
+        assert detail['data']['bvid'] == 'BVfixture'
+        assert protocol.viewer_detail_calls == ['BVfixture']
+        assert protocol.detail_calls == []
+    finally:
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_viewer_detail_falls_back_to_the_creator_api() -> None:
+    protocol = FakeProtocol()
+    protocol.viewer_detail_errors.append(BiliApiError(-404))
+    reader = ArchiveReadService(protocol)
+    try:
+        detail = await reader.viewer_detail(
+            object(), account_id=7, credential_version=3, bvid='BVfixture'
+        )
+
+        assert detail['data']['archive']['bvid'] == 'BVfixture'
+        assert protocol.viewer_detail_calls == ['BVfixture']
+        assert protocol.detail_calls == ['BVfixture']
     finally:
         await reader.close()
 

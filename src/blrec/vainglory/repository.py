@@ -552,13 +552,17 @@ class VaingloryRepository:
             for sync in syncs:
                 account_id = int(sync['account_id'])
                 values = connection.execute(
-                    'SELECT state,progress FROM vainglory_archive_imports '
+                    'SELECT state,progress,retryable '
+                    'FROM vainglory_archive_imports '
                     'WHERE account_id=?',
                     (account_id,),
                 ).fetchall()
                 total = len(values)
                 completed = sum(
-                    str(value['state']) in ('ready', 'failed', 'skipped')
+                    str(value['state']) in ('ready', 'skipped')
+                    or (
+                        str(value['state']) == 'failed' and not bool(value['retryable'])
+                    )
                     for value in values
                 )
                 progress = (
@@ -567,8 +571,16 @@ class VaingloryRepository:
                     else sum(
                         (
                             1.0
-                            if str(value['state']) == 'skipped'
-                            else float(value['progress'])
+                            if str(value['state']) in ('ready', 'skipped')
+                            or (
+                                str(value['state']) == 'failed'
+                                and not bool(value['retryable'])
+                            )
+                            else (
+                                0.0
+                                if str(value['state']) == 'failed'
+                                else float(value['progress'])
+                            )
                         )
                         for value in values
                     )

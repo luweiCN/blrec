@@ -137,6 +137,12 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
                 'PRAGMA table_info(vainglory_archive_imports)'
             )
         }
+        vainglory_sync_columns = {
+            row['name']
+            for row in await database.fetchall(
+                'PRAGMA table_info(vainglory_archive_syncs)'
+            )
+        }
         clip_columns = {
             row['name']
             for row in await database.fetchall('PRAGMA table_info(highlight_clips)')
@@ -146,7 +152,11 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
         assert {
             'content_classification',
             'classification_reason',
+            'retryable',
+            'attempt_count',
+            'next_retry_at',
         } <= vainglory_archive_columns
+        assert 'retry_after_at' in vainglory_sync_columns
         assert {
             'cancellation_generation',
             'deletion_state',

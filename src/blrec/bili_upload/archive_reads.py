@@ -5,7 +5,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Hashable, Mapping, Tuple, TypeVar
 
-from .errors import ProtocolContractError
+from .errors import (
+    BiliApiError,
+    DefinitelyNotSent,
+    ProtocolContractError,
+    RemoteOutcomeUnknown,
+)
 
 __all__ = ('ArchiveReadService',)
 
@@ -23,6 +28,13 @@ class _PageKey:
 
 @dataclass(frozen=True)
 class _DetailKey:
+    account_id: int
+    credential_version: int
+    bvid: str
+
+
+@dataclass(frozen=True)
+class _ViewerDetailKey:
     account_id: int
     credential_version: int
     bvid: str
@@ -59,6 +71,14 @@ class ArchiveReadService:
     ) -> Mapping[str, Any]:
         key = _DetailKey(account_id, credential_version, bvid)
         return await self._singleflight(key, lambda: self._fetch_detail(bundle, bvid))
+
+    async def viewer_detail(
+        self, bundle: Any, *, account_id: int, credential_version: int, bvid: str
+    ) -> Mapping[str, Any]:
+        key = _ViewerDetailKey(account_id, credential_version, bvid)
+        return await self._singleflight(
+            key, lambda: self._fetch_viewer_detail(bundle, bvid)
+        )
 
     async def close(self) -> None:
         async with self._lock:
@@ -139,4 +159,18 @@ class ArchiveReadService:
         )
         if not isinstance(response, Mapping):
             raise ProtocolContractError('archive detail response is invalid')
+        return dict(response)
+
+    async def _fetch_viewer_detail(self, bundle: Any, bvid: str) -> Mapping[str, Any]:
+        try:
+            response = await self._protocol.public_archive_view(bundle, bvid=bvid)
+        except (
+            BiliApiError,
+            DefinitelyNotSent,
+            ProtocolContractError,
+            RemoteOutcomeUnknown,
+        ):
+            return await self._fetch_detail(bundle, bvid)
+        if not isinstance(response, Mapping):
+            return await self._fetch_detail(bundle, bvid)
         return dict(response)

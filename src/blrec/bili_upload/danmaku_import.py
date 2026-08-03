@@ -9,7 +9,7 @@ import sqlite3
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import (
@@ -231,7 +231,13 @@ class DanmakuImporter:
     ) -> int:
         part = await self._database.fetchone(
             'SELECT part.id,part.job_id,part.xml_path,part.danmaku_import_state,'
-            'part.cid,job.policy_snapshot_json FROM upload_parts part '
+            'part.cid,job.policy_snapshot_json,'
+            '(SELECT recording.record_duration_seconds '
+            'FROM recording_parts recording '
+            'WHERE recording.session_id=job.session_id '
+            'AND recording.part_index=part.part_index '
+            'ORDER BY recording.id DESC LIMIT 1) AS duration_seconds '
+            'FROM upload_parts part '
             'JOIN upload_jobs job ON job.id=part.job_id '
             'JOIN recording_sessions session ON session.id=job.session_id '
             "WHERE part.id=? AND session.deletion_state='none'",
@@ -248,6 +254,10 @@ class DanmakuImporter:
         if self._positive_int(part['cid']) is None:
             raise ValueError('danmaku part has no CID')
         job_id = int(part['job_id'])
+        duration_seconds = self._positive_int(part['duration_seconds'])
+        max_progress_ms = (
+            None if duration_seconds is None else max(0, (duration_seconds - 1) * 1000)
+        )
         loop = asyncio.get_running_loop()
         try:
             filters = danmaku_filter or self._snapshot_filter(
@@ -284,7 +294,7 @@ class DanmakuImporter:
                 if not batch:
                     break
                 added, capacity_reached = await self._insert_batch(
-                    part_id, identity, batch
+                    part_id, identity, batch, max_progress_ms=max_progress_ms
                 )
                 imported += added
                 if capacity_reached:
@@ -362,7 +372,12 @@ class DanmakuImporter:
         )
 
     async def _insert_batch(
-        self, part_id: int, xml_identity: str, rows: Sequence[ImportedDanmaku]
+        self,
+        part_id: int,
+        xml_identity: str,
+        rows: Sequence[ImportedDanmaku],
+        *,
+        max_progress_ms: Optional[int] = None,
     ) -> Tuple[int, bool]:
         def insert(connection: sqlite3.Connection) -> Tuple[int, bool]:
             placeholders = ','.join('?' for _ in self._ACTIVE_STATES)
@@ -375,6 +390,11 @@ class DanmakuImporter:
             )
             inserted = 0
             for row in rows:
+                stored = (
+                    row
+                    if max_progress_ms is None or row.progress_ms <= max_progress_ms
+                    else replace(row, progress_ms=max_progress_ms)
+                )
                 if active >= self._import_high_watermark:
                     exists = connection.execute(
                         'SELECT 1 FROM danmaku_items '
@@ -392,14 +412,14 @@ class DanmakuImporter:
                     (
                         part_id,
                         xml_identity,
-                        row.original_index,
-                        row.progress_ms,
-                        row.mode,
-                        row.fontsize,
-                        row.color,
-                        row.content,
-                        row.priority,
-                        self._fingerprint(part_id, xml_identity, row),
+                        stored.original_index,
+                        stored.progress_ms,
+                        stored.mode,
+                        stored.fontsize,
+                        stored.color,
+                        stored.content,
+                        stored.priority,
+                        self._fingerprint(part_id, xml_identity, stored),
                     ),
                 )
                 if cursor.rowcount == 1:

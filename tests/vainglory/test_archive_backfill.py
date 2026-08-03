@@ -4,6 +4,7 @@ from typing import Any, Mapping, Tuple
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.errors import BiliApiError
 from blrec.bili_upload.remote_media import RemoteMediaStatus
 from blrec.vainglory.archive_backfill import ArchiveBackfillService
 
@@ -55,6 +56,16 @@ class FakeArchiveReader:
                 ],
             }
         }
+
+    async def viewer_detail(
+        self, bundle: object, *, account_id: int, credential_version: int, bvid: str
+    ) -> Mapping[str, Any]:
+        return await self.detail(
+            bundle,
+            account_id=account_id,
+            credential_version=credential_version,
+            bvid=bvid,
+        )
 
 
 class FakeRemoteMediaCache:
@@ -136,6 +147,209 @@ async def test_discovers_materializes_and_queues_each_archive_page(
             int(parts[0]['recording_part_id']),
             int(parts[1]['recording_part_id']),
         ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_reads_public_viewer_pages_without_creator_metadata(
+    tmp_path: Path,
+) -> None:
+    class ViewerReader(FakeArchiveReader):
+        async def detail(self, *_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
+            raise AssertionError('creator detail must not be the primary source')
+
+        async def viewer_detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            assert (account_id, credential_version, bvid) == (1, 1, 'BV1abcdefgh')
+            return {
+                'data': {
+                    'aid': 101,
+                    'bvid': bvid,
+                    'title': '公开虚荣录播',
+                    'desc': '普通观看接口',
+                    'pages': [
+                        {'page': 1, 'cid': 301, 'part': '第一部分', 'duration': 700}
+                    ],
+                }
+            }
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            ViewerReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        part = await database.fetchone(
+            'SELECT cid,title,duration_seconds FROM vainglory_archive_parts'
+        )
+        assert part is not None
+        assert (
+            int(part['cid']),
+            str(part['title']),
+            int(part['duration_seconds']),
+        ) == (301, '第一部分', 700)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retryable_metadata_failure_is_not_counted_as_complete(
+    tmp_path: Path,
+) -> None:
+    class RetryReader(FakeArchiveReader):
+        def __init__(self) -> None:
+            self.failures = 1
+
+        async def viewer_detail(
+            self, bundle: object, *, account_id: int, credential_version: int, bvid: str
+        ) -> Mapping[str, Any]:
+            if self.failures:
+                self.failures -= 1
+                raise BiliApiError(-702, operation='archive_view')
+            return await super().detail(
+                bundle,
+                account_id=account_id,
+                credential_version=credential_version,
+                bvid=bvid,
+            )
+
+    now = [1_000]
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            RetryReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: now[0],
+        )
+        await service.request(1)
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        imported = await database.fetchone(
+            'SELECT state,retryable,next_retry_at FROM vainglory_archive_imports'
+        )
+        assert imported is not None
+        assert str(imported['state']) == 'failed'
+        assert int(imported['retryable']) == 1
+        assert int(imported['next_retry_at']) > now[0]
+        assert (await service.status(1)).completed_count == 0
+
+        assert await service.run_once() is False
+        now[0] = int(imported['next_retry_at'])
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        assert (
+            await database.scalar('SELECT state FROM vainglory_archive_imports')
+            == 'analyzing'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_uploaded_archive_reuses_its_recording_parts(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    cache = FakeRemoteMediaCache()
+    try:
+        await seed_account(database)
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(99,100,'existing:99','closed',900,'早期虚荣录播')"
+        )
+        await database.execute(
+            "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+            "VALUES('existing-run',99,'finished',900,2300)"
+        )
+        for page, cid in ((1, 201), (2, 202)):
+            await database.execute(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,record_start_time,'
+                'artifact_state,created_at,updated_at) '
+                "VALUES(?,99,'existing-run',?,?,900,'ready',900,900)",
+                (100 + page, page, '/recording/p{}.mp4'.format(page)),
+            )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,created_at,updated_at) '
+            "VALUES(50,99,1,'{}','approved','confirmed',101,"
+            "'BV1abcdefgh',900,900)"
+        )
+        for page, cid in ((1, 201), (2, 202)):
+            await database.execute(
+                'INSERT INTO upload_parts('
+                'job_id,part_index,source_path,artifact_state,upload_state,'
+                'remote_filename,cid) '
+                "VALUES(50,?,?,'ready','confirmed',?,?)",
+                (
+                    page,
+                    '/recording/p{}.mp4'.format(page),
+                    'remote-p{}'.format(page),
+                    cid,
+                ),
+            )
+            await database.execute(
+                'INSERT INTO vainglory_part_jobs('
+                'part_id,session_id,state,request_kind,progress,algorithm_version,'
+                'match_count,error,requested_at,started_at,completed_at,updated_at) '
+                "VALUES(?,99,'ready','automatic',1,13,0,NULL,900,900,900,900)",
+                (100 + page,),
+            )
+
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=cache,
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        assert await service.run_once() is True
+        assert (
+            await database.scalar('SELECT state FROM vainglory_archive_imports')
+            == 'queued'
+        )
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        assert await database.scalar('SELECT COUNT(*) FROM recording_parts') == 2
+        links = await database.fetchall(
+            'SELECT page,recording_part_id,state '
+            'FROM vainglory_archive_parts ORDER BY page'
+        )
+        assert [
+            (int(row['page']), int(row['recording_part_id']), str(row['state']))
+            for row in links
+        ] == [(1, 101, 'ready'), (2, 102, 'ready')]
+        assert (
+            await database.scalar('SELECT state FROM vainglory_archive_imports')
+            == 'ready'
+        )
+        assert cache.requests == []
     finally:
         await database.close()
 

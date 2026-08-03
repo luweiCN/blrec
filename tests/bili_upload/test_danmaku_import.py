@@ -264,6 +264,28 @@ async def test_create_uses_frozen_policy_filters_and_queues_for_publish(
 
 
 @pytest.mark.asyncio
+async def test_import_clamps_danmaku_after_the_recording_end(
+    database: BiliUploadDatabase, tmp_path: Path
+) -> None:
+    xml = write_xml(tmp_path / 'after-end.xml', '<d p="12,1,25,1,1,0,h,1">末尾弹幕</d>')
+    await seed_part(database, xml)
+    await database.execute(
+        "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+        "VALUES('run-1',1,'finished',1,11)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,record_start_time,'
+        'artifact_state,record_duration_seconds,created_at,updated_at) '
+        "VALUES(1,1,'run-1',1,'/rec/p1.flv',1,'ready',10,1,1)"
+    )
+
+    await DanmakuImporter(database, space_threshold_bytes=0).import_part(1, str(xml))
+
+    assert await database.scalar('SELECT progress_ms FROM danmaku_items') == 9000
+
+
+@pytest.mark.asyncio
 async def test_low_disk_pauses_import_and_keeps_source(
     database: BiliUploadDatabase, tmp_path: Path
 ) -> None:

@@ -635,3 +635,35 @@ async def test_permanent_content_error_does_not_retry(
         await database.scalar('SELECT danmaku_branch_state FROM upload_jobs WHERE id=1')
         == 'failed'
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_progress_is_clamped_and_retried(
+    database: BiliUploadDatabase,
+) -> None:
+    await seed_job(database, 1, [0])
+    await database.execute(
+        "INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) "
+        "VALUES('run-1',1,'finished',1,11)"
+    )
+    await database.execute(
+        'INSERT INTO recording_parts('
+        'id,session_id,run_id,part_index,source_path,record_start_time,'
+        'artifact_state,record_duration_seconds,created_at,updated_at) '
+        "VALUES(1,1,'run-1',1,'/rec/p1.flv',1,'ready',10,1,1)"
+    )
+    await database.execute('UPDATE danmaku_items SET progress_ms=12000')
+    protocol = FakeProtocol()
+    protocol.results = [BiliApiError(36714), {'code': 0, 'data': {'dmid': 9001}}]
+    clock = FakeClock()
+    worker = publisher(database, protocol, clock)
+
+    await worker.run_once()
+    item = await database.fetchone(
+        'SELECT state,progress_ms,error_code FROM danmaku_items'
+    )
+    assert dict(item) == {'state': 'prepared', 'progress_ms': 9000, 'error_code': 36714}
+
+    clock.advance(25)
+    await worker.run_once()
+    assert await database.scalar('SELECT state FROM danmaku_items') == 'confirmed'

@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.errors import BiliApiError
 
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title
@@ -111,6 +112,9 @@ class _ArchivePage:
 class ArchiveBackfillService:
     PAGE_SIZE = 50
     MAX_PAGES = 200
+    RETRY_BASE_SECONDS = 5 * 60
+    RETRY_MAX_SECONDS = 6 * 60 * 60
+    METADATA_COOLDOWN_SECONDS = 15 * 60
 
     def __init__(
         self,
@@ -367,7 +371,8 @@ class ArchiveBackfillService:
             'AND discovery_complete=0 AND NOT EXISTS('
             'SELECT 1 FROM vainglory_archive_imports imported '
             'WHERE imported.account_id=vainglory_archive_syncs.account_id '
-            "AND imported.state NOT IN ('ready','failed','skipped')) "
+            "AND imported.state NOT IN ('ready','skipped') "
+            "AND NOT (imported.state='failed' AND imported.retryable=0)) "
             'ORDER BY requested_at,account_id LIMIT 1'
         )
         if sync is not None:
@@ -375,7 +380,10 @@ class ArchiveBackfillService:
             return True
         import_row = await self._claim_import()
         if import_row is not None:
-            await self._materialize(import_row)
+            if int(import_row['page_count']) > 0:
+                await self._retry_parts(import_row)
+            else:
+                await self._materialize(import_row)
             return True
         part = await self._database.fetchone(
             'SELECT archive.recording_part_id '
@@ -480,8 +488,6 @@ class ArchiveBackfillService:
                     'GROUP BY job.session_id',
                     (account_id, archive.bvid),
                 ).fetchone()
-                state = 'skipped' if uploaded is not None else 'queued'
-                page_count = 0 if uploaded is None else int(uploaded['page_count'])
                 connection.execute(
                     'INSERT INTO vainglory_archive_imports('
                     'account_id,aid,bvid,title,published_at,session_id,state,'
@@ -494,10 +500,10 @@ class ArchiveBackfillService:
                         archive.title,
                         archive.published_at,
                         (None if uploaded is None else int(uploaded['session_id'])),
-                        state,
-                        1 if uploaded is not None else 0,
-                        page_count,
-                        page_count,
+                        'queued',
+                        0,
+                        0,
+                        0,
                         None,
                         now,
                         now,
@@ -505,7 +511,8 @@ class ArchiveBackfillService:
                 )
             counts = connection.execute(
                 'SELECT COUNT(*) AS total,'
-                "SUM(CASE WHEN state IN ('ready','failed','skipped') "
+                "SUM(CASE WHEN state IN ('ready','skipped') "
+                "OR (state='failed' AND retryable=0) "
                 'THEN 1 ELSE 0 END) AS completed '
                 'FROM vainglory_archive_imports WHERE account_id=?',
                 (account_id,),
@@ -549,13 +556,19 @@ class ArchiveBackfillService:
                 'JOIN bili_accounts account ON account.id=imported.account_id '
                 'JOIN vainglory_archive_syncs sync '
                 'ON sync.account_id=imported.account_id '
-                "WHERE imported.state='queued' AND account.state='active' "
+                "WHERE (imported.state='queued' OR ("
+                "imported.state='failed' AND imported.retryable=1 "
+                'AND imported.next_retry_at<=?)) '
+                "AND account.state='active' "
                 "AND sync.state IN ('discovering','running') "
-                'AND sync.operator_paused=0 AND ('
+                'AND sync.operator_paused=0 '
+                'AND (sync.retry_after_at IS NULL OR sync.retry_after_at<=?) AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
                 'OR sync.quota_day<>? OR sync.daily_used<sync.daily_limit) '
-                'ORDER BY imported.created_at,imported.id LIMIT 1',
-                (quota_day, quota_day),
+                "ORDER BY CASE imported.state WHEN 'failed' THEN 0 ELSE 1 END,"
+                'COALESCE(imported.next_retry_at,imported.created_at),'
+                'imported.created_at,imported.id LIMIT 1',
+                (now, now, quota_day, quota_day),
             ).fetchone()
             if row is None:
                 return None
@@ -572,8 +585,12 @@ class ArchiveBackfillService:
                 return None
             changed = connection.execute(
                 "UPDATE vainglory_archive_imports SET state='downloading',"
-                "error=NULL,quota_day=?,updated_at=? WHERE id=? AND state='queued'",
-                (quota_day, now, int(row['id'])),
+                'progress=CASE WHEN page_count=0 THEN 0 ELSE progress END,'
+                'error=NULL,retryable=0,next_retry_at=NULL,'
+                'attempt_count=attempt_count+1,quota_day=?,updated_at=? '
+                "WHERE id=? AND (state='queued' OR (state='failed' "
+                'AND retryable=1 AND next_retry_at<=?))',
+                (quota_day, now, int(row['id']), now),
             )
             if changed.rowcount != 1:
                 return None
@@ -594,11 +611,16 @@ class ArchiveBackfillService:
         import_id = int(imported['id'])
         try:
             bundle = await self._bundle_loader(int(imported['account_id']))
-            detail = await self._archive_reader.detail(
+            detail = await self._archive_reader.viewer_detail(
                 bundle,
                 account_id=int(imported['account_id']),
                 credential_version=int(imported['credential_version']),
                 bvid=str(imported['bvid']),
+            )
+            await self._database.execute(
+                'UPDATE vainglory_archive_syncs SET retry_after_at=NULL '
+                'WHERE account_id=?',
+                (int(imported['account_id']),),
             )
             detail_title, description = self._detail_metadata(
                 detail, fallback_title=str(imported['title'])
@@ -621,7 +643,17 @@ class ArchiveBackfillService:
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
                 raise
             await self._fail_import(
-                import_id, '{}: {}'.format(type(error).__name__, error)
+                import_id,
+                self._error_text(error),
+                retry_after_seconds=(
+                    max(
+                        self.METADATA_COOLDOWN_SECONDS,
+                        int(error.retry_after_seconds or 0),
+                    )
+                    if isinstance(error, BiliApiError)
+                    else None
+                ),
+                pause_account=isinstance(error, BiliApiError),
             )
 
     async def _persist_pages(
@@ -713,35 +745,86 @@ class ArchiveBackfillService:
                     continue
                 part_started_at = started_at + elapsed
                 part_ended_at = part_started_at + (page.duration_seconds or 0)
-                cursor = connection.execute(
-                    'INSERT INTO recording_parts('
-                    'session_id,run_id,part_index,source_path,final_path,xml_path,'
-                    'record_start_time,artifact_state,xml_completed,'
-                    'record_end_time,record_duration_seconds,file_size_bytes,'
-                    'video_deleted_at,video_delete_reason,created_at,updated_at,'
-                    'media_index_state,upload_excluded_reason) '
-                    "VALUES(?,?,?,?,NULL,NULL,?,'missing',1,?,?,NULL,?,"
-                    "'历史稿件临时视频已清理',?,?,'not_required',"
-                    "'历史稿件只用于对局分析')",
+                recorded = connection.execute(
+                    'SELECT part.id,part.final_path,part.artifact_state,'
+                    'part.video_deleted_at,part.file_size_bytes,'
+                    'analysis.state AS analysis_state '
+                    'FROM recording_parts part '
+                    'LEFT JOIN upload_jobs job ON job.session_id=part.session_id '
+                    'AND job.account_id=? AND job.bvid=? '
+                    'LEFT JOIN upload_parts uploaded ON uploaded.job_id=job.id '
+                    'AND uploaded.part_index=part.part_index '
+                    'LEFT JOIN vainglory_part_jobs analysis '
+                    'ON analysis.part_id=part.id '
+                    'WHERE part.session_id=? '
+                    'AND (uploaded.cid=? OR part.part_index=?) '
+                    'ORDER BY CASE WHEN uploaded.cid=? THEN 0 ELSE 1 END,'
+                    'part.id LIMIT 1',
                     (
+                        int(imported['account_id']),
+                        str(imported['bvid']),
                         int(session_id),
-                        str(run['id']),
+                        page.cid,
                         page.page,
-                        'bili://{}/p{}'.format(str(imported['bvid']), page.page),
-                        part_started_at,
-                        part_ended_at,
-                        page.duration_seconds,
-                        now,
-                        now,
-                        now,
+                        page.cid,
                     ),
-                )
-                part_id = int(cursor.lastrowid)
+                ).fetchone()
+                if recorded is None:
+                    cursor = connection.execute(
+                        'INSERT INTO recording_parts('
+                        'session_id,run_id,part_index,source_path,final_path,'
+                        'xml_path,record_start_time,artifact_state,xml_completed,'
+                        'record_end_time,record_duration_seconds,file_size_bytes,'
+                        'video_deleted_at,video_delete_reason,created_at,updated_at,'
+                        'media_index_state,upload_excluded_reason) '
+                        "VALUES(?,?,?,?,NULL,NULL,?,'missing',1,?,?,NULL,?,"
+                        "'历史稿件临时视频已清理',?,?,'not_required',"
+                        "'历史稿件只用于对局分析')",
+                        (
+                            int(session_id),
+                            str(run['id']),
+                            page.page,
+                            'bili://{}/p{}'.format(str(imported['bvid']), page.page),
+                            part_started_at,
+                            part_ended_at,
+                            page.duration_seconds,
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
+                    part_id = int(cursor.lastrowid)
+                    origin = 'archive'
+                    original_final_path = None
+                    original_artifact_state = 'missing'
+                    original_video_deleted_at = now
+                    original_file_size_bytes = None
+                    analysis_state = None
+                else:
+                    part_id = int(recorded['id'])
+                    origin = 'upload'
+                    original_final_path = recorded['final_path']
+                    original_artifact_state = str(recorded['artifact_state'])
+                    original_video_deleted_at = recorded['video_deleted_at']
+                    original_file_size_bytes = recorded['file_size_bytes']
+                    analysis_state = recorded['analysis_state']
+                    if analysis_state == 'failed':
+                        connection.execute(
+                            'DELETE FROM vainglory_ocr_jobs WHERE part_id=?', (part_id,)
+                        )
+                        connection.execute(
+                            "DELETE FROM vainglory_part_jobs WHERE part_id=? "
+                            "AND state='failed'",
+                            (part_id,),
+                        )
+                        analysis_state = None
+                archive_state = 'ready' if analysis_state == 'ready' else 'queued'
+                archive_progress = 1 if archive_state == 'ready' else 0
                 connection.execute(
                     'INSERT INTO vainglory_archive_parts('
                     'import_id,page,cid,title,duration_seconds,'
                     'recording_part_id,state,progress,error,created_at,updated_at) '
-                    "VALUES(?,?,?,?,?,?,'queued',0,NULL,?,?)",
+                    'VALUES(?,?,?,?,?,?,?,?,NULL,?,?)',
                     (
                         import_id,
                         page.page,
@@ -749,40 +832,107 @@ class ArchiveBackfillService:
                         page.title,
                         page.duration_seconds,
                         part_id,
+                        archive_state,
+                        archive_progress,
                         now,
                         now,
                     ),
                 )
                 connection.execute(
-                    'INSERT INTO vainglory_video_sources('
+                    'INSERT OR IGNORE INTO vainglory_video_sources('
                     'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
                     'progress,downloaded_bytes,total_bytes,cache_path,'
                     'original_final_path,original_artifact_state,'
                     'original_video_deleted_at,original_file_size_bytes,'
                     'cached_at,expires_at,error,created_at,updated_at) '
-                    "VALUES(?,?,?,?,?,'archive','missing','analysis',0,0,NULL,"
-                    "NULL,NULL,'missing',?,NULL,NULL,NULL,NULL,?,?)",
+                    "VALUES(?,?,?,?,?,?,'missing','analysis',0,0,NULL,NULL,"
+                    '?,?,?,?,NULL,NULL,NULL,?,?)',
                     (
                         part_id,
                         int(imported['account_id']),
                         str(imported['bvid']),
                         page.cid,
                         page.page,
-                        now,
+                        origin,
+                        original_final_path,
+                        original_artifact_state,
+                        original_video_deleted_at,
+                        original_file_size_bytes,
                         now,
                         now,
                     ),
                 )
                 elapsed += page.duration_seconds or 0
+            completed = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM vainglory_archive_parts "
+                    "WHERE import_id=? AND state='ready'",
+                    (import_id,),
+                ).fetchone()[0]
+            )
             connection.execute(
                 "UPDATE vainglory_archive_imports SET state='analyzing',"
-                'progress=0,page_count=?,completed_page_count=0,error=NULL,'
+                'progress=?,page_count=?,completed_page_count=?,error=NULL,'
                 "content_classification='unknown',classification_reason=NULL,"
-                'updated_at=? WHERE id=?',
-                (len(pages), now, import_id),
+                'retryable=0,next_retry_at=NULL,updated_at=? WHERE id=?',
+                (
+                    float(completed) / float(len(pages)),
+                    len(pages),
+                    completed,
+                    now,
+                    import_id,
+                ),
             )
 
         await self._database.write(persist)
+
+    async def _retry_parts(self, imported: sqlite3.Row) -> None:
+        now = self._now()
+
+        def retry(connection: sqlite3.Connection) -> None:
+            import_id = int(imported['id'])
+            failed = connection.execute(
+                "SELECT recording_part_id FROM vainglory_archive_parts "
+                "WHERE import_id=? AND state='failed'",
+                (import_id,),
+            ).fetchall()
+            part_ids = tuple(
+                int(row['recording_part_id'])
+                for row in failed
+                if row['recording_part_id'] is not None
+            )
+            for part_id in part_ids:
+                connection.execute(
+                    'DELETE FROM vainglory_ocr_jobs WHERE part_id=?', (part_id,)
+                )
+                connection.execute(
+                    "DELETE FROM vainglory_part_jobs WHERE part_id=? "
+                    "AND state='failed'",
+                    (part_id,),
+                )
+            connection.execute(
+                "UPDATE vainglory_archive_parts SET state='queued',progress=0,"
+                'error=NULL,updated_at=? '
+                "WHERE import_id=? AND state='failed'",
+                (now, import_id),
+            )
+            completed = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM vainglory_archive_parts "
+                    "WHERE import_id=? AND state='ready'",
+                    (import_id,),
+                ).fetchone()[0]
+            )
+            page_count = max(1, int(imported['page_count']))
+            connection.execute(
+                "UPDATE vainglory_archive_imports SET state='analyzing',"
+                'progress=?,completed_page_count=?,error=NULL,retryable=0,'
+                "next_retry_at=NULL,content_classification='unknown',"
+                'classification_reason=NULL,updated_at=? WHERE id=?',
+                (float(completed) / float(page_count), completed, now, import_id),
+            )
+
+        await self._database.write(retry)
 
     async def _queue_download(self, part_id: int) -> None:
         now = self._now()
@@ -845,7 +995,7 @@ class ArchiveBackfillService:
                 )
                 changed = True
             imports = connection.execute(
-                'SELECT id,state FROM vainglory_archive_imports '
+                'SELECT id,state,attempt_count FROM vainglory_archive_imports '
                 "WHERE state IN ('downloading','analyzing')"
             ).fetchall()
             for imported in imports:
@@ -867,9 +1017,7 @@ class ArchiveBackfillService:
                 state = ('failed' if failures else 'ready') if terminal else 'analyzing'
                 progress = sum(float(part['progress']) for part in parts) / len(parts)
                 error = '; '.join(failures)[:500] if failures and terminal else None
-                completed = sum(
-                    str(part['state']) in ('ready', 'failed') for part in parts
-                )
+                completed = sum(str(part['state']) == 'ready' for part in parts)
                 classification = 'unknown'
                 classification_reason: Optional[str] = None
                 if state == 'ready':
@@ -889,10 +1037,17 @@ class ArchiveBackfillService:
                         classification = 'suspected_non_vainglory'
                         classification_reason = '所有分P分析完成，但未发现虚荣对局结算'
                 if state != str(imported['state']) or terminal or completed > 0:
+                    retryable = 1 if state == 'failed' else 0
+                    next_retry_at = (
+                        now + self._retry_delay_seconds(int(imported['attempt_count']))
+                        if retryable
+                        else None
+                    )
                     connection.execute(
                         'UPDATE vainglory_archive_imports SET state=?,progress=?,'
                         'completed_page_count=?,error=?,content_classification=?,'
-                        'classification_reason=?,updated_at=? WHERE id=?',
+                        'classification_reason=?,retryable=?,next_retry_at=?,'
+                        'updated_at=? WHERE id=?',
                         (
                             state,
                             progress,
@@ -900,6 +1055,8 @@ class ArchiveBackfillService:
                             error,
                             classification,
                             classification_reason,
+                            retryable,
+                            next_retry_at,
                             now,
                             int(imported['id']),
                         ),
@@ -913,13 +1070,17 @@ class ArchiveBackfillService:
             ).fetchall()
             for sync in syncs:
                 values = connection.execute(
-                    'SELECT state,progress FROM vainglory_archive_imports '
+                    'SELECT state,progress,retryable '
+                    'FROM vainglory_archive_imports '
                     'WHERE account_id=?',
                     (int(sync['account_id']),),
                 ).fetchall()
                 total = len(values)
                 completed = sum(
-                    str(value['state']) in ('ready', 'failed', 'skipped')
+                    str(value['state']) in ('ready', 'skipped')
+                    or (
+                        str(value['state']) == 'failed' and not bool(value['retryable'])
+                    )
                     for value in values
                 )
                 progress = (
@@ -928,8 +1089,16 @@ class ArchiveBackfillService:
                     else sum(
                         (
                             1.0
-                            if str(value['state']) == 'skipped'
-                            else float(value['progress'])
+                            if str(value['state']) in ('ready', 'skipped')
+                            or (
+                                str(value['state']) == 'failed'
+                                and not bool(value['retryable'])
+                            )
+                            else (
+                                0.0
+                                if str(value['state']) == 'failed'
+                                else float(value['progress'])
+                            )
                         )
                         for value in values
                     )
@@ -998,21 +1167,58 @@ class ArchiveBackfillService:
             (error.strip()[:500] or '历史回填失败', now, now, int(account_id)),
         )
 
-    async def _fail_import(self, import_id: int, error: str) -> None:
+    async def _fail_import(
+        self,
+        import_id: int,
+        error: str,
+        *,
+        retry_after_seconds: Optional[int] = None,
+        pause_account: bool = False,
+    ) -> None:
         normalized_error = error.strip()[:500] or '历史稿件处理失败'
-        await self._database.execute(
-            "UPDATE vainglory_archive_imports SET state='failed',progress=1,"
-            "content_classification='unknown',classification_reason=?,"
-            'error=?,updated_at=? WHERE id=?',
-            ('处理失败，无法判断内容类型', normalized_error, self._now(), import_id),
-        )
+        now = self._now()
+
+        def fail(connection: sqlite3.Connection) -> None:
+            imported = connection.execute(
+                'SELECT account_id,attempt_count FROM vainglory_archive_imports '
+                'WHERE id=?',
+                (int(import_id),),
+            ).fetchone()
+            if imported is None:
+                return
+            delay = self._retry_delay_seconds(int(imported['attempt_count']))
+            if retry_after_seconds is not None:
+                delay = max(delay, max(1, int(retry_after_seconds)))
+            retry_at = now + delay
+            connection.execute(
+                "UPDATE vainglory_archive_imports SET state='failed',progress=0,"
+                "content_classification='unknown',classification_reason=?,"
+                'error=?,retryable=1,next_retry_at=?,updated_at=? WHERE id=?',
+                (
+                    '处理失败，等待自动重试',
+                    normalized_error,
+                    retry_at,
+                    now,
+                    int(import_id),
+                ),
+            )
+            if pause_account:
+                connection.execute(
+                    'UPDATE vainglory_archive_syncs SET retry_after_at=CASE '
+                    'WHEN retry_after_at IS NULL OR retry_after_at<? THEN ? '
+                    'ELSE retry_after_at END,updated_at=? WHERE account_id=?',
+                    (retry_at, retry_at, now, int(imported['account_id'])),
+                )
+
+        await self._database.write(fail)
 
     async def _skip_import(self, import_id: int) -> None:
         await self._database.execute(
             "UPDATE vainglory_archive_imports SET state='skipped',progress=1,"
             "content_classification='unknown',"
             "classification_reason='稿件短于10分钟，未进行内容分析',"
-            'page_count=0,completed_page_count=0,error=NULL,updated_at=? '
+            'page_count=0,completed_page_count=0,error=NULL,retryable=0,'
+            'next_retry_at=NULL,updated_at=? '
             'WHERE id=?',
             (self._now(), int(import_id)),
         )
@@ -1080,6 +1286,8 @@ class ArchiveBackfillService:
             return ()
         videos = data.get('videos')
         if not isinstance(videos, list):
+            videos = data.get('pages')
+        if not isinstance(videos, list):
             return ()
         pages: List[_ArchivePage] = []
         for index, value in enumerate(videos, 1):
@@ -1096,13 +1304,28 @@ class ArchiveBackfillService:
             )
             pages.append(
                 _ArchivePage(
-                    page=index,
+                    page=cls._positive_int(value.get('page')) or index,
                     cid=cid,
                     title=title[:200],
                     duration_seconds=cls._positive_int(value.get('duration')),
                 )
             )
         return tuple(pages)
+
+    @classmethod
+    def _retry_delay_seconds(cls, attempt_count: int) -> int:
+        exponent = max(0, min(8, int(attempt_count) - 1))
+        return min(cls.RETRY_MAX_SECONDS, cls.RETRY_BASE_SECONDS * (2**exponent))
+
+    @staticmethod
+    def _error_text(error: BaseException) -> str:
+        values = ['{}: {}'.format(type(error).__name__, error)]
+        if isinstance(error, BiliApiError):
+            if error.operation:
+                values.append('operation={}'.format(error.operation))
+            if error.public_message:
+                values.append(str(error.public_message))
+        return '; '.join(values)[:500]
 
     @classmethod
     def _detail_metadata(

@@ -103,11 +103,12 @@ class _DanmakuWork:
     bvid: str
     cid: int
     branch_state: str
+    duration_seconds: Optional[int]
 
 
 class DanmakuPublisher:
     _AUTH_CODES = frozenset((-101, -111))
-    _PERMANENT_CODES = frozenset((36701, 36702, 36718)) | frozenset(range(36705, 36715))
+    _PERMANENT_CODES = frozenset((36701, 36702, 36718)) | frozenset(range(36705, 36714))
 
     def __init__(
         self,
@@ -408,6 +409,9 @@ class DanmakuPublisher:
             delay = self.breaker_for(work.account_id).daily_limited(self._clock())
             await self._daily_pause(claim, work, error.code, delay)
             return
+        if error.code == 36714:
+            await self._retry_invalid_progress(claim, work, error.code)
+            return
         if error.code in self._AUTH_CODES:
             await self._auth_retry(claim, work, error.code)
             return
@@ -521,6 +525,27 @@ class DanmakuPublisher:
             result='failed_permanent',
         )
         await self._complete_if_done(work.job_id)
+
+    async def _retry_invalid_progress(
+        self, claim: LeaseClaim, work: _DanmakuWork, error_code: int
+    ) -> None:
+        corrected = max(0, work.progress_ms - 1000)
+        if work.duration_seconds is not None:
+            corrected = min(corrected, max(0, (work.duration_seconds - 1) * 1000))
+        if corrected >= work.progress_ms or claim.attempt >= 5:
+            await self._fail_item(claim, work, error_code)
+            return
+        await self._update_item(
+            claim,
+            {
+                'state': 'prepared',
+                'progress_ms': corrected,
+                'error_code': error_code,
+                'error_message': '弹幕时间超过视频范围，已调整到有效时间后自动重试',
+                'next_attempt_at': self._deadline(self._interval_seconds),
+            },
+            release=True,
+        )
 
     async def _safe_retry(
         self, claim: LeaseClaim, work: _DanmakuWork, message: str
@@ -690,7 +715,12 @@ class DanmakuPublisher:
             'SELECT item.id,item.part_id,item.state,item.progress_ms,item.mode,'
             'item.fontsize,item.color,item.content,part.job_id,part.cid,'
             'job.account_id,job.aid,job.bvid,job.danmaku_branch_state,'
-            'account.state AS account_state,account.credential_version '
+            'account.state AS account_state,account.credential_version,'
+            '(SELECT recording.record_duration_seconds '
+            'FROM recording_parts recording '
+            'WHERE recording.session_id=job.session_id '
+            'AND recording.part_index=part.part_index '
+            'ORDER BY recording.id DESC LIMIT 1) AS duration_seconds '
             'FROM danmaku_items item JOIN upload_parts part ON part.id=item.part_id '
             'JOIN upload_jobs job ON job.id=part.job_id '
             'JOIN bili_accounts account ON account.id=job.account_id '
@@ -721,6 +751,11 @@ class DanmakuPublisher:
             bvid=bvid,
             cid=cid,
             branch_state=str(row['danmaku_branch_state']),
+            duration_seconds=(
+                None
+                if row['duration_seconds'] is None
+                else int(row['duration_seconds'])
+            ),
         )
 
     async def _start_send(
@@ -826,7 +861,14 @@ class DanmakuPublisher:
     async def _update_item(
         self, claim: LeaseClaim, values: Mapping[str, Any], *, release: bool = False
     ) -> None:
-        allowed = {'dmid', 'error_code', 'error_message', 'next_attempt_at', 'state'}
+        allowed = {
+            'dmid',
+            'error_code',
+            'error_message',
+            'next_attempt_at',
+            'progress_ms',
+            'state',
+        }
         if not values or not set(values) <= allowed:
             raise ValueError('invalid danmaku item update')
         assignments = ['{}=?'.format(column) for column in values]

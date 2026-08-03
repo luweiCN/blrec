@@ -692,7 +692,8 @@ class VaingloryPublicationService:
                     return
                 await self._database.execute(
                     "UPDATE vainglory_publications SET state='confirmed',"
-                    'needs_refresh=0,error=NULL,updated_at=? WHERE id=?',
+                    "needs_refresh=0,error=CASE WHEN chapter_state='skipped' "
+                    'THEN error ELSE NULL END,updated_at=? WHERE id=?',
                     (self._now(), publication_id),
                 )
         except (
@@ -734,7 +735,11 @@ class VaingloryPublicationService:
             )
             targets = _chapter_targets(matches, pages)
             if not targets:
-                await self._set_chapter_state(publication_id, 'skipped')
+                await self._set_chapter_state(
+                    publication_id,
+                    'skipped',
+                    error='没有可写入 B 站章节的有效对局时间点',
+                )
                 return
             for target_index, (page, cards) in enumerate(targets):
                 current = await self._protocol.archive_cards(
@@ -781,7 +786,18 @@ class VaingloryPublicationService:
                     str(publication['bvid']),
                     error.code,
                 )
-                await self._set_chapter_state(publication_id, 'skipped')
+                await self._set_chapter_state(
+                    publication_id,
+                    'skipped',
+                    error='B 站章节接口拒绝写入（{}）{}'.format(
+                        error.code,
+                        (
+                            ''
+                            if not error.public_message
+                            else '：{}'.format(error.public_message)
+                        ),
+                    ),
+                )
         except ProtocolContractError:
             await self._retry_publication(
                 publication_id,
@@ -1305,11 +1321,18 @@ class VaingloryPublicationService:
             (state, self._now(), publication_id),
         )
 
-    async def _set_chapter_state(self, publication_id: int, state: str) -> None:
+    async def _set_chapter_state(
+        self, publication_id: int, state: str, *, error: Optional[str] = None
+    ) -> None:
         await self._database.execute(
-            'UPDATE vainglory_publications SET chapter_state=?,updated_at=? '
+            'UPDATE vainglory_publications SET chapter_state=?,error=?,updated_at=? '
             'WHERE id=?',
-            (state, self._now(), publication_id),
+            (
+                state,
+                None if error is None else error[:500],
+                self._now(),
+                publication_id,
+            ),
         )
 
     @staticmethod

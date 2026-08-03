@@ -202,13 +202,13 @@ export class RecordingSessionRowComponent {
   matchChapterLabel(): string {
     switch (this.session.matchChapterState) {
       case 'prepared':
-        return '分段：待写入';
+        return '章节：待写入';
       case 'confirmed':
-        return '分段：已完成';
+        return '章节：已完成';
       case 'skipped':
-        return '分段：已跳过';
+        return '章节：未写入';
       default:
-        return '分段：未生成';
+        return '章节：未生成';
     }
   }
 

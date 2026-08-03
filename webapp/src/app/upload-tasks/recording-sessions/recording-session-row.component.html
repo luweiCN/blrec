@@ -90,7 +90,11 @@
   </ng-container>
   <div class="match-status-summary" data-testid="match-publication-summary">
     <nz-tag [nzColor]="matchIndexColor()">{{ matchIndexLabel() }}</nz-tag>
-    <nz-tag [nzColor]="matchChapterColor()">
+    <nz-tag
+      [nzColor]="matchChapterColor()"
+      nz-tooltip
+      [nzTooltipTitle]="session.matchPublicationError || null"
+    >
       {{ matchChapterLabel() }}
     </nz-tag>
     <nz-tag [nzColor]="matchDescriptionColor()">
