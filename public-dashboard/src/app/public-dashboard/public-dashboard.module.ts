@@ -2,6 +2,7 @@ import { CommonModule } from '@angular/common';
 import { NgModule } from '@angular/core';
 
 import { DashboardModeSwitcherComponent } from './dashboard-mode-switcher.component';
+import { DownloadGuidePageComponent } from './download-guide-page.component';
 import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
@@ -29,6 +30,7 @@ import { RankingGuidePageComponent } from './ranking-guide-page.component';
     HeroDetailPageComponent,
     RankingGuidePageComponent,
     PlayGuidePageComponent,
+    DownloadGuidePageComponent,
   ],
   imports: [CommonModule, PublicDashboardRoutingModule],
 })

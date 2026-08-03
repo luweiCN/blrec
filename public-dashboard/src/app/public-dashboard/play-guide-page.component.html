@@ -1,16 +1,16 @@
 <article class="guide-page play-guide">
   <header class="guide-hero">
     <div>
-      <p class="guide-kicker">RETURN TO THE HALCYON FOLD</p>
-      <h1>现在，怎么重新玩《虚荣》？</h1>
+      <p class="guide-kicker">COMMUNITY MATCHMAKING</p>
+      <h1>装好以后，怎么找到一局？</h1>
       <p class="guide-lead">
-        从正确的客户端、地区与网络线路开始，再选择当前仍容易匹配的模式。下面把官方仍确认的事实和社区实践分开说明。
+        国内玩家先连接加速线路，再根据时段选择东亚或东南亚。3V3 仍可公开匹配；5V5 通常需要在群里凑齐十人，用组队码组织一场“内战”。
       </p>
     </div>
     <div class="guide-meta" aria-label="信息核对时间">
       <span>信息核对</span>
       <strong>2026 / 08 / 03</strong>
-      <small>入口和排队状态可能变化</small>
+      <small>匹配人数会随时段变化</small>
     </div>
   </header>
 
@@ -30,6 +30,13 @@
     >
       如何游玩
     </a>
+    <a
+      routerLink="/guide/download"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+    >
+      下载指南
+    </a>
   </nav>
 
   <div class="guide-layout">
@@ -37,147 +44,124 @@
       <p>本页目录</p>
       <nav aria-label="游玩指南目录">
         <a [routerLink]="[]" fragment="status">现在是什么状态</a>
-        <a [routerLink]="[]" fragment="download">下载与安装</a>
+        <a [routerLink]="[]" fragment="network">国内如何连接</a>
         <a [routerLink]="[]" fragment="region">东亚与东南亚</a>
-        <a [routerLink]="[]" fragment="network">国内网络</a>
-        <a [routerLink]="[]" fragment="queue">如何排队</a>
+        <a [routerLink]="[]" fragment="queue">现在如何排队</a>
+        <a [routerLink]="[]" fragment="party-code">组队码教程</a>
         <a [routerLink]="[]" fragment="troubleshoot">常见问题</a>
       </nav>
-      <span class="rail-note">优先从 3V3 开始</span>
+      <span class="rail-note">公开匹配优先 3V3</span>
     </aside>
 
     <div class="guide-content">
       <section id="status" class="content-section">
         <p class="section-index">01 / CURRENT STATE</p>
-        <h2>能玩，但不是过去的完整商业服</h2>
+        <h2>能玩，但要按社区服的方式来</h2>
         <div class="key-statement">
-          <strong>当前常见客户端为 4.13.4，组队码可以正常用于约局和组队。</strong>
+          <strong>中国大陆玩家应先连接东亚或东南亚加速线路，再启动游戏。</strong>
           <p>
-            Super Evil Megacorp 在 2020 年暂停了原定开发路线，但保留了游戏服务器。核心对战与组队码仍可使用；传统账号、好友列表、聊天、历史档案和正式排位进度等功能没有完整恢复。
+            裸连通常会出现高延迟、丢包或地区判断不稳定。进入正确地区后，核心对战与组队码仍可使用；过去的账号资产、好友列表、正式段位和完整组队大厅没有恢复。
           </p>
         </div>
 
         <div class="status-columns">
           <div>
-            <span>仍可使用</span>
+            <span>现在仍能做</span>
             <ul>
-              <li>3V3、乱斗与 5V5 核心对战</li>
-              <li>通过组队码组织同局和分队</li>
-              <li>简体中文界面</li>
-              <li>英雄及支持模式下的皮肤、天赋选择</li>
-              <li>现有官方服务器匹配</li>
+              <li>公开匹配 3V3 与部分乱斗</li>
+              <li>进入 5V5 核心对战地图</li>
+              <li>用组队码组织同局和分边</li>
+              <li>修改本地游戏昵称</li>
+              <li>游玩英雄、皮肤与天赋</li>
             </ul>
           </div>
           <div>
-            <span>不要期待</span>
+            <span>与过去不同</span>
             <ul>
-              <li>过去的账号资产与历史段位</li>
-              <li>过去的好友列表与一键邀请流程</li>
-              <li>持续平衡更新或新内容</li>
-              <li>与旧商业服相同的匹配质量</li>
+              <li>没有原来的账号资产和历史段位</li>
+              <li>没有可靠的好友邀请与私人房间</li>
+              <li>匹配人数受地区和时段影响明显</li>
+              <li>选人退出、挂机没有完整惩罚体系</li>
+              <li>不会持续获得官方平衡更新</li>
             </ul>
           </div>
         </div>
 
+        <a class="inline-route-link" routerLink="/guide/download">
+          还没有客户端？前往独立下载指南
+        </a>
+
         <p class="source-note">
-          官方依据：
+          官方背景：
           <a
             href="https://www.vainglorygame.com/news/vainglory-community-edition-update-edtheshred/"
             target="_blank"
             rel="noopener noreferrer"
-          >Community Edition 状态说明</a>
-          与
-          <a
-            href="https://apps.apple.com/hk/app/vainglory/id671464704?l=en"
-            target="_blank"
-            rel="noopener noreferrer"
-          >App Store 4.13.4 版本记录</a>。
-          官方旧路线曾把组队码列在 Stage 1C，但此后没有发布新的阶段公告；由于当前实际已经可以使用组队码，本页按“版本号 + 可用功能”描述，不再用 1B 或 1C 简化现状。
+          >Community Edition 状态说明</a>。
+          当前可用性与匹配情况来自国内玩家实测和近期社区反馈，不是官方服务承诺。
         </p>
       </section>
 
-      <section id="download" class="content-section">
-        <p class="section-index">02 / DOWNLOAD</p>
-        <h2>先选择你的设备</h2>
-        <div class="download-grid">
-          <section>
-            <span class="platform-label official">官方入口</span>
-            <p class="platform-name">iPhone / iPad</p>
-            <h3>从仍上架地区的 App Store 下载</h3>
-            <p>香港等地区的商店页目前仍可访问，版本为 4.13.4，页面标注约 2.4 GB，并支持简体中文。</p>
-            <a
-              class="action-link"
-              href="https://apps.apple.com/hk/app/vainglory/id671464704?l=zh-Hans-CN"
-              target="_blank"
-              rel="noopener noreferrer"
-            >打开 App Store 页面</a>
-          </section>
+      <section id="network" class="content-section">
+        <p class="section-index">02 / NETWORK IN CHINA</p>
+        <h2>先开加速器，再打开《虚荣》</h2>
+        <p>
+          从中国大陆连接海外匹配池时，加速器基本是正常游玩的前提。奇游和 UU 是国内常见选择；本站不接受推广，也不保证某个产品或节点长期可用，请以实际延迟和丢包为准。
+        </p>
 
-          <section>
-            <span class="platform-label community">第三方归档</span>
-            <p class="platform-name">Android</p>
-            <h3>当前通常使用 4.13.4 XAPK</h3>
-            <p>官方旧公告仍写 Google Play，但目前官方页面已难以访问。近期社区通常从 APKPure 获取约 1.3 GB 的 4.13.4 归档包。</p>
-            <a
-              class="action-link"
-              href="https://apkpure.net/vainglory/com.superevilmegacorp.game/download"
-              target="_blank"
-              rel="noopener noreferrer"
-            >查看 APKPure 归档</a>
-          </section>
-
-          <section>
-            <span class="platform-label legacy">旧版客户端</span>
-            <p class="platform-name">Windows / macOS</p>
-            <h3>不建议新玩家从桌面端开始</h3>
-            <p>Steam、Samsung 和 Amazon 的新下载已被官方移除。已入库的旧客户端可能仍可运行，但兼容性和加载问题较多。</p>
-            <a
-              class="action-link quiet"
-              href="https://www.reddit.com/r/vainglorygame/comments/ixo974/community_edition_faq_download_links_including/"
-              target="_blank"
-              rel="noopener noreferrer"
-            >查看社区兼容性说明</a>
-          </section>
-        </div>
-
-        <div class="safety-note">
-          <strong>Android 下载提醒</strong>
-          <p>
-            APKPure 不是官方商店。请确认包名为
-            <code>com.superevilmegacorp.game</code>、版本为 4.13.4，不要下载“MOD”“无限资源”等修改包；安装完成后关闭“允许未知来源安装”，并自行承担第三方分发风险。
-          </p>
-        </div>
-
-        <ol class="install-steps">
+        <ol class="network-steps">
           <li>
-            <span>1</span>
+            <span>01</span>
             <div>
-              <strong>预留足够空间</strong>
-              <p>客户端和资源包体积较大，建议至少预留数 GB，并用稳定 Wi-Fi 完成首次资源加载。</p>
+              <strong>完全退出游戏</strong>
+              <p>先从后台划掉《虚荣》，不要在已经进入游戏后再切换地区。</p>
             </div>
           </li>
           <li>
-            <span>2</span>
+            <span>02</span>
             <div>
-              <strong>先确定想去的地区</strong>
-              <p>首次进入前选好东亚或东南亚线路，避免下载完成后反复清数据或重装。</p>
+              <strong>在加速器里搜索“虚荣”或“Vainglory”</strong>
+              <p>优先使用游戏专线；没有专线时，再按产品说明选择海外手游线路。</p>
             </div>
           </li>
           <li>
-            <span>3</span>
+            <span>03</span>
             <div>
-              <strong>进入后先开一局练习</strong>
-              <p>确认地图资源、触控、声音和延迟正常，再进入公开匹配。</p>
+              <strong>明确选择东亚或东南亚</strong>
+              <p>东亚可尝试日本、韩国等节点，东南亚可尝试新加坡等节点；约人前必须确认大家在同一地区。</p>
+            </div>
+          </li>
+          <li>
+            <span>04</span>
+            <div>
+              <strong>加速成功后再启动游戏</strong>
+              <p>进入后先打练习或观察实战延迟；如果地区不对，退出游戏后重新选线。</p>
             </div>
           </li>
         </ol>
+
+        <p class="source-note">
+          常用产品入口：
+          <a
+            href="https://www.qiyou.cn/specials/QeeyouMobile-m?cid=3054"
+            target="_blank"
+            rel="noopener noreferrer"
+          >奇游手游加速器</a>
+          ·
+          <a
+            href="https://uu.163.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >网易 UU</a>。
+          不要同时开启多个加速器，也不要在对局中途切换节点。
+        </p>
       </section>
 
       <section id="region" class="content-section">
-        <p class="section-index">03 / REGION</p>
-        <h2>东亚还是东南亚？</h2>
+        <p class="section-index">03 / EA OR SEA</p>
+        <h2>东亚看中国时段，东南亚覆盖更广</h2>
         <p>
-          两个地区是不同的匹配池。不要只看客户端显示的地区文字，最终以延迟、能否遇到同一批玩家和你所在社区约定的线路为准。
+          两个地区是不同的匹配池。延迟更低不等于一定更容易开局，选择时还要看当地活跃人口和你准备游玩的模式。
         </p>
 
         <div class="region-grid">
@@ -191,16 +175,16 @@
             </header>
             <dl>
               <div>
-                <dt>适合谁</dt>
-                <dd>中国大陆玩家通常可先尝试；也便于与中、日、韩等地区玩家约局。</dd>
+                <dt>玩家</dt>
+                <dd>当前以中国玩家为主，活跃时间基本跟北京时间一致。</dd>
               </div>
               <div>
-                <dt>网络</dt>
-                <dd>多数情况下线路更近，但实际延迟仍取决于运营商与加速节点。</dd>
+                <dt>3V3</dt>
+                <dd>通常仍能匹配；工作日白天和凌晨可能因为人数不足而久等。</dd>
               </div>
               <div>
                 <dt>建议</dt>
-                <dd>没有固定队伍或社区约定时，把东亚作为第一选择。</dd>
+                <dd>晚间和周末优先；已有国内群或主播约局时选东亚更方便。</dd>
               </div>
             </dl>
           </section>
@@ -215,220 +199,205 @@
             </header>
             <dl>
               <div>
-                <dt>适合谁</dt>
-                <dd>与东南亚玩家约局，或你所在的群固定在 SEA 时使用。</dd>
+                <dt>玩家</dt>
+                <dd>覆盖多个国家，也会有其他地区玩家跨区加入，活跃时段更分散。</dd>
               </div>
               <div>
-                <dt>网络</dt>
-                <dd>中国大陆的线路可能更绕、波动更大，需要实际测试。</dd>
+                <dt>3V3</dt>
+                <dd>排位通常全天都有机会匹配到人，是没有固定队伍时更稳的选择。</dd>
               </div>
               <div>
-                <dt>现状</dt>
-                <dd>近期社区反馈 3V3 仍可匹配，5V5 通常需要约时。</dd>
+                <dt>建议</dt>
+                <dd>东亚久等时可以尝试；先确认加速后的延迟是否适合实战。</dd>
               </div>
             </dl>
           </section>
         </div>
 
         <div class="plain-callout">
-          社区长期反馈：CE 客户端内的地区下拉并不可靠，实际归属会受首次启动或清除数据后的网络出口影响。换区前请先确认同伴所在地区；清除数据或重装会丢失本地设置。
+          无论东亚还是东南亚，5V5 都不适合一个人长期盲排。国内常说的“5V5 内战”，就是先在 QQ 群、直播群等社区凑齐十个人，再用同一个组队码进入同一局。
         </div>
       </section>
 
-      <section id="network" class="content-section">
-        <p class="section-index">04 / NETWORK IN CHINA</p>
-        <h2>国内通常需要准备游戏加速线路</h2>
-        <p>
-          加速器不是游戏官方组件，也不是绝对必需；但从中国大陆连接海外匹配池时，合适的线路通常能减少高延迟、丢包和登录卡顿。奇游和 UU 是常见选择，实际是否仍提供《虚荣》专用入口请以它们当日客户端为准。
-        </p>
-
-        <ol class="network-steps">
-          <li>
-            <span>01</span>
-            <div>
-              <strong>完全退出游戏</strong>
-              <p>不要在对局中切线路，也不要同时开启多个加速器。</p>
-            </div>
-          </li>
-          <li>
-            <span>02</span>
-            <div>
-              <strong>搜索“Vainglory”或“虚荣”</strong>
-              <p>有专用游戏入口时优先使用；没有时按产品说明选择海外手游线路。</p>
-            </div>
-          </li>
-          <li>
-            <span>03</span>
-            <div>
-              <strong>线路与目标地区一致</strong>
-              <p>去东亚先测试日本、韩国或邻近东亚节点；去 SEA 再测试新加坡等东南亚节点。</p>
-            </div>
-          </li>
-          <li>
-            <span>04</span>
-            <div>
-              <strong>用实战结果选择</strong>
-              <p>连续测试延迟、丢包和匹配池，不要只看加速器首页给出的单次数字。</p>
-            </div>
-          </li>
-        </ol>
-
-        <p class="source-note">
-          产品入口：
-          <a
-            href="https://www.qiyou.cn/specials/QeeyouMobile-m?cid=3054"
-            target="_blank"
-            rel="noopener noreferrer"
-          >奇游手游加速器</a>
-          ·
-          <a
-            href="https://uu.163.com/"
-            target="_blank"
-            rel="noopener noreferrer"
-          >网易 UU</a>。
-          本站不接受加速器推广，也不保证某条线路长期可用。
-        </p>
-      </section>
-
       <section id="queue" class="content-section">
-        <p class="section-index">05 / MATCHMAKING</p>
-        <h2>现在应该怎么排队</h2>
+        <p class="section-index">04 / MATCHMAKING</p>
+        <h2>按模式选择排队方式</h2>
         <div class="queue-grid">
           <section>
-            <span>最容易开始</span>
+            <span>公开匹配首选</span>
             <h3>3V3 排位</h3>
-            <p>先从 3V3 开始。近期 SEA 社区反馈常见等待约 1—3 分钟，但人数随地区与时段波动，不能视为保证。</p>
+            <p>当前最容易开局。东亚要避开低活跃时段；东南亚通常全天都能找到玩家，但等待时间仍会波动。</p>
           </section>
           <section>
-            <span>有机会直排</span>
+            <span>人数不固定</span>
             <h3>大乱斗 / ARAL</h3>
-            <p>部分地区仍有稳定小群体。若长时间没有结果，先确认模式轮换、地区和当地活跃时段。</p>
+            <p>仍有人游玩，但玩家池比 3V3 小。长时间没有结果时，先回到 3V3 或去对应地区社区询问。</p>
           </section>
           <section>
-            <span>需要先约人</span>
-            <h3>5V5</h3>
-            <p>不要长期盲排。当前 5V5 多由地区 Discord、QQ群或直播社区约定同一时间后一起进入队列。</p>
+            <span>先约满十人</span>
+            <h3>5V5 内战</h3>
+            <p>东亚和东南亚都很难靠单排凑满。通常在群里确定十人、分好两边，再统一改名和倒计时进队列。</p>
           </section>
         </div>
 
         <div class="queue-rules">
           <div>
-            <strong>想和朋友一起</strong>
-            <p>先确认相同地区和模式，再约定同一个组队码、分队后缀与进队时间。旧好友列表不完整，但组队码可以完成当前的约局需求。</p>
+            <strong>一个人想马上玩</strong>
+            <p>开加速器后优先排 3V3 排位；东亚没人的时段，可以在延迟可接受的前提下换东南亚。</p>
           </div>
           <div>
-            <strong>一直匹配不到</strong>
-            <p>先取消，核对地区与模式，再去社区确认是否有人正在排。频繁在选人阶段退出会让本就有限的玩家池更难开局。</p>
+            <strong>三五个朋友一起玩</strong>
+            <p>不要直接使用 3000 以上的满员码。先在群里补齐 3V3 六人或 5V5 十人，再按完整组队码流程进入。</p>
           </div>
           <div>
-            <strong>“排位”不会恢复旧段位</strong>
-            <p>按钮名称仍在，但当前客户端没有过去那套完整的账号段位、天梯和匹配惩罚体系。</p>
+            <strong>想打 5V5</strong>
+            <p>把它当成一场需要组织的社区内战：先定地区、模式、人数和分边，最后才是同时点击匹配。</p>
           </div>
         </div>
+      </section>
 
-        <h3 class="subsection-title">组队码 / 狙击码怎么用</h3>
-        <p>
-          国内社区常把匹配用的数字前缀叫作组队码。它会影响匹配分组：同一地区、同一模式的玩家约定相同数字，再把游戏 ID 改成下面的格式后同时排队。
-        </p>
+      <section id="party-code" class="content-section">
+        <p class="section-index">05 / PARTY CODE</p>
+        <h2>组队码到底怎么用</h2>
+        <div class="key-statement">
+          <strong>组队码不是一个单独的输入框，而是写在每个人游戏昵称前面的数字。</strong>
+          <p>
+            它利用 Community Edition 的匹配分规则，让同一码的玩家更容易进入同一局；加上 <code>-1</code> 或 <code>-2</code> 后，还可以指定进入地图的哪一边。
+          </p>
+        </div>
+
+        <ol class="install-steps code-steps">
+          <li>
+            <span>1</span>
+            <div>
+              <strong>先凑齐人数</strong>
+              <p>3V3 内战凑 6 人，5V5 内战凑 10 人。3000 以上的码在人数不满时通常会一直匹配。</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <strong>选一个最多四位、且大于 3000 的数字</strong>
+              <p>例如 <code>6666</code>。同一时间尽量使用群里临时约定的码，降低与其他队伍撞码的概率。</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <strong>在游戏首页修改昵称</strong>
+              <p>点首页右上角的玩家名或 Guest，进入资料页后点铅笔图标，把名字改为下面的格式。</p>
+            </div>
+          </li>
+          <li>
+            <span>4</span>
+            <div>
+              <strong>确认地区、模式和队列完全一致</strong>
+              <p>所有人必须在同一服务器，选择同一个模式，并确认大家排的是同一种队列。</p>
+            </div>
+          </li>
+          <li>
+            <span>5</span>
+            <div>
+              <strong>群里倒计时，同时点击匹配</strong>
+              <p>如果有人没有进入或选人阶段退出，全员先取消，再重新核对名字和时间后一起排。</p>
+            </div>
+          </li>
+        </ol>
+
+        <h3 class="subsection-title">三种名字格式</h3>
         <div class="code-guide">
           <div>
-            <span>同局</span>
-            <code>6666_你的名字</code>
-            <p>所有人使用相同数字前缀。3V3 凑齐 6 人、5V5 凑齐 10 人时最稳定。</p>
+            <span>只要求进入同一局</span>
+            <code>6666_小明</code>
+            <p>所有人使用同一个数字，系统决定双方分边。</p>
           </div>
           <div>
-            <span>指定分边</span>
-            <code>6666-1_名字 / 6666-2_名字</code>
-            <p><code>-1</code> 与 <code>-2</code> 用于约定两边；每边玩家分别使用对应后缀。</p>
+            <span>固定左边 · 魔翼方</span>
+            <code>6666-1_小明</code>
+            <p>这一边的 3 人或 5 人都使用 <code>-1</code>。</p>
           </div>
           <div>
-            <span>注意</span>
-            <code>同地区 · 同模式 · 同时排</code>
-            <p>它不是带密码的私人房间。人数不足可能一直等待，其他人撞到同码也可能进入。</p>
+            <span>固定右边 · 暗爪方</span>
+            <code>6666-2_小王</code>
+            <p>另一边的 3 人或 5 人都使用 <code>-2</code>。</p>
           </div>
         </div>
-        <p class="fine-print">
-          社区说明建议满人局使用 3000 以上、最多四位的数字前缀；单人公开匹配不要保留组队码。服务器规则可能调整，若与你所在群的最新约定不同，以群内当前规则为准。
-        </p>
+
+        <div class="team-code-example" aria-label="5V5 内战组队码示例">
+          <section>
+            <span>A 队 · 5 人</span>
+            <strong>名字统一写成</strong>
+            <code>6666-1_各自昵称</code>
+          </section>
+          <section>
+            <span>B 队 · 5 人</span>
+            <strong>名字统一写成</strong>
+            <code>6666-2_各自昵称</code>
+          </section>
+        </div>
+
+        <div class="safety-note">
+          <strong>它仍然不是私人房间</strong>
+          <p>
+            同码只会提高同局和分边的确定性，不能阻止其他人撞码进入。单人公开匹配时不要保留 3000 以上的组队码；内战结束后建议改回普通名字。
+          </p>
+        </div>
 
         <p class="source-note">
-          近期社区观察：
-          <a
-            href="https://www.reddit.com/r/vainglorygame/comments/1ubdu3w/anyone_from_sea_still_playing/"
-            target="_blank"
-            rel="noopener noreferrer"
-          >2026 年 SEA 匹配反馈</a>
-          ·
+          规则与格式参考：
           <a
             href="https://wiki.biligame.com/vg/%E7%8B%99%E5%87%BB%E5%8C%B9%E9%85%8D%E8%AF%B4%E6%98%8E"
             target="_blank"
             rel="noopener noreferrer"
-          >中文社区组队码说明</a>
-          ·
-          <a
-            href="https://www.reddit.com/r/vainglorygame/comments/1t5cvy1/naeueasea_ranked_5v5_games_regional_discord_links/"
-            target="_blank"
-            rel="noopener noreferrer"
-          >地区社区与 5V5 约局帖</a>
-          ·
-          <a
-            href="https://vg-arena.com/"
-            target="_blank"
-            rel="noopener noreferrer"
-          >第三方 3V3 匹配工具 VG Arena</a>。
-          这些都不是官方服务，活动时间和可用性可能变化。
+          >中文社区组队码 / 狙击匹配说明</a>。
+          如果你所在群使用了新的约定，以群内当日通知为准。
         </p>
       </section>
 
       <section id="troubleshoot" class="content-section last-section">
         <p class="section-index">06 / TROUBLESHOOTING</p>
-        <h2>遇到问题时，按这个顺序排查</h2>
+        <h2>排不到时，先判断是哪一类问题</h2>
         <div class="faq-list">
           <details>
-            <summary>卡在 Loading 或资源下载失败</summary>
-            <p>先确认剩余空间和 Wi-Fi，完全退出后更换同地区的另一条加速线路。Android 的 XAPK 还需确认大体积资源已随安装器正确写入。</p>
+            <summary>延迟很高，或者频繁掉线</summary>
+            <p>确认加速器仍在运行，节点与目标地区一致，并尝试同地区的另一条线路。不要在已经开局后切换节点。</p>
           </details>
           <details>
-            <summary>进入了错误的服务器</summary>
-            <p>先在社区确认目标地区，退出游戏后更换线路再打开。部分客户端只有清除应用数据或重装后，才会按新的网络出口重新判断地区；这会清掉本地昵称与设置。</p>
+            <summary>东亚 3V3 一直没有人</summary>
+            <p>先看北京时间：工作日白天和凌晨可能处于低活跃时段。可以晚些再排，或在延迟允许时切到东南亚。</p>
           </details>
           <details>
-            <summary>延迟不高，但一直排不到人</summary>
-            <p>更可能是模式或时段没有足够玩家，而非纯网络故障。先试 3V3，再去对应地区社区确认当前是否有人排队。</p>
+            <summary>为什么 5V5 一个人排不到？</summary>
+            <p>目前两个亚洲地区的 5V5 都主要依靠社区内战。先去群里凑齐十人，再统一使用组队码，不建议持续盲排。</p>
           </details>
           <details>
-            <summary>为什么对局水平差异很大？</summary>
-            <p>当前玩家池较小，也没有过去完整的账号、段位与惩罚体系。新玩家和老玩家同局、临时退出或挂机都可能发生，请把它当作由社区共同维持的公开对局环境。</p>
+            <summary>组队码正确，为什么仍然没有进同一局？</summary>
+            <p>逐项检查人数、地区、模式、队列类型、数字、<code>-1/-2</code> 分边和点击匹配的时间。还要排除有人保留旧码、名字没有保存或其他队伍撞码。</p>
           </details>
           <details>
-            <summary>用了组队码，为什么仍然没进同一局？</summary>
-            <p>确认所有人位于相同地区、选择相同模式、使用完全一致的数字前缀，并在接近的时间进入队列。人数不满、撞码或服务器规则变化都会降低成功率。</p>
+            <summary>换了节点，游戏还是进入原来的地区</summary>
+            <p>完全退出游戏后再换线。部分设备可能需要清除应用数据或重装后重新判断地区；这样会删除本地昵称和设置，请先记下来。</p>
           </details>
         </div>
 
         <div class="source-block">
           <p>继续核对</p>
           <a
-            href="https://www.vainglorygame.com/news/vainglory-community-edition-update-edtheshred/"
+            href="https://www.reddit.com/r/vainglorygame/comments/1ubdu3w/anyone_from_sea_still_playing/"
             target="_blank"
             rel="noopener noreferrer"
-          >官方 Community Edition 状态</a>
+          >2026 年 SEA 3V3 与 5V5 匹配反馈</a>
           <a
-            href="https://apps.apple.com/hk/app/vainglory/id671464704?l=en"
+            href="https://www.reddit.com/r/vainglorygame/comments/1ub3441/how_to_yall_enter_a_5v5_match/"
             target="_blank"
             rel="noopener noreferrer"
-          >官方 App Store 版本记录</a>
+          >2026 年社区 5V5 组织方式讨论</a>
           <a
             href="https://wiki.biligame.com/vg/%E9%A6%96%E9%A1%B5"
             target="_blank"
             rel="noopener noreferrer"
-          >中文社区 Wiki：安装、换区与社区版说明</a>
-          <a
-            href="https://bubbleland.org/download-vainglory/"
-            target="_blank"
-            rel="noopener noreferrer"
-          >Bubbleland 社区下载说明</a>
-          <small>第三方页面可能失效或被修改。下载前再次核对版本、包名和来源，不要把任何社区链接视为官方背书。</small>
+          >中文社区 Wiki：社区版与换区说明</a>
+          <small>排队状态是社区观察，不是实时在线人数。地区人口、节点和服务器规则都可能变化。</small>
         </div>
       </section>
     </div>

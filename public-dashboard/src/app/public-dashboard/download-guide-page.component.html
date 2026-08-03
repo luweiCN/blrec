@@ -1,0 +1,410 @@
+<article class="guide-page download-guide">
+  <header class="guide-hero">
+    <div>
+      <p class="guide-kicker">DOWNLOAD PATHS</p>
+      <h1>把《虚荣》装回你的设备</h1>
+      <p class="guide-lead">
+        普通玩家优先使用原版 4.13.4；想体验对局追踪、经典地图、观战和队内聊天，再考虑 VGNA 社区客户端。这里把 iOS、Android 和第三方客户端分开说明。
+      </p>
+    </div>
+    <div class="guide-meta" aria-label="信息核对时间">
+      <span>信息核对</span>
+      <strong>2026 / 08 / 03</strong>
+      <small>安装包与签名状态可能变化</small>
+    </div>
+  </header>
+
+  <nav class="guide-switcher" aria-label="说明与指南">
+    <a
+      routerLink="/guide/rankings"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+    >
+      榜单说明
+    </a>
+    <a
+      routerLink="/guide/play"
+      routerLinkActive="active"
+      ariaCurrentWhenActive="page"
+    >
+      如何游玩
+    </a>
+    <a
+      routerLink="/guide/download"
+      routerLinkActive="active"
+      [routerLinkActiveOptions]="{ exact: true }"
+      ariaCurrentWhenActive="page"
+    >
+      下载指南
+    </a>
+  </nav>
+
+  <div class="guide-layout">
+    <aside class="guide-rail">
+      <p>本页目录</p>
+      <nav aria-label="下载指南目录">
+        <a [routerLink]="[]" fragment="choose">先选择版本</a>
+        <a [routerLink]="[]" fragment="ios">iPhone / iPad</a>
+        <a [routerLink]="[]" fragment="android">Android</a>
+        <a [routerLink]="[]" fragment="vgna">VGNA 客户端</a>
+        <a [routerLink]="[]" fragment="safety">安全与隐私</a>
+        <a [routerLink]="[]" fragment="download-faq">常见问题</a>
+      </nav>
+      <span class="rail-note">安装后仍需加速器</span>
+    </aside>
+
+    <div class="guide-content">
+      <section id="choose" class="content-section">
+        <p class="section-index">01 / CHOOSE A BUILD</p>
+        <h2>先决定你需要哪一种客户端</h2>
+        <div class="key-statement">
+          <strong>只想正常玩社区服，优先安装原版 4.13.4。</strong>
+          <p>
+            VGNA 是北美玩家社区制作的重打包客户端，不是 Super Evil Megacorp 的官方更新。它增加了社区功能，也会收集实现这些功能所需的账号、设备和对局数据。
+          </p>
+        </div>
+
+        <div class="download-grid download-choice-grid">
+          <section>
+            <span class="platform-label official">官方商店</span>
+            <p class="platform-name">iPhone / iPad</p>
+            <h3>App Store 原版 4.13.4</h3>
+            <p>以前下载过的用户先查“已购项目”；新用户使用仍有上架记录的外区 Apple 账户。</p>
+            <a class="action-link" [routerLink]="[]" fragment="ios">查看 iOS 方法</a>
+          </section>
+
+          <section>
+            <span class="platform-label community">第三方归档</span>
+            <p class="platform-name">Android</p>
+            <h3>原版 4.13.4 XAPK</h3>
+            <p>Google Play 已很难直接获取，当前常用包含 APK 与 OBB 的完整 XAPK 归档。</p>
+            <a class="action-link" [routerLink]="[]" fragment="android">查看 Android 方法</a>
+          </section>
+
+          <section>
+            <span class="platform-label legacy">社区增强版</span>
+            <p class="platform-name">iOS / Android</p>
+            <h3>VGNA Client</h3>
+            <p>提供经典地图、对局追踪、回放、观战和队内聊天，安装前需理解它的身份验证与数据收集。</p>
+            <a class="action-link" [routerLink]="[]" fragment="vgna">了解 VGNA</a>
+          </section>
+        </div>
+
+        <div class="plain-callout">
+          无论安装哪一个客户端，中国大陆玩家实际游玩时都应先开启加速器并连接东亚或东南亚。安装完成后的选区、排队和组队码操作请看<a routerLink="/guide/play">如何游玩</a>。
+        </div>
+      </section>
+
+      <section id="ios" class="content-section">
+        <p class="section-index">02 / IPHONE &amp; IPAD</p>
+        <h2>iOS 原版有两条官方商店路径</h2>
+        <p>
+          《虚荣》目前仍能在香港、美国等地区的 App Store 看到，版本为 4.13.4、大小约 2.4 GB。中国大陆商店搜索不到时，先判断自己以前是否下载过。
+        </p>
+
+        <div class="download-path-grid">
+          <section>
+            <span>以前下载过</span>
+            <h3>从“已购项目”重新下载</h3>
+            <ol>
+              <li>打开 App Store，点右上角头像。</li>
+              <li>进入“App 与购买历史”→“你的 App”。</li>
+              <li>选择“不在此 iPhone / iPad 上”。</li>
+              <li>搜索 Vainglory，点云朵下载按钮。</li>
+            </ol>
+            <p>必须使用当年获取《虚荣》的同一个 Apple 账户；如果当时用了另一个账号，就到那个账号的已购记录里找。</p>
+          </section>
+
+          <section>
+            <span>从未下载过</span>
+            <h3>使用自己可控的外区 Apple 账户</h3>
+            <ol>
+              <li>准备香港、美国等仍能打开商店页的 Apple 账户。</li>
+              <li>在“设置”→你的姓名→“媒体与购买项目”中切换购买账户，不必退出整台设备的 iCloud。</li>
+              <li>打开下方 App Store 页面并获取《虚荣》。</li>
+              <li>安装完成后保留该账号凭据，日后重新下载仍可能需要它。</li>
+            </ol>
+            <p>不要购买或租用来路不明的共享账号。共享账号可能被找回、锁定，也可能暴露你的设备和购买记录。</p>
+          </section>
+        </div>
+
+        <div class="download-actions">
+          <a
+            href="https://apps.apple.com/hk/app/vainglory/id671464704?l=zh-Hans-CN"
+            target="_blank"
+            rel="noopener noreferrer"
+          >打开香港 App Store 的《虚荣》</a>
+          <a
+            class="secondary"
+            href="https://support.apple.com/zh-cn/102417"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Apple：重新下载 App</a>
+        </div>
+
+        <div class="safety-note">
+          <strong>不建议直接修改主账号地区</strong>
+          <p>
+            Apple 要求先处理余额、订阅、预订和付款方式，才能更改账户国家或地区。对多数人来说，使用自己长期保管的外区账户登录“媒体与购买项目”更容易管理；切换前仍要留意 Apple Music 等购买服务的影响。
+          </p>
+        </div>
+
+        <p class="source-note">
+          官方说明：
+          <a
+            href="https://support.apple.com/zh-cn/118283"
+            target="_blank"
+            rel="noopener noreferrer"
+          >更改 Apple 账户国家或地区</a>
+          ·
+          <a
+            href="https://support.apple.com/zh-cn/117294"
+            target="_blank"
+            rel="noopener noreferrer"
+          >使用不同账户登录“媒体与购买项目”</a>。
+        </p>
+      </section>
+
+      <section id="android" class="content-section">
+        <p class="section-index">03 / ANDROID</p>
+        <h2>Android 要安装完整 XAPK</h2>
+        <p>
+          当前常用归档是 Vainglory 4.13.4（build 147219），包名为 <code>com.superevilmegacorp.game</code>，文件约 1.3 GB。它是包含主程序和 OBB 资源的 XAPK，不是一个几十 MB 的普通 APK。
+        </p>
+
+        <div class="formula-panel download-facts">
+          <div>
+            <span>版本</span>
+            <strong>4.13.4 · build 147219</strong>
+          </div>
+          <div>
+            <span>包名</span>
+            <strong>com.superevilmegacorp.game</strong>
+          </div>
+          <div>
+            <span>格式</span>
+            <strong>XAPK · 约 1.3 GB · 包含 OBB</strong>
+          </div>
+        </div>
+
+        <ol class="install-steps">
+          <li>
+            <span>1</span>
+            <div>
+              <strong>从版本页下载 4.13.4 XAPK</strong>
+              <p>下面链接直接进入对应包的下载页。APKPure 是第三方归档站，不是官方商店。</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <strong>使用支持 XAPK 的安装器</strong>
+              <p>可使用 APKPure 自己的安装器或其他可信的 XAPK 安装器，让它同时写入 APK 与 OBB。</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <strong>临时允许“安装未知应用”</strong>
+              <p>只对当前浏览器或安装器授权；安装完成后立即关闭该权限。</p>
+            </div>
+          </li>
+          <li>
+            <span>4</span>
+            <div>
+              <strong>开加速器后首次启动</strong>
+              <p>先选好东亚或东南亚线路，再打开游戏并等待资源检查完成。</p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="download-actions">
+          <a
+            href="https://apkpure.net/vainglory/com.superevilmegacorp.game/download"
+            target="_blank"
+            rel="noopener noreferrer"
+          >打开 Vainglory 4.13.4 XAPK 下载页</a>
+        </div>
+
+        <div class="safety-note">
+          <strong>普通 APK 可能会卡在资源下载</strong>
+          <p>
+            旧资源服务器已经不适合依赖客户端再补齐 OBB。只拿到主 APK 时，游戏可能在 Loading 阶段崩溃或无限等待。不要下载“MOD”“无限资源”等修改包，也不要从陌生网盘接收二次打包文件。
+          </p>
+        </div>
+
+        <p class="source-note">
+          版本与文件信息：
+          <a
+            href="https://apkpure.net/vainglory/com.superevilmegacorp.game/download"
+            target="_blank"
+            rel="noopener noreferrer"
+          >APKPure 4.13.4 归档记录</a>。
+          下载地址可能动态变化，因此本站链接到版本页，不复制或托管安装包。
+        </p>
+      </section>
+
+      <section id="vgna" class="content-section">
+        <p class="section-index">04 / VGNA CLIENT</p>
+        <h2>VGNA 是社区增强版，不是官方续作</h2>
+        <p>
+          Vainglory North America（VGNA）在原客户端基础上重新打包，加入自动对局追踪、六张经典 3V3 地图、回放与直播观战、VGNA Pro 数据，以及仅限同客户端队友的游戏内聊天。它可在不同地区运行，但 VGNA 的 Discord 匹配和 Elo 体系目前主要服务北美社区。
+        </p>
+
+        <div class="rule-lines vgna-features">
+          <div>
+            <strong>安装前置</strong>
+            <p>加入 VGNA Discord，并通过 Discord 验证客户端；这不是匿名、纯离线的原版安装包。</p>
+          </div>
+          <div>
+            <strong>新增能力</strong>
+            <p>经典地图、对局数据、回放、近实时观战和队内聊天，由 VGNA 自己的服务提供。</p>
+          </div>
+          <div>
+            <strong>地区边界</strong>
+            <p>客户端本身可连接其他地区；VGNA 组织的排位、Elo 和机器人服务仍以北美社区为主。</p>
+          </div>
+        </div>
+
+        <div class="download-path-grid vgna-platforms">
+          <section>
+            <span>Android</span>
+            <h3>可以直接下载 APK</h3>
+            <p>当前页面显示 1.04r3，安装器约 85 MB，首次启动再下载约 2 GB 游戏与地图数据。建议至少预留 2.3 GB。</p>
+            <ul>
+              <li>“替换原版”兼容手机游戏中心，但需先卸载原版《虚荣》。</li>
+              <li>“与原版共存”会安装成另一个应用，适合先试用。</li>
+            </ul>
+            <div class="download-actions compact">
+              <a
+                href="https://client.vgna.net/android/VGNA-Client-Android-1.04r3-OEM.apk"
+                target="_blank"
+                rel="noopener noreferrer"
+              >直接下载：替换原版 APK</a>
+              <a
+                class="secondary"
+                href="https://client.vgna.net/android/VGNA-Client-Android-1.04r3-Side-by-Side.apk"
+                target="_blank"
+                rel="noopener noreferrer"
+              >直接下载：与原版共存 APK</a>
+            </div>
+          </section>
+
+          <section>
+            <span>iPhone / iPad</span>
+            <h3>登记设备后等待 Apple 处理签名</h3>
+            <ol>
+              <li>用 Safari 打开 VGNA Client 页面，确认签名服务器在线。</li>
+              <li>点“Register this device”，安装设备登记描述文件。</li>
+              <li>等待 Apple 处理设备注册；VGNA 页面提示最长可能需要 72 小时。</li>
+              <li>状态变为 Ready 后安装客户端。</li>
+              <li>到“设置”→“隐私与安全性”开启开发者模式，重启后确认启用。</li>
+            </ol>
+            <p>玩家不需要自己购买 Apple Developer 账号；实际是把设备登记到 VGNA 开发团队的测试签名范围中。</p>
+          </section>
+        </div>
+
+        <div class="download-actions">
+          <a
+            href="https://client.vgna.net/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >打开 VGNA 官方安装页</a>
+          <a
+            class="secondary"
+            href="https://client.vgna.net/trust/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >查看校验值、安全扫描与隐私说明</a>
+        </div>
+
+        <p class="fine-print">
+          上面的 Android 直链对应 2026-08-03 核对到的 1.04r3。VGNA 更新版本后，旧直链可能失效；遇到 404 时请回到它的安装首页获取最新版，不要搜索来历不明的镜像。
+        </p>
+      </section>
+
+      <section id="safety" class="content-section">
+        <p class="section-index">05 / SAFETY &amp; PRIVACY</p>
+        <h2>第三方客户端需要你主动做一次判断</h2>
+        <p>
+          VGNA 明确声明它与 Super Evil Megacorp 没有隶属关系。它公开了安装包哈希、签名、扫描报告和数据用途，但扫描通过不等于软件绝对安全，也不能替代你对第三方客户端的信任判断。
+        </p>
+
+        <div class="limitation-list">
+          <div>
+            <strong>会绑定 Discord</strong>
+            <p>使用 Discord 用户 ID 与显示名验证社区成员并关联客户端安装。</p>
+          </div>
+          <div>
+            <strong>会读取对局身份</strong>
+            <p>包括游戏 UUID、昵称、房间与比赛 ID、模式和对局结果，用于匹配、统计与回放。</p>
+          </div>
+          <div>
+            <strong>会上传回放与状态</strong>
+            <p>客户端版本、安装 ID、连接状态、回放片段和 VGNA 聊天会发送到其社区服务。</p>
+          </div>
+          <div>
+            <strong>iOS 登记包含设备信息</strong>
+            <p>设备 UDID、名称、型号和系统信息会用于设备注册与测试包签名。</p>
+          </div>
+        </div>
+
+        <div class="plain-callout">
+          如果你不需要 VGNA 的附加功能，原版 4.13.4 是更简单的选择；如果决定使用 VGNA，只从 <code>client.vgna.net</code> 下载，并在下载后核对它公布的完整 SHA-256。
+        </div>
+      </section>
+
+      <section id="download-faq" class="content-section last-section">
+        <p class="section-index">06 / FAQ</p>
+        <h2>下载常见问题</h2>
+        <div class="faq-list">
+          <details>
+            <summary>iOS 一定要用外区账号吗？</summary>
+            <p>不一定。以前用当前或其他 Apple 账户下载过《虚荣》时，先去对应账户的已购项目查找；从未下载过，才需要使用仍能获取该 App 的外区账户。</p>
+          </details>
+          <details>
+            <summary>Android 为什么不能只装一个普通 APK？</summary>
+            <p>《虚荣》还需要大体积 OBB 资源。完整 XAPK 会把主程序和资源一起安装；只有 APK 时，旧客户端可能无法再从原资源地址补齐文件。</p>
+          </details>
+          <details>
+            <summary>VGNA Android 两个 APK 选哪个？</summary>
+            <p>想让手机游戏中心继续识别《虚荣》，并且愿意卸载原版，就选“替换原版”；想保留两个客户端并行测试，就选“与原版共存”。</p>
+          </details>
+          <details>
+            <summary>VGNA iOS 为什么要等 Apple？</summary>
+            <p>它使用私有测试构建，每台设备必须先登记到开发团队并重新签名。页面会保留队列位置；签名服务器离线或 Apple 处理较慢时，只能等待页面恢复。</p>
+          </details>
+          <details>
+            <summary>装好后还是 Loading 或进不去怎么办？</summary>
+            <p>检查剩余空间、安装包是否完整，然后完全退出游戏，开启目标地区的加速线路再启动。Android 原版还要确认 OBB 已由 XAPK 安装器正确写入。</p>
+          </details>
+        </div>
+
+        <div class="source-block">
+          <p>下载与安装依据</p>
+          <a
+            href="https://apps.apple.com/hk/app/vainglory/id671464704"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Apple App Store：《Vainglory》当前商店页</a>
+          <a
+            href="https://apkpure.net/vainglory/com.superevilmegacorp.game/download"
+            target="_blank"
+            rel="noopener noreferrer"
+          >APKPure：Android 4.13.4 XAPK 归档</a>
+          <a
+            href="https://www.vgna.net/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >VGNA：项目与客户端功能说明</a>
+          <a
+            href="https://client.vgna.net/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >VGNA Client：当前安装流程与下载</a>
+          <small>本站不托管安装包，也不代表 Apple、SEMC、APKPure 或 VGNA。第三方链接失效或内容变化时，以来源页面的最新说明为准。</small>
+        </div>
+      </section>
+    </div>
+  </div>
+</article>

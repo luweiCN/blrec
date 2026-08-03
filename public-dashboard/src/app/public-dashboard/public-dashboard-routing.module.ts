@@ -1,6 +1,7 @@
 import { NgModule } from '@angular/core';
 import { RouterModule, Routes } from '@angular/router';
 
+import { DownloadGuidePageComponent } from './download-guide-page.component';
 import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { PlayGuidePageComponent } from './play-guide-page.component';
@@ -55,6 +56,11 @@ const routes: Routes = [
         path: 'guide/play',
         component: PlayGuidePageComponent,
         title: '如何游玩虚荣 · 虚荣对局榜',
+      },
+      {
+        path: 'guide/download',
+        component: DownloadGuidePageComponent,
+        title: '虚荣下载指南 · 虚荣对局榜',
       },
     ],
   },
