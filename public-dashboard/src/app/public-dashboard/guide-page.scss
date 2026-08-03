@@ -765,6 +765,54 @@ app-download-guide-page {
   font-size: 0.74rem;
 }
 
+.party-code-modes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 28px 0 34px;
+
+  section {
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-top: 2px solid var(--cyan);
+    background: var(--surface-1);
+
+    &:last-child {
+      border-top-color: var(--gold);
+    }
+  }
+
+  span {
+    color: var(--cyan);
+    font-size: 0.58rem;
+    font-weight: 760;
+    letter-spacing: 0.07em;
+  }
+
+  section:last-child span {
+    color: var(--gold);
+  }
+
+  strong {
+    color: var(--ink);
+    font-size: 1rem;
+  }
+
+  code {
+    color: var(--cyan);
+    font-size: 0.78rem;
+    overflow-wrap: anywhere;
+  }
+
+  p {
+    margin: 2px 0 0;
+    font-size: 0.7rem;
+  }
+}
+
 .region-grid > section {
   padding: 22px;
   border: 1px solid var(--line);
@@ -1001,7 +1049,8 @@ app-download-guide-page {
   .download-grid,
   .queue-grid,
   .code-guide,
-  .download-path-grid {
+  .download-path-grid,
+  .party-code-modes {
     grid-template-columns: 1fr;
     gap: 26px;
 

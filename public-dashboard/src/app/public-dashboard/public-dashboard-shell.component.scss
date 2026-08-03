@@ -124,7 +124,36 @@ a:focus-visible {
         }
       }
     }
+
+    .game-guide-link {
+      align-self: center;
+      height: 30px;
+      padding: 0 11px;
+      border: 1px solid oklch(70% 0.115 77 / 0.58);
+      border-radius: 3px;
+      background: linear-gradient(
+        135deg,
+        oklch(83% 0.145 82 / 0.1),
+        oklch(79% 0.13 204 / 0.04)
+      );
+      color: var(--gold);
+
+      &::after {
+        display: none;
+      }
+
+      &:hover,
+      &.active {
+        border-color: var(--gold);
+        background: oklch(83% 0.145 82 / 0.14);
+        color: var(--ink);
+      }
+    }
   }
+}
+
+.nav-label-short {
+  display: none;
 }
 
 .header-mode {
@@ -323,6 +352,20 @@ footer {
       font-size: 0.72rem;
       text-align: center;
     }
+
+    .game-guide-link {
+      height: 31px;
+      margin-left: 5px;
+      padding: 0 4px;
+    }
+  }
+
+  .nav-label-long {
+    display: none;
+  }
+
+  .nav-label-short {
+    display: inline;
   }
 
   .header-mode {

@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
+import { Router } from '@angular/router';
 
 import { seasonOption } from './public-dashboard.data';
 import { DashboardDataService } from './public-dashboard-data.service';
@@ -14,7 +15,15 @@ export class PublicDashboardShellComponent {
   constructor(
     readonly data: DashboardDataService,
     readonly dashboardMode: DashboardModeService,
+    private readonly router: Router,
   ) {}
+
+  get isGameGuideActive(): boolean {
+    return (
+      this.router.url.startsWith('/guide/download') ||
+      this.router.url.startsWith('/guide/play')
+    );
+  }
 
   get currentSeasonLabel(): string {
     const snapshot = this.data.snapshotOrNull;

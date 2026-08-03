@@ -41,7 +41,11 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('工作日白天和凌晨');
     expect(page.textContent).toContain('排位通常全天都有机会匹配到人');
     expect(page.textContent).toContain('5V5 内战');
+    expect(page.textContent).toContain('需要路人补位');
+    expect(page.textContent).toContain('使用低于 3000 的数字');
+    expect(page.textContent).toContain('使用高于 3000 的数字');
     expect(page.textContent).toContain('点首页右上角的玩家名或 Guest');
+    expect(page.textContent).toContain('2000-1_各自昵称');
     expect(page.textContent).toContain('6666-1_小明');
     expect(page.textContent).toContain('6666-2_小王');
     expect(page.textContent).not.toContain('APKPure 不是官方商店');
@@ -53,15 +57,18 @@ describe('public guide pages', () => {
     fixture.detectChanges();
     const page = fixture.nativeElement as HTMLElement;
 
+    expect(page.textContent).toContain('美区直接搜索，国区只看历史已购');
+    expect(page.textContent).toContain('在 App Store 搜索后直接下载');
     expect(page.textContent).toContain('从“已购项目”重新下载');
-    expect(page.textContent).toContain('自己可控的外区 Apple 账户');
+    expect(page.textContent).not.toContain('香港');
+    expect(page.textContent).not.toContain('港区');
     expect(page.textContent).toContain('Android 要安装完整 XAPK');
     expect(page.textContent).toContain('VGNA 是社区增强版，不是官方续作');
     expect(page.textContent).toContain('玩家不需要自己购买 Apple Developer 账号');
     expect(page.textContent).toContain('会绑定 Discord');
     expect(
       page.querySelector<HTMLAnchorElement>(
-        'a[href*="apps.apple.com"]',
+        'a[href^="https://apps.apple.com/us/"]',
       )?.target,
     ).toBe('_blank');
     expect(

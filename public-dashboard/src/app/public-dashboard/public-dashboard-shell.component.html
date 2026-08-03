@@ -34,22 +34,33 @@
           routerLinkActive="active"
           ariaCurrentWhenActive="page"
         >
-          玩家排行
+          <span class="nav-label-long">玩家排行</span>
+          <span class="nav-label-short">玩家</span>
         </a>
         <a
           routerLink="/heroes"
           routerLinkActive="active"
           ariaCurrentWhenActive="page"
         >
-          英雄排行
+          <span class="nav-label-long">英雄排行</span>
+          <span class="nav-label-short">英雄</span>
         </a>
         <a
-          routerLink="/guide"
+          routerLink="/guide/rankings"
           routerLinkActive="active"
           ariaCurrentWhenActive="page"
-          [routerLinkActiveOptions]="{ exact: false }"
         >
-          说明与指南
+          <span class="nav-label-long">榜单说明</span>
+          <span class="nav-label-short">榜单</span>
+        </a>
+        <a
+          class="game-guide-link"
+          routerLink="/guide/download"
+          [class.active]="isGameGuideActive"
+          [attr.aria-current]="isGameGuideActive ? 'page' : null"
+        >
+          <span class="nav-label-long">下载与游玩</span>
+          <span class="nav-label-short">下载游玩</span>
         </a>
       </nav>
 
