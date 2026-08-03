@@ -223,6 +223,15 @@ class PlayerNameRequest(ApiModel):
     name: str = Field(..., max_length=80)
 
 
+class PlayerRoomSeedRequest(ApiModel):
+    room_id: int = Field(..., gt=0)
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+class PlayerRoomSyncRequest(ApiModel):
+    rooms: List[PlayerRoomSeedRequest] = Field(..., max_items=500)
+
+
 class RecordedPlayerRequest(ApiModel):
     side: Literal['left', 'right']
     slot: int = Field(..., ge=1, le=5)
@@ -743,6 +752,23 @@ async def create_player(
         ) from error
 
 
+@router.post('/players/sync-rooms', response_model=List[PlayerResponse])
+async def sync_player_rooms(
+    payload: PlayerRoomSyncRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> List[PlayerResponse]:
+    try:
+        players = await index.ensure_players_for_rooms(
+            tuple((room.room_id, room.name) for room in payload.rooms)
+        )
+        return [_stored_player(player) for player in players]
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
+
+
 @router.patch('/players/{player_id}', response_model=PlayerResponse)
 async def rename_player(
     player_id: int,
@@ -759,6 +785,19 @@ async def rename_player(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+
+
+@router.delete('/players/{player_id}', status_code=status.HTTP_204_NO_CONTENT)
+async def delete_player(
+    player_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        await index.delete_player(player_id)
+    except VaingloryNotFound as error:
+        _raise_repository_error(error)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.put('/players/{player_id}/rooms/{room_id}', response_model=PlayerResponse)

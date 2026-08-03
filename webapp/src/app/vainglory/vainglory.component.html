@@ -32,10 +32,6 @@
       <i nz-icon nzType="cloud-download"></i>
       历史数据接入
     </button>
-    <button nz-button type="button" (click)="openPlayerManager()">
-      <i nz-icon nzType="user"></i>
-      玩家库
-    </button>
     <button nz-button type="button" (click)="heroManagerVisible = true">
       <i nz-icon nzType="database"></i>
       英雄库
@@ -911,168 +907,223 @@
         </section>
       </div>
     </nz-tab>
-  </nz-tabset>
-</main>
-
-<nz-modal
-  [nzVisible]="playerManagerVisible"
-  nzTitle="玩家库"
-  [nzFooter]="null"
-  [nzWidth]="920"
-  [nzMaskClosable]="!creatingPlayer && savingPlayerIds.size === 0"
-  (nzOnCancel)="closePlayerManager()"
->
-  <ng-container *nzModalContent>
-    <p class="player-library-help">
-      玩家是排行榜里的稳定身份，名称不必等于直播名或游戏 OCR 名。一名玩家可以绑定多个直播间；把已绑定房间填到另一名玩家，会将该房间及其历史统计一并改绑。
-    </p>
-    <section class="player-create" aria-labelledby="create-player-title">
-      <div>
-        <label id="create-player-title" for="new-player-name">创建玩家</label>
-        <span id="new-player-name-help">请输入排行榜希望展示的名称</span>
-      </div>
-      <input
-        nz-input
-        id="new-player-name"
-        maxlength="80"
-        aria-describedby="new-player-name-help"
-        [(ngModel)]="newPlayerName"
-        (keyup.enter)="createPlayer()"
-      />
-      <button
-        nz-button
-        nzType="primary"
-        type="button"
-        [nzLoading]="creatingPlayer"
-        [disabled]="!newPlayerName.trim()"
-        (click)="createPlayer()"
-      >
-        创建
-      </button>
-    </section>
-
-    <nz-alert
-      *ngIf="playersView.state === 'error'"
-      nzType="error"
-      nzShowIcon
-      nzMessage="玩家库加载失败"
-      [nzDescription]="playersView.message"
-    ></nz-alert>
-    <div
-      *ngIf="playersView.state === 'loading'"
-      class="loading-state"
-      role="status"
-      aria-live="polite"
-    >
-      <nz-spin nzSimple></nz-spin>
-      <span>正在加载玩家库…</span>
-    </div>
-    <div
-      *ngIf="playersView.state === 'ready' && playerLibrary.length === 0"
-      class="empty-state"
-    >
-      <strong>还没有玩家</strong>
-      <span>创建第一名玩家，或等待新对局自动生成。</span>
-    </div>
-    <section
-      *ngIf="playerLibrary.length > 0"
-      class="player-library-list"
-      aria-label="玩家列表"
-    >
-      <article
-        *ngFor="let player of playerLibrary; trackBy: trackStoredPlayer"
-        class="player-library-item"
-        [attr.aria-busy]="playerSaving(player.id)"
-      >
-        <header>
+    <nz-tab nzTitle="玩家库">
+      <div class="tab-panel player-library-page">
+        <header class="player-library-header">
           <div>
-            <strong>{{ player.name }}</strong>
-            <nz-tag [nzColor]="player.origin === 'manual' ? 'blue' : 'default'">
-              {{ player.origin === "manual" ? "手动创建" : "自动生成" }}
-            </nz-tag>
+            <h2>玩家与直播间</h2>
+            <span>
+              {{ playerLibrary.length }} 名玩家 ·
+              {{ managedRooms.length }} 个受管直播间
+            </span>
           </div>
-          <span>{{ player.rooms.length }} 个直播间</span>
-        </header>
-
-        <div class="player-name-editor">
-          <label [for]="'player-name-' + player.id">排行榜名称</label>
-          <input
-            nz-input
-            maxlength="80"
-            [id]="'player-name-' + player.id"
-            [ngModel]="playerNameDraft(player)"
-            (ngModelChange)="setPlayerNameDraft(player.id, $event)"
-            (keyup.enter)="savePlayerName(player)"
-          />
-          <button
-            nz-button
-            type="button"
-            [nzLoading]="playerSaving(player.id)"
-            [disabled]="
-              !playerNameDraft(player).trim() ||
-              playerNameDraft(player).trim() === player.name
-            "
-            (click)="savePlayerName(player)"
-          >
-            保存名称
-          </button>
-        </div>
-
-        <ul class="player-room-list" *ngIf="player.rooms.length > 0">
-          <li *ngFor="let room of player.rooms">
-            <div>
-              <a
-                [href]="'https://live.bilibili.com/' + room.roomId"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                直播间 {{ room.roomId }}
-              </a>
-              <span *ngIf="room.anchorName">
-                来源名称：{{ room.anchorName }}
-              </span>
-            </div>
+          <div>
+            <input
+              nz-input
+              type="search"
+              placeholder="搜索玩家、主播或房间号"
+              [(ngModel)]="playerSearch"
+            />
             <button
               nz-button
-              nzType="link"
-              nzDanger
               type="button"
-              [attr.aria-label]="'解绑直播间 ' + room.roomId"
-              [disabled]="playerSaving(player.id)"
-              (click)="unbindPlayerRoom(player, room.roomId)"
+              [nzLoading]="syncingManagedRooms"
+              (click)="syncManagedRooms(true)"
             >
-              解绑
+              <i nz-icon nzType="sync"></i>
+              同步房间管理
             </button>
-          </li>
-        </ul>
-
-        <div class="player-room-editor">
-          <label [for]="'player-room-' + player.id">绑定直播间号</label>
+          </div>
+        </header>
+        <p class="player-library-help">
+          玩家是排行榜里的稳定身份，名称不必等于直播名或游戏 OCR
+          名。一名玩家可以绑定多个直播间；把已绑定房间填到另一名玩家，会将该房间及其历史统计一并改绑。
+        </p>
+        <section class="player-create" aria-labelledby="create-player-title">
+          <div>
+            <label id="create-player-title" for="new-player-name"
+              >创建玩家</label
+            >
+            <span id="new-player-name-help">请输入排行榜希望展示的名称</span>
+          </div>
           <input
             nz-input
-            type="number"
-            min="1"
-            step="1"
-            inputmode="numeric"
-            [id]="'player-room-' + player.id"
-            [ngModel]="playerRoomDraft(player.id)"
-            (ngModelChange)="setPlayerRoomDraft(player.id, $event)"
-            (keyup.enter)="bindPlayerRoom(player)"
+            id="new-player-name"
+            maxlength="80"
+            aria-describedby="new-player-name-help"
+            [(ngModel)]="newPlayerName"
+            (keyup.enter)="createPlayer()"
           />
           <button
             nz-button
+            nzType="primary"
             type="button"
-            [nzLoading]="playerSaving(player.id)"
-            [disabled]="!playerRoomDraft(player.id)"
-            (click)="bindPlayerRoom(player)"
+            [nzLoading]="creatingPlayer"
+            [disabled]="!newPlayerName.trim()"
+            (click)="createPlayer()"
           >
-            绑定
+            创建
           </button>
+        </section>
+
+        <nz-alert
+          *ngIf="playersView.state === 'error'"
+          nzType="error"
+          nzShowIcon
+          nzMessage="玩家库加载失败"
+          [nzDescription]="playersView.message"
+        ></nz-alert>
+        <div
+          *ngIf="playersView.state === 'loading'"
+          class="loading-state"
+          role="status"
+          aria-live="polite"
+        >
+          <nz-spin nzSimple></nz-spin>
+          <span>正在加载玩家库…</span>
         </div>
-      </article>
-    </section>
-  </ng-container>
-</nz-modal>
+        <div
+          *ngIf="
+            playersView.state === 'ready' && filteredPlayerLibrary.length === 0
+          "
+          class="empty-state"
+        >
+          <strong>{{
+            playerLibrary.length === 0 ? "还没有玩家" : "没有匹配的玩家"
+          }}</strong>
+          <span>
+            {{
+              playerLibrary.length === 0
+                ? "创建第一名玩家，或从房间管理同步。"
+                : "请尝试其他搜索关键词。"
+            }}
+          </span>
+        </div>
+        <section
+          *ngIf="filteredPlayerLibrary.length > 0"
+          class="player-library-list"
+          aria-label="玩家列表"
+        >
+          <article
+            *ngFor="
+              let player of filteredPlayerLibrary;
+              trackBy: trackStoredPlayer
+            "
+            class="player-library-item"
+            [attr.aria-busy]="playerSaving(player.id)"
+          >
+            <header>
+              <div>
+                <strong>{{ player.name }}</strong>
+                <nz-tag
+                  [nzColor]="player.origin === 'manual' ? 'blue' : 'default'"
+                >
+                  {{ player.origin === "manual" ? "手动创建" : "自动生成" }}
+                </nz-tag>
+              </div>
+              <div class="player-library-item-actions">
+                <span>{{ player.rooms.length }} 个直播间</span>
+                <button
+                  nz-button
+                  nzType="text"
+                  nzDanger
+                  type="button"
+                  nz-popconfirm
+                  nzPopconfirmTitle="删除后将解除直播间和历史直播的玩家归属，确定删除吗？"
+                  nzOkText="删除"
+                  nzCancelText="取消"
+                  [disabled]="playerSaving(player.id)"
+                  (nzOnConfirm)="deletePlayer(player)"
+                >
+                  删除
+                </button>
+              </div>
+            </header>
+
+            <div class="player-name-editor">
+              <label [for]="'player-name-' + player.id">排行榜名称</label>
+              <input
+                nz-input
+                maxlength="80"
+                [id]="'player-name-' + player.id"
+                [ngModel]="playerNameDraft(player)"
+                (ngModelChange)="setPlayerNameDraft(player.id, $event)"
+                (keyup.enter)="savePlayerName(player)"
+              />
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="playerSaving(player.id)"
+                [disabled]="
+                  !playerNameDraft(player).trim() ||
+                  playerNameDraft(player).trim() === player.name
+                "
+                (click)="savePlayerName(player)"
+              >
+                保存名称
+              </button>
+            </div>
+
+            <ul class="player-room-list" *ngIf="player.rooms.length > 0">
+              <li *ngFor="let room of player.rooms">
+                <div>
+                  <a
+                    [href]="'https://live.bilibili.com/' + room.roomId"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    直播间 {{ room.roomId }}
+                  </a>
+                  <span *ngIf="room.anchorName">
+                    来源名称：{{ room.anchorName }}
+                  </span>
+                </div>
+                <button
+                  nz-button
+                  nzType="link"
+                  nzDanger
+                  type="button"
+                  [attr.aria-label]="'解绑直播间 ' + room.roomId"
+                  [disabled]="playerSaving(player.id)"
+                  (click)="unbindPlayerRoom(player, room.roomId)"
+                >
+                  解绑
+                </button>
+              </li>
+            </ul>
+
+            <div class="player-room-editor">
+              <label [for]="'player-room-' + player.id">绑定直播间</label>
+              <nz-select
+                [id]="'player-room-' + player.id"
+                nzShowSearch
+                nzAllowClear
+                nzPlaceHolder="搜索主播或房间号"
+                [ngModel]="playerRoomDraft(player.id)"
+                (ngModelChange)="setPlayerRoomDraft(player.id, $event)"
+              >
+                <nz-option
+                  *ngFor="let room of managedRooms"
+                  [nzValue]="room.roomId.toString()"
+                  [nzLabel]="room.label"
+                ></nz-option>
+              </nz-select>
+              <button
+                nz-button
+                type="button"
+                [nzLoading]="playerSaving(player.id)"
+                [disabled]="!playerRoomDraft(player.id)"
+                (click)="bindPlayerRoom(player)"
+              >
+                绑定
+              </button>
+            </div>
+          </article>
+        </section>
+      </div>
+    </nz-tab>
+  </nz-tabset>
+</main>
 
 <nz-modal
   [nzVisible]="archiveManagerVisible"

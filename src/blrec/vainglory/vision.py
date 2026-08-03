@@ -12,6 +12,8 @@ from loguru import logger
 TeamColor = Literal['teal', 'orange']
 TeamSide = Literal['left', 'right']
 
+_MINIMUM_RESULT_ACTION_CONTRAST = 35
+
 
 @dataclass(frozen=True)
 class PixelRect:
@@ -180,7 +182,10 @@ def detect_result_layouts(frame: RgbFrame) -> Tuple[ResultLayout, ...]:
     layouts: List[ResultLayout] = []
     for viewport in _result_viewports(frame.width / frame.height):
         action_contrasts = _result_action_contrasts(frame, viewport)
-        if min(standard_action_contrasts) < 14 and min(action_contrasts) < 14:
+        if (
+            min(standard_action_contrasts) < _MINIMUM_RESULT_ACTION_CONTRAST
+            and min(action_contrasts) < _MINIMUM_RESULT_ACTION_CONTRAST
+        ):
             _log_layout_attempt(
                 frame,
                 viewport,
@@ -366,7 +371,7 @@ def detect_recorded_player(
     (slot, best), (_, second) = ranked[:2]
     margin = best - second
     relative_margin = margin / max(1.0, best)
-    if best < 32 or margin < 10 or relative_margin < 0.18:
+    if best < 32 or margin < 6 or relative_margin < 0.12:
         logger.debug(
             'Vainglory recorded player highlight was ambiguous: side={} '
             'scores={} best={:.1f} margin={:.1f} relative_margin={:.3f}',
@@ -381,8 +386,8 @@ def detect_recorded_player(
         0.99,
         0.70
         + min(0.10, max(0.0, best - 32) / 330)
-        + min(0.14, max(0.0, margin - 10) / 180)
-        + min(0.05, max(0.0, relative_margin - 0.18) / 4),
+        + min(0.14, max(0.0, margin - 6) / 180)
+        + min(0.05, max(0.0, relative_margin - 0.12) / 4),
     )
     logger.debug(
         'Vainglory recorded player highlight recognized: side={} slot={} '
@@ -404,7 +409,12 @@ def result_frame_quality(frame: RgbFrame, layout: ResultLayout) -> float:
         ),
     )
     step = max(1, min(frame.width // 640, frame.height // 360))
-    quality = layout.confidence * 0.3
+    standard_action_contrasts = _result_action_contrasts(frame, STANDARD_VIEWPORT)
+    viewport_action_contrasts = _result_action_contrasts(frame, layout.viewport)
+    action_contrast = max(
+        min(standard_action_contrasts), min(viewport_action_contrasts)
+    )
+    quality = layout.confidence * 0.3 + min(1.0, action_contrast / 220) * 0.4
     for expected_color, rect in regions:
         teal, orange = _theme_votes(frame, rect, step=step)
         sampled_columns = (rect.right - rect.left + step - 1) // step

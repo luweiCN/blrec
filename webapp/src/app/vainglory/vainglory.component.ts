@@ -122,6 +122,8 @@ interface ManagedAnchorOption {
   readonly label: string;
 }
 
+type ManagedRoomOption = ManagedAnchorOption;
+
 type BulkUpdateAction = 'anchor' | 'include' | 'exclude';
 
 @Component({
@@ -164,12 +166,14 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   managedAnchors: readonly ManagedAnchorOption[] = [];
   managedAnchorsLoading = false;
 
-  playerManagerVisible = false;
+  playerSearch = '';
   newPlayerName = '';
   creatingPlayer = false;
+  syncingManagedRooms = false;
   readonly playerNameDrafts = new Map<number, string>();
   readonly playerRoomDrafts = new Map<number, string>();
   readonly savingPlayerIds = new Set<number>();
+  managedRooms: readonly ManagedRoomOption[] = [];
   heroStatsGameMode: GameMode | '' = '3v3';
 
   heroManagerVisible = false;
@@ -231,7 +235,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadHeroes();
     this.loadAnchorStats();
-    this.loadPlayers();
     this.loadPlayerStats();
     this.loadHeroStats();
     this.loadManagedAnchors();
@@ -294,6 +297,22 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   get playerLibrary(): readonly VaingloryPlayer[] {
     return this.playersView.state === 'ready' ? this.playersView.items : [];
+  }
+
+  get filteredPlayerLibrary(): readonly VaingloryPlayer[] {
+    const query = this.playerSearch.trim().toLocaleLowerCase('zh-CN');
+    if (!query) {
+      return this.playerLibrary;
+    }
+    return this.playerLibrary.filter((player) =>
+      [
+        player.name,
+        ...player.rooms.flatMap((room) => [
+          String(room.roomId),
+          room.anchorName,
+        ]),
+      ].some((value) => value.toLocaleLowerCase('zh-CN').includes(query)),
+    );
   }
 
   get playerStats(): readonly VaingloryPlayerStats[] {
@@ -518,19 +537,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
   }
 
-  openPlayerManager(): void {
-    this.playerManagerVisible = true;
-    this.loadPlayers();
-  }
-
-  closePlayerManager(): void {
-    if (this.creatingPlayer || this.savingPlayerIds.size > 0) {
-      return;
-    }
-    this.playerManagerVisible = false;
-    this.changeDetector.markForCheck();
-  }
-
   loadPlayers(): void {
     this.playersView = { state: 'loading' };
     this.vainglory
@@ -553,6 +559,47 @@ export class VaingloryComponent implements OnInit, OnDestroy {
             message: this.errorMessage(error, '玩家库加载失败'),
           };
           this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  syncManagedRooms(showMessage = false): void {
+    if (this.syncingManagedRooms) {
+      return;
+    }
+    if (this.managedRooms.length === 0) {
+      this.loadPlayers();
+      return;
+    }
+    this.syncingManagedRooms = true;
+    this.vainglory
+      .syncPlayerRooms(
+        this.managedRooms.map((room) => ({
+          roomId: room.roomId,
+          name: room.anchorName,
+        })),
+      )
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.syncingManagedRooms = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (items) => {
+          this.playersView = { state: 'ready', items };
+          for (const player of items) {
+            this.playerNameDrafts.set(player.id, player.name);
+          }
+          if (showMessage) {
+            this.messages.success('房间管理中的玩家已同步');
+          }
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '房间管理玩家同步失败'));
+          this.loadPlayers();
         },
       });
   }
@@ -616,6 +663,35 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         },
         error: (error: unknown) => {
           this.messages.error(this.errorMessage(error, '玩家名称保存失败'));
+        },
+      });
+  }
+
+  deletePlayer(player: VaingloryPlayer): void {
+    if (this.playerSaving(player.id)) {
+      return;
+    }
+    this.savingPlayerIds.add(player.id);
+    this.vainglory
+      .deletePlayer(player.id)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.savingPlayerIds.delete(player.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.playerNameDrafts.delete(player.id);
+          this.playerRoomDrafts.delete(player.id);
+          this.messages.success('玩家已删除');
+          this.loadPlayers();
+          this.loadPlayerStats();
+          this.loadHeroStats();
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '玩家删除失败'));
         },
       });
   }
@@ -746,6 +822,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         next: (items) => {
           this.managedAnchorsLoading = false;
           this.managedAnchors = this.managedAnchorOptions(items);
+          this.managedRooms = this.managedRoomOptions(items);
+          this.syncManagedRooms();
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
@@ -753,6 +831,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           this.messages.error(
             this.errorMessage(error, '房间管理主播加载失败'),
           );
+          this.loadPlayers();
           this.changeDetector.markForCheck();
         },
       });
@@ -2234,6 +2313,28 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
     }
     return [...byIdentity.values()].sort((left, right) =>
+      left.anchorName.localeCompare(right.anchorName, 'zh-CN'),
+    );
+  }
+
+  private managedRoomOptions(
+    items: readonly TaskData[],
+  ): readonly ManagedRoomOption[] {
+    const byRoom = new Map<number, ManagedRoomOption>();
+    for (const item of items) {
+      const anchorName = item.user_info.name.trim();
+      const roomId = item.room_info.room_id;
+      if (!anchorName || roomId <= 0) {
+        continue;
+      }
+      byRoom.set(roomId, {
+        anchorName,
+        roomId,
+        anchorUid: item.user_info.uid,
+        label: `${anchorName}（房间 ${roomId}）`,
+      });
+    }
+    return [...byRoom.values()].sort((left, right) =>
       left.anchorName.localeCompare(right.anchorName, 'zh-CN'),
     );
   }

@@ -163,10 +163,25 @@ export class VaingloryService {
     );
   }
 
+  syncPlayerRooms(
+    rooms: readonly { readonly roomId: number; readonly name: string }[],
+  ): Observable<readonly VaingloryPlayer[]> {
+    return this.http.post<readonly VaingloryPlayer[]>(
+      this.url.makeApiUrl('/api/v1/vainglory/players/sync-rooms'),
+      { rooms },
+    );
+  }
+
   renamePlayer(playerId: number, name: string): Observable<VaingloryPlayer> {
     return this.http.patch<VaingloryPlayer>(
       this.url.makeApiUrl(`/api/v1/vainglory/players/${playerId}`),
       { name },
+    );
+  }
+
+  deletePlayer(playerId: number): Observable<void> {
+    return this.http.delete<void>(
+      this.url.makeApiUrl(`/api/v1/vainglory/players/${playerId}`),
     );
   }
 

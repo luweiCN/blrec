@@ -436,9 +436,9 @@ def refresh_session_scan_job(
 
 
 class VaingloryRepository:
-    ALGORITHM_VERSION = 13
-    HERO_RECOGNITION_VERSION = 3
-    RECORDED_PLAYER_DETECTION_VERSION = 1
+    ALGORITHM_VERSION = 14
+    HERO_RECOGNITION_VERSION = 4
+    RECORDED_PLAYER_DETECTION_VERSION = 2
     _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
     _MATCH_SELECT = (
         'SELECT match.id,match.session_id,match.result_part_id,'
@@ -2403,6 +2403,54 @@ class VaingloryRepository:
 
         return await self.get_player(await self._database.write(create))
 
+    async def ensure_players_for_rooms(
+        self, rooms: Sequence[Tuple[int, str]]
+    ) -> Tuple[PlayerRecord, ...]:
+        normalized_rooms = tuple(
+            (int(room_id), self._normalize_player_display_name(name))
+            for room_id, name in rooms
+            if int(room_id) > 0
+        )
+        now = self._now()
+
+        def ensure(connection: sqlite3.Connection) -> None:
+            seen: Set[int] = set()
+            for room_id, name in normalized_rooms:
+                if room_id in seen:
+                    continue
+                seen.add(room_id)
+                if (
+                    connection.execute(
+                        'SELECT 1 FROM vainglory_player_rooms WHERE room_id=?',
+                        (room_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    continue
+                if (
+                    connection.execute(
+                        'SELECT 1 FROM vainglory_player_room_suppressions '
+                        'WHERE room_id=?',
+                        (room_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    continue
+                cursor = connection.execute(
+                    'INSERT INTO vainglory_players('
+                    'name,origin,created_at,updated_at) '
+                    "VALUES(?,'automatic',?,?)",
+                    (name, now, now),
+                )
+                connection.execute(
+                    'INSERT INTO vainglory_player_rooms('
+                    'room_id,player_id,created_at,updated_at) VALUES(?,?,?,?)',
+                    (room_id, int(cursor.lastrowid), now, now),
+                )
+
+        await self._database.write(ensure)
+        return await self.list_players()
+
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         normalized = self._normalize_player_display_name(name)
         count = await self._database.execute(
@@ -2439,6 +2487,10 @@ class VaingloryRepository:
                 'ON CONFLICT(room_id) DO UPDATE SET '
                 'player_id=excluded.player_id,updated_at=excluded.updated_at',
                 (selected_room_id, selected_player_id, now, now),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_player_room_suppressions WHERE room_id=?',
+                (selected_room_id,),
             )
             connection.execute(
                 'UPDATE vainglory_players SET updated_at=? WHERE id=?',
@@ -2482,12 +2534,42 @@ class VaingloryRepository:
             if changed != 1:
                 raise VaingloryNotFound('直播间未绑定到该玩家')
             connection.execute(
+                'INSERT INTO vainglory_player_room_suppressions(room_id,created_at) '
+                'VALUES(?,?) ON CONFLICT(room_id) DO NOTHING',
+                (selected_room_id, now),
+            )
+            connection.execute(
                 'UPDATE vainglory_players SET updated_at=? WHERE id=?',
                 (now, selected_player_id),
             )
 
         await self._database.write(unbind)
         return await self.get_player(selected_player_id)
+
+    async def delete_player(self, player_id: int) -> None:
+        selected_player_id = int(player_id)
+        now = self._now()
+
+        def delete(connection: sqlite3.Connection) -> None:
+            player = connection.execute(
+                'SELECT id FROM vainglory_players WHERE id=?', (selected_player_id,)
+            ).fetchone()
+            if player is None:
+                raise VaingloryNotFound('玩家不存在')
+            room_rows = connection.execute(
+                'SELECT room_id FROM vainglory_player_rooms WHERE player_id=?',
+                (selected_player_id,),
+            ).fetchall()
+            connection.executemany(
+                'INSERT INTO vainglory_player_room_suppressions(room_id,created_at) '
+                'VALUES(?,?) ON CONFLICT(room_id) DO NOTHING',
+                ((int(row['room_id']), now) for row in room_rows),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_players WHERE id=?', (selected_player_id,)
+            )
+
+        await self._database.write(delete)
 
     async def list_player_stats(self) -> Tuple[PlayerStatsRecord, ...]:
         players = await self.list_players()

@@ -106,6 +106,7 @@ class SiftHeroRecognizer:
         self._sift = self._cv2.SIFT_create()
         self._matcher = self._cv2.BFMatcher(self._cv2.NORM_L2)
         self._clahe = self._cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        self._strong_clahe = self._cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
         self._ratio_threshold = ratio_threshold
         self._minimum_inliers = minimum_inliers
         self._minimum_margin = minimum_margin
@@ -142,7 +143,12 @@ class SiftHeroRecognizer:
         match = self._match_image(image, self._references)
         if match is not None or not self._normalized_references:
             return match
-        return self._match_image(self._clahe.apply(image), self._normalized_references)
+        match = self._match_image(self._clahe.apply(image), self._normalized_references)
+        if match is not None:
+            return match
+        return self._match_image(
+            self._strong_clahe.apply(image), self._normalized_references
+        )
 
     def _match_image(
         self, image: Any, references: Sequence[Tuple[str, Sequence[Any], Any]]

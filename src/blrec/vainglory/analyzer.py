@@ -388,17 +388,17 @@ class VaingloryVideoAnalyzer:
             header_ocr_seconds += time.monotonic() - header_started
             layout, header = self._select_ocr_context(layouts, attempts)
             nearby_started = time.monotonic()
-            name_frames = self._sample_nearby_result_frames(
+            nearby_contexts = self._sample_nearby_result_frames(
                 part.path, at_ms=candidate_at_ms, duration_ms=scanned.video_duration_ms
             )
             nearby_frame_seconds += time.monotonic() - nearby_started
-            ranked_frames = sorted(
-                (frame, *name_frames),
-                key=lambda item: result_frame_quality(item, layout),
+            ranked_contexts = sorted(
+                ((frame, layout), *nearby_contexts),
+                key=lambda item: result_frame_quality(item[0], item[1]),
                 reverse=True,
             )
-            frame = ranked_frames[0]
-            name_frames = tuple(ranked_frames[1:])
+            frame, layout = ranked_contexts[0]
+            name_frames = tuple(item[0] for item in ranked_contexts[1:])
             match_started = time.monotonic()
             recognized = self._recognize_frame(
                 frame,
@@ -853,11 +853,11 @@ class VaingloryVideoAnalyzer:
 
     def _sample_nearby_result_frames(
         self, path: str, *, at_ms: int, duration_ms: int
-    ) -> Tuple[RgbFrame, ...]:
-        frames: List[RgbFrame] = []
+    ) -> Tuple[Tuple[RgbFrame, ResultLayout], ...]:
+        frames: List[Tuple[RgbFrame, ResultLayout]] = []
         attempted_at: List[int] = []
         accepted_at: List[int] = []
-        offsets_ms = (-4_000, -2_000, -1_000, 1_000, 2_000, 4_000)
+        offsets_ms = (-5_000, -3_000, -1_000, 1_000, 3_000, 5_000)
         for offset_ms in offsets_ms:
             candidate_at = max(0, min(duration_ms - 1, at_ms + offset_ms))
             if candidate_at == at_ms or candidate_at in attempted_at:
@@ -873,9 +873,10 @@ class VaingloryVideoAnalyzer:
                     error,
                 )
                 continue
-            if detect_result_layout(frame) is None:
+            layout = detect_result_layout(frame)
+            if layout is None:
                 continue
-            frames.append(frame)
+            frames.append((frame, layout))
             accepted_at.append(candidate_at)
         logger.debug(
             'Vainglory nearby OCR frames: at_ms={} sampled_at={} accepted={}',

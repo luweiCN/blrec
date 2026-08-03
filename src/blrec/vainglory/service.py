@@ -148,6 +148,11 @@ class VaingloryIndexService:
     async def create_player(self, name: str) -> PlayerRecord:
         return await self._repository.create_player(name)
 
+    async def ensure_players_for_rooms(
+        self, rooms: Sequence[Tuple[int, str]]
+    ) -> Tuple[PlayerRecord, ...]:
+        return await self._repository.ensure_players_for_rooms(rooms)
+
     async def rename_player(self, player_id: int, name: str) -> PlayerRecord:
         return await self._repository.rename_player(player_id, name)
 
@@ -156,6 +161,9 @@ class VaingloryIndexService:
 
     async def unbind_player_room(self, player_id: int, room_id: int) -> PlayerRecord:
         return await self._repository.unbind_player_room(player_id, room_id)
+
+    async def delete_player(self, player_id: int) -> None:
+        await self._repository.delete_player(player_id)
 
     async def list_player_stats(self) -> Tuple[PlayerStatsRecord, ...]:
         return await self._repository.list_player_stats()

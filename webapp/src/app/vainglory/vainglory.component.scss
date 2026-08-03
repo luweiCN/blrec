@@ -863,7 +863,37 @@
 }
 
 .player-library-help {
+  margin: 0;
   color: #595959;
+}
+
+.player-library-page {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.player-library-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+
+  h2 {
+    margin: 0;
+  }
+
+  span {
+    color: #8c8c8c;
+  }
+
+  > div:last-child {
+    display: flex;
+    gap: 8px;
+
+    input {
+      width: min(320px, 42vw);
+    }
+  }
 }
 
 .player-create,
@@ -898,8 +928,8 @@
 
 .player-library-list {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
   gap: 12px;
-  margin-top: 16px;
 }
 
 .player-library-item {
@@ -951,6 +981,16 @@
     display: block;
     color: #8c8c8c;
     font-size: 12px;
+  }
+}
+
+.player-library-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  span {
+    color: #8c8c8c;
   }
 }
 
@@ -1075,9 +1115,23 @@
   }
 
   .hero-ranking-panel > header,
+  .player-library-header,
   .player-create,
   .player-name-editor,
   .player-room-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .player-library-header {
+    flex-direction: column;
+
+    > div:last-child,
+    > div:last-child input {
+      width: 100%;
+    }
+  }
+
+  .player-library-list {
     grid-template-columns: 1fr;
   }
 

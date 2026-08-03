@@ -14,6 +14,7 @@ import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
 import { NzProgressModule } from 'ng-zorro-antd/progress';
+import { NzPopconfirmModule } from 'ng-zorro-antd/popconfirm';
 import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
 import { NzTagModule } from 'ng-zorro-antd/tag';
@@ -42,6 +43,7 @@ import { VaingloryComponent } from './vainglory.component';
     NzPageHeaderModule,
     NzPaginationModule,
     NzProgressModule,
+    NzPopconfirmModule,
     NzSelectModule,
     NzSpinModule,
     NzTagModule,
