@@ -6,6 +6,37 @@
   margin: 42px auto;
 }
 
+.ranking-empty {
+  color: var(--ink-muted);
+  font-size: 0.74rem;
+  text-align: center;
+}
+
+.podium-grid > .ranking-empty {
+  grid-column: 1 / -1;
+  align-self: center;
+  margin: 0;
+}
+
+.player-detail-empty {
+  display: grid;
+  min-height: 420px;
+  place-content: center;
+  padding: 28px;
+  text-align: center;
+
+  p {
+    color: var(--ink-muted);
+  }
+
+  a {
+    margin-top: 10px;
+    color: var(--cyan);
+    font-size: 0.72rem;
+    text-decoration: none;
+  }
+}
+
 .ranking-panel,
 .heroes-section {
   overflow: hidden;

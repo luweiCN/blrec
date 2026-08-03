@@ -13,8 +13,8 @@ import {
   winRate,
 } from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
+import { DashboardDataService } from './public-dashboard-data.service';
 import {
-  CURRENT_SEASON_KEY,
   DashboardSummary,
   HeroPerformance,
   HeroStanding,
@@ -26,7 +26,14 @@ import {
   MODE_OPTIONS,
   Performance,
   PlayerStanding,
+  SeasonKey,
 } from './public-dashboard.models';
+
+const EMPTY_PERFORMANCE: Performance = {
+  matches: 0,
+  wins: 0,
+  topHero: '',
+};
 
 @Component({
   selector: 'app-public-dashboard',
@@ -40,21 +47,31 @@ import {
 })
 export class PublicDashboardComponent {
   readonly modeOptions: readonly ModeOption[] = MODE_OPTIONS;
-  readonly activeSeason = CURRENT_SEASON_KEY;
+  readonly activeSeason: SeasonKey;
 
   activeMode: ModeFilter = 'all';
-  selectedPlayerId = getPlayerRankings(this.activeSeason, this.activeMode)[0]
-    .id;
+  selectedPlayerId: number | null;
+
+  constructor(private readonly data: DashboardDataService) {
+    this.activeSeason = data.snapshot.currentSeasonKey;
+    this.selectedPlayerId =
+      getPlayerRankings(data.snapshot, this.activeSeason, this.activeMode)[0]
+        ?.id ?? null;
+  }
 
   get rankings(): readonly PlayerStanding[] {
-    return getPlayerRankings(this.activeSeason, this.activeMode);
+    return getPlayerRankings(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+    );
   }
 
   get overviewRankings(): readonly PlayerStanding[] {
     return this.rankings.slice(0, OVERVIEW_LIMIT);
   }
 
-  get selectedPlayer(): PlayerStanding {
+  get selectedPlayer(): PlayerStanding | undefined {
     return (
       this.rankings.find((player) => player.id === this.selectedPlayerId) ??
       this.rankings[0]
@@ -62,26 +79,34 @@ export class PublicDashboardComponent {
   }
 
   get selectedPlayerRank(): number {
-    return (
-      this.rankings.findIndex((player) => player.id === this.selectedPlayerId) +
-      1
+    const index = this.rankings.findIndex(
+      (player) => player.id === this.selectedPlayerId,
     );
+    return index < 0 ? 0 : index + 1;
   }
 
-  get topPlayer(): PlayerStanding {
+  get topPlayer(): PlayerStanding | undefined {
     return this.rankings[0];
   }
 
   get podiumPlayers(): readonly PlayerStanding[] {
-    return [this.rankings[1], this.rankings[0], this.rankings[2]];
+    return [this.rankings[1], this.rankings[0], this.rankings[2]].filter(
+      (player): player is PlayerStanding => player !== undefined,
+    );
   }
 
   get selectedModeBreakdown(): readonly ModeBreakdown[] {
-    return getModeBreakdown(this.selectedPlayer);
+    return this.selectedPlayer === undefined
+      ? []
+      : getModeBreakdown(this.selectedPlayer);
   }
 
   get heroRankings(): readonly HeroStanding[] {
-    return getHeroRankings(this.activeSeason, this.activeMode);
+    return getHeroRankings(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+    );
   }
 
   get overviewHeroRankings(): readonly HeroStanding[] {
@@ -89,20 +114,28 @@ export class PublicDashboardComponent {
   }
 
   get summary(): DashboardSummary {
-    return getDashboardSummary(this.activeSeason, this.activeMode);
+    return getDashboardSummary(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+    );
   }
 
   get seasonLabel(): string {
-    return seasonOption(this.activeSeason).label;
+    return seasonOption(this.data.snapshot, this.activeSeason).label;
   }
 
   get seasonPeriod(): string {
-    return seasonOption(this.activeSeason).period;
+    return seasonOption(this.data.snapshot, this.activeSeason).period;
+  }
+
+  get seasonCode(): string {
+    return this.activeSeason.replace('-', ' · ').toLocaleUpperCase();
   }
 
   selectMode(mode: ModeFilter): void {
     this.activeMode = mode;
-    this.selectedPlayerId = this.rankings[0].id;
+    this.selectedPlayerId = this.rankings[0]?.id ?? null;
   }
 
   selectPlayer(playerId: number): void {
@@ -114,7 +147,9 @@ export class PublicDashboardComponent {
   }
 
   selectedPerformance(): Performance {
-    return this.playerPerformance(this.selectedPlayer);
+    return this.selectedPlayer === undefined
+      ? EMPTY_PERFORMANCE
+      : this.playerPerformance(this.selectedPlayer);
   }
 
   selectedHeroWinRate(hero: HeroUsage): number {
@@ -148,7 +183,7 @@ export class PublicDashboardComponent {
     if (trend < 0) {
       return '下降 ' + Math.abs(trend) + ' 名';
     }
-    return '排名不变';
+    return '暂无历史趋势';
   }
 
   podiumRank(player: PlayerStanding): number {

@@ -12,11 +12,17 @@ import {
 } from '@angular/core';
 
 import {
-  CURRENT_SEASON_KEY,
   SeasonKey,
   SeasonOption,
-  SEASON_OPTIONS,
 } from './public-dashboard.models';
+
+const FALLBACK_SEASON: SeasonOption = {
+  key: 'all-time',
+  label: '跨赛季总榜',
+  shortLabel: '总榜',
+  period: '全部已收录对局',
+  current: false,
+};
 
 @Component({
   selector: 'app-leaderboard-season-select',
@@ -25,8 +31,8 @@ import {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class LeaderboardSeasonSelectComponent {
-  @Input() value: SeasonKey = CURRENT_SEASON_KEY;
-  @Input() options: readonly SeasonOption[] = SEASON_OPTIONS;
+  @Input() value: SeasonKey = 'all-time';
+  @Input() options: readonly SeasonOption[] = [];
 
   @Output() readonly valueChange = new EventEmitter<SeasonKey>();
 
@@ -44,7 +50,8 @@ export class LeaderboardSeasonSelectComponent {
   get selectedOption(): SeasonOption {
     return (
       this.options.find((option) => option.key === this.value) ??
-      this.options[0]
+      this.options[0] ??
+      FALLBACK_SEASON
     );
   }
 

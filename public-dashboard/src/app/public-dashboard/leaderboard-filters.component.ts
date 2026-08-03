@@ -7,13 +7,11 @@ import {
 } from '@angular/core';
 
 import {
-  CURRENT_SEASON_KEY,
   ModeFilter,
   ModeOption,
   MODE_OPTIONS,
   SeasonKey,
   SeasonOption,
-  SEASON_OPTIONS,
 } from './public-dashboard.models';
 
 @Component({
@@ -23,13 +21,13 @@ import {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class LeaderboardFiltersComponent {
-  @Input() activeSeason: SeasonKey = CURRENT_SEASON_KEY;
+  @Input() activeSeason: SeasonKey = 'all-time';
   @Input() activeMode: ModeFilter = 'all';
+  @Input() seasonOptions: readonly SeasonOption[] = [];
 
   @Output() readonly activeSeasonChange = new EventEmitter<SeasonKey>();
   @Output() readonly activeModeChange = new EventEmitter<ModeFilter>();
 
-  readonly seasonOptions: readonly SeasonOption[] = SEASON_OPTIONS;
   readonly modeOptions: readonly ModeOption[] = MODE_OPTIONS;
 
   selectSeason(season: SeasonKey): void {

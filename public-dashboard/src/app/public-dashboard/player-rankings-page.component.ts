@@ -10,8 +10,8 @@ import {
   winRate,
 } from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
+import { DashboardDataService } from './public-dashboard-data.service';
 import {
-  CURRENT_SEASON_KEY,
   MatchResult,
   ModeFilter,
   Performance,
@@ -31,13 +31,25 @@ import {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PlayerRankingsPageComponent {
-  activeSeason: SeasonKey = CURRENT_SEASON_KEY;
+  activeSeason: SeasonKey;
   activeMode: ModeFilter = 'all';
   searchQuery = '';
   currentPage = 1;
 
+  constructor(private readonly data: DashboardDataService) {
+    this.activeSeason = data.snapshot.currentSeasonKey;
+  }
+
+  get seasonOptions(): readonly SeasonOption[] {
+    return this.data.snapshot.seasons;
+  }
+
   get rankingRows(): readonly PlayerRankingRow[] {
-    return getPlayerRankingRows(this.activeSeason, this.activeMode);
+    return getPlayerRankingRows(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+    );
   }
 
   get filteredRows(): readonly PlayerRankingRow[] {
@@ -76,7 +88,7 @@ export class PlayerRankingsPageComponent {
   }
 
   get selectedSeason(): SeasonOption {
-    return seasonOption(this.activeSeason);
+    return seasonOption(this.data.snapshot, this.activeSeason);
   }
 
   selectSeason(season: SeasonKey): void {
@@ -125,7 +137,7 @@ export class PlayerRankingsPageComponent {
     if (trend < 0) {
       return '下降 ' + Math.abs(trend) + ' 名';
     }
-    return '排名不变';
+    return '暂无历史趋势';
   }
 
   trackRow(_index: number, row: PlayerRankingRow): number {

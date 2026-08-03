@@ -2,7 +2,9 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
+import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
 describe('PublicDashboardComponent', () => {
   let fixture: ComponentFixture<PublicDashboardComponent>;
@@ -12,6 +14,12 @@ describe('PublicDashboardComponent', () => {
     await TestBed.configureTestingModule({
       declarations: [PublicDashboardComponent],
       imports: [CommonModule, RouterTestingModule],
+      providers: [
+        {
+          provide: DashboardDataService,
+          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+        },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(PublicDashboardComponent);
@@ -19,11 +27,13 @@ describe('PublicDashboardComponent', () => {
     fixture.detectChanges();
   });
 
-  it('renders the mock-data leaderboard', () => {
+  it('renders the loaded snapshot leaderboard', () => {
     const page = fixture.nativeElement as HTMLElement;
 
     expect(page.querySelector('h1')?.textContent).toContain('每一局');
-    expect(page.querySelector('.mock-note')?.textContent).toContain('MOCK');
+    expect(page.querySelector('.snapshot-note')?.textContent).toContain(
+      '真实数据',
+    );
     expect(page.querySelectorAll('tbody tr').length).toBe(10);
     expect(
       page.querySelector('.podium-slot.first .podium-name')?.textContent,
@@ -49,7 +59,7 @@ describe('PublicDashboardComponent', () => {
     fixture.detectChanges();
 
     expect(component.activeMode).toBe('brawl');
-    expect(component.topPlayer.name).toBe('洛川');
+    expect(component.topPlayer?.name).toBe('洛川');
     expect(brawl?.getAttribute('aria-pressed')).toBe('true');
   });
 
@@ -61,7 +71,7 @@ describe('PublicDashboardComponent', () => {
     playerButtons[1].click();
     fixture.detectChanges();
 
-    expect(component.selectedPlayer.name).toBe('洛川');
+    expect(component.selectedPlayer?.name).toBe('洛川');
     expect(
       fixture.nativeElement.querySelector('#player-detail-title')?.textContent,
     ).toContain('洛川');

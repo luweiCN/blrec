@@ -2,6 +2,7 @@ import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
 describe('LeaderboardSeasonSelectComponent', () => {
   let fixture: ComponentFixture<LeaderboardSeasonSelectComponent>;
@@ -15,6 +16,8 @@ describe('LeaderboardSeasonSelectComponent', () => {
 
     fixture = TestBed.createComponent(LeaderboardSeasonSelectComponent);
     component = fixture.componentInstance;
+    component.value = TEST_DASHBOARD_SNAPSHOT.currentSeasonKey;
+    component.options = TEST_DASHBOARD_SNAPSHOT.seasons;
     fixture.detectChanges();
   });
 

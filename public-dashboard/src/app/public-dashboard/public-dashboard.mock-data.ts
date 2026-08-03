@@ -510,6 +510,8 @@ function seasonScale(season: SeasonKey): number {
       return 0.64;
     case 'all-time':
       return 2.45;
+    default:
+      return 1;
   }
 }
 

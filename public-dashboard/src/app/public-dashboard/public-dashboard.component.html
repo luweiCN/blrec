@@ -30,7 +30,7 @@
           <span>本期王座</span>
           <strong>{{ modeLabel() }} TOP 3</strong>
         </div>
-        <span class="season-id">2026 · SUMMER</span>
+        <span class="season-id">{{ seasonCode }}</span>
       </header>
 
       <div class="podium-grid">
@@ -55,6 +55,9 @@
             {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
           </span>
         </button>
+        <p *ngIf="podiumPlayers.length === 0" class="ranking-empty">
+          当前模式还没有玩家达到 20 局门槛。
+        </p>
       </div>
     </aside>
   </section>
@@ -82,7 +85,7 @@
         <dd>{{ summary.heroCount }}</dd>
       </div>
     </dl>
-    <p class="mock-note">MOCK DATA</p>
+    <p class="snapshot-note">真实数据 · 每日快照</p>
   </section>
 
   <section id="players" class="players-section" aria-labelledby="players-title">
@@ -181,12 +184,21 @@
                 {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
               </td>
             </tr>
+            <tr *ngIf="overviewRankings.length === 0">
+              <td colspan="6" class="ranking-empty">
+                当前模式还没有玩家达到 20 局门槛。
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <aside class="player-detail" aria-labelledby="player-detail-title">
+    <aside
+      *ngIf="selectedPlayer as selected; else noEligiblePlayer"
+      class="player-detail"
+      aria-labelledby="player-detail-title"
+    >
       <header class="detail-header">
         <span>PLAYER PROFILE</span>
         <strong>#{{ selectedPlayerRank.toString().padStart(2, "0") }}</strong>
@@ -196,11 +208,11 @@
         <div class="detail-identity">
           <span class="detail-portrait">
             <img [src]="heroImage(selectedPerformance().topHero)" alt="" />
-            <span aria-hidden="true">{{ selectedPlayer.initial }}</span>
+            <span aria-hidden="true">{{ selected.initial }}</span>
           </span>
           <div>
-            <h2 id="player-detail-title">{{ selectedPlayer.name }}</h2>
-            <p>{{ selectedPlayer.roomLabel }}</p>
+            <h2 id="player-detail-title">{{ selected.name }}</h2>
+            <p>{{ selected.roomLabel }}</p>
             <small>
               代表英雄 · {{ heroDisplayName(selectedPerformance().topHero) }}
             </small>
@@ -259,7 +271,7 @@
         <ol>
           <li
             *ngFor="
-              let hero of selectedPlayer.heroPool;
+              let hero of selected.heroPool;
               trackBy: trackHeroUsage
             "
           >
@@ -273,6 +285,13 @@
         </ol>
       </section>
     </aside>
+
+    <ng-template #noEligiblePlayer>
+      <aside class="player-detail player-detail-empty">
+        <p>当前模式暂无符合 20 局门槛的玩家。</p>
+        <a routerLink="/players">查看其他赛季或模式 →</a>
+      </aside>
+    </ng-template>
   </section>
 
   <section id="heroes" class="heroes-section" aria-labelledby="heroes-title">
@@ -315,6 +334,9 @@
           {{ winRate(heroPerformance(hero)) | percent: "1.0-1" }}
           <small>WIN RATE</small>
         </strong>
+      </li>
+      <li *ngIf="overviewHeroRankings.length === 0" class="ranking-empty">
+        当前模式还没有英雄达到 20 局门槛。
       </li>
     </ol>
   </section>

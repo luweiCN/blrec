@@ -10,8 +10,8 @@ import {
   winRate,
 } from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
+import { DashboardDataService } from './public-dashboard-data.service';
 import {
-  CURRENT_SEASON_KEY,
   HeroPerformance,
   HeroRankingRow,
   HeroStanding,
@@ -30,13 +30,25 @@ import {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class HeroRankingsPageComponent {
-  activeSeason: SeasonKey = CURRENT_SEASON_KEY;
+  activeSeason: SeasonKey;
   activeMode: ModeFilter = 'all';
   searchQuery = '';
   currentPage = 1;
 
+  constructor(private readonly data: DashboardDataService) {
+    this.activeSeason = data.snapshot.currentSeasonKey;
+  }
+
+  get seasonOptions(): readonly SeasonOption[] {
+    return this.data.snapshot.seasons;
+  }
+
   get rankingRows(): readonly HeroRankingRow[] {
-    return getHeroRankingRows(this.activeSeason, this.activeMode);
+    return getHeroRankingRows(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+    );
   }
 
   get filteredRows(): readonly HeroRankingRow[] {
@@ -75,7 +87,7 @@ export class HeroRankingsPageComponent {
   }
 
   get selectedSeason(): SeasonOption {
-    return seasonOption(this.activeSeason);
+    return seasonOption(this.data.snapshot, this.activeSeason);
   }
 
   selectSeason(season: SeasonKey): void {

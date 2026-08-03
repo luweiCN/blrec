@@ -5,6 +5,8 @@ import { RouterTestingModule } from '@angular/router/testing';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { DashboardDataService } from './public-dashboard-data.service';
+import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
 describe('HeroRankingsPageComponent', () => {
   let fixture: ComponentFixture<HeroRankingsPageComponent>;
@@ -18,6 +20,12 @@ describe('HeroRankingsPageComponent', () => {
         LeaderboardSeasonSelectComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
+      providers: [
+        {
+          provide: DashboardDataService,
+          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+        },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(HeroRankingsPageComponent);

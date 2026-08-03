@@ -1,14 +1,10 @@
 export const MODE_FILTERS = ['all', '3v3', 'brawl', '5v5'] as const;
-export const SEASON_KEYS = [
-  '2026-summer',
-  '2026-spring',
-  '2025-autumn',
-  'all-time',
-] as const;
 
 export type ModeFilter = (typeof MODE_FILTERS)[number];
 export type CompetitiveMode = Exclude<ModeFilter, 'all'>;
-export type SeasonKey = (typeof SEASON_KEYS)[number];
+export type SeasonKey =
+  | `${number}-${'spring' | 'summer' | 'autumn'}`
+  | 'all-time';
 export type MatchResult = 'W' | 'L';
 
 export interface ModeOption {
@@ -23,6 +19,17 @@ export interface SeasonOption {
   readonly shortLabel: string;
   readonly period: string;
   readonly current: boolean;
+}
+
+export interface DashboardManifest {
+  readonly schemaVersion: 1;
+  readonly snapshotId: string;
+  readonly snapshotPath: string;
+  readonly publicationDate: string;
+  readonly generatedAt: string;
+  readonly sourceLastMatchId: number;
+  readonly sha256: string;
+  readonly bytes: number;
 }
 
 export interface Performance {
@@ -59,6 +66,23 @@ export interface HeroStanding {
   readonly id: string;
   readonly name: string;
   readonly modes: Readonly<Record<ModeFilter, HeroPerformance>>;
+}
+
+export interface SeasonStandings {
+  readonly players: readonly PlayerStanding[];
+  readonly heroes: readonly HeroStanding[];
+}
+
+export interface DashboardSnapshot {
+  readonly schemaVersion: 2;
+  readonly snapshotId: string;
+  readonly publicationDate: string;
+  readonly generatedAt: string;
+  readonly sourceLastMatchId: number;
+  readonly sourceMatchCount: number;
+  readonly currentSeasonKey: SeasonKey;
+  readonly seasons: readonly SeasonOption[];
+  readonly standings: Readonly<Record<string, SeasonStandings>>;
 }
 
 export interface DashboardSummary {
@@ -105,43 +129,13 @@ export const COMPETITIVE_MODE_OPTIONS: readonly {
   { key: '5v5', label: '5V5' },
 ];
 
-export const SEASON_OPTIONS: readonly SeasonOption[] = [
-  {
-    key: '2026-summer',
-    label: '2026 夏季赛',
-    shortLabel: '本期 · 夏季赛',
-    period: '2026.05.01—08.31',
-    current: true,
-  },
-  {
-    key: '2026-spring',
-    label: '2026 春季赛',
-    shortLabel: '2026 春季赛',
-    period: '2026.01.01—04.30',
-    current: false,
-  },
-  {
-    key: '2025-autumn',
-    label: '2025 秋季赛',
-    shortLabel: '2025 秋季赛',
-    period: '2025.09.01—12.31',
-    current: false,
-  },
-  {
-    key: 'all-time',
-    label: '跨赛季总榜',
-    shortLabel: '总榜',
-    period: '全部已发布对局',
-    current: false,
-  },
-];
-
-export const CURRENT_SEASON_KEY: SeasonKey = '2026-summer';
-
 export function isModeFilter(value: string): value is ModeFilter {
   return (MODE_FILTERS as readonly string[]).includes(value);
 }
 
 export function isSeasonKey(value: string): value is SeasonKey {
-  return (SEASON_KEYS as readonly string[]).includes(value);
+  return (
+    value === 'all-time' ||
+    /^\d{4}-(spring|summer|autumn)$/u.test(value)
+  );
 }

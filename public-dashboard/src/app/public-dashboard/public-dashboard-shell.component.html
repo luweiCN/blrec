@@ -33,19 +33,32 @@
       </a>
     </nav>
 
-    <p class="data-status">
+    <p *ngIf="data.state.kind === 'ready'" class="data-status">
       <span aria-hidden="true"></span>
-      {{ currentSeason.label }} · 最后同步 02:05
+      {{ currentSeasonLabel }} · 最后同步 {{ lastUpdatedLabel }}
     </p>
   </header>
 
-  <router-outlet></router-outlet>
+  <router-outlet *ngIf="data.state.kind === 'ready'"></router-outlet>
+
+  <section
+    *ngIf="data.state.kind === 'error'"
+    class="data-load-error"
+    role="alert"
+  >
+    <p>DATA UNAVAILABLE</p>
+    <h1>排行榜数据暂时没有加载成功</h1>
+    <p>{{ data.state.message }}</p>
+    <button type="button" (click)="data.load()">重新加载</button>
+  </section>
 
   <footer id="method">
     <div>
       <strong>虚荣对局榜</strong>
-      <p>赛季按北京时间直播开始时间归档 · 当前页面仅用于确认视觉与信息结构</p>
+      <p>赛季按北京时间直播开始时间归档 · 每日发布只读数据快照</p>
     </div>
-    <p>MOCK DATA / 非真实排名</p>
+    <p *ngIf="data.snapshotOrNull as snapshot">
+      DATA SNAPSHOT / {{ snapshot.publicationDate }}
+    </p>
   </footer>
 </main>

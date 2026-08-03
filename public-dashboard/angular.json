@@ -31,6 +31,11 @@
                 "glob": "*.jpg",
                 "input": "../src/blrec/data/vainglory/heroes",
                 "output": "/assets/vainglory/heroes/"
+              },
+              {
+                "glob": "**/*.json",
+                "input": "public-data",
+                "output": "/data/"
               }
             ],
             "styles": ["src/styles.scss"],
@@ -94,6 +99,11 @@
                 "glob": "*.jpg",
                 "input": "../src/blrec/data/vainglory/heroes",
                 "output": "/assets/vainglory/heroes/"
+              },
+              {
+                "glob": "**/*.json",
+                "input": "public-data",
+                "output": "/data/"
               }
             ],
             "styles": ["src/styles.scss"],

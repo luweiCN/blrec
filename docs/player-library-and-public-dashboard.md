@@ -6,7 +6,7 @@
 
 公网化只发布排行榜所需的只读数据，不把 NAS、SQLite 文件或当前管理 API 暴露到互联网。公开榜单源码位于仓库根目录的 `public-dashboard/`，它是一个拥有独立 `package.json`、构建产物和发布流程的 Angular 应用。原有 `webapp/` 只负责 BLREC 后台管理，随 NAS 镜像发布，不包含公开榜单路由。
 
-本期不实现公网部署与同步程序；本文给出后续可直接实施的边界和协议。
+当前已完成真实 SQLite 快照导出器、数据契约测试和独立静态看板的快照加载；阿里云 OSS/CDN 资源和 NAS 每日发布协调器待配置。
 
 ## 领域模型
 
@@ -111,75 +111,39 @@ LIVE INDEX 不是排名分数，而是当前公开快照的状态区，固定展
 
 ## 公网部署与同步决策
 
-第一版使用“阿里云静态站点 + NAS 每日主动推送完整快照”。阿里云不访问 NAS，也不复制 SQLite；NAS 只建立出站 SSH 连接。榜单目前只有几十名玩家和几十名英雄，完整快照比增量同步简单、可恢复，而且不会产生玩家榜和英雄榜版本不一致的半成品状态。
+第一版使用“阿里云 OSS 静态对象 + CDN + NAS 每日主动推送完整快照”。阿里云不访问 NAS，不复制 SQLite，也不运行常驻 API。NAS 只通过 HTTPS 调用 OSS 接口。榜单目前只有几十名玩家和几十名英雄，完整快照比增量同步简单、可恢复，而且不会产生玩家榜和英雄榜版本不一致的半成品状态。
 
 ```text
 群晖上的 BLREC / SQLite（唯一事实源）
-        │ 每日发布协调器：启动即检查，运行中每 10 分钟校验
-        │ SSH 上传临时文件、校验摘要、原子替换清单
+        │ 只读事务生成完整 JSON 快照
+        │ 发布协调器：启动即检查，运行中定期校验
+        │ HTTPS / OSS 最小权限上传
         ▼
-阿里云 /srv/vg-dashboard/data
+阿里云 OSS Bucket
         │
-        ├── manifest.json             当前版本指针
-        └── snapshots/<snapshotId>.json  不可变快照
+        ├── index.html / 带哈希的站点资源
+        └── data
+             ├── manifest.json                    当前版本指针
+             └── snapshots/<snapshotId>.json      不可变快照
                     │
                     ▼
-             Nginx + vg.luwei.host
+             阿里云 CDN + vg.luwei.host
 ```
 
-静态前端由 `public-dashboard/` 独立执行 `npm ci && npm run build`，再把 `dist/` 作为版本目录发布到 `/srv/vg-dashboard/releases/<releaseId>`，验证后原子切换 `/srv/vg-dashboard/current` 软链接。BLREC 的 `webapp/` 构建和 NAS 镜像更新不会发布这个站点；反过来，站点发布也不会改动后台管理。
+静态前端由 `public-dashboard/` 独立执行 `npm ci && npm run build`，构建产物和数据快照发布到同一 Bucket。BLREC 的 `webapp/` 仍只是 NAS 后台管理页，不会被公网发布。日常数据更新只上传 `data/`；站点代码有新的已验证构建时，同一协调器再同步静态资源，不在 NAS 上自动 `git pull` 未经验证的代码。
 
-Nginx 已占用 80/443，第一版不需要额外开放应用端口，也不需要常驻云端 API 或 Docker 容器。
+这个方案不占用原阿里云服务器端口，也不需要 Nginx、Docker 或云端常驻进程。`vg.luwei.host` 通过 CNAME 指向 CDN 加速域名；OSS 是回源站，不直接暴露 NAS。
 
-### 已核查的服务器条件
+推荐 Bucket 保持私有并启用 CDN 回源授权。站点与数据同域，不需要 CORS。CDN/OSS 规则固定为：
 
-2026-08-03 通过本机 SSH 别名 `aliyun-server` 做过只读核查：
-
-- 系统是 Ubuntu 24.04 LTS，Nginx 正常运行并监听 80/443，磁盘空间足够托管静态榜单。
-- `vg.luwei.host` 已解析到该服务器，服务器已有 `*.luwei.host` 通配符证书，但尚无 `vg.luwei.host` 的 Nginx 站点配置。
-- 服务器没有可用的 Docker 命令；该限制不影响静态站点方案。
-
-正式部署时应创建权限受限的站点目录和专用发布账号，不让 NAS 持有日常使用的 root 凭据。首次建目录、安装公钥和启用 Nginx 配置属于一次性运维动作，部署前单独执行并验收。
-
-建议的 Nginx 结构如下，证书路径沿用服务器现有通配符证书：
-
-```nginx
-server {
-    listen 80;
-    listen [::]:80;
-    server_name vg.luwei.host;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name vg.luwei.host;
-
-    ssl_certificate /etc/nginx/ssl/<wildcard-luwei-host>/fullchain.cer;
-    ssl_certificate_key /etc/nginx/ssl/<wildcard-luwei-host>/private.key;
-
-    root /srv/vg-dashboard/current;
-
-    location = /data/manifest.json {
-        root /srv/vg-dashboard;
-        add_header Cache-Control "no-store" always;
-    }
-
-    location /data/snapshots/ {
-        alias /srv/vg-dashboard/data/snapshots/;
-        add_header Cache-Control "public, max-age=31536000, immutable" always;
-    }
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-```
+- `index.html` 和 `data/manifest.json`：不缓存，每次回源校验。
+- `data/snapshots/*` 与带哈希的 JS/CSS/图片：一年缓存并标记 `immutable`。
+- SPA 未命中路径回退到 `/index.html`。
+- HTTPS 证书由阿里云 CDN 托管，不把私钥交给 NAS 日常发布账号。
 
 ### 快照格式
 
-快照使用普通 JSON，Nginx 在传输时压缩；字段采用显式白名单。加入赛季与每日发布状态后使用 schema version 2：
+快照使用普通 JSON，CDN 在传输时压缩；字段采用显式白名单。快照使用 schema version 2，当前指针另存为 schema version 1 的 `manifest.json`：
 
 ```json
 {
@@ -188,6 +152,7 @@ server {
   "publicationDate": "2026-08-03",
   "generatedAt": "2026-08-03T02:05:00Z",
   "sourceLastMatchId": 12345,
+  "sourceMatchCount": 701,
   "currentSeasonKey": "2026-summer",
   "seasons": [
     {
@@ -196,25 +161,14 @@ server {
       "endsAt": "2026-09-01T00:00:00+08:00"
     }
   ],
-  "players": [],
-  "rankings": {
+  "standings": {
     "2026-summer": {
-      "players": {
-        "all": [],
-        "3v3": [],
-        "brawl": [],
-        "5v5": []
-      },
-      "heroes": {
-        "all": [],
-        "3v3": [],
-        "brawl": [],
-        "5v5": []
-      }
+      "players": [],
+      "heroes": []
     },
     "all-time": {
-      "players": {},
-      "heroes": {}
+      "players": [],
+      "heroes": []
     }
   }
 }
@@ -228,26 +182,26 @@ server {
 
 不能只设置一个“每天零点触发”的内存计时器。容器可能在零点停机，或在发布失败后重启；正确模型是持续协调期望状态：
 
-1. Worker 启动后立即读取远端 `manifest.json`，运行期间每 10 分钟重复检查。
+1. Worker 启动后立即通过 OSS 内网或公网 Endpoint 直接读取 `data/manifest.json`（不经 CDN），运行期间每 10 分钟重复检查。
 2. 以 `Asia/Shanghai` 的今天作为期望 `publicationDate`。远端清单已经是今天且对应快照存在、摘要正确时直接跳过。
 3. 未发布时，从同一个 SQLite 只读事务生成玩家、英雄和赛季完整快照，计算确定性 JSON 与 SHA-256；没有新增对局也照常发布当天版本。
-4. 先通过 SSH 上传到临时文件，远端校验摘要后移动为 `snapshots/{snapshotId}.json`；最后用同目录临时文件原子替换 `manifest.json`。整个“复查清单并替换”步骤使用远端 `flock`，避免两个实例并发覆盖。
+4. 先上传不可变的 `data/snapshots/{snapshotId}.json`，再通过 OSS 校验字节数与摘要，最后 PUT `data/manifest.json`。单个 OSS 对象替换是原子可见的，且清单始终最后发布；本地单例锁避免同一 NAS 上两个协调器并发。
 5. 只有远端清单切换成功才算当天发布成功。失败按 1、5、15、60 分钟退避重试，60 分钟封顶；容器重启后从第 1 步重新协调，不依赖丢失的内存状态。
-6. 如果快照已上传但清单尚未切换，重试复用同一个 `snapshotId`；如果清单已切换但 SSH 响应丢失，下一次检查会识别当天已发布并跳过。因此每一步都可以安全重复。
+6. 如果快照已上传但清单尚未切换，重试复用同一个 `snapshotId`；如果清单已切换但 OSS 响应丢失，下一次检查会识别当天已发布并跳过。因此每一步都可以安全重复。
 
 远端 `manifest.json` 是跨容器重启的发布事实源；本地数据库可以另记尝试次数、最后错误和成功时间用于运维，但不能只靠本地“已执行”标记决定跳过。自动发布拒绝对局水位、玩家数或对局数倒退的快照，除非使用明确的人工回退流程。
 
 ## 运行与告警
 
-- 发布协调器运行在 NAS/BLREC 容器内，只建立出站 SSH；NAS 不开放新入站端口，不公开 `2234`，公网也不调用管理员 API。
+- 发布协调器运行在 NAS/BLREC 容器内，只发起 OSS HTTPS 出站请求；NAS 不开放新入站端口，不公开 `2234`，公网也不调用管理员 API。
 - 公网站点显示 `generatedAt`；超过 36 小时未发布时显示延迟状态并发送告警。
 - 监控至少包含：目标发布日、远端实际发布日、最后成功时间、连续失败次数、快照摘要和字节数、玩家数、对局数、最后对局 ID。
 - 保留最近 30 个不可变快照；清理任务不得删除当前清单引用的版本。错误发布通过原子回退清单恢复。
 
 ## 实施顺序
 
-1. 在 BLREC 中增加只读快照导出器及契约测试，固定字段白名单、赛季聚合、别名和 schema version。
-2. 增加每日发布协调器及测试，覆盖零点停机、失败后重启、响应丢失、重复执行、数据倒退和并发发布。
-3. 将公网排行榜构建为独立只读静态产物，不包含管理入口和 NAS API 地址。
-4. 在阿里云创建受限发布账号、站点目录和 `vg.luwei.host` Nginx 配置，先执行 `nginx -t` 再平滑加载。
+1. 已完成：在 BLREC 中增加只读快照导出器及契约测试，固定字段白名单、赛季聚合、别名和 schema version。
+2. 已完成：将公网排行榜构建为独立只读静态产物，并加载 `manifest.json` 指向的真实快照，不包含管理入口和 NAS API 地址。
+3. 待实施：增加 OSS 每日发布协调器及测试，覆盖零点停机、失败后重启、响应丢失、重复执行、数据倒退和并发发布。
+4. 待配置：在阿里云创建私有 OSS Bucket、CDN 加速域名、HTTPS 证书和受限 RAM 发布账号。
 5. 在测试路径运行一周，验证断网重试、重复推送、缓存、错误快照回退和过期告警后再正式开放域名。

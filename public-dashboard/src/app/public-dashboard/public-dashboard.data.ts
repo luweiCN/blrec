@@ -1,10 +1,7 @@
-import {
-  heroesForSeason,
-  playersForSeason,
-} from './public-dashboard.mock-data';
 import { heroSearchSegments } from './public-dashboard.hero-names';
 import {
   COMPETITIVE_MODE_OPTIONS,
+  DashboardSnapshot,
   DashboardSummary,
   HeroRankingRow,
   HeroStanding,
@@ -17,7 +14,6 @@ import {
   PlayerStanding,
   SeasonKey,
   SeasonOption,
-  SEASON_OPTIONS,
 } from './public-dashboard.models';
 import { matchesSearchSegments } from './public-dashboard.search';
 
@@ -34,10 +30,11 @@ export function winRate(value: {
 }
 
 export function getPlayerRankings(
+  snapshot: DashboardSnapshot,
   season: SeasonKey,
   mode: ModeFilter,
 ): readonly PlayerStanding[] {
-  return playersForSeason(season)
+  return playersForSeason(snapshot, season)
     .filter((player) => player.modes[mode].matches >= PLAYER_MIN_MATCHES)
     .sort(
       (left, right) =>
@@ -49,20 +46,22 @@ export function getPlayerRankings(
 }
 
 export function getPlayerRankingRows(
+  snapshot: DashboardSnapshot,
   season: SeasonKey,
   mode: ModeFilter,
 ): readonly PlayerRankingRow[] {
-  return getPlayerRankings(season, mode).map((player, index) => ({
+  return getPlayerRankings(snapshot, season, mode).map((player, index) => ({
     rank: index + 1,
     player,
   }));
 }
 
 export function getHeroRankings(
+  snapshot: DashboardSnapshot,
   season: SeasonKey,
   mode: ModeFilter,
 ): readonly HeroStanding[] {
-  return heroesForSeason(season)
+  return heroesForSeason(snapshot, season)
     .filter((hero) => hero.modes[mode].matches >= HERO_MIN_MATCHES)
     .sort((left, right) => {
       const leftPerformance = left.modes[mode];
@@ -76,21 +75,23 @@ export function getHeroRankings(
 }
 
 export function getHeroRankingRows(
+  snapshot: DashboardSnapshot,
   season: SeasonKey,
   mode: ModeFilter,
 ): readonly HeroRankingRow[] {
-  return getHeroRankings(season, mode).map((hero, index) => ({
+  return getHeroRankings(snapshot, season, mode).map((hero, index) => ({
     rank: index + 1,
     hero,
   }));
 }
 
 export function getDashboardSummary(
+  snapshot: DashboardSnapshot,
   season: SeasonKey,
   mode: ModeFilter,
 ): DashboardSummary {
-  const players = playersForSeason(season);
-  const heroes = heroesForSeason(season);
+  const players = playersForSeason(snapshot, season);
+  const heroes = heroesForSeason(snapshot, season);
   const totals = players.reduce(
     (result, player) => ({
       matches: result.matches + player.modes[mode].matches,
@@ -99,10 +100,11 @@ export function getDashboardSummary(
     { matches: 0, wins: 0 },
   );
   return {
-    playerCount: players.length,
+    playerCount: players.filter((player) => player.modes[mode].matches > 0)
+      .length,
     matchCount: totals.matches,
     winRate: winRate(totals),
-    heroCount: heroes.length,
+    heroCount: heroes.filter((hero) => hero.modes[mode].matches > 0).length,
   };
 }
 
@@ -122,12 +124,7 @@ export function playerMatchesQuery(
   query: string,
 ): boolean {
   return matchesSearchSegments(
-    [
-      player.name,
-      player.roomLabel,
-      ...player.aliases,
-      ...heroSearchSegments(player.modes.all.topHero),
-    ],
+    [player.name, player.roomLabel, ...player.aliases],
     query,
   );
 }
@@ -146,10 +143,28 @@ export function modeLabel(mode: ModeFilter): string {
   );
 }
 
-export function seasonOption(season: SeasonKey): SeasonOption {
+export function seasonOption(
+  snapshot: DashboardSnapshot,
+  season: SeasonKey,
+): SeasonOption {
   return (
-    SEASON_OPTIONS.find((option) => option.key === season) ?? SEASON_OPTIONS[0]
+    snapshot.seasons.find((option) => option.key === season) ??
+    snapshot.seasons[0]
   );
+}
+
+export function playersForSeason(
+  snapshot: DashboardSnapshot,
+  season: SeasonKey,
+): readonly PlayerStanding[] {
+  return snapshot.standings[season]?.players ?? [];
+}
+
+export function heroesForSeason(
+  snapshot: DashboardSnapshot,
+  season: SeasonKey,
+): readonly HeroStanding[] {
+  return snapshot.standings[season]?.heroes ?? [];
 }
 
 export function selectedHeroWinRate(hero: HeroUsage): number {

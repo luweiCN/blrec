@@ -15,7 +15,7 @@ const routes: Routes = [
         path: '',
         pathMatch: 'full',
         component: PublicDashboardComponent,
-        title: '虚荣对局榜 · Mock Preview',
+        title: '虚荣对局榜',
       },
       {
         path: 'players',
