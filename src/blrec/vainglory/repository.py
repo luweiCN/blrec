@@ -318,6 +318,123 @@ class _PlayerStatsAccumulator:
     heroes: Dict[int, Tuple[str, _OutcomeAccumulator]] = field(default_factory=dict)
 
 
+def refresh_session_scan_job(
+    connection: sqlite3.Connection, session_id: int, now: int
+) -> None:
+    summary = connection.execute(
+        'SELECT COUNT(*) AS part_count,'
+        "SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending_count,"
+        "SUM(CASE WHEN state='analyzing' THEN 1 ELSE 0 END) AS analyzing_count,"
+        "SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_count,"
+        'AVG(progress) AS progress,SUM(match_count) AS match_count,'
+        'MIN(requested_at) AS requested_at,MIN(started_at) AS started_at,'
+        'MAX(algorithm_version) AS algorithm_version '
+        'FROM vainglory_part_jobs WHERE session_id=?',
+        (session_id,),
+    ).fetchone()
+    if summary is None or int(summary['part_count']) == 0:
+        return
+    pending_count = int(summary['pending_count'])
+    analyzing_count = int(summary['analyzing_count'])
+    failed_count = int(summary['failed_count'])
+    archive = connection.execute(
+        'SELECT COALESCE(MAX(imported.page_count),0) AS expected_count,'
+        'COUNT(part.id) AS materialized_count,'
+        "SUM(CASE WHEN part.state='ready' THEN 1 ELSE 0 END) AS ready_count,"
+        "SUM(CASE WHEN part.state='failed' THEN 1 ELSE 0 END) AS failed_count,"
+        'COALESCE(SUM(part.progress),0) AS progress_sum '
+        'FROM vainglory_archive_imports imported '
+        'LEFT JOIN vainglory_archive_parts part ON part.import_id=imported.id '
+        'WHERE imported.session_id=?',
+        (session_id,),
+    ).fetchone()
+    expected_count = int(archive['expected_count'])
+    materialized_count = int(archive['materialized_count'])
+    archive_ready_count = int(archive['ready_count'] or 0)
+    archive_failed_count = int(archive['failed_count'] or 0)
+    archive_terminal_count = archive_ready_count + archive_failed_count
+    archive_incomplete = expected_count > 0 and (
+        materialized_count < expected_count
+        or archive_terminal_count < expected_count
+        or int(summary['part_count']) < expected_count
+    )
+    archive_failed = (
+        expected_count > 0 and not archive_incomplete and archive_failed_count > 0
+    )
+    error: Optional[str] = None
+    completed_at: Optional[int] = None
+    if archive_incomplete:
+        has_progress = (
+            archive_terminal_count > 0
+            or float(archive['progress_sum'] or 0) > 0
+            or analyzing_count > 0
+            or summary['started_at'] is not None
+        )
+        state = 'analyzing' if has_progress else 'pending'
+        progress = min(0.99, float(archive['progress_sum'] or 0) / expected_count)
+    elif archive_failed:
+        state = 'failed'
+        progress = 1.0
+        error_row = connection.execute(
+            'SELECT error FROM vainglory_archive_parts part '
+            'JOIN vainglory_archive_imports imported ON imported.id=part.import_id '
+            "WHERE imported.session_id=? AND part.state='failed' "
+            'ORDER BY part.updated_at DESC,part.id DESC LIMIT 1',
+            (session_id,),
+        ).fetchone()
+        error = (
+            '部分分 P 分析失败'
+            if error_row is None or error_row['error'] is None
+            else str(error_row['error'])
+        )
+        completed_at = now
+    elif analyzing_count:
+        state = 'analyzing'
+        progress = float(summary['progress'] or 0)
+    elif pending_count:
+        state = 'pending'
+        progress = float(summary['progress'] or 0)
+    elif failed_count:
+        state = 'failed'
+        progress = float(summary['progress'] or 0)
+        error_row = connection.execute(
+            'SELECT error FROM vainglory_part_jobs '
+            "WHERE session_id=? AND state='failed' "
+            'ORDER BY updated_at DESC,part_id DESC LIMIT 1',
+            (session_id,),
+        ).fetchone()
+        error = (
+            '部分分 P 分析失败'
+            if error_row is None or error_row['error'] is None
+            else str(error_row['error'])
+        )
+        completed_at = now
+    else:
+        state = 'ready'
+        progress = float(summary['progress'] or 0)
+        completed_at = now
+    started_at = None if summary['started_at'] is None else int(summary['started_at'])
+    if state == 'pending':
+        started_at = None
+    connection.execute(
+        'UPDATE vainglory_scan_jobs SET state=?,progress=?,'
+        'algorithm_version=?,match_count=?,error=?,requested_at=?,'
+        'started_at=?,completed_at=?,updated_at=? WHERE session_id=?',
+        (
+            state,
+            progress,
+            int(summary['algorithm_version']),
+            int(summary['match_count'] or 0),
+            error,
+            int(summary['requested_at']),
+            started_at,
+            completed_at,
+            now,
+            session_id,
+        ),
+    )
+
+
 class VaingloryRepository:
     ALGORITHM_VERSION = 13
     HERO_RECOGNITION_VERSION = 3
@@ -1689,6 +1806,9 @@ class VaingloryRepository:
             session_id=session_id,
         )
         conditions = [
+            'EXISTS(SELECT 1 FROM vainglory_scan_jobs completed_scan '
+            'WHERE completed_scan.session_id=session.id '
+            "AND completed_scan.state='ready')",
             'EXISTS(SELECT 1 FROM vainglory_matches match '
             'WHERE match.session_id=session.id AND ' + ' AND '.join(where) + ')'
         ]
@@ -2728,67 +2848,7 @@ class VaingloryRepository:
     def _refresh_session_job(
         self, connection: sqlite3.Connection, session_id: int, now: int
     ) -> None:
-        summary = connection.execute(
-            'SELECT COUNT(*) AS part_count,'
-            "SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending_count,"
-            "SUM(CASE WHEN state='analyzing' THEN 1 ELSE 0 END) AS analyzing_count,"
-            "SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_count,"
-            'AVG(progress) AS progress,SUM(match_count) AS match_count,'
-            'MIN(requested_at) AS requested_at,MIN(started_at) AS started_at,'
-            'MAX(algorithm_version) AS algorithm_version '
-            'FROM vainglory_part_jobs WHERE session_id=?',
-            (session_id,),
-        ).fetchone()
-        if summary is None or int(summary['part_count']) == 0:
-            return
-        pending_count = int(summary['pending_count'])
-        analyzing_count = int(summary['analyzing_count'])
-        failed_count = int(summary['failed_count'])
-        error: Optional[str] = None
-        completed_at: Optional[int] = None
-        if analyzing_count:
-            state = 'analyzing'
-        elif pending_count:
-            state = 'pending'
-        elif failed_count:
-            state = 'failed'
-            error_row = connection.execute(
-                'SELECT error FROM vainglory_part_jobs '
-                "WHERE session_id=? AND state='failed' "
-                'ORDER BY updated_at DESC,part_id DESC LIMIT 1',
-                (session_id,),
-            ).fetchone()
-            error = (
-                '部分分 P 分析失败'
-                if error_row is None or error_row['error'] is None
-                else str(error_row['error'])
-            )
-            completed_at = now
-        else:
-            state = 'ready'
-            completed_at = now
-        started_at = (
-            None if summary['started_at'] is None else int(summary['started_at'])
-        )
-        if state == 'pending' and analyzing_count == 0:
-            started_at = None
-        connection.execute(
-            'UPDATE vainglory_scan_jobs SET state=?,progress=?,'
-            'algorithm_version=?,match_count=?,error=?,requested_at=?,'
-            'started_at=?,completed_at=?,updated_at=? WHERE session_id=?',
-            (
-                state,
-                float(summary['progress'] or 0),
-                int(summary['algorithm_version']),
-                int(summary['match_count'] or 0),
-                error,
-                int(summary['requested_at']),
-                started_at,
-                completed_at,
-                now,
-                session_id,
-            ),
-        )
+        refresh_session_scan_job(connection, session_id, now)
 
     @staticmethod
     def _existing_heroes(connection: sqlite3.Connection) -> List[Tuple[int, str, str]]:

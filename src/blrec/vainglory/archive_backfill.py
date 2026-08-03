@@ -14,6 +14,7 @@ from blrec.bili_upload.errors import BiliApiError
 
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title
+from .repository import refresh_session_scan_job
 
 
 class ArchiveBackfillNotFound(ValueError):
@@ -978,7 +979,9 @@ class ArchiveBackfillService:
                 'ON source.part_id=archive.recording_part_id '
                 'LEFT JOIN vainglory_part_jobs analysis '
                 'ON analysis.part_id=archive.recording_part_id '
-                "WHERE archive.state IN ('downloading','analyzing')"
+                "WHERE archive.state IN ('downloading','analyzing') OR ("
+                "archive.state='queued' AND (analysis.state IS NOT NULL "
+                "OR source.state!='missing'))"
             ).fetchall()
             for row in rows:
                 state, progress, error = self._derived_part_state(row)
@@ -995,7 +998,8 @@ class ArchiveBackfillService:
                 )
                 changed = True
             imports = connection.execute(
-                'SELECT id,state,attempt_count FROM vainglory_archive_imports '
+                'SELECT id,session_id,state,attempt_count '
+                'FROM vainglory_archive_imports '
                 "WHERE state IN ('downloading','analyzing')"
             ).fetchall()
             for imported in imports:
@@ -1063,6 +1067,10 @@ class ArchiveBackfillService:
                     )
                     if terminal:
                         changed = True
+                if imported['session_id'] is not None:
+                    refresh_session_scan_job(
+                        connection, int(imported['session_id']), now
+                    )
             syncs = connection.execute(
                 'SELECT account_id,state,discovered_count,completed_count,'
                 'discovery_complete FROM vainglory_archive_syncs '

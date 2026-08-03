@@ -387,6 +387,9 @@ async def test_marks_finished_archive_and_sync_without_duplicating_on_rescan(
                 '1000,1000,1000,1000 FROM recording_parts WHERE id=?',
                 (part_id,),
             )
+        await database.execute(
+            "UPDATE vainglory_archive_parts SET state='queued',progress=0"
+        )
 
         assert await service.run_once() is True
         sync = await service.status(1)

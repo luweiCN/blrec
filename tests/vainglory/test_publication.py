@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Tuple
 
@@ -13,6 +14,8 @@ from blrec.vainglory.publication import (
     DESCRIPTION_BEGIN,
     DESCRIPTION_END,
     VaingloryPublicationService,
+    _automatic_chapter_cards,
+    _chapter_content,
     build_publication_plan,
     description_contains_block,
     merge_archive_description,
@@ -130,6 +133,19 @@ def test_unknown_result_is_not_counted_as_a_loss() -> None:
     assert '共 1 局｜0 胜 0 负｜1 局结果未确认' in plan.description_block
     assert '第1局｜结果未确认' in plan.description_block
     assert '第1局 1#02:00｜结果未确认' in plan.comments[0].content
+
+
+def test_chapter_uses_full_chinese_hero_name_with_game_number() -> None:
+    current = match(1)
+    recorded = replace(current.players[0], hero_label='Grace', is_recorded_player=True)
+    current = replace(current, players=(recorded, *current.players[1:]))
+
+    content = _chapter_content(1, current)
+
+    assert content == '第1局|胜|格瑞丝'
+    assert len(content) <= 16
+    assert _automatic_chapter_cards(({'content': content},)) is True
+    assert _automatic_chapter_cards(({'content': '1胜|锤妈'},)) is True
 
 
 def test_comment_keeps_all_results_in_first_comment_and_splits_only_pictures() -> None:
@@ -614,6 +630,89 @@ async def test_service_discovers_direct_historical_archive_without_upload_job(
             'bvid': 'BV1abcdefgh',
             'session_id': 1,
         }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_historical_publication_waits_for_every_archive_page(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute('DELETE FROM upload_parts WHERE job_id=1')
+        await database.execute('DELETE FROM upload_jobs WHERE id=1')
+        for part_id, part_index in ((2, 2), (3, 3)):
+            await database.execute(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,record_start_time,'
+                'artifact_state,created_at,updated_at) '
+                "VALUES(?,1,'run:1',?,?,1,'missing',1,1)",
+                (part_id, part_index, 'bili://history/p{}'.format(part_index)),
+            )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,error,created_at,updated_at) '
+            "VALUES(1,1,303,'BV1abcdefgh','历史稿件',1,1,'failed',1,3,1,"
+            "'部分分 P 未完成',1,1)"
+        )
+        for page, part_id, state in (
+            (1, 2, 'failed'),
+            (2, 3, 'failed'),
+            (3, 1, 'ready'),
+        ):
+            await database.execute(
+                'INSERT INTO vainglory_archive_parts('
+                'import_id,page,cid,title,duration_seconds,recording_part_id,'
+                'state,progress,error,created_at,updated_at) '
+                'VALUES(1,?,?,?,600,?,?,1,?,1,1)',
+                (
+                    page,
+                    400 + page,
+                    'P{}'.format(page),
+                    part_id,
+                    state,
+                    None if state == 'ready' else '未完成',
+                ),
+            )
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is False
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 0
+
+        await database.execute(
+            "UPDATE vainglory_archive_parts SET state='ready',progress=1,error=NULL"
+        )
+        await database.execute(
+            "UPDATE vainglory_archive_imports SET state='ready',progress=1,"
+            'completed_page_count=3,error=NULL'
+        )
+        assert await service.run_once() is True
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 1
+
+        await database.execute(
+            "UPDATE vainglory_archive_parts SET state='queued',progress=0 "
+            'WHERE page IN (1,2)'
+        )
+        await database.execute(
+            "UPDATE vainglory_archive_imports SET state='analyzing',progress=?,"
+            'completed_page_count=1',
+            (1 / 3,),
+        )
+        assert await service.run_once() is False
+        assert protocol.edit_calls == []
+        assert protocol.add_reply_calls == []
     finally:
         await database.close()
 

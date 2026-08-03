@@ -580,6 +580,70 @@ async def test_repository_completes_parts_without_replacing_previous_matches(
 
 
 @pytest.mark.asyncio
+async def test_session_job_stays_in_progress_until_every_archive_page_finishes(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'p1.mp4'
+        second = tmp_path / 'p2.mp4'
+        third = tmp_path / 'p3.mp4'
+        for path in (first, second, third):
+            path.write_bytes(b'video')
+        await seed_session(database, first)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        await seed_part(database, second, session_id=1, part_id=2, part_index=2)
+        await seed_part(database, third, session_id=1, part_id=3, part_index=3)
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            "state,created_at,updated_at) VALUES(1,42,'账号',X'00',1,'key',"
+            "'active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,created_at,updated_at) '
+            "VALUES(1,1,303,'BV1abcdefgh','历史稿件',1,1,'analyzing',?,3,1,1,1)",
+            (1 / 3,),
+        )
+        for page, state in ((1, 'ready'), (2, 'queued'), (3, 'queued')):
+            await database.execute(
+                'INSERT INTO vainglory_archive_parts('
+                'import_id,page,cid,title,duration_seconds,recording_part_id,'
+                'state,progress,created_at,updated_at) '
+                'VALUES(1,?,?,?,600,?,?,?,1,1)',
+                (
+                    page,
+                    400 + page,
+                    'P{}'.format(page),
+                    page,
+                    state,
+                    1 if state == 'ready' else 0,
+                ),
+            )
+
+        await database.write(
+            lambda connection: repository._refresh_session_job(connection, 1, 100)
+        )
+
+        row = await database.fetchone(
+            'SELECT state,progress,completed_at FROM vainglory_scan_jobs '
+            'WHERE session_id=1'
+        )
+        assert row is not None
+        assert str(row['state']) == 'analyzing'
+        assert float(row['progress']) == pytest.approx(1 / 3)
+        assert row['completed_at'] is None
+        assert (await repository.list_match_sessions()).total == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_uses_upload_title_until_match_title_is_overridden(
     tmp_path: Path,
 ) -> None:

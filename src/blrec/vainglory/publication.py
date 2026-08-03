@@ -42,7 +42,7 @@ from blrec.bili_upload.errors import (
     RemoteOutcomeUnknown,
 )
 
-from .catalog import hero_chapter_name, hero_chinese_name
+from .catalog import hero_chinese_name
 from .exclusions import EXCLUDED_TITLE_MARKER
 from .repository import MatchRecord, VaingloryRepository
 
@@ -65,6 +65,46 @@ _GENERATED_LINK_LINE = re.compile(
     r'^第\d+局：https://www\.bilibili\.com/video/BV[0-9A-Za-z]+' r'\?p=\d+&t=\d+$'
 )
 _GENERATED_TRUNCATION = '…其余对局请见置顶评论'
+
+_SESSION_ARCHIVES_COMPLETE = (
+    'NOT EXISTS(SELECT 1 FROM vainglory_archive_imports source_import '
+    'WHERE source_import.session_id=session.id AND ('
+    "source_import.state!='ready' OR source_import.page_count<=0 OR "
+    'source_import.completed_page_count!=source_import.page_count OR ('
+    'SELECT COUNT(*) FROM vainglory_archive_parts source_part '
+    'WHERE source_part.import_id=source_import.id '
+    "AND source_part.state='ready')!=source_import.page_count))"
+)
+_PUBLICATION_READY_PREDICATE = (
+    'EXISTS(SELECT 1 FROM vainglory_scan_jobs source_scan '
+    'WHERE source_scan.session_id=session.id '
+    "AND source_scan.state='ready') AND "
+    + _SESSION_ARCHIVES_COMPLETE
+    + " AND (publication.source_kind!='archive' OR EXISTS("
+    'SELECT 1 FROM vainglory_archive_imports source_import '
+    'WHERE source_import.session_id=session.id '
+    'AND source_import.account_id=publication.account_id '
+    'AND source_import.bvid=publication.bvid '
+    "AND source_import.state='ready' AND source_import.page_count>0 "
+    'AND source_import.completed_page_count=source_import.page_count '
+    'AND (SELECT COUNT(*) FROM vainglory_archive_parts source_part '
+    'WHERE source_part.import_id=source_import.id '
+    "AND source_part.state='ready')=source_import.page_count)) "
+    "AND (publication.source_kind!='upload' OR ("
+    'publication.upload_job_id IS NOT NULL AND EXISTS('
+    'SELECT 1 FROM upload_parts expected_upload '
+    'WHERE expected_upload.job_id=publication.upload_job_id '
+    'AND expected_upload.cid IS NOT NULL) AND NOT EXISTS('
+    'SELECT 1 FROM upload_parts expected_upload '
+    'WHERE expected_upload.job_id=publication.upload_job_id '
+    'AND expected_upload.cid IS NOT NULL AND NOT EXISTS('
+    'SELECT 1 FROM recording_parts expected_recording '
+    'JOIN vainglory_part_jobs expected_analysis '
+    'ON expected_analysis.part_id=expected_recording.id '
+    'WHERE expected_recording.session_id=session.id '
+    'AND expected_recording.part_index=expected_upload.part_index '
+    "AND expected_analysis.state='ready'))))"
+)
 
 
 @dataclass(frozen=True)
@@ -412,7 +452,7 @@ class VaingloryPublicationService:
     async def run_once(self) -> bool:
         if await self._discover():
             return True
-        row = await self._database.fetchone(
+        work_query = (
             'SELECT publication.*,account.state AS account_state,'
             'account.credential_version,account.uid AS account_uid '
             'FROM vainglory_publications publication '
@@ -430,13 +470,18 @@ class VaingloryPublicationService:
             'AND NOT EXISTS(SELECT 1 FROM upload_jobs source_job '
             'WHERE source_job.id=publication.upload_job_id '
             'AND instr(COALESCE(source_job.policy_snapshot_json,\'\'),?)>0) '
-            'AND publication.next_attempt_at<=? '
+            'AND '
+            + _PUBLICATION_READY_PREDICATE
+            + ' AND publication.next_attempt_at<=? '
             'ORDER BY CASE '
             "WHEN publication.source_kind='upload' AND NOT EXISTS("
             'SELECT 1 FROM archive_migration_items priority_item '
             'WHERE priority_item.upload_job_id=publication.upload_job_id) THEN 0 '
             "WHEN publication.source_kind='archive' THEN 1 ELSE 2 END,"
-            'publication.created_at,publication.id LIMIT 1',
+            'publication.created_at,publication.id LIMIT 1'
+        )
+        row = await self._database.fetchone(
+            work_query,
             (
                 EXCLUDED_TITLE_MARKER,
                 EXCLUDED_TITLE_MARKER,
@@ -566,7 +611,9 @@ class VaingloryPublicationService:
         common = (
             'JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
             "JOIN bili_accounts account ON account.id={account}.account_id "
-            "WHERE account.state='active' AND scan.state IN ('ready','failed') "
+            "WHERE account.state='active' AND scan.state='ready' AND "
+            + _SESSION_ARCHIVES_COMPLETE
+            + ' '
             "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
             'AND scan.algorithm_version>=? AND EXISTS('
             'SELECT 1 FROM vainglory_matches match '
@@ -597,6 +644,18 @@ class VaingloryPublicationService:
             + common.format(account='job')
             + "AND job.state IN ('waiting_review','approved','completed') "
             "AND job.submit_state='confirmed' AND job.aid>0 AND job.bvid<>'' "
+            'AND EXISTS(SELECT 1 FROM upload_parts expected_upload '
+            'WHERE expected_upload.job_id=job.id '
+            'AND expected_upload.cid IS NOT NULL) '
+            'AND NOT EXISTS(SELECT 1 FROM upload_parts expected_upload '
+            'WHERE expected_upload.job_id=job.id '
+            'AND expected_upload.cid IS NOT NULL AND NOT EXISTS('
+            'SELECT 1 FROM recording_parts expected_recording '
+            'JOIN vainglory_part_jobs expected_analysis '
+            'ON expected_analysis.part_id=expected_recording.id '
+            'WHERE expected_recording.session_id=session.id '
+            'AND expected_recording.part_index=expected_upload.part_index '
+            "AND expected_analysis.state='ready')) "
             'ORDER BY CASE WHEN EXISTS('
             'SELECT 1 FROM archive_migration_items priority_item '
             'WHERE priority_item.upload_job_id=job.id) THEN 1 ELSE 0 END,'
@@ -615,7 +674,8 @@ class VaingloryPublicationService:
                 'JOIN recording_sessions session '
                 'ON session.id=imported.session_id '
                 + common.format(account='imported')
-                + "AND imported.state IN ('ready','failed') "
+                + "AND imported.state='ready' AND imported.page_count>0 "
+                'AND imported.completed_page_count=imported.page_count '
                 'AND imported.session_id IS NOT NULL '
                 'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
                 'WHERE job.session_id=imported.session_id) '
@@ -653,6 +713,8 @@ class VaingloryPublicationService:
 
     async def _process(self, publication: Mapping[str, Any]) -> None:
         publication_id = int(publication['id'])
+        if not await self._publication_ready(publication_id):
+            return
         if str(publication['account_state']) != 'active':
             await self._retry_publication(
                 publication_id, int(publication['attempt_count']), '投稿账号当前不可用'
@@ -709,6 +771,17 @@ class VaingloryPublicationService:
                 int(publication['attempt_count']),
                 '投稿账号或凭据在发布期间发生变化',
             )
+
+    async def _publication_ready(self, publication_id: int) -> bool:
+        return bool(
+            await self._database.scalar(
+                'SELECT EXISTS(SELECT 1 FROM vainglory_publications publication '
+                'JOIN recording_sessions session '
+                'ON session.id=publication.session_id '
+                'WHERE publication.id=? AND ' + _PUBLICATION_READY_PREDICATE + ')',
+                (int(publication_id),),
+            )
+        )
 
     async def _publish_chapters(
         self, publication: Mapping[str, Any], bundle: CredentialBundle
@@ -1560,7 +1633,7 @@ def _build_chapter_cards(
 
 def _chapter_content(index: int, match: MatchRecord) -> str:
     result = {'teal': '胜', 'orange': '负'}.get(match.winner_color, '未定')
-    content = '{}{}'.format(index, result)
+    content = '第{}局|{}'.format(index, result)
     recorded = next(
         (
             player
@@ -1575,7 +1648,7 @@ def _chapter_content(index: int, match: MatchRecord) -> str:
     )
     if recorded is None or not recorded.hero_label:
         return content
-    hero = '|{}'.format(hero_chapter_name(recorded.hero_label))
+    hero = '|{}'.format(hero_chinese_name(recorded.hero_label))
     return content + hero if len(content + hero) <= _CHAPTER_CONTENT_LIMIT else content
 
 
@@ -1605,7 +1678,8 @@ def _automatic_chapter_cards(cards: Sequence[Mapping[str, Any]]) -> bool:
     return all(
         str(card.get('content') or '') == '直播开始'
         or re.fullmatch(
-            r'(?:第\d+局|\d+(?:胜|负|未定)'
+            r'(?:第\d+局(?:\|(?:胜|负|未定)(?:\|[^|\r\n]{1,8})?)?'
+            r'|\d+(?:胜|负|未定)'
             r'(?:(?:\[[^\[\]\r\n]{1,8}\])|(?:\|[^|\r\n]{1,8}))?)',
             str(card.get('content') or ''),
         )

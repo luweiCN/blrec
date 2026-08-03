@@ -65,66 +65,6 @@ HERO_CHINESE_NAMES = {
     'Ylva': '伊娃',
 }
 
-HERO_CHAPTER_NAMES = {
-    'Adagio': '鸟人',
-    'Alpha': '阿尔法',
-    'Amael': '牛头',
-    'Anka': '安卡',
-    'Ardan': '二蛋',
-    'Baptiste': '巴蒂',
-    'Baron': '巴隆',
-    'Blackfeather': '黑羽',
-    'Caine': '凯恩',
-    'Catherine': '女警',
-    'Celeste': '星妈',
-    'Churnwalker': '沃克尔',
-    'Flicker': '小精灵',
-    'Fortress': '魔狼',
-    'Glaive': '豹子',
-    'Grace': '锤妈',
-    'Grumpjaw': '大嘴',
-    'Gwen': '女枪',
-    'Idris': '伊德瑞',
-    'Inara': '伊娜',
-    'Ishtar': '伊斯塔',
-    'Joule': '猪儿',
-    'Karas': '鸦',
-    'Kensei': '剑圣',
-    'Kestrel': '鹰眼',
-    'Kinetic': '基尼',
-    'Koshka': '猫女',
-    'Krul': '鬼剑',
-    'Lance': '兰斯',
-    'Leo': '里昂',
-    'Lorelai': '蛇女',
-    'Lyra': '莱拉',
-    'Magnus': '马哥',
-    'Malene': '小公主',
-    'Miho': '美慧',
-    'Ozo': '猴子',
-    'Petal': '花花',
-    'Phinn': '鱼人',
-    'Reim': '老头',
-    'Reza': '火法',
-    'Ringo': '酒枪',
-    'Rona': '罗娜',
-    'Samuel': '黑法',
-    'Sanfeng': '三丰',
-    'SAW': '机枪',
-    'Shin': '哪吒',
-    'Silvernail': '银锭',
-    'Skaarf': '火龙',
-    'Skye': '斯凯伊',
-    'Taka': '塔卡',
-    'Tony': '托尼',
-    'Varya': '雷妈',
-    'Viola': '维奥拉',
-    'Vox': '舞司',
-    'Warhawk': '小炮',
-    'Yates': '椰子',
-    'Ylva': '伊娃',
-}
-
 
 @dataclass(frozen=True)
 class BuiltinHero:
@@ -193,7 +133,3 @@ def identify_builtin_hero(
 
 def hero_chinese_name(label: str) -> str:
     return HERO_CHINESE_NAMES.get(label, label)
-
-
-def hero_chapter_name(label: str) -> str:
-    return HERO_CHAPTER_NAMES.get(label, hero_chinese_name(label))
