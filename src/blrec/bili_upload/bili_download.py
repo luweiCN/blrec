@@ -56,8 +56,11 @@ class YtDlpMediaDownloader:
             None, target.parent.mkdir, 0o700, True, True
         )
         token = secrets.token_hex(8)
-        prefix = target.parent / '.{}.yt-dlp-{}'.format(target.name, token)
-        cookie_path = self._sidecar_path(prefix, '.cookies.txt')
+        prefix = self._download_prefix(target, cid)
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._cleanup_cookie_sidecars, prefix
+        )
+        cookie_path = self._sidecar_path(prefix, '.cookies-{}.txt'.format(token))
         self.write_cookie_file(bundle.cookies, cookie_path, now=int(self._clock()))
         selection = None
         affinity_key = 'archive:{}:{}'.format(bundle.mid, bvid)
@@ -78,6 +81,7 @@ class YtDlpMediaDownloader:
             write_danmaku=danmaku_target is not None,
         )
         environment = self.subprocess_environment(self._network_manager, selection)
+        completed = False
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -125,10 +129,15 @@ class YtDlpMediaDownloader:
                 await asyncio.get_running_loop().run_in_executor(
                     None, os.replace, str(danmaku_source), str(danmaku_target)
                 )
+            completed = True
         finally:
             await asyncio.get_running_loop().run_in_executor(
-                None, self._cleanup_prefix, prefix
+                None, self._unlink_if_present, cookie_path
             )
+            if completed:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._cleanup_prefix, prefix
+                )
 
     async def download_danmaku(
         self, bundle: CredentialBundle, *, bvid: str, cid: int, page: int, target: Path
@@ -233,9 +242,10 @@ class YtDlpMediaDownloader:
             '--concurrent-fragments',
             '1',
             '--retries',
-            '3',
+            '20',
             '--fragment-retries',
-            '3',
+            '20',
+            '--continue',
             '--socket-timeout',
             '30',
             '--newline',
@@ -519,6 +529,15 @@ class YtDlpMediaDownloader:
     @staticmethod
     def _sidecar_path(prefix: Path, suffix: str) -> Path:
         return Path(str(prefix) + suffix)
+
+    @staticmethod
+    def _download_prefix(target: Path, cid: int) -> Path:
+        return target.parent / '.{}.yt-dlp-{}'.format(target.name, int(cid))
+
+    @staticmethod
+    def _cleanup_cookie_sidecars(prefix: Path) -> None:
+        for path in prefix.parent.glob(prefix.name + '.cookies-*.txt'):
+            YtDlpMediaDownloader._unlink_if_present(path)
 
     @staticmethod
     def _cleanup_prefix(prefix: Path) -> None:

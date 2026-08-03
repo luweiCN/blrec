@@ -23,6 +23,9 @@ def test_builds_resource_friendly_highest_quality_command_on_selected_ip(
     assert command[command.index('--format') + 1] == 'bv*+ba/b'
     assert command[command.index('--format-sort') + 1] == 'res,codec:avc'
     assert command[command.index('--concurrent-fragments') + 1] == '1'
+    assert command[command.index('--retries') + 1] == '20'
+    assert command[command.index('--fragment-retries') + 1] == '20'
+    assert '--continue' in command
     assert command[command.index('--source-address') + 1] == '192.168.50.10'
     assert command[command.index('--sub-langs') + 1] == 'danmaku'
     assert command[command.index('--sub-format') + 1] == 'xml'
@@ -56,6 +59,17 @@ def test_cookie_sidecar_keeps_the_unique_download_token(tmp_path: Path) -> None:
     assert YtDlpMediaDownloader._sidecar_path(first, '.cookies.txt').name.endswith(
         'yt-dlp-first.cookies.txt'
     )
+
+
+def test_video_partial_prefix_is_stable_for_the_same_cid(tmp_path: Path) -> None:
+    target = tmp_path / 'video.mp4'
+
+    first = YtDlpMediaDownloader._download_prefix(target, 123)
+    second = YtDlpMediaDownloader._download_prefix(target, 123)
+    replacement = YtDlpMediaDownloader._download_prefix(target, 456)
+
+    assert first == second
+    assert first != replacement
 
 
 def test_writes_short_lived_netscape_cookie_file_with_owner_only_permissions(
