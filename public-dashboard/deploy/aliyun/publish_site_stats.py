@@ -17,6 +17,8 @@ ACTIVE_WINDOW_MINUTES = 5
 REFRESH_CALENDAR_DAYS = 7
 ANALYTICS_PATH = '/analytics/pixel.svg'
 ANALYTICS_DOMAIN = 'vg.luwei.host'
+PAGEVIEW_PARAM_PATTERN = r'^[?]event=pageview&visitor=[0-9a-f-]{16,64}$'
+ACTIVE_PARAM_PATTERN = r'^[?]event=(pageview|heartbeat)&visitor=[0-9a-f-]{16,64}$'
 HISTORY_OBJECT_KEY = 'data/site-stats-history.json'
 PUBLIC_OBJECT_KEY = 'data/site-stats.json'
 
@@ -253,7 +255,7 @@ class AliyunSlsAnalytics:
             + ' | SELECT count(*) AS page_views, count(DISTINCT '
             + self._visitor_expression
             + ") AS visitors FROM log WHERE regexp_like(uri_param, "
-            + "'^event=pageview&visitor=[0-9a-f-]{16,64}$')"
+            + "'{}')".format(PAGEVIEW_PARAM_PATTERN)
         )
         result = self._query(from_time, to_time, query)
         return Counts(
@@ -267,7 +269,7 @@ class AliyunSlsAnalytics:
             + ' | SELECT count(DISTINCT '
             + self._visitor_expression
             + ") AS visitors FROM log WHERE regexp_like(uri_param, "
-            + "'^event=(pageview|heartbeat)&visitor=[0-9a-f-]{16,64}$')"
+            + "'{}')".format(ACTIVE_PARAM_PATTERN)
         )
         return _count_field(self._query(from_time, to_time, query), 'visitors')
 

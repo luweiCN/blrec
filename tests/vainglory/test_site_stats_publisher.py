@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,19 @@ SPEC.loader.exec_module(site_stats_publisher)
 
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
+
+
+def test_sls_parameter_patterns_include_the_leading_question_mark() -> None:
+    visitor = 'f71877fd-1665-4635-8f93-31558a3ad9ee'
+
+    assert re.fullmatch(
+        site_stats_publisher.PAGEVIEW_PARAM_PATTERN,
+        '?event=pageview&visitor={}'.format(visitor),
+    )
+    assert re.fullmatch(
+        site_stats_publisher.ACTIVE_PARAM_PATTERN,
+        '?event=heartbeat&visitor={}'.format(visitor),
+    )
 
 
 class FakeAnalytics:
