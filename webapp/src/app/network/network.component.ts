@@ -60,7 +60,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
     {
       key: 'archiveDownload',
       name: '历史稿件下载',
-      help: '稿件列表、高清播放地址和媒体分片固定使用同一线路。',
+      help: '固定线路使用 3 路下载；多线路并行时，每条开启“历史下载”的线路固定运行 3 路，可单独暂停。',
     },
   ];
 
@@ -196,6 +196,13 @@ export class NetworkComponent implements OnInit, OnDestroy {
     this.updateInterface(item, { enabled });
   }
 
+  setArchiveDownloadEnabled(
+    item: NetworkInterface,
+    enabled: boolean,
+  ): void {
+    this.updateInterface(item, { archiveDownloadEnabled: enabled });
+  }
+
   saveUploadLimit(item: NetworkInterface, megabytesPerSecond: number): void {
     const normalized = Number.isFinite(megabytesPerSecond)
       ? Math.max(0, megabytesPerSecond)
@@ -211,6 +218,10 @@ export class NetworkComponent implements OnInit, OnDestroy {
 
   supportsRoundRobin(purpose: NetworkPurpose): boolean {
     return !['upload', 'biliApi', 'archiveDownload'].includes(purpose);
+  }
+
+  supportsParallel(purpose: NetworkPurpose): boolean {
+    return purpose === 'archiveDownload';
   }
 
   formatRate(bytesPerSecond: number): string {
@@ -233,7 +244,11 @@ export class NetworkComponent implements OnInit, OnDestroy {
 
   private updateInterface(
     item: NetworkInterface,
-    update: { enabled?: boolean; uploadLimitBps?: number },
+    update: {
+      enabled?: boolean;
+      archiveDownloadEnabled?: boolean;
+      uploadLimitBps?: number;
+    },
   ): void {
     if (this.savingInterfaces.has(item.name)) {
       return;
@@ -271,6 +286,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
       for (const item of interfaces) {
         this.settings.interfaces[item.name] = {
           enabled: item.enabled,
+          archiveDownloadEnabled: item.archiveDownloadEnabled,
           uploadLimitBps: item.uploadLimitBps,
         };
       }

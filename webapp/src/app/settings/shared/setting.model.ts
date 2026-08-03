@@ -14,13 +14,14 @@ export interface LiveMonitorSettings {
 }
 
 export interface NetworkRouteSettings {
-  mode: 'fixed' | 'round_robin';
+  mode: 'fixed' | 'round_robin' | 'parallel';
   interface: string | null;
   failoverEnabled: boolean;
 }
 
 export interface NetworkInterfaceSettings {
   enabled: boolean;
+  archiveDownloadEnabled: boolean;
   uploadLimitBps: number;
 }
 

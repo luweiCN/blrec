@@ -327,7 +327,7 @@ class LiveMonitorSettings(BaseModel):
 
 
 class NetworkRouteSettings(BaseModel):
-    mode: Literal['fixed', 'round_robin'] = 'fixed'
+    mode: Literal['fixed', 'round_robin', 'parallel'] = 'fixed'
     interface: Optional[str] = None
     failover_enabled: bool = True
 
@@ -345,6 +345,7 @@ class NetworkRouteSettings(BaseModel):
 
 class NetworkInterfaceSettings(BaseModel):
     enabled: bool = True
+    archive_download_enabled: bool = True
     upload_limit_bps: Annotated[int, Field(ge=0)] = 0
 
 
@@ -384,15 +385,26 @@ class NetworkSettings(BaseModel):
     def _credential_routes_must_be_fixed(
         cls, values: Dict[str, object]
     ) -> Dict[str, object]:
-        for field in ('upload', 'bili_api', 'archive_download'):
+        for field in ('upload', 'bili_api'):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.mode != 'fixed':
                 raise ValueError('{} network route must use fixed mode'.format(field))
-            if (
-                field in ('upload', 'archive_download')
-                and isinstance(route, NetworkRouteSettings)
-                and route.failover_enabled
-            ):
+        archive_route = values.get('archive_download')
+        if isinstance(
+            archive_route, NetworkRouteSettings
+        ) and archive_route.mode not in ('fixed', 'parallel'):
+            raise ValueError(
+                'archive_download network route must use fixed or parallel mode'
+            )
+        for field in ('room_status', 'danmaku', 'recording'):
+            route = values.get(field)
+            if isinstance(route, NetworkRouteSettings) and route.mode == 'parallel':
+                raise ValueError(
+                    '{} network route cannot use parallel mode'.format(field)
+                )
+        for field in ('upload', 'archive_download'):
+            route = values.get(field)
+            if isinstance(route, NetworkRouteSettings) and route.failover_enabled:
                 values[field] = route.copy(update={'failover_enabled': False})
         return values
 

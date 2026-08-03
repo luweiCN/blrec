@@ -17,10 +17,18 @@ from blrec.networking.manager import (
 
 from .crypto import CookieRecord, CredentialBundle
 
-__all__ = ('BiliDownloadContractError', 'YtDlpMediaDownloader')
+__all__ = (
+    'BiliDownloadContractError',
+    'BiliDownloadRoutePaused',
+    'YtDlpMediaDownloader',
+)
 
 
 class BiliDownloadContractError(RuntimeError):
+    pass
+
+
+class BiliDownloadRoutePaused(RuntimeError):
     pass
 
 
@@ -50,6 +58,8 @@ class YtDlpMediaDownloader:
         target: Path,
         danmaku_target: Optional[Path] = None,
         progress: Callable[[int, Optional[int]], Awaitable[None]],
+        _network_interface: Optional[str] = None,
+        _network_affinity_key: Optional[str] = None,
     ) -> None:
         self._validate_source(bvid, cid, page)
         await asyncio.get_running_loop().run_in_executor(
@@ -63,14 +73,26 @@ class YtDlpMediaDownloader:
         cookie_path = self._sidecar_path(prefix, '.cookies-{}.txt'.format(token))
         self.write_cookie_file(bundle.cookies, cookie_path, now=int(self._clock()))
         selection = None
-        affinity_key = 'archive:{}:{}'.format(bundle.mid, bvid)
+        affinity_key = _network_affinity_key or 'archive:{}:{}'.format(bundle.mid, bvid)
         if self._network_manager is not None:
             try:
-                selection = self._network_manager.select(
-                    'archive_download', anonymous=False, affinity_key=affinity_key
+                selection = (
+                    self._network_manager.select(
+                        'archive_download', anonymous=False, affinity_key=affinity_key
+                    )
+                    if _network_interface is None
+                    else self._network_manager.select_interface(
+                        'archive_download',
+                        _network_interface,
+                        affinity_key=affinity_key,
+                    )
                 )
             except NetworkUnavailable:
                 self._unlink_if_present(cookie_path)
+                if _network_interface is not None:
+                    raise BiliDownloadRoutePaused(
+                        '历史稿件下载线路已暂停或不可用'
+                    ) from None
                 raise BiliDownloadContractError('历史稿件下载网络当前不可用') from None
         command = self.build_command(
             cookie_path=cookie_path,
@@ -81,6 +103,17 @@ class YtDlpMediaDownloader:
             write_danmaku=danmaku_target is not None,
         )
         environment = self.subprocess_environment(self._network_manager, selection)
+        cancelled: Optional[Callable[[], bool]] = None
+        if _network_interface is not None and self._network_manager is not None:
+            network_manager = self._network_manager
+            network_interface = _network_interface
+
+            def route_cancelled() -> bool:
+                return not network_manager.interface_available(
+                    'archive_download', network_interface
+                )
+
+            cancelled = route_cancelled
         completed = False
         try:
             try:
@@ -94,12 +127,13 @@ class YtDlpMediaDownloader:
             except OSError:
                 raise BiliDownloadContractError('NAS 容器中没有可用的 yt-dlp') from None
             try:
-                output_path, error = await self._monitor(
+                output_path, error = await self._monitor_with_route_control(
                     process,
                     progress,
                     interface_name=(
                         None if selection is None else selection.interface_name
                     ),
+                    cancelled=cancelled,
                 )
             except (asyncio.CancelledError, KeyboardInterrupt):
                 await self._terminate(process)
@@ -138,6 +172,29 @@ class YtDlpMediaDownloader:
                 await asyncio.get_running_loop().run_in_executor(
                     None, self._cleanup_prefix, prefix
                 )
+
+    async def download_on_interface(
+        self,
+        bundle: CredentialBundle,
+        *,
+        bvid: str,
+        cid: int,
+        page: int,
+        target: Path,
+        progress: Callable[[int, Optional[int]], Awaitable[None]],
+        interface_name: str,
+        affinity_key: str,
+    ) -> None:
+        await self.download(
+            bundle,
+            bvid=bvid,
+            cid=cid,
+            page=page,
+            target=target,
+            progress=progress,
+            _network_interface=interface_name,
+            _network_affinity_key=affinity_key,
+        )
 
     async def download_danmaku(
         self, bundle: CredentialBundle, *, bvid: str, cid: int, page: int, target: Path
@@ -461,6 +518,33 @@ class YtDlpMediaDownloader:
         await stdout_task
         error = await stderr_task
         return output_path, error
+
+    async def _monitor_with_route_control(
+        self,
+        process: asyncio.subprocess.Process,
+        progress: Callable[[int, Optional[int]], Awaitable[None]],
+        *,
+        interface_name: Optional[str],
+        cancelled: Optional[Callable[[], bool]],
+    ) -> Tuple[Optional[str], str]:
+        monitor = asyncio.create_task(
+            self._monitor(process, progress, interface_name=interface_name)
+        )
+        try:
+            while not monitor.done():
+                if cancelled is not None and cancelled():
+                    await self._terminate(process)
+                    await asyncio.gather(monitor, return_exceptions=True)
+                    raise BiliDownloadRoutePaused('历史稿件下载线路已停用')
+                await asyncio.wait((monitor,), timeout=1)
+            return await monitor
+        except BaseException:
+            if process.returncode is None:
+                await self._terminate(process)
+            if not monitor.done():
+                monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+            raise
 
     @classmethod
     def parse_progress(cls, line: str) -> Optional[Tuple[str, int, Optional[int]]]:

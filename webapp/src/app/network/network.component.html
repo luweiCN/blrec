@@ -32,7 +32,7 @@
           [nzData]="interfaces"
           [nzFrontPagination]="false"
           [nzShowPagination]="false"
-          [nzScroll]="{ x: '1040px' }"
+          [nzScroll]="{ x: '1140px' }"
           nzSize="middle"
         >
           <thead>
@@ -41,7 +41,8 @@
               <th nzWidth="180px">地址与网关</th>
               <th nzWidth="145px">出口状态</th>
               <th nzWidth="180px">BLREC 实时流量</th>
-              <th nzWidth="70px">启用</th>
+              <th nzWidth="80px">全局启用</th>
+              <th nzWidth="90px">历史下载</th>
               <th nzWidth="245px">上传限速</th>
               <th nzWidth="70px" nzAlign="right">操作</th>
             </tr>
@@ -85,6 +86,14 @@
                   [ngModel]="item.enabled"
                   [nzLoading]="isInterfaceSaving(item.name)"
                   (ngModelChange)="setInterfaceEnabled(item, $event)"
+                ></nz-switch>
+              </td>
+              <td>
+                <nz-switch
+                  [ngModel]="item.archiveDownloadEnabled"
+                  [nzLoading]="isInterfaceSaving(item.name)"
+                  [nzDisabled]="item.kind === 'bridge'"
+                  (ngModelChange)="setArchiveDownloadEnabled(item, $event)"
                 ></nz-switch>
               </td>
               <td>
@@ -135,7 +144,7 @@
               nz-icon
               nzType="question-circle"
               nz-tooltip
-              nzTooltipTitle="固定线路始终使用所选网卡；轮换只用于匿名请求，并按请求批次、弹幕连接或直播场次保持稳定。"
+              nzTooltipTitle="固定线路始终使用所选网卡；轮换只用于匿名请求；历史稿件的多线路并行会在每条已启用线路上固定运行 3 个下载。"
             ></i>
           </div>
           <button
@@ -173,10 +182,15 @@
               nzLabel="轮换可用线路"
               [nzDisabled]="!supportsRoundRobin(purpose.key)"
             ></nz-option>
+            <nz-option
+              nzValue="parallel"
+              nzLabel="多线路并行（每路 3 个）"
+              [nzDisabled]="!supportsParallel(purpose.key)"
+            ></nz-option>
           </nz-select>
           <nz-select
             [(ngModel)]="route(purpose.key).interface"
-            [nzDisabled]="route(purpose.key).mode === 'round_robin'"
+            [nzDisabled]="route(purpose.key).mode !== 'fixed'"
           >
             <nz-option nzLabel="系统默认" [nzValue]="null"></nz-option>
             <nz-option
@@ -188,7 +202,9 @@
           </nz-select>
           <nz-switch
             [(ngModel)]="route(purpose.key).failoverEnabled"
-            [nzDisabled]="purpose.key === 'upload'"
+            [nzDisabled]="
+              purpose.key === 'upload' || purpose.key === 'archiveDownload'
+            "
           ></nz-switch>
         </div>
       </section>

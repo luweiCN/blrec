@@ -396,7 +396,8 @@ class ArchiveBackfillService:
             "WHERE archive.state='queued' "
             "AND imported.state IN ('downloading','analyzing') "
             'AND sync.operator_paused=0 '
-            'ORDER BY imported.created_at,archive.import_id,archive.page LIMIT 1'
+            'ORDER BY COALESCE(imported.published_at,imported.created_at) DESC,'
+            'archive.import_id,archive.page LIMIT 1'
         )
         if part is not None:
             await self._queue_download(int(part['recording_part_id']))
@@ -567,8 +568,9 @@ class ArchiveBackfillService:
                 'imported.quota_day=? OR sync.quota_day IS NULL '
                 'OR sync.quota_day<>? OR sync.daily_used<sync.daily_limit) '
                 "ORDER BY CASE imported.state WHEN 'failed' THEN 0 ELSE 1 END,"
-                'COALESCE(imported.next_retry_at,imported.created_at),'
-                'imported.created_at,imported.id LIMIT 1',
+                'COALESCE(imported.next_retry_at,0),'
+                'COALESCE(imported.published_at,imported.created_at) DESC,'
+                'imported.id LIMIT 1',
                 (now, now, quota_day, quota_day),
             ).fetchone()
             if row is None:

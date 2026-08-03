@@ -7,8 +7,11 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Any, Awaitable, Callable, Dict, Optional, Protocol, Tuple
 
+from blrec.networking.manager import NetworkRouteManager
+
+from .bili_download import BiliDownloadRoutePaused
 from .database import BiliUploadDatabase
 
 __all__ = (
@@ -20,7 +23,7 @@ __all__ = (
 )
 
 _TEN_DAYS_SECONDS = 10 * 24 * 60 * 60
-_DOWNLOAD_CONCURRENCY = 3
+_DOWNLOADS_PER_INTERFACE = 3
 
 
 class RemoteMediaNotFound(ValueError):
@@ -71,6 +74,8 @@ class RemoteMediaCache:
         *,
         bundle_loader: Callable[[int], Awaitable[Any]],
         downloader: RemoteMediaDownloader,
+        network_manager: Optional[NetworkRouteManager] = None,
+        download_interfaces: Tuple[str, ...] = (),
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._database = database
@@ -80,9 +85,12 @@ class RemoteMediaCache:
         self._cache_root = (self._recording_root / '.remote-media').resolve()
         self._bundle_loader = bundle_loader
         self._downloader = downloader
+        self._network_manager = network_manager
+        self._download_interfaces = tuple(download_interfaces)
         self._clock = clock
-        self._download_slots = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
         self._wake = asyncio.Event()
+        self._claim_lock = asyncio.Lock()
+        self._paused_part_interfaces: Dict[int, str] = {}
         self._task: Optional[asyncio.Task[None]] = None
 
     @property
@@ -143,27 +151,52 @@ class RemoteMediaCache:
     async def status(self, part_id: int) -> RemoteMediaStatus:
         return await self._load_status(part_id, create_source=True)
 
-    async def run_once(self) -> bool:
-        async with self._download_slots:
-            await self.cleanup_expired()
-            claim = await self._claim()
-            if claim is None:
-                return False
-            part_id = int(claim['part_id'])
-            target = self._target_path(
-                int(claim['account_id']), str(claim['bvid']), int(claim['page'])
+    async def run_once(
+        self,
+        *,
+        network_interface: Optional[str] = None,
+        worker_index: Optional[int] = None,
+    ) -> bool:
+        if (
+            network_interface is not None
+            and self._network_manager is not None
+            and not self._network_manager.interface_available(
+                'archive_download', network_interface
             )
-            try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, target.parent.mkdir, 0o700, True, True
+        ):
+            return False
+        await self.cleanup_expired()
+        claim = await self._claim(network_interface)
+        if claim is None:
+            return False
+        part_id = int(claim['part_id'])
+        target = self._target_path(
+            int(claim['account_id']), str(claim['bvid']), int(claim['page'])
+        )
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, target.parent.mkdir, 0o700, True, True
+            )
+            bundle = await self._bundle_loader(int(claim['account_id']))
+
+            async def report(downloaded_bytes: int, total_bytes: Optional[int]) -> None:
+                await self._update_progress(part_id, downloaded_bytes, total_bytes)
+
+            download_on_interface = getattr(
+                self._downloader, 'download_on_interface', None
+            )
+            if network_interface is not None and callable(download_on_interface):
+                await download_on_interface(
+                    bundle,
+                    bvid=str(claim['bvid']),
+                    cid=int(claim['cid']),
+                    page=int(claim['page']),
+                    target=target,
+                    progress=report,
+                    interface_name=network_interface,
+                    affinity_key='archive-download-slot:{}'.format(worker_index or 0),
                 )
-                bundle = await self._bundle_loader(int(claim['account_id']))
-
-                async def report(
-                    downloaded_bytes: int, total_bytes: Optional[int]
-                ) -> None:
-                    await self._update_progress(part_id, downloaded_bytes, total_bytes)
-
+            else:
                 await self._downloader.download(
                     bundle,
                     bvid=str(claim['bvid']),
@@ -172,20 +205,25 @@ class RemoteMediaCache:
                     target=target,
                     progress=report,
                 )
-                size = await asyncio.get_running_loop().run_in_executor(
-                    None, self._regular_file_size, target
-                )
-                if size is None or size <= 0:
-                    raise RemoteMediaUnavailable('下载完成后没有生成有效视频文件')
-                await self._complete(part_id, target, size)
-            except (asyncio.CancelledError, KeyboardInterrupt):
+            size = await asyncio.get_running_loop().run_in_executor(
+                None, self._regular_file_size, target
+            )
+            if size is None or size <= 0:
+                raise RemoteMediaUnavailable('下载完成后没有生成有效视频文件')
+            await self._complete(part_id, target, size)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            await self._reset_pending(part_id)
+            raise
+        except BiliDownloadRoutePaused:
+            if network_interface is None:
                 await self._reset_pending(part_id)
-                raise
-            except BaseException as error:
-                await self._mark_failed(
-                    part_id, '{}: {}'.format(type(error).__name__, error)
-                )
-            return True
+            else:
+                await self._pause_download(part_id, network_interface)
+        except BaseException as error:
+            await self._mark_failed(
+                part_id, '{}: {}'.format(type(error).__name__, error)
+            )
+        return True
 
     async def cleanup_expired(self) -> int:
         now = self._now()
@@ -338,28 +376,60 @@ class RemoteMediaCache:
 
         await self._database.write(ensure)
 
-    async def _claim(self) -> Optional[sqlite3.Row]:
+    async def _claim(self, network_interface: Optional[str]) -> Optional[sqlite3.Row]:
         now = self._now()
-
-        def claim(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
-            row = connection.execute(
-                'SELECT * FROM vainglory_video_sources '
-                "WHERE state='pending' ORDER BY updated_at,part_id LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            changed = connection.execute(
-                "UPDATE vainglory_video_sources SET state='downloading',"
-                'progress=0,downloaded_bytes=0,total_bytes=NULL,error=NULL,'
-                'updated_at=? '
-                "WHERE part_id=? AND state='pending'",
-                (now, int(row['part_id'])),
+        async with self._claim_lock:
+            excluded = tuple(
+                part_id
+                for part_id, interface_name in self._paused_part_interfaces.items()
+                if interface_name != network_interface
             )
-            if changed.rowcount != 1:
-                return None
-            return row
+            placeholders = ','.join('?' for _ in excluded)
+            exclusion = (
+                ''
+                if not excluded
+                else 'AND source.part_id NOT IN ({}) '.format(placeholders)
+            )
 
-        return await self._database.write(claim)
+            def claim(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
+                row = connection.execute(
+                    'SELECT source.* FROM vainglory_video_sources source '
+                    'LEFT JOIN vainglory_archive_parts archive '
+                    'ON archive.recording_part_id=source.part_id '
+                    'LEFT JOIN vainglory_archive_imports imported '
+                    'ON imported.id=archive.import_id '
+                    "WHERE source.state='pending' "
+                    + exclusion
+                    + "ORDER BY CASE WHEN source.retention_kind='ten_day' "
+                    'THEN 0 ELSE 1 END,'
+                    'CASE WHEN archive.import_id IS NOT NULL AND EXISTS('
+                    'SELECT 1 FROM vainglory_archive_parts active_archive '
+                    'JOIN vainglory_video_sources active_source '
+                    'ON active_source.part_id=active_archive.recording_part_id '
+                    'WHERE active_archive.import_id=archive.import_id '
+                    "AND active_source.state='downloading') THEN 0 ELSE 1 END,"
+                    'COALESCE(imported.published_at,imported.created_at,'
+                    'source.updated_at) DESC,archive.import_id,archive.page,'
+                    'source.updated_at,source.part_id LIMIT 1',
+                    excluded,
+                ).fetchone()
+                if row is None:
+                    return None
+                changed = connection.execute(
+                    "UPDATE vainglory_video_sources SET state='downloading',"
+                    'progress=0,downloaded_bytes=0,total_bytes=NULL,error=NULL,'
+                    'updated_at=? '
+                    "WHERE part_id=? AND state='pending'",
+                    (now, int(row['part_id'])),
+                )
+                if changed.rowcount != 1:
+                    return None
+                return row
+
+            row = await self._database.write(claim)
+            if row is not None:
+                self._paused_part_interfaces.pop(int(row['part_id']), None)
+            return row
 
     async def _update_progress(
         self, part_id: int, downloaded_bytes: int, total_bytes: Optional[int]
@@ -449,6 +519,11 @@ class RemoteMediaCache:
             (self._now(), int(part_id)),
         )
 
+    async def _pause_download(self, part_id: int, interface_name: str) -> None:
+        async with self._claim_lock:
+            self._paused_part_interfaces[int(part_id)] = interface_name
+            await self._reset_pending(part_id)
+
     async def _mark_failed(self, part_id: int, error: str) -> None:
         message = error.strip()[:500] or '远程视频下载失败'
         await self._database.execute(
@@ -458,13 +533,38 @@ class RemoteMediaCache:
         )
 
     async def _run(self) -> None:
+        bindings: Tuple[Optional[str], ...]
+        if self._download_interfaces:
+            bindings = tuple(
+                interface_name
+                for interface_name in self._download_interfaces
+                for _ in range(_DOWNLOADS_PER_INTERFACE)
+            )
+        else:
+            bindings = (None,) * _DOWNLOADS_PER_INTERFACE
         await asyncio.gather(
-            *(self._run_worker() for _ in range(_DOWNLOAD_CONCURRENCY))
+            *(
+                self._run_worker(interface_name, worker_index)
+                for worker_index, interface_name in enumerate(bindings)
+            )
         )
 
-    async def _run_worker(self) -> None:
+    async def _run_worker(
+        self, interface_name: Optional[str], worker_index: int
+    ) -> None:
         while True:
-            processed = await self.run_once()
+            if (
+                interface_name is not None
+                and self._network_manager is not None
+                and not self._network_manager.interface_available(
+                    'archive_download', interface_name
+                )
+            ):
+                await asyncio.sleep(1)
+                continue
+            processed = await self.run_once(
+                network_interface=interface_name, worker_index=worker_index
+            )
             if processed:
                 continue
             self._wake.clear()

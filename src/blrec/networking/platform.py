@@ -25,6 +25,7 @@ class NetworkInterface:
     dns_servers: Tuple[str, ...] = ()
     kind: str = 'physical'
     enabled: bool = True
+    archive_download_enabled: bool = True
     upload_limit_bps: int = 0
 
 

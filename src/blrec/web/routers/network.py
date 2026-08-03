@@ -20,6 +20,7 @@ class ProbeRequest(BaseModel):
 
 class InterfaceUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
+    archive_download_enabled: Optional[bool] = None
     upload_limit_bps: Optional[int] = Field(None, ge=0)
 
     class Config:
@@ -75,6 +76,7 @@ def snapshot() -> Dict[str, List[Dict[str, Any]]]:
                 'dnsServers': list(interface.dns_servers),
                 'kind': interface.kind,
                 'enabled': interface.enabled,
+                'archiveDownloadEnabled': interface.archive_download_enabled,
                 'uploadLimitBps': interface.upload_limit_bps,
                 'uploadBps': interface_traffic.get('uploadBps', 0.0),
                 'downloadBps': interface_traffic.get('downloadBps', 0.0),
@@ -111,6 +113,7 @@ async def update_interface(
         await network_manager.update_interface(
             interface_name,
             enabled=request.enabled,
+            archive_download_enabled=request.archive_download_enabled,
             upload_limit_bps=request.upload_limit_bps,
         )
     except KeyError:

@@ -563,6 +563,14 @@ class BiliAccountRuntime:
                 downloader=YtDlpMediaDownloader(
                     network_manager=self._network_route_manager, clock=self._clock
                 ),
+                network_manager=self._network_route_manager,
+                download_interfaces=(
+                    ()
+                    if self._network_route_manager is None
+                    else self._network_route_manager.parallel_interface_names(
+                        'archive_download'
+                    )
+                ),
                 clock=self._clock,
             )
             await remote_media_cache.start()

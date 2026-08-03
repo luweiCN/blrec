@@ -48,7 +48,7 @@ class RouteSelection:
     purpose: NetworkPurpose
     interface_name: Optional[str]
     source_address: Optional[str]
-    role: Literal['primary', 'fallback', 'round_robin', 'system']
+    role: Literal['primary', 'fallback', 'round_robin', 'parallel', 'system']
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,7 @@ class NetworkRouteManager:
                 result[name] = replace(
                     interface,
                     enabled=settings.enabled,
+                    archive_download_enabled=settings.archive_download_enabled,
                     upload_limit_bps=settings.upload_limit_bps,
                 )
         return result
@@ -166,6 +167,7 @@ class NetworkRouteManager:
         interface_name: str,
         *,
         enabled: Optional[bool] = None,
+        archive_download_enabled: Optional[bool] = None,
         upload_limit_bps: Optional[int] = None,
     ) -> None:
         interfaces = self.interfaces()
@@ -179,11 +181,15 @@ class NetworkRouteManager:
         item = updated.interfaces.get(
             interface_name,
             NetworkInterfaceSettings(
-                enabled=interface.enabled, upload_limit_bps=interface.upload_limit_bps
+                enabled=interface.enabled,
+                archive_download_enabled=interface.archive_download_enabled,
+                upload_limit_bps=interface.upload_limit_bps,
             ),
         )
         if enabled is not None:
             item.enabled = enabled
+        if archive_download_enabled is not None:
+            item.archive_download_enabled = archive_download_enabled
         if upload_limit_bps is not None:
             item.upload_limit_bps = upload_limit_bps
         updated.interfaces[interface_name] = item
@@ -195,6 +201,7 @@ class NetworkRouteManager:
             'network_interface_updated',
             interface=interface_name,
             enabled=item.enabled,
+            archive_download_enabled=item.archive_download_enabled,
             upload_limit_bps=item.upload_limit_bps,
         )
 
@@ -208,6 +215,32 @@ class NetworkRouteManager:
 
     def system_default_interface_name(self) -> Optional[str]:
         return self._system_default_interface_name(self.interfaces())
+
+    def interface_enabled(self, interface_name: str) -> bool:
+        interface = self.interfaces().get(interface_name)
+        return interface is not None and interface.enabled
+
+    def interface_available(self, purpose: NetworkPurpose, interface_name: str) -> bool:
+        interface = self.interfaces().get(interface_name)
+        if (
+            interface is None
+            or not interface.enabled
+            or (
+                purpose == 'archive_download' and not interface.archive_download_enabled
+            )
+        ):
+            return False
+        with self._lock:
+            return self._is_healthy(purpose, interface_name)
+
+    def parallel_interface_names(self, purpose: NetworkPurpose) -> Tuple[str, ...]:
+        if self._route_settings(purpose).mode != 'parallel':
+            return ()
+        return tuple(
+            name
+            for name, interface in sorted(self.interfaces().items())
+            if interface.kind != 'bridge' and interface.gateway is not None
+        )
 
     @property
     def traffic_meter(self) -> TrafficMeter:
@@ -365,7 +398,11 @@ class NetworkRouteManager:
             candidates = [
                 interface
                 for name, interface in sorted(interfaces.items())
-                if interface.enabled and self._is_healthy(purpose, name)
+                if interface.enabled
+                and (
+                    purpose != 'archive_download' or interface.archive_download_enabled
+                )
+                and self._is_healthy(purpose, name)
             ]
             affinity = (purpose, affinity_key) if affinity_key is not None else None
             if affinity is not None:
@@ -376,13 +413,21 @@ class NetworkRouteManager:
                         interface is not None
                         and interface.enabled
                         and (
+                            purpose != 'archive_download'
+                            or interface.archive_download_enabled
+                        )
+                        and (
                             self._is_healthy(purpose, name)
                             or not route.failover_enabled
                             or purpose in ('upload', 'archive_download')
                         )
                     ):
                         return self._audited_selection(
-                            self._selection(purpose, interface, 'primary'),
+                            self._selection(
+                                purpose,
+                                interface,
+                                'parallel' if route.mode == 'parallel' else 'primary',
+                            ),
                             anonymous=anonymous,
                             affinity_key=affinity_key,
                         )
@@ -404,6 +449,22 @@ class NetworkRouteManager:
                     affinity_key=affinity_key,
                 )
 
+            if route.mode == 'parallel' and purpose == 'archive_download':
+                if not candidates:
+                    raise NetworkUnavailable(
+                        'No enabled and healthy interface for {}'.format(purpose)
+                    )
+                cursor = self._round_robin_cursors.get(purpose, 0)
+                interface = candidates[cursor % len(candidates)]
+                self._round_robin_cursors[purpose] = cursor + 1
+                if affinity is not None:
+                    self._affinities[affinity] = interface.name
+                return self._audited_selection(
+                    self._selection(purpose, interface, 'parallel'),
+                    anonymous=anonymous,
+                    affinity_key=affinity_key,
+                )
+
             configured = interfaces.get(route.interface or '')
             if route.interface is None:
                 return self._audited_selection(
@@ -416,6 +477,9 @@ class NetworkRouteManager:
             if (
                 configured is not None
                 and configured.enabled
+                and (
+                    purpose != 'archive_download' or configured.archive_download_enabled
+                )
                 and self._is_healthy(purpose, configured.name)
             ):
                 if affinity is not None:
@@ -450,6 +514,36 @@ class NetworkRouteManager:
             self._audit_unavailable(purpose, route.interface)
             raise NetworkUnavailable(
                 'Configured network interface is unavailable for {}'.format(purpose)
+            )
+
+    def select_interface(
+        self,
+        purpose: NetworkPurpose,
+        interface_name: str,
+        *,
+        affinity_key: Optional[str] = None,
+    ) -> RouteSelection:
+        route = self._route_settings(purpose)
+        if purpose != 'archive_download' or route.mode != 'parallel':
+            raise NetworkUnavailable(
+                'Explicit interface selection is unavailable for {}'.format(purpose)
+            )
+        with self._lock:
+            interface = self.interfaces().get(interface_name)
+            if (
+                interface is None
+                or not interface.enabled
+                or not interface.archive_download_enabled
+                or not self._is_healthy(purpose, interface_name)
+            ):
+                self._audit_unavailable(purpose, interface_name)
+                raise NetworkUnavailable(
+                    'Configured network interface is unavailable for {}'.format(purpose)
+                )
+            return self._audited_selection(
+                self._selection(purpose, interface, 'parallel'),
+                anonymous=False,
+                affinity_key=affinity_key,
             )
 
     def release_affinity(self, purpose: NetworkPurpose, affinity_key: str) -> None:
@@ -562,6 +656,7 @@ class NetworkRouteManager:
             'primary': 'configured',
             'fallback': 'configured_unavailable',
             'round_robin': 'round_robin',
+            'parallel': 'parallel_download_slot',
             'system': 'system_default',
         }
         audit(
@@ -597,7 +692,7 @@ class NetworkRouteManager:
     def _selection(
         purpose: NetworkPurpose,
         interface: NetworkInterface,
-        role: Literal['primary', 'fallback', 'round_robin'],
+        role: Literal['primary', 'fallback', 'round_robin', 'parallel'],
     ) -> RouteSelection:
         return RouteSelection(
             purpose=purpose,

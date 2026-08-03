@@ -25,6 +25,7 @@ export interface NetworkInterface {
   dnsServers: string[];
   kind: 'physical' | 'bridge' | 'tunnel';
   enabled: boolean;
+  archiveDownloadEnabled: boolean;
   uploadLimitBps: number;
   uploadBps: number;
   downloadBps: number;
@@ -35,6 +36,7 @@ export interface NetworkInterface {
 
 export interface NetworkInterfaceUpdate {
   enabled?: boolean;
+  archiveDownloadEnabled?: boolean;
   uploadLimitBps?: number;
 }
 
