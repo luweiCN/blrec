@@ -220,6 +220,9 @@ describe('RealtimeService', () => {
       'network',
       'upload_progress',
       'highlight_progress',
+      'archive_migration',
+      'archive_backfill',
+      'vainglory_index',
       'resync',
       'heartbeat',
     ]);

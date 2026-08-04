@@ -726,6 +726,7 @@ class VaingloryRepository:
 
     async def invalidate_outdated_results(self) -> int:
         now = self._now()
+        obsolete_frame_paths: List[str] = []
 
         def invalidate(connection: sqlite3.Connection) -> int:
             session_rows = connection.execute(
@@ -746,6 +747,17 @@ class VaingloryRepository:
                 'WHERE algorithm_version<?)',
                 (self.ALGORITHM_VERSION,),
             ).fetchall()
+            obsolete_frame_paths.extend(
+                str(row['result_frame_path'])
+                for row in connection.execute(
+                    'SELECT result_frame_path FROM vainglory_matches '
+                    'WHERE result_frame_path IS NOT NULL AND NOT EXISTS('
+                    'SELECT 1 FROM vainglory_part_jobs job '
+                    'WHERE job.part_id=vainglory_matches.result_part_id '
+                    'AND job.algorithm_version>=?)',
+                    (self.ALGORITHM_VERSION,),
+                ).fetchall()
+            )
             deleted = connection.execute(
                 'DELETE FROM vainglory_matches WHERE NOT EXISTS('
                 'SELECT 1 FROM vainglory_part_jobs job '
@@ -810,6 +822,7 @@ class VaingloryRepository:
             return deleted
 
         deleted = await self._database.write(invalidate)
+        self._remove_result_frame_files(obsolete_frame_paths)
         if deleted:
             logger.info(
                 'Invalidated outdated Vainglory results: matches={} algorithm={}',
@@ -1673,6 +1686,7 @@ class VaingloryRepository:
     ) -> None:
         now = self._now()
         written_paths: List[Path] = []
+        obsolete_frame_paths: List[str] = []
 
         def complete(connection: sqlite3.Connection) -> None:
             job = connection.execute(
@@ -1700,6 +1714,14 @@ class VaingloryRepository:
                 ).fetchall()
             }
             used_manual_overrides: Set[Tuple[int, str, int]] = set()
+            obsolete_frame_paths.extend(
+                str(row['result_frame_path'])
+                for row in connection.execute(
+                    'SELECT result_frame_path FROM vainglory_matches '
+                    'WHERE result_part_id=? AND result_frame_path IS NOT NULL',
+                    (int(part_id),),
+                ).fetchall()
+            )
             connection.execute(
                 'DELETE FROM vainglory_matches WHERE result_part_id=?', (int(part_id),)
             )
@@ -1875,6 +1897,7 @@ class VaingloryRepository:
             self._refresh_session_job(connection, session_id, now)
 
         await self._database.write(complete)
+        self._remove_result_frame_files(obsolete_frame_paths, keep=written_paths)
         if written_paths:
             logger.info(
                 'Vainglory result frames stored: part_id={} frames={} directory={}',
@@ -3007,6 +3030,31 @@ class VaingloryRepository:
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
+
+    def _remove_result_frame_files(
+        self, relative_paths: Sequence[str], *, keep: Sequence[Path] = ()
+    ) -> None:
+        preserved = {path.resolve() for path in keep}
+        for relative_path in relative_paths:
+            try:
+                path = self._resolve_result_frame_path(relative_path)
+            except ValueError:
+                logger.warning(
+                    'Skipped invalid Vainglory result frame path: path={}',
+                    relative_path,
+                )
+                continue
+            if path in preserved:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                logger.warning(
+                    'Failed to remove obsolete Vainglory result frame: '
+                    'path={} error={}',
+                    path,
+                    error,
+                )
 
     def _resolve_hero(
         self,

@@ -292,6 +292,7 @@ def make_manager(
     remuxer: Optional[FakeRemuxer] = None,
     control_journal: Optional[ControlOperationJournal] = None,
     wake_uploads=lambda: None,
+    immediate_submission_retry: Optional[Any] = None,
 ) -> tuple[UploadTaskActionManager, FakeUploader, FakeEditPayloadBuilder]:
     uploader = FakeUploader(database)
     payload_builder = FakeEditPayloadBuilder(database)
@@ -312,6 +313,7 @@ def make_manager(
         ),
         control_journal=control_journal,
         wake_uploads=wake_uploads,
+        immediate_submission_retry=immediate_submission_retry,
         clock=lambda: 1_000,
     )
     return manager, uploader, payload_builder
@@ -639,6 +641,7 @@ async def test_retry_failed_can_immediately_probe_a_safe_frequency_wait(
     database = BiliUploadDatabase(str(tmp_path / 'db.sqlite3'))
     await database.open()
     wakeups: List[str] = []
+    immediate_retries = []
     try:
         await seed_job(
             database,
@@ -652,16 +655,22 @@ async def test_retry_failed_can_immediately_probe_a_safe_frequency_wait(
             "review_reason='B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿' "
             'WHERE id=9'
         )
+
+        async def retry_submission_now(job_id: int, original_retry_at: int) -> str:
+            immediate_retries.append((job_id, original_retry_at))
+            return '已立即请求投稿'
+
         manager, _, _ = make_manager(
             database,
             FakeProtocol(archive_response()),
             tmp_path,
             wake_uploads=lambda: wakeups.append('wake'),
+            immediate_submission_retry=retry_submission_now,
         )
 
         message = await manager.retry_failed(9, manager_subject='manager')
 
-        assert message == '已立即重新排队投稿，不会重复上传已确认分 P'
+        assert message == '已立即请求投稿'
         job = await database.fetchone(
             'SELECT state,submit_state,next_attempt_at,review_reason '
             'FROM upload_jobs WHERE id=9'
@@ -670,9 +679,10 @@ async def test_retry_failed_can_immediately_probe_a_safe_frequency_wait(
         assert dict(job) == {
             'state': 'submitting',
             'submit_state': 'prepared',
-            'next_attempt_at': 1_000,
+            'next_attempt_at': 2_800,
             'review_reason': '管理员要求立即重试投稿',
         }
+        assert immediate_retries == [(9, 2_800)]
         assert wakeups == ['wake']
         assert (
             await database.scalar(

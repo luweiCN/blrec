@@ -1598,9 +1598,7 @@ class UploadCoordinator:
             return None
         return await self._run_claim(claim)
 
-    async def retry_submission_now(
-        self, job_id: int, original_retry_at: int
-    ) -> str:
+    async def retry_submission_now(self, job_id: int, original_retry_at: int) -> str:
         """Run one prepared submission now without waiting for the upload queue."""
         now = int(self._clock())
         claim = await self._database.claim_by_id(

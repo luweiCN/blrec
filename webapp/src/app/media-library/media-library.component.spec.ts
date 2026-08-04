@@ -88,6 +88,7 @@ function sessionDetail(partId = 11): RecordingSessionDetail {
     matchIndexState: null,
     matchCount: 0,
     matchPublicationState: null,
+    matchChapterState: null,
     matchDescriptionState: null,
     matchCommentState: null,
     matchCommentCount: 0,

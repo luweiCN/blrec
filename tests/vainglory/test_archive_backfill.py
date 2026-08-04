@@ -22,7 +22,7 @@ class FakeArchiveReader:
     ) -> Tuple[Mapping[str, Any], ...]:
         assert account_id == 1
         assert credential_version == 1
-        assert status == 'pubed'
+        assert status == 'is_pubing,pubed,not_pubed'
         assert page_size == 50
         if page_number > 1:
             return ()

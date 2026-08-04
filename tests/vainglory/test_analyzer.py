@@ -300,14 +300,15 @@ def test_name_ocr_samples_the_same_result_slot_from_nearby_frames(
 
     sampler = Sampler()
     analyzer = VaingloryVideoAnalyzer(sampler=sampler)  # type: ignore[arg-type]
-    monkeypatch.setattr(analyzer_module, 'detect_result_layout', lambda _frame: hit(0))
+    layout = hit(0).layout
+    monkeypatch.setattr(analyzer, '_detect_result_layout', lambda _frame: layout)
 
     nearby = analyzer._sample_nearby_result_frames(
         'unused', at_ms=1_000, duration_ms=2_000
     )
 
-    assert sampler.calls == [0, 1_999]
-    assert nearby == (frame, frame)
+    assert sampler.calls == [0, 500, 1_500, 1_999]
+    assert nearby == tuple((frame, layout) for _index in range(4))
 
 
 def test_name_ocr_skips_an_unreadable_optional_nearby_frame(
@@ -326,14 +327,15 @@ def test_name_ocr_skips_an_unreadable_optional_nearby_frame(
 
     sampler = Sampler()
     analyzer = VaingloryVideoAnalyzer(sampler=sampler)  # type: ignore[arg-type]
-    monkeypatch.setattr(analyzer_module, 'detect_result_layout', lambda _frame: hit(0))
+    layout = hit(0).layout
+    monkeypatch.setattr(analyzer, '_detect_result_layout', lambda _frame: layout)
 
     nearby = analyzer._sample_nearby_result_frames(
         'unused', at_ms=1_000, duration_ms=2_000
     )
 
-    assert sampler.calls == [0, 1_999]
-    assert nearby == (frame,)
+    assert sampler.calls == [0, 500, 1_500, 1_999]
+    assert nearby == tuple((frame, layout) for _index in range(3))
 
 
 def test_aram_detection_samples_the_talent_selection_near_estimated_start() -> None:
@@ -357,7 +359,11 @@ def test_aram_detection_samples_the_talent_selection_near_estimated_start() -> N
     )
 
     mode = analyzer._detect_game_mode(
-        'unused', result_at_ms=600_000, duration_seconds=590, video_duration_ms=700_000
+        'unused',
+        result_at_ms=600_000,
+        duration_seconds=590,
+        video_duration_ms=700_000,
+        team_size=3,
     )
 
     assert mode == 'aram'
@@ -384,6 +390,7 @@ def test_aram_detection_fails_safe_when_match_start_is_outside_the_part() -> Non
             result_at_ms=200_000,
             duration_seconds=590,
             video_duration_ms=700_000,
+            team_size=3,
         )
         == 'unknown'
     )
@@ -412,10 +419,14 @@ def test_aram_detection_ignores_an_unreadable_optional_frame() -> None:
     )
 
     mode = analyzer._detect_game_mode(
-        'unused', result_at_ms=600_000, duration_seconds=590, video_duration_ms=700_000
+        'unused',
+        result_at_ms=600_000,
+        duration_seconds=590,
+        video_duration_ms=700_000,
+        team_size=3,
     )
 
-    assert mode == 'unknown'
+    assert mode == '3v3'
     assert sampler.calls == [11_000, 13_000, 15_000]
 
 
@@ -680,8 +691,9 @@ def test_hero_recognition_searches_one_shared_layout_offset(
     calls = []
 
     def extract(
-        _frame: RgbFrame, *, viewport, center_shift: float
+        _frame: RgbFrame, *, viewport, team_size: int, center_shift: float
     ) -> Tuple[HeroFrame, ...]:
+        assert team_size == 3
         calls.append(center_shift)
         variant = 1 if center_shift == 0.01 else 0
         return tuple(
@@ -721,8 +733,9 @@ def test_hero_recognition_keeps_the_center_layout_when_all_six_match(
     calls = []
 
     def extract(
-        _frame: RgbFrame, *, viewport, center_shift: float
+        _frame: RgbFrame, *, viewport, team_size: int, center_shift: float
     ) -> Tuple[HeroFrame, ...]:
+        assert team_size == 3
         calls.append(center_shift)
         return tuple(
             HeroFrame(side=side, slot=slot, frame=RgbFrame(1, 1, bytes((0, slot, 0))))

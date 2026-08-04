@@ -200,7 +200,7 @@ async def test_repository_claims_persists_and_searches_matches(tmp_path: Path) -
         assert await database.scalar(
             'SELECT result_frame_path FROM vainglory_matches WHERE id=?',
             (page.items[0].id,),
-        ) == ('session-1/part-1-123500.png')
+        ) == ('session-1/part-1-123500-c30a3f0e89ba6624.png')
         hero_ids = tuple(value.id for value in await repository.list_heroes())
         lineup_page = await repository.list_matches(
             hero_ids=(hero_ids[0], hero_ids[-1])
@@ -317,7 +317,7 @@ async def test_reanalysis_replaces_result_frame_files(tmp_path: Path) -> None:
         second_path = await repository.result_frame_path(second_match.id)
 
         assert second_path is not None
-        assert second_path.name == 'part-1-456000.png'
+        assert second_path.name == 'part-1-456000-c30a3f0e89ba6624.png'
         assert second_path.read_bytes() == b'\x89PNG-result-frame'
         assert not first_path.exists()
     finally:
@@ -673,7 +673,7 @@ async def test_session_job_stays_in_progress_until_every_archive_page_finishes(
         assert str(row['state']) == 'analyzing'
         assert float(row['progress']) == pytest.approx(1 / 3)
         assert row['completed_at'] is None
-        assert (await repository.list_match_sessions()).total == 0
+        assert (await repository.list_match_sessions()).total == 1
     finally:
         await database.close()
 

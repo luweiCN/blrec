@@ -53,7 +53,8 @@ class FakeArchiveMigration:
     async def list_statuses(self) -> tuple:
         return (self.status(),)
 
-    async def list_items(self, migration_id: int) -> tuple:
+    async def list_items(self, migration_id: int, *, limit: int = 100) -> tuple:
+        assert limit == 100
         if migration_id != 9:
             raise ArchiveMigrationNotFound('稿件迁移任务不存在')
         return (
@@ -70,7 +71,14 @@ class FakeArchiveMigration:
                 attempt_count=1,
                 session_id=31,
                 upload_job_id=41,
+                upload_state='approved',
+                submit_state='confirmed',
+                comment_branch_state='completed',
+                danmaku_branch_state='completed',
+                analysis_state='ready',
+                target_bvid='BV1target',
                 error=None,
+                updated_at=1_700_000_100,
             ),
         )
 
@@ -370,7 +378,14 @@ def test_archive_migration_can_be_requested_and_polled(
         'attemptCount': 1,
         'sessionId': 31,
         'uploadJobId': 41,
+        'uploadState': 'approved',
+        'submitState': 'confirmed',
+        'commentBranchState': 'completed',
+        'danmakuBranchState': 'completed',
+        'analysisState': 'ready',
+        'targetBvid': 'BV1target',
         'error': None,
+        'updatedAt': 1_700_000_100,
     }
 
 

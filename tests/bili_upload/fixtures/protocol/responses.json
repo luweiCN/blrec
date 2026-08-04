@@ -1,6 +1,7 @@
 {
   "add_reply": {"code": 0, "data": {"rpid": 101}},
   "add_collection_episode": {"code": 0},
+  "archive_cards": {"code": 0, "data": {"cards": []}},
   "archive_pre": {"code": 0, "data": {"typelist": [{"id": 4, "name": "游戏", "children": [{"id": 17, "name": "单机游戏", "desc": "单机内容", "show": true}]}]}},
   "archive_view": {"code": 0, "data": {"archive": {"aid": 303, "bvid": "BVfixture"}, "videos": [{"aid": 303, "bvid": "BVfixture", "filename": "fixture", "cid": 202, "page": 1}]}},
   "complete_upload": {"OK": 1},
@@ -19,7 +20,9 @@
   "public_archive_view": {"code": 0, "data": {"aid": 303, "bvid": "BVfixture", "owner": {"mid": 42, "name": "fixture"}, "pages": [{"cid": 202, "page": 1, "part": "P1"}], "tid": 172, "title": "fixture"}},
   "refresh_token": {"code": 0, "data": {"expires_in": 15552000}},
   "reply_detail": {"code": 0, "data": {"replies": []}},
+  "delete_reply": {"code": 0},
   "submit_archive": {"code": 0, "data": {"aid": 303, "bvid": "BVfixture"}},
+  "submit_archive_chapters": {"code": 0},
   "top_reply": {"code": 0},
   "upload_chunk": {"OK": 1, "etag": "fixture-etag"},
   "upload_cover": {"code": 0, "data": {"url": "https://archive.biliimg.com/bfs/archive/fixture.jpg"}},

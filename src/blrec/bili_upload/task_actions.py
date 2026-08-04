@@ -494,8 +494,7 @@ class UploadTaskActionManager:
         def run(
             connection: sqlite3.Connection,
         ) -> Tuple[
-            Tuple[UploadTaskBatchItem, ...],
-            Tuple[_ImmediateSubmissionRetryPlan, ...],
+            Tuple[UploadTaskBatchItem, ...], Tuple[_ImmediateSubmissionRetryPlan, ...]
         ]:
             results = []
             immediate_retries: List[_ImmediateSubmissionRetryPlan] = []
@@ -560,8 +559,7 @@ class UploadTaskActionManager:
         def run(
             connection: sqlite3.Connection,
         ) -> Tuple[
-            Tuple[UploadTaskBatchItem, ...],
-            Tuple[_ImmediateSubmissionRetryPlan, ...],
+            Tuple[UploadTaskBatchItem, ...], Tuple[_ImmediateSubmissionRetryPlan, ...]
         ]:
             results = []
             immediate_retries: List[_ImmediateSubmissionRetryPlan] = []
@@ -1451,8 +1449,7 @@ class UploadTaskActionManager:
             assert callback is not None
             try:
                 message = await callback(
-                    immediate_retries[0].job_id,
-                    immediate_retries[0].original_retry_at,
+                    immediate_retries[0].job_id, immediate_retries[0].original_retry_at
                 )
             except ValueError as error:
                 raise UploadTaskActionRejected(str(error)) from None
@@ -1474,15 +1471,11 @@ class UploadTaskActionManager:
                 message = await callback(plan.job_id, plan.original_retry_at)
             except ValueError as error:
                 replacements[plan.target_id] = UploadTaskBatchItem(
-                    target_id=plan.target_id,
-                    accepted=False,
-                    message=str(error),
+                    target_id=plan.target_id, accepted=False, message=str(error)
                 )
             else:
                 replacements[plan.target_id] = UploadTaskBatchItem(
-                    target_id=plan.target_id,
-                    accepted=True,
-                    message=message,
+                    target_id=plan.target_id, accepted=True, message=message
                 )
         return tuple(replacements.get(item.target_id, item) for item in results)
 
@@ -1549,10 +1542,7 @@ class UploadTaskActionManager:
             )
 
         if immediate_submission_retry:
-            if (
-                self._immediate_submission_retry is None
-                or immediate_retries is None
-            ):
+            if self._immediate_submission_retry is None or immediate_retries is None:
                 raise UploadTaskActionRejected('立即投稿服务当前不可用')
             if any(str(part['upload_state']) != 'confirmed' for part in parts):
                 raise UploadTaskActionRejected('只有分 P 全部确认后才能立即重试投稿')

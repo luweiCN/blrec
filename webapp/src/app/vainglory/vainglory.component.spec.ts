@@ -97,6 +97,7 @@ function session(local: boolean): RecordingSessionDetail {
     matchIndexState: null,
     matchCount: 0,
     matchPublicationState: null,
+    matchChapterState: null,
     matchDescriptionState: null,
     matchCommentState: null,
     matchCommentCount: 0,
@@ -373,6 +374,10 @@ describe('VaingloryComponent remote media', () => {
       surrenderCount: 0,
       durationSeconds: 585,
       gameModes: ['3v3'],
+      publicationState: null,
+      descriptionState: null,
+      pinState: null,
+      chapterState: null,
     };
     vainglory.listMatches.and.returnValue(of({ total: 1, items: [match()] }));
 
@@ -413,6 +418,10 @@ describe('VaingloryComponent remote media', () => {
       surrenderCount: 0,
       durationSeconds: 585,
       gameModes: ['3v3'],
+      publicationState: null,
+      descriptionState: null,
+      pinState: null,
+      chapterState: null,
     };
     const saved = { ...summary, title: '整场新标题' };
     vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));
@@ -445,6 +454,10 @@ describe('VaingloryComponent remote media', () => {
       surrenderCount: 0,
       durationSeconds: 585,
       gameModes: ['3v3'],
+      publicationState: null,
+      descriptionState: null,
+      pinState: null,
+      chapterState: null,
     };
     const saved = { ...summary, anchorName: '玩不明白' };
     vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));

@@ -13,6 +13,7 @@ import { NZ_ICONS, NzIconModule } from 'ng-zorro-antd/icon';
 import { NzMenuModule } from 'ng-zorro-antd/menu';
 import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzTagModule } from 'ng-zorro-antd/tag';
+import { NzToolTipModule } from 'ng-zorro-antd/tooltip';
 
 import { RecordingSessionSummary } from '../shared/recording-session.model';
 import {
@@ -56,6 +57,7 @@ function summary(): RecordingSessionSummary {
     matchIndexState: null,
     matchCount: 0,
     matchPublicationState: null,
+    matchChapterState: null,
     matchDescriptionState: null,
     matchCommentState: null,
     matchCommentCount: 0,
@@ -171,6 +173,7 @@ describe('RecordingSessionRowComponent', () => {
         NzMenuModule,
         NzProgressModule,
         NzTagModule,
+        NzToolTipModule,
       ],
       providers: [{ provide: NZ_ICONS, useValue: [MoreOutline] }],
     }).compileComponents();
@@ -264,10 +267,7 @@ describe('RecordingSessionRowComponent', () => {
     controls.editSubmission();
     controls.runSessionAction(serverAction);
     controls.editTask(9);
-    const deleteButton = fixture.nativeElement.querySelector(
-      '[data-testid="delete-session"]',
-    ) as HTMLButtonElement;
-    deleteButton.click();
+    controls.runSessionAction('delete_local');
 
     expect(events).toEqual([
       { type: 'selected', sessionId: 1, selected: true },
@@ -462,7 +462,7 @@ describe('RecordingSessionRowComponent', () => {
     ).toContain('验证码或人工验证');
   });
 
-  it('renders a direct immediate retry button for a safe frequency wait', () => {
+  it('offers immediate retry for a safe frequency wait', () => {
     const events: RecordingSessionRowAction[] = [];
     host.session = {
       ...host.session,
@@ -482,13 +482,9 @@ describe('RecordingSessionRowComponent', () => {
       events.push(event),
     );
 
-    const button = fixture.nativeElement.querySelector(
-      '[data-testid="retry-submission-now"]',
-    ) as HTMLButtonElement | null;
-    expect(button).not.toBeNull();
-    expect(button?.textContent).toContain('立即重试');
-
-    button?.click();
+    expect(row.hasAction('retry_failed')).toBeTrue();
+    expect(row.retryActionLabel(host.session.uploadJob)).toBe('立即重试');
+    row.runSessionAction('retry_failed');
 
     expect(events).toEqual([
       { type: 'session-action', sessionId: 1, action: 'retry_failed' },

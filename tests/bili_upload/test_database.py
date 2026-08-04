@@ -59,6 +59,7 @@ REQUIRED_TABLES = {
     'vainglory_match_players',
     'vainglory_players',
     'vainglory_player_rooms',
+    'vainglory_player_room_suppressions',
     'vainglory_player_sessions',
     'vainglory_archive_syncs',
     'vainglory_archive_imports',
@@ -66,6 +67,7 @@ REQUIRED_TABLES = {
     'vainglory_video_sources',
     'vainglory_publications',
     'vainglory_publication_comments',
+    'vainglory_publication_stale_comments',
     'archive_migration_jobs',
     'archive_migration_items',
 }

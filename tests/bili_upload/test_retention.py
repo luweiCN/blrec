@@ -172,7 +172,8 @@ async def test_migration_video_is_kept_until_match_analysis_is_ready(
             submitted_at=1_000,
         )
         await database.execute(
-            "UPDATE recording_sessions SET broadcast_session_key='bili-migration:1:1:BV1test' "
+            'UPDATE recording_sessions SET broadcast_session_key='
+            "'bili-migration:1:1:BV1test' "
             'WHERE id=1'
         )
         await database.execute(

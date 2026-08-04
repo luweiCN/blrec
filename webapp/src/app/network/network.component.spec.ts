@@ -65,6 +65,7 @@ describe('NetworkComponent', () => {
     speedMbps: 1000,
     isDefault: true,
     enabled: true,
+    archiveDownloadEnabled: false,
     uploadLimitBps: 0,
     uploadBps: 1024,
     downloadBps: 2048,
@@ -154,7 +155,7 @@ describe('NetworkComponent', () => {
     };
 
     expect(getComputedStyle(panel).overflowX).toBe('visible');
-    expect(table.nzScroll?.x).toBe('1040px');
+    expect(table.nzScroll?.x).toBe('1140px');
   });
 
   it('saves interface enable state immediately without saving all routes', () => {

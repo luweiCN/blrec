@@ -411,6 +411,7 @@ class VaingloryIndexService:
         if claim is None:
             return False
         part = claim.part
+        scanned = claim.scanned
         loop = asyncio.get_running_loop()
         try:
             last_progress = -0.05
@@ -436,7 +437,7 @@ class VaingloryIndexService:
             matches: Tuple[AnalyzedMatch, ...] = await loop.run_in_executor(
                 None,
                 lambda: self._analyzer.recognize_scanned_part(
-                    part, claim.scanned, progress=report, cancelled=self._stop.is_set
+                    part, scanned, progress=report, cancelled=self._stop.is_set
                 ),
             )
             await self._repository.complete_part(part.id, matches)

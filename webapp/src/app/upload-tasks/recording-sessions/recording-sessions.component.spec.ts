@@ -64,6 +64,7 @@ import {
 import { TaskManagerService } from '../../tasks/shared/services/task-manager.service';
 import { MediaLibraryService } from '../../media-library/media-library.service';
 import { MediaLibraryItem } from '../../media-library/media-library.model';
+import { VaingloryService } from '../../vainglory/vainglory.service';
 
 @Component({ selector: 'app-task-edit-dialog', template: '' })
 class TaskEditDialogStubComponent {
@@ -202,6 +203,7 @@ describe('RecordingSessionsComponent', () => {
   let highlights: jasmine.SpyObj<HighlightService>;
   let controlOperations: jasmine.SpyObj<ControlOperationService>;
   let mediaLibrary: jasmine.SpyObj<MediaLibraryService>;
+  let vainglory: jasmine.SpyObj<VaingloryService>;
   let realtimeEvents: FakeRealtimeSource;
   let detailSession: RecordingSessionDetail;
   let summarySession: RecordingSessionSummary;
@@ -277,6 +279,10 @@ describe('RecordingSessionsComponent', () => {
       ['favorite'],
     );
     mediaLibrary.favorite.and.returnValue(of({} as MediaLibraryItem));
+    vainglory = jasmine.createSpyObj<VaingloryService>('VaingloryService', [
+      'listMatches',
+    ]);
+    vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));
     service.retryFailedJobs.and.returnValue(
       of({ operationId: 'upload-retry-1', status: 'accepted', total: 0 }),
     );
@@ -333,6 +339,7 @@ describe('RecordingSessionsComponent', () => {
       matchIndexState: null,
       matchCount: 0,
       matchPublicationState: null,
+      matchChapterState: null,
       matchDescriptionState: null,
       matchCommentState: null,
       matchCommentCount: 0,
@@ -497,6 +504,7 @@ describe('RecordingSessionsComponent', () => {
       providers: [
         { provide: RecordingSessionService, useValue: service },
         { provide: MediaLibraryService, useValue: mediaLibrary },
+        { provide: VaingloryService, useValue: vainglory },
         { provide: Clipboard, useValue: clipboard },
         { provide: NzMessageService, useValue: message },
         { provide: TaskManagerService, useValue: taskManager },
@@ -830,17 +838,17 @@ describe('RecordingSessionsComponent', () => {
     expect(dropdown.nzOverlayClassName).toBe('action-dropdown-overlay');
   });
 
-  it('hides the more menu when delete is the only available row action', () => {
+  it('keeps delete in the more menu when it is the only row action', () => {
     fixture.detectChanges();
 
     expect(
       fixture.nativeElement.querySelector('[data-testid="delete-session"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(
       fixture.nativeElement.querySelector(
         '[data-testid="session-actions-trigger"]',
       ),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 
   it('offers current-file cutting only for an active live recording', () => {
@@ -913,14 +921,18 @@ describe('RecordingSessionsComponent', () => {
     );
   });
 
-  it('keeps delete visible and uses concise operation names', () => {
+  it('keeps delete available and uses concise operation names', () => {
     fixture.detectChanges();
 
-    const deleteButton = fixture.nativeElement.querySelector(
-      '[data-testid="delete-session"]',
-    ) as HTMLButtonElement | null;
-    expect(deleteButton).not.toBeNull();
-    expect(deleteButton?.textContent?.trim()).toBe('删除');
+    const row = fixture.debugElement.query(
+      By.directive(RecordingSessionRowComponent),
+    ).componentInstance as RecordingSessionRowComponent;
+    expect(row.hasAction('delete_local')).toBeTrue();
+    expect(
+      fixture.nativeElement.querySelector(
+        '[data-testid="session-actions-trigger"]',
+      ),
+    ).not.toBeNull();
 
     fixture.componentInstance.openSessionAction('retry_failed', [1]);
     expect(fixture.componentInstance.uploadActionTitle()).toBe('重试失败任务');

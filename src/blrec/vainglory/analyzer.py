@@ -1773,7 +1773,7 @@ class VaingloryVideoAnalyzer:
         header = merge_result_headers(
             tuple(
                 (attempt_header, attempt_layout.confidence)
-                for attempt_layout, attempt_header in accepted
+                for attempt_layout, attempt_header in attempts
                 if attempt_layout.team_size == accepted_team_size
             )
         )

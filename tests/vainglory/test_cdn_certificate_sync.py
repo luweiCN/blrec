@@ -5,7 +5,6 @@ from typing import List, Sequence
 
 import pytest
 
-
 SCRIPT_PATH = (
     Path(__file__).parents[2]
     / 'public-dashboard'

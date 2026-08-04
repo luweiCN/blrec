@@ -470,6 +470,14 @@ class VaingloryPublicationService:
             "WHERE publication.state IN ('prepared','running','paused') "
             'AND publication.needs_refresh=0 '
             'AND instr(COALESCE(session.title,\'\'),?)=0 '
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_publications failed '
+            'WHERE failed.account_id=publication.account_id '
+            "AND failed.state='failed') "
+            'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
+            'JOIN archive_migration_jobs paused_job '
+            'ON paused_job.id=paused_item.migration_id '
+            'WHERE paused_item.session_id=publication.session_id '
+            'AND paused_job.operator_paused=1) '
             'AND NOT EXISTS(SELECT 1 FROM vainglory_archive_imports imported '
             'WHERE imported.session_id=publication.session_id '
             'AND instr(imported.title,?)>0) '
@@ -637,6 +645,14 @@ class VaingloryPublicationService:
             + _SESSION_ARCHIVES_COMPLETE
             + ' '
             "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_publications failed '
+            'WHERE failed.account_id={account}.account_id '
+            "AND failed.state='failed') "
+            'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
+            'JOIN archive_migration_jobs paused_job '
+            'ON paused_job.id=paused_item.migration_id '
+            'WHERE paused_item.session_id=session.id '
+            'AND paused_job.operator_paused=1) '
             'AND scan.algorithm_version>=? AND EXISTS('
             'SELECT 1 FROM vainglory_matches match '
             'WHERE match.session_id=session.id) AND NOT EXISTS('
@@ -1349,6 +1365,7 @@ class VaingloryPublicationService:
         bundle: CredentialBundle,
     ) -> None:
         try:
+            entries: Tuple[Mapping[str, Any], ...]
             stored_rpid = _positive_int(comment.get('rpid'))
             if stored_rpid is not None:
                 response = await self._protocol.reply_detail(
@@ -1802,9 +1819,9 @@ def _chapter_targets(
         anchor = _match_anchor(match)
         if anchor is None:
             continue
-        page, seconds = anchor
-        anchors.setdefault(page, []).append((seconds, index, match))
-    targets = []
+        anchor_page, seconds = anchor
+        anchors.setdefault(anchor_page, []).append((seconds, index, match))
+    targets: List[Tuple[_ChapterPage, Tuple[Mapping[str, Any], ...]]] = []
     for page in sorted(pages, key=lambda item: item.page):
         if page.duration_seconds is None:
             continue

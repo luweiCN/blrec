@@ -3513,7 +3513,7 @@ async def test_legacy_frequency_recovery_immediately_probes_only_one_job_per_acc
 
 
 @pytest.mark.asyncio
-async def test_legacy_migration_rate_limit_is_immediately_probed_after_priority_recovery(
+async def test_legacy_migration_rate_limit_probed_after_priority_recovery(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'upload.sqlite3'))

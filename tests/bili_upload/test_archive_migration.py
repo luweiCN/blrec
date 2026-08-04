@@ -36,12 +36,17 @@ class FakeCatalog:
 
 
 class FakeDetailReader:
-    def __init__(self, detail: ArchiveDetail) -> None:
+    def __init__(
+        self, detail: ArchiveDetail, *, match_requested_bvid: bool = False
+    ) -> None:
         self.detail_value = detail
+        self.match_requested_bvid = match_requested_bvid
         self.calls: List[str] = []
 
     async def detail(self, _bundle: Any, *, bvid: str) -> ArchiveDetail:
         self.calls.append(bvid)
+        if self.match_requested_bvid:
+            return replace(self.detail_value, bvid=bvid)
         return self.detail_value
 
 
@@ -95,19 +100,50 @@ class FakeTaskCreator:
                 'SELECT target_account_id FROM archive_migration_jobs LIMIT 1'
             )
         )
+        parts = await self.database.fetchall(
+            'SELECT part_index,source_path,final_path,xml_path '
+            'FROM recording_parts WHERE session_id=? ORDER BY part_index',
+            (session_id,),
+        )
+        snapshot = json.dumps(
+            {
+                'description': description,
+                'danmaku_backfill': True,
+                'part_titles': list(part_titles),
+                'recording_part_indexes': [int(part['part_index']) for part in parts],
+            },
+            ensure_ascii=False,
+        )
         now = 1000
-        cursor_id = await self.database.write(
-            lambda connection: int(
+
+        def create(connection) -> int:
+            job_id = int(
                 connection.execute(
                     'INSERT INTO upload_jobs('
                     'session_id,account_id,policy_snapshot_json,state,submit_state,'
+                    'operator_paused,operator_resume_state,review_reason,'
                     'created_at,updated_at) '
-                    "VALUES(?,?,?,'ready','prepared',?,?)",
-                    (session_id, account_id, '{}', now, now),
+                    "VALUES(?,?,?,'paused','prepared',1,'ready',?,?,?)",
+                    (session_id, account_id, snapshot, '迁移一致性校验中', now, now),
                 ).lastrowid
             )
-        )
-        return cursor_id
+            for part in parts:
+                connection.execute(
+                    'INSERT INTO upload_parts('
+                    'job_id,part_index,source_path,final_path,xml_path,'
+                    'artifact_state,upload_state,danmaku_import_state) '
+                    "VALUES(?,?,?,?,?,'ready','prepared','pending')",
+                    (
+                        job_id,
+                        int(part['part_index']),
+                        str(part['source_path']),
+                        str(part['final_path']),
+                        str(part['xml_path']),
+                    ),
+                )
+            return job_id
+
+        return await self.database.write(create)
 
 
 async def seed_accounts(database: BiliUploadDatabase) -> None:
@@ -399,7 +435,7 @@ async def test_migration_pause_and_daily_quota_survive_worker_iterations(
     try:
         await seed_accounts(database)
         now = [1_000]
-        details = FakeDetailReader(archive_detail())
+        details = FakeDetailReader(archive_detail(), match_requested_bvid=True)
         service = ArchiveMigrationService(
             database,
             recording_root=tmp_path / 'rec',
@@ -616,7 +652,7 @@ async def test_upload_coordinator_creates_idempotent_migration_task(
             str(job['state']),
             int(job['operator_paused']),
             int(job['priority']),
-        ) == (2, 'ready', 0, -100)
+        ) == (2, 'paused', 1, -100)
         snapshot = json.loads(str(job['policy_snapshot_json']))
         assert snapshot['title'] == '旧稿件'
         assert snapshot['description'] == '  原简介\n第二行  '

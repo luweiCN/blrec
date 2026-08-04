@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from .vision import PixelRect, ResultPanelDetection, RgbFrame
 
@@ -37,8 +37,8 @@ class OnnxResultPanelDetector:
         path = Path(model_path)
         if not path.is_file():
             raise FileNotFoundError(path)
-        numpy = importlib.import_module('numpy')
-        onnxruntime = importlib.import_module('onnxruntime')
+        numpy: Any = importlib.import_module('numpy')
+        onnxruntime: Any = importlib.import_module('onnxruntime')
         options = onnxruntime.SessionOptions()
         options.intra_op_num_threads = 1
         options.inter_op_num_threads = 1
@@ -51,7 +51,7 @@ class OnnxResultPanelDetector:
         self._input_size = input_size
 
     def detect(self, frame: RgbFrame) -> Optional[ResultPanelDetection]:
-        cv2 = importlib.import_module('cv2')
+        cv2: Any = importlib.import_module('cv2')
         numpy = self._numpy
         image = numpy.frombuffer(frame.pixels, dtype=numpy.uint8).reshape(
             frame.height, frame.width, 3

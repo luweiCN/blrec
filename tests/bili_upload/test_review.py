@@ -868,6 +868,7 @@ async def test_still_reviewing_is_polled_at_most_once_per_interval(
             comment_branch=FakeBranch(),
             danmaku_branch=FakeBranch(),
             collection_branch=FakeBranch(),
+            poll_interval_seconds=900,
             clock=clock,
         )
 

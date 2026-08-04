@@ -49,6 +49,7 @@ class FakeNetworkManager:
         interface_name: str,
         *,
         enabled: Optional[bool] = None,
+        archive_download_enabled: Optional[bool] = None,
         upload_limit_bps: Optional[int] = None,
     ) -> None:
         self.events.append('update:{}'.format(interface_name))
@@ -58,6 +59,11 @@ class FakeNetworkManager:
             **{
                 **self._interface.__dict__,
                 'enabled': (self._interface.enabled if enabled is None else enabled),
+                'archive_download_enabled': (
+                    self._interface.archive_download_enabled
+                    if archive_download_enabled is None
+                    else archive_download_enabled
+                ),
                 'upload_limit_bps': (
                     self._interface.upload_limit_bps
                     if upload_limit_bps is None
@@ -94,6 +100,7 @@ def test_lists_host_network_interfaces() -> None:
                 'dnsServers': ['192.168.1.1'],
                 'kind': 'physical',
                 'enabled': True,
+                'archiveDownloadEnabled': True,
                 'uploadLimitBps': 0,
                 'uploadBps': 0.0,
                 'downloadBps': 0.0,

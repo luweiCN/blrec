@@ -106,16 +106,18 @@ def test_publication_uses_clean_description_and_comment_native_timestamps() -> N
     assert '红方玩家' not in plan.description_block
     assert DESCRIPTION_BEGIN not in plan.description_block
     assert DESCRIPTION_END not in plan.description_block
-    assert '第1局｜胜｜凯恩 vs 骷髅' in plan.description_block
-    assert '第2局｜负｜凯恩 vs 骷髅' in plan.description_block
+    assert '①｜胜　｜凯恩 vs 骷髅' in plan.description_block
+    assert '②｜负　｜凯恩 vs 骷髅' in plan.description_block
     assert '#02:00' not in plan.description_block
     assert '1/2/3' not in plan.description_block
     assert '经济' not in plan.description_block
     assert '补刀' not in plan.description_block
-    assert 'https://' not in plan.description_block
+    assert '第1局：https://www.bilibili.com/video/BV1abcdefgh?p=1&t=120' in (
+        plan.description_block
+    )
     assert plan.comments[0].content.startswith('共 2 局｜1 胜 1 负\n')
-    assert '第1局 1#02:00｜胜｜凯恩 vs 骷髅' in plan.comments[0].content
-    assert '第2局 2#02:00｜负｜凯恩 vs 骷髅' in plan.comments[0].content
+    assert '①｜胜　｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
+    assert '②｜负　｜凯恩 vs 骷髅｜2#02:00' in plan.comments[0].content
     assert plan.comments[0].match_ids == (1, 2)
 
 
@@ -131,8 +133,8 @@ def test_unknown_result_is_not_counted_as_a_loss() -> None:
     plan = build_publication_plan((match(1, winner_color='unknown'),))
 
     assert '共 1 局｜0 胜 0 负｜1 局结果未确认' in plan.description_block
-    assert '第1局｜结果未确认' in plan.description_block
-    assert '第1局 1#02:00｜结果未确认' in plan.comments[0].content
+    assert '①｜待定｜凯恩 vs 骷髅' in plan.description_block
+    assert '①｜待定｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
 
 
 def test_chapter_uses_full_chinese_hero_name_with_game_number() -> None:
@@ -142,7 +144,7 @@ def test_chapter_uses_full_chinese_hero_name_with_game_number() -> None:
 
     content = _chapter_content(1, current)
 
-    assert content == '第1局|胜|格瑞丝'
+    assert content == '第一局｜胜｜格瑞丝｜3V3'
     assert len(content) <= 16
     assert _automatic_chapter_cards(({'content': content},)) is True
     assert _automatic_chapter_cards(({'content': '1胜|锤妈'},)) is True
@@ -159,7 +161,7 @@ def test_comment_keeps_all_results_in_first_comment_and_splits_only_pictures() -
         (10, 11),
     )
     assert all(
-        '第{}局'.format(match_id) in plan.comments[0].content
+        chr(0x2460 + match_id - 1) in plan.comments[0].content
         for match_id in range(1, 12)
     )
     assert plan.comments[1].content == '结算截图（续 1）'
@@ -173,7 +175,7 @@ def test_native_timestamp_supports_hours_and_multipart_seek() -> None:
     )
 
     assert '3#01:02:03' not in plan.description_block
-    assert '第1局 3#01:02:03｜胜｜凯恩 vs 骷髅' in plan.comments[0].content
+    assert '①｜胜　｜凯恩 vs 骷髅｜3#01:02:03' in plan.comments[0].content
 
 
 def test_very_long_archive_keeps_every_result_in_first_comment() -> None:
@@ -242,6 +244,7 @@ class FakePublicationProtocol:
         self.add_reply_calls: List[Mapping[str, Any]] = []
         self.top_reply_calls: List[Mapping[str, Any]] = []
         self.list_replies_calls: List[Mapping[str, Any]] = []
+        self.chapter_calls: List[Mapping[str, Any]] = []
         self.add_reply_result: Any = {'code': 0, 'data': {'rpid': 501}}
         self.list_replies_result: Mapping[str, Any] = {
             'code': 0,
@@ -266,10 +269,35 @@ class FakePublicationProtocol:
                 },
                 'subtitle': {'open': 1, 'lan': 'zh-CN'},
                 'videos': [
-                    {'filename': 'remote-p1', 'title': 'P1', 'desc': '', 'cid': 401}
+                    {
+                        'filename': 'remote-p1',
+                        'title': 'P1',
+                        'desc': '',
+                        'cid': 401,
+                        'duration': 1200,
+                    }
                 ],
             },
         }
+
+    async def archive_cards(
+        self, _bundle: object, *, aid: int, cid: int
+    ) -> Mapping[str, Any]:
+        assert (aid, cid) == (303, 401)
+        return {'code': 0, 'data': {'catalog': []}}
+
+    async def submit_archive_chapters(
+        self,
+        _bundle: object,
+        *,
+        aid: int,
+        cid: int,
+        cards: Tuple[Mapping[str, Any], ...],
+        permanent: bool,
+    ) -> Mapping[str, Any]:
+        assert (aid, cid, permanent) == (303, 401, True)
+        self.chapter_calls.extend(cards)
+        return {'code': 0}
 
     async def edit_archive(
         self, _bundle: object, payload: Mapping[str, Any]
@@ -316,7 +344,15 @@ class FakePublicationProtocol:
     async def reply_detail(
         self, _bundle: object, _params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        raise AssertionError('single-match publication has no reply reconciliation')
+        return {
+            'code': 0,
+            'data': {
+                'root': {
+                    'rpid': 501,
+                    'content': {'pictures': [{'img_src': 'result.png'}]},
+                }
+            },
+        }
 
 
 async def seed_publication_match(
@@ -430,7 +466,7 @@ async def test_service_preserves_description_posts_picture_and_pins_once(
             clock=lambda: 1000,
         )
 
-        for _ in range(5):
+        for _ in range(6):
             assert await service.run_once() is True
 
         assert protocol.description.startswith('  原简介\n第二行  \n\n')
@@ -480,7 +516,7 @@ async def test_multiple_picture_comments_are_independent_root_comments(
             (publication_id,),
         )
 
-        for _ in range(5):
+        for _ in range(6):
             assert await service.run_once() is True
 
         assert len(protocol.add_reply_calls) == 2
@@ -513,7 +549,7 @@ async def test_definite_comment_api_error_returns_comment_to_prepared(
             clock=lambda: 1000,
         )
 
-        for _ in range(3):
+        for _ in range(4):
             assert await service.run_once() is True
 
         assert (
@@ -550,6 +586,7 @@ async def test_unknown_comment_is_reconciled_without_duplicate_or_image_reupload
         assert await service.run_once() is True
         assert await service.run_once() is True
         assert await service.run_once() is True
+        assert await service.run_once() is True
         content = protocol.add_reply_calls[0]['message']
         protocol.list_replies_result = {
             'code': 0,
@@ -560,7 +597,10 @@ async def test_unknown_comment_is_reconciled_without_duplicate_or_image_reupload
                         'oid': 303,
                         'mid': 42,
                         'root': 0,
-                        'content': {'message': content},
+                        'content': {
+                            'message': content,
+                            'pictures': [{'img_src': 'result.png'}],
+                        },
                     }
                 ]
             },

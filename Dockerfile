@@ -33,6 +33,7 @@ RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels blrec &
     rm -rf /wheels
 COPY scripts/migrate_legacy_settings.py /app/scripts/migrate_legacy_settings.py
 COPY scripts/migrate_biliupforjava_rooms.py /app/scripts/migrate_biliupforjava_rooms.py
+COPY scripts/backup_blrec_database.py /app/scripts/backup_blrec_database.py
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \

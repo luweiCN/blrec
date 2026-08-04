@@ -178,12 +178,15 @@ async def test_default_wbi_signer_discovers_and_caches_remote_keys() -> None:
         ('archive_pre', 'web_cookie', '/x/vupre/web/archive/pre'),
         ('list_archives', 'web_cookie', '/x/web/archives'),
         ('archive_view', 'web_cookie', '/x/vupre/web/archive/view'),
+        ('archive_cards', 'web_cookie', '/x/web/allcards'),
+        ('submit_archive_chapters', 'web_cookie_csrf', '/x/web/card/submit'),
         ('public_archive_view', 'web_cookie', '/x/web-interface/view'),
         ('public_archive_tags', 'web_cookie', '/x/tag/archive/tags'),
         ('web_nav', 'web_cookie', '/x/web-interface/nav'),
         ('list_replies', 'web_cookie_wbi', '/x/v2/reply/main'),
         ('reply_detail', 'web_cookie_wbi', '/x/v2/reply/detail'),
-        ('add_reply', 'web_cookie_csrf', '/x/v2/reply/add'),
+        ('add_reply', 'web_cookie_csrf_wbi', '/x/v2/reply/add'),
+        ('delete_reply', 'web_cookie_csrf', '/x/v2/reply/del'),
         ('top_reply', 'web_cookie_csrf', '/x/v2/reply/top'),
         ('post_danmaku', 'web_cookie_csrf_wbi', '/x/v2/dm/post'),
     ],
@@ -396,7 +399,7 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         assert dict(request.query).get('uploadId') == 'fixture-upload-id' or name == (
             'preupload_init'
         )
-    for name in ('list_replies', 'reply_detail', 'post_danmaku'):
+    for name in ('list_replies', 'reply_detail', 'add_reply', 'post_danmaku'):
         assert 'w_rid' in dict(requests[name].query)
     for name in (
         'preupload',
@@ -405,7 +408,6 @@ async def test_all_operations_use_only_their_allowed_auth_scope() -> None:
         'archive_view',
         'public_archive_view',
         'public_archive_tags',
-        'add_reply',
         'top_reply',
         'submit_archive',
         'edit_archive',

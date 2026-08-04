@@ -633,7 +633,8 @@ def test_cut_retries_transcode_sequentially_when_fast_seek_is_still_wrong(
         Path(command[-1]).write_bytes(b'clip')
         return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
 
-    def validate_transcode(_inspection, _path):
+    def validate_transcode(_inspection, _path, *, sequential=False):
+        del sequential
         transcode_validations.append(True)
         if len(transcode_validations) == 1:
             raise HighlightCutError('快速转码起点仍然错误')

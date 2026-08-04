@@ -185,6 +185,7 @@ class ArchiveBackfillService:
             'last_page_identity=NULL',
             (int(account_id), now, now),
         )
+        self._next_discovery_at = 0
         self._wake.set()
         return await self.status(account_id)
 

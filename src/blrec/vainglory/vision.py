@@ -14,6 +14,8 @@ TeamSide = Literal['left', 'right']
 TeamSize = Literal[3, 5]
 
 _MINIMUM_RESULT_ACTION_CONTRAST = 35
+_MINIMUM_LOW_CONTRAST_RESULT_ACTION = 18
+_MAXIMUM_LOW_CONTRAST_RESULT_ACTION = 30
 GAMEPLAY_HUD_CENTER_VARIANTS: Tuple[Tuple[float, ...], ...] = (
     (0.365, 0.415, 0.465, 0.55, 0.60, 0.65),
     (0.33, 0.395, 0.46, 0.54, 0.605, 0.67),
@@ -249,7 +251,15 @@ def detect_result_layouts(
         )
         minimum_action_contrast: float
         if panel_detection is None:
-            minimum_action_contrast = _MINIMUM_RESULT_ACTION_CONTRAST
+            low_contrast_actions = (
+                min(action_contrasts) >= _MINIMUM_LOW_CONTRAST_RESULT_ACTION
+                and max(action_contrasts) <= _MAXIMUM_LOW_CONTRAST_RESULT_ACTION
+            )
+            minimum_action_contrast = (
+                _MINIMUM_LOW_CONTRAST_RESULT_ACTION
+                if low_contrast_actions
+                else _MINIMUM_RESULT_ACTION_CONTRAST
+            )
         else:
             reference_contrast = 18 if viewport.name == 'detected-desktop-3v3' else 24
             minimum_action_contrast = max(
