@@ -99,6 +99,7 @@ class RuntimeProbe:
     media_library = None
     delete_media_library_item = None
     vainglory_service = None
+    vainglory_publication = None
     archive_backfill = None
     archive_migration = None
 

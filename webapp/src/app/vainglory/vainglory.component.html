@@ -351,26 +351,62 @@
                   >
                     简介：{{ descriptionStateLabel(session) }}
                   </nz-tag>
-                  <nz-tag
-                    [nzColor]="
-                      publicationStepColor(
-                        session.pinState,
-                        session.publicationState
-                      )
-                    "
-                  >
-                    置顶评论：{{ pinStateLabel(session) }}
-                  </nz-tag>
-                  <nz-tag
-                    [nzColor]="
-                      publicationStepColor(
-                        session.chapterState,
-                        session.publicationState
-                      )
-                    "
-                  >
-                    视频分段：{{ chapterStateLabel(session) }}
-                  </nz-tag>
+                  <span>
+                    <nz-tag
+                      [nzColor]="
+                        publicationStepColor(
+                          session.pinState,
+                          session.publicationState
+                        )
+                      "
+                    >
+                      置顶评论：{{ pinStateLabel(session) }}
+                    </nz-tag>
+                    <button
+                      *ngIf="isPublicationStepFailed(session, 'pin')"
+                      nz-button
+                      nzType="link"
+                      nzSize="small"
+                      type="button"
+                      [nzLoading]="
+                        isPublicationStepRetrying(session.sessionId, 'pin')
+                      "
+                      [disabled]="
+                        isPublicationStepRetrying(session.sessionId, 'pin')
+                      "
+                      (click)="retryPublicationStep(session, 'pin')"
+                    >
+                      重试
+                    </button>
+                  </span>
+                  <span>
+                    <nz-tag
+                      [nzColor]="
+                        publicationStepColor(
+                          session.chapterState,
+                          session.publicationState
+                        )
+                      "
+                    >
+                      视频分段：{{ chapterStateLabel(session) }}
+                    </nz-tag>
+                    <button
+                      *ngIf="isPublicationStepFailed(session, 'chapter')"
+                      nz-button
+                      nzType="link"
+                      nzSize="small"
+                      type="button"
+                      [nzLoading]="
+                        isPublicationStepRetrying(session.sessionId, 'chapter')
+                      "
+                      [disabled]="
+                        isPublicationStepRetrying(session.sessionId, 'chapter')
+                      "
+                      (click)="retryPublicationStep(session, 'chapter')"
+                    >
+                      重试
+                    </button>
+                  </span>
                 </div>
               </div>
               <div class="session-summary">

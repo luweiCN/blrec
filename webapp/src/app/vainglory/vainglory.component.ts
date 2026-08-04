@@ -52,6 +52,7 @@ import {
   VaingloryMatchSessionSort,
   VaingloryPlayer,
   VaingloryPlayerStats,
+  VaingloryPublicationRetryStep,
   VaingloryScanJob,
   VaingloryZeroMatchSession,
 } from './vainglory.model';
@@ -191,6 +192,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   readonly pageSize = 20;
   readonly selectedSessionIds = new Set<number>();
   readonly rescanningSessionIds = new Set<number>();
+  readonly retryingPublicationSteps = new Set<string>();
   bulkAnchorDraft: string | null = null;
   bulkAnchorModalVisible = false;
   bulkUpdatingAction: BulkUpdateAction | null = null;
@@ -594,6 +596,98 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
   }
 
+  isPublicationStepFailed(
+    session: VaingloryMatchSession,
+    step: VaingloryPublicationRetryStep,
+  ): boolean {
+    if (session.publicationState !== 'failed') {
+      return false;
+    }
+    return step === 'pin'
+      ? session.pinState !== 'confirmed'
+      : session.chapterState !== 'confirmed';
+  }
+
+  isPublicationStepRetrying(
+    sessionId: number,
+    step: VaingloryPublicationRetryStep,
+  ): boolean {
+    return this.retryingPublicationSteps.has(
+      this.publicationRetryKey(sessionId, step),
+    );
+  }
+
+  retryPublicationStep(
+    session: VaingloryMatchSession,
+    step: VaingloryPublicationRetryStep,
+  ): void {
+    if (!this.isPublicationStepFailed(session, step)) {
+      return;
+    }
+    const key = this.publicationRetryKey(session.sessionId, step);
+    if (this.retryingPublicationSteps.has(key)) {
+      return;
+    }
+    this.retryingPublicationSteps.add(key);
+    this.changeDetector.markForCheck();
+    this.vainglory
+      .retryPublicationStep(session.sessionId, step)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.retryingPublicationSteps.delete(key);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.markPublicationStepQueued(session.sessionId, step);
+          this.messages.success(
+            `已重新提交${step === 'pin' ? '置顶评论' : '视频分段'}`,
+          );
+        },
+        error: (error: unknown) => {
+          this.messages.error(
+            this.errorMessage(
+              error,
+              `无法重试${step === 'pin' ? '置顶评论' : '视频分段'}`,
+            ),
+          );
+        },
+      });
+  }
+
+  private publicationRetryKey(
+    sessionId: number,
+    step: VaingloryPublicationRetryStep,
+  ): string {
+    return `${sessionId}:${step}`;
+  }
+
+  private markPublicationStepQueued(
+    sessionId: number,
+    step: VaingloryPublicationRetryStep,
+  ): void {
+    if (this.sessionsView.state !== 'ready') {
+      return;
+    }
+    this.sessionsView = {
+      ...this.sessionsView,
+      items: this.sessionsView.items.map((session) => {
+        if (session.sessionId !== sessionId) {
+          return session;
+        }
+        return {
+          ...session,
+          publicationState: 'prepared',
+          pinState: step === 'pin' ? 'prepared' : session.pinState,
+          chapterState:
+            step === 'chapter' ? 'prepared' : session.chapterState,
+        };
+      }),
+    };
+  }
+
   publicationStepColor(
     state: string | null,
     publicationState: string | null,
@@ -644,10 +738,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   pinStateLabel(session: VaingloryMatchSession): string {
-    if (
-      session.publicationState === 'failed' &&
-      session.pinState !== 'confirmed'
-    ) {
+    if (this.isPublicationStepFailed(session, 'pin')) {
       return '失败';
     }
     if (
@@ -669,10 +760,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   chapterStateLabel(session: VaingloryMatchSession): string {
-    if (
-      session.publicationState === 'failed' &&
-      session.chapterState !== 'confirmed'
-    ) {
+    if (this.isPublicationStepFailed(session, 'chapter')) {
       return '失败';
     }
     if (

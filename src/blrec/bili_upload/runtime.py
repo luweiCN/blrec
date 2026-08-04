@@ -296,6 +296,10 @@ class BiliAccountRuntime:
         return self._vainglory_service
 
     @property
+    def vainglory_publication(self) -> Optional[VaingloryPublicationService]:
+        return self._vainglory_publication
+
+    @property
     def archive_backfill(self) -> Optional[ArchiveBackfillService]:
         return self._archive_backfill
 

@@ -17,6 +17,7 @@ from blrec.vainglory.archive_backfill import (
     ArchiveSync,
 )
 from blrec.vainglory.catalog import hero_chinese_name
+from blrec.vainglory.publication import VaingloryPublicationService
 from blrec.vainglory.repository import (
     AnchorStatsRecord,
     GameModeStatsRecord,
@@ -38,6 +39,7 @@ from blrec.vainglory.service import VaingloryIndexService
 from .bili_accounts import authenticated_manager_subject
 
 service: Optional[VaingloryIndexService] = None
+publication: Optional[VaingloryPublicationService] = None
 archive_backfill: Optional[ArchiveBackfillService] = None
 unavailable_reason: Optional[str] = 'Vainglory match index is not ready'
 
@@ -369,6 +371,15 @@ def get_archive_backfill() -> ArchiveBackfillService:
     return archive_backfill
 
 
+def get_publication() -> VaingloryPublicationService:
+    if publication is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or 'Vainglory publication is unavailable',
+        )
+    return publication
+
+
 def _scan_job(value: ScanJob) -> ScanJobResponse:
     return ScanJobResponse(**value.__dict__)
 
@@ -685,6 +696,25 @@ async def get_scan(
             status_code=status.HTTP_404_NOT_FOUND, detail='分析任务不存在'
         )
     return _scan_job(value)
+
+
+@router.post(
+    '/sessions/{session_id}/publication/{step}/retry',
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_publication_step(
+    session_id: int,
+    step: Literal['pin', 'chapter'],
+    _subject: str = Depends(authenticated_manager_subject),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
+) -> Response:
+    try:
+        await publication_service.retry_failed_step(session_id, step)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.get('/matches', response_model=MatchListResponse)

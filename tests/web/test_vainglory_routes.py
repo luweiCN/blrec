@@ -37,6 +37,7 @@ class FakeService:
         self.updated_session_titles = []
         self.updated_session_anchors = []
         self.bulk_updates = []
+        self.publication_retries = []
         self.created_players = []
         self.renamed_players = []
         self.bound_rooms = []
@@ -217,6 +218,9 @@ class FakeService:
     async def result_frame_path(self, _match_id: int) -> Path:
         return self.result_frame_path_value
 
+    async def retry_failed_step(self, session_id: int, step: str) -> None:
+        self.publication_retries.append((session_id, step))
+
 
 class FakeArchiveBackfill:
     def __init__(self) -> None:
@@ -363,8 +367,22 @@ def api_client(tmp_path: Path) -> Iterator[Tuple[TestClient, FakeService]]:
         lambda: 'manager'
     )
     application.dependency_overrides[vainglory.get_service] = lambda: fake
+    application.dependency_overrides[vainglory.get_publication] = lambda: fake
     with TestClient(application) as client:
         yield client, fake
+
+
+def test_retries_failed_pin_and_chapter_independently(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    pin = client.post('/api/v1/vainglory/sessions/9/publication/pin/retry')
+    chapter = client.post('/api/v1/vainglory/sessions/9/publication/chapter/retry')
+
+    assert pin.status_code == 202
+    assert chapter.status_code == 202
+    assert fake.publication_retries == [(9, 'pin'), (9, 'chapter')]
 
 
 def test_match_filters_use_camel_case_query_names(

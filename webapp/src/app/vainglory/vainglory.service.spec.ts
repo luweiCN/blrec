@@ -149,6 +149,17 @@ describe('VaingloryService', () => {
     request.flush([]);
   });
 
+  it('retries one failed publication step', () => {
+    service.retryPublicationStep(9, 'pin').subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/vainglory/sessions/9/publication/pin/retry',
+    );
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toBeNull();
+    request.flush(null);
+  });
+
   it('manages players and loads player-centred rankings', () => {
     service.listPlayers().subscribe();
     const listed = http.expectOne('/api/v1/vainglory/players');

@@ -566,6 +566,7 @@ browser_extension.policy_manager = None
 browser_extension.category_catalog = None
 browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
 vainglory.service = None
+vainglory.publication = None
 vainglory.archive_backfill = None
 vainglory.unavailable_reason = _bili_account_runtime.unavailable_reason
 network.manager = _network_route_manager
@@ -755,6 +756,7 @@ async def on_startup() -> None:
         browser_extension.category_catalog = _bili_account_runtime.category_catalog
         browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
         vainglory.service = _bili_account_runtime.vainglory_service
+        vainglory.publication = _bili_account_runtime.vainglory_publication
         vainglory.archive_backfill = _bili_account_runtime.archive_backfill
         vainglory.unavailable_reason = _bili_account_runtime.unavailable_reason
         application_launch_entered = True
@@ -802,6 +804,7 @@ async def on_startup() -> None:
             highlights.upload_task_creator = None
             highlights.clip_deleter = None
             vainglory.service = None
+            vainglory.publication = None
             vainglory.archive_backfill = None
             browser_extension.reset()
             await _realtime_sampler.stop()
@@ -880,6 +883,7 @@ async def on_shuntdown() -> None:
         highlights.upload_task_creator = None
         highlights.clip_deleter = None
         vainglory.service = None
+        vainglory.publication = None
         vainglory.archive_backfill = None
         browser_extension.reset()
         try:

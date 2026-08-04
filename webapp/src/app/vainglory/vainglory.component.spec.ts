@@ -174,6 +174,7 @@ describe('VaingloryComponent remote media', () => {
       'updateSessionAnchor',
       'bulkUpdateSessions',
       'requestScan',
+      'retryPublicationStep',
       'requestArchiveSync',
       'getArchiveSync',
       'listArchiveSyncItems',
@@ -559,6 +560,39 @@ describe('VaingloryComponent remote media', () => {
     expect(messages.success).toHaveBeenCalledWith(
       '已加入重新分析队列，并提升为手动优先',
     );
+  });
+
+  it('retries a failed publication step and clears its failed label', () => {
+    const failed: VaingloryMatchSession = {
+      sessionId: 9,
+      title: '直播标题',
+      sourceTitle: '原始直播标题',
+      anchorName: '主播',
+      startedAt: 1_000,
+      matchCount: 1,
+      tealWinCount: 1,
+      orangeWinCount: 0,
+      winCount: 1,
+      lossCount: 0,
+      unknownCount: 0,
+      surrenderCount: 0,
+      durationSeconds: 585,
+      gameModes: ['3v3'],
+      publicationState: 'failed',
+      descriptionState: 'confirmed',
+      pinState: 'in_flight',
+      chapterState: 'confirmed',
+    };
+    component.sessionsView = { state: 'ready', total: 1, items: [failed] };
+    vainglory.retryPublicationStep.and.returnValue(of(void 0));
+
+    component.retryPublicationStep(failed, 'pin');
+
+    expect(vainglory.retryPublicationStep).toHaveBeenCalledOnceWith(9, 'pin');
+    expect(component.isPublicationStepRetrying(9, 'pin')).toBeFalse();
+    expect(component.sessions[0].publicationState).toBe('prepared');
+    expect(component.sessions[0].pinState).toBe('prepared');
+    expect(messages.success).toHaveBeenCalledWith('已重新提交置顶评论');
   });
 
   it('creates a player, renames it, and manages its room binding', () => {

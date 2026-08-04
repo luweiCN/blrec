@@ -821,6 +821,110 @@ async def insert_failed_publication(database: BiliUploadDatabase) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_chapter_retry_preserves_other_completed_steps(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+        assert await service.run_once() is True
+        await database.execute(
+            "UPDATE vainglory_publications SET state='failed',"
+            "chapter_state='skipped',description_state='confirmed',"
+            "pin_state='confirmed',attempt_count=5,next_attempt_at=9999,error='失败'"
+        )
+
+        await service.retry_failed_step(1, 'chapter')
+
+        row = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,'
+            'attempt_count,next_attempt_at,error FROM vainglory_publications'
+        )
+        assert dict(row) == {
+            'state': 'prepared',
+            'chapter_state': 'prepared',
+            'description_state': 'confirmed',
+            'pin_state': 'confirmed',
+            'attempt_count': 0,
+            'next_attempt_at': 0,
+            'error': None,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_pin_retry_only_resets_the_pin_step(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+        assert await service.run_once() is True
+        await database.execute(
+            "UPDATE vainglory_publications SET state='failed',"
+            "chapter_state='confirmed',description_state='confirmed',"
+            "pin_state='in_flight',error='失败'"
+        )
+
+        await service.retry_failed_step(1, 'pin')
+
+        row = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,error '
+            'FROM vainglory_publications'
+        )
+        assert dict(row) == {
+            'state': 'prepared',
+            'chapter_state': 'confirmed',
+            'description_state': 'confirmed',
+            'pin_state': 'prepared',
+            'error': None,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_publication_retry_rejects_a_non_failed_task(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+        assert await service.run_once() is True
+
+        with pytest.raises(ValueError, match='不是失败状态'):
+            await service.retry_failed_step(1, 'chapter')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_publication_blocks_new_discovery_for_same_account(
     tmp_path: Path,
 ) -> None:

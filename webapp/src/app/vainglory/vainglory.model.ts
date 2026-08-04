@@ -28,6 +28,7 @@ export type VaingloryDescriptionState =
   | 'skipped_no_room';
 export type VaingloryPinState = 'prepared' | 'in_flight' | 'confirmed';
 export type VaingloryChapterState = 'prepared' | 'confirmed' | 'skipped';
+export type VaingloryPublicationRetryStep = 'pin' | 'chapter';
 
 export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
 

@@ -21,6 +21,7 @@ import {
   VaingloryMatchSessionSort,
   VaingloryPlayer,
   VaingloryPlayerStats,
+  VaingloryPublicationRetryStep,
   VaingloryScanJob,
   VaingloryZeroMatchSessionList,
 } from './vainglory.model';
@@ -152,6 +153,18 @@ export class VaingloryService {
   getScan(sessionId: number): Observable<VaingloryScanJob> {
     return this.http.get<VaingloryScanJob>(
       this.url.makeApiUrl(`/api/v1/vainglory/sessions/${sessionId}/scan`),
+    );
+  }
+
+  retryPublicationStep(
+    sessionId: number,
+    step: VaingloryPublicationRetryStep,
+  ): Observable<void> {
+    return this.http.post<void>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/sessions/${sessionId}/publication/${step}/retry`,
+      ),
+      null,
     );
   }
 

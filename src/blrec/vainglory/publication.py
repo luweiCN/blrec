@@ -324,6 +324,48 @@ class VaingloryPublicationService:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    async def retry_failed_step(self, session_id: int, step: str) -> None:
+        if session_id <= 0:
+            raise ValueError('直播场次编号无效')
+        columns = {'chapter': 'chapter_state', 'pin': 'pin_state'}
+        column = columns.get(step)
+        if column is None:
+            raise ValueError('不支持重试这个发布步骤')
+        now = self._now()
+
+        def retry(connection: sqlite3.Connection) -> Tuple[int, str]:
+            publication = connection.execute(
+                'SELECT id,bvid,state,chapter_state,pin_state '
+                'FROM vainglory_publications WHERE session_id=? '
+                'ORDER BY id DESC LIMIT 1',
+                (session_id,),
+            ).fetchone()
+            if publication is None:
+                raise ValueError('这场直播没有可重试的发布任务')
+            if str(publication['state']) != 'failed':
+                raise ValueError('发布任务当前不是失败状态')
+            current_state = str(publication[column])
+            if current_state == 'confirmed':
+                raise ValueError('这个发布步骤已经完成，无需重试')
+            connection.execute(
+                'UPDATE vainglory_publications SET state=\'prepared\','
+                '{}=\'prepared\',attempt_count=0,next_attempt_at=0,error=NULL,'
+                'updated_at=? WHERE id=?'.format(column),
+                (now, int(publication['id'])),
+            )
+            return int(publication['id']), str(publication['bvid'])
+
+        publication_id, bvid = await self._database.write(retry)
+        logger.info(
+            'Vainglory publication manually retried: publication_id={} '
+            'session_id={} bvid={} step={}',
+            publication_id,
+            session_id,
+            bvid,
+            step,
+        )
+        self._wake.set()
+
     async def recover_interrupted(self) -> int:
         now = self._now()
 
