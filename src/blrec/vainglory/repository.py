@@ -261,6 +261,25 @@ class MatchSessionPage:
 
 
 @dataclass(frozen=True)
+class ZeroMatchSessionRecord:
+    session_id: int
+    title: str
+    source_title: str
+    anchor_name: str
+    started_at: int
+    completed_at: int
+    recording_duration_seconds: int
+    part_count: int
+    bvid: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ZeroMatchSessionPage:
+    total: int
+    items: Tuple[ZeroMatchSessionRecord, ...]
+
+
+@dataclass(frozen=True)
 class HeroRecord:
     id: int
     label: str
@@ -2204,6 +2223,81 @@ class VaingloryRepository:
         }
         return MatchSessionPage(
             total=total, items=tuple(by_id[value] for value in session_ids)
+        )
+
+    async def list_zero_match_sessions(
+        self, *, limit: int = 20, offset: int = 0
+    ) -> ZeroMatchSessionPage:
+        if limit < 1 or limit > 100:
+            raise ValueError('limit must be between 1 and 100')
+        if offset < 0:
+            raise ValueError('offset must not be negative')
+        condition = (
+            "scan.state='ready' AND scan.algorithm_version=? "
+            'AND scan.match_count=0 AND scan.completed_at IS NOT NULL '
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_matches match '
+            'WHERE match.session_id=session.id)'
+        )
+        parameters = (self.ALGORITHM_VERSION,)
+        total = int(
+            await self._database.scalar(
+                'SELECT COUNT(*) FROM vainglory_scan_jobs scan '
+                'JOIN recording_sessions session ON session.id=scan.session_id '
+                'WHERE ' + condition,
+                parameters,
+            )
+        )
+        rows = await self._database.fetchall(
+            'SELECT session.id AS session_id,'
+            'COALESCE(scan.custom_title,session.title) AS title,'
+            'session.title AS source_title,session.anchor_name,session.started_at,'
+            'scan.completed_at,'
+            '(SELECT COUNT(*) FROM recording_parts part '
+            'WHERE part.session_id=session.id) AS part_count,'
+            '(SELECT COALESCE(SUM(COALESCE(part.record_duration_seconds,0)),0) '
+            'FROM recording_parts part WHERE part.session_id=session.id) '
+            'AS recording_duration_seconds,'
+            'COALESCE('
+            '(SELECT upload.bvid FROM upload_jobs upload '
+            'WHERE upload.session_id=session.id AND upload.bvid IS NOT NULL '
+            "AND upload.bvid<>'' ORDER BY upload.id DESC LIMIT 1),"
+            '(SELECT source.bvid FROM vainglory_video_sources source '
+            'JOIN recording_parts source_part ON source_part.id=source.part_id '
+            'WHERE source_part.session_id=session.id AND NOT EXISTS('
+            'SELECT 1 FROM archive_migration_items source_migration '
+            'WHERE source_migration.session_id=session.id) '
+            'ORDER BY source.page LIMIT 1),'
+            '(SELECT imported.bvid FROM vainglory_archive_imports imported '
+            'JOIN vainglory_archive_parts archive ON archive.import_id=imported.id '
+            'JOIN recording_parts archive_part '
+            'ON archive_part.id=archive.recording_part_id '
+            'WHERE archive_part.session_id=session.id '
+            'ORDER BY archive.page LIMIT 1)) AS bvid '
+            'FROM vainglory_scan_jobs scan '
+            'JOIN recording_sessions session ON session.id=scan.session_id '
+            'WHERE '
+            + condition
+            + ' ORDER BY scan.completed_at DESC,session.id DESC LIMIT ? OFFSET ?',
+            parameters + (limit, offset),
+        )
+        return ZeroMatchSessionPage(
+            total=total,
+            items=tuple(
+                ZeroMatchSessionRecord(
+                    session_id=int(row['session_id']),
+                    title=str(row['title'] or ''),
+                    source_title=str(row['source_title'] or ''),
+                    anchor_name=str(row['anchor_name'] or ''),
+                    started_at=int(row['started_at']),
+                    completed_at=int(row['completed_at']),
+                    recording_duration_seconds=int(
+                        row['recording_duration_seconds'] or 0
+                    ),
+                    part_count=int(row['part_count'] or 0),
+                    bvid=None if row['bvid'] is None else str(row['bvid']),
+                )
+                for row in rows
+            ),
         )
 
     async def list_recorded_player_reviews(

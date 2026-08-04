@@ -63,6 +63,47 @@
   }
 }
 
+.zero-match-review-list {
+  display: grid;
+  gap: 10px;
+}
+
+.zero-match-review-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid #ffd591;
+  border-radius: 8px;
+
+  > div:first-child {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  header {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+
+    strong {
+      overflow: hidden;
+      font-size: 15px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+}
+
+.zero-match-review-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
 .hero-manager-help {
   color: #8c8c8c;
 }
@@ -527,7 +568,6 @@
   padding: 10px 12px;
   border-right: 1px solid #f0f0f0;
   background: #fafafa;
-
 }
 
 .match-result-frame-preview {
@@ -1113,6 +1153,7 @@
   }
 
   .session-card-header,
+  .zero-match-review-item,
   .match-card > header {
     align-items: flex-start;
     flex-direction: column;

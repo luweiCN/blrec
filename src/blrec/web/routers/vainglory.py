@@ -31,6 +31,7 @@ from blrec.vainglory.repository import (
     ScanJob,
     VaingloryConflict,
     VaingloryNotFound,
+    ZeroMatchSessionRecord,
 )
 from blrec.vainglory.service import VaingloryIndexService
 
@@ -149,6 +150,23 @@ class MatchSessionResponse(ApiModel):
 class MatchSessionListResponse(ApiModel):
     total: int
     items: List[MatchSessionResponse]
+
+
+class ZeroMatchSessionResponse(ApiModel):
+    session_id: int
+    title: str
+    source_title: str
+    anchor_name: str
+    started_at: int
+    completed_at: int
+    recording_duration_seconds: int
+    part_count: int
+    bvid: Optional[str]
+
+
+class ZeroMatchSessionListResponse(ApiModel):
+    total: int
+    items: List[ZeroMatchSessionResponse]
 
 
 class AnchorStatsResponse(ApiModel):
@@ -451,6 +469,20 @@ def _match_session(value: MatchSessionRecord) -> MatchSessionResponse:
     )
 
 
+def _zero_match_session(value: ZeroMatchSessionRecord) -> ZeroMatchSessionResponse:
+    return ZeroMatchSessionResponse(
+        session_id=value.session_id,
+        title=value.title,
+        source_title=value.source_title,
+        anchor_name=value.anchor_name,
+        started_at=value.started_at,
+        completed_at=value.completed_at,
+        recording_duration_seconds=value.recording_duration_seconds,
+        part_count=value.part_count,
+        bvid=value.bvid,
+    )
+
+
 def _hero(value: HeroRecord) -> HeroResponse:
     return HeroResponse(
         id=value.id,
@@ -738,6 +770,19 @@ async def list_match_sessions(
     )
     return MatchSessionListResponse(
         total=page.total, items=[_match_session(item) for item in page.items]
+    )
+
+
+@router.get('/zero-match-sessions', response_model=ZeroMatchSessionListResponse)
+async def list_zero_match_sessions(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> ZeroMatchSessionListResponse:
+    page = await index.list_zero_match_sessions(limit=limit, offset=offset)
+    return ZeroMatchSessionListResponse(
+        total=page.total, items=[_zero_match_session(item) for item in page.items]
     )
 
 

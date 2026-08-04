@@ -33,6 +33,7 @@ from .repository import (
     PlayerStatsRecord,
     ScanJob,
     VaingloryRepository,
+    ZeroMatchSessionPage,
 )
 
 
@@ -234,6 +235,13 @@ class VaingloryIndexService:
 
     async def list_match_sessions(self, **filters: Any) -> MatchSessionPage:
         return await self._repository.list_match_sessions(**filters)
+
+    async def list_zero_match_sessions(
+        self, *, limit: int = 20, offset: int = 0
+    ) -> ZeroMatchSessionPage:
+        return await self._repository.list_zero_match_sessions(
+            limit=limit, offset=offset
+        )
 
     async def list_recorded_player_reviews(
         self, *, limit: int = 50, offset: int = 0

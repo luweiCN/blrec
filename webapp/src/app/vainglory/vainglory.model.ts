@@ -345,6 +345,23 @@ export interface VaingloryMatchSessionList {
   readonly items: readonly VaingloryMatchSession[];
 }
 
+export interface VaingloryZeroMatchSession {
+  readonly sessionId: number;
+  readonly title: string;
+  readonly sourceTitle: string;
+  readonly anchorName: string;
+  readonly startedAt: number;
+  readonly completedAt: number;
+  readonly recordingDurationSeconds: number;
+  readonly partCount: number;
+  readonly bvid: string | null;
+}
+
+export interface VaingloryZeroMatchSessionList {
+  readonly total: number;
+  readonly items: readonly VaingloryZeroMatchSession[];
+}
+
 export interface VaingloryAnchorStats {
   readonly anchorUid: number | null;
   readonly anchorName: string;

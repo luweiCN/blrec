@@ -22,6 +22,8 @@ from blrec.vainglory.repository import (
     PlayerRecord,
     PlayerRoomRecord,
     PlayerStatsRecord,
+    ZeroMatchSessionPage,
+    ZeroMatchSessionRecord,
 )
 from blrec.web.routers import vainglory
 
@@ -67,6 +69,25 @@ class FakeService:
                     surrender_count=1,
                     duration_seconds=2_700,
                     game_modes=('3v3',),
+                ),
+            ),
+        )
+
+    async def list_zero_match_sessions(self, **filters: object) -> ZeroMatchSessionPage:
+        self.zero_match_filters = filters
+        return ZeroMatchSessionPage(
+            total=1,
+            items=(
+                ZeroMatchSessionRecord(
+                    session_id=12,
+                    title='未识别直播',
+                    source_title='原始标题',
+                    anchor_name='待核对主播',
+                    started_at=900,
+                    completed_at=1_200,
+                    recording_duration_seconds=7_200,
+                    part_count=3,
+                    bvid='BV1zero12345',
                 ),
             ),
         )
@@ -397,6 +418,35 @@ def test_lists_recording_session_summaries_instead_of_flat_matches(
     assert payload['items'][0]['winCount'] == 2
     assert payload['items'][0]['lossCount'] == 1
     assert payload['items'][0]['anchorName'] == '主播名'
+
+
+def test_lists_completed_zero_match_sessions_for_review(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    response = client.get(
+        '/api/v1/vainglory/zero-match-sessions', params={'limit': 10, 'offset': 20}
+    )
+
+    assert response.status_code == 200
+    assert fake.zero_match_filters == {'limit': 10, 'offset': 20}
+    assert response.json() == {
+        'total': 1,
+        'items': [
+            {
+                'sessionId': 12,
+                'title': '未识别直播',
+                'sourceTitle': '原始标题',
+                'anchorName': '待核对主播',
+                'startedAt': 900,
+                'completedAt': 1_200,
+                'recordingDurationSeconds': 7_200,
+                'partCount': 3,
+                'bvid': 'BV1zero12345',
+            }
+        ],
+    }
 
 
 def test_lists_anchor_win_loss_statistics(

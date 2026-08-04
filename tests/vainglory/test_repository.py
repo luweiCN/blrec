@@ -869,6 +869,55 @@ async def test_repository_lists_one_summary_per_recording_session(
 
 
 @pytest.mark.asyncio
+async def test_repository_lists_only_completed_zero_match_sessions(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.mp4'
+        second = tmp_path / 'second.mp4'
+        third = tmp_path / 'third.mp4'
+        for path in (first, second, third):
+            path.write_bytes(b'video')
+        await seed_session(database, first, session_id=1)
+        await seed_part(database, second, session_id=1, part_id=3, part_index=2)
+        await seed_session(database, third, session_id=2)
+        await database.execute(
+            'UPDATE recording_parts SET record_duration_seconds=600 WHERE id=1'
+        )
+        await database.execute(
+            'UPDATE recording_parts SET record_duration_seconds=300 WHERE id=3'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        first_claim = await repository.claim_next()
+        assert first_claim is not None and first_claim.part.id == 1
+        await repository.complete_part(1, ())
+        second_claim = await repository.claim_next()
+        assert second_claim is not None and second_claim.part.id == 3
+        await repository.complete_part(3, ())
+        matched_claim = await repository.claim_next()
+        assert matched_claim is not None and matched_claim.part.id == 2
+        await repository.complete_part(2, (replace(analyzed_match(), part_id=2),))
+
+        page = await repository.list_zero_match_sessions()
+
+        assert page.total == 1
+        assert len(page.items) == 1
+        item = page.items[0]
+        assert item.session_id == 1
+        assert item.title == '样本录播'
+        assert item.anchor_name == '样本主播'
+        assert item.completed_at == 100
+        assert item.recording_duration_seconds == 900
+        assert item.part_count == 2
+        assert item.bvid is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_invalidates_old_results_and_removes_unknown_catalog(
     tmp_path: Path,
 ) -> None:

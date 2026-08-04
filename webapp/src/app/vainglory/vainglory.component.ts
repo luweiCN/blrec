@@ -53,6 +53,7 @@ import {
   VaingloryPlayer,
   VaingloryPlayerStats,
   VaingloryScanJob,
+  VaingloryZeroMatchSession,
 } from './vainglory.model';
 import { VaingloryService } from './vainglory.service';
 
@@ -62,6 +63,15 @@ type SessionsView =
       readonly state: 'ready';
       readonly total: number;
       readonly items: readonly VaingloryMatchSession[];
+    }
+  | { readonly state: 'error'; readonly message: string };
+
+type ZeroMatchSessionsView =
+  | { readonly state: 'loading' }
+  | {
+      readonly state: 'ready';
+      readonly total: number;
+      readonly items: readonly VaingloryZeroMatchSession[];
     }
   | { readonly state: 'error'; readonly message: string };
 
@@ -153,6 +163,7 @@ type BulkRescanResult =
 })
 export class VaingloryComponent implements OnInit, OnDestroy {
   sessionsView: SessionsView = { state: 'loading' };
+  zeroMatchSessionsView: ZeroMatchSessionsView = { state: 'loading' };
   heroesView: HeroesView = { state: 'loading' };
   anchorStatsView: AnchorStatsView = { state: 'loading' };
   playersView: PlayersView = { state: 'loading' };
@@ -206,6 +217,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   savingRecordedPlayerMatchId: number | null = null;
   savingRecordedPlayerSlot: number | null = null;
   analysisTaskModalVisible = false;
+  zeroMatchReviewVisible = false;
+  zeroMatchPageIndex = 1;
+  readonly zeroMatchPageSize = 20;
   archiveManagerVisible = false;
   archiveAccounts: readonly BiliAccount[] = [];
   archiveAccountsLoading = false;
@@ -260,6 +274,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.loadManagedAnchors();
     this.loadHeroReviews(false);
     this.loadRecordedPlayerReviews(false);
+    this.loadZeroMatchSessions();
     this.realtime.events$
       .pipe(takeUntil(this.destroy$))
       .subscribe((event) => {
@@ -303,6 +318,18 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   get total(): number {
     return this.sessionsView.state === 'ready' ? this.sessionsView.total : 0;
+  }
+
+  get zeroMatchSessions(): readonly VaingloryZeroMatchSession[] {
+    return this.zeroMatchSessionsView.state === 'ready'
+      ? this.zeroMatchSessionsView.items
+      : [];
+  }
+
+  get zeroMatchSessionTotal(): number {
+    return this.zeroMatchSessionsView.state === 'ready'
+      ? this.zeroMatchSessionsView.total
+      : 0;
   }
 
   get heroes(): readonly VaingloryHero[] {
@@ -480,6 +507,46 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       });
   }
 
+  openZeroMatchReviews(): void {
+    this.zeroMatchReviewVisible = true;
+    this.loadZeroMatchSessions();
+  }
+
+  zeroMatchPageChanged(pageIndex: number): void {
+    if (pageIndex === this.zeroMatchPageIndex) {
+      return;
+    }
+    this.zeroMatchPageIndex = pageIndex;
+    this.loadZeroMatchSessions();
+  }
+
+  loadZeroMatchSessions(): void {
+    this.zeroMatchSessionsView = { state: 'loading' };
+    this.vainglory
+      .listZeroMatchSessions(
+        this.zeroMatchPageSize,
+        (this.zeroMatchPageIndex - 1) * this.zeroMatchPageSize,
+      )
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.zeroMatchSessionsView = {
+            state: 'ready',
+            total: response.total,
+            items: response.items,
+          };
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.zeroMatchSessionsView = {
+            state: 'error',
+            message: this.errorMessage(error, '0 局直播加载失败'),
+          };
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
   openSessionDetails(session: VaingloryMatchSession): void {
     this.selectedSession = session;
     this.sessionTitleDraft = session.title;
@@ -500,7 +567,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return this.rescanningSessionIds.has(sessionId);
   }
 
-  requestSessionRescan(session: VaingloryMatchSession): void {
+  requestSessionRescan(session: { readonly sessionId: number }): void {
     if (this.rescanningSessionIds.has(session.sessionId)) {
       return;
     }
@@ -519,6 +586,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         next: (job) => {
           this.messages.success('已加入重新分析队列，并提升为手动优先');
           this.receiveScanJob(job);
+          this.loadZeroMatchSessions();
         },
         error: (error: unknown) => {
           this.messages.error(this.errorMessage(error, '无法重新分析这场直播'));
@@ -988,6 +1056,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   refreshPage(): void {
     this.loadSessions();
+    this.loadZeroMatchSessions();
     this.loadAnchorStats();
     this.loadPlayers();
     this.loadPlayerStats();
@@ -2263,6 +2332,12 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       : null;
   }
 
+  zeroMatchSessionBiliUrl(session: VaingloryZeroMatchSession): string | null {
+    return session.bvid
+      ? `https://www.bilibili.com/video/${session.bvid}`
+      : null;
+  }
+
   gameModeLabel(mode: GameMode): string {
     return {
       '3v3': '3V3',
@@ -2394,6 +2469,13 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   trackSession(_index: number, session: VaingloryMatchSession): number {
+    return session.sessionId;
+  }
+
+  trackZeroMatchSession(
+    _index: number,
+    session: VaingloryZeroMatchSession,
+  ): number {
     return session.sessionId;
   }
 

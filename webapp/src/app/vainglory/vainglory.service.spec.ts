@@ -88,6 +88,16 @@ describe('VaingloryService', () => {
     request.flush({ total: 0, items: [] });
   });
 
+  it('loads completed zero-match sessions for manual review', () => {
+    service.listZeroMatchSessions(10, 20).subscribe();
+
+    const request = http.expectOne(
+      '/api/v1/vainglory/zero-match-sessions?limit=10&offset=20',
+    );
+    expect(request.request.method).toBe('GET');
+    request.flush({ total: 0, items: [] });
+  });
+
   it('loads unresolved heroes and saves a manual hero', () => {
     service.listHeroReviews(20, 40).subscribe();
     const reviews = http.expectOne(

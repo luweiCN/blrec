@@ -159,6 +159,7 @@ describe('VaingloryComponent remote media', () => {
   beforeEach(() => {
     vainglory = jasmine.createSpyObj<VaingloryService>('VaingloryService', [
       'listMatchSessions',
+      'listZeroMatchSessions',
       'listMatches',
       'listHeroes',
       'listAnchorStats',
@@ -188,6 +189,9 @@ describe('VaingloryComponent remote media', () => {
       ['getSession', 'requestRemoteMedia', 'getRemoteMediaStatus'],
     );
     vainglory.listAnchorStats.and.returnValue(of([]));
+    vainglory.listZeroMatchSessions.and.returnValue(
+      of({ total: 0, items: [] }),
+    );
     vainglory.listPlayers.and.returnValue(of([]));
     vainglory.listPlayerStats.and.returnValue(of([]));
     vainglory.listHeroStats.and.returnValue(of([]));
@@ -522,6 +526,38 @@ describe('VaingloryComponent remote media', () => {
     expect(component.selectedSessionIds.has(10)).toBeTrue();
     expect(messages.warning).toHaveBeenCalledWith(
       '已加入 1 场，1 场失败；失败项已保留选中',
+    );
+  });
+
+  it('loads zero-match sessions and refreshes them after requeueing one', () => {
+    vainglory.listZeroMatchSessions.and.returnValue(
+      of({
+        total: 1,
+        items: [
+          {
+            sessionId: 12,
+            title: '未识别直播',
+            sourceTitle: '原始标题',
+            anchorName: '主播',
+            startedAt: 1_000,
+            completedAt: 2_000,
+            recordingDurationSeconds: 7_200,
+            partCount: 3,
+            bvid: 'BV1zero12345',
+          },
+        ],
+      }),
+    );
+    vainglory.requestScan.and.returnValue(of(scanJob(12)));
+
+    component.loadZeroMatchSessions();
+    component.requestSessionRescan(component.zeroMatchSessions[0]);
+
+    expect(component.zeroMatchSessionTotal).toBe(1);
+    expect(vainglory.requestScan).toHaveBeenCalledOnceWith(12);
+    expect(vainglory.listZeroMatchSessions).toHaveBeenCalledTimes(2);
+    expect(messages.success).toHaveBeenCalledWith(
+      '已加入重新分析队列，并提升为手动优先',
     );
   });
 

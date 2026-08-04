@@ -22,6 +22,7 @@ import {
   VaingloryPlayer,
   VaingloryPlayerStats,
   VaingloryScanJob,
+  VaingloryZeroMatchSessionList,
 } from './vainglory.model';
 
 @Injectable({ providedIn: 'root' })
@@ -40,6 +41,16 @@ export class VaingloryService {
     return this.http.get<VaingloryMatchSessionList>(
       this.url.makeApiUrl('/api/v1/vainglory/sessions'),
       { params: this.matchParams(filters, limit, offset).set('sort', sort) },
+    );
+  }
+
+  listZeroMatchSessions(
+    limit = 20,
+    offset = 0,
+  ): Observable<VaingloryZeroMatchSessionList> {
+    return this.http.get<VaingloryZeroMatchSessionList>(
+      this.url.makeApiUrl('/api/v1/vainglory/zero-match-sessions'),
+      { params: new HttpParams().set('limit', limit).set('offset', offset) },
     );
   }
 
