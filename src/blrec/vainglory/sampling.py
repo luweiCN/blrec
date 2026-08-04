@@ -48,6 +48,7 @@ class ScanWindow:
     end_ms: int
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
     hero_lineup: Tuple[str, ...] = ()
+    focus_ms: Optional[int] = None
 
 
 def hud_lineup_similarity(left: str, right: str) -> float:
@@ -82,11 +83,9 @@ def same_gameplay_run(
         return False
     if current.at_ms <= previous.at_ms:
         return False
-    lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
-    if lineup_evidence == 'mismatched':
-        return False
     if current.at_ms - previous.at_ms <= maximum_gap_ms:
         return True
+    lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
     return lineup_evidence == 'matched'
 
 
@@ -180,6 +179,7 @@ def result_search_windows(
                         duration_ms,
                         view_context=run_last.view_context,
                         hero_lineup=run_lineup,
+                        focus_ms=run_last.at_ms,
                     )
                 )
                 run_lineup = observation.hero_lineup
@@ -193,11 +193,15 @@ def result_search_windows(
                 duration_ms,
                 view_context=run_last.view_context,
                 hero_lineup=run_lineup,
+                focus_ms=run_last.at_ms,
             )
         )
     windows.extend(
         _bounded_window(
-            observation.at_ms - 3_000, observation.at_ms + 3_000, duration_ms
+            observation.at_ms - 3_000,
+            observation.at_ms + 3_000,
+            duration_ms,
+            focus_ms=observation.at_ms,
         )
         for observation in observations
         if observation.result_visible
@@ -211,7 +215,7 @@ class FfmpegSampler:
         *,
         ffmpeg: str = 'ffmpeg',
         ffprobe: str = 'ffprobe',
-        coarse_interval_seconds: int = 30,
+        coarse_interval_seconds: int = 10,
         fine_frames_per_second: int = 4,
     ) -> None:
         if coarse_interval_seconds < 1:
@@ -550,12 +554,14 @@ def _bounded_window(
     *,
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown',
     hero_lineup: Sequence[str] = (),
+    focus_ms: Optional[int] = None,
 ) -> ScanWindow:
     return ScanWindow(
         start_ms=max(0, min(duration_ms, start_ms)),
         end_ms=max(0, min(duration_ms, end_ms)),
         view_context=view_context,
         hero_lineup=tuple(hero_lineup),
+        focus_ms=(None if focus_ms is None else max(0, min(duration_ms, focus_ms))),
     )
 
 
@@ -592,6 +598,9 @@ def _merge_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
             end_ms=max(previous.end_ms, window.end_ms),
             view_context=view_context,
             hero_lineup=_merge_hero_lineups(previous.hero_lineup, window.hero_lineup),
+            focus_ms=(
+                window.focus_ms if window.focus_ms is not None else previous.focus_ms
+            ),
         )
     return tuple(merged)
 

@@ -534,25 +534,32 @@ def test_scan_logs_coarse_progress_and_each_fine_window(
     assert statuses[-1].current_window == 2
 
 
-def test_fine_scan_detects_a_short_result_from_a_scene_change(
+def test_fine_scan_checks_the_narrow_boundary_window_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     preview = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
     result = RgbFrame(4, 4, b'\xff\xff\xff' * 16)
-    frames = tuple(
-        TimedFrame(at_ms=index * 250, frame=result if index == 5 else preview)
-        for index in range(20)
-    )
 
     class Sampler:
-        def fine_frames(self, *_args, **_kwargs):
-            yield from frames
+        def __init__(self) -> None:
+            self.fine_windows = []
 
-    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
-    detected = []
+        def result_preview_frames(
+            self, _path: str, window: ScanWindow, *, keyframes_only: bool
+        ):
+            yield TimedFrame(at_ms=window.start_ms, frame=preview)
+
+        def fine_frames(self, _path: str, window: ScanWindow):
+            self.fine_windows.append((window.start_ms, window.end_ms))
+            for at_ms in range(window.start_ms, window.end_ms, 250):
+                yield TimedFrame(
+                    at_ms=at_ms, frame=result if at_ms == 101_250 else preview
+                )
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler)  # type: ignore[arg-type]
 
     def detect(frame: RgbFrame):
-        detected.append(frame)
         return hit(0).layout if frame is result else None
 
     monkeypatch.setattr(analyzer, '_detect_result_layout', detect)
@@ -560,48 +567,62 @@ def test_fine_scan_detects_a_short_result_from_a_scene_change(
 
     scanned = analyzer._scan_window(
         'unused',
-        ScanWindow(0, 2_000),
+        ScanWindow(90_000, 160_000, focus_ms=100_000),
         window_index=1,
         window_count=1,
         status=statuses.append,
     )
 
-    assert [item.at_ms for item in scanned.hits] == [1_250]
-    assert len(detected) < len(frames) // 2
-    assert scanned.sampled_frames == len(frames)
-    assert scanned.model_frames == len(detected)
-    assert statuses[-1] == '第 1/1 个区间：正在进行场景自适应精扫'
+    assert [item.at_ms for item in scanned.hits] == [101_250]
+    assert sampler.fine_windows == [(95_000, 125_000)]
+    assert scanned.expanded_fallback is False
+    assert statuses[-1] == '第 1/1 个区间：窄区间预览未命中，正在高帧率兜底'
 
 
-def test_fine_scan_periodically_checks_a_static_scene(
+def test_fine_scan_expands_to_the_full_beta36_window_after_a_narrow_miss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     preview = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
-    result = RgbFrame(4, 4, b'\x01\x01\x01' * 16)
-    frames = tuple(
-        TimedFrame(at_ms=index * 250, frame=result if index == 12 else preview)
-        for index in range(20)
-    )
+    result = RgbFrame(4, 4, b'\xff\xff\xff' * 16)
 
     class Sampler:
-        def fine_frames(self, *_args, **_kwargs):
-            yield from frames
+        def __init__(self) -> None:
+            self.fine_windows = []
 
-    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
-    detected = []
+        def result_preview_frames(
+            self, _path: str, window: ScanWindow, *, keyframes_only: bool
+        ):
+            yield TimedFrame(at_ms=window.start_ms, frame=preview)
+
+        def fine_frames(self, _path: str, window: ScanWindow):
+            self.fine_windows.append((window.start_ms, window.end_ms))
+            for at_ms in range(window.start_ms, window.end_ms, 250):
+                yield TimedFrame(
+                    at_ms=at_ms, frame=result if at_ms == 145_000 else preview
+                )
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler)  # type: ignore[arg-type]
 
     def detect(frame: RgbFrame):
-        detected.append(frame)
         return hit(0).layout if frame is result else None
 
     monkeypatch.setattr(analyzer, '_detect_result_layout', detect)
 
     scanned = analyzer._scan_window(
-        'unused', ScanWindow(0, 5_000), window_index=1, window_count=1
+        'unused',
+        ScanWindow(90_000, 160_000, focus_ms=100_000),
+        window_index=1,
+        window_count=1,
     )
 
-    assert [item.at_ms for item in scanned.hits] == [3_000]
-    assert len(detected) == 2
+    assert [item.at_ms for item in scanned.hits] == [145_000]
+    assert sampler.fine_windows == [
+        (95_000, 125_000),
+        (90_000, 95_000),
+        (125_000, 160_000),
+    ]
+    assert scanned.expanded_fallback is True
 
 
 def test_recognition_logs_each_candidate_rejection(

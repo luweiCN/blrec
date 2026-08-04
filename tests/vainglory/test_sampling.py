@@ -30,8 +30,8 @@ def observation(
     )
 
 
-def test_default_hud_probe_interval_is_thirty_seconds() -> None:
-    assert FfmpegSampler()._coarse_interval_seconds == 30
+def test_default_hud_probe_interval_is_ten_seconds() -> None:
+    assert FfmpegSampler()._coarse_interval_seconds == 10
 
 
 def test_searches_after_each_gameplay_run_and_at_video_end() -> None:
@@ -49,8 +49,8 @@ def test_searches_after_each_gameplay_run_and_at_video_end() -> None:
     )
 
     assert windows == (
-        ScanWindow(0, 70_000, view_context='played'),
-        ScanWindow(85_000, 110_000, view_context='played'),
+        ScanWindow(0, 70_000, view_context='played', focus_ms=10_000),
+        ScanWindow(85_000, 110_000, view_context='played', focus_ms=95_000),
     )
 
 
@@ -71,7 +71,9 @@ def test_temporary_scoreboard_gap_merges_into_one_result_window() -> None:
         duration_ms=180_000,
     )
 
-    assert windows == (ScanWindow(120_000, 180_000, view_context='played'),)
+    assert windows == (
+        ScanWindow(120_000, 180_000, view_context='played', focus_ms=130_000),
+    )
 
 
 def test_a_keyframe_result_is_searched_even_without_detectable_hud() -> None:
@@ -80,7 +82,7 @@ def test_a_keyframe_result_is_searched_even_without_detectable_hud() -> None:
         duration_ms=20_000,
     )
 
-    assert windows == (ScanWindow(7_000, 13_000),)
+    assert windows == (ScanWindow(7_000, 13_000, focus_ms=10_000),)
 
 
 def test_consecutive_huds_stay_in_one_game_despite_changed_portrait_hashes() -> None:
@@ -93,7 +95,9 @@ def test_consecutive_huds_stay_in_one_game_despite_changed_portrait_hashes() -> 
         duration_ms=220_000,
     )
 
-    assert windows == (ScanWindow(120_000, 190_000, view_context='played'),)
+    assert windows == (
+        ScanWindow(120_000, 190_000, view_context='played', focus_ms=130_000),
+    )
 
 
 def test_recognized_lineup_reconnects_one_game_after_a_long_hud_gap() -> None:
@@ -110,7 +114,13 @@ def test_recognized_lineup_reconnects_one_game_after_a_long_hud_gap() -> None:
     )
 
     assert windows == (
-        ScanWindow(210_000, 280_000, view_context='played', hero_lineup=lineup),
+        ScanWindow(
+            210_000,
+            280_000,
+            view_context='played',
+            hero_lineup=lineup,
+            focus_ms=220_000,
+        ),
     )
 
 
@@ -128,17 +138,40 @@ def test_conflicting_recognized_lineups_split_games_after_a_long_gap() -> None:
     )
 
     assert windows == (
-        ScanWindow(90_000, 160_000, view_context='played', hero_lineup=first_lineup),
-        ScanWindow(210_000, 280_000, view_context='played', hero_lineup=second_lineup),
+        ScanWindow(
+            90_000,
+            160_000,
+            view_context='played',
+            hero_lineup=first_lineup,
+            focus_ms=100_000,
+        ),
+        ScanWindow(
+            210_000,
+            280_000,
+            view_context='played',
+            hero_lineup=second_lineup,
+            focus_ms=220_000,
+        ),
     )
 
 
-def test_same_heroes_on_opposite_sides_are_a_conflicting_hud() -> None:
+def test_conflicting_hero_read_does_not_split_nearby_hud_samples() -> None:
     previous = observation(
         100, hud=True, heroes=('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
     )
     current = observation(
         130, hud=True, heroes=('Delta', 'Epsilon', 'Zeta', 'Alpha', 'Beta', 'Gamma')
+    )
+
+    assert same_gameplay_run(previous, current) is True
+
+
+def test_same_heroes_on_opposite_sides_split_after_a_long_hud_gap() -> None:
+    previous = observation(
+        100, hud=True, heroes=('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
+    )
+    current = observation(
+        190, hud=True, heroes=('Delta', 'Epsilon', 'Zeta', 'Alpha', 'Beta', 'Gamma')
     )
 
     assert same_gameplay_run(previous, current) is False
@@ -178,7 +211,9 @@ def test_observer_gameplay_creates_an_observed_result_window() -> None:
         duration_ms=220_000,
     )
 
-    assert windows == (ScanWindow(120_000, 190_000, view_context='observed'),)
+    assert windows == (
+        ScanWindow(120_000, 190_000, view_context='observed', focus_ms=130_000),
+    )
 
 
 def test_lineup_similarity_allows_small_perceptual_hash_noise() -> None:
