@@ -5,7 +5,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from statistics import median
-from typing import Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import Iterator, List, Literal, Optional, Sequence, Tuple, cast
 
 from loguru import logger
 
@@ -221,6 +221,7 @@ def detect_result_layouts(
         return ()
     layouts: List[ResultLayout] = []
     candidates: List[Tuple[ViewportTransform, TeamSize]] = []
+    team_sizes: Tuple[TeamSize, ...]
     if panel_detection is not None:
         team_sizes = _detected_panel_team_sizes(panel_detection)
         candidates.extend(
@@ -233,10 +234,11 @@ def detect_result_layouts(
             for team_size in team_sizes
         )
     else:
+        team_sizes = (cast(TeamSize, 3), cast(TeamSize, 5))
         candidates.extend(
             (viewport, team_size)
             for viewport in _result_viewports(frame.width / frame.height)
-            for team_size in (3, 5)
+            for team_size in team_sizes
         )
     for viewport, team_size in candidates:
         standard_action_contrasts = _result_action_contrasts(
@@ -245,6 +247,7 @@ def detect_result_layouts(
         action_contrasts = _result_action_contrasts(
             frame, viewport, team_size=team_size
         )
+        minimum_action_contrast: float
         if panel_detection is None:
             minimum_action_contrast = _MINIMUM_RESULT_ACTION_CONTRAST
         else:
@@ -587,6 +590,7 @@ def extract_result_heroes(
 ) -> Tuple[HeroFrame, ...]:
     result: List[HeroFrame] = []
     separator = 0.5 + center_shift
+    row_centers: Tuple[float, ...]
     if team_size == 5:
         center_offset = 0.046
         row_centers = (0.255, 0.379, 0.503, 0.627, 0.750)
@@ -618,6 +622,7 @@ def detect_recorded_player(
     frame: RgbFrame, layout: ResultLayout
 ) -> Optional[RecordedPlayer]:
     side: TeamSide = 'left' if layout.left_color == 'teal' else 'right'
+    row_centers: Tuple[float, ...]
     if layout.team_size == 5:
         left, right = (0.08, 0.44) if side == 'left' else (0.56, 0.92)
         row_centers = (0.255, 0.379, 0.503, 0.627, 0.750)
