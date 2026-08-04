@@ -139,6 +139,9 @@ async def test_ocr_queue_preserves_observed_candidate_context(tmp_path: Path) ->
                 video_duration_ms=1_000,
                 candidate_times_ms=(500,),
                 candidate_view_contexts=('observed',),
+                candidate_hero_lineups=(
+                    ('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta'),
+                ),
             ),
         )
 
@@ -147,6 +150,9 @@ async def test_ocr_queue_preserves_observed_candidate_context(tmp_path: Path) ->
         assert claim is not None
         assert claim.scanned.candidate_times_ms == (500,)
         assert claim.scanned.candidate_view_contexts == ('observed',)
+        assert claim.scanned.candidate_hero_lineups == (
+            ('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta'),
+        )
     finally:
         await database.close()
 

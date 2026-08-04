@@ -448,7 +448,7 @@ def refresh_session_scan_job(
 
 
 class VaingloryRepository:
-    ALGORITHM_VERSION = 16
+    ALGORITHM_VERSION = 17
     HERO_RECOGNITION_VERSION = 5
     RECORDED_PLAYER_DETECTION_VERSION = 3
     _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
@@ -1115,10 +1115,21 @@ class VaingloryRepository:
             if len(scanned.candidate_view_contexts) == len(scanned.candidate_times_ms)
             else tuple('unknown' for _ in scanned.candidate_times_ms)
         )
+        hero_lineups = (
+            scanned.candidate_hero_lineups
+            if len(scanned.candidate_hero_lineups) == len(scanned.candidate_times_ms)
+            else tuple(() for _ in scanned.candidate_times_ms)
+        )
         candidate_times_json = json.dumps(
             tuple(
-                {'at_ms': at_ms, 'view_context': view_context}
-                for at_ms, view_context in zip(scanned.candidate_times_ms, contexts)
+                {
+                    'at_ms': at_ms,
+                    'view_context': view_context,
+                    'hero_lineup': hero_lineup,
+                }
+                for at_ms, view_context, hero_lineup in zip(
+                    scanned.candidate_times_ms, contexts, hero_lineups
+                )
             ),
             separators=(',', ':'),
         )
@@ -1234,6 +1245,15 @@ class VaingloryRepository:
                 )
                 for value in raw_times
             )
+            candidate_hero_lineups = tuple(
+                (
+                    tuple(str(label) for label in value.get('hero_lineup', ()))
+                    if isinstance(value, dict)
+                    and isinstance(value.get('hero_lineup', ()), (list, tuple))
+                    else ()
+                )
+                for value in raw_times
+            )
             return OcrClaim(
                 session_id=int(row['session_id']),
                 part=VideoPart(
@@ -1253,6 +1273,7 @@ class VaingloryRepository:
                         Tuple[Literal['played', 'observed', 'unknown'], ...],
                         candidate_contexts,
                     ),
+                    candidate_hero_lineups=candidate_hero_lineups,
                 ),
             )
 

@@ -29,6 +29,7 @@ from .sampling import (
     CoarseObservation,
     FfmpegSampler,
     ScanWindow,
+    hero_lineup_evidence,
     hud_lineup_similarity,
     result_search_windows,
     same_gameplay_run,
@@ -57,6 +58,12 @@ from .vision import (
 
 class AnalysisCancelled(RuntimeError):
     pass
+
+
+class _ResultEvidenceRejected(RuntimeError):
+    def __init__(self, result: ResultOcr) -> None:
+        super().__init__('结算画面证据不完整')
+        self.result = result
 
 
 class ResultReader(Protocol):
@@ -102,6 +109,7 @@ class ResultHit:
     at_ms: int
     layout: ResultLayout
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
+    hero_lineup: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,7 @@ class ScannedPart:
     video_duration_ms: int
     candidate_times_ms: Tuple[int, ...]
     candidate_view_contexts: Tuple[Literal['played', 'observed', 'unknown'], ...] = ()
+    candidate_hero_lineups: Tuple[Tuple[str, ...], ...] = ()
 
 
 def classify_match_kind(
@@ -312,6 +321,7 @@ def collapse_result_hits(
                 at_ms=middle.at_ms,
                 layout=strongest.layout,
                 view_context=strongest.view_context,
+                hero_lineup=strongest.hero_lineup,
             )
         )
     return tuple(result)
@@ -376,6 +386,7 @@ def collapse_analyzed_matches(
 
 class VaingloryVideoAnalyzer:
     _RESULT_FALLBACK_INTERVAL_MS = 120_000
+    _HUD_CONTINUITY_MS = 75_000
 
     def __init__(
         self,
@@ -385,18 +396,12 @@ class VaingloryVideoAnalyzer:
         hero_recognizer: Optional[SiftHeroRecognizer] = None,
         aram_detector: Optional[AramDetector] = None,
         result_panel_detector: Optional[ResultPanelDetector] = None,
-        game_timer_reader: Optional[Any] = None,
         minimum_match_seconds: int = 60,
     ) -> None:
         if minimum_match_seconds < 0:
             raise ValueError('minimum match duration must not be negative')
         self._sampler = sampler or FfmpegSampler()
         self._result_reader = result_reader or TesseractResultReader()
-        self._game_timer_reader: Any = game_timer_reader or (
-            self._result_reader
-            if callable(getattr(self._result_reader, 'read_game_timer', None))
-            else None
-        )
         self._hero_recognizer = hero_recognizer
         self._aram_detector = aram_detector or AramTalentSelectionDetector()
         self._result_panel_detector = result_panel_detector
@@ -446,11 +451,13 @@ class VaingloryVideoAnalyzer:
         coarse_started = time.monotonic()
         observations: List[CoarseObservation] = []
         previous_gameplay: Optional[CoarseObservation] = None
+        segment_lineup: Tuple[str, ...] = ()
+        lineup_probe_attempts = 0
         last_result_fallback_ms = -self._RESULT_FALLBACK_INTERVAL_MS
         result_fallback_probes = 0
-        timer_reads = 0
-        timer_hits = 0
-        timer_seconds = 0.0
+        lineup_probes = 0
+        lineup_recognized_slots = 0
+        lineup_seconds = 0.0
         hud_detection_seconds = 0.0
         result_fallback_seconds = 0.0
         for timed in self._sampler.coarse_frames(part.path):
@@ -462,16 +469,34 @@ class VaingloryVideoAnalyzer:
                 hud = detect_observer_hud(timed.frame)
                 view_context = 'observed' if hud is not None else 'unknown'
             hud_detection_seconds += time.monotonic() - hud_started
-            game_timer_seconds: Optional[int] = None
-            timer_confidence = 0.0
-            if hud is not None:
-                timer_started = time.monotonic()
-                timer_reads += 1
-                game_timer_seconds, timer_confidence = self._read_game_timer(
-                    timed.frame
+            new_hud_segment = hud is not None and (
+                previous_gameplay is None
+                or previous_gameplay.view_context != view_context
+                or timed.at_ms - previous_gameplay.at_ms > self._HUD_CONTINUITY_MS
+            )
+            if new_hud_segment:
+                segment_lineup = ()
+                lineup_probe_attempts = 0
+            if (
+                hud is not None
+                and view_context == 'played'
+                and self._hero_recognizer is not None
+                and lineup_probe_attempts < 2
+                and sum(bool(label) for label in segment_lineup) < hud.team_size * 2
+            ):
+                lineup_started = time.monotonic()
+                lineup_probes += 1
+                lineup_probe_attempts += 1
+                recognized_lineup = self._recognize_coarse_hud_lineup(
+                    part.path, timed.at_ms, team_size=hud.team_size
                 )
-                timer_seconds += time.monotonic() - timer_started
-                timer_hits += game_timer_seconds is not None
+                lineup_seconds += time.monotonic() - lineup_started
+                lineup_recognized_slots += sum(
+                    bool(label) for label in recognized_lineup
+                )
+                segment_lineup = self._merge_hud_lineups(
+                    segment_lineup, recognized_lineup
+                )
             result_visible = False
             if (
                 hud is None
@@ -487,11 +512,10 @@ class VaingloryVideoAnalyzer:
                 at_ms=timed.at_ms,
                 hud_signature=None if hud is None else hud.signature,
                 result_visible=result_visible,
-                game_timer_seconds=game_timer_seconds,
-                timer_confidence=timer_confidence,
                 team_size=None if hud is None else hud.team_size,
                 visible_portraits=0 if hud is None else hud.visible_portraits,
                 view_context=view_context,
+                hero_lineup=segment_lineup if hud is not None else (),
             )
             similarity = (
                 None
@@ -500,24 +524,16 @@ class VaingloryVideoAnalyzer:
                     previous_gameplay.hud_signature or '', hud.signature
                 )
             )
-            estimated_start_ms = (
-                None
-                if game_timer_seconds is None
-                else timed.at_ms - game_timer_seconds * 1_000
-            )
             logger.debug(
                 'Vainglory HUD probe: part_id={} at_ms={} context={} '
-                'team_size={} visible_portraits={} timer_seconds={} '
-                'timer_confidence={:.4f} estimated_start_ms={} '
+                'team_size={} visible_portraits={} recognized_heroes={} '
                 'lineup_similarity={} result_fallback={} result_visible={}',
                 part.id,
                 timed.at_ms,
                 view_context,
                 observation.team_size,
                 observation.visible_portraits,
-                game_timer_seconds,
-                timer_confidence,
-                estimated_start_ms,
+                tuple(label for label in observation.hero_lineup if label),
                 None if similarity is None else round(similarity, 4),
                 hud is None and timed.at_ms == last_result_fallback_ms,
                 result_visible,
@@ -528,15 +544,13 @@ class VaingloryVideoAnalyzer:
             ):
                 logger.info(
                     'Vainglory gameplay run started: part_id={} at_ms={} '
-                    'context={} team_size={} timer_seconds={} '
-                    'estimated_start_ms={} previous_at_ms={} '
-                    'lineup_similarity={}',
+                    'context={} team_size={} recognized_heroes={} '
+                    'previous_at_ms={} lineup_similarity={}',
                     part.id,
                     timed.at_ms,
                     view_context,
                     observation.team_size,
-                    game_timer_seconds,
-                    estimated_start_ms,
+                    tuple(label for label in observation.hero_lineup if label),
                     None if previous_gameplay is None else previous_gameplay.at_ms,
                     None if similarity is None else round(similarity, 4),
                 )
@@ -550,8 +564,8 @@ class VaingloryVideoAnalyzer:
         windows = result_search_windows(observations, duration_ms=profile.duration_ms)
         logger.info(
             'Vainglory coarse scan completed: part_id={} frames={} hud_hits={} '
-            'observer_hits={} timer_reads={} timer_hits={} '
-            'hud_detection_seconds={:.3f} timer_seconds={:.3f} '
+            'observer_hits={} lineup_probes={} lineup_recognized_slots={} '
+            'hud_detection_seconds={:.3f} lineup_seconds={:.3f} '
             'result_fallback_probes={} result_fallback_seconds={:.3f} '
             'result_hits={} windows={} elapsed_seconds={:.3f}',
             part.id,
@@ -561,10 +575,10 @@ class VaingloryVideoAnalyzer:
                 for item in observations
             ),
             sum(item.view_context == 'observed' for item in observations),
-            timer_reads,
-            timer_hits,
+            lineup_probes,
+            lineup_recognized_slots,
             hud_detection_seconds,
-            timer_seconds,
+            lineup_seconds,
             result_fallback_probes,
             result_fallback_seconds,
             sum(item.result_visible for item in observations),
@@ -591,7 +605,12 @@ class VaingloryVideoAnalyzer:
             self._raise_if_cancelled(cancelled)
             scanned = self._scan_window(part.path, window, cancelled=cancelled)
             hits.extend(
-                replace(hit, view_context=window.view_context) for hit in scanned.hits
+                replace(
+                    hit,
+                    view_context=window.view_context,
+                    hero_lineup=window.hero_lineup,
+                )
+                for hit in scanned.hits
             )
             keyframe_preview_frames += scanned.keyframe_preview_frames
             fallback_preview_frames += scanned.fallback_preview_frames
@@ -638,6 +657,9 @@ class VaingloryVideoAnalyzer:
             candidate_view_contexts=tuple(
                 candidate.view_context for candidate in candidates
             ),
+            candidate_hero_lineups=tuple(
+                candidate.hero_lineup for candidate in candidates
+            ),
         )
 
     def recognize_scanned_part(
@@ -655,18 +677,27 @@ class VaingloryVideoAnalyzer:
             if len(scanned.candidate_view_contexts) == len(candidates)
             else tuple('unknown' for _ in candidates)
         )
+        candidate_lineups = (
+            scanned.candidate_hero_lineups
+            if len(scanned.candidate_hero_lineups) == len(candidates)
+            else tuple(() for _ in candidates)
+        )
         matches: List[AnalyzedMatch] = []
         rejected_layout = 0
         rejected_header = 0
         rejected_short = 0
+        rejected_evidence = 0
+        rejected_lineup = 0
         candidate_started = time.monotonic()
         candidate_frame_seconds = 0.0
         header_ocr_seconds = 0.0
         nearby_frame_seconds = 0.0
         match_recognition_seconds = 0.0
-        for index, (candidate_at_ms, candidate_view_context) in enumerate(
-            zip(candidates, candidate_contexts)
-        ):
+        for index, (
+            candidate_at_ms,
+            candidate_view_context,
+            candidate_lineup,
+        ) in enumerate(zip(candidates, candidate_contexts, candidate_lineups)):
             self._raise_if_cancelled(cancelled)
             if progress is not None:
                 progress(index / max(1, len(candidates)))
@@ -700,17 +731,42 @@ class VaingloryVideoAnalyzer:
             frame, layout = ranked_contexts[0]
             name_frames = tuple(item[0] for item in ranked_contexts[1:])
             match_started = time.monotonic()
-            recognized = self._recognize_frame(
-                frame,
-                part=part,
-                at_ms=candidate_at_ms,
-                layout=layout,
-                header=header,
-                name_frames=name_frames,
-                hero_frames=name_frames,
-                video_duration_ms=scanned.video_duration_ms,
-                view_context=candidate_view_context,
-            )
+            try:
+                recognized = self._recognize_frame(
+                    frame,
+                    part=part,
+                    at_ms=candidate_at_ms,
+                    layout=layout,
+                    header=header,
+                    name_frames=name_frames,
+                    hero_frames=name_frames,
+                    video_duration_ms=scanned.video_duration_ms,
+                    view_context=candidate_view_context,
+                )
+            except _ResultEvidenceRejected as rejected:
+                match_recognition_seconds += time.monotonic() - match_started
+                rejected_evidence += 1
+                evidence_header = rejected.result.header
+                complete_kda = sum(
+                    player.stats.kills is not None
+                    and player.stats.deaths is not None
+                    and player.stats.assists is not None
+                    for player in rejected.result.players
+                )
+                logger.info(
+                    'Vainglory result candidate rejected after full OCR: '
+                    'part_id={} at_ms={} reason=evidence left_kills={} '
+                    'right_kills={} left_economy={} right_economy={} '
+                    'complete_kda={}',
+                    part.id,
+                    candidate_at_ms,
+                    evidence_header.left_kills,
+                    evidence_header.right_kills,
+                    evidence_header.left_economy,
+                    evidence_header.right_economy,
+                    complete_kda,
+                )
+                continue
             match_recognition_seconds += time.monotonic() - match_started
             recognized_header = recognized.ocr.header
             if not self._is_completed_match(recognized_header):
@@ -728,6 +784,27 @@ class VaingloryVideoAnalyzer:
                     reason,
                     recognized_header.result_text,
                     recognized_header.duration_seconds,
+                )
+                continue
+            lineup_evidence = self._result_hero_lineup_evidence(
+                recognized.heroes, candidate_lineup, team_size=layout.team_size
+            )
+            logger.info(
+                'Vainglory result/HUD hero comparison: part_id={} at_ms={} '
+                'evidence={} result_heroes={} hud_heroes={}',
+                part.id,
+                candidate_at_ms,
+                lineup_evidence,
+                tuple(hero.label for hero in recognized.heroes if hero.label),
+                tuple(label for label in candidate_lineup if label),
+            )
+            if lineup_evidence == 'mismatched':
+                rejected_lineup += 1
+                logger.info(
+                    'Vainglory result candidate rejected after hero comparison: '
+                    'part_id={} at_ms={} reason=lineup',
+                    part.id,
+                    candidate_at_ms,
                 )
                 continue
             matches.append(recognized)
@@ -764,7 +841,8 @@ class VaingloryVideoAnalyzer:
             'Vainglory recognition completed: part_id={} candidates={} '
             'matches={} timeline_duplicates={} content_duplicates={} '
             'rejected_layout={} '
-            'rejected_header={} rejected_short={} '
+            'rejected_header={} rejected_short={} rejected_evidence={} '
+            'rejected_lineup={} '
             'candidate_seconds={:.3f} candidate_frame_seconds={:.3f} '
             'header_ocr_seconds={:.3f} nearby_frame_seconds={:.3f} '
             'match_recognition_seconds={:.3f} total_seconds={:.3f}',
@@ -776,6 +854,8 @@ class VaingloryVideoAnalyzer:
             rejected_layout,
             rejected_header,
             rejected_short,
+            rejected_evidence,
+            rejected_lineup,
             candidate_seconds,
             candidate_frame_seconds,
             header_ocr_seconds,
@@ -904,6 +984,8 @@ class VaingloryVideoAnalyzer:
                 team_size=layout.team_size,
             )
         ocr_seconds = time.monotonic() - ocr_started
+        if not self._is_credible_result(recognized, team_size=layout.team_size):
+            raise _ResultEvidenceRejected(recognized)
         heroes_started = time.monotonic()
         heroes = self._recognize_heroes(frame, layout, nearby_frames=hero_frames)
         recorded_player = detect_recorded_player(frame, layout)
@@ -1428,6 +1510,38 @@ class VaingloryVideoAnalyzer:
             return {'left': 'left', 'right': 'right'}
         return {'left': 'right', 'right': 'left'}
 
+    @staticmethod
+    def _result_hero_lineup_evidence(
+        heroes: Sequence[AnalyzedHero], lineup: Sequence[str], *, team_size: TeamSize
+    ) -> Literal['matched', 'mismatched', 'unknown']:
+        if len(lineup) != team_size * 2:
+            return 'unknown'
+        labels = {(hero.side, hero.slot): hero.label for hero in heroes if hero.label}
+        sides: Tuple[TeamSide, TeamSide] = ('left', 'right')
+        result_lineup = tuple(
+            labels.get((side, slot), '')
+            for side in sides
+            for slot in range(1, team_size + 1)
+        )
+        return hero_lineup_evidence(result_lineup, lineup)
+
+    @staticmethod
+    def _result_hud_lineup_evidence(
+        heroes: Sequence[AnalyzedHero],
+        hud: Dict[Tuple[TeamSide, int], Tuple[HeroFrame, HeroMatch]],
+        *,
+        team_size: TeamSize,
+    ) -> Literal['matched', 'mismatched', 'unknown']:
+        sides: Tuple[TeamSide, TeamSide] = ('left', 'right')
+        lineup = tuple(
+            ('' if (side, slot) not in hud else hud[(side, slot)][1].label)
+            for side in sides
+            for slot in range(1, team_size + 1)
+        )
+        return VaingloryVideoAnalyzer._result_hero_lineup_evidence(
+            heroes, lineup, team_size=team_size
+        )
+
     def recognize_saved_heroes(self, content: bytes) -> Tuple[AnalyzedHero, ...]:
         frame = self._sampler.decode_image(content)
         layout = self._detect_result_layout(frame)
@@ -1522,22 +1636,46 @@ class VaingloryVideoAnalyzer:
         )
         return tuple(frames)
 
-    def _read_game_timer(self, frame: RgbFrame) -> Tuple[Optional[int], float]:
-        reader = self._game_timer_reader
-        if reader is None:
-            return None, 0.0
+    def _recognize_coarse_hud_lineup(
+        self, path: str, at_ms: int, *, team_size: TeamSize
+    ) -> Tuple[str, ...]:
         try:
-            reading = reader.read_game_timer(frame)
-            seconds = reading.seconds
-            confidence = max(0.0, min(1.0, float(reading.confidence)))
-        except Exception as error:
-            logger.warning('Vainglory HUD timer OCR failed: reason={!r}', error)
-            return None, 0.0
-        if seconds is None or not 0 <= int(seconds) <= 2 * 60 * 60:
-            return None, confidence
-        if confidence < 0.3:
-            return None, confidence
-        return int(seconds), confidence
+            frame = self._sampler.frame_at(path, at_ms)
+        except RuntimeError as error:
+            logger.warning(
+                'Skipped unreadable Vainglory HUD lineup frame: ' 'at_ms={} error={}',
+                at_ms,
+                error,
+            )
+            return ()
+        recognized = self._recognize_gameplay_hud_heroes((frame,), team_size=team_size)
+        sides: Tuple[TeamSide, TeamSide] = ('left', 'right')
+        lineup = tuple(
+            (
+                ''
+                if (side, slot) not in recognized
+                else recognized[(side, slot)][1].label
+            )
+            for side in sides
+            for slot in range(1, team_size + 1)
+        )
+        logger.debug(
+            'Vainglory coarse HUD heroes: at_ms={} team_size={} labels={}',
+            at_ms,
+            team_size,
+            lineup,
+        )
+        return lineup
+
+    @staticmethod
+    def _merge_hud_lineups(
+        previous: Sequence[str], current: Sequence[str]
+    ) -> Tuple[str, ...]:
+        if not previous:
+            return tuple(current)
+        if not current or len(previous) != len(current):
+            return tuple(previous)
+        return tuple(left or right for left, right in zip(previous, current))
 
     def _detect_result_layout(self, frame: RgbFrame) -> Optional[ResultLayout]:
         layouts = self._detect_result_layouts(frame)
@@ -1600,6 +1738,21 @@ class VaingloryVideoAnalyzer:
             self._is_result_header(header)
             and header.duration_seconds is not None
             and header.duration_seconds >= self._minimum_match_seconds
+        )
+
+    @staticmethod
+    def _is_credible_result(result: ResultOcr, *, team_size: int) -> bool:
+        if team_size not in (3, 5):
+            return False
+        header = result.header
+        return all(
+            value is not None
+            for value in (
+                header.left_kills,
+                header.right_kills,
+                header.left_economy,
+                header.right_economy,
+            )
         )
 
     def _select_ocr_context(

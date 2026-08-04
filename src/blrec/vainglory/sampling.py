@@ -6,7 +6,8 @@ import select
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 
@@ -35,11 +36,10 @@ class CoarseObservation:
     at_ms: int
     hud_signature: Optional[str]
     result_visible: bool
-    game_timer_seconds: Optional[int] = None
-    timer_confidence: float = 0
     team_size: Optional[int] = None
     visible_portraits: int = 0
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
+    hero_lineup: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,7 @@ class ScanWindow:
     start_ms: int
     end_ms: int
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
+    hero_lineup: Tuple[str, ...] = ()
 
 
 def hud_lineup_similarity(left: str, right: str) -> float:
@@ -74,7 +75,6 @@ def same_gameplay_run(
     current: CoarseObservation,
     *,
     maximum_gap_ms: int = 75_000,
-    maximum_start_drift_ms: int = 45_000,
 ) -> bool:
     if previous.hud_signature is None or current.hud_signature is None:
         return False
@@ -82,18 +82,56 @@ def same_gameplay_run(
         return False
     if current.at_ms <= previous.at_ms:
         return False
-    if current.at_ms - previous.at_ms > maximum_gap_ms:
+    lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
+    if lineup_evidence == 'mismatched':
         return False
-    previous_timer = previous.game_timer_seconds
-    current_timer = current.game_timer_seconds
-    if previous_timer is not None and current_timer is not None:
-        if current_timer + 15 < previous_timer:
-            return False
-        previous_start = previous.at_ms - previous_timer * 1_000
-        current_start = current.at_ms - current_timer * 1_000
-        if abs(previous_start - current_start) <= maximum_start_drift_ms:
-            return True
-    return hud_lineup_similarity(previous.hud_signature, current.hud_signature) >= 0.72
+    if current.at_ms - previous.at_ms <= maximum_gap_ms:
+        return True
+    return lineup_evidence == 'matched'
+
+
+def hero_lineup_evidence(
+    previous: Sequence[str], current: Sequence[str]
+) -> Literal['matched', 'mismatched', 'unknown']:
+    if not previous or len(previous) != len(current) or len(previous) % 2 != 0:
+        return 'unknown'
+    team_size = len(previous) // 2
+    minimum_matches = 2 if team_size == 3 else 3
+    previous_sides = (Counter(previous[:team_size]), Counter(previous[team_size:]))
+    current_sides = (Counter(current[:team_size]), Counter(current[team_size:]))
+    for values in (*previous_sides, *current_sides):
+        values.pop('', None)
+    same_side = sum(
+        sum((left & right).values())
+        for left, right in zip(previous_sides, current_sides)
+    )
+    swapped_side = sum(
+        sum((left & right).values())
+        for left, right in zip(previous_sides, reversed(current_sides))
+    )
+    if same_side >= minimum_matches and same_side > swapped_side:
+        return 'matched'
+    if swapped_side >= minimum_matches and swapped_side > same_side:
+        return 'mismatched'
+    previous_known: Counter[str] = sum(previous_sides, Counter())
+    current_known: Counter[str] = sum(current_sides, Counter())
+    if (
+        sum(previous_known.values()) >= team_size
+        and sum(current_known.values()) >= team_size
+        and max(same_side, swapped_side) < minimum_matches
+    ):
+        return 'mismatched'
+    return 'unknown'
+
+
+def _merge_hero_lineups(
+    previous: Sequence[str], current: Sequence[str]
+) -> Tuple[str, ...]:
+    if not previous:
+        return tuple(current)
+    if not current or len(previous) != len(current):
+        return tuple(previous)
+    return tuple(left or right for left, right in zip(previous, current))
 
 
 def fit_frame_dimensions(
@@ -131,16 +169,22 @@ def result_search_windows(
     )
     if gameplay:
         run_last = gameplay[0]
+        run_lineup = run_last.hero_lineup
         for observation in gameplay[1:]:
-            if not same_gameplay_run(run_last, observation, maximum_gap_ms=hud_gap_ms):
+            reference = replace(run_last, hero_lineup=run_lineup)
+            if not same_gameplay_run(reference, observation, maximum_gap_ms=hud_gap_ms):
                 windows.append(
                     _bounded_window(
                         run_last.at_ms - before_end_ms,
                         run_last.at_ms + after_end_ms,
                         duration_ms,
                         view_context=run_last.view_context,
+                        hero_lineup=run_lineup,
                     )
                 )
+                run_lineup = observation.hero_lineup
+            else:
+                run_lineup = _merge_hero_lineups(run_lineup, observation.hero_lineup)
             run_last = observation
         windows.append(
             _bounded_window(
@@ -148,6 +192,7 @@ def result_search_windows(
                 run_last.at_ms + after_end_ms,
                 duration_ms,
                 view_context=run_last.view_context,
+                hero_lineup=run_lineup,
             )
         )
     windows.extend(
@@ -504,11 +549,13 @@ def _bounded_window(
     duration_ms: int,
     *,
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown',
+    hero_lineup: Sequence[str] = (),
 ) -> ScanWindow:
     return ScanWindow(
         start_ms=max(0, min(duration_ms, start_ms)),
         end_ms=max(0, min(duration_ms, end_ms)),
         view_context=view_context,
+        hero_lineup=tuple(hero_lineup),
     )
 
 
@@ -527,6 +574,14 @@ def _merge_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
         if contexts == {'played', 'observed'}:
             merged.append(window)
             continue
+        if (
+            previous.hero_lineup
+            and window.hero_lineup
+            and hero_lineup_evidence(previous.hero_lineup, window.hero_lineup)
+            == 'mismatched'
+        ):
+            merged.append(window)
+            continue
         view_context = (
             previous.view_context
             if previous.view_context != 'unknown'
@@ -536,6 +591,7 @@ def _merge_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
             start_ms=previous.start_ms,
             end_ms=max(previous.end_ms, window.end_ms),
             view_context=view_context,
+            hero_lineup=_merge_hero_lineups(previous.hero_lineup, window.hero_lineup),
         )
     return tuple(merged)
 

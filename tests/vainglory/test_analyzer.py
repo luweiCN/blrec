@@ -20,7 +20,13 @@ from blrec.vainglory.analyzer import (
 from blrec.vainglory.hero_recognition import HeroMatch
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
 from blrec.vainglory.sampling import TimedFrame, VideoProfile
-from blrec.vainglory.vision import HeroFrame, ResultLayout, RgbFrame, ViewportTransform
+from blrec.vainglory.vision import (
+    GameplayHud,
+    HeroFrame,
+    ResultLayout,
+    RgbFrame,
+    ViewportTransform,
+)
 
 
 def hit(at_ms: int, confidence: float = 1.0) -> ResultHit:
@@ -460,6 +466,212 @@ def test_coarse_scan_runs_expensive_result_fallback_only_every_two_minutes(
 
     assert scanned.candidate_times_ms == ()
     assert len(result_probes) == 2
+
+
+def test_coarse_scan_never_calls_the_game_timer_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def probe(self, _path: str) -> VideoProfile:
+            return VideoProfile(width=1, height=1, duration_ms=60_000)
+
+        def coarse_frames(self, _path: str):
+            yield TimedFrame(at_ms=0, frame=frame)
+            yield TimedFrame(at_ms=30_000, frame=frame)
+
+        def result_preview_frames(self, *_args, **_kwargs):
+            return iter(())
+
+    class Reader:
+        timer_calls = 0
+
+        def read_game_timer(self, _frame: RgbFrame):
+            self.timer_calls += 1
+            raise AssertionError('粗扫不得调用计时器 OCR')
+
+    reader = Reader()
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(),  # type: ignore[arg-type]
+        result_reader=reader,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        analyzer_module,
+        'detect_gameplay_hud_details',
+        lambda _frame: GameplayHud('lineup', 3, 6),
+    )
+
+    analyzer.scan_part(VideoPart(id=1, index=1, path='unused'))
+
+    assert reader.timer_calls == 0
+
+
+def test_coarse_scan_recognizes_heroes_only_at_gameplay_anchors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hud_frame = RgbFrame(1, 1, b'\x01\x00\x00')
+    blank_frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def probe(self, _path: str) -> VideoProfile:
+            return VideoProfile(width=1, height=1, duration_ms=210_000)
+
+        def coarse_frames(self, _path: str):
+            for at_ms, frame in (
+                (0, hud_frame),
+                (30_000, hud_frame),
+                (60_000, hud_frame),
+                (90_000, blank_frame),
+                (120_000, blank_frame),
+                (150_000, hud_frame),
+                (180_000, hud_frame),
+            ):
+                yield TimedFrame(at_ms=at_ms, frame=frame)
+
+        def result_preview_frames(self, *_args, **_kwargs):
+            return iter(())
+
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(),  # type: ignore[arg-type]
+        hero_recognizer=object(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        analyzer_module,
+        'detect_gameplay_hud_details',
+        lambda frame: GameplayHud('lineup', 3, 6) if frame is hud_frame else None,
+    )
+    monkeypatch.setattr(analyzer_module, 'detect_observer_hud', lambda _frame: None)
+    recognized_at = []
+    monkeypatch.setattr(
+        analyzer,
+        '_recognize_coarse_hud_lineup',
+        lambda _path, at_ms, **_kwargs: recognized_at.append(at_ms)
+        or ('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta'),
+        raising=False,
+    )
+
+    analyzer.scan_part(VideoPart(id=1, index=1, path='unused'))
+
+    assert recognized_at == [0, 150_000]
+
+
+def test_final_result_evidence_rejects_the_in_game_scoreboard_pattern() -> None:
+    complete_players = tuple(
+        OcrPlayer(
+            side=side,
+            slot=slot,
+            name='{}{}'.format(side, slot),
+            normalized_name='{}{}'.format(side, slot),
+            stats=PlayerStats(slot, slot, slot, 10_000 + slot),
+            confidence=1,
+        )
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    )
+    valid = ResultOcr(
+        ResultHeader('投降', 'surrender', 929, 3, 20, 29_600, 42_000), complete_players
+    )
+    scoreboard_players = tuple(
+        replace(
+            player,
+            stats=replace(
+                player.stats,
+                kills=None if player.side == 'left' else player.stats.kills,
+                deaths=None if player.side == 'right' else player.stats.deaths,
+            ),
+            confidence=0.45,
+        )
+        for player in complete_players
+    )
+    scoreboard = ResultOcr(
+        ResultHeader('投降', 'surrender', 552, 100, None, 5_300, None),
+        scoreboard_players,
+    )
+
+    assert VaingloryVideoAnalyzer._is_credible_result(valid, team_size=3) is True
+    assert VaingloryVideoAnalyzer._is_credible_result(scoreboard, team_size=3) is False
+
+
+def test_incomplete_result_evidence_stops_before_hero_recognition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    scoreboard = ResultOcr(
+        ResultHeader('投降', 'surrender', 552, 100, None, 5_300, None), ()
+    )
+
+    class Reader:
+        def read(self, *_args, **_kwargs) -> ResultOcr:
+            return scoreboard
+
+    analyzer = VaingloryVideoAnalyzer(result_reader=Reader())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        analyzer,
+        '_recognize_heroes',
+        lambda *_args, **_kwargs: pytest.fail('不完整候选不得进入英雄识别'),
+    )
+
+    with pytest.raises(analyzer_module._ResultEvidenceRejected):
+        analyzer._recognize_frame(
+            frame,
+            part=VideoPart(id=1, index=1, path='unused'),
+            at_ms=552_000,
+            layout=hit(0).layout,
+            header=scoreboard.header,
+            video_duration_ms=600_000,
+        )
+
+
+def test_result_hero_lineup_distinguishes_mismatch_from_missing_evidence() -> None:
+    heroes = tuple(
+        AnalyzedHero(
+            side=side,
+            slot=slot,
+            fingerprint='',
+            thumbnail_png=b'',
+            label=label,
+            confidence=0.9,
+        )
+        for side, labels in (
+            ('left', ('Alpha', 'Beta', 'Gamma')),
+            ('right', ('Delta', 'Epsilon', 'Zeta')),
+        )
+        for slot, label in enumerate(labels, 1)
+    )
+    frame = HeroFrame(side='left', slot=1, frame=RgbFrame(1, 1, b'\x00\x00\x00'))
+
+    def hud(labels: Tuple[str, ...]):
+        return {
+            (side, slot): (
+                replace(frame, side=side, slot=slot),
+                HeroMatch(label, 0.9, 12, 6),
+            )
+            for side, side_labels in (('left', labels[:3]), ('right', labels[3:]))
+            for slot, label in enumerate(side_labels, 1)
+            if label
+        }
+
+    assert (
+        VaingloryVideoAnalyzer._result_hud_lineup_evidence(
+            heroes, hud(('Alpha', 'Beta', '', 'Delta', 'Epsilon', '')), team_size=3
+        )
+        == 'matched'
+    )
+    assert (
+        VaingloryVideoAnalyzer._result_hud_lineup_evidence(
+            heroes,
+            hud(('Kestrel', 'Lance', 'Lyra', 'Ringo', 'Skaarf', 'Vox')),
+            team_size=3,
+        )
+        == 'mismatched'
+    )
+    assert (
+        VaingloryVideoAnalyzer._result_hud_lineup_evidence(
+            heroes, hud(('Alpha', '', '', '', '', '')), team_size=3
+        )
+        == 'unknown'
+    )
 
 
 def test_hero_recognition_searches_one_shared_layout_offset(

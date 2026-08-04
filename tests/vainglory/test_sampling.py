@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Tuple
 
 from blrec.vainglory.sampling import (
     CoarseObservation,
@@ -16,15 +16,16 @@ def observation(
     *,
     hud: bool = False,
     result: bool = False,
-    timer_seconds: Optional[int] = None,
     signature: str = 'lineup',
+    heroes: Tuple[str, ...] = (),
     view_context: str = 'played',
 ) -> CoarseObservation:
     return CoarseObservation(
         at_ms=at_seconds * 1_000,
         hud_signature=signature if hud else None,
         result_visible=result,
-        game_timer_seconds=timer_seconds,
+        hero_lineup=heroes,
+        team_size=len(heroes) // 2 if heroes else None,
         view_context=view_context if hud else 'unknown',
     )
 
@@ -82,11 +83,11 @@ def test_a_keyframe_result_is_searched_even_without_detectable_hud() -> None:
     assert windows == (ScanWindow(7_000, 13_000),)
 
 
-def test_timer_keeps_changed_hud_portraits_in_the_same_game() -> None:
+def test_consecutive_huds_stay_in_one_game_despite_changed_portrait_hashes() -> None:
     windows = result_search_windows(
         (
-            observation(100, hud=True, timer_seconds=40, signature='00:00'),
-            observation(130, hud=True, timer_seconds=70, signature='ff:ff'),
+            observation(100, hud=True, signature='00:00'),
+            observation(130, hud=True, signature='ff:ff'),
             observation(160),
         ),
         duration_ms=220_000,
@@ -95,34 +96,83 @@ def test_timer_keeps_changed_hud_portraits_in_the_same_game() -> None:
     assert windows == (ScanWindow(120_000, 190_000, view_context='played'),)
 
 
-def test_timer_reset_splits_consecutive_games_even_when_lineups_match() -> None:
+def test_recognized_lineup_reconnects_one_game_after_a_long_hud_gap() -> None:
+    lineup = ('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
+    windows = result_search_windows(
+        (
+            observation(100, hud=True, heroes=lineup),
+            observation(130, hud=True, heroes=('Alpha', '', 'Gamma', '', '', 'Zeta')),
+            observation(160),
+            observation(190),
+            observation(220, hud=True, heroes=('Alpha', 'Beta', '', '', '', 'Zeta')),
+        ),
+        duration_ms=300_000,
+    )
+
+    assert windows == (
+        ScanWindow(210_000, 280_000, view_context='played', hero_lineup=lineup),
+    )
+
+
+def test_conflicting_recognized_lineups_split_games_after_a_long_gap() -> None:
+    first_lineup = ('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
+    second_lineup = ('Kestrel', 'Lance', 'Lyra', 'Ringo', 'Skaarf', 'Vox')
+    windows = result_search_windows(
+        (
+            observation(100, hud=True, heroes=first_lineup),
+            observation(130),
+            observation(160),
+            observation(220, hud=True, heroes=second_lineup),
+        ),
+        duration_ms=300_000,
+    )
+
+    assert windows == (
+        ScanWindow(90_000, 160_000, view_context='played', hero_lineup=first_lineup),
+        ScanWindow(210_000, 280_000, view_context='played', hero_lineup=second_lineup),
+    )
+
+
+def test_same_heroes_on_opposite_sides_are_a_conflicting_hud() -> None:
     previous = observation(
-        100, hud=True, timer_seconds=500, signature='0000000000000000:0000000000000000'
+        100, hud=True, heroes=('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
     )
     current = observation(
-        130, hud=True, timer_seconds=10, signature='0000000000000000:0000000000000000'
+        130, hud=True, heroes=('Delta', 'Epsilon', 'Zeta', 'Alpha', 'Beta', 'Gamma')
     )
 
     assert same_gameplay_run(previous, current) is False
 
 
+def test_changed_detected_team_size_does_not_split_consecutive_hud_samples() -> None:
+    previous = observation(
+        100, hud=True, heroes=('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
+    )
+    current = observation(
+        130,
+        hud=True,
+        heroes=(
+            'Alpha',
+            'Beta',
+            'Gamma',
+            'Kestrel',
+            'Lance',
+            'Delta',
+            'Epsilon',
+            'Zeta',
+            'Ringo',
+            'Vox',
+        ),
+    )
+
+    assert same_gameplay_run(previous, current) is True
+
+
 def test_observer_gameplay_creates_an_observed_result_window() -> None:
     windows = result_search_windows(
         (
-            observation(
-                100,
-                hud=True,
-                timer_seconds=40,
-                signature='00:00',
-                view_context='observed',
-            ),
-            observation(
-                130,
-                hud=True,
-                timer_seconds=70,
-                signature='00:00',
-                view_context='observed',
-            ),
+            observation(100, hud=True, signature='00:00', view_context='observed'),
+            observation(130, hud=True, signature='00:00', view_context='observed'),
             observation(160),
         ),
         duration_ms=220_000,
