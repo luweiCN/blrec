@@ -365,8 +365,7 @@ class ArchiveBackfillService:
         return await self.status(account_id)
 
     async def run_once(self) -> bool:
-        if await self._reconcile():
-            return True
+        reconciled = await self._reconcile()
         season_start = current_season_started_at(self._now())
         sync = await self._database.fetchone(
             "SELECT account_id FROM vainglory_archive_syncs "
@@ -415,7 +414,7 @@ class ArchiveBackfillService:
         if part is not None:
             await self._queue_download(int(part['recording_part_id']))
             return True
-        return False
+        return reconciled
 
     async def _discover(self, account_id: int) -> None:
         now = self._now()
