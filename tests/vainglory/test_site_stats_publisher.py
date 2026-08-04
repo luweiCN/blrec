@@ -5,9 +5,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import pytest
+
+from blrec.compat import ZoneInfo
 
 SCRIPT_PATH = (
     Path(__file__).parents[2]

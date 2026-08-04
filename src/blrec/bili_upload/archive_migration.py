@@ -22,10 +22,10 @@ from typing import (
     Protocol,
     Tuple,
 )
-from zoneinfo import ZoneInfo
 
 from loguru import logger
 
+from blrec.compat import ZoneInfo
 from blrec.networking.manager import NetworkRouteManager, NetworkUnavailable
 from blrec.vainglory.anchor_identity import infer_recorded_anchor
 from blrec.vainglory.title_time import resolve_recording_started_at

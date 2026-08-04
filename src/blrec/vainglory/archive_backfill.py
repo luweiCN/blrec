@@ -7,10 +7,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, List, Mapping, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.bili_upload.errors import BiliApiError
+from blrec.compat import ZoneInfo
 
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title

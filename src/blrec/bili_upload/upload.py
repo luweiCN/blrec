@@ -9,10 +9,10 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from liquid import Environment
 
+from blrec.compat import ZoneInfo
 from blrec.logging.audit import audit
 
 from .accounts import (
