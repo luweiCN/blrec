@@ -34,6 +34,10 @@ function match(): VaingloryMatch {
     uploadTitle: '投稿标题',
     gameMode: '3v3',
     teamSize: 3,
+    matchKind: 'pvp',
+    viewContext: 'played',
+    statsEligible: true,
+    statsExclusionReason: null,
     startedAtMs: 15_000,
     resultAtMs: 600_000,
     durationSeconds: 585,
@@ -212,6 +216,16 @@ describe('VaingloryComponent remote media', () => {
       tasks,
       { events$: NEVER } as Pick<RealtimeService, 'events$'> as RealtimeService,
     );
+  });
+
+  it('shows the audit reason for a match excluded from rankings', () => {
+    expect(
+      component.statsExclusionLabel({
+        ...match(),
+        statsEligible: false,
+        statsExclusionReason: 'observed',
+      }),
+    ).toBe('观战或回放');
   });
 
   it('only downloads missing match video after an explicit request', () => {

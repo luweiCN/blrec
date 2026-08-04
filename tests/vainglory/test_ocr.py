@@ -1,6 +1,7 @@
 from blrec.vainglory.ocr import (
     PlayerStats,
     clean_player_name,
+    parse_game_timer,
     parse_player_stats,
     parse_result_header,
     resolve_player_stats,
@@ -18,6 +19,13 @@ def test_parse_chinese_result_header_keeps_reason_separate_from_winner() -> None
     assert header.right_kills == 19
     assert header.left_economy == 29_800
     assert header.right_economy == 41_300
+
+
+def test_parse_game_timer_accepts_only_valid_minute_second_values() -> None:
+    assert parse_game_timer('12:55') == 12 * 60 + 55
+    assert parse_game_timer('比赛 3：07') == 3 * 60 + 7
+    assert parse_game_timer('12:75') is None
+    assert parse_game_timer('没有时间') is None
 
 
 def test_parse_multilingual_header_without_a_known_result_word() -> None:

@@ -69,12 +69,20 @@ class OcrPlayer:
     normalized_name: str
     stats: PlayerStats
     confidence: float
+    raw_name: str = ''
 
 
 @dataclass(frozen=True)
 class ResultOcr:
     header: ResultHeader
     players: Tuple[OcrPlayer, ...]
+    raw_text: str = ''
+
+
+@dataclass(frozen=True)
+class GameTimerReading:
+    seconds: Optional[int]
+    confidence: float
 
 
 @dataclass(frozen=True)
@@ -179,6 +187,19 @@ class TesseractResultReader:
             team_size=team_size,
         )
 
+    def read_game_timer(self, frame: RgbFrame) -> GameTimerReading:
+        if self._name_reader is None:
+            return GameTimerReading(None, 0)
+        crop = frame.crop(frame.relative_rect(0.44, 0.0, 0.56, 0.09))
+        variants = (crop.resize_nearest(240, 80),)
+        first = self._name_reader.read(variants[0])
+        seconds = parse_game_timer(first.text)
+        if seconds is not None:
+            return GameTimerReading(seconds, first.confidence)
+        thresholded = variants[0].threshold(120)
+        fallback = self._name_reader.read(thresholded)
+        return GameTimerReading(parse_game_timer(fallback.text), fallback.confidence)
+
     def _read_result(
         self,
         frame: RgbFrame,
@@ -194,7 +215,7 @@ class TesseractResultReader:
         if header is None:
             header = self.read_header(frame, viewport=viewport, team_size=team_size)
 
-        raw_players: List[Tuple[str, int, str, float]] = []
+        raw_players: List[Tuple[str, int, str, float, str]] = []
         stats_candidates: List[List[PlayerStats]] = []
         stats_frames: List[RgbFrame] = []
         kda_frames: List[RgbFrame] = []
@@ -338,7 +359,7 @@ class TesseractResultReader:
                         languages=self._languages,
                         page_segmentation_mode=name_psm,
                     )
-                name, name_confidence = _select_player_name(name_candidates)
+                name, name_confidence, raw_name = _select_player_name(name_candidates)
                 logger.debug(
                     'Vainglory player name OCR: side={} slot={} engine={} '
                     'candidates={} selected={!r} confidence={:.4f}',
@@ -352,7 +373,7 @@ class TesseractResultReader:
                     name,
                     name_confidence,
                 )
-                raw_players.append((side, slot, name, name_confidence))
+                raw_players.append((side, slot, name, name_confidence, raw_name))
                 stats_frames.append(stats_frame)
                 name_stats_candidates = [
                     stats
@@ -404,7 +425,7 @@ class TesseractResultReader:
         for raw, stats, candidates in zip(
             raw_players, resolved_stats, stats_candidates
         ):
-            side, slot, name, name_confidence = raw
+            side, slot, name, name_confidence, raw_name = raw
             parsed_fields = sum(
                 value is not None
                 for value in (stats.kills, stats.deaths, stats.assists, stats.economy)
@@ -421,11 +442,18 @@ class TesseractResultReader:
                     normalized_name=normalize_player_name(name),
                     stats=stats,
                     confidence=confidence,
+                    raw_name=raw_name,
                 )
             )
 
         header = _header_with_resolved_team_totals(header, resolved_stats)
-        return ResultOcr(header=header, players=tuple(players))
+        return ResultOcr(
+            header=header,
+            players=tuple(players),
+            raw_text='\n'.join(
+                player.raw_name for player in players if player.raw_name
+            ),
+        )
 
     def read_header(
         self,
@@ -595,6 +623,17 @@ def parse_result_header(text: str) -> ResultHeader:
         left_economy=left_economy,
         right_economy=right_economy,
     )
+
+
+def parse_game_timer(text: str) -> Optional[int]:
+    normalized = unicodedata.normalize('NFKC', text).translate(_NUMERIC_TRANSLATION)
+    match = _DURATION_PATTERN.search(normalized)
+    if match is None:
+        return None
+    minutes, seconds = (int(value) for value in match.groups())
+    if seconds >= 60:
+        return None
+    return minutes * 60 + seconds
 
 
 def parse_player_stats(text: str) -> PlayerStats:
@@ -838,18 +877,22 @@ def _choose_kill_value(values: Sequence[Tuple[Optional[int], float]]) -> Optiona
     )
 
 
-def _select_player_name(candidates: Sequence[_OcrText]) -> Tuple[str, float]:
+def _select_player_name(candidates: Sequence[_OcrText]) -> Tuple[str, float, str]:
     present = [
-        (clean_player_name(candidate.text), candidate.confidence)
+        (
+            clean_player_name(candidate.text),
+            candidate.confidence,
+            ' '.join(unicodedata.normalize('NFKC', candidate.text).split())[:160],
+        )
         for candidate in candidates
         if clean_player_name(candidate.text)
     ]
     if not present:
-        return '', 0.0
-    normalized = [normalize_player_name(value) for value, _ in present]
+        return '', 0.0, ''
+    normalized = [normalize_player_name(value) for value, _, _ in present]
 
     def score(index: int) -> float:
-        value, confidence = present[index]
+        value, confidence, _ = present[index]
         exact_matches = sum(1 for other in normalized if other == normalized[index])
         similarity = sum(
             max(0.0, SequenceMatcher(None, normalized[index], other).ratio() - 0.55)
@@ -863,11 +906,11 @@ def _select_player_name(candidates: Sequence[_OcrText]) -> Tuple[str, float]:
         )
 
     selected = max(range(len(present)), key=score)
-    value, confidence = present[selected]
+    value, confidence, raw_name = present[selected]
     agreement = sum(1 for other in normalized if other == normalized[selected]) / len(
         normalized
     )
-    return value, min(1.0, confidence * 0.85 + agreement * 0.15)
+    return value, min(1.0, confidence * 0.85 + agreement * 0.15), raw_name
 
 
 def _stats_agreement(selected: PlayerStats, candidates: Sequence[PlayerStats]) -> float:

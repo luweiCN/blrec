@@ -5,6 +5,7 @@ from blrec.vainglory.vision import (
     RgbFrame,
     ViewportTransform,
     detect_gameplay_hud,
+    detect_observer_hud,
     detect_result_layout,
     detect_result_layouts,
     extract_result_heroes,
@@ -261,6 +262,66 @@ def test_gameplay_hud_requires_portraits_and_a_timer() -> None:
 
     assert detect_gameplay_hud(without_timer) is None
     assert detect_gameplay_hud(with_timer) is not None
+
+
+def test_practice_gameplay_hud_accepts_one_portrait_with_a_timer() -> None:
+    width, height = 960, 540
+    pixels = bytearray(bytes((15, 20, 15)) * width * height)
+    center = 0.365
+    rect = PixelRect(
+        int((center - 0.021) * width),
+        0,
+        int((center + 0.021) * width),
+        int(0.075 * height),
+    )
+    fill(pixels, width, rect, (35, 170, 210))
+    fill(
+        pixels,
+        width,
+        PixelRect(rect.left, rect.top, (rect.left + rect.right) // 2, rect.bottom),
+        (5, 5, 5),
+    )
+    fill(pixels, width, PixelRect(465, 8, 480, 28), (225, 225, 225))
+
+    assert detect_gameplay_hud(RgbFrame(width, height, bytes(pixels))) is not None
+
+
+def test_observer_hud_recognizes_six_bottom_player_panels() -> None:
+    width, height = 960, 540
+    pixels = bytearray(bytes((45, 70, 45)) * width * height)
+    fill(pixels, width, PixelRect(0, 425, width, height), (15, 18, 18))
+    for index, center in enumerate((0.07, 0.23, 0.39, 0.65, 0.81, 0.95)):
+        rect = PixelRect(
+            int((center - 0.035) * width),
+            int(0.82 * height),
+            min(width, int((center + 0.035) * width)),
+            int(0.98 * height),
+        )
+        fill(pixels, width, rect, (35, 170, 210) if index % 2 else (180, 60, 45))
+        fill(
+            pixels,
+            width,
+            PixelRect(rect.left, rect.top, (rect.left + rect.right) // 2, rect.bottom),
+            (5, 5, 5),
+        )
+    fill(pixels, width, PixelRect(340, 410, 600, 535), (92, 96, 96))
+    fill(pixels, width, PixelRect(465, 8, 475, 25), (225, 225, 225))
+
+    frame = RgbFrame(width, height, bytes(pixels))
+    observation = detect_observer_hud(frame)
+    coarse_observation = detect_observer_hud(frame.resize_nearest(388, 270))
+
+    assert observation is not None
+    assert observation.team_size == 3
+    assert observation.visible_portraits >= 5
+    assert coarse_observation is not None
+
+
+def test_observer_hud_rejects_a_result_screen() -> None:
+    assert (
+        detect_observer_hud(synthetic_result_frame(left_teal=True, winner_teal=True))
+        is None
+    )
 
 
 def test_result_hero_crops_follow_both_sides_and_three_slots() -> None:

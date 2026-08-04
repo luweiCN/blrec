@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
-from blrec.vainglory.analyzer import AnalyzedHero, AnalyzedMatch
+from blrec.vainglory.analyzer import AnalyzedHero, AnalyzedMatch, ScannedPart
 from blrec.vainglory.hero_recognition import HeroReference
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
 from blrec.vainglory.repository import VaingloryNotFound, VaingloryRepository
@@ -120,6 +120,35 @@ def analyzed_match() -> AnalyzedMatch:
         confidence=0.95,
         result_frame_png=b'\x89PNG-result-frame',
     )
+
+
+@pytest.mark.asyncio
+async def test_ocr_queue_preserves_observed_candidate_context(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        await repository.enqueue_ocr(
+            1,
+            ScannedPart(
+                video_duration_ms=1_000,
+                candidate_times_ms=(500,),
+                candidate_view_contexts=('observed',),
+            ),
+        )
+
+        claim = await repository.claim_next_ocr()
+
+        assert claim is not None
+        assert claim.scanned.candidate_times_ms == (500,)
+        assert claim.scanned.candidate_view_contexts == ('observed',)
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
@@ -901,6 +930,63 @@ async def test_repository_aggregates_results_by_anchor_identity(tmp_path: Path) 
         assert identity is not None
         assert int(identity['room_id']) == 0
         assert identity['anchor_uid'] is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_match_level_exclusion_keeps_match_but_filters_all_statistics(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.mp4'
+        second = tmp_path / 'second.mp4'
+        first.write_bytes(b'first')
+        second.write_bytes(b'second')
+        await seed_session(database, first, session_id=1)
+        await seed_session(database, second, session_id=2)
+        await database.execute(
+            "UPDATE recording_sessions SET anchor_uid=42,anchor_name='主播甲' "
+            'WHERE id IN (1,2)'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        assert await repository.claim_next() is not None
+        excluded = replace(
+            analyzed_match(),
+            part_id=2,
+            match_kind='bot',
+            stats_eligible=False,
+            stats_exclusion_reason='bot',
+            layout=replace(
+                analyzed_match().layout,
+                winner_color='orange',
+                winner_side='left',
+                left_color='orange',
+                right_color='teal',
+            ),
+        )
+        await repository.complete_part(2, (excluded,))
+
+        page = await repository.list_matches()
+        stats = await repository.list_anchor_stats()
+        summary = await repository.index_summary()
+
+        assert page.total == 2
+        excluded_record = next(item for item in page.items if item.part_id == 2)
+        assert excluded_record.match_kind == 'bot'
+        assert excluded_record.stats_eligible is False
+        assert excluded_record.stats_exclusion_reason == 'bot'
+        assert len(stats) == 1
+        assert stats[0].match_count == 1
+        assert stats[0].win_count == 1
+        assert stats[0].loss_count == 0
+        assert summary.match_count == 2
+        assert summary.win_count == 1
+        assert summary.loss_count == 0
     finally:
         await database.close()
 

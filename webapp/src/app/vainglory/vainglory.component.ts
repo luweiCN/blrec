@@ -2104,6 +2104,23 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     }[mode];
   }
 
+  statsExclusionLabel(match: VaingloryMatch): string {
+    switch (match.statsExclusionReason) {
+      case 'too_short_3v3':
+        return '3V3 时长过短';
+      case 'bot':
+        return '人机对战';
+      case 'practice':
+        return '练习模式';
+      case 'observed':
+        return '观战或回放';
+      case 'duplicate':
+        return '重复对局';
+      default:
+        return '不计入排行榜';
+    }
+  }
+
   sessionModes(session: VaingloryMatchSession): string {
     return session.gameModes
       .map((mode) => this.gameModeLabel(mode))

@@ -11,6 +11,7 @@ import requests
 from loguru import logger
 
 from .ocr import (
+    GameTimerReading,
     OcrPlayer,
     PlayerStats,
     ResultHeader,
@@ -249,6 +250,9 @@ class GlmOcrResultReader:
             team_size=team_size,
         )
 
+    def read_game_timer(self, frame: RgbFrame) -> GameTimerReading:
+        return self._fallback.read_game_timer(frame)
+
     def _read_result(
         self,
         frame: RgbFrame,
@@ -410,7 +414,9 @@ def parse_glm_result(text: str, *, team_size: int = 3) -> ResultOcr:
             positioned = column_positioned
 
     return ResultOcr(
-        header=header, players=_players_from_positions(positioned, team_size=team_size)
+        header=header,
+        players=_players_from_positions(positioned, team_size=team_size),
+        raw_text=text,
     )
 
 
@@ -462,7 +468,13 @@ def merge_glm_results(
         side, slot = position
         rows = by_position.get(position, ())
         players.append(_merge_players(rows, side=side, slot=slot, stats=stats))
-    return ResultOcr(header=merged_header, players=tuple(players))
+    return ResultOcr(
+        header=merged_header,
+        players=tuple(players),
+        raw_text='\n'.join(
+            candidate.raw_text for candidate in candidates if candidate.raw_text
+        ),
+    )
 
 
 def _resolve_with_supported_header(
@@ -497,6 +509,7 @@ def _unpositioned_player(name: str, stats: PlayerStats) -> OcrPlayer:
         normalized_name=normalize_player_name(name),
         stats=stats,
         confidence=confidence,
+        raw_name=name,
     )
 
 
@@ -508,6 +521,7 @@ def _position_player(player: OcrPlayer, side: str, slot: int) -> OcrPlayer:
         normalized_name=player.normalized_name,
         stats=player.stats,
         confidence=player.confidence,
+        raw_name=player.raw_name,
     )
 
 
@@ -593,8 +607,17 @@ def _merge_players(
             for value in names
             if normalize_player_name(value) == selected_normalized
         )
+        raw_name = next(
+            (
+                item.raw_name
+                for item in candidates
+                if item.name and normalize_player_name(item.name) == selected_normalized
+            ),
+            name,
+        )
     else:
         name = ''
+        raw_name = ''
     if stats is None:
         stats = PlayerStats(
             kills=_choose_stat(candidates, 'kills'),
@@ -610,6 +633,7 @@ def _merge_players(
         normalized_name=normalize_player_name(name),
         stats=stats,
         confidence=_player_confidence(name, stats),
+        raw_name=raw_name,
     )
 
 

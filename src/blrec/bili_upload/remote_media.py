@@ -408,7 +408,8 @@ class RemoteMediaCache:
                     'ON active_source.part_id=active_archive.recording_part_id '
                     'WHERE active_archive.import_id=archive.import_id '
                     "AND active_source.state='downloading') THEN 0 ELSE 1 END,"
-                    'COALESCE(imported.published_at,imported.created_at,'
+                    'COALESCE(imported.recording_started_at,'
+                    'imported.published_at,imported.created_at,'
                     'source.updated_at) DESC,archive.import_id,archive.page,'
                     'source.updated_at,source.part_id LIMIT 1',
                     excluded,

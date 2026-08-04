@@ -517,6 +517,10 @@ def test_updates_match_title_and_returns_timeline_metadata(
     assert payload['sourceTitle'] == '直播标题'
     assert payload['uploadTitle'] == '投稿标题'
     assert payload['gameMode'] == '3v3'
+    assert payload['matchKind'] == 'unknown'
+    assert payload['viewContext'] == 'unknown'
+    assert payload['statsEligible'] is True
+    assert payload['statsExclusionReason'] is None
     assert payload['startedAtMs'] == 60_000
     assert payload['bvid'] == 'BV1abcdefgh'
     assert payload['archivePage'] == 2

@@ -7,6 +7,12 @@ export type MatchEndReason = (typeof MATCH_END_REASONS)[number];
 export const GAME_MODES = ['3v3', '5v5', 'aram', 'other', 'unknown'] as const;
 export type GameMode = (typeof GAME_MODES)[number];
 
+export const MATCH_KINDS = ['pvp', 'bot', 'practice', 'unknown'] as const;
+export type MatchKind = (typeof MATCH_KINDS)[number];
+
+export const VIEW_CONTEXTS = ['played', 'observed', 'unknown'] as const;
+export type ViewContext = (typeof VIEW_CONTEXTS)[number];
+
 export type VaingloryMatchSessionSort = 'analyzed' | 'started';
 
 export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
@@ -217,6 +223,10 @@ export interface VaingloryMatch {
   readonly uploadTitle: string;
   readonly gameMode: GameMode;
   readonly teamSize: number | null;
+  readonly matchKind: MatchKind;
+  readonly viewContext: ViewContext;
+  readonly statsEligible: boolean;
+  readonly statsExclusionReason: string | null;
   readonly startedAtMs: number;
   readonly resultAtMs: number;
   readonly durationSeconds: number | null;

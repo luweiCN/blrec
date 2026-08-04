@@ -198,6 +198,13 @@ class RecordedPlayer:
     confidence: float
 
 
+@dataclass(frozen=True)
+class GameplayHud:
+    signature: str
+    team_size: TeamSize
+    visible_portraits: int
+
+
 def detect_result_layout(
     frame: RgbFrame, *, panel_detection: Optional[ResultPanelDetection] = None
 ) -> Optional[ResultLayout]:
@@ -434,25 +441,87 @@ def _detect_result_layout(
 
 
 def detect_gameplay_hud(frame: RgbFrame) -> Optional[str]:
+    detected = detect_gameplay_hud_details(frame)
+    return None if detected is None else detected.signature
+
+
+def detect_gameplay_hud_details(frame: RgbFrame) -> Optional[GameplayHud]:
     best_portraits: Tuple[RgbFrame, ...] = ()
     best_visible = 0
-    for team_size in (3, 5):
-        selected = select_gameplay_hud_centers(frame, team_size=team_size)
-        if selected is None:
-            continue
-        portraits, visible = _gameplay_hud_portraits(frame, selected)
-        if visible > best_visible:
-            best_portraits, best_visible = portraits, visible
+    best_team_size: TeamSize = 3
+    team_sizes: Tuple[TeamSize, ...] = (3, 5)
+    for team_size in team_sizes:
+        variants = (
+            GAMEPLAY_HUD_CENTER_VARIANTS
+            if team_size == 3
+            else GAMEPLAY_HUD_FIVE_CENTER_VARIANTS
+        )
+        for centers in variants:
+            portraits, visible = _gameplay_hud_portraits(frame, centers)
+            if visible > best_visible:
+                best_portraits = portraits
+                best_visible = visible
+                best_team_size = team_size
+    timer_white = _game_timer_white_ratio(frame)
+    if best_visible == 1 and timer_white >= 0.02:
+        return GameplayHud(
+            signature=':'.join(
+                perceptual_hash(portrait) for portrait in best_portraits
+            ),
+            team_size=3,
+            visible_portraits=1,
+        )
+    if best_visible < 4 or timer_white < 0.012:
+        return None
+    return GameplayHud(
+        signature=':'.join(perceptual_hash(portrait) for portrait in best_portraits),
+        team_size=best_team_size,
+        visible_portraits=best_visible,
+    )
+
+
+def detect_observer_hud(frame: RgbFrame) -> Optional[GameplayHud]:
+    if _game_timer_white_ratio(frame) < 0.004:
+        return None
+    centers = (0.07, 0.23, 0.39, 0.65, 0.81, 0.95)
+    portraits = tuple(
+        frame.crop(
+            frame.relative_rect(
+                max(0.0, center - 0.035), 0.82, min(1.0, center + 0.035), 0.98
+            )
+        )
+        for center in centers
+    )
+    visible = sum(_looks_like_portrait(portrait) for portrait in portraits)
+    if visible < 5:
+        return None
+    bottom = tuple(frame.colors(frame.relative_rect(0.0, 0.80, 1.0, 0.99), step=2))
+    bottom_dark = sum(
+        (red * 3 + green * 6 + blue) // 10 < 75 for red, green, blue in bottom
+    ) / max(1, len(bottom))
+    minimap = tuple(frame.colors(frame.relative_rect(0.35, 0.76, 0.62, 0.99), step=2))
+    minimap_neutral = sum(
+        max(red, green, blue) - min(red, green, blue) < 30
+        and 45 < (red * 3 + green * 6 + blue) // 10 < 210
+        for red, green, blue in minimap
+    ) / max(1, len(minimap))
+    if bottom_dark < 0.55 or minimap_neutral < 0.18:
+        return None
+    return GameplayHud(
+        signature=':'.join(perceptual_hash(portrait) for portrait in portraits),
+        team_size=3,
+        visible_portraits=visible,
+    )
+
+
+def _game_timer_white_ratio(frame: RgbFrame) -> float:
     timer = frame.relative_rect(0.465, 0.0, 0.53, 0.075)
     timer_pixels = tuple(frame.colors(timer))
-    timer_white = sum(
+    return sum(
         min(red, green, blue) > 140
         and max(red, green, blue) - min(red, green, blue) < 55
         for red, green, blue in timer_pixels
     ) / max(1, len(timer_pixels))
-    if best_visible < 4 or timer_white < 0.012:
-        return None
-    return ':'.join(perceptual_hash(portrait) for portrait in best_portraits)
 
 
 def select_gameplay_hud_centers(

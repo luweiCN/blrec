@@ -168,6 +168,10 @@ class MatchRecord:
     recorded_player_confidence: Optional[float]
     recorded_player_source: str
     players: Tuple[MatchPlayerRecord, ...]
+    match_kind: Literal['pvp', 'bot', 'practice', 'unknown'] = 'unknown'
+    view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
+    stats_eligible: bool = True
+    stats_exclusion_reason: Optional[str] = None
     recorded_player_state: str = 'pending'
     previous_archive_page: Optional[int] = None
     previous_archive_duration_seconds: Optional[int] = None
@@ -440,7 +444,7 @@ def refresh_session_scan_job(
 
 
 class VaingloryRepository:
-    ALGORITHM_VERSION = 15
+    ALGORITHM_VERSION = 16
     HERO_RECOGNITION_VERSION = 5
     RECORDED_PLAYER_DETECTION_VERSION = 3
     _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
@@ -450,6 +454,8 @@ class VaingloryRepository:
         'match.end_reason,match.left_color,match.right_color,match.winner_side,'
         'match.left_kills,match.right_kills,match.left_economy,'
         'match.right_economy,match.confidence,match.game_mode,match.team_size,'
+        'match.match_kind,match.view_context,match.stats_eligible,'
+        'match.stats_exclusion_reason,'
         'match.started_at_ms,match.custom_title,'
         'match.result_frame_path,match.recorded_player_confidence,'
         'match.recorded_player_source,match.recorded_player_detection_version,'
@@ -1061,6 +1067,7 @@ class VaingloryRepository:
                 "AND sibling_archive.state NOT IN ('analyzing','ready'))) "
                 'ORDER BY priority,'
                 'CASE WHEN priority>=3 THEN COALESCE('
+                'archive_import.recording_started_at,'
                 'archive_import.published_at,migration_item.published_at,'
                 'session.started_at) END DESC,'
                 'job.session_id,part.part_index,part.created_at,job.part_id LIMIT 1',
@@ -1099,8 +1106,17 @@ class VaingloryRepository:
         if not scanned.candidate_times_ms:
             raise ValueError('OCR queue needs at least one result candidate')
         now = self._now()
+        contexts = (
+            scanned.candidate_view_contexts
+            if len(scanned.candidate_view_contexts) == len(scanned.candidate_times_ms)
+            else tuple('unknown' for _ in scanned.candidate_times_ms)
+        )
         candidate_times_json = json.dumps(
-            scanned.candidate_times_ms, separators=(',', ':')
+            tuple(
+                {'at_ms': at_ms, 'view_context': view_context}
+                for at_ms, view_context in zip(scanned.candidate_times_ms, contexts)
+            ),
+            separators=(',', ':'),
         )
 
         def enqueue(connection: sqlite3.Connection) -> None:
@@ -1200,7 +1216,20 @@ class VaingloryRepository:
             if cursor.rowcount != 1:
                 return None
             raw_times = json.loads(str(row['candidate_times_json']))
-            candidate_times = tuple(int(value) for value in raw_times)
+            candidate_times = tuple(
+                int(value['at_ms']) if isinstance(value, dict) else int(value)
+                for value in raw_times
+            )
+            candidate_contexts = tuple(
+                (
+                    str(value.get('view_context', 'unknown'))
+                    if isinstance(value, dict)
+                    and str(value.get('view_context', 'unknown'))
+                    in ('played', 'observed', 'unknown')
+                    else 'unknown'
+                )
+                for value in raw_times
+            )
             return OcrClaim(
                 session_id=int(row['session_id']),
                 part=VideoPart(
@@ -1216,6 +1245,10 @@ class VaingloryRepository:
                 scanned=ScannedPart(
                     video_duration_ms=int(row['video_duration_ms']),
                     candidate_times_ms=candidate_times,
+                    candidate_view_contexts=cast(
+                        Tuple[Literal['played', 'observed', 'unknown'], ...],
+                        candidate_contexts,
+                    ),
                 ),
             )
 
@@ -1431,7 +1464,8 @@ class VaingloryRepository:
             + ' AS part_count,'
             + completed_part_count
             + ' AS completed_part_count,'
-            'MAX(COALESCE(archive_import.published_at,'
+            'MAX(COALESCE(archive_import.recording_started_at,'
+            'archive_import.published_at,'
             'migration_item.published_at,session.started_at)) AS sort_time'
             + joins
             + " WHERE (job.state='pending' OR (job.state='analyzing' "
@@ -1520,7 +1554,7 @@ class VaingloryRepository:
                 "WHEN 'right' THEN match.right_color ELSE 'unknown' END "
                 'AS winner_color FROM vainglory_matches match '
                 'JOIN vainglory_scan_jobs scan ON scan.session_id=match.session_id '
-                'WHERE scan.stats_included=1)'
+                'WHERE scan.stats_included=1 AND match.stats_eligible=1)'
             ).fetchone()
             heroes = connection.execute(
                 'SELECT COUNT(*) AS player_slots,'
@@ -1670,6 +1704,22 @@ class VaingloryRepository:
                         else '5v5' if normalized_team_size == 5 else 'unknown'
                     )
                 )
+                match_kind = (
+                    match.match_kind
+                    if match.match_kind in ('pvp', 'bot', 'practice')
+                    else 'unknown'
+                )
+                view_context = (
+                    match.view_context
+                    if match.view_context in ('played', 'observed')
+                    else 'unknown'
+                )
+                stats_eligible = bool(match.stats_eligible)
+                stats_exclusion_reason = (
+                    None
+                    if stats_eligible
+                    else match.stats_exclusion_reason.strip()[:64] or 'classification'
+                )
                 started_at_ms = max(
                     0, match.result_at_ms - (header.duration_seconds or 0) * 1_000
                 )
@@ -1693,8 +1743,9 @@ class VaingloryRepository:
                     'result_frame_path,hero_recognition_version,'
                     'recorded_player_side,recorded_player_slot,'
                     'recorded_player_confidence,'
-                    'recorded_player_detection_version) '
-                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    'recorded_player_detection_version,match_kind,view_context,'
+                    'stats_eligible,stats_exclusion_reason) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (
                         session_id,
                         match.part_id,
@@ -1724,6 +1775,10 @@ class VaingloryRepository:
                             else recorded_player.confidence
                         ),
                         self.RECORDED_PLAYER_DETECTION_VERSION,
+                        match_kind,
+                        view_context,
+                        1 if stats_eligible else 0,
+                        stats_exclusion_reason,
                     ),
                 )
                 match_id = int(cursor.lastrowid)
@@ -2781,7 +2836,7 @@ class VaingloryRepository:
             'FROM vainglory_matches match '
             'JOIN recording_sessions session ON session.id=match.session_id '
             'JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
-            'WHERE scan.stats_included=1 '
+            'WHERE scan.stats_included=1 AND match.stats_eligible=1 '
             'ORDER BY session.started_at,session.id,match.id'
         )
         grouped: Dict[str, _AnchorStatsAccumulator] = {}
@@ -3028,7 +3083,7 @@ class VaingloryRepository:
     async def _player_match_stats_rows(
         self, *, game_mode: str = ''
     ) -> List[sqlite3.Row]:
-        conditions = ['scan.stats_included=1']
+        conditions = ['scan.stats_included=1', 'match.stats_eligible=1']
         parameters: List[object] = []
         if game_mode:
             conditions.append('match.game_mode=?')
@@ -3348,6 +3403,18 @@ class VaingloryRepository:
             upload_title=upload_title,
             game_mode=str(row['game_mode']),
             team_size=(None if row['team_size'] is None else int(row['team_size'])),
+            match_kind=cast(
+                Literal['pvp', 'bot', 'practice', 'unknown'], str(row['match_kind'])
+            ),
+            view_context=cast(
+                Literal['played', 'observed', 'unknown'], str(row['view_context'])
+            ),
+            stats_eligible=bool(int(row['stats_eligible'])),
+            stats_exclusion_reason=(
+                None
+                if row['stats_exclusion_reason'] is None
+                else str(row['stats_exclusion_reason'])
+            ),
             started_at_ms=int(row['started_at_ms']),
             result_at_ms=int(row['result_at_ms']),
             duration_seconds=(

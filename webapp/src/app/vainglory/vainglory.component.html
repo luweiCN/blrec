@@ -442,6 +442,12 @@
                           <div>
                             <div class="match-title-row">
                               <h2>第 {{ matchIndex + 1 }} 局</h2>
+                              <nz-tag
+                                *ngIf="!match.statsEligible"
+                                nzColor="warning"
+                              >
+                                不计榜 · {{ statsExclusionLabel(match) }}
+                              </nz-tag>
                             </div>
                             <p>
                               {{ gameModeLabel(match.gameMode) }} · P{{

@@ -44,6 +44,7 @@ async def seed_match(
     hero_id: Optional[int],
     anchor_name: str,
     stats_included: bool = True,
+    match_stats_eligible: bool = True,
 ) -> None:
     session_id = match_id
     run_id = 'run:{}'.format(match_id)
@@ -96,9 +97,10 @@ async def seed_match(
         'result_text,end_reason,left_color,right_color,winner_side,confidence,'
         'created_at,game_mode,team_size,started_at_ms,recorded_player_side,'
         'recorded_player_slot,recorded_player_confidence,'
-        'recorded_player_detection_version) '
+        'recorded_player_detection_version,stats_eligible,'
+        'stats_exclusion_reason) '
         "VALUES(?,?,?,900000,900,'胜利','normal','teal','orange',?,1,?,?,?,?,"
-        "'left',1,1,1)",
+        "'left',1,1,1,?,?)",
         (
             match_id,
             session_id,
@@ -108,6 +110,8 @@ async def seed_match(
             game_mode,
             3,
             0,
+            1 if match_stats_eligible else 0,
+            None if match_stats_eligible else 'bot',
         ),
     )
     await database.execute(
@@ -202,6 +206,18 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             hero_id=1,
             anchor_name='另一名主播',
             stats_included=False,
+        )
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=7,
+            room_id=100,
+            started_at=timestamp(2026, 7, 4),
+            game_mode='3v3',
+            won=False,
+            hero_id=1,
+            anchor_name='直播名称',
+            match_stats_eligible=False,
         )
 
         snapshot = await database.read(

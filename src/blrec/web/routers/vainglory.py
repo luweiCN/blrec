@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, cast
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.exceptions import HTTPException
@@ -88,6 +88,10 @@ class MatchResponse(ApiModel):
     upload_title: str
     game_mode: str
     team_size: Optional[int]
+    match_kind: Literal['pvp', 'bot', 'practice', 'unknown']
+    view_context: Literal['played', 'observed', 'unknown']
+    stats_eligible: bool
+    stats_exclusion_reason: Optional[str]
     started_at_ms: int
     result_at_ms: int
     duration_seconds: Optional[int]
@@ -378,6 +382,10 @@ def _match(value: MatchRecord) -> MatchResponse:
         upload_title=value.upload_title,
         game_mode=value.game_mode,
         team_size=value.team_size,
+        match_kind=value.match_kind,
+        view_context=value.view_context,
+        stats_eligible=value.stats_eligible,
+        stats_exclusion_reason=value.stats_exclusion_reason,
         started_at_ms=value.started_at_ms,
         result_at_ms=value.result_at_ms,
         duration_seconds=value.duration_seconds,
@@ -403,8 +411,13 @@ def _match(value: MatchRecord) -> MatchResponse:
             else None
         ),
         recorded_player_confidence=value.recorded_player_confidence,
-        recorded_player_source=value.recorded_player_source,
-        recorded_player_state=value.recorded_player_state,
+        recorded_player_source=cast(
+            Literal['automatic', 'manual'], value.recorded_player_source
+        ),
+        recorded_player_state=cast(
+            Literal['pending', 'uncertain', 'automatic', 'manual', 'unsupported'],
+            value.recorded_player_state,
+        ),
         players=[_player(player) for player in value.players],
     )
 

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Tuple
 
 import pytest
@@ -5,15 +6,19 @@ import pytest
 import blrec.vainglory.analyzer as analyzer_module
 from blrec.vainglory.analyzer import (
     AnalysisCancelled,
+    AnalyzedHero,
     AnalyzedMatch,
     ResultHit,
     VaingloryVideoAnalyzer,
     VideoPart,
+    classify_match_kind,
     collapse_analyzed_matches,
     collapse_result_hits,
+    exclude_content_duplicates,
+    stats_eligibility,
 )
 from blrec.vainglory.hero_recognition import HeroMatch
-from blrec.vainglory.ocr import ResultHeader, ResultOcr
+from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
 from blrec.vainglory.sampling import TimedFrame, VideoProfile
 from blrec.vainglory.vision import HeroFrame, ResultLayout, RgbFrame, ViewportTransform
 
@@ -86,12 +91,169 @@ def test_completed_matches_collapse_by_their_estimated_game_start() -> None:
     assert [item.result_at_ms for item in collapsed] == [610_000, 1_200_000]
 
 
+def test_replayed_result_with_identical_content_is_kept_but_excluded() -> None:
+    players = tuple(
+        OcrPlayer(
+            side=side,
+            slot=slot,
+            name='{}{}'.format(side, slot),
+            normalized_name='{}{}'.format(side, slot),
+            stats=PlayerStats(slot, slot, slot, 10_000 + slot),
+            confidence=1,
+        )
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    )
+    first = replace(
+        analyzed_match(600_000, 590),
+        ocr=replace(analyzed_match(600_000, 590).ocr, players=players),
+    )
+    replay = replace(first, result_at_ms=1_200_000)
+
+    deduplicated = exclude_content_duplicates((first, replay))
+
+    assert len(deduplicated) == 2
+    assert deduplicated[0].stats_eligible is True
+    assert deduplicated[1].stats_eligible is False
+    assert deduplicated[1].stats_exclusion_reason == 'duplicate'
+
+
+def test_observed_result_does_not_exclude_a_later_played_copy() -> None:
+    players = tuple(
+        OcrPlayer(
+            side=side,
+            slot=slot,
+            name='{}{}'.format(side, slot),
+            normalized_name='{}{}'.format(side, slot),
+            stats=PlayerStats(slot, slot, slot, 10_000 + slot),
+            confidence=1,
+        )
+        for side in ('left', 'right')
+        for slot in range(1, 4)
+    )
+    played = replace(
+        analyzed_match(1_200_000, 590),
+        ocr=replace(analyzed_match(1_200_000, 590).ocr, players=players),
+    )
+    observed = replace(
+        played,
+        result_at_ms=600_000,
+        view_context='observed',
+        stats_eligible=False,
+        stats_exclusion_reason='observed',
+    )
+
+    deduplicated = exclude_content_duplicates((observed, played))
+
+    assert deduplicated[0].stats_exclusion_reason == 'observed'
+    assert deduplicated[1].stats_eligible is True
+
+
 def test_result_confirmation_does_not_depend_on_the_client_language() -> None:
     analyzer = VaingloryVideoAnalyzer()
     header = ResultHeader('', 'unknown', 479, 9, 18, 40_900, 45_800)
 
     assert analyzer._is_result_header(header) is True
     assert analyzer._is_completed_match(header) is True
+
+
+def test_short_3v3_is_retained_but_excluded_from_statistics() -> None:
+    assert stats_eligibility(
+        game_mode='3v3', duration_seconds=179, match_kind='pvp', view_context='played'
+    ) == (False, 'too_short_3v3')
+    assert stats_eligibility(
+        game_mode='aram', duration_seconds=179, match_kind='pvp', view_context='played'
+    ) == (True, '')
+
+
+def test_observed_bot_and_practice_matches_are_excluded_from_statistics() -> None:
+    assert stats_eligibility(
+        game_mode='3v3', duration_seconds=900, match_kind='pvp', view_context='observed'
+    ) == (False, 'observed')
+    assert stats_eligibility(
+        game_mode='3v3', duration_seconds=900, match_kind='bot', view_context='played'
+    ) == (False, 'bot')
+    assert stats_eligibility(
+        game_mode='3v3',
+        duration_seconds=900,
+        match_kind='practice',
+        view_context='played',
+    ) == (False, 'practice')
+
+
+def test_three_player_bot_names_preserve_spaces_for_classification() -> None:
+    players = tuple(
+        OcrPlayer(
+            side='left',
+            slot=slot,
+            name=name.replace(' ', ''),
+            normalized_name=name.replace(' ', '').casefold(),
+            stats=PlayerStats(1, 1, 1, 1_000),
+            confidence=1,
+            raw_name=name,
+        )
+        for slot, name in enumerate(('主播', 'Alpha Bot', 'Beta Bot'), 1)
+    )
+
+    assert (
+        classify_match_kind(
+            ResultOcr(ResultHeader('', 'normal', 900, 1, 1, 1, 1), players),
+            (),
+            team_size=3,
+        )
+        == 'bot'
+    )
+
+
+def test_five_player_bot_names_must_match_multiple_recognized_heroes() -> None:
+    players = tuple(
+        OcrPlayer(
+            side='left',
+            slot=slot,
+            name=raw_name.replace(' ', ''),
+            normalized_name=raw_name.replace(' ', '').casefold(),
+            stats=PlayerStats(1, 1, 1, 1_000),
+            confidence=1,
+            raw_name=raw_name,
+        )
+        for slot, raw_name in enumerate(('主播', '无情 凯恩', '盲暴 格雷'), 1)
+    )
+    heroes = (
+        AnalyzedHero('left', 1, '0' * 16, b'', label='Caine'),
+        AnalyzedHero('left', 2, '1' * 16, b'', label='Glaive'),
+    )
+
+    assert (
+        classify_match_kind(
+            ResultOcr(ResultHeader('', 'normal', 900, 1, 1, 1, 1), players),
+            heroes,
+            team_size=5,
+        )
+        == 'bot'
+    )
+
+
+def test_one_visible_player_is_classified_as_practice() -> None:
+    player = OcrPlayer(
+        side='left',
+        slot=1,
+        name='主播',
+        normalized_name='主播',
+        stats=PlayerStats(1, 0, 0, 1_000),
+        confidence=1,
+    )
+    hero = AnalyzedHero(
+        side='left', slot=1, fingerprint='0' * 16, thumbnail_png=b'', label='Caine'
+    )
+
+    assert (
+        classify_match_kind(
+            ResultOcr(ResultHeader('', 'normal', 120, 1, 0, 1, 0), (player,)),
+            (hero,),
+            team_size=3,
+        )
+        == 'practice'
+    )
 
 
 def test_player_ocr_keeps_the_primary_visual_layout_when_header_fallback_wins() -> None:
@@ -267,6 +429,37 @@ def test_video_analysis_stops_between_sampled_frames() -> None:
         analyzer.analyze_part(
             VideoPart(id=1, index=1, path='unused'), cancelled=lambda: True
         )
+
+
+def test_coarse_scan_runs_expensive_result_fallback_only_every_two_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def probe(self, _path: str) -> VideoProfile:
+            return VideoProfile(width=1, height=1, duration_ms=180_000)
+
+        def coarse_frames(self, _path: str):
+            for at_ms in range(0, 180_000, 30_000):
+                yield TimedFrame(at_ms=at_ms, frame=frame)
+
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
+    result_probes = []
+    monkeypatch.setattr(
+        analyzer_module, 'detect_gameplay_hud_details', lambda _frame: None
+    )
+    monkeypatch.setattr(analyzer_module, 'detect_observer_hud', lambda _frame: None)
+    monkeypatch.setattr(
+        analyzer,
+        '_detect_result_layout',
+        lambda _frame: result_probes.append(True) and None,
+    )
+
+    scanned = analyzer.scan_part(VideoPart(id=1, index=1, path='unused'))
+
+    assert scanned.candidate_times_ms == ()
+    assert len(result_probes) == 2
 
 
 def test_hero_recognition_searches_one_shared_layout_offset(

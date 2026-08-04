@@ -221,8 +221,8 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
     version_row = connection.execute(
         'SELECT COALESCE(MAX(version),0) FROM schema_migrations'
     ).fetchone()
-    if version_row is None or int(version_row[0]) < 49:
-        raise sqlite3.DatabaseError('dashboard source database requires schema 49+')
+    if version_row is None or int(version_row[0]) < 54:
+        raise sqlite3.DatabaseError('dashboard source database requires schema 54+')
 
 
 def _player_metadata(
@@ -291,6 +291,7 @@ def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
         'AND recorded.slot=match.recorded_player_slot '
         'LEFT JOIN vainglory_heroes hero ON hero.id=recorded.hero_id '
         "AND length(trim(hero.label))>0 WHERE scan.stats_included=1 "
+        'AND match.stats_eligible=1 '
         "AND match.game_mode IN ('3v3','5v5','aram','other') "
         "AND CASE match.winner_side WHEN 'left' THEN match.left_color "
         "WHEN 'right' THEN match.right_color END IN ('teal','orange') "

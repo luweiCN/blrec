@@ -8,7 +8,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import IO, Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from .vision import RgbFrame
 
@@ -35,12 +35,65 @@ class CoarseObservation:
     at_ms: int
     hud_signature: Optional[str]
     result_visible: bool
+    game_timer_seconds: Optional[int] = None
+    timer_confidence: float = 0
+    team_size: Optional[int] = None
+    visible_portraits: int = 0
+    view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
 
 
 @dataclass(frozen=True)
 class ScanWindow:
     start_ms: int
     end_ms: int
+    view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
+
+
+def hud_lineup_similarity(left: str, right: str) -> float:
+    if left == right and left:
+        return 1.0
+    left_hashes = left.split(':')
+    right_hashes = right.split(':')
+    if not left_hashes or len(left_hashes) != len(right_hashes):
+        return 0.0
+    similarities: List[float] = []
+    for left_hash, right_hash in zip(left_hashes, right_hashes):
+        if len(left_hash) != len(right_hash) or not left_hash:
+            return 0.0
+        try:
+            difference = int(left_hash, 16) ^ int(right_hash, 16)
+        except ValueError:
+            return 0.0
+        bit_count = len(left_hash) * 4
+        similarities.append(1.0 - bin(difference).count('1') / bit_count)
+    return sum(similarities) / len(similarities)
+
+
+def same_gameplay_run(
+    previous: CoarseObservation,
+    current: CoarseObservation,
+    *,
+    maximum_gap_ms: int = 75_000,
+    maximum_start_drift_ms: int = 45_000,
+) -> bool:
+    if previous.hud_signature is None or current.hud_signature is None:
+        return False
+    if previous.view_context != current.view_context:
+        return False
+    if current.at_ms <= previous.at_ms:
+        return False
+    if current.at_ms - previous.at_ms > maximum_gap_ms:
+        return False
+    previous_timer = previous.game_timer_seconds
+    current_timer = current.game_timer_seconds
+    if previous_timer is not None and current_timer is not None:
+        if current_timer + 15 < previous_timer:
+            return False
+        previous_start = previous.at_ms - previous_timer * 1_000
+        current_start = current.at_ms - current_timer * 1_000
+        if abs(previous_start - current_start) <= maximum_start_drift_ms:
+            return True
+    return hud_lineup_similarity(previous.hud_signature, current.hud_signature) >= 0.72
 
 
 def fit_frame_dimensions(
@@ -59,7 +112,7 @@ def result_search_windows(
     observations: Sequence[CoarseObservation],
     *,
     duration_ms: int,
-    hud_gap_ms: int = 15_000,
+    hud_gap_ms: int = 75_000,
     before_end_ms: int = 10_000,
     after_end_ms: int = 60_000,
 ) -> Tuple[ScanWindow, ...]:
@@ -67,25 +120,34 @@ def result_search_windows(
         raise ValueError('video duration must be positive')
     if hud_gap_ms <= 0:
         raise ValueError('HUD gap must be positive')
-    hud_times = sorted(
-        observation.at_ms
-        for observation in observations
-        if observation.hud_signature is not None
-    )
     windows: List[ScanWindow] = []
-    if hud_times:
-        run_last = hud_times[0]
-        for at_ms in hud_times[1:]:
-            if at_ms - run_last > hud_gap_ms:
+    gameplay = sorted(
+        (
+            observation
+            for observation in observations
+            if observation.hud_signature is not None
+        ),
+        key=lambda observation: observation.at_ms,
+    )
+    if gameplay:
+        run_last = gameplay[0]
+        for observation in gameplay[1:]:
+            if not same_gameplay_run(run_last, observation, maximum_gap_ms=hud_gap_ms):
                 windows.append(
                     _bounded_window(
-                        run_last - before_end_ms, run_last + after_end_ms, duration_ms
+                        run_last.at_ms - before_end_ms,
+                        run_last.at_ms + after_end_ms,
+                        duration_ms,
+                        view_context=run_last.view_context,
                     )
                 )
-            run_last = at_ms
+            run_last = observation
         windows.append(
             _bounded_window(
-                run_last - before_end_ms, run_last + after_end_ms, duration_ms
+                run_last.at_ms - before_end_ms,
+                run_last.at_ms + after_end_ms,
+                duration_ms,
+                view_context=run_last.view_context,
             )
         )
     windows.extend(
@@ -104,7 +166,7 @@ class FfmpegSampler:
         *,
         ffmpeg: str = 'ffmpeg',
         ffprobe: str = 'ffprobe',
-        coarse_interval_seconds: int = 5,
+        coarse_interval_seconds: int = 30,
         fine_frames_per_second: int = 4,
     ) -> None:
         if coarse_interval_seconds < 1:
@@ -436,10 +498,17 @@ class FfmpegSampler:
         return result
 
 
-def _bounded_window(start_ms: int, end_ms: int, duration_ms: int) -> ScanWindow:
+def _bounded_window(
+    start_ms: int,
+    end_ms: int,
+    duration_ms: int,
+    *,
+    view_context: Literal['played', 'observed', 'unknown'] = 'unknown',
+) -> ScanWindow:
     return ScanWindow(
         start_ms=max(0, min(duration_ms, start_ms)),
         end_ms=max(0, min(duration_ms, end_ms)),
+        view_context=view_context,
     )
 
 
@@ -454,8 +523,19 @@ def _merge_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
             merged.append(window)
             continue
         previous = merged[-1]
+        contexts = {previous.view_context, window.view_context}
+        if contexts == {'played', 'observed'}:
+            merged.append(window)
+            continue
+        view_context = (
+            previous.view_context
+            if previous.view_context != 'unknown'
+            else window.view_context
+        )
         merged[-1] = ScanWindow(
-            start_ms=previous.start_ms, end_ms=max(previous.end_ms, window.end_ms)
+            start_ms=previous.start_ms,
+            end_ms=max(previous.end_ms, window.end_ms),
+            view_context=view_context,
         )
     return tuple(merged)
 
