@@ -202,6 +202,10 @@ class MatchSessionRecord:
     unknown_count: int = 0
     stats_included: bool = True
     bvid: Optional[str] = None
+    publication_state: Optional[str] = None
+    description_state: Optional[str] = None
+    pin_state: Optional[str] = None
+    chapter_state: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -2014,6 +2018,20 @@ class VaingloryRepository:
             'ON archive_part.id=archive.recording_part_id '
             'WHERE archive_part.session_id=session.id '
             'ORDER BY archive.page LIMIT 1)) AS bvid,'
+            '(SELECT publication.state FROM vainglory_publications publication '
+            'WHERE publication.session_id=session.id '
+            'ORDER BY publication.id DESC LIMIT 1) AS publication_state,'
+            '(SELECT publication.description_state '
+            'FROM vainglory_publications publication '
+            'WHERE publication.session_id=session.id '
+            'ORDER BY publication.id DESC LIMIT 1) AS description_state,'
+            '(SELECT publication.pin_state FROM vainglory_publications publication '
+            'WHERE publication.session_id=session.id '
+            'ORDER BY publication.id DESC LIMIT 1) AS pin_state,'
+            '(SELECT publication.chapter_state '
+            'FROM vainglory_publications publication '
+            'WHERE publication.session_id=session.id '
+            'ORDER BY publication.id DESC LIMIT 1) AS chapter_state,'
             'COUNT(match.id) AS match_count,'
             "SUM(CASE WHEN {}='teal' THEN 1 ELSE 0 END) AS teal_win_count,"
             "SUM(CASE WHEN {}='orange' THEN 1 ELSE 0 END) AS orange_win_count,"
@@ -3275,6 +3293,20 @@ class VaingloryRepository:
             game_modes=tuple(mode for mode in mode_order if mode in present_modes),
             stats_included=bool(row['stats_included']),
             bvid=None if row['bvid'] is None else str(row['bvid']),
+            publication_state=(
+                None
+                if row['publication_state'] is None
+                else str(row['publication_state'])
+            ),
+            description_state=(
+                None
+                if row['description_state'] is None
+                else str(row['description_state'])
+            ),
+            pin_state=None if row['pin_state'] is None else str(row['pin_state']),
+            chapter_state=(
+                None if row['chapter_state'] is None else str(row['chapter_state'])
+            ),
         )
 
     @staticmethod

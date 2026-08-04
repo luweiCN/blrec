@@ -140,6 +140,10 @@ class MatchSessionResponse(ApiModel):
     game_modes: List[str]
     stats_included: bool
     bvid: Optional[str]
+    publication_state: Optional[str]
+    description_state: Optional[str]
+    pin_state: Optional[str]
+    chapter_state: Optional[str]
 
 
 class MatchSessionListResponse(ApiModel):
@@ -440,6 +444,10 @@ def _match_session(value: MatchSessionRecord) -> MatchSessionResponse:
         game_modes=list(value.game_modes),
         stats_included=value.stats_included,
         bvid=value.bvid,
+        publication_state=value.publication_state,
+        description_state=value.description_state,
+        pin_state=value.pin_state,
+        chapter_state=value.chapter_state,
     )
 
 

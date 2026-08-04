@@ -15,6 +15,20 @@ export type ViewContext = (typeof VIEW_CONTEXTS)[number];
 
 export type VaingloryMatchSessionSort = 'analyzed' | 'started';
 
+export type VaingloryPublicationState =
+  | 'prepared'
+  | 'running'
+  | 'confirmed'
+  | 'paused'
+  | 'failed';
+export type VaingloryDescriptionState =
+  | 'prepared'
+  | 'in_flight'
+  | 'confirmed'
+  | 'skipped_no_room';
+export type VaingloryPinState = 'prepared' | 'in_flight' | 'confirmed';
+export type VaingloryChapterState = 'prepared' | 'confirmed' | 'skipped';
+
 export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
 
 export type RecordedPlayerSource = 'automatic' | 'manual';
@@ -273,6 +287,10 @@ export interface VaingloryMatchSession {
   readonly gameModes: readonly GameMode[];
   readonly statsIncluded?: boolean;
   readonly bvid?: string | null;
+  readonly publicationState: VaingloryPublicationState | null;
+  readonly descriptionState: VaingloryDescriptionState | null;
+  readonly pinState: VaingloryPinState | null;
+  readonly chapterState: VaingloryChapterState | null;
 }
 
 export interface VaingloryMatchSessionList {

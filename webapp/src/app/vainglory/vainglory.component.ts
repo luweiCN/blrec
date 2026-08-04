@@ -160,6 +160,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   pageIndex = 1;
   readonly pageSize = 20;
   readonly selectedSessionIds = new Set<number>();
+  readonly rescanningSessionIds = new Set<number>();
   bulkAnchorDraft: string | null = null;
   bulkAnchorModalVisible = false;
   bulkUpdatingAction: BulkUpdateAction | null = null;
@@ -474,6 +475,135 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   closeSessionDetails(): void {
     this.detailsDrawerVisible = false;
     this.changeDetector.markForCheck();
+  }
+
+  isSessionRescanning(sessionId: number): boolean {
+    return this.rescanningSessionIds.has(sessionId);
+  }
+
+  requestSessionRescan(session: VaingloryMatchSession): void {
+    if (this.rescanningSessionIds.has(session.sessionId)) {
+      return;
+    }
+    this.rescanningSessionIds.add(session.sessionId);
+    this.changeDetector.markForCheck();
+    this.vainglory
+      .requestScan(session.sessionId)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.rescanningSessionIds.delete(session.sessionId);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (job) => {
+          this.messages.success('已加入重新分析队列，并提升为手动优先');
+          this.receiveScanJob(job);
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '无法重新分析这场直播'));
+        },
+      });
+  }
+
+  publicationStepColor(
+    state: string | null,
+    publicationState: string | null,
+  ): string {
+    if (publicationState === 'failed' && state !== 'confirmed') {
+      return 'red';
+    }
+    if (publicationState === 'paused' && state !== 'confirmed') {
+      return 'orange';
+    }
+    if (state === 'confirmed') {
+      return 'green';
+    }
+    if (state === 'in_flight') {
+      return 'blue';
+    }
+    if (state === 'prepared') {
+      return 'gold';
+    }
+    return 'default';
+  }
+
+  descriptionStateLabel(session: VaingloryMatchSession): string {
+    if (
+      session.publicationState === 'failed' &&
+      session.descriptionState !== 'confirmed'
+    ) {
+      return '失败';
+    }
+    if (
+      session.publicationState === 'paused' &&
+      session.descriptionState !== 'confirmed'
+    ) {
+      return '已暂停';
+    }
+    switch (session.descriptionState) {
+      case 'prepared':
+        return '等待回填';
+      case 'in_flight':
+        return '回填中';
+      case 'confirmed':
+        return '已回填';
+      case 'skipped_no_room':
+        return '已跳过';
+      case null:
+        return '未开始';
+    }
+  }
+
+  pinStateLabel(session: VaingloryMatchSession): string {
+    if (
+      session.publicationState === 'failed' &&
+      session.pinState !== 'confirmed'
+    ) {
+      return '失败';
+    }
+    if (
+      session.publicationState === 'paused' &&
+      session.pinState !== 'confirmed'
+    ) {
+      return '已暂停';
+    }
+    switch (session.pinState) {
+      case 'prepared':
+        return '等待处理';
+      case 'in_flight':
+        return '处理中';
+      case 'confirmed':
+        return '已置顶';
+      case null:
+        return '未开始';
+    }
+  }
+
+  chapterStateLabel(session: VaingloryMatchSession): string {
+    if (
+      session.publicationState === 'failed' &&
+      session.chapterState !== 'confirmed'
+    ) {
+      return '失败';
+    }
+    if (
+      session.publicationState === 'paused' &&
+      session.chapterState !== 'confirmed'
+    ) {
+      return '已暂停';
+    }
+    switch (session.chapterState) {
+      case 'prepared':
+        return '等待设置';
+      case 'confirmed':
+        return '已设置';
+      case 'skipped':
+        return '已跳过';
+      case null:
+        return '未开始';
+    }
   }
 
   detailsFor(sessionId: number): MatchDetailsView | null {
