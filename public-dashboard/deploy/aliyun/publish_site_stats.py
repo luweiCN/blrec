@@ -7,7 +7,11 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Dict, Optional, Protocol
-from zoneinfo import ZoneInfo
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - exercised by the Python 3.8 CI job
+    from backports.zoneinfo import ZoneInfo
 
 LOGGER = logging.getLogger('site-stats-publisher')
 SHANGHAI = ZoneInfo('Asia/Shanghai')
