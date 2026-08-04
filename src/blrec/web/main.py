@@ -323,6 +323,8 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                 'requestedAt': value.requested_at,
                 'startedAt': value.started_at,
                 'updatedAt': value.updated_at,
+                'partCount': value.part_count,
+                'completedPartCount': value.completed_part_count,
             }
 
         analysis_queue = {

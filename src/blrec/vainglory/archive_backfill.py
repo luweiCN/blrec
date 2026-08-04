@@ -15,7 +15,7 @@ from blrec.bili_upload.errors import BiliApiError
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title
 from .repository import refresh_session_scan_job
-from .title_time import resolve_recording_started_at
+from .title_time import current_season_started_at, resolve_recording_started_at
 
 
 class ArchiveBackfillNotFound(ValueError):
@@ -367,15 +367,26 @@ class ArchiveBackfillService:
     async def run_once(self) -> bool:
         if await self._reconcile():
             return True
+        season_start = current_season_started_at(self._now())
         sync = await self._database.fetchone(
             "SELECT account_id FROM vainglory_archive_syncs "
             "WHERE state IN ('discovering','running') AND operator_paused=0 "
-            'AND discovery_complete=0 AND NOT EXISTS('
+            'AND discovery_complete=0 AND ('
+            'NOT EXISTS(SELECT 1 FROM vainglory_archive_imports season_boundary '
+            'WHERE season_boundary.account_id=vainglory_archive_syncs.account_id '
+            'AND season_boundary.updated_at>=vainglory_archive_syncs.requested_at '
+            'AND season_boundary.published_at<?) OR NOT EXISTS('
             'SELECT 1 FROM vainglory_archive_imports imported '
             'WHERE imported.account_id=vainglory_archive_syncs.account_id '
             "AND imported.state NOT IN ('ready','skipped') "
-            "AND NOT (imported.state='failed' AND imported.retryable=0)) "
-            'ORDER BY requested_at,account_id LIMIT 1'
+            "AND NOT (imported.state='failed' AND imported.retryable=0))) "
+            'ORDER BY CASE WHEN NOT EXISTS('
+            'SELECT 1 FROM vainglory_archive_imports season_boundary '
+            'WHERE season_boundary.account_id=vainglory_archive_syncs.account_id '
+            'AND season_boundary.updated_at>=vainglory_archive_syncs.requested_at '
+            'AND season_boundary.published_at<?) THEN 0 ELSE 1 END,'
+            'requested_at,account_id LIMIT 1',
+            (season_start, season_start),
         )
         if sync is not None:
             await self._discover(int(sync['account_id']))
@@ -549,6 +560,7 @@ class ArchiveBackfillService:
     async def _claim_import(self) -> Optional[sqlite3.Row]:
         now = self._now()
         quota_day = self._quota_day(now)
+        season_start = current_season_started_at(now)
 
         def claim(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
             row = connection.execute(
@@ -568,11 +580,13 @@ class ArchiveBackfillService:
                 'AND (sync.retry_after_at IS NULL OR sync.retry_after_at<=?) AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
                 'OR sync.quota_day<>? OR sync.daily_used<sync.daily_limit) '
-                "ORDER BY CASE imported.state WHEN 'failed' THEN 0 ELSE 1 END,"
+                'ORDER BY CASE WHEN COALESCE(imported.published_at,'
+                'imported.created_at)>=? THEN 0 ELSE 1 END,'
+                "CASE imported.state WHEN 'failed' THEN 0 ELSE 1 END,"
                 'COALESCE(imported.next_retry_at,0),'
                 'COALESCE(imported.published_at,imported.created_at) DESC,'
                 'imported.id LIMIT 1',
-                (now, now, quota_day, quota_day),
+                (now, now, quota_day, quota_day, season_start),
             ).fetchone()
             if row is None:
                 return None

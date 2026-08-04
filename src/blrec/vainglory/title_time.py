@@ -13,6 +13,17 @@ _TITLE_TIME_PATTERN = re.compile(
 _SHANGHAI = ZoneInfo('Asia/Shanghai')
 
 
+def current_season_started_at(now: int) -> int:
+    local = datetime.fromtimestamp(int(now), _SHANGHAI)
+    if local.month < 5:
+        month = 1
+    elif local.month < 9:
+        month = 5
+    else:
+        month = 9
+    return int(datetime(local.year, month, 1, tzinfo=_SHANGHAI).timestamp())
+
+
 def resolve_recording_started_at(
     title: str,
     *,

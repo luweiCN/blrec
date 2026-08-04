@@ -114,6 +114,8 @@ export interface VaingloryAnalysisQueueItem {
   readonly requestedAt: number;
   readonly startedAt: number | null;
   readonly updatedAt: number;
+  readonly partCount: number;
+  readonly completedPartCount: number;
 }
 
 export interface VaingloryAnalysisQueue {

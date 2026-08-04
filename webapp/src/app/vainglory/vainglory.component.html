@@ -25,7 +25,7 @@
       <i nz-icon nzType="unordered-list"></i>
       对局分析任务
       <ng-container *ngIf="analysisQueue as queue">
-        （{{ queue.active.length }} 执行中 / {{ queue.pendingCount }} 等待）
+        （{{ queue.active.length }} 场执行中 / {{ queue.pendingCount }} 场等待）
       </ng-container>
     </button>
     <button nz-button type="button" (click)="openArchiveManager()">
@@ -1714,8 +1714,9 @@
         <div>
           <strong>{{ active.title || "未命名直播" }}</strong>
           <span>
-            {{ analysisQueueCategoryLabel(active.category) }} · 分 P
-            {{ active.partIndex }}
+            {{ analysisQueueCategoryLabel(active.category) }} · 本场
+            {{ active.completedPartCount }}/{{ active.partCount }} 个分 P 已完成
+            · 当前 P{{ active.partIndex }}
             <ng-container *ngIf="active.anchorName">
               · {{ active.anchorName }}
             </ng-container>
@@ -1739,12 +1740,12 @@
       </div>
 
       <div class="analysis-queue-counts">
-        <span><strong>{{ queue.pendingCount }}</strong> 总等待</span>
-        <span><strong>{{ queue.manualPending }}</strong> 手动任务</span>
-        <span><strong>{{ queue.realtimePending }}</strong> 新录播</span>
-        <span><strong>{{ queue.archivePending }}</strong> 历史接入</span>
-        <span><strong>{{ queue.migrationPending }}</strong> 稿件迁移</span>
-        <span><strong>{{ queue.backlogPending }}</strong> 旧数据重扫</span>
+        <span><strong>{{ queue.pendingCount }}</strong> 场总等待</span>
+        <span><strong>{{ queue.manualPending }}</strong> 场手动任务</span>
+        <span><strong>{{ queue.realtimePending }}</strong> 场新录播</span>
+        <span><strong>{{ queue.archivePending }}</strong> 场历史接入</span>
+        <span><strong>{{ queue.migrationPending }}</strong> 场稿件迁移</span>
+        <span><strong>{{ queue.backlogPending }}</strong> 场旧数据重扫</span>
       </div>
 
       <div *ngIf="queue.queued.length > 0" class="analysis-next-tasks">
@@ -1757,7 +1758,8 @@
             </span>
             <strong>{{ queued.title || "未命名直播" }}</strong>
             <small>
-              分 P {{ queued.partIndex }}
+              本场 {{ queued.completedPartCount }}/{{ queued.partCount }} 个分 P 已完成
+              · 下一个 P{{ queued.partIndex }}
               <ng-container *ngIf="queued.anchorName">
                 · {{ queued.anchorName }}
               </ng-container>

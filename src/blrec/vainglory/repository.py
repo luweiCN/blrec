@@ -19,6 +19,7 @@ from .catalog import identify_builtin_hero
 from .exclusions import EXCLUDED_TITLE_MARKER, is_excluded_title
 from .hero_recognition import HeroReference
 from .ocr import clean_player_name, normalize_player_name
+from .title_time import current_season_started_at
 from .vision import RecordedPlayer
 
 
@@ -76,6 +77,8 @@ class AnalysisQueueItem:
     requested_at: int
     started_at: Optional[int]
     updated_at: int
+    part_count: int
+    completed_part_count: int
 
 
 @dataclass(frozen=True)
@@ -1014,6 +1017,7 @@ class VaingloryRepository:
         await self.discover_ready_parts()
         now = self._now()
         recent_cutoff = max(1, now - self._REALTIME_WINDOW_SECONDS)
+        season_start = current_season_started_at(now)
 
         def claim(connection: sqlite3.Connection) -> Optional[ScanClaim]:
             row = connection.execute(
@@ -1023,10 +1027,15 @@ class VaingloryRepository:
                 "WHEN session.state='open' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
                 'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+                "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
+                "source.origin!='archive' AND source.cache_path IS NULL)) THEN 3 "
+                'WHEN session.started_at>=? THEN 4 '
                 'WHEN EXISTS(SELECT 1 FROM vainglory_publications publication '
                 'WHERE publication.session_id=job.session_id '
-                'AND publication.needs_refresh=1) THEN 3 '
-                "WHEN source.origin='archive' THEN 4 ELSE 5 END AS priority "
+                'AND publication.needs_refresh=1) THEN 5 '
+                "WHEN source.origin IS NULL OR (source.origin!='archive' "
+                'AND source.cache_path IS NULL) THEN 6 '
+                'ELSE 7 END AS priority '
                 'FROM vainglory_part_jobs job '
                 'JOIN recording_parts part ON part.id=job.part_id '
                 'JOIN recording_sessions session ON session.id=job.session_id '
@@ -1046,12 +1055,16 @@ class VaingloryRepository:
                 "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
                 "AND (source.origin IS NULL OR source.origin!='archive' "
                 'OR COALESCE(archive_sync.operator_paused,0)=0) '
+                'AND (archive_part.import_id IS NULL OR NOT EXISTS('
+                'SELECT 1 FROM vainglory_archive_parts sibling_archive '
+                'WHERE sibling_archive.import_id=archive_part.import_id '
+                "AND sibling_archive.state NOT IN ('analyzing','ready'))) "
                 'ORDER BY priority,'
                 'CASE WHEN priority>=3 THEN COALESCE('
                 'archive_import.published_at,migration_item.published_at,'
                 'session.started_at) END DESC,'
                 'job.session_id,part.part_index,part.created_at,job.part_id LIMIT 1',
-                (recent_cutoff,),
+                (recent_cutoff, season_start, season_start),
             ).fetchone()
             if row is None:
                 return None
@@ -1297,20 +1310,38 @@ class VaingloryRepository:
     async def analysis_queue_status(self, *, limit: int = 8) -> AnalysisQueueStatus:
         if not 1 <= limit <= 20:
             raise ValueError('analysis queue limit must be between 1 and 20')
-        recent_cutoff = max(1, self._now() - self._REALTIME_WINDOW_SECONDS)
-        category_sql = (
-            "CASE WHEN job.request_kind='manual' THEN 'manual' "
+        now = self._now()
+        recent_cutoff = max(1, now - self._REALTIME_WINDOW_SECONDS)
+        season_start = current_season_started_at(now)
+        category_rank_sql = (
+            "CASE WHEN job.request_kind='manual' THEN 0 "
             "WHEN session.state='open' OR ((source.origin IS NULL "
             "OR source.origin!='archive') AND migration_item.id IS NULL "
-            "AND session.started_at>=?) THEN 'realtime' "
-            "WHEN source.origin='archive' THEN 'archive' "
-            "WHEN migration_item.id IS NOT NULL THEN 'migration' "
-            "ELSE 'backlog' END"
+            'AND session.started_at>=?) THEN 1 '
+            "WHEN source.origin='archive' THEN 2 "
+            'WHEN migration_item.id IS NOT NULL THEN 3 ELSE 4 END'
+        )
+        priority_sql = (
+            "CASE WHEN job.request_kind='manual' THEN 0 "
+            "WHEN session.state='open' THEN 1 "
+            "WHEN (source.origin IS NULL OR source.origin!='archive') "
+            'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+            "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
+            "source.origin!='archive' AND source.cache_path IS NULL)) THEN 3 "
+            'WHEN session.started_at>=? THEN 4 '
+            'WHEN EXISTS(SELECT 1 FROM vainglory_publications publication '
+            'WHERE publication.session_id=job.session_id '
+            'AND publication.needs_refresh=1) THEN 5 '
+            "WHEN source.origin IS NULL OR (source.origin!='archive' "
+            'AND source.cache_path IS NULL) THEN 6 '
+            'ELSE 7 END'
         )
         joins = (
             ' FROM vainglory_part_jobs job '
             'JOIN recording_parts part ON part.id=job.part_id '
             'JOIN recording_sessions session ON session.id=job.session_id '
+            'LEFT JOIN vainglory_scan_jobs session_job '
+            'ON session_job.session_id=job.session_id '
             'LEFT JOIN vainglory_ocr_jobs ocr ON ocr.part_id=job.part_id '
             'LEFT JOIN vainglory_video_sources source ON source.part_id=part.id '
             'LEFT JOIN vainglory_archive_parts archive_part '
@@ -1322,50 +1353,117 @@ class VaingloryRepository:
             'LEFT JOIN archive_migration_items migration_item '
             'ON migration_item.session_id=session.id '
         )
-        select = (
-            'SELECT job.part_id,job.session_id,part.part_index,session.title,'
-            'session.anchor_name,job.state,job.progress,job.requested_at,'
-            'job.started_at,job.updated_at,CASE '
-            "WHEN job.state='pending' THEN 'video_scan' "
-            "WHEN ocr.state='pending' THEN 'ocr_waiting' "
-            "WHEN ocr.state='running' THEN 'ocr_recognition' "
-            "ELSE 'video_scan' END AS stage," + category_sql + ' AS category' + joins
-        )
         claimable = (
             " AND part.artifact_state='ready' AND part.video_deleted_at IS NULL "
             "AND session.deletion_state='none' "
             "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
             "AND (source.origin IS NULL OR source.origin!='archive' "
             'OR COALESCE(archive_sync.operator_paused,0)=0) '
+            'AND (archive_part.import_id IS NULL OR NOT EXISTS('
+            'SELECT 1 FROM vainglory_archive_parts sibling_archive '
+            'WHERE sibling_archive.import_id=archive_part.import_id '
+            "AND sibling_archive.state NOT IN ('analyzing','ready'))) "
         )
+        active_predicate = (
+            "job.state='analyzing' AND (ocr.state='running' "
+            'OR ocr.part_id IS NULL) '
+            "AND instr(COALESCE(session.title,''),'直播剪辑')=0"
+        )
+        no_active_sibling = (
+            ' AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs active_job '
+            'LEFT JOIN vainglory_ocr_jobs active_ocr '
+            'ON active_ocr.part_id=active_job.part_id '
+            'WHERE active_job.session_id=job.session_id '
+            "AND active_job.state='analyzing' AND (active_ocr.state='running' "
+            'OR active_ocr.part_id IS NULL))'
+        )
+        task_progress = 'COALESCE(MAX(session_job.progress),AVG(job.progress))'
+        part_count = (
+            '(SELECT COUNT(*) FROM vainglory_part_jobs all_job '
+            'WHERE all_job.session_id=job.session_id)'
+        )
+        completed_part_count = (
+            '(SELECT COUNT(*) FROM vainglory_part_jobs completed_job '
+            'WHERE completed_job.session_id=job.session_id '
+            "AND completed_job.state='ready')"
+        )
+        active_select = (
+            'SELECT COALESCE(MIN(CASE WHEN ocr.state=\'running\' '
+            'THEN job.part_id END),MIN(job.part_id)) AS part_id,'
+            'job.session_id,COALESCE(MIN(CASE WHEN ocr.state=\'running\' '
+            'THEN part.part_index END),MIN(part.part_index)) AS part_index,'
+            'MAX(session.title) AS title,MAX(session.anchor_name) AS anchor_name,'
+            "'analyzing' AS state,CASE WHEN SUM(CASE WHEN ocr.state='running' "
+            "THEN 1 ELSE 0 END)>0 THEN 'ocr_recognition' "
+            "ELSE 'video_scan' END AS stage,MIN("
+            + category_rank_sql
+            + ') AS category_rank,'
+            + task_progress
+            + ' AS progress,MIN(job.requested_at) AS requested_at,'
+            'MIN(job.started_at) AS started_at,MAX(job.updated_at) AS updated_at,'
+            + part_count
+            + ' AS part_count,'
+            + completed_part_count
+            + ' AS completed_part_count'
+            + joins
+            + ' WHERE '
+            + active_predicate
+            + ' GROUP BY job.session_id ORDER BY MIN(job.started_at),job.session_id'
+        )
+        queued_select = (
+            'SELECT COALESCE(MIN(CASE WHEN ocr.state=\'pending\' '
+            'THEN job.part_id END),MIN(job.part_id)) AS part_id,'
+            'job.session_id,COALESCE(MIN(CASE WHEN ocr.state=\'pending\' '
+            'THEN part.part_index END),MIN(part.part_index)) AS part_index,'
+            'MAX(session.title) AS title,MAX(session.anchor_name) AS anchor_name,'
+            "CASE WHEN SUM(CASE WHEN job.state='analyzing' THEN 1 ELSE 0 END)>0 "
+            "THEN 'analyzing' ELSE 'pending' END AS state,"
+            "CASE WHEN SUM(CASE WHEN ocr.state='pending' THEN 1 ELSE 0 END)>0 "
+            "THEN 'ocr_waiting' ELSE 'video_scan' END AS stage,MIN("
+            + category_rank_sql
+            + ') AS category_rank,MIN('
+            + priority_sql
+            + ') AS priority,'
+            + task_progress
+            + ' AS progress,MIN(job.requested_at) AS requested_at,'
+            'MIN(job.started_at) AS started_at,MAX(job.updated_at) AS updated_at,'
+            + part_count
+            + ' AS part_count,'
+            + completed_part_count
+            + ' AS completed_part_count,'
+            'MAX(COALESCE(archive_import.published_at,'
+            'migration_item.published_at,session.started_at)) AS sort_time'
+            + joins
+            + " WHERE (job.state='pending' OR (job.state='analyzing' "
+            "AND ocr.state='pending'))"
+            + claimable
+            + no_active_sibling
+            + ' GROUP BY job.session_id'
+        )
+        category_names = {
+            0: 'manual',
+            1: 'realtime',
+            2: 'archive',
+            3: 'migration',
+            4: 'backlog',
+        }
 
         def read(connection: sqlite3.Connection) -> AnalysisQueueStatus:
-            active_rows = connection.execute(
-                select + " WHERE job.state='analyzing' AND (ocr.state='running' "
-                "OR ocr.part_id IS NULL) AND instr(COALESCE(session.title,''),"
-                "'直播剪辑')=0 ORDER BY job.started_at",
-                (recent_cutoff,),
-            ).fetchall()
+            active_rows = connection.execute(active_select, (recent_cutoff,)).fetchall()
             count_rows = connection.execute(
-                'SELECT category,COUNT(*) AS count FROM ('
-                + select
-                + " WHERE (job.state='pending' OR (job.state='analyzing' "
-                "AND ocr.state='pending'))" + claimable + ') GROUP BY category',
-                (recent_cutoff,),
+                'SELECT category_rank,COUNT(*) AS count FROM ('
+                + queued_select
+                + ') GROUP BY category_rank',
+                (recent_cutoff, recent_cutoff, season_start, season_start),
             ).fetchall()
             queued_rows = connection.execute(
-                select + " WHERE (job.state='pending' OR (job.state='analyzing' "
-                "AND ocr.state='pending'))"
-                + claimable
-                + " ORDER BY CASE category WHEN 'manual' THEN 0 "
-                "WHEN 'realtime' THEN 1 WHEN 'archive' THEN 2 ELSE 3 END,"
-                'CASE WHEN category IN (\'archive\',\'migration\',\'backlog\') '
-                'THEN COALESCE(archive_import.published_at,'
-                'migration_item.published_at,session.started_at) END DESC,'
-                'part.created_at,job.part_id LIMIT ?',
-                (recent_cutoff, limit),
+                queued_select + ' ORDER BY priority,sort_time DESC,2 LIMIT ?',
+                (recent_cutoff, recent_cutoff, season_start, season_start, limit),
             ).fetchall()
-            counts = {str(row['category']): int(row['count']) for row in count_rows}
+            counts = {
+                category_names[int(row['category_rank'])]: int(row['count'])
+                for row in count_rows
+            }
 
             def item(row: sqlite3.Row) -> AnalysisQueueItem:
                 return AnalysisQueueItem(
@@ -1376,13 +1474,15 @@ class VaingloryRepository:
                     anchor_name=str(row['anchor_name'] or ''),
                     state=str(row['state']),
                     stage=str(row['stage']),
-                    category=str(row['category']),
+                    category=category_names[int(row['category_rank'])],
                     progress=float(row['progress']),
                     requested_at=int(row['requested_at']),
                     started_at=(
                         None if row['started_at'] is None else int(row['started_at'])
                     ),
                     updated_at=int(row['updated_at']),
+                    part_count=int(row['part_count']),
+                    completed_part_count=int(row['completed_part_count']),
                 )
 
             return AnalysisQueueStatus(
