@@ -1061,6 +1061,7 @@ class VaingloryRepository:
                 "AND sibling_archive.state NOT IN ('analyzing','ready'))) "
                 'ORDER BY priority,'
                 'CASE WHEN priority>=3 THEN COALESCE('
+                'archive_import.recording_started_at,'
                 'archive_import.published_at,migration_item.published_at,'
                 'session.started_at) END DESC,'
                 'job.session_id,part.part_index,part.created_at,job.part_id LIMIT 1',
@@ -1431,7 +1432,8 @@ class VaingloryRepository:
             + ' AS part_count,'
             + completed_part_count
             + ' AS completed_part_count,'
-            'MAX(COALESCE(archive_import.published_at,'
+            'MAX(COALESCE(archive_import.recording_started_at,'
+            'archive_import.published_at,'
             'migration_item.published_at,session.started_at)) AS sort_time'
             + joins
             + " WHERE (job.state='pending' OR (job.state='analyzing' "
