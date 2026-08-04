@@ -651,7 +651,7 @@ async def test_retry_failed_can_immediately_probe_a_safe_frequency_wait(
             second_upload_state='confirmed',
         )
         await database.execute(
-            'UPDATE upload_jobs SET next_attempt_at=2_800,'
+            'UPDATE upload_jobs SET next_attempt_at=2800,'
             "review_reason='B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿' "
             'WHERE id=9'
         )

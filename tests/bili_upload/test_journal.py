@@ -623,7 +623,7 @@ async def test_frequency_wait_exposes_safe_immediate_retry_action(
     )
     await database.execute(
         "UPDATE upload_jobs SET state='submitting',submit_state='prepared',"
-        "next_attempt_at=21_800,operator_paused=0,"
+        "next_attempt_at=21800,operator_paused=0,"
         "review_reason='B 站投稿过于频繁（137022），将在 30 分钟后自动重新投稿' "
         'WHERE id=1'
     )

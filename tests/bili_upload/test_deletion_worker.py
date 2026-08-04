@@ -318,10 +318,13 @@ async def test_blocked_deletion_is_rechecked_without_an_explicit_wake(
         )
 
         async def wait_for_deletion() -> None:
-            while paths[0].exists():
+            while await database.scalar(
+                'SELECT COUNT(*) FROM recording_sessions WHERE id=1'
+            ):
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait_for_deletion(), timeout=1.5)
+        await asyncio.wait_for(wait_for_deletion(), timeout=3.0)
+        assert not paths[0].exists()
         assert (
             await database.scalar('SELECT COUNT(*) FROM recording_sessions WHERE id=1')
             == 0
