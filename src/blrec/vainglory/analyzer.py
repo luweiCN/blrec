@@ -1453,8 +1453,45 @@ class VaingloryVideoAnalyzer:
                 len(refinement_hits),
                 time.monotonic() - pass_started,
             )
+        fine_fallback_hits: List[ResultHit] = []
+        if not fallback_hits:
+            pass_started = time.monotonic()
+            if status is not None:
+                status(
+                    '第 {}/{} 个区间：预览未命中，正在高帧率兜底'.format(
+                        window_index, window_count
+                    )
+                )
+            logger.info(
+                'Vainglory fine scan pass started: part_id={} window={}/{} '
+                'pass=fine_fallback source=preview_miss',
+                part_id,
+                window_index,
+                window_count,
+            )
+            frame_count = 0
+            for timed in self._sampler.fine_frames(path, window):
+                self._raise_if_cancelled(cancelled)
+                frame_count += 1
+                layout = self._detect_result_layout(timed.frame)
+                if layout is not None:
+                    fine_fallback_hits.append(
+                        ResultHit(at_ms=timed.at_ms, layout=layout)
+                    )
+            refinement_frames += frame_count
+            refinement_windows += 1
+            logger.info(
+                'Vainglory fine scan pass completed: part_id={} window={}/{} '
+                'pass=fine_fallback frames={} hits={} elapsed_seconds={:.3f}',
+                part_id,
+                window_index,
+                window_count,
+                frame_count,
+                len(fine_fallback_hits),
+                time.monotonic() - pass_started,
+            )
         hits = refinement_hits or collapse_result_hits(
-            fallback_hits or keyframe_hits, maximum_gap_ms=5_000
+            fine_fallback_hits or fallback_hits or keyframe_hits, maximum_gap_ms=5_000
         )
         return _WindowScanResult(
             hits=hits,

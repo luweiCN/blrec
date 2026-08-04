@@ -534,6 +534,44 @@ def test_scan_logs_coarse_progress_and_each_fine_window(
     assert statuses[-1].current_window == 2
 
 
+def test_fine_scan_falls_back_when_a_short_result_appears_between_previews(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = RgbFrame(1, 1, b'\x00\x00\x00')
+    result = RgbFrame(1, 1, b'\x01\x00\x00')
+
+    class Sampler:
+        def result_preview_frames(self, *_args, **_kwargs):
+            yield TimedFrame(at_ms=1_000, frame=preview)
+
+        def fine_frames(self, *_args, **_kwargs):
+            yield TimedFrame(at_ms=1_000, frame=preview)
+            yield TimedFrame(at_ms=1_250, frame=result)
+
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        analyzer,
+        '_detect_result_layout',
+        lambda frame: hit(0).layout if frame is result else None,
+    )
+    statuses = []
+
+    scanned = analyzer._scan_window(
+        'unused',
+        ScanWindow(0, 2_000),
+        window_index=1,
+        window_count=1,
+        status=statuses.append,
+    )
+
+    assert [item.at_ms for item in scanned.hits] == [1_250]
+    assert scanned.keyframe_preview_frames == 1
+    assert scanned.fallback_preview_frames == 1
+    assert scanned.refinement_frames == 2
+    assert scanned.refinement_windows == 1
+    assert statuses[-1] == '第 1/1 个区间：预览未命中，正在高帧率兜底'
+
+
 def test_recognition_logs_each_candidate_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -585,6 +623,9 @@ def test_coarse_scan_never_calls_the_game_timer_reader(
         def result_preview_frames(self, *_args, **_kwargs):
             return iter(())
 
+        def fine_frames(self, *_args, **_kwargs):
+            return iter(())
+
     class Reader:
         timer_calls = 0
 
@@ -631,6 +672,9 @@ def test_coarse_scan_recognizes_heroes_only_at_gameplay_anchors(
                 yield TimedFrame(at_ms=at_ms, frame=frame)
 
         def result_preview_frames(self, *_args, **_kwargs):
+            return iter(())
+
+        def fine_frames(self, *_args, **_kwargs):
             return iter(())
 
     analyzer = VaingloryVideoAnalyzer(
