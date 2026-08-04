@@ -1,7 +1,7 @@
 import { ChangeDetectorRef } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 
-import { NEVER, of } from 'rxjs';
+import { NEVER, of, throwError } from 'rxjs';
 import { NzMessageService } from 'ng-zorro-antd/message';
 
 import { RealtimeService } from '../core/services/realtime.service';
@@ -18,6 +18,7 @@ import {
   VaingloryMatch,
   VaingloryMatchSession,
   VaingloryPlayer,
+  VaingloryScanJob,
 } from './vainglory.model';
 import { VaingloryService } from './vainglory.service';
 
@@ -60,6 +61,21 @@ function match(): VaingloryMatch {
     recordedPlayerSource: 'automatic',
     recordedPlayerState: 'pending',
     players: [],
+  };
+}
+
+function scanJob(sessionId: number): VaingloryScanJob {
+  return {
+    sessionId,
+    state: 'pending',
+    progress: 0,
+    algorithmVersion: 17,
+    matchCount: 0,
+    error: null,
+    requestedAt: 1_000,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: 1_000,
   };
 }
 
@@ -156,6 +172,7 @@ describe('VaingloryComponent remote media', () => {
       'updateSessionTitle',
       'updateSessionAnchor',
       'bulkUpdateSessions',
+      'requestScan',
       'requestArchiveSync',
       'getArchiveSync',
       'listArchiveSyncItems',
@@ -487,6 +504,25 @@ describe('VaingloryComponent remote media', () => {
     });
     expect(component.selectedSessionIds.size).toBe(0);
     expect(messages.success).toHaveBeenCalledWith('已更新 2 场直播');
+  });
+
+  it('keeps failed sessions selected when batch reanalysis partly fails', () => {
+    vainglory.requestScan.and.callFake((sessionId) =>
+      sessionId === 9
+        ? of(scanJob(sessionId))
+        : throwError(() => new Error('队列暂不可用')),
+    );
+    component.selectedSessionIds.add(9);
+    component.selectedSessionIds.add(10);
+
+    component.bulkRescanSelected();
+
+    expect(vainglory.requestScan.calls.allArgs()).toEqual([[9], [10]]);
+    expect(component.selectedSessionIds.has(9)).toBeFalse();
+    expect(component.selectedSessionIds.has(10)).toBeTrue();
+    expect(messages.warning).toHaveBeenCalledWith(
+      '已加入 1 场，1 场失败；失败项已保留选中',
+    );
   });
 
   it('creates a player, renames it, and manages its room binding', () => {

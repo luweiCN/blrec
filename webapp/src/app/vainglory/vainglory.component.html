@@ -250,6 +250,26 @@
           <button
             nz-button
             type="button"
+            nz-popconfirm
+            [nzPopconfirmTitle]="
+              '将使用当前算法重新分析已选的 ' +
+              selectedSessionIds.size +
+              ' 场直播的全部分 P，是否继续？'
+            "
+            nzOkText="批量重新分析"
+            nzCancelText="取消"
+            [nzLoading]="bulkActionLoading('rescan')"
+            [disabled]="
+              selectedSessionIds.size === 0 || bulkUpdatingAction !== null
+            "
+            (nzOnConfirm)="bulkRescanSelected()"
+          >
+            <i nz-icon nzType="reload"></i>
+            批量重新分析
+          </button>
+          <button
+            nz-button
+            type="button"
             [nzLoading]="bulkActionLoading('anchor')"
             [disabled]="
               selectedSessionIds.size === 0 || bulkUpdatingAction !== null

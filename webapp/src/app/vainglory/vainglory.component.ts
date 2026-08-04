@@ -9,8 +9,17 @@ import {
 import { ActivatedRoute, Router } from '@angular/router';
 
 import { NzMessageService } from 'ng-zorro-antd/message';
-import { Subject, timer } from 'rxjs';
-import { finalize, switchMap, takeUntil, takeWhile } from 'rxjs/operators';
+import { from, of, Subject, timer } from 'rxjs';
+import {
+  catchError,
+  concatMap,
+  finalize,
+  map,
+  switchMap,
+  takeUntil,
+  takeWhile,
+  toArray,
+} from 'rxjs/operators';
 
 import { RealtimeService } from '../core/services/realtime.service';
 import {
@@ -122,7 +131,19 @@ interface ManagedAnchorOption {
 
 type ManagedRoomOption = ManagedAnchorOption;
 
-type BulkUpdateAction = 'anchor' | 'include' | 'exclude';
+type BulkUpdateAction = 'anchor' | 'include' | 'exclude' | 'rescan';
+
+type BulkRescanResult =
+  | {
+      readonly state: 'queued';
+      readonly sessionId: number;
+      readonly job: VaingloryScanJob;
+    }
+  | {
+      readonly state: 'failed';
+      readonly sessionId: number;
+      readonly error: unknown;
+    };
 
 @Component({
   selector: 'app-vainglory',
@@ -1442,6 +1463,71 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.bulkUpdateSelected(statsIncluded ? 'include' : 'exclude', {
       statsIncluded,
     });
+  }
+
+  bulkRescanSelected(): void {
+    if (this.bulkUpdatingAction !== null) {
+      return;
+    }
+    const sessionIds = [...this.selectedSessionIds];
+    if (sessionIds.length === 0) {
+      this.messages.warning('请先选择至少一场直播');
+      return;
+    }
+    this.bulkUpdatingAction = 'rescan';
+    this.changeDetector.markForCheck();
+    from(sessionIds)
+      .pipe(
+        concatMap((sessionId) =>
+          this.vainglory.requestScan(sessionId).pipe(
+            map(
+              (job): BulkRescanResult => ({
+                state: 'queued',
+                sessionId,
+                job,
+              }),
+            ),
+            catchError((error: unknown) =>
+              of<BulkRescanResult>({ state: 'failed', sessionId, error }),
+            ),
+          ),
+        ),
+        toArray(),
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.bulkUpdatingAction = null;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe((results) => {
+        let queuedCount = 0;
+        let failedCount = 0;
+        let firstError: unknown = null;
+        for (const result of results) {
+          if (result.state === 'queued') {
+            queuedCount += 1;
+            this.selectedSessionIds.delete(result.sessionId);
+            this.receiveScanJob(result.job);
+          } else {
+            failedCount += 1;
+            firstError ??= result.error;
+          }
+        }
+        if (failedCount === 0) {
+          this.messages.success(
+            `已将 ${queuedCount} 场直播加入重新分析队列`,
+          );
+        } else if (queuedCount > 0) {
+          this.messages.warning(
+            `已加入 ${queuedCount} 场，${failedCount} 场失败；失败项已保留选中`,
+          );
+        } else {
+          this.messages.error(
+            `批量重新分析失败：${this.errorMessage(firstError, '未知错误')}`,
+          );
+        }
+        this.changeDetector.markForCheck();
+      });
   }
 
   confirmBulkSetSessionAnchor(): void {
