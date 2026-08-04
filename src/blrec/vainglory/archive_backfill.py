@@ -114,6 +114,7 @@ class _ArchivePage:
 class ArchiveBackfillService:
     PAGE_SIZE = 50
     MAX_PAGES = 200
+    DISCOVERY_INTERVAL_SECONDS = 15
     RETRY_BASE_SECONDS = 5 * 60
     RETRY_MAX_SECONDS = 6 * 60 * 60
     METADATA_COOLDOWN_SECONDS = 15 * 60
@@ -136,6 +137,7 @@ class ArchiveBackfillService:
         self._remote_media_cache = remote_media_cache
         self._clock = clock
         self._idle_poll_seconds = idle_poll_seconds
+        self._next_discovery_at = 0
         self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task[None]] = None
 
@@ -366,28 +368,16 @@ class ArchiveBackfillService:
 
     async def run_once(self) -> bool:
         reconciled = await self._reconcile()
-        season_start = current_season_started_at(self._now())
-        sync = await self._database.fetchone(
-            "SELECT account_id FROM vainglory_archive_syncs "
-            "WHERE state IN ('discovering','running') AND operator_paused=0 "
-            'AND discovery_complete=0 AND ('
-            'NOT EXISTS(SELECT 1 FROM vainglory_archive_imports season_boundary '
-            'WHERE season_boundary.account_id=vainglory_archive_syncs.account_id '
-            'AND season_boundary.updated_at>=vainglory_archive_syncs.requested_at '
-            'AND season_boundary.recording_started_at<?) OR NOT EXISTS('
-            'SELECT 1 FROM vainglory_archive_imports imported '
-            'WHERE imported.account_id=vainglory_archive_syncs.account_id '
-            "AND imported.state NOT IN ('ready','skipped') "
-            "AND NOT (imported.state='failed' AND imported.retryable=0))) "
-            'ORDER BY CASE WHEN NOT EXISTS('
-            'SELECT 1 FROM vainglory_archive_imports season_boundary '
-            'WHERE season_boundary.account_id=vainglory_archive_syncs.account_id '
-            'AND season_boundary.updated_at>=vainglory_archive_syncs.requested_at '
-            'AND season_boundary.recording_started_at<?) THEN 0 ELSE 1 END,'
-            'requested_at,account_id LIMIT 1',
-            (season_start, season_start),
-        )
+        now = self._now()
+        sync = None
+        if now >= self._next_discovery_at:
+            sync = await self._database.fetchone(
+                'SELECT account_id FROM vainglory_archive_syncs '
+                "WHERE state IN ('discovering','running') AND operator_paused=0 "
+                'AND discovery_complete=0 ORDER BY requested_at,account_id LIMIT 1'
+            )
         if sync is not None:
+            self._next_discovery_at = now + self.DISCOVERY_INTERVAL_SECONDS
             await self._discover(int(sync['account_id']))
             return True
         import_row = await self._claim_import()
@@ -1006,6 +996,26 @@ class ArchiveBackfillService:
 
         def reconcile(connection: sqlite3.Connection) -> bool:
             changed = False
+            untimed = connection.execute(
+                'SELECT id,title,published_at FROM vainglory_archive_imports '
+                'WHERE recording_started_at IS NULL LIMIT 500'
+            ).fetchall()
+            for imported in untimed:
+                recording_started_at = resolve_recording_started_at(
+                    str(imported['title']),
+                    published_at=(
+                        None
+                        if imported['published_at'] is None
+                        else int(imported['published_at'])
+                    ),
+                    fallback=now,
+                )
+                connection.execute(
+                    'UPDATE vainglory_archive_imports '
+                    'SET recording_started_at=? WHERE id=?',
+                    (recording_started_at, int(imported['id'])),
+                )
+                changed = True
             rows = connection.execute(
                 'SELECT archive.id,archive.state,archive.progress,archive.error,'
                 'source.state AS source_state,source.progress AS source_progress,'
