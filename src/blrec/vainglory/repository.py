@@ -380,7 +380,7 @@ def refresh_session_scan_job(
         state = 'failed'
         progress = 1.0
         error_row = connection.execute(
-            'SELECT error FROM vainglory_archive_parts part '
+            'SELECT part.error AS error FROM vainglory_archive_parts part '
             'JOIN vainglory_archive_imports imported ON imported.id=part.import_id '
             "WHERE imported.session_id=? AND part.state='failed' "
             'ORDER BY part.updated_at DESC,part.id DESC LIMIT 1',
