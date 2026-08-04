@@ -40,7 +40,7 @@ class OnnxResultPanelDetector:
         numpy: Any = importlib.import_module('numpy')
         onnxruntime: Any = importlib.import_module('onnxruntime')
         options = onnxruntime.SessionOptions()
-        options.intra_op_num_threads = 1
+        options.intra_op_num_threads = 2
         options.inter_op_num_threads = 1
         self._numpy = numpy
         self._session = onnxruntime.InferenceSession(

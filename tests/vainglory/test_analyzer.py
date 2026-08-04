@@ -534,26 +534,28 @@ def test_scan_logs_coarse_progress_and_each_fine_window(
     assert statuses[-1].current_window == 2
 
 
-def test_fine_scan_falls_back_when_a_short_result_appears_between_previews(
+def test_fine_scan_detects_a_short_result_from_a_scene_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    preview = RgbFrame(1, 1, b'\x00\x00\x00')
-    result = RgbFrame(1, 1, b'\x01\x00\x00')
+    preview = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
+    result = RgbFrame(4, 4, b'\xff\xff\xff' * 16)
+    frames = tuple(
+        TimedFrame(at_ms=index * 250, frame=result if index == 5 else preview)
+        for index in range(20)
+    )
 
     class Sampler:
-        def result_preview_frames(self, *_args, **_kwargs):
-            yield TimedFrame(at_ms=1_000, frame=preview)
-
         def fine_frames(self, *_args, **_kwargs):
-            yield TimedFrame(at_ms=1_000, frame=preview)
-            yield TimedFrame(at_ms=1_250, frame=result)
+            yield from frames
 
     analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
-    monkeypatch.setattr(
-        analyzer,
-        '_detect_result_layout',
-        lambda frame: hit(0).layout if frame is result else None,
-    )
+    detected = []
+
+    def detect(frame: RgbFrame):
+        detected.append(frame)
+        return hit(0).layout if frame is result else None
+
+    monkeypatch.setattr(analyzer, '_detect_result_layout', detect)
     statuses = []
 
     scanned = analyzer._scan_window(
@@ -565,11 +567,41 @@ def test_fine_scan_falls_back_when_a_short_result_appears_between_previews(
     )
 
     assert [item.at_ms for item in scanned.hits] == [1_250]
-    assert scanned.keyframe_preview_frames == 1
-    assert scanned.fallback_preview_frames == 1
-    assert scanned.refinement_frames == 2
-    assert scanned.refinement_windows == 1
-    assert statuses[-1] == '第 1/1 个区间：预览未命中，正在高帧率兜底'
+    assert len(detected) < len(frames) // 2
+    assert scanned.sampled_frames == len(frames)
+    assert scanned.model_frames == len(detected)
+    assert statuses[-1] == '第 1/1 个区间：正在进行场景自适应精扫'
+
+
+def test_fine_scan_periodically_checks_a_static_scene(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
+    result = RgbFrame(4, 4, b'\x01\x01\x01' * 16)
+    frames = tuple(
+        TimedFrame(at_ms=index * 250, frame=result if index == 12 else preview)
+        for index in range(20)
+    )
+
+    class Sampler:
+        def fine_frames(self, *_args, **_kwargs):
+            yield from frames
+
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
+    detected = []
+
+    def detect(frame: RgbFrame):
+        detected.append(frame)
+        return hit(0).layout if frame is result else None
+
+    monkeypatch.setattr(analyzer, '_detect_result_layout', detect)
+
+    scanned = analyzer._scan_window(
+        'unused', ScanWindow(0, 5_000), window_index=1, window_count=1
+    )
+
+    assert [item.at_ms for item in scanned.hits] == [3_000]
+    assert len(detected) == 2
 
 
 def test_recognition_logs_each_candidate_rejection(

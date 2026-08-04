@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, replace
 from statistics import mean
 from typing import (
     Any,
     Callable,
+    Deque,
     Dict,
     List,
     Literal,
@@ -115,10 +116,10 @@ class ResultHit:
 @dataclass(frozen=True)
 class _WindowScanResult:
     hits: Tuple[ResultHit, ...]
-    keyframe_preview_frames: int
-    fallback_preview_frames: int
-    refinement_frames: int
-    refinement_windows: int
+    sampled_frames: int
+    model_frames: int
+    scene_change_frames: int
+    periodic_probe_frames: int
 
 
 @dataclass(frozen=True)
@@ -346,29 +347,24 @@ def collapse_result_hits(
     return tuple(result)
 
 
-def _result_refinement_windows(
-    hits: Sequence[ResultHit], *, outer_window: ScanWindow, padding_ms: int = 2_000
-) -> Tuple[ScanWindow, ...]:
-    candidates = collapse_result_hits(hits, maximum_gap_ms=5_000)
-    windows = [
-        ScanWindow(
-            start_ms=max(outer_window.start_ms, hit.at_ms - padding_ms),
-            end_ms=min(outer_window.end_ms, hit.at_ms + padding_ms),
-        )
-        for hit in candidates
-    ]
-    merged: List[ScanWindow] = []
-    for window in windows:
-        if window.end_ms <= window.start_ms:
-            continue
-        if not merged or window.start_ms > merged[-1].end_ms:
-            merged.append(window)
-            continue
-        previous = merged[-1]
-        merged[-1] = ScanWindow(
-            start_ms=previous.start_ms, end_ms=max(previous.end_ms, window.end_ms)
-        )
-    return tuple(merged)
+def _scene_change_fraction(left: RgbFrame, right: RgbFrame) -> float:
+    if (left.width, left.height) != (right.width, right.height):
+        return 1.0
+    columns = min(32, left.width)
+    rows = min(18, left.height)
+    changed = 0
+    for row in range(rows):
+        y = min(left.height - 1, (row * 2 + 1) * left.height // (rows * 2))
+        for column in range(columns):
+            x = min(left.width - 1, (column * 2 + 1) * left.width // (columns * 2))
+            offset = (y * left.width + x) * 3
+            difference = sum(
+                abs(left.pixels[offset + channel] - right.pixels[offset + channel])
+                for channel in range(3)
+            )
+            if difference >= 120:
+                changed += 1
+    return changed / (columns * rows)
 
 
 def collapse_analyzed_matches(
@@ -406,6 +402,9 @@ def collapse_analyzed_matches(
 class VaingloryVideoAnalyzer:
     _RESULT_FALLBACK_INTERVAL_MS = 120_000
     _HUD_CONTINUITY_MS = 75_000
+    _FINE_SCAN_PERIODIC_INTERVAL_MS = 3_000
+    _FINE_SCAN_SCENE_CHANGE_THRESHOLD = 0.25
+    _FINE_SCAN_SCENE_BURST_MS = 750
 
     def __init__(
         self,
@@ -700,10 +699,10 @@ class VaingloryVideoAnalyzer:
             ),
         )
         hits: List[ResultHit] = []
-        keyframe_preview_frames = 0
-        fallback_preview_frames = 0
-        refinement_frames = 0
-        refinement_windows = 0
+        model_frames = 0
+        sampled_frames = 0
+        scene_change_frames = 0
+        periodic_probe_frames = 0
         total_window_ms = sum(window.end_ms - window.start_ms for window in windows)
         scanned_window_ms = 0
         fine_started = time.monotonic()
@@ -780,27 +779,27 @@ class VaingloryVideoAnalyzer:
                 )
                 for hit in scanned.hits
             )
-            keyframe_preview_frames += scanned.keyframe_preview_frames
-            fallback_preview_frames += scanned.fallback_preview_frames
-            refinement_frames += scanned.refinement_frames
-            refinement_windows += scanned.refinement_windows
+            model_frames += scanned.model_frames
+            sampled_frames += scanned.sampled_frames
+            scene_change_frames += scanned.scene_change_frames
+            periodic_probe_frames += scanned.periodic_probe_frames
             scanned_window_ms += window.end_ms - window.start_ms
             candidates_so_far = len(collapse_result_hits(hits))
             logger.info(
                 'Vainglory fine scan window completed: part_id={} window={}/{} '
-                'hits={} candidates_so_far={} keyframe_preview_frames={} '
-                'fallback_preview_frames={} refinement_windows={} '
-                'refinement_frames={} window_seconds={:.3f} '
+                'hits={} candidates_so_far={} sampled_frames={} '
+                'model_frames={} scene_changes={} periodic_probes={} '
+                'window_seconds={:.3f} '
                 'elapsed_seconds={:.3f}',
                 part.id,
                 window_index,
                 len(windows),
                 len(scanned.hits),
                 candidates_so_far,
-                scanned.keyframe_preview_frames,
-                scanned.fallback_preview_frames,
-                scanned.refinement_windows,
-                scanned.refinement_frames,
+                scanned.sampled_frames,
+                scanned.model_frames,
+                scanned.scene_change_frames,
+                scanned.periodic_probe_frames,
                 time.monotonic() - window_started,
                 time.monotonic() - scan_started,
             )
@@ -828,17 +827,16 @@ class VaingloryVideoAnalyzer:
         candidates = collapse_result_hits(hits)
         logger.info(
             'Vainglory fine scan completed: part_id={} windows={} hits={} '
-            'candidates={} keyframe_preview_frames={} '
-            'fallback_preview_frames={} refinement_windows={} '
-            'refinement_frames={} elapsed_seconds={:.3f}',
+            'candidates={} sampled_frames={} model_frames={} '
+            'scene_changes={} periodic_probes={} elapsed_seconds={:.3f}',
             part.id,
             len(windows),
             len(hits),
             len(candidates),
-            keyframe_preview_frames,
-            fallback_preview_frames,
-            refinement_windows,
-            refinement_frames,
+            sampled_frames,
+            model_frames,
+            scene_change_frames,
+            periodic_probe_frames,
             fine_seconds,
         )
         self._emit_status(
@@ -1326,220 +1324,93 @@ class VaingloryVideoAnalyzer:
         pass_started = time.monotonic()
         if status is not None:
             status(
-                '第 {}/{} 个区间：正在快速检查关键帧'.format(window_index, window_count)
-            )
-        logger.info(
-            'Vainglory fine scan pass started: part_id={} window={}/{} '
-            'pass=keyframe_preview',
-            part_id,
-            window_index,
-            window_count,
-        )
-        keyframe_hits, keyframe_frames = self._scan_preview(
-            path, window, keyframes_only=True, cancelled=cancelled
-        )
-        logger.info(
-            'Vainglory fine scan pass completed: part_id={} window={}/{} '
-            'pass=keyframe_preview frames={} hits={} elapsed_seconds={:.3f}',
-            part_id,
-            window_index,
-            window_count,
-            keyframe_frames,
-            len(keyframe_hits),
-            time.monotonic() - pass_started,
-        )
-        refinement_hits: Tuple[ResultHit, ...] = ()
-        refinement_frames = 0
-        refinement_windows = 0
-        if keyframe_hits:
-            pass_started = time.monotonic()
-            if status is not None:
-                status(
-                    '第 {}/{} 个区间：关键帧命中，正在加密确认'.format(
-                        window_index, window_count
-                    )
-                )
-            logger.info(
-                'Vainglory fine scan pass started: part_id={} window={}/{} '
-                'pass=refinement source=keyframe',
-                part_id,
-                window_index,
-                window_count,
-            )
-            (refinement_hits, frame_count, refinement_window_count) = (
-                self._refine_preview_hits(
-                    path, window, keyframe_hits, cancelled=cancelled
-                )
-            )
-            refinement_frames += frame_count
-            refinement_windows += refinement_window_count
-            logger.info(
-                'Vainglory fine scan pass completed: part_id={} window={}/{} '
-                'pass=refinement source=keyframe frames={} hits={} '
-                'elapsed_seconds={:.3f}',
-                part_id,
-                window_index,
-                window_count,
-                frame_count,
-                len(refinement_hits),
-                time.monotonic() - pass_started,
-            )
-        if refinement_hits:
-            return _WindowScanResult(
-                hits=refinement_hits,
-                keyframe_preview_frames=keyframe_frames,
-                fallback_preview_frames=0,
-                refinement_frames=refinement_frames,
-                refinement_windows=refinement_windows,
-            )
-
-        pass_started = time.monotonic()
-        if status is not None:
-            status(
-                '第 {}/{} 个区间：关键帧未确认，正在逐秒补扫'.format(
+                '第 {}/{} 个区间：正在进行场景自适应精扫'.format(
                     window_index, window_count
                 )
             )
         logger.info(
             'Vainglory fine scan pass started: part_id={} window={}/{} '
-            'pass=fallback_preview',
+            'pass=adaptive_scene',
             part_id,
             window_index,
             window_count,
         )
-        fallback_hits, fallback_frames = self._scan_preview(
-            path, window, keyframes_only=False, cancelled=cancelled
-        )
-        logger.info(
-            'Vainglory fine scan pass completed: part_id={} window={}/{} '
-            'pass=fallback_preview frames={} hits={} elapsed_seconds={:.3f}',
-            part_id,
-            window_index,
-            window_count,
-            fallback_frames,
-            len(fallback_hits),
-            time.monotonic() - pass_started,
-        )
-        if fallback_hits:
-            pass_started = time.monotonic()
-            if status is not None:
-                status(
-                    '第 {}/{} 个区间：补扫命中，正在加密确认'.format(
-                        window_index, window_count
-                    )
-                )
-            logger.info(
-                'Vainglory fine scan pass started: part_id={} window={}/{} '
-                'pass=refinement source=fallback',
-                part_id,
-                window_index,
-                window_count,
-            )
-            (refinement_hits, frame_count, refinement_window_count) = (
-                self._refine_preview_hits(
-                    path, window, fallback_hits, cancelled=cancelled
-                )
-            )
-            refinement_frames += frame_count
-            refinement_windows += refinement_window_count
-            logger.info(
-                'Vainglory fine scan pass completed: part_id={} window={}/{} '
-                'pass=refinement source=fallback frames={} hits={} '
-                'elapsed_seconds={:.3f}',
-                part_id,
-                window_index,
-                window_count,
-                frame_count,
-                len(refinement_hits),
-                time.monotonic() - pass_started,
-            )
-        fine_fallback_hits: List[ResultHit] = []
-        if not fallback_hits:
-            pass_started = time.monotonic()
-            if status is not None:
-                status(
-                    '第 {}/{} 个区间：预览未命中，正在高帧率兜底'.format(
-                        window_index, window_count
-                    )
-                )
-            logger.info(
-                'Vainglory fine scan pass started: part_id={} window={}/{} '
-                'pass=fine_fallback source=preview_miss',
-                part_id,
-                window_index,
-                window_count,
-            )
-            frame_count = 0
-            for timed in self._sampler.fine_frames(path, window):
-                self._raise_if_cancelled(cancelled)
-                frame_count += 1
-                layout = self._detect_result_layout(timed.frame)
-                if layout is not None:
-                    fine_fallback_hits.append(
-                        ResultHit(at_ms=timed.at_ms, layout=layout)
-                    )
-            refinement_frames += frame_count
-            refinement_windows += 1
-            logger.info(
-                'Vainglory fine scan pass completed: part_id={} window={}/{} '
-                'pass=fine_fallback frames={} hits={} elapsed_seconds={:.3f}',
-                part_id,
-                window_index,
-                window_count,
-                frame_count,
-                len(fine_fallback_hits),
-                time.monotonic() - pass_started,
-            )
-        hits = refinement_hits or collapse_result_hits(
-            fine_fallback_hits or fallback_hits or keyframe_hits, maximum_gap_ms=5_000
-        )
-        return _WindowScanResult(
-            hits=hits,
-            keyframe_preview_frames=keyframe_frames,
-            fallback_preview_frames=fallback_frames,
-            refinement_frames=refinement_frames,
-            refinement_windows=refinement_windows,
-        )
-
-    def _scan_preview(
-        self,
-        path: str,
-        window: ScanWindow,
-        *,
-        keyframes_only: bool,
-        cancelled: Optional[Callable[[], bool]],
-    ) -> Tuple[Tuple[ResultHit, ...], int]:
         hits: List[ResultHit] = []
-        frame_count = 0
-        for timed in self._sampler.result_preview_frames(
-            path, window, keyframes_only=keyframes_only
-        ):
+        history: Deque[Tuple[int, RgbFrame]] = deque()
+        sampled_frames = 0
+        model_frames = 0
+        scene_change_frames = 0
+        periodic_probe_frames = 0
+        last_periodic_probe_ms: Optional[int] = None
+        scene_burst_until_ms = window.start_ms - 1
+        for timed in self._sampler.fine_frames(path, window):
             self._raise_if_cancelled(cancelled)
-            frame_count += 1
-            layout = self._detect_result_layout(timed.frame)
-            if layout is not None:
-                hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
-        return tuple(hits), frame_count
-
-    def _refine_preview_hits(
-        self,
-        path: str,
-        outer_window: ScanWindow,
-        preview_hits: Sequence[ResultHit],
-        *,
-        cancelled: Optional[Callable[[], bool]],
-    ) -> Tuple[Tuple[ResultHit, ...], int, int]:
-        windows = _result_refinement_windows(preview_hits, outer_window=outer_window)
-        hits: List[ResultHit] = []
-        frame_count = 0
-        for window in windows:
-            for timed in self._sampler.fine_frames(path, window):
-                self._raise_if_cancelled(cancelled)
-                frame_count += 1
+            sampled_frames += 1
+            previous = history[-1][1] if history else None
+            one_second_ago = next(
+                (
+                    frame
+                    for at_ms, frame in reversed(history)
+                    if at_ms <= timed.at_ms - 750
+                ),
+                None,
+            )
+            change_fraction = max(
+                (
+                    _scene_change_fraction(previous, timed.frame)
+                    if previous is not None
+                    else 0.0
+                ),
+                (
+                    _scene_change_fraction(one_second_ago, timed.frame)
+                    if one_second_ago is not None
+                    else 0.0
+                ),
+            )
+            if change_fraction >= self._FINE_SCAN_SCENE_CHANGE_THRESHOLD:
+                scene_change_frames += 1
+                scene_burst_until_ms = max(
+                    scene_burst_until_ms, timed.at_ms + self._FINE_SCAN_SCENE_BURST_MS
+                )
+            periodic_probe = (
+                last_periodic_probe_ms is None
+                or timed.at_ms - last_periodic_probe_ms
+                >= self._FINE_SCAN_PERIODIC_INTERVAL_MS
+            )
+            if periodic_probe:
+                last_periodic_probe_ms = timed.at_ms
+                periodic_probe_frames += 1
+            if periodic_probe or timed.at_ms <= scene_burst_until_ms:
+                model_frames += 1
                 layout = self._detect_result_layout(timed.frame)
                 if layout is not None:
                     hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
-        return collapse_result_hits(hits), frame_count, len(windows)
+            history.append((timed.at_ms, timed.frame))
+            while history and history[0][0] < timed.at_ms - 1_500:
+                history.popleft()
+
+        collapsed_hits = collapse_result_hits(hits, maximum_gap_ms=5_000)
+        logger.info(
+            'Vainglory fine scan pass completed: part_id={} window={}/{} '
+            'pass=adaptive_scene sampled_frames={} model_frames={} '
+            'scene_changes={} periodic_probes={} hits={} elapsed_seconds={:.3f}',
+            part_id,
+            window_index,
+            window_count,
+            sampled_frames,
+            model_frames,
+            scene_change_frames,
+            periodic_probe_frames,
+            len(collapsed_hits),
+            time.monotonic() - pass_started,
+        )
+        return _WindowScanResult(
+            hits=collapsed_hits,
+            sampled_frames=sampled_frames,
+            model_frames=model_frames,
+            scene_change_frames=scene_change_frames,
+            periodic_probe_frames=periodic_probe_frames,
+        )
 
     def _recognize_frame(
         self,
