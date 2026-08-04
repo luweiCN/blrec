@@ -494,7 +494,7 @@ async def test_does_not_treat_the_archive_owner_as_the_recorded_anchor(
 
 
 @pytest.mark.asyncio
-async def test_skips_archive_pages_shorter_than_ten_minutes(tmp_path: Path) -> None:
+async def test_keeps_short_archive_pages_for_result_scanning(tmp_path: Path) -> None:
     class Reader(FakeArchiveReader):
         async def detail(
             self,
@@ -544,7 +544,7 @@ async def test_skips_archive_pages_shorter_than_ten_minutes(tmp_path: Path) -> N
         assert [
             (int(row['page']), int(row['cid']), int(row['duration_seconds']))
             for row in pages
-        ] == [(2, 202, 600)]
+        ] == [(1, 201, 599), (2, 202, 600)]
     finally:
         await database.close()
 

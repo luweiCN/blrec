@@ -645,11 +645,7 @@ class ArchiveBackfillService:
             if is_excluded_title(str(imported['title']), detail_title):
                 await self._delete_import(import_id)
                 return
-            pages = tuple(
-                page
-                for page in self._parse_detail(detail)
-                if page.duration_seconds is None or page.duration_seconds >= 600
-            )
+            pages = self._parse_detail(detail)
             if not pages:
                 await self._skip_import(import_id)
                 return
@@ -1273,7 +1269,7 @@ class ArchiveBackfillService:
         await self._database.execute(
             "UPDATE vainglory_archive_imports SET state='skipped',progress=1,"
             "content_classification='unknown',"
-            "classification_reason='稿件短于10分钟，未进行内容分析',"
+            "classification_reason='稿件没有可分析的分 P',"
             'page_count=0,completed_page_count=0,error=NULL,retryable=0,'
             'next_retry_at=NULL,updated_at=? '
             'WHERE id=?',
