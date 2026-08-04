@@ -2,6 +2,7 @@ from dataclasses import replace
 from typing import Tuple
 
 import pytest
+from loguru import logger
 
 import blrec.vainglory.analyzer as analyzer_module
 from blrec.vainglory.analyzer import (
@@ -19,7 +20,7 @@ from blrec.vainglory.analyzer import (
 )
 from blrec.vainglory.hero_recognition import HeroMatch
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
-from blrec.vainglory.sampling import TimedFrame, VideoProfile
+from blrec.vainglory.sampling import ScanWindow, TimedFrame, VideoProfile
 from blrec.vainglory.vision import (
     GameplayHud,
     HeroFrame,
@@ -477,6 +478,95 @@ def test_coarse_scan_runs_expensive_result_fallback_only_every_two_minutes(
 
     assert scanned.candidate_times_ms == ()
     assert len(result_probes) == 2
+
+
+def test_scan_logs_coarse_progress_and_each_fine_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def probe(self, _path: str) -> VideoProfile:
+            return VideoProfile(width=1, height=1, duration_ms=600_000)
+
+        def coarse_frames(self, _path: str):
+            for at_ms in range(0, 600_000, 60_000):
+                yield TimedFrame(at_ms=at_ms, frame=frame)
+
+    windows = (ScanWindow(100_000, 170_000), ScanWindow(300_000, 370_000))
+    scan_results = iter(
+        (
+            analyzer_module._WindowScanResult((hit(120_000),), 3, 4, 5, 1),
+            analyzer_module._WindowScanResult((), 6, 7, 0, 0),
+        )
+    )
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        analyzer_module, 'detect_gameplay_hud_details', lambda _frame: None
+    )
+    monkeypatch.setattr(analyzer_module, 'detect_observer_hud', lambda _frame: None)
+    monkeypatch.setattr(analyzer, '_detect_result_layout', lambda _frame: None)
+    monkeypatch.setattr(
+        analyzer_module, 'result_search_windows', lambda *_args, **_kwargs: windows
+    )
+    monkeypatch.setattr(
+        analyzer, '_scan_window', lambda *_args, **_kwargs: next(scan_results)
+    )
+    messages = []
+    statuses = []
+    sink = logger.add(messages.append, format='{message}')
+    try:
+        scanned = analyzer.scan_part(
+            VideoPart(id=1, index=2, path='unused'), status_callback=statuses.append
+        )
+    finally:
+        logger.remove(sink)
+
+    message = ''.join(str(item) for item in messages)
+    assert scanned.candidate_times_ms == (120_000,)
+    assert 'Vainglory coarse scan progress: part_id=1' in message
+    assert 'Vainglory fine scan started: part_id=1 windows=2' in message
+    assert 'Vainglory fine scan window started: part_id=1 window=1/2' in message
+    assert 'Vainglory fine scan window completed: part_id=1 window=2/2' in message
+    assert 'candidates_so_far=1' in message
+    assert statuses[-1].stage == 'fine_scan'
+    assert statuses[-1].candidate_count == 1
+    assert statuses[-1].current_window == 2
+
+
+def test_recognition_logs_each_candidate_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        def frame_at(self, _path: str, _at_ms: int) -> RgbFrame:
+            return frame
+
+    analyzer = VaingloryVideoAnalyzer(sampler=Sampler())  # type: ignore[arg-type]
+    monkeypatch.setattr(analyzer, '_detect_result_layouts', lambda _frame: ())
+    messages = []
+    statuses = []
+    sink = logger.add(messages.append, format='{message}')
+    try:
+        matches = analyzer.recognize_scanned_part(
+            VideoPart(id=1, index=2, path='unused'),
+            analyzer_module.ScannedPart(600_000, (120_000, 360_000)),
+            status_callback=statuses.append,
+        )
+    finally:
+        logger.remove(sink)
+
+    message = ''.join(str(item) for item in messages)
+    assert matches == ()
+    assert 'Vainglory recognition started: part_id=1 candidates=2' in message
+    assert 'Vainglory candidate recognition started: part_id=1 candidate=1/2' in message
+    assert 'reason=layout' in message
+    assert (
+        'Vainglory candidate recognition completed: part_id=1 candidate=2/2' in message
+    )
+    assert statuses[-1].rejected_candidates == 2
+    assert statuses[-1].recognized_matches == 0
 
 
 def test_coarse_scan_never_calls_the_game_timer_reader(

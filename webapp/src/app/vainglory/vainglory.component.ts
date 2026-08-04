@@ -27,8 +27,6 @@ import {
   GameMode,
   TeamColor,
   VaingloryAnalysisQueue,
-  VaingloryAnalysisQueueCategory,
-  VaingloryAnalysisQueueItem,
   VaingloryAnchorStats,
   VaingloryArchiveBackfillItem,
   VaingloryArchiveBackfillRealtimeSnapshot,
@@ -1595,51 +1593,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       managed_elsewhere: '已由录制或迁移流程接管',
       failed: '处理失败',
     }[item.stage];
-  }
-
-  analysisQueueWorkerLabel(queue: VaingloryAnalysisQueue): string {
-    if (queue.workerState === 'failed') {
-      return '分析服务异常';
-    }
-    if (queue.workerState === 'stopped') {
-      return '分析服务未运行';
-    }
-    if (queue.active.length > 0) {
-      return '正在运行';
-    }
-    return queue.pendingCount > 0 ? '准备领取任务' : '空闲';
-  }
-
-  analysisQueueCategoryLabel(
-    category: VaingloryAnalysisQueueCategory,
-  ): string {
-    return {
-      manual: '手动任务',
-      realtime: '当天直播',
-      archive: '历史稿件接入',
-      migration: '稿件迁移',
-      backlog: '旧数据重扫',
-    }[category];
-  }
-
-  analysisQueueStageLabel(item: VaingloryAnalysisQueueItem): string {
-    if (item.state === 'pending') {
-      return '等待扫描视频';
-    }
-    if (item.stage === 'ocr_waiting') {
-      return '已定位结算画面，等待 OCR';
-    }
-    if (item.stage === 'ocr_recognition') {
-      return 'OCR 与英雄识别';
-    }
-    if (item.progress < 0.42) {
-      return '粗扫视频';
-    }
-    return '定位结算画面';
-  }
-
-  analysisQueuePercent(item: VaingloryAnalysisQueueItem): number {
-    return Math.max(0, Math.min(100, Math.round(item.progress * 100)));
   }
 
   heroRecognitionPercent(summary: VaingloryIndexSummary): number {

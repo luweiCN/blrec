@@ -1,0 +1,274 @@
+<section
+  *ngIf="queue as taskQueue"
+  class="analysis-task-center"
+  aria-label="对局分析任务中心"
+>
+  <header class="analysis-task-header">
+    <div>
+      <strong>新录播优先处理</strong>
+      <span>
+        页面会持续显示当前步骤、阶段产物和最近处理记录
+        <ng-container *ngIf="sampledAt !== null">
+          · SSE 更新于 {{ sampledAt * 1000 | date: "HH:mm:ss" }}
+        </ng-container>
+      </span>
+    </div>
+    <nz-tag
+      [nzColor]="
+        taskQueue.workerState === 'failed'
+          ? 'red'
+          : taskQueue.active.length > 0
+            ? 'blue'
+            : 'default'
+      "
+    >
+      {{ workerLabel(taskQueue) }}
+    </nz-tag>
+  </header>
+
+  <section class="analysis-task-section" aria-labelledby="active-task-title">
+    <header class="analysis-section-heading">
+      <div>
+        <h3 id="active-task-title">正在处理</h3>
+        <span *ngIf="taskQueue.active.length > 0">
+          {{ taskQueue.active.length }} 个工作进程正在运行
+        </span>
+      </div>
+    </header>
+    <article
+      *ngFor="let active of taskQueue.active"
+      class="analysis-active-task"
+    >
+      <header class="analysis-active-heading">
+        <div class="analysis-active-identity">
+          <div>
+            <strong>{{ active.title || "未命名直播" }}</strong>
+            <nz-tag nzColor="blue">{{ categoryLabel(active.category) }}</nz-tag>
+          </div>
+          <span>
+            <ng-container *ngIf="active.anchorName">
+              主播 {{ active.anchorName }} ·
+            </ng-container>
+            当前 P{{ active.partIndex }} · 已完成
+            {{ active.completedPartCount }}/{{ active.partCount }} 个分 P
+          </span>
+        </div>
+        <div class="analysis-progress-number">
+          <strong>{{ percent(active) }}%</strong>
+          <span>{{ stageLabel(active) }}</span>
+        </div>
+      </header>
+
+      <dl class="analysis-task-facts">
+        <div>
+          <dt>直播开始</dt>
+          <dd>
+            <ng-container *ngIf="active.liveStartedAt > 0; else noLiveStart">
+              {{ active.liveStartedAt * 1000 | date: "MM-dd HH:mm" }}
+            </ng-container>
+            <ng-template #noLiveStart>待获取</ng-template>
+          </dd>
+        </div>
+        <div>
+          <dt>当前分 P 时长</dt>
+          <dd>{{ formatDuration(active.partDurationSeconds) }}</dd>
+        </div>
+        <div>
+          <dt>整场录像时长</dt>
+          <dd>{{ formatDuration(active.recordingDurationSeconds) }}</dd>
+        </div>
+        <div>
+          <dt>任务开始</dt>
+          <dd>
+            <ng-container *ngIf="active.startedAt !== null; else noTaskStart">
+              {{ active.startedAt * 1000 | date: "HH:mm:ss" }}
+            </ng-container>
+            <ng-template #noTaskStart>待开始</ng-template>
+          </dd>
+        </div>
+        <div>
+          <dt>任务已运行</dt>
+          <dd>{{ formatDuration(elapsedSeconds(active)) }}</dd>
+        </div>
+        <div>
+          <dt>已确认对局</dt>
+          <dd>{{ active.matchCount }} 局</dd>
+        </div>
+      </dl>
+
+      <section class="analysis-current-step" aria-label="当前处理步骤">
+        <header>
+          <span>当前步骤</span>
+          <time>
+            阶段累计 {{ formatDuration(active.runtimeElapsedSeconds) }} · 最后进度
+            {{ active.updatedAt * 1000 | date: "HH:mm:ss" }}
+          </time>
+        </header>
+        <strong>{{ currentLabel(active) }}</strong>
+        <nz-progress
+          nzSize="small"
+          nzStatus="active"
+          [nzPercent]="percent(active)"
+          [nzShowInfo]="false"
+        ></nz-progress>
+      </section>
+
+      <dl *ngIf="active.runtimeStage" class="analysis-stage-metrics">
+        <div><dt>粗扫帧</dt><dd>{{ active.coarseFrames }}</dd></div>
+        <div><dt>游戏片段</dt><dd>{{ active.gameplayRuns }}</dd></div>
+        <div><dt>疑似区间</dt><dd>{{ active.resultWindows }}</dd></div>
+        <div>
+          <dt>
+            {{ active.runtimeStage === "ocr_recognition" ? "候选验证" : "精扫进度" }}
+          </dt>
+          <dd *ngIf="active.runtimeStage === 'ocr_recognition'; else fineProgress">
+            {{ active.currentCandidate }}/{{ active.totalCandidates }}
+          </dd>
+          <ng-template #fineProgress>
+            <dd>{{ active.currentWindow }}/{{ active.totalWindows }}</dd>
+          </ng-template>
+        </div>
+        <div><dt>结算候选</dt><dd>{{ active.candidateCount }}</dd></div>
+        <div><dt>已排除候选</dt><dd>{{ active.rejectedCandidates }}</dd></div>
+        <div><dt>本 P 识别通过</dt><dd>{{ active.recognizedMatches }}</dd></div>
+      </dl>
+
+      <section
+        *ngIf="recentEvents(active) as events"
+        class="analysis-event-log"
+        aria-label="实时处理记录"
+      >
+        <header *ngIf="events.length > 0">
+          <h4>实时处理记录</h4>
+          <span>最近 {{ events.length }} 条</span>
+        </header>
+        <ol *ngIf="events.length > 0">
+          <li *ngFor="let event of events">
+            <time>{{ event.at * 1000 | date: "HH:mm:ss" }}</time>
+            <span>{{ event.detail }}</span>
+            <small>阶段累计 {{ formatDuration(event.elapsedSeconds) }}</small>
+          </li>
+        </ol>
+      </section>
+    </article>
+
+    <div *ngIf="taskQueue.active.length === 0" class="analysis-idle-state">
+      当前没有正在执行的分析任务。
+    </div>
+  </section>
+
+  <section
+    *ngIf="taskQueue.recentCompletions.length > 0"
+    class="analysis-task-section"
+    aria-labelledby="recent-completion-title"
+  >
+    <header class="analysis-section-heading">
+      <div>
+        <h3 id="recent-completion-title">最近完成</h3>
+        <span>保留本次服务启动后的最近 6 个分 P</span>
+      </div>
+    </header>
+    <ol class="analysis-completion-list">
+      <li *ngFor="let completion of taskQueue.recentCompletions">
+        <div>
+          <strong>
+            {{ completion.title || "未命名直播" }} · P{{ completion.partIndex }}
+          </strong>
+          <time>
+            完成于 {{ completion.completedAt * 1000 | date: "HH:mm:ss" }}
+          </time>
+        </div>
+        <dl>
+          <div>
+            <dt>分 P 时长</dt>
+            <dd>{{ formatDuration(completion.partDurationSeconds) }}</dd>
+          </div>
+          <div>
+            <dt>整场录像</dt>
+            <dd>{{ formatDuration(completion.recordingDurationSeconds) }}</dd>
+          </div>
+          <div><dt>候选画面</dt><dd>{{ completion.candidateCount }} 个</dd></div>
+          <div><dt>确认对局</dt><dd>{{ completion.matchCount }} 局</dd></div>
+          <div>
+            <dt>处理总耗时</dt>
+            <dd>{{ formatDuration(completion.elapsedSeconds) }}</dd>
+          </div>
+        </dl>
+      </li>
+    </ol>
+  </section>
+
+  <section class="analysis-task-section" aria-labelledby="queue-summary-title">
+    <header class="analysis-section-heading">
+      <div>
+        <h3 id="queue-summary-title">等待队列</h3>
+        <span>共 {{ taskQueue.pendingCount }} 场等待处理</span>
+      </div>
+    </header>
+    <dl class="analysis-queue-counts">
+      <div><dt>总等待</dt><dd>{{ taskQueue.pendingCount }}</dd></div>
+      <div><dt>手动任务</dt><dd>{{ taskQueue.manualPending }}</dd></div>
+      <div><dt>新录播</dt><dd>{{ taskQueue.realtimePending }}</dd></div>
+      <div><dt>历史接入</dt><dd>{{ taskQueue.archivePending }}</dd></div>
+      <div><dt>稿件迁移</dt><dd>{{ taskQueue.migrationPending }}</dd></div>
+      <div><dt>旧数据重扫</dt><dd>{{ taskQueue.backlogPending }}</dd></div>
+    </dl>
+  </section>
+
+  <section
+    *ngIf="taskQueue.queued.length > 0"
+    class="analysis-task-section analysis-next-tasks"
+    aria-labelledby="next-task-title"
+  >
+    <header class="analysis-section-heading">
+      <div>
+        <h3 id="next-task-title">接下来处理</h3>
+        <span>按任务优先级展示前 {{ taskQueue.queued.length }} 场</span>
+      </div>
+    </header>
+    <ol>
+      <li *ngFor="let queued of taskQueue.queued; let index = index">
+        <span class="analysis-queue-position">{{ index + 1 }}</span>
+        <div class="analysis-queued-task">
+          <div>
+            <strong>{{ queued.title || "未命名直播" }}</strong>
+            <span>
+              {{ categoryLabel(queued.category) }} · {{ stageLabel(queued) }}
+              <ng-container *ngIf="queued.anchorName">
+                · {{ queued.anchorName }}
+              </ng-container>
+            </span>
+          </div>
+          <dl>
+            <div>
+              <dt>直播开始</dt>
+              <dd>
+                <ng-container *ngIf="queued.liveStartedAt > 0; else noQueuedLiveStart">
+                  {{ queued.liveStartedAt * 1000 | date: "MM-dd HH:mm" }}
+                </ng-container>
+                <ng-template #noQueuedLiveStart>待获取</ng-template>
+              </dd>
+            </div>
+            <div>
+              <dt>整场录像</dt>
+              <dd>{{ formatDuration(queued.recordingDurationSeconds) }}</dd>
+            </div>
+            <div><dt>已确认</dt><dd>{{ queued.matchCount }} 局</dd></div>
+            <div>
+              <dt>分 P 进度</dt>
+              <dd>
+                {{ queued.completedPartCount }}/{{ queued.partCount }} · 下一个 P{{
+                  queued.partIndex
+                }}
+              </dd>
+            </div>
+            <div>
+              <dt>进入队列</dt>
+              <dd>{{ queued.requestedAt * 1000 | date: "MM-dd HH:mm" }}</dd>
+            </div>
+          </dl>
+        </div>
+      </li>
+    </ol>
+  </section>
+</section>

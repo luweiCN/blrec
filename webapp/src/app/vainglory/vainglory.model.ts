@@ -121,6 +121,34 @@ export type VaingloryAnalysisQueueCategory =
   | 'migration'
   | 'backlog';
 
+export type VaingloryAnalysisRuntimeStage =
+  | 'probing'
+  | 'coarse_scan'
+  | 'fine_scan'
+  | 'ocr_waiting'
+  | 'ocr_recognition'
+  | '';
+
+export interface VaingloryAnalysisQueueEvent {
+  readonly at: number;
+  readonly stage: VaingloryAnalysisRuntimeStage;
+  readonly detail: string;
+  readonly elapsedSeconds: number;
+}
+
+export interface VaingloryAnalysisQueueCompletion {
+  readonly completedAt: number;
+  readonly sessionId: number;
+  readonly partId: number;
+  readonly partIndex: number;
+  readonly title: string;
+  readonly partDurationSeconds: number | null;
+  readonly recordingDurationSeconds: number;
+  readonly candidateCount: number;
+  readonly matchCount: number;
+  readonly elapsedSeconds: number;
+}
+
 export interface VaingloryAnalysisQueueItem {
   readonly partId: number;
   readonly sessionId: number;
@@ -134,14 +162,33 @@ export interface VaingloryAnalysisQueueItem {
   readonly requestedAt: number;
   readonly startedAt: number | null;
   readonly updatedAt: number;
+  readonly liveStartedAt: number;
+  readonly partDurationSeconds: number | null;
+  readonly recordingDurationSeconds: number;
+  readonly matchCount: number;
   readonly partCount: number;
   readonly completedPartCount: number;
+  readonly runtimeStage: VaingloryAnalysisRuntimeStage;
+  readonly runtimeDetail: string;
+  readonly runtimeElapsedSeconds: number;
+  readonly coarseFrames: number;
+  readonly gameplayRuns: number;
+  readonly resultWindows: number;
+  readonly currentWindow: number;
+  readonly totalWindows: number;
+  readonly candidateCount: number;
+  readonly currentCandidate: number;
+  readonly totalCandidates: number;
+  readonly rejectedCandidates: number;
+  readonly recognizedMatches: number;
+  readonly events: readonly VaingloryAnalysisQueueEvent[];
 }
 
 export interface VaingloryAnalysisQueue {
   readonly workerState: 'running' | 'stopped' | 'failed';
   readonly active: readonly VaingloryAnalysisQueueItem[];
   readonly queued: readonly VaingloryAnalysisQueueItem[];
+  readonly recentCompletions: readonly VaingloryAnalysisQueueCompletion[];
   readonly pendingCount: number;
   readonly manualPending: number;
   readonly realtimePending: number;

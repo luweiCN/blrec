@@ -1190,7 +1190,7 @@
   <ng-container *nzModalContent>
     <p class="archive-manager-help">
       选择当前保存迁移后稿件的投稿账号。系统会下载新稿件的最高画质并逐个分 P
-      分析；不足 10 分钟的分 P 会跳过。识别结果会回填到同一个新稿件的简介和置顶评论，
+      分析，短分 P 也会正常检查结算画面。识别结果会回填到同一个新稿件的简介和置顶评论，
       分析完成即删除临时视频。进程异常退出后会从未完成任务继续。
     </p>
     <nz-alert
@@ -1733,96 +1733,15 @@
   [(nzVisible)]="analysisTaskModalVisible"
   nzTitle="对局分析任务"
   [nzFooter]="null"
-  [nzWidth]="860"
+  [nzWidth]="1040"
   (nzOnCancel)="analysisTaskModalVisible = false"
 >
   <ng-container *nzModalContent>
-    <section
+    <app-vainglory-analysis-task-center
       *ngIf="analysisQueue as queue; else analysisQueueLoading"
-      class="analysis-task-center"
-      aria-label="对局分析任务中心"
-    >
-      <header>
-        <div>
-          <h2>任务状态</h2>
-          <span>
-            新录播优先处理
-            <ng-container *ngIf="indexSampledAt !== null">
-              · SSE 更新于 {{ indexSampledAt * 1000 | date: "HH:mm:ss" }}
-            </ng-container>
-          </span>
-        </div>
-        <nz-tag
-          [nzColor]="
-            queue.workerState === 'failed'
-              ? 'red'
-              : queue.active.length > 0
-                ? 'blue'
-                : 'default'
-          "
-        >
-          {{ analysisQueueWorkerLabel(queue) }}
-        </nz-tag>
-      </header>
-
-      <div *ngFor="let active of queue.active" class="analysis-active-task">
-        <div>
-          <strong>{{ active.title || "未命名直播" }}</strong>
-          <span>
-            {{ analysisQueueCategoryLabel(active.category) }} · 本场
-            {{ active.completedPartCount }}/{{ active.partCount }} 个分 P 已完成
-            · 当前 P{{ active.partIndex }}
-            <ng-container *ngIf="active.anchorName">
-              · {{ active.anchorName }}
-            </ng-container>
-          </span>
-        </div>
-        <div class="analysis-active-status">
-          <span>{{ analysisQueueStageLabel(active) }}</span>
-          <span>
-            最后进度 {{ active.updatedAt * 1000 | date: "HH:mm:ss" }}
-          </span>
-        </div>
-        <nz-progress
-          nzSize="small"
-          nzStatus="active"
-          [nzPercent]="analysisQueuePercent(active)"
-        ></nz-progress>
-      </div>
-
-      <div *ngIf="queue.active.length === 0" class="analysis-idle-state">
-        当前没有正在执行的分析任务。
-      </div>
-
-      <div class="analysis-queue-counts">
-        <span><strong>{{ queue.pendingCount }}</strong> 场总等待</span>
-        <span><strong>{{ queue.manualPending }}</strong> 场手动任务</span>
-        <span><strong>{{ queue.realtimePending }}</strong> 场新录播</span>
-        <span><strong>{{ queue.archivePending }}</strong> 场历史接入</span>
-        <span><strong>{{ queue.migrationPending }}</strong> 场稿件迁移</span>
-        <span><strong>{{ queue.backlogPending }}</strong> 场旧数据重扫</span>
-      </div>
-
-      <div *ngIf="queue.queued.length > 0" class="analysis-next-tasks">
-        <strong>接下来处理</strong>
-        <ol>
-          <li *ngFor="let queued of queue.queued">
-            <span>
-              {{ analysisQueueCategoryLabel(queued.category) }} ·
-              {{ analysisQueueStageLabel(queued) }}
-            </span>
-            <strong>{{ queued.title || "未命名直播" }}</strong>
-            <small>
-              本场 {{ queued.completedPartCount }}/{{ queued.partCount }} 个分 P 已完成
-              · 下一个 P{{ queued.partIndex }}
-              <ng-container *ngIf="queued.anchorName">
-                · {{ queued.anchorName }}
-              </ng-container>
-            </small>
-          </li>
-        </ol>
-      </div>
-    </section>
+      [queue]="queue"
+      [sampledAt]="indexSampledAt"
+    ></app-vainglory-analysis-task-center>
     <ng-template #analysisQueueLoading>
       <nz-spin nzSimple></nz-spin>
     </ng-template>

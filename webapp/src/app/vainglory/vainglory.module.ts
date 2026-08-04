@@ -21,11 +21,12 @@ import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzTabsModule } from 'ng-zorro-antd/tabs';
 
 import { PartVideoDialogModule } from '../upload-tasks/part-video-dialog/part-video-dialog.module';
+import { AnalysisTaskCenterComponent } from './analysis-task-center/analysis-task-center.component';
 import { VaingloryRoutingModule } from './vainglory-routing.module';
 import { VaingloryComponent } from './vainglory.component';
 
 @NgModule({
-  declarations: [VaingloryComponent],
+  declarations: [VaingloryComponent, AnalysisTaskCenterComponent],
   imports: [
     CommonModule,
     FormsModule,

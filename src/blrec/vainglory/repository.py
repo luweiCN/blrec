@@ -50,6 +50,8 @@ class ScanClaim:
     session_id: int
     part: VideoPart
     realtime: bool
+    part_duration_seconds: Optional[int] = None
+    recording_duration_seconds: int = 0
 
     @property
     def parts(self) -> Tuple[VideoPart, ...]:
@@ -61,6 +63,31 @@ class OcrClaim:
     session_id: int
     part: VideoPart
     scanned: ScannedPart
+    analysis_started_at: Optional[int] = None
+    part_duration_seconds: Optional[int] = None
+    recording_duration_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class AnalysisQueueEvent:
+    at: int
+    stage: str
+    detail: str
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class AnalysisQueueCompletion:
+    completed_at: int
+    session_id: int
+    part_id: int
+    part_index: int
+    title: str
+    part_duration_seconds: Optional[int]
+    recording_duration_seconds: int
+    candidate_count: int
+    match_count: int
+    elapsed_seconds: float
 
 
 @dataclass(frozen=True)
@@ -77,8 +104,26 @@ class AnalysisQueueItem:
     requested_at: int
     started_at: Optional[int]
     updated_at: int
+    live_started_at: int
+    part_duration_seconds: Optional[int]
+    recording_duration_seconds: int
+    match_count: int
     part_count: int
     completed_part_count: int
+    runtime_stage: str = ''
+    runtime_detail: str = ''
+    runtime_elapsed_seconds: float = 0
+    coarse_frames: int = 0
+    gameplay_runs: int = 0
+    result_windows: int = 0
+    current_window: int = 0
+    total_windows: int = 0
+    candidate_count: int = 0
+    current_candidate: int = 0
+    total_candidates: int = 0
+    rejected_candidates: int = 0
+    recognized_matches: int = 0
+    events: Tuple[AnalysisQueueEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,6 +136,7 @@ class AnalysisQueueStatus:
     archive_pending: int
     migration_pending: int
     backlog_pending: int
+    recent_completions: Tuple[AnalysisQueueCompletion, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1046,6 +1092,11 @@ class VaingloryRepository:
             row = connection.execute(
                 'SELECT job.part_id,job.session_id,part.part_index,'
                 'part.source_path,part.final_path,session.title AS session_title,'
+                'part.record_duration_seconds,'
+                '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,'
+                '0)),0) FROM recording_parts all_part '
+                'WHERE all_part.session_id=job.session_id) '
+                'AS recording_duration_seconds,'
                 "CASE WHEN job.request_kind='manual' THEN 0 "
                 "WHEN session.state='open' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
@@ -1114,7 +1165,15 @@ class VaingloryRepository:
                 title=str(row['session_title'] or ''),
             )
             return ScanClaim(
-                session_id=session_id, part=part, realtime=int(row['priority']) <= 2
+                session_id=session_id,
+                part=part,
+                realtime=int(row['priority']) <= 2,
+                part_duration_seconds=(
+                    None
+                    if row['record_duration_seconds'] is None
+                    else int(row['record_duration_seconds'])
+                ),
+                recording_duration_seconds=int(row['recording_duration_seconds']),
             )
 
         return await self._database.write(claim)
@@ -1197,6 +1256,12 @@ class VaingloryRepository:
                 'SELECT ocr.part_id,ocr.session_id,ocr.video_duration_ms,'
                 'ocr.candidate_times_json,part.part_index,part.source_path,'
                 'part.final_path,session.title AS session_title,'
+                'job.started_at AS analysis_started_at,'
+                'part.record_duration_seconds,'
+                '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,'
+                '0)),0) FROM recording_parts all_part '
+                'WHERE all_part.session_id=ocr.session_id) '
+                'AS recording_duration_seconds,'
                 "CASE WHEN job.request_kind='manual' THEN 0 "
                 "WHEN session.state='open' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
@@ -1288,6 +1353,17 @@ class VaingloryRepository:
                     ),
                     candidate_hero_lineups=candidate_hero_lineups,
                 ),
+                analysis_started_at=(
+                    None
+                    if row['analysis_started_at'] is None
+                    else int(row['analysis_started_at'])
+                ),
+                part_duration_seconds=(
+                    None
+                    if row['record_duration_seconds'] is None
+                    else int(row['record_duration_seconds'])
+                ),
+                recording_duration_seconds=int(row['recording_duration_seconds']),
             )
 
         return await self._database.write(claim)
@@ -1458,6 +1534,15 @@ class VaingloryRepository:
             'WHERE completed_job.session_id=job.session_id '
             "AND completed_job.state='ready')"
         )
+        live_started_at = (
+            'MAX(CASE WHEN COALESCE(session.live_start_time,0)>0 '
+            'THEN session.live_start_time ELSE session.started_at END)'
+        )
+        recording_duration = (
+            '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,0)),0) '
+            'FROM recording_parts all_part '
+            'WHERE all_part.session_id=job.session_id)'
+        )
         active_select = (
             'SELECT COALESCE(MIN(CASE WHEN ocr.state=\'running\' '
             'THEN job.part_id END),MIN(job.part_id)) AS part_id,'
@@ -1472,6 +1557,14 @@ class VaingloryRepository:
             + task_progress
             + ' AS progress,MIN(job.requested_at) AS requested_at,'
             'MIN(job.started_at) AS started_at,MAX(job.updated_at) AS updated_at,'
+            + live_started_at
+            + ' AS live_started_at,COALESCE(MAX(CASE WHEN ocr.state='
+            "'running' THEN part.record_duration_seconds END),"
+            'MAX(CASE WHEN ocr.part_id IS NULL '
+            'THEN part.record_duration_seconds END)) AS part_duration_seconds,'
+            + recording_duration
+            + ' AS recording_duration_seconds,'
+            'MAX(COALESCE(session_job.match_count,0)) AS match_count,'
             + part_count
             + ' AS part_count,'
             + completed_part_count
@@ -1498,6 +1591,13 @@ class VaingloryRepository:
             + task_progress
             + ' AS progress,MIN(job.requested_at) AS requested_at,'
             'MIN(job.started_at) AS started_at,MAX(job.updated_at) AS updated_at,'
+            + live_started_at
+            + ' AS live_started_at,MAX(CASE WHEN ocr.state='
+            "'pending' THEN part.record_duration_seconds END) "
+            'AS part_duration_seconds,'
+            + recording_duration
+            + ' AS recording_duration_seconds,'
+            'MAX(COALESCE(session_job.match_count,0)) AS match_count,'
             + part_count
             + ' AS part_count,'
             + completed_part_count
@@ -1553,6 +1653,14 @@ class VaingloryRepository:
                         None if row['started_at'] is None else int(row['started_at'])
                     ),
                     updated_at=int(row['updated_at']),
+                    live_started_at=int(row['live_started_at']),
+                    part_duration_seconds=(
+                        None
+                        if row['part_duration_seconds'] is None
+                        else int(row['part_duration_seconds'])
+                    ),
+                    recording_duration_seconds=int(row['recording_duration_seconds']),
+                    match_count=int(row['match_count']),
                     part_count=int(row['part_count']),
                     completed_part_count=int(row['completed_part_count']),
                 )

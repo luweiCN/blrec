@@ -157,6 +157,25 @@ class ScannedPart:
     candidate_hero_lineups: Tuple[Tuple[str, ...], ...] = ()
 
 
+@dataclass(frozen=True)
+class AnalysisStatus:
+    stage: Literal[
+        'probing', 'coarse_scan', 'fine_scan', 'ocr_waiting', 'ocr_recognition'
+    ]
+    detail: str
+    elapsed_seconds: float
+    coarse_frames: int = 0
+    gameplay_runs: int = 0
+    result_windows: int = 0
+    current_window: int = 0
+    total_windows: int = 0
+    candidate_count: int = 0
+    current_candidate: int = 0
+    total_candidates: int = 0
+    rejected_candidates: int = 0
+    recognized_matches: int = 0
+
+
 def classify_match_kind(
     ocr: ResultOcr, heroes: Sequence[AnalyzedHero], *, team_size: int
 ) -> Literal['pvp', 'bot', 'practice', 'unknown']:
@@ -412,6 +431,7 @@ class VaingloryVideoAnalyzer:
         part: VideoPart,
         *,
         progress: Optional[Callable[[float], None]] = None,
+        status_callback: Optional[Callable[[AnalysisStatus], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
     ) -> Tuple[AnalyzedMatch, ...]:
         def scan_progress(value: float) -> None:
@@ -422,9 +442,18 @@ class VaingloryVideoAnalyzer:
             if progress is not None:
                 progress(0.7 + value * 0.3)
 
-        scanned = self.scan_part(part, progress=scan_progress, cancelled=cancelled)
+        scanned = self.scan_part(
+            part,
+            progress=scan_progress,
+            status_callback=status_callback,
+            cancelled=cancelled,
+        )
         return self.recognize_scanned_part(
-            part, scanned, progress=recognition_progress, cancelled=cancelled
+            part,
+            scanned,
+            progress=recognition_progress,
+            status_callback=status_callback,
+            cancelled=cancelled,
         )
 
     def scan_part(
@@ -432,6 +461,7 @@ class VaingloryVideoAnalyzer:
         part: VideoPart,
         *,
         progress: Optional[Callable[[float], None]] = None,
+        status_callback: Optional[Callable[[AnalysisStatus], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
     ) -> ScannedPart:
         scan_started = time.monotonic()
@@ -448,6 +478,14 @@ class VaingloryVideoAnalyzer:
             profile.width / profile.height,
             profile.duration_ms,
         )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='probing',
+                detail='视频信息读取完成，准备开始粗扫',
+                elapsed_seconds=time.monotonic() - scan_started,
+            ),
+        )
         coarse_started = time.monotonic()
         observations: List[CoarseObservation] = []
         previous_gameplay: Optional[CoarseObservation] = None
@@ -460,6 +498,24 @@ class VaingloryVideoAnalyzer:
         lineup_seconds = 0.0
         hud_detection_seconds = 0.0
         result_fallback_seconds = 0.0
+        played_hud_hits = 0
+        observer_hud_hits = 0
+        gameplay_runs = 0
+        coarse_result_hits = 0
+        next_coarse_report = 0.1
+        logger.info(
+            'Vainglory coarse scan started: part_id={} duration_ms={}',
+            part.id,
+            profile.duration_ms,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='coarse_scan',
+                detail='开始粗扫整段视频',
+                elapsed_seconds=time.monotonic() - scan_started,
+            ),
+        )
         for timed in self._sampler.coarse_frames(part.path):
             self._raise_if_cancelled(cancelled)
             hud_started = time.monotonic()
@@ -538,10 +594,12 @@ class VaingloryVideoAnalyzer:
                 hud is None and timed.at_ms == last_result_fallback_ms,
                 result_visible,
             )
-            if hud is not None and (
+            gameplay_run_started = hud is not None and (
                 previous_gameplay is None
                 or not same_gameplay_run(previous_gameplay, observation)
-            ):
+            )
+            if gameplay_run_started:
+                gameplay_runs += 1
                 logger.info(
                     'Vainglory gameplay run started: part_id={} at_ms={} '
                     'context={} team_size={} recognized_heroes={} '
@@ -557,6 +615,40 @@ class VaingloryVideoAnalyzer:
             observations.append(observation)
             if hud is not None:
                 previous_gameplay = observation
+                if view_context == 'played':
+                    played_hud_hits += 1
+                else:
+                    observer_hud_hits += 1
+            if result_visible:
+                coarse_result_hits += 1
+            coarse_ratio = min(1.0, timed.at_ms / max(1, profile.duration_ms))
+            if coarse_ratio >= next_coarse_report:
+                logger.info(
+                    'Vainglory coarse scan progress: part_id={} progress={:.0%} '
+                    'media_at_ms={} frames={} hud_hits={} observer_hits={} '
+                    'gameplay_runs={} result_hits={} elapsed_seconds={:.3f}',
+                    part.id,
+                    coarse_ratio,
+                    timed.at_ms,
+                    len(observations),
+                    played_hud_hits,
+                    observer_hud_hits,
+                    gameplay_runs,
+                    coarse_result_hits,
+                    time.monotonic() - coarse_started,
+                )
+                self._emit_status(
+                    status_callback,
+                    AnalysisStatus(
+                        stage='coarse_scan',
+                        detail='粗扫已完成约 {:.0%}'.format(coarse_ratio),
+                        elapsed_seconds=time.monotonic() - scan_started,
+                        coarse_frames=len(observations),
+                        gameplay_runs=gameplay_runs,
+                    ),
+                )
+                while next_coarse_report <= coarse_ratio:
+                    next_coarse_report += 0.1
             if progress is not None:
                 progress(min(0.6, timed.at_ms / profile.duration_ms * 0.6))
 
@@ -585,6 +677,20 @@ class VaingloryVideoAnalyzer:
             len(windows),
             coarse_seconds,
         )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='coarse_scan',
+                detail='粗扫完成：发现 {} 个游戏片段，生成 {} 个疑似结算区间'.format(
+                    gameplay_runs, len(windows)
+                ),
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+                gameplay_runs=gameplay_runs,
+                result_windows=len(windows),
+                total_windows=len(windows),
+            ),
+        )
         logger.debug(
             'Vainglory result search windows: part_id={} windows={}',
             part.id,
@@ -601,9 +707,71 @@ class VaingloryVideoAnalyzer:
         total_window_ms = sum(window.end_ms - window.start_ms for window in windows)
         scanned_window_ms = 0
         fine_started = time.monotonic()
-        for window in windows:
+        logger.info(
+            'Vainglory fine scan started: part_id={} windows={} '
+            'search_duration_ms={} elapsed_seconds={:.3f}',
+            part.id,
+            len(windows),
+            total_window_ms,
+            time.monotonic() - scan_started,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='fine_scan',
+                detail='开始精扫 {} 个疑似结算区间'.format(len(windows)),
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+                gameplay_runs=gameplay_runs,
+                result_windows=len(windows),
+                total_windows=len(windows),
+            ),
+        )
+        for window_index, window in enumerate(windows, 1):
             self._raise_if_cancelled(cancelled)
-            scanned = self._scan_window(part.path, window, cancelled=cancelled)
+            window_started = time.monotonic()
+            logger.info(
+                'Vainglory fine scan window started: part_id={} window={}/{} '
+                'start_ms={} end_ms={} duration_ms={} candidates_so_far={} '
+                'elapsed_seconds={:.3f}',
+                part.id,
+                window_index,
+                len(windows),
+                window.start_ms,
+                window.end_ms,
+                window.end_ms - window.start_ms,
+                len(collapse_result_hits(hits)),
+                time.monotonic() - scan_started,
+            )
+
+            def report_window_step(detail: str) -> None:
+                self._emit_status(
+                    status_callback,
+                    AnalysisStatus(
+                        stage='fine_scan',
+                        detail=detail,
+                        elapsed_seconds=time.monotonic() - scan_started,
+                        coarse_frames=len(observations),
+                        gameplay_runs=gameplay_runs,
+                        result_windows=len(windows),
+                        current_window=window_index,
+                        total_windows=len(windows),
+                        candidate_count=len(collapse_result_hits(hits)),
+                    ),
+                )
+
+            report_window_step(
+                '正在精扫第 {}/{} 个疑似结算区间'.format(window_index, len(windows))
+            )
+            scanned = self._scan_window(
+                part.path,
+                window,
+                part_id=part.id,
+                window_index=window_index,
+                window_count=len(windows),
+                status=report_window_step,
+                cancelled=cancelled,
+            )
             hits.extend(
                 replace(
                     hit,
@@ -617,6 +785,41 @@ class VaingloryVideoAnalyzer:
             refinement_frames += scanned.refinement_frames
             refinement_windows += scanned.refinement_windows
             scanned_window_ms += window.end_ms - window.start_ms
+            candidates_so_far = len(collapse_result_hits(hits))
+            logger.info(
+                'Vainglory fine scan window completed: part_id={} window={}/{} '
+                'hits={} candidates_so_far={} keyframe_preview_frames={} '
+                'fallback_preview_frames={} refinement_windows={} '
+                'refinement_frames={} window_seconds={:.3f} '
+                'elapsed_seconds={:.3f}',
+                part.id,
+                window_index,
+                len(windows),
+                len(scanned.hits),
+                candidates_so_far,
+                scanned.keyframe_preview_frames,
+                scanned.fallback_preview_frames,
+                scanned.refinement_windows,
+                scanned.refinement_frames,
+                time.monotonic() - window_started,
+                time.monotonic() - scan_started,
+            )
+            self._emit_status(
+                status_callback,
+                AnalysisStatus(
+                    stage='fine_scan',
+                    detail='第 {}/{} 个区间完成，累计发现 {} 个结算候选'.format(
+                        window_index, len(windows), candidates_so_far
+                    ),
+                    elapsed_seconds=time.monotonic() - scan_started,
+                    coarse_frames=len(observations),
+                    gameplay_runs=gameplay_runs,
+                    result_windows=len(windows),
+                    current_window=window_index,
+                    total_windows=len(windows),
+                    candidate_count=candidates_so_far,
+                ),
+            )
             if progress is not None:
                 fine_progress = scanned_window_ms / max(1, total_window_ms)
                 progress(0.6 + fine_progress * 0.4)
@@ -637,6 +840,22 @@ class VaingloryVideoAnalyzer:
             refinement_windows,
             refinement_frames,
             fine_seconds,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='fine_scan',
+                detail='精扫完成：{} 个区间得到 {} 个结算候选'.format(
+                    len(windows), len(candidates)
+                ),
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+                gameplay_runs=gameplay_runs,
+                result_windows=len(windows),
+                current_window=len(windows),
+                total_windows=len(windows),
+                candidate_count=len(candidates),
+            ),
         )
         if progress is not None:
             progress(1.0)
@@ -668,6 +887,7 @@ class VaingloryVideoAnalyzer:
         scanned: ScannedPart,
         *,
         progress: Optional[Callable[[float], None]] = None,
+        status_callback: Optional[Callable[[AnalysisStatus], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
     ) -> Tuple[AnalyzedMatch, ...]:
         recognition_run_started = time.monotonic()
@@ -693,12 +913,60 @@ class VaingloryVideoAnalyzer:
         header_ocr_seconds = 0.0
         nearby_frame_seconds = 0.0
         match_recognition_seconds = 0.0
+        logger.info(
+            'Vainglory recognition started: part_id={} candidates={} '
+            'video_duration_ms={}',
+            part.id,
+            len(candidates),
+            scanned.video_duration_ms,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='ocr_recognition',
+                detail='开始逐个验证 {} 个结算候选'.format(len(candidates)),
+                elapsed_seconds=0.0,
+                candidate_count=len(candidates),
+                total_candidates=len(candidates),
+            ),
+        )
         for index, (
             candidate_at_ms,
             candidate_view_context,
             candidate_lineup,
         ) in enumerate(zip(candidates, candidate_contexts, candidate_lineups)):
             self._raise_if_cancelled(cancelled)
+            item_started = time.monotonic()
+            logger.info(
+                'Vainglory candidate recognition started: part_id={} '
+                'candidate={}/{} at_ms={} elapsed_seconds={:.3f}',
+                part.id,
+                index + 1,
+                len(candidates),
+                candidate_at_ms,
+                time.monotonic() - recognition_run_started,
+            )
+            self._emit_status(
+                status_callback,
+                AnalysisStatus(
+                    stage='ocr_recognition',
+                    detail='正在验证第 {}/{} 个结算候选'.format(
+                        index + 1, len(candidates)
+                    ),
+                    elapsed_seconds=time.monotonic() - recognition_run_started,
+                    candidate_count=len(candidates),
+                    current_candidate=index + 1,
+                    total_candidates=len(candidates),
+                    rejected_candidates=(
+                        rejected_layout
+                        + rejected_header
+                        + rejected_short
+                        + rejected_evidence
+                        + rejected_lineup
+                    ),
+                    recognized_matches=len(matches),
+                ),
+            )
             if progress is not None:
                 progress(index / max(1, len(candidates)))
             frame_started = time.monotonic()
@@ -707,6 +975,25 @@ class VaingloryVideoAnalyzer:
             candidate_frame_seconds += time.monotonic() - frame_started
             if not layouts:
                 rejected_layout += 1
+                self._log_candidate_completed(
+                    part_id=part.id,
+                    index=index,
+                    total=len(candidates),
+                    at_ms=candidate_at_ms,
+                    outcome='rejected',
+                    reason='layout',
+                    item_started=item_started,
+                    run_started=recognition_run_started,
+                    status_callback=status_callback,
+                    rejected_candidates=(
+                        rejected_layout
+                        + rejected_header
+                        + rejected_short
+                        + rejected_evidence
+                        + rejected_lineup
+                    ),
+                    recognized_matches=len(matches),
+                )
                 continue
             header_started = time.monotonic()
             attempts = self._read_layout_headers(
@@ -766,6 +1053,25 @@ class VaingloryVideoAnalyzer:
                     evidence_header.right_economy,
                     complete_kda,
                 )
+                self._log_candidate_completed(
+                    part_id=part.id,
+                    index=index,
+                    total=len(candidates),
+                    at_ms=candidate_at_ms,
+                    outcome='rejected',
+                    reason='evidence',
+                    item_started=item_started,
+                    run_started=recognition_run_started,
+                    status_callback=status_callback,
+                    rejected_candidates=(
+                        rejected_layout
+                        + rejected_header
+                        + rejected_short
+                        + rejected_evidence
+                        + rejected_lineup
+                    ),
+                    recognized_matches=len(matches),
+                )
                 continue
             match_recognition_seconds += time.monotonic() - match_started
             recognized_header = recognized.ocr.header
@@ -784,6 +1090,25 @@ class VaingloryVideoAnalyzer:
                     reason,
                     recognized_header.result_text,
                     recognized_header.duration_seconds,
+                )
+                self._log_candidate_completed(
+                    part_id=part.id,
+                    index=index,
+                    total=len(candidates),
+                    at_ms=candidate_at_ms,
+                    outcome='rejected',
+                    reason=reason,
+                    item_started=item_started,
+                    run_started=recognition_run_started,
+                    status_callback=status_callback,
+                    rejected_candidates=(
+                        rejected_layout
+                        + rejected_header
+                        + rejected_short
+                        + rejected_evidence
+                        + rejected_lineup
+                    ),
+                    recognized_matches=len(matches),
                 )
                 continue
             lineup_evidence = self._result_hero_lineup_evidence(
@@ -806,6 +1131,25 @@ class VaingloryVideoAnalyzer:
                     part.id,
                     candidate_at_ms,
                 )
+                self._log_candidate_completed(
+                    part_id=part.id,
+                    index=index,
+                    total=len(candidates),
+                    at_ms=candidate_at_ms,
+                    outcome='rejected',
+                    reason='lineup',
+                    item_started=item_started,
+                    run_started=recognition_run_started,
+                    status_callback=status_callback,
+                    rejected_candidates=(
+                        rejected_layout
+                        + rejected_header
+                        + rejected_short
+                        + rejected_evidence
+                        + rejected_lineup
+                    ),
+                    recognized_matches=len(matches),
+                )
                 continue
             matches.append(recognized)
             logger.info(
@@ -826,6 +1170,25 @@ class VaingloryVideoAnalyzer:
                 recognized.view_context,
                 recognized.stats_eligible,
                 recognized.stats_exclusion_reason,
+            )
+            self._log_candidate_completed(
+                part_id=part.id,
+                index=index,
+                total=len(candidates),
+                at_ms=candidate_at_ms,
+                outcome='accepted',
+                reason='',
+                item_started=item_started,
+                run_started=recognition_run_started,
+                status_callback=status_callback,
+                rejected_candidates=(
+                    rejected_layout
+                    + rejected_header
+                    + rejected_short
+                    + rejected_evidence
+                    + rejected_lineup
+                ),
+                recognized_matches=len(matches),
             )
         recognized_match_count = len(matches)
         matches = list(collapse_analyzed_matches(matches))
@@ -863,27 +1226,164 @@ class VaingloryVideoAnalyzer:
             match_recognition_seconds,
             time.monotonic() - recognition_run_started,
         )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='ocr_recognition',
+                detail='候选验证完成：确认 {} 局，排除 {} 个候选'.format(
+                    len(matches),
+                    rejected_layout
+                    + rejected_header
+                    + rejected_short
+                    + rejected_evidence
+                    + rejected_lineup,
+                ),
+                elapsed_seconds=time.monotonic() - recognition_run_started,
+                candidate_count=len(candidates),
+                current_candidate=len(candidates),
+                total_candidates=len(candidates),
+                rejected_candidates=(
+                    rejected_layout
+                    + rejected_header
+                    + rejected_short
+                    + rejected_evidence
+                    + rejected_lineup
+                ),
+                recognized_matches=len(matches),
+            ),
+        )
         return tuple(matches)
+
+    def _log_candidate_completed(
+        self,
+        *,
+        part_id: int,
+        index: int,
+        total: int,
+        at_ms: int,
+        outcome: Literal['accepted', 'rejected'],
+        reason: str,
+        item_started: float,
+        run_started: float,
+        status_callback: Optional[Callable[[AnalysisStatus], None]],
+        rejected_candidates: int,
+        recognized_matches: int,
+    ) -> None:
+        logger.info(
+            'Vainglory candidate recognition completed: part_id={} '
+            'candidate={}/{} at_ms={} outcome={} reason={} '
+            'candidate_seconds={:.3f} elapsed_seconds={:.3f}',
+            part_id,
+            index + 1,
+            total,
+            at_ms,
+            outcome,
+            reason,
+            time.monotonic() - item_started,
+            time.monotonic() - run_started,
+        )
+        reason_labels = {
+            'layout': '画面结构不是完整结算页',
+            'evidence': '结算数据证据不完整',
+            'header': '未读到有效结算时长',
+            'short': '对局时长不足最低要求',
+            'lineup': '结算英雄与 HUD 阵容不一致',
+        }
+        detail = (
+            '第 {}/{} 个候选已确认，当前通过 {} 局'.format(
+                index + 1, total, recognized_matches
+            )
+            if outcome == 'accepted'
+            else '第 {}/{} 个候选已排除：{}'.format(
+                index + 1, total, reason_labels.get(reason, reason or '证据不足')
+            )
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='ocr_recognition',
+                detail=detail,
+                elapsed_seconds=time.monotonic() - run_started,
+                candidate_count=total,
+                current_candidate=index + 1,
+                total_candidates=total,
+                rejected_candidates=rejected_candidates,
+                recognized_matches=recognized_matches,
+            ),
+        )
 
     def _scan_window(
         self,
         path: str,
         window: ScanWindow,
         *,
+        part_id: int = 0,
+        window_index: int = 0,
+        window_count: int = 0,
+        status: Optional[Callable[[str], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
     ) -> _WindowScanResult:
+        pass_started = time.monotonic()
+        if status is not None:
+            status(
+                '第 {}/{} 个区间：正在快速检查关键帧'.format(window_index, window_count)
+            )
+        logger.info(
+            'Vainglory fine scan pass started: part_id={} window={}/{} '
+            'pass=keyframe_preview',
+            part_id,
+            window_index,
+            window_count,
+        )
         keyframe_hits, keyframe_frames = self._scan_preview(
             path, window, keyframes_only=True, cancelled=cancelled
+        )
+        logger.info(
+            'Vainglory fine scan pass completed: part_id={} window={}/{} '
+            'pass=keyframe_preview frames={} hits={} elapsed_seconds={:.3f}',
+            part_id,
+            window_index,
+            window_count,
+            keyframe_frames,
+            len(keyframe_hits),
+            time.monotonic() - pass_started,
         )
         refinement_hits: Tuple[ResultHit, ...] = ()
         refinement_frames = 0
         refinement_windows = 0
         if keyframe_hits:
-            refinement_hits, frame_count, window_count = self._refine_preview_hits(
-                path, window, keyframe_hits, cancelled=cancelled
+            pass_started = time.monotonic()
+            if status is not None:
+                status(
+                    '第 {}/{} 个区间：关键帧命中，正在加密确认'.format(
+                        window_index, window_count
+                    )
+                )
+            logger.info(
+                'Vainglory fine scan pass started: part_id={} window={}/{} '
+                'pass=refinement source=keyframe',
+                part_id,
+                window_index,
+                window_count,
+            )
+            (refinement_hits, frame_count, refinement_window_count) = (
+                self._refine_preview_hits(
+                    path, window, keyframe_hits, cancelled=cancelled
+                )
             )
             refinement_frames += frame_count
-            refinement_windows += window_count
+            refinement_windows += refinement_window_count
+            logger.info(
+                'Vainglory fine scan pass completed: part_id={} window={}/{} '
+                'pass=refinement source=keyframe frames={} hits={} '
+                'elapsed_seconds={:.3f}',
+                part_id,
+                window_index,
+                window_count,
+                frame_count,
+                len(refinement_hits),
+                time.monotonic() - pass_started,
+            )
         if refinement_hits:
             return _WindowScanResult(
                 hits=refinement_hits,
@@ -893,15 +1393,66 @@ class VaingloryVideoAnalyzer:
                 refinement_windows=refinement_windows,
             )
 
+        pass_started = time.monotonic()
+        if status is not None:
+            status(
+                '第 {}/{} 个区间：关键帧未确认，正在逐秒补扫'.format(
+                    window_index, window_count
+                )
+            )
+        logger.info(
+            'Vainglory fine scan pass started: part_id={} window={}/{} '
+            'pass=fallback_preview',
+            part_id,
+            window_index,
+            window_count,
+        )
         fallback_hits, fallback_frames = self._scan_preview(
             path, window, keyframes_only=False, cancelled=cancelled
         )
+        logger.info(
+            'Vainglory fine scan pass completed: part_id={} window={}/{} '
+            'pass=fallback_preview frames={} hits={} elapsed_seconds={:.3f}',
+            part_id,
+            window_index,
+            window_count,
+            fallback_frames,
+            len(fallback_hits),
+            time.monotonic() - pass_started,
+        )
         if fallback_hits:
-            refinement_hits, frame_count, window_count = self._refine_preview_hits(
-                path, window, fallback_hits, cancelled=cancelled
+            pass_started = time.monotonic()
+            if status is not None:
+                status(
+                    '第 {}/{} 个区间：补扫命中，正在加密确认'.format(
+                        window_index, window_count
+                    )
+                )
+            logger.info(
+                'Vainglory fine scan pass started: part_id={} window={}/{} '
+                'pass=refinement source=fallback',
+                part_id,
+                window_index,
+                window_count,
+            )
+            (refinement_hits, frame_count, refinement_window_count) = (
+                self._refine_preview_hits(
+                    path, window, fallback_hits, cancelled=cancelled
+                )
             )
             refinement_frames += frame_count
-            refinement_windows += window_count
+            refinement_windows += refinement_window_count
+            logger.info(
+                'Vainglory fine scan pass completed: part_id={} window={}/{} '
+                'pass=refinement source=fallback frames={} hits={} '
+                'elapsed_seconds={:.3f}',
+                part_id,
+                window_index,
+                window_count,
+                frame_count,
+                len(refinement_hits),
+                time.monotonic() - pass_started,
+            )
         hits = refinement_hits or collapse_result_hits(
             fallback_hits or keyframe_hits, maximum_gap_ms=5_000
         )
@@ -1782,6 +2333,13 @@ class VaingloryVideoAnalyzer:
     @staticmethod
     def _is_result_header(header: ResultHeader) -> bool:
         return header.duration_seconds is not None
+
+    @staticmethod
+    def _emit_status(
+        callback: Optional[Callable[[AnalysisStatus], None]], status: AnalysisStatus
+    ) -> None:
+        if callback is not None:
+            callback(status)
 
     @staticmethod
     def _raise_if_cancelled(cancelled: Optional[Callable[[], bool]]) -> None:

@@ -615,6 +615,53 @@ async def test_repository_completes_parts_without_replacing_previous_matches(
 
 
 @pytest.mark.asyncio
+async def test_analysis_queue_exposes_live_time_durations_and_confirmed_matches(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'p1.mp4'
+        second = tmp_path / 'p2.mp4'
+        first.write_bytes(b'first')
+        second.write_bytes(b'second')
+        await seed_session(database, first)
+        await seed_part(database, second, session_id=1, part_id=2, part_index=2)
+        await database.execute(
+            'UPDATE recording_sessions SET live_start_time=900,started_at=950 '
+            'WHERE id=1'
+        )
+        await database.execute(
+            'UPDATE recording_parts SET record_duration_seconds=3600 WHERE id=1'
+        )
+        await database.execute(
+            'UPDATE recording_parts SET record_duration_seconds=1800 WHERE id=2'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 2_000)
+
+        first_claim = await repository.claim_next()
+        assert first_claim is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        await database.execute(
+            'UPDATE recording_parts SET video_deleted_at=1500 WHERE id=1'
+        )
+        second_claim = await repository.claim_next()
+        assert second_claim is not None
+        assert second_claim.part.id == 2
+
+        status = await repository.analysis_queue_status()
+
+        assert len(status.active) == 1
+        active = status.active[0]
+        assert active.live_started_at == 900
+        assert active.part_duration_seconds == 1800
+        assert active.recording_duration_seconds == 5400
+        assert active.match_count == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_session_job_stays_in_progress_until_every_archive_page_finishes(
     tmp_path: Path,
 ) -> None:

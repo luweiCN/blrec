@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Optional, Sequence, Tuple
+import time
+from dataclasses import replace
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from loguru import logger
 
 from .analyzer import (
     AnalysisCancelled,
+    AnalysisStatus,
     AnalyzedHero,
     AnalyzedMatch,
     VaingloryVideoAnalyzer,
+    VideoPart,
 )
 from .hero_recognition import load_hero_references
 from .repository import (
+    AnalysisQueueCompletion,
+    AnalysisQueueEvent,
+    AnalysisQueueItem,
     AnalysisQueueStatus,
     AnchorStatsRecord,
     HeroStatsRecord,
@@ -50,6 +57,10 @@ class VaingloryIndexService:
         self._scan_task: Optional[asyncio.Task[None]] = None
         self._ocr_task: Optional[asyncio.Task[None]] = None
         self._analysis_lock = asyncio.Lock()
+        self._runtime_lock = threading.Lock()
+        self._runtime_status: Dict[int, AnalysisStatus] = {}
+        self._runtime_events: Dict[int, List[AnalysisQueueEvent]] = {}
+        self._recent_completions: List[AnalysisQueueCompletion] = []
 
     @property
     def repository(self) -> VaingloryRepository:
@@ -117,7 +128,103 @@ class VaingloryIndexService:
         return await self._repository.get_job(session_id)
 
     async def analysis_queue_status(self) -> AnalysisQueueStatus:
-        return await self._repository.analysis_queue_status()
+        queue = await self._repository.analysis_queue_status()
+        with self._runtime_lock:
+            statuses = dict(self._runtime_status)
+            events = {
+                part_id: tuple(items) for part_id, items in self._runtime_events.items()
+            }
+            recent_completions = tuple(self._recent_completions)
+
+        def enrich(item: AnalysisQueueItem) -> AnalysisQueueItem:
+            status = statuses.get(item.part_id)
+            if status is None:
+                return item
+            item_events = events.get(item.part_id, ())
+            return replace(
+                item,
+                updated_at=max(
+                    item.updated_at,
+                    item_events[-1].at if item_events else item.updated_at,
+                ),
+                runtime_stage=status.stage,
+                runtime_detail=status.detail,
+                runtime_elapsed_seconds=status.elapsed_seconds,
+                coarse_frames=status.coarse_frames,
+                gameplay_runs=status.gameplay_runs,
+                result_windows=status.result_windows,
+                current_window=status.current_window,
+                total_windows=status.total_windows,
+                candidate_count=status.candidate_count,
+                current_candidate=status.current_candidate,
+                total_candidates=status.total_candidates,
+                rejected_candidates=status.rejected_candidates,
+                recognized_matches=status.recognized_matches,
+                events=item_events,
+            )
+
+        return replace(
+            queue,
+            active=tuple(enrich(item) for item in queue.active),
+            queued=tuple(enrich(item) for item in queue.queued),
+            recent_completions=recent_completions,
+        )
+
+    def _record_runtime_status(self, part_id: int, status: AnalysisStatus) -> None:
+        event = AnalysisQueueEvent(
+            at=int(time.time()),
+            stage=status.stage,
+            detail=status.detail,
+            elapsed_seconds=status.elapsed_seconds,
+        )
+        with self._runtime_lock:
+            previous = self._runtime_status.get(part_id)
+            if previous is not None:
+                status = replace(
+                    status,
+                    coarse_frames=status.coarse_frames or previous.coarse_frames,
+                    gameplay_runs=status.gameplay_runs or previous.gameplay_runs,
+                    result_windows=status.result_windows or previous.result_windows,
+                    current_window=status.current_window or previous.current_window,
+                    total_windows=status.total_windows or previous.total_windows,
+                    candidate_count=status.candidate_count or previous.candidate_count,
+                )
+            self._runtime_status[part_id] = status
+            events = self._runtime_events.setdefault(part_id, [])
+            events.append(event)
+            del events[:-12]
+
+    def _clear_runtime_status(self, part_id: int) -> None:
+        with self._runtime_lock:
+            self._runtime_status.pop(part_id, None)
+            self._runtime_events.pop(part_id, None)
+
+    def _record_completion(
+        self,
+        *,
+        session_id: int,
+        part: VideoPart,
+        part_duration_seconds: Optional[int],
+        recording_duration_seconds: int,
+        candidate_count: int,
+        match_count: int,
+        elapsed_seconds: float,
+    ) -> None:
+        completion = AnalysisQueueCompletion(
+            completed_at=int(time.time()),
+            session_id=session_id,
+            part_id=part.id,
+            part_index=part.index,
+            title=part.title,
+            part_duration_seconds=part_duration_seconds,
+            recording_duration_seconds=recording_duration_seconds,
+            candidate_count=candidate_count,
+            match_count=match_count,
+            elapsed_seconds=elapsed_seconds,
+        )
+        with self._runtime_lock:
+            self._recent_completions.insert(0, completion)
+            del self._recent_completions[6:]
 
     async def index_summary(self) -> IndexSummary:
         return await self._repository.index_summary()
@@ -344,6 +451,18 @@ class VaingloryIndexService:
             return False
         session_id = claim.session_id
         part = claim.part
+        task_started = time.monotonic()
+        logger.info(
+            'Vainglory part analysis task started: session_id={} part_id={} '
+            'part_index={} realtime={} part_duration_seconds={} '
+            'recording_duration_seconds={}',
+            session_id,
+            part.id,
+            part.index,
+            claim.realtime,
+            claim.part_duration_seconds,
+            claim.recording_duration_seconds,
+        )
         loop = asyncio.get_running_loop()
         preempt = threading.Event()
         monitor: Optional[asyncio.Task[None]] = None
@@ -378,19 +497,68 @@ class VaingloryIndexService:
                 lambda: self._analyzer.scan_part(
                     part,
                     progress=report,
+                    status_callback=lambda status: self._record_runtime_status(
+                        part.id, status
+                    ),
                     cancelled=lambda: self._stop.is_set() or preempt.is_set(),
                 ),
             )
             if scanned.candidate_times_ms:
                 await self._repository.enqueue_ocr(part.id, scanned)
+                self._record_runtime_status(
+                    part.id,
+                    AnalysisStatus(
+                        stage='ocr_waiting',
+                        detail='已定位 {} 个结算候选，等待 OCR 与英雄识别'.format(
+                            len(scanned.candidate_times_ms)
+                        ),
+                        elapsed_seconds=time.monotonic() - task_started,
+                        candidate_count=len(scanned.candidate_times_ms),
+                        total_candidates=len(scanned.candidate_times_ms),
+                    ),
+                )
                 self._ocr_wake.set()
+                logger.info(
+                    'Vainglory part scan stage completed: session_id={} '
+                    'part_id={} candidates={} scan_seconds={:.3f}',
+                    session_id,
+                    part.id,
+                    len(scanned.candidate_times_ms),
+                    time.monotonic() - task_started,
+                )
             else:
                 await self._repository.complete_part(part.id, ())
+                elapsed_seconds = time.monotonic() - task_started
+                self._record_completion(
+                    session_id=session_id,
+                    part=part,
+                    part_duration_seconds=claim.part_duration_seconds,
+                    recording_duration_seconds=claim.recording_duration_seconds,
+                    candidate_count=0,
+                    match_count=0,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                logger.info(
+                    'Vainglory part analysis task completed: session_id={} '
+                    'part_id={} matches=0 candidates=0 total_seconds={:.3f}',
+                    session_id,
+                    part.id,
+                    elapsed_seconds,
+                )
+                self._clear_runtime_status(part.id)
         except AnalysisCancelled:
             if self._stop.is_set() or preempt.is_set():
                 await self._repository.requeue(part.id)
             else:
                 await self._repository.fail(part.id, '对局分析意外停止')
+            logger.info(
+                'Vainglory part analysis task stopped: session_id={} part_id={} '
+                'elapsed_seconds={:.3f}',
+                session_id,
+                part.id,
+                time.monotonic() - task_started,
+            )
+            self._clear_runtime_status(part.id)
         except Exception as error:
             logger.exception(
                 'Vainglory video scan failed for session {} part {}',
@@ -400,6 +568,7 @@ class VaingloryIndexService:
             await self._repository.fail(
                 part.id, '{}: {}'.format(type(error).__name__, error)
             )
+            self._clear_runtime_status(part.id)
         finally:
             if monitor is not None:
                 monitor.cancel()
@@ -412,6 +581,24 @@ class VaingloryIndexService:
             return False
         part = claim.part
         scanned = claim.scanned
+        recognition_started = time.monotonic()
+        elapsed_before_recognition = (
+            0.0
+            if claim.analysis_started_at is None
+            else max(0.0, time.time() - claim.analysis_started_at)
+        )
+        logger.info(
+            'Vainglory part recognition task started: session_id={} part_id={} '
+            'part_index={} candidates={} part_duration_seconds={} '
+            'recording_duration_seconds={} elapsed_before_recognition={:.3f}',
+            claim.session_id,
+            part.id,
+            part.index,
+            len(scanned.candidate_times_ms),
+            claim.part_duration_seconds,
+            claim.recording_duration_seconds,
+            elapsed_before_recognition,
+        )
         loop = asyncio.get_running_loop()
         try:
             last_progress = -0.05
@@ -437,15 +624,48 @@ class VaingloryIndexService:
             matches: Tuple[AnalyzedMatch, ...] = await loop.run_in_executor(
                 None,
                 lambda: self._analyzer.recognize_scanned_part(
-                    part, scanned, progress=report, cancelled=self._stop.is_set
+                    part,
+                    scanned,
+                    progress=report,
+                    status_callback=lambda status: self._record_runtime_status(
+                        part.id, status
+                    ),
+                    cancelled=self._stop.is_set,
                 ),
             )
             await self._repository.complete_part(part.id, matches)
+            total_seconds = (
+                time.monotonic() - recognition_started
+                if claim.analysis_started_at is None
+                else max(0.0, time.time() - claim.analysis_started_at)
+            )
+            self._record_completion(
+                session_id=claim.session_id,
+                part=part,
+                part_duration_seconds=claim.part_duration_seconds,
+                recording_duration_seconds=claim.recording_duration_seconds,
+                candidate_count=len(scanned.candidate_times_ms),
+                match_count=len(matches),
+                elapsed_seconds=total_seconds,
+            )
+            logger.info(
+                'Vainglory part analysis task completed: session_id={} '
+                'part_id={} candidates={} matches={} recognition_seconds={:.3f} '
+                'total_seconds={:.3f}',
+                claim.session_id,
+                part.id,
+                len(scanned.candidate_times_ms),
+                len(matches),
+                time.monotonic() - recognition_started,
+                total_seconds,
+            )
+            self._clear_runtime_status(part.id)
         except AnalysisCancelled:
             if self._stop.is_set():
                 await self._repository.requeue_ocr(part.id)
             else:
                 await self._repository.fail(part.id, 'OCR 识别意外停止')
+            self._clear_runtime_status(part.id)
         except Exception as error:
             logger.exception(
                 'Vainglory OCR failed for session {} part {}', claim.session_id, part.id
@@ -453,6 +673,7 @@ class VaingloryIndexService:
             await self._repository.fail(
                 part.id, '{}: {}'.format(type(error).__name__, error)
             )
+            self._clear_runtime_status(part.id)
         return True
 
     async def _watch_for_preemption(

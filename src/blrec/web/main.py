@@ -287,6 +287,7 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         'workerState': 'stopped',
         'active': [],
         'queued': [],
+        'recentCompletions': [],
         'pendingCount': 0,
         'manualPending': 0,
         'realtimePending': 0,
@@ -323,14 +324,55 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                 'requestedAt': value.requested_at,
                 'startedAt': value.started_at,
                 'updatedAt': value.updated_at,
+                'liveStartedAt': value.live_started_at,
+                'partDurationSeconds': value.part_duration_seconds,
+                'recordingDurationSeconds': value.recording_duration_seconds,
+                'matchCount': value.match_count,
                 'partCount': value.part_count,
                 'completedPartCount': value.completed_part_count,
+                'runtimeStage': value.runtime_stage,
+                'runtimeDetail': value.runtime_detail,
+                'runtimeElapsedSeconds': value.runtime_elapsed_seconds,
+                'coarseFrames': value.coarse_frames,
+                'gameplayRuns': value.gameplay_runs,
+                'resultWindows': value.result_windows,
+                'currentWindow': value.current_window,
+                'totalWindows': value.total_windows,
+                'candidateCount': value.candidate_count,
+                'currentCandidate': value.current_candidate,
+                'totalCandidates': value.total_candidates,
+                'rejectedCandidates': value.rejected_candidates,
+                'recognizedMatches': value.recognized_matches,
+                'events': [
+                    {
+                        'at': event.at,
+                        'stage': event.stage,
+                        'detail': event.detail,
+                        'elapsedSeconds': event.elapsed_seconds,
+                    }
+                    for event in value.events
+                ],
             }
 
         analysis_queue = {
             'workerState': index_service.worker_state,
             'active': [queue_item(item) for item in queue_status.active],
             'queued': [queue_item(item) for item in queue_status.queued],
+            'recentCompletions': [
+                {
+                    'completedAt': value.completed_at,
+                    'sessionId': value.session_id,
+                    'partId': value.part_id,
+                    'partIndex': value.part_index,
+                    'title': value.title,
+                    'partDurationSeconds': value.part_duration_seconds,
+                    'recordingDurationSeconds': value.recording_duration_seconds,
+                    'candidateCount': value.candidate_count,
+                    'matchCount': value.match_count,
+                    'elapsedSeconds': value.elapsed_seconds,
+                }
+                for value in queue_status.recent_completions
+            ],
             'pendingCount': queue_status.pending_count,
             'manualPending': queue_status.manual_pending,
             'realtimePending': queue_status.realtime_pending,

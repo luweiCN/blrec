@@ -114,41 +114,6 @@
   }
 }
 
-.analysis-task-center {
-  display: grid;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid #d6e4ff;
-
-  > header {
-    display: flex;
-    justify-content: space-between;
-
-    h2 {
-      margin: 0;
-      font-size: 16px;
-    }
-  }
-}
-
-.analysis-active-task {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid #91caff;
-  border-radius: 6px;
-
-  > div {
-    display: flex;
-    justify-content: space-between;
-  }
-}
-
-.analysis-queue-counts {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-}
-
 .archive-account-list {
   display: grid;
   gap: 8px;
@@ -360,10 +325,6 @@
 @media (max-width: 900px) {
   .index-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .analysis-queue-counts {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .archive-account-row {
