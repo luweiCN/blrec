@@ -343,6 +343,9 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                 'totalCandidates': value.total_candidates,
                 'rejectedCandidates': value.rejected_candidates,
                 'recognizedMatches': value.recognized_matches,
+                'bvid': value.bvid,
+                'archivePage': value.archive_page,
+                'localVideoAvailable': value.local_video_available,
                 'events': [
                     {
                         'at': event.at,
@@ -370,6 +373,9 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                     'candidateCount': value.candidate_count,
                     'matchCount': value.match_count,
                     'elapsedSeconds': value.elapsed_seconds,
+                    'bvid': value.bvid,
+                    'archivePage': value.archive_page,
+                    'localVideoAvailable': value.local_video_available,
                 }
                 for value in queue_status.recent_completions
             ],

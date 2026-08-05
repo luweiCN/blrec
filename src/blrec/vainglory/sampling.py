@@ -82,6 +82,12 @@ def same_gameplay_run(
         return False
     if previous.view_context != current.view_context:
         return False
+    if (
+        previous.team_size is not None
+        and current.team_size is not None
+        and previous.team_size != current.team_size
+    ):
+        return False
     if current.at_ms <= previous.at_ms:
         return False
     lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
@@ -182,7 +188,14 @@ def result_search_windows(
         run_lineup = run_last.hero_lineup
         for observation in gameplay[1:]:
             reference = replace(run_last, hero_lineup=run_lineup)
-            if not same_gameplay_run(reference, observation, maximum_gap_ms=hud_gap_ms):
+            result_between = any(
+                reference.at_ms < candidate.at_ms <= observation.at_ms
+                and candidate.result_visible
+                for candidate in observations
+            )
+            if result_between or not same_gameplay_run(
+                reference, observation, maximum_gap_ms=hud_gap_ms
+            ):
                 windows.append(
                     _bounded_window(
                         run_last.at_ms - before_end_ms,
@@ -242,8 +255,16 @@ def _transition_result_search_windows(
         for index in gameplay_indexes[1:]:
             observation = ordered[index]
             reference = replace(ordered[run_last_index], hero_lineup=tuple(run_lineup))
-            if observation.at_ms - reference.at_ms <= hud_gap_ms and same_gameplay_run(
-                reference, observation, maximum_gap_ms=hud_gap_ms
+            result_between = any(
+                candidate.result_visible
+                for candidate in ordered[run_last_index + 1 : index + 1]
+            )
+            if (
+                not result_between
+                and observation.at_ms - reference.at_ms <= hud_gap_ms
+                and same_gameplay_run(
+                    reference, observation, maximum_gap_ms=hud_gap_ms
+                )
             ):
                 run_lineup = _merge_hero_lineups(run_lineup, observation.hero_lineup)
                 run_last_index = index

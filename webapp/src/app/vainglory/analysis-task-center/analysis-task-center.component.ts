@@ -1,12 +1,15 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  EventEmitter,
   Input,
+  Output,
 } from '@angular/core';
 
 import {
   VaingloryAnalysisQueue,
   VaingloryAnalysisQueueCategory,
+  VaingloryAnalysisQueueCompletion,
   VaingloryAnalysisQueueEvent,
   VaingloryAnalysisQueueItem,
 } from '../vainglory.model';
@@ -20,6 +23,10 @@ import {
 export class AnalysisTaskCenterComponent {
   @Input() queue: VaingloryAnalysisQueue | null = null;
   @Input() sampledAt: number | null = null;
+  @Output() playPart = new EventEmitter<{
+    readonly sessionId: number;
+    readonly partId: number;
+  }>();
 
   workerLabel(queue: VaingloryAnalysisQueue): string {
     if (queue.workerState === 'failed') {
@@ -79,6 +86,22 @@ export class AnalysisTaskCenterComponent {
     item: VaingloryAnalysisQueueItem,
   ): readonly VaingloryAnalysisQueueEvent[] {
     return item.events.slice(-6);
+  }
+
+  biliUrl(
+    item: VaingloryAnalysisQueueItem | VaingloryAnalysisQueueCompletion,
+  ): string | null {
+    if (!item.bvid) {
+      return null;
+    }
+    const page = item.archivePage ?? item.partIndex;
+    return `https://www.bilibili.com/video/${item.bvid}?p=${Math.max(1, page)}`;
+  }
+
+  requestPlayback(
+    item: VaingloryAnalysisQueueItem | VaingloryAnalysisQueueCompletion,
+  ): void {
+    this.playPart.emit({ sessionId: item.sessionId, partId: item.partId });
   }
 
   formatDuration(seconds: number | null): string {

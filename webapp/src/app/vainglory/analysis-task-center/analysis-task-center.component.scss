@@ -6,6 +6,7 @@
 .analysis-task-section,
 .analysis-active-task,
 .analysis-active-identity,
+.analysis-active-tools,
 .analysis-progress-number,
 .analysis-current-step,
 .analysis-event-log,
@@ -90,6 +91,13 @@
 .analysis-active-heading {
   align-items: flex-start;
   gap: 20px;
+}
+
+.analysis-active-tools {
+  flex: none;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 12px;
 }
 
 .analysis-active-identity {
@@ -305,6 +313,13 @@
   }
 }
 
+.analysis-completion-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
 .analysis-completion-list dl,
 .analysis-queued-task dl {
   display: flex;
@@ -375,21 +390,26 @@
   min-width: 0;
   gap: 8px;
 
-  > div:first-child {
+  > .analysis-queued-heading {
     gap: 16px;
+  }
+}
 
-    strong {
-      overflow: hidden;
-      color: #262626;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+.analysis-queued-identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
 
-    span {
-      flex: none;
-      color: #8c8c8c;
-      font-size: 12px;
-    }
+  strong {
+    overflow: hidden;
+    color: #262626;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  span {
+    color: #8c8c8c;
+    font-size: 12px;
   }
 }
 
@@ -413,7 +433,7 @@
 @media (max-width: 620px) {
   .analysis-task-header,
   .analysis-active-heading,
-  .analysis-queued-task > div:first-child,
+  .analysis-queued-task > .analysis-queued-heading,
   .analysis-completion-list > li > div {
     align-items: flex-start;
     flex-direction: column;

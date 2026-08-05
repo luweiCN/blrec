@@ -149,9 +149,12 @@ export interface VaingloryAnalysisQueueCompletion {
   readonly title: string;
   readonly partDurationSeconds: number | null;
   readonly recordingDurationSeconds: number;
-  readonly candidateCount: number;
+  readonly candidateCount: number | null;
   readonly matchCount: number;
   readonly elapsedSeconds: number;
+  readonly bvid?: string | null;
+  readonly archivePage?: number | null;
+  readonly localVideoAvailable?: boolean;
 }
 
 export interface VaingloryAnalysisQueueItem {
@@ -187,6 +190,9 @@ export interface VaingloryAnalysisQueueItem {
   readonly rejectedCandidates: number;
   readonly recognizedMatches: number;
   readonly events: readonly VaingloryAnalysisQueueEvent[];
+  readonly bvid?: string | null;
+  readonly archivePage?: number | null;
+  readonly localVideoAvailable?: boolean;
 }
 
 export interface VaingloryAnalysisQueue {

@@ -35,13 +35,16 @@ from .sampling import (
     same_gameplay_run,
 )
 from .vision import (
+    GameplayHud,
     HeroFrame,
+    PixelRect,
     RecordedPlayer,
     ResultLayout,
     RgbFrame,
     TeamSide,
     TeamSize,
     ViewportTransform,
+    detect_active_content_rect,
     detect_gameplay_hud,
     detect_gameplay_hud_details,
     detect_observer_hud,
@@ -50,6 +53,7 @@ from .vision import (
     extract_gameplay_hud_heroes,
     extract_result_heroes,
     hero_fingerprint,
+    normalize_gameplay_frame,
     png_bytes,
     result_frame_quality,
     select_gameplay_hud_centers,
@@ -64,6 +68,16 @@ class _ResultEvidenceRejected(RuntimeError):
     def __init__(self, result: ResultOcr) -> None:
         super().__init__('结算画面证据不完整')
         self.result = result
+
+
+def _detect_hud_context(
+    frame: RgbFrame,
+) -> Tuple[Optional[GameplayHud], Literal['played', 'observed', 'unknown']]:
+    detected = detect_gameplay_hud_details(frame)
+    if detected is not None:
+        return detected, 'played'
+    detected = detect_observer_hud(frame)
+    return detected, 'observed' if detected is not None else 'unknown'
 
 
 class ResultReader(Protocol):
@@ -462,6 +476,9 @@ def collapse_analyzed_matches(
 class VaingloryVideoAnalyzer:
     _RESULT_FALLBACK_INTERVAL_MS = 120_000
     _HUD_CONTINUITY_MS = 20_000
+    _NOISY_HUD_CONTINUITY_MS = 75_000
+    _MAX_RESULT_WINDOWS_PER_HOUR = 60
+    _MIN_RESULT_WINDOWS_BEFORE_RELAXING = 30
     _COMPACT_FINE_WINDOW_MS = 12_000
 
     def __init__(
@@ -560,6 +577,9 @@ class VaingloryVideoAnalyzer:
         observer_hud_hits = 0
         gameplay_runs = 0
         coarse_result_hits = 0
+        transition_result_probes = 0
+        gameplay_viewport: Optional[Tuple[float, float, float, float]] = None
+        next_viewport_probe_ms = 0
         next_coarse_report = 0.1
         logger.info(
             'Vainglory coarse scan started: part_id={} duration_ms={}',
@@ -577,12 +597,63 @@ class VaingloryVideoAnalyzer:
         for timed in self._sampler.coarse_frames(part.path):
             self._raise_if_cancelled(cancelled)
             hud_started = time.monotonic()
-            hud = detect_gameplay_hud_details(timed.frame)
-            view_context: Literal['played', 'observed', 'unknown'] = 'played'
-            if hud is None:
-                hud = detect_observer_hud(timed.frame)
-                view_context = 'observed' if hud is not None else 'unknown'
+            hud_frame = timed.frame
+            if gameplay_viewport is not None:
+                hud_frame = timed.frame.crop(
+                    timed.frame.relative_rect(*gameplay_viewport)
+                )
+            hud, view_context = _detect_hud_context(hud_frame)
+            if hud is None and gameplay_viewport not in (None, (0.0, 0.0, 1.0, 1.0)):
+                hud, view_context = _detect_hud_context(timed.frame)
+                if hud is not None:
+                    gameplay_viewport = (0.0, 0.0, 1.0, 1.0)
+                    hud_frame = timed.frame
+            if hud is None and timed.at_ms >= next_viewport_probe_ms:
+                next_viewport_probe_ms = timed.at_ms + 30_000
+                rect = detect_active_content_rect(timed.frame)
+                if rect != PixelRect(0, 0, timed.frame.width, timed.frame.height):
+                    candidate = timed.frame.crop(rect)
+                    hud, view_context = _detect_hud_context(candidate)
+                    if hud is not None:
+                        gameplay_viewport = (
+                            rect.left / timed.frame.width,
+                            rect.top / timed.frame.height,
+                            rect.right / timed.frame.width,
+                            rect.bottom / timed.frame.height,
+                        )
+                        hud_frame = candidate
+                        logger.info(
+                            'Vainglory gameplay viewport detected: part_id={} '
+                            'at_ms={} source={}x{} rect=({}, {}, {}, {})',
+                            part.id,
+                            timed.at_ms,
+                            timed.frame.width,
+                            timed.frame.height,
+                            rect.left,
+                            rect.top,
+                            rect.right,
+                            rect.bottom,
+                        )
+            if hud is not None and gameplay_viewport is None:
+                gameplay_viewport = (0.0, 0.0, 1.0, 1.0)
             hud_detection_seconds += time.monotonic() - hud_started
+
+            result_visible = False
+            suspicious_hud_return = (
+                hud is not None
+                and not previous_probe_had_hud
+                and previous_gameplay is not None
+                and previous_gameplay.team_size is not None
+                and previous_gameplay.team_size != hud.team_size
+            )
+            if suspicious_hud_return:
+                transition_result_probes += 1
+                result_fallback_started = time.monotonic()
+                result_visible = self._detect_result_layout(timed.frame) is not None
+                result_fallback_seconds += time.monotonic() - result_fallback_started
+                if result_visible:
+                    hud = None
+                    view_context = 'unknown'
             new_hud_segment = hud is not None and (
                 previous_gameplay is None
                 or previous_gameplay.view_context != view_context
@@ -605,7 +676,10 @@ class VaingloryVideoAnalyzer:
                 lineup_probes += 1
                 lineup_probe_attempts += 1
                 recognized_lineup = self._recognize_coarse_hud_lineup(
-                    part.path, timed.at_ms, team_size=hud.team_size
+                    part.path,
+                    timed.at_ms,
+                    team_size=hud.team_size,
+                    viewport=gameplay_viewport,
                 )
                 lineup_seconds += time.monotonic() - lineup_started
                 lineup_recognized_slots += sum(
@@ -614,9 +688,9 @@ class VaingloryVideoAnalyzer:
                 segment_lineup = self._merge_hud_lineups(
                     segment_lineup, recognized_lineup
                 )
-            result_visible = False
             if (
-                hud is None
+                not result_visible
+                and hud is None
                 and timed.at_ms - last_result_fallback_ms
                 >= self._RESULT_FALLBACK_INTERVAL_MS
             ):
@@ -658,7 +732,11 @@ class VaingloryVideoAnalyzer:
             )
             gameplay_run_started = hud is not None and (
                 previous_gameplay is None
-                or not same_gameplay_run(previous_gameplay, observation)
+                or not same_gameplay_run(
+                    previous_gameplay,
+                    observation,
+                    maximum_gap_ms=self._HUD_CONTINUITY_MS,
+                )
             )
             if gameplay_run_started:
                 gameplay_runs += 1
@@ -722,12 +800,48 @@ class VaingloryVideoAnalyzer:
             hud_gap_ms=self._HUD_CONTINUITY_MS,
             before_end_ms=5_000,
         )
+        primary_window_count = len(windows)
+        maximum_expected_windows = max(
+            self._MIN_RESULT_WINDOWS_BEFORE_RELAXING,
+            (
+                profile.duration_ms * self._MAX_RESULT_WINDOWS_PER_HOUR
+                + 3_600_000
+                - 1
+            )
+            // 3_600_000,
+        )
+        relaxed_hud_continuity = primary_window_count > maximum_expected_windows
+        if relaxed_hud_continuity:
+            relaxed_windows = result_search_windows(
+                observations,
+                duration_ms=profile.duration_ms,
+                hud_gap_ms=self._NOISY_HUD_CONTINUITY_MS,
+                before_end_ms=5_000,
+            )
+            if len(relaxed_windows) < primary_window_count:
+                windows = relaxed_windows
+                logger.warning(
+                    'Vainglory noisy HUD transitions compacted: part_id={} '
+                    'duration_ms={} primary_gap_ms={} primary_windows={} '
+                    'threshold={} relaxed_gap_ms={} relaxed_windows={}',
+                    part.id,
+                    profile.duration_ms,
+                    self._HUD_CONTINUITY_MS,
+                    primary_window_count,
+                    maximum_expected_windows,
+                    self._NOISY_HUD_CONTINUITY_MS,
+                    len(windows),
+                )
+            else:
+                relaxed_hud_continuity = False
         logger.info(
             'Vainglory coarse scan completed: part_id={} frames={} hud_hits={} '
             'observer_hits={} lineup_probes={} lineup_recognized_slots={} '
             'hud_detection_seconds={:.3f} lineup_seconds={:.3f} '
             'result_fallback_probes={} result_fallback_seconds={:.3f} '
-            'result_hits={} windows={} elapsed_seconds={:.3f}',
+            'transition_result_probes={} result_hits={} primary_windows={} '
+            'windows={} relaxed_hud_continuity={} '
+            'elapsed_seconds={:.3f}',
             part.id,
             len(observations),
             sum(
@@ -741,16 +855,25 @@ class VaingloryVideoAnalyzer:
             lineup_seconds,
             result_fallback_probes,
             result_fallback_seconds,
+            transition_result_probes,
             sum(item.result_visible for item in observations),
+            primary_window_count,
             len(windows),
+            relaxed_hud_continuity,
             coarse_seconds,
         )
         self._emit_status(
             status_callback,
             AnalysisStatus(
                 stage='coarse_scan',
-                detail='粗扫完成：发现 {} 个游戏片段，生成 {} 个疑似结算区间'.format(
-                    gameplay_runs, len(windows)
+                detail=(
+                    '粗扫完成：发现 {} 个游戏片段，生成 {} 个疑似结算区间'.format(
+                        gameplay_runs, len(windows)
+                    )
+                    if not relaxed_hud_continuity
+                    else '粗扫完成：噪声区间已从 {} 个合并为 {} 个'.format(
+                        primary_window_count, len(windows)
+                    )
                 ),
                 elapsed_seconds=time.monotonic() - scan_started,
                 coarse_frames=len(observations),
@@ -2221,6 +2344,7 @@ class VaingloryVideoAnalyzer:
                     error,
                 )
                 continue
+            frame = normalize_gameplay_frame(frame)
             if detect_gameplay_hud(frame) is None:
                 continue
             frames.append(frame)
@@ -2534,7 +2658,12 @@ class VaingloryVideoAnalyzer:
         return tuple(frames)
 
     def _recognize_coarse_hud_lineup(
-        self, path: str, at_ms: int, *, team_size: TeamSize
+        self,
+        path: str,
+        at_ms: int,
+        *,
+        team_size: TeamSize,
+        viewport: Optional[Tuple[float, float, float, float]] = None,
     ) -> Tuple[str, ...]:
         try:
             frame = self._sampler.frame_at(path, at_ms)
@@ -2545,6 +2674,10 @@ class VaingloryVideoAnalyzer:
                 error,
             )
             return ()
+        if viewport is None:
+            frame = normalize_gameplay_frame(frame)
+        elif viewport != (0.0, 0.0, 1.0, 1.0):
+            frame = frame.crop(frame.relative_rect(*viewport))
         recognized = self._recognize_gameplay_hud_heroes((frame,), team_size=team_size)
         sides: Tuple[TeamSide, TeamSide] = ('left', 'right')
         lineup = tuple(

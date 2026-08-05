@@ -208,6 +208,108 @@ class GameplayHud:
     visible_portraits: int
 
 
+def detect_active_content_rect(frame: RgbFrame) -> PixelRect:
+    """Locate a materially letterboxed/windowed capture inside a video frame."""
+    x_step = max(1, math.ceil(frame.width / 120))
+    y_step = max(1, math.ceil(frame.height / 68))
+    sampled_x = tuple(range(0, frame.width, x_step))
+    sampled_y = tuple(range(0, frame.height, y_step))
+    row_bright = [0] * len(sampled_y)
+    column_bright = [0] * len(sampled_x)
+    pixels = frame.pixels
+    row_bytes = frame.width * 3
+    for row_index, y in enumerate(sampled_y):
+        row_offset = y * row_bytes
+        for column_index, x in enumerate(sampled_x):
+            offset = row_offset + x * 3
+            red, green, blue = pixels[offset : offset + 3]
+            if red * 3 + green * 6 + blue > 240:
+                row_bright[row_index] += 1
+                column_bright[column_index] += 1
+
+    minimum_row_bright = max(2, round(len(sampled_x) * 0.10))
+    minimum_column_bright = max(2, round(len(sampled_y) * 0.10))
+    content_rows = tuple(
+        index
+        for index, bright in enumerate(row_bright)
+        if bright >= minimum_row_bright
+    )
+    content_columns = tuple(
+        index
+        for index, bright in enumerate(column_bright)
+        if bright >= minimum_column_bright
+    )
+    if not content_rows or not content_columns:
+        return PixelRect(0, 0, frame.width, frame.height)
+
+    def row_has_content(y: int) -> bool:
+        row_offset = y * row_bytes
+        bright = 0
+        for x in sampled_x:
+            offset = row_offset + x * 3
+            red, green, blue = pixels[offset : offset + 3]
+            if red * 3 + green * 6 + blue > 240:
+                bright += 1
+        return bright >= minimum_row_bright
+
+    def column_has_content(x: int) -> bool:
+        bright = 0
+        for y in sampled_y:
+            offset = y * row_bytes + x * 3
+            red, green, blue = pixels[offset : offset + 3]
+            if red * 3 + green * 6 + blue > 240:
+                bright += 1
+        return bright >= minimum_column_bright
+
+    first_row = sampled_y[content_rows[0]]
+    last_row = sampled_y[content_rows[-1]]
+    top = next(
+        y
+        for y in range(max(0, first_row - y_step + 1), first_row + 1)
+        if row_has_content(y)
+    )
+    bottom = next(
+        y + 1
+        for y in range(min(frame.height - 1, last_row + y_step - 1), last_row - 1, -1)
+        if row_has_content(y)
+    )
+    first_column = sampled_x[content_columns[0]]
+    last_column = sampled_x[content_columns[-1]]
+    left = next(
+        x
+        for x in range(max(0, first_column - x_step + 1), first_column + 1)
+        if column_has_content(x)
+    )
+    right = next(
+        x + 1
+        for x in range(
+            min(frame.width - 1, last_column + x_step - 1), last_column - 1, -1
+        )
+        if column_has_content(x)
+    )
+    candidate = PixelRect(left, top, right, bottom)
+    materially_cropped = max(
+        candidate.left / frame.width,
+        candidate.top / frame.height,
+        (frame.width - candidate.right) / frame.width,
+        (frame.height - candidate.bottom) / frame.height,
+    ) >= 0.025
+    sufficiently_large = (
+        candidate.right - candidate.left >= frame.width * 0.55
+        and candidate.bottom - candidate.top >= frame.height * 0.50
+    )
+    if not materially_cropped or not sufficiently_large:
+        return PixelRect(0, 0, frame.width, frame.height)
+    return candidate
+
+
+def normalize_gameplay_frame(frame: RgbFrame) -> RgbFrame:
+    rect = detect_active_content_rect(frame)
+    if rect == PixelRect(0, 0, frame.width, frame.height):
+        return frame
+    return frame.crop(rect)
+
+
 def detect_result_layout(
     frame: RgbFrame, *, panel_detection: Optional[ResultPanelDetection] = None
 ) -> Optional[ResultLayout]:
@@ -251,9 +353,11 @@ def detect_result_layouts(
             frame, viewport, team_size=team_size
         )
         action_balance = min(action_contrasts) / max(1.0, max(action_contrasts))
+        strong_actions = sum(value >= 30 for value in action_contrasts)
         if (
             panel_detection is not None
             and action_balance < _MINIMUM_RESULT_ACTION_BALANCE
+            and strong_actions < 3
         ):
             _log_layout_attempt(
                 frame,
@@ -262,6 +366,7 @@ def detect_result_layouts(
                 team_size=team_size,
                 viewport_contrasts=tuple(round(value, 2) for value in action_contrasts),
                 balance=round(action_balance, 3),
+                strong_actions=strong_actions,
             )
             continue
         minimum_action_contrast: float

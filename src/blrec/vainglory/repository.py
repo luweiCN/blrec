@@ -97,9 +97,12 @@ class AnalysisQueueCompletion:
     title: str
     part_duration_seconds: Optional[int]
     recording_duration_seconds: int
-    candidate_count: int
+    candidate_count: Optional[int]
     match_count: int
     elapsed_seconds: float
+    bvid: Optional[str] = None
+    archive_page: Optional[int] = None
+    local_video_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,9 @@ class AnalysisQueueItem:
     rejected_candidates: int = 0
     recognized_matches: int = 0
     events: Tuple[AnalysisQueueEvent, ...] = ()
+    bvid: Optional[str] = None
+    archive_page: Optional[int] = None
+    local_video_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -533,8 +539,15 @@ def refresh_session_scan_job(
     )
 
 
+def _preferred_part_path(source_path: object, final_path: object) -> str:
+    for path in (final_path, source_path):
+        if path is not None and os.path.isfile(str(path)):
+            return str(path)
+    return str(final_path if final_path is not None else source_path)
+
+
 class VaingloryRepository:
-    ALGORITHM_VERSION = 17
+    ALGORITHM_VERSION = 18
     HERO_RECOGNITION_VERSION = 5
     RECORDED_PLAYER_DETECTION_VERSION = 3
     _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
@@ -1391,11 +1404,7 @@ class VaingloryRepository:
             part = VideoPart(
                 id=part_id,
                 index=int(row['part_index']),
-                path=str(
-                    row['final_path']
-                    if row['final_path'] is not None
-                    else row['source_path']
-                ),
+                path=_preferred_part_path(row['source_path'], row['final_path']),
                 title=str(row['session_title'] or ''),
                 manual_candidate_times_ms=self._marker_times(
                     row['manual_candidate_times_ms']
@@ -1576,10 +1585,8 @@ class VaingloryRepository:
                 part=VideoPart(
                     id=part_id,
                     index=int(row['part_index']),
-                    path=str(
-                        row['final_path']
-                        if row['final_path'] is not None
-                        else row['source_path']
+                    path=_preferred_part_path(
+                        row['source_path'], row['final_path']
                     ),
                     title=str(row['session_title'] or ''),
                 ),
@@ -1871,12 +1878,89 @@ class VaingloryRepository:
                 queued_select + ' ORDER BY priority,sort_time DESC,2 LIMIT ?',
                 (recent_cutoff, recent_cutoff, season_start, season_start, limit),
             ).fetchall()
+            completion_rows = connection.execute(
+                'SELECT job.completed_at,job.started_at,job.session_id,job.part_id,'
+                'part.part_index,session.title,part.record_duration_seconds,'
+                'job.candidate_count,job.match_count,'
+                '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,0)),0) '
+                'FROM recording_parts all_part '
+                'WHERE all_part.session_id=job.session_id) '
+                'AS recording_duration_seconds '
+                'FROM vainglory_part_jobs job '
+                'JOIN recording_parts part ON part.id=job.part_id '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                "WHERE job.state='ready' AND job.completed_at IS NOT NULL "
+                'ORDER BY job.completed_at DESC,job.part_id DESC'
+            ).fetchall()
+            part_ids = {
+                int(row['part_id'])
+                for row in (*active_rows, *queued_rows, *completion_rows)
+            }
+            media_by_part: Dict[int, Tuple[Optional[str], Optional[int], bool]] = {}
+            if part_ids:
+                placeholders = ','.join('?' for _ in part_ids)
+                media_rows = connection.execute(
+                    'SELECT part.id,part.session_id,part.part_index,part.source_path,'
+                    'part.final_path,COALESCE('
+                    '(SELECT source.bvid FROM vainglory_video_sources source '
+                    'WHERE source.part_id=part.id LIMIT 1),'
+                    '(SELECT upload.bvid FROM upload_jobs upload '
+                    'WHERE upload.session_id=part.session_id '
+                    "AND upload.bvid IS NOT NULL AND upload.bvid<>'' "
+                    'ORDER BY upload.id DESC LIMIT 1),'
+                    '(SELECT imported.bvid FROM vainglory_archive_parts archived '
+                    'JOIN vainglory_archive_imports imported '
+                    'ON imported.id=archived.import_id '
+                    'WHERE archived.recording_part_id=part.id LIMIT 1),'
+                    '(SELECT publication.bvid FROM vainglory_publications publication '
+                    'WHERE publication.session_id=part.session_id LIMIT 1)) AS bvid,'
+                    'COALESCE('
+                    '(SELECT source.page FROM vainglory_video_sources source '
+                    'WHERE source.part_id=part.id LIMIT 1),'
+                    'NULLIF((SELECT COUNT(*) FROM upload_parts remote '
+                    'JOIN upload_jobs upload ON upload.id=remote.job_id '
+                    'WHERE upload.session_id=part.session_id '
+                    "AND upload.bvid IS NOT NULL AND upload.bvid<>'' "
+                    'AND remote.cid IS NOT NULL '
+                    'AND remote.part_index<=part.part_index),0),'
+                    '(SELECT archived.page FROM vainglory_archive_parts archived '
+                    'WHERE archived.recording_part_id=part.id LIMIT 1),'
+                    '(SELECT COUNT(*) FROM recording_parts eligible '
+                    'WHERE eligible.session_id=part.session_id '
+                    'AND eligible.part_index<=part.part_index '
+                    'AND eligible.upload_excluded_reason IS NULL)) AS archive_page '
+                    'FROM recording_parts part WHERE part.id IN ('
+                    + placeholders
+                    + ')',
+                    tuple(sorted(part_ids)),
+                ).fetchall()
+                for media in media_rows:
+                    paths = (media['final_path'], media['source_path'])
+                    local_available = any(
+                        path is not None and os.path.isfile(str(path)) for path in paths
+                    )
+                    bvid = None if media['bvid'] is None else str(media['bvid'])
+                    page = (
+                        None
+                        if bvid is None
+                        or media['archive_page'] is None
+                        or int(media['archive_page']) < 1
+                        else int(media['archive_page'])
+                    )
+                    media_by_part[int(media['id'])] = (
+                        bvid,
+                        page,
+                        local_available,
+                    )
             counts = {
                 category_names[int(row['category_rank'])]: int(row['count'])
                 for row in count_rows
             }
 
             def item(row: sqlite3.Row) -> AnalysisQueueItem:
+                bvid, archive_page, local_available = media_by_part.get(
+                    int(row['part_id']), (None, None, False)
+                )
                 return AnalysisQueueItem(
                     part_id=int(row['part_id']),
                     session_id=int(row['session_id']),
@@ -1902,6 +1986,43 @@ class VaingloryRepository:
                     match_count=int(row['match_count']),
                     part_count=int(row['part_count']),
                     completed_part_count=int(row['completed_part_count']),
+                    bvid=bvid,
+                    archive_page=archive_page,
+                    local_video_available=local_available,
+                )
+
+            def completion(row: sqlite3.Row) -> AnalysisQueueCompletion:
+                completed_at = int(row['completed_at'])
+                started_at = (
+                    completed_at
+                    if row['started_at'] is None
+                    else int(row['started_at'])
+                )
+                bvid, archive_page, local_available = media_by_part.get(
+                    int(row['part_id']), (None, None, False)
+                )
+                return AnalysisQueueCompletion(
+                    completed_at=completed_at,
+                    session_id=int(row['session_id']),
+                    part_id=int(row['part_id']),
+                    part_index=int(row['part_index']),
+                    title=str(row['title'] or ''),
+                    part_duration_seconds=(
+                        None
+                        if row['record_duration_seconds'] is None
+                        else int(row['record_duration_seconds'])
+                    ),
+                    recording_duration_seconds=int(row['recording_duration_seconds']),
+                    candidate_count=(
+                        None
+                        if row['candidate_count'] is None
+                        else int(row['candidate_count'])
+                    ),
+                    match_count=int(row['match_count']),
+                    elapsed_seconds=max(0, completed_at - started_at),
+                    bvid=bvid,
+                    archive_page=archive_page,
+                    local_video_available=local_available,
                 )
 
             return AnalysisQueueStatus(
@@ -1913,6 +2034,9 @@ class VaingloryRepository:
                 archive_pending=counts.get('archive', 0),
                 migration_pending=counts.get('migration', 0),
                 backlog_pending=counts.get('backlog', 0),
+                recent_completions=tuple(
+                    completion(row) for row in completion_rows
+                ),
             )
 
         return await self._database.read(read)
@@ -2029,7 +2153,11 @@ class VaingloryRepository:
         await self._database.write(fail)
 
     async def complete_part(
-        self, part_id: int, matches: Sequence[AnalyzedMatch]
+        self,
+        part_id: int,
+        matches: Sequence[AnalyzedMatch],
+        *,
+        candidate_count: Optional[int] = None,
     ) -> None:
         now = self._now()
         written_paths: List[Path] = []
@@ -2258,16 +2386,25 @@ class VaingloryRepository:
             if rerun_requested:
                 connection.execute(
                     "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
-                    'algorithm_version=?,match_count=?,error=NULL,requested_at=?,'
+                    'algorithm_version=?,match_count=?,candidate_count=COALESCE(?,'
+                    'candidate_count),error=NULL,requested_at=?,'
                     'started_at=NULL,completed_at=NULL,updated_at=? WHERE part_id=?',
-                    (self.ALGORITHM_VERSION, len(matches), now, now, int(part_id)),
+                    (
+                        self.ALGORITHM_VERSION,
+                        len(matches),
+                        candidate_count,
+                        now,
+                        now,
+                        int(part_id),
+                    ),
                 )
             else:
                 connection.execute(
                     "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
-                    'match_count=?,error=NULL,completed_at=?,updated_at=? '
+                    'match_count=?,candidate_count=COALESCE(?,candidate_count),'
+                    'error=NULL,completed_at=?,updated_at=? '
                     'WHERE part_id=?',
-                    (len(matches), now, now, int(part_id)),
+                    (len(matches), candidate_count, now, now, int(part_id)),
                 )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '

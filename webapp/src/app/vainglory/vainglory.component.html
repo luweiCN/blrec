@@ -2268,6 +2268,7 @@
       *ngIf="analysisQueue as queue; else analysisQueueLoading"
       [queue]="queue"
       [sampledAt]="indexSampledAt"
+      (playPart)="openAnalysisPart($event)"
     ></app-vainglory-analysis-task-center>
     <ng-template #analysisQueueLoading>
       <nz-spin nzSimple></nz-spin>

@@ -2526,6 +2526,33 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.openMatchMedia(match, atResult ? 'result' : 'play');
   }
 
+  openAnalysisPart(target: {
+    readonly sessionId: number;
+    readonly partId: number;
+  }): void {
+    this.recordingSessions
+      .getSession(target.sessionId)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (session) => {
+          const part = session.parts.find((item) => item.id === target.partId);
+          if (part === undefined || (!part.sourceExists && !part.finalExists)) {
+            this.messages.info('该分 P 的本地视频已经不可用');
+            return;
+          }
+          this.analysisTaskModalVisible = false;
+          this.previewSession = session;
+          this.previewPart = part;
+          this.previewSeekSeconds = null;
+          this.previewVisible = true;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '录像打开失败'));
+        },
+      });
+  }
+
   openMatchClip(match: VaingloryMatch): void {
     this.openMatchMedia(match, 'clip');
   }

@@ -53,9 +53,34 @@
             {{ active.completedPartCount }}/{{ active.partCount }} 个分 P
           </span>
         </div>
-        <div class="analysis-progress-number">
-          <strong>{{ percent(active) }}%</strong>
-          <span>{{ stageLabel(active) }}</span>
+        <div class="analysis-active-tools">
+          <a
+            *ngIf="biliUrl(active) as archiveUrl; else activeLocalPlayback"
+            nz-button
+            nzType="link"
+            nzSize="small"
+            [href]="archiveUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            查看稿件
+          </a>
+          <ng-template #activeLocalPlayback>
+            <button
+              *ngIf="active.localVideoAvailable"
+              nz-button
+              nzType="link"
+              nzSize="small"
+              type="button"
+              (click)="requestPlayback(active)"
+            >
+              播放
+            </button>
+          </ng-template>
+          <div class="analysis-progress-number">
+            <strong>{{ percent(active) }}%</strong>
+            <span>{{ stageLabel(active) }}</span>
+          </div>
         </div>
       </header>
 
@@ -165,18 +190,43 @@
     <header class="analysis-section-heading">
       <div>
         <h3 id="recent-completion-title">最近完成</h3>
-        <span>保留本次服务启动后的最近 6 个分 P</span>
+        <span>数据库中共 {{ taskQueue.recentCompletions.length }} 个已完成分 P</span>
       </div>
     </header>
     <ol class="analysis-completion-list">
       <li *ngFor="let completion of taskQueue.recentCompletions">
-        <div>
+        <div class="analysis-completion-heading">
           <strong>
             {{ completion.title || "未命名直播" }} · P{{ completion.partIndex }}
           </strong>
-          <time>
-            完成于 {{ completion.completedAt * 1000 | date: "HH:mm:ss" }}
-          </time>
+          <div class="analysis-completion-actions">
+            <time>
+              完成于 {{ completion.completedAt * 1000 | date: "MM-dd HH:mm:ss" }}
+            </time>
+            <a
+              *ngIf="biliUrl(completion) as archiveUrl; else completedLocalPlayback"
+              nz-button
+              nzType="link"
+              nzSize="small"
+              [href]="archiveUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看稿件
+            </a>
+            <ng-template #completedLocalPlayback>
+              <button
+                *ngIf="completion.localVideoAvailable"
+                nz-button
+                nzType="link"
+                nzSize="small"
+                type="button"
+                (click)="requestPlayback(completion)"
+              >
+                播放
+              </button>
+            </ng-template>
+          </div>
         </div>
         <dl>
           <div>
@@ -187,7 +237,12 @@
             <dt>整场录像</dt>
             <dd>{{ formatDuration(completion.recordingDurationSeconds) }}</dd>
           </div>
-          <div><dt>候选画面</dt><dd>{{ completion.candidateCount }} 个</dd></div>
+          <div>
+            <dt>候选画面</dt>
+            <dd>
+              {{ completion.candidateCount === null ? "历史未保存" : completion.candidateCount + " 个" }}
+            </dd>
+          </div>
           <div><dt>确认对局</dt><dd>{{ completion.matchCount }} 局</dd></div>
           <div>
             <dt>处理总耗时</dt>
@@ -230,14 +285,39 @@
       <li *ngFor="let queued of taskQueue.queued; let index = index">
         <span class="analysis-queue-position">{{ index + 1 }}</span>
         <div class="analysis-queued-task">
-          <div>
-            <strong>{{ queued.title || "未命名直播" }}</strong>
-            <span>
-              {{ categoryLabel(queued.category) }} · {{ stageLabel(queued) }}
-              <ng-container *ngIf="queued.anchorName">
-                · {{ queued.anchorName }}
-              </ng-container>
-            </span>
+          <div class="analysis-queued-heading">
+            <div class="analysis-queued-identity">
+              <strong>{{ queued.title || "未命名直播" }}</strong>
+              <span>
+                {{ categoryLabel(queued.category) }} · {{ stageLabel(queued) }}
+                <ng-container *ngIf="queued.anchorName">
+                  · {{ queued.anchorName }}
+                </ng-container>
+              </span>
+            </div>
+            <a
+              *ngIf="biliUrl(queued) as archiveUrl; else queuedLocalPlayback"
+              nz-button
+              nzType="link"
+              nzSize="small"
+              [href]="archiveUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看稿件
+            </a>
+            <ng-template #queuedLocalPlayback>
+              <button
+                *ngIf="queued.localVideoAvailable"
+                nz-button
+                nzType="link"
+                nzSize="small"
+                type="button"
+                (click)="requestPlayback(queued)"
+              >
+                播放
+              </button>
+            </ng-template>
           </div>
           <dl>
             <div>
