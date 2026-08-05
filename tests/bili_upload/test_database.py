@@ -56,6 +56,8 @@ REQUIRED_TABLES = {
     'vainglory_ocr_jobs',
     'vainglory_heroes',
     'vainglory_matches',
+    'vainglory_match_overrides',
+    'vainglory_manual_match_markers',
     'vainglory_match_players',
     'vainglory_players',
     'vainglory_player_rooms',

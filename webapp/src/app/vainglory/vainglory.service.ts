@@ -16,6 +16,7 @@ import {
   VaingloryMatch,
   VaingloryMatchFilters,
   VaingloryMatchList,
+  VaingloryMatchUpdate,
   VaingloryMatchSession,
   VaingloryMatchSessionList,
   VaingloryMatchSessionSort,
@@ -172,6 +173,31 @@ export class VaingloryService {
     );
   }
 
+  markSessionMatch(
+    sessionId: number,
+    partIndex: number,
+    atMs: number,
+  ): Observable<{
+    readonly id: number;
+    readonly sessionId: number;
+    readonly partId: number;
+    readonly partIndex: number;
+    readonly atMs: number;
+  }> {
+    return this.http.post<{
+      readonly id: number;
+      readonly sessionId: number;
+      readonly partId: number;
+      readonly partIndex: number;
+      readonly atMs: number;
+    }>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/sessions/${sessionId}/match-markers`,
+      ),
+      { partIndex, atMs },
+    );
+  }
+
   getScan(sessionId: number): Observable<VaingloryScanJob> {
     return this.http.get<VaingloryScanJob>(
       this.url.makeApiUrl(`/api/v1/vainglory/sessions/${sessionId}/scan`),
@@ -286,9 +312,16 @@ export class VaingloryService {
   }
 
   updateMatchTitle(matchId: number, title: string): Observable<VaingloryMatch> {
+    return this.updateMatch(matchId, { title });
+  }
+
+  updateMatch(
+    matchId: number,
+    update: VaingloryMatchUpdate,
+  ): Observable<VaingloryMatch> {
     return this.http.patch<VaingloryMatch>(
       this.url.makeApiUrl(`/api/v1/vainglory/matches/${matchId}`),
-      { title },
+      update,
     );
   }
 

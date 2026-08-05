@@ -120,6 +120,14 @@ def extension_client(
     browser_extension.highlight_service = highlights
     browser_extension.policy_manager = policies  # type: ignore[assignment]
     browser_extension.category_catalog = FakeCatalog()  # type: ignore[assignment]
+    vainglory = AsyncMock()
+    vainglory.find_video_part.return_value = SimpleNamespace(
+        session_id=12, part_id=34, part_index=2
+    )
+    vainglory.mark_video_match.return_value = SimpleNamespace(
+        id=56, session_id=12, part_id=34, part_index=2, at_ms=754_000
+    )
+    browser_extension.vainglory_service = vainglory
     old_control_journal = control_operations.journal
     control_journal = AsyncMock()
     control_journal.get.return_value = SimpleNamespace(
@@ -327,6 +335,43 @@ def test_highlight_is_saved_independently_of_current_recording_state(
         anchor_name='主播',
         name='精彩操作',
         source='browser_extension',
+    )
+
+
+def test_video_page_can_mark_the_current_playback_time(extension_client) -> None:
+    client, _application, _policies, _highlights, _store, _clock = extension_client
+    token = pair(client)
+
+    status_response = client.get(
+        '/api/v1/browser-extension/videos/BV1abcdefgh?page=2',
+        headers=extension_headers(token),
+    )
+    marker_response = client.post(
+        '/api/v1/browser-extension/videos/BV1abcdefgh/matches',
+        headers=extension_headers(token),
+        json={'page': 2, 'currentTimeMs': 754_000},
+    )
+
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        'indexed': True,
+        'sessionId': 12,
+        'partId': 34,
+        'partIndex': 2,
+    }
+    assert marker_response.status_code == 201
+    assert marker_response.json() == {
+        'id': 56,
+        'sessionId': 12,
+        'partId': 34,
+        'partIndex': 2,
+        'atMs': 754_000,
+    }
+    index = browser_extension.vainglory_service
+    assert index is not None
+    index.find_video_part.assert_awaited_once_with('BV1abcdefgh', 2)
+    index.mark_video_match.assert_awaited_once_with(
+        bvid='BV1abcdefgh', page=2, at_ms=754_000
     )
 
 

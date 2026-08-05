@@ -102,6 +102,7 @@ class VideoPart:
     index: int
     path: str
     title: str = ''
+    manual_candidate_times_ms: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -897,6 +898,54 @@ class VaingloryVideoAnalyzer:
 
         fine_seconds = time.monotonic() - fine_started
         candidates = collapse_result_hits(hits)
+        candidate_entries: List[
+            Tuple[int, Literal['played', 'observed', 'unknown'], Tuple[str, ...]]
+        ] = [
+            (candidate.at_ms, candidate.view_context, candidate.hero_lineup)
+            for candidate in candidates
+        ]
+        for manual_at_ms in part.manual_candidate_times_ms:
+            if manual_at_ms < 0 or manual_at_ms >= profile.duration_ms:
+                logger.warning(
+                    'Ignored out-of-range manual match marker: part_id={} '
+                    'at_ms={} duration_ms={}',
+                    part.id,
+                    manual_at_ms,
+                    profile.duration_ms,
+                )
+                continue
+            nearby = min(
+                (
+                    (abs(at_ms - manual_at_ms), index)
+                    for index, (at_ms, _context, _lineup) in enumerate(
+                        candidate_entries
+                    )
+                    if abs(at_ms - manual_at_ms) <= 5_000
+                ),
+                default=None,
+            )
+            if nearby is None:
+                candidate_entries.append((manual_at_ms, 'unknown', ()))
+            else:
+                _distance, index = nearby
+                _at_ms, context, lineup = candidate_entries[index]
+                candidate_entries[index] = (manual_at_ms, context, lineup)
+        candidate_entries = sorted(
+            {
+                at_ms: (at_ms, context, lineup)
+                for at_ms, context, lineup in candidate_entries
+            }.values(),
+            key=lambda item: item[0],
+        )
+        if part.manual_candidate_times_ms:
+            logger.info(
+                'Vainglory manual match markers merged: part_id={} markers={} '
+                'candidates_before={} candidates_after={}',
+                part.id,
+                part.manual_candidate_times_ms,
+                len(candidates),
+                len(candidate_entries),
+            )
         logger.info(
             'Vainglory fine scan completed: part_id={} windows={} hits={} '
             'candidates={} keyframe_preview_frames={} '
@@ -944,13 +993,9 @@ class VaingloryVideoAnalyzer:
         )
         return ScannedPart(
             video_duration_ms=profile.duration_ms,
-            candidate_times_ms=tuple(candidate.at_ms for candidate in candidates),
-            candidate_view_contexts=tuple(
-                candidate.view_context for candidate in candidates
-            ),
-            candidate_hero_lineups=tuple(
-                candidate.hero_lineup for candidate in candidates
-            ),
+            candidate_times_ms=tuple(item[0] for item in candidate_entries),
+            candidate_view_contexts=tuple(item[1] for item in candidate_entries),
+            candidate_hero_lineups=tuple(item[2] for item in candidate_entries),
         )
 
     def recognize_scanned_part(
@@ -1937,6 +1982,7 @@ class VaingloryVideoAnalyzer:
         if estimated_start_ms < 0:
             return 'unknown'
         sampled_at: List[int] = []
+        talent_hits = 0
         for offset_ms in (1_000, 3_000, 5_000):
             at_ms = estimated_start_ms + offset_ms
             if at_ms < 0 or at_ms >= video_duration_ms or at_ms in sampled_at:
@@ -1952,9 +1998,18 @@ class VaingloryVideoAnalyzer:
                     error,
                 )
                 continue
-            if self._aram_detector.is_visible(frame):
+            visible = self._aram_detector.is_visible(frame)
+            logger.debug(
+                'Vainglory game mode probe: at_ms={} talent_visible={}', at_ms, visible
+            )
+            if visible:
+                talent_hits += 1
+            if talent_hits >= 2:
                 logger.info(
-                    'Vainglory ARAM talent selector recognized: at_ms={}', at_ms
+                    'Vainglory ARAM talent selector recognized: '
+                    'sampled_at={} talent_hits={}',
+                    tuple(sampled_at),
+                    talent_hits,
                 )
                 return 'aram'
         return '3v3'

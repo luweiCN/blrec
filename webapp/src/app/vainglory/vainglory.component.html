@@ -341,16 +341,34 @@
                   class="session-publication-status"
                   aria-label="稿件回填状态"
                 >
-                  <nz-tag
-                    [nzColor]="
-                      publicationStepColor(
-                        session.descriptionState,
-                        session.publicationState
-                      )
-                    "
-                  >
-                    简介：{{ descriptionStateLabel(session) }}
-                  </nz-tag>
+                  <span>
+                    <nz-tag
+                      [nzColor]="
+                        publicationStepColor(
+                          session.descriptionState,
+                          session.publicationState
+                        )
+                      "
+                    >
+                      简介：{{ descriptionStateLabel(session) }}
+                    </nz-tag>
+                    <button
+                      *ngIf="canRetryPublicationStep(session)"
+                      nz-button
+                      nzType="link"
+                      nzSize="small"
+                      type="button"
+                      [nzLoading]="
+                        isPublicationStepRetrying(
+                          session.sessionId,
+                          'description'
+                        )
+                      "
+                      (click)="retryPublicationStep(session, 'description')"
+                    >
+                      {{ publicationRetryLabel(session, "description") }}
+                    </button>
+                  </span>
                   <span>
                     <nz-tag
                       [nzColor]="
@@ -363,20 +381,24 @@
                       置顶评论：{{ pinStateLabel(session) }}
                     </nz-tag>
                     <button
-                      *ngIf="isPublicationStepFailed(session, 'pin')"
+                      *ngIf="canRetryPublicationStep(session)"
                       nz-button
                       nzType="link"
                       nzSize="small"
                       type="button"
+                      nz-popconfirm
+                      nzPopconfirmTitle="重发前会删除本投稿账号在该稿件下的所有顶层评论，再发布新评论，是否继续？"
+                      nzOkText="删除并重发"
+                      nzCancelText="取消"
                       [nzLoading]="
-                        isPublicationStepRetrying(session.sessionId, 'pin')
+                        isPublicationStepRetrying(session.sessionId, 'comments')
                       "
                       [disabled]="
-                        isPublicationStepRetrying(session.sessionId, 'pin')
+                        isPublicationStepRetrying(session.sessionId, 'comments')
                       "
-                      (click)="retryPublicationStep(session, 'pin')"
+                      (nzOnConfirm)="retryPublicationStep(session, 'comments')"
                     >
-                      重试
+                      {{ publicationRetryLabel(session, "comments") }}
                     </button>
                   </span>
                   <span>
@@ -391,7 +413,7 @@
                       视频分段：{{ chapterStateLabel(session) }}
                     </nz-tag>
                     <button
-                      *ngIf="isPublicationStepFailed(session, 'chapter')"
+                      *ngIf="canRetryPublicationStep(session)"
                       nz-button
                       nzType="link"
                       nzSize="small"
@@ -404,7 +426,7 @@
                       "
                       (click)="retryPublicationStep(session, 'chapter')"
                     >
-                      重试
+                      {{ publicationRetryLabel(session, "chapter") }}
                     </button>
                   </span>
                 </div>
@@ -703,6 +725,33 @@
                             >
                               B站播放
                             </a>
+                            <button
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              (click)="openMatchEditor(match)"
+                            >
+                              编辑对局
+                            </button>
+                            <button
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              nz-popconfirm
+                              [nzPopconfirmTitle]="
+                                match.statsEligible
+                                  ? '确认这一局不计入玩家胜率和排行榜？'
+                                  : '恢复这一局计入统计？'
+                              "
+                              [nzLoading]="savingMatchIds.has(match.id)"
+                              (nzOnConfirm)="toggleMatchStatsEligibility(match)"
+                            >
+                              {{
+                                match.statsEligible
+                                  ? "不计入统计"
+                                  : "恢复统计"
+                              }}
+                            </button>
                             <ng-container
                               *ngIf="remoteMediaStatus(match) as remoteMedia"
                             >
@@ -1966,6 +2015,14 @@
               查看稿件
             </a>
             <button
+              nz-button
+              type="button"
+              (click)="openManualMarker(session)"
+            >
+              <i nz-icon nzType="plus"></i>
+              手动添加对局
+            </button>
+            <button
               *ngIf="!suppressed"
               nz-button
               type="button"
@@ -2020,6 +2077,182 @@
         </article>
       </section>
     </ng-template>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="manualMarkerVisible"
+  nzTitle="手动标记对局"
+  nzOkText="标记并重新识别"
+  nzCancelText="取消"
+  [nzOkLoading]="savingManualMarker"
+  (nzOnOk)="saveManualMarker()"
+  (nzOnCancel)="manualMarkerVisible = false"
+>
+  <ng-container *nzModalContent>
+    <p class="manual-marker-help">
+      请在 B 站稿件中暂停到结算画面，填入当前分 P 和播放时间。
+      这个时间点会持久保留，以后重扫也会继续校验。
+    </p>
+    <div class="manual-marker-fields">
+      <label>
+        <span>分 P</span>
+        <nz-input-number
+          [(ngModel)]="manualMarkerPartIndex"
+          [nzMin]="1"
+          [nzMax]="manualMarkerSession?.partCount || 1"
+          [nzPrecision]="0"
+        ></nz-input-number>
+      </label>
+      <label>
+        <span>播放时间</span>
+        <input
+          nz-input
+          [(ngModel)]="manualMarkerTime"
+          placeholder="例如 12:34 或 1:02:03"
+          (keyup.enter)="saveManualMarker()"
+        />
+      </label>
+    </div>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [(nzVisible)]="matchEditorVisible"
+  nzTitle="编辑对局识别结果"
+  nzOkText="保存修正"
+  nzCancelText="取消"
+  [nzWidth]="1100"
+  [nzOkLoading]="savingMatchEdit"
+  (nzOnOk)="saveMatchEdit()"
+  (nzOnCancel)="matchEditorVisible = false"
+>
+  <ng-container *nzModalContent>
+    <ng-container *ngIf="matchEditDraft as draft">
+      <nz-alert
+        nzType="info"
+        nzShowIcon
+        nzMessage="人工修正会持久保留"
+        nzDescription="以后即使用新算法重新分析，这些人工字段也不会被自动结果覆盖。"
+      ></nz-alert>
+      <section class="match-editor-grid">
+        <label class="match-editor-wide">
+          <span>对局标题</span>
+          <input nz-input maxlength="200" [(ngModel)]="draft.title" />
+        </label>
+        <label>
+          <span>模式</span>
+          <nz-select [(ngModel)]="draft.gameMode">
+            <nz-option nzValue="3v3" nzLabel="3V3"></nz-option>
+            <nz-option nzValue="5v5" nzLabel="5V5"></nz-option>
+            <nz-option nzValue="aram" nzLabel="大乱斗"></nz-option>
+            <nz-option nzValue="other" nzLabel="其他"></nz-option>
+            <nz-option nzValue="unknown" nzLabel="未知"></nz-option>
+          </nz-select>
+        </label>
+        <label>
+          <span>胜负</span>
+          <nz-select [(ngModel)]="draft.winnerColor">
+            <nz-option nzValue="teal" nzLabel="主播方胜"></nz-option>
+            <nz-option nzValue="orange" nzLabel="主播方负"></nz-option>
+            <nz-option nzValue="unknown" nzLabel="未确认"></nz-option>
+          </nz-select>
+        </label>
+        <label>
+          <span>对局时长（秒）</span>
+          <nz-input-number
+            [(ngModel)]="draft.durationSeconds"
+            [nzMin]="1"
+            [nzPrecision]="0"
+          ></nz-input-number>
+        </label>
+        <label>
+          <span>结束方式</span>
+          <nz-select [(ngModel)]="draft.endReason">
+            <nz-option nzValue="normal" nzLabel="正常结束"></nz-option>
+            <nz-option nzValue="surrender" nzLabel="投降"></nz-option>
+            <nz-option nzValue="unknown" nzLabel="未知"></nz-option>
+          </nz-select>
+        </label>
+        <label>
+          <span>对局类型</span>
+          <nz-select [(ngModel)]="draft.matchKind">
+            <nz-option nzValue="pvp" nzLabel="玩家对战"></nz-option>
+            <nz-option nzValue="bot" nzLabel="人机对战"></nz-option>
+            <nz-option nzValue="practice" nzLabel="练习模式"></nz-option>
+            <nz-option nzValue="unknown" nzLabel="未知"></nz-option>
+          </nz-select>
+        </label>
+        <label>
+          <span>画面来源</span>
+          <nz-select [(ngModel)]="draft.viewContext">
+            <nz-option nzValue="played" nzLabel="本人对局"></nz-option>
+            <nz-option nzValue="observed" nzLabel="观战 / 回放"></nz-option>
+            <nz-option nzValue="unknown" nzLabel="未知"></nz-option>
+          </nz-select>
+        </label>
+        <label class="match-editor-wide">
+          <span>结果文字</span>
+          <input nz-input maxlength="32" [(ngModel)]="draft.resultText" />
+        </label>
+        <label class="match-editor-switch">
+          <span>计入玩家统计和排行榜</span>
+          <nz-switch [(ngModel)]="draft.statsEligible"></nz-switch>
+        </label>
+      </section>
+
+      <section class="match-editor-team-totals">
+        <h3>队伍汇总</h3>
+        <label>
+          <span>左队击杀</span>
+          <nz-input-number [(ngModel)]="draft.leftKills" [nzMin]="0"></nz-input-number>
+        </label>
+        <label>
+          <span>右队击杀</span>
+          <nz-input-number [(ngModel)]="draft.rightKills" [nzMin]="0"></nz-input-number>
+        </label>
+        <label>
+          <span>左队经济</span>
+          <nz-input-number [(ngModel)]="draft.leftEconomy" [nzMin]="0"></nz-input-number>
+        </label>
+        <label>
+          <span>右队经济</span>
+          <nz-input-number [(ngModel)]="draft.rightEconomy" [nzMin]="0"></nz-input-number>
+        </label>
+      </section>
+
+      <section class="match-editor-players">
+        <h3>玩家数据</h3>
+        <div class="match-editor-player-header" aria-hidden="true">
+          <span>位置</span><span>玩家名</span><span>英雄</span>
+          <span>K</span><span>D</span><span>A</span><span>经济</span><span>补刀</span>
+        </div>
+        <div
+          *ngFor="let player of draft.players"
+          class="match-editor-player-row"
+        >
+          <strong>{{ player.side === "left" ? "左" : "右" }}{{ player.slot }}</strong>
+          <input nz-input maxlength="80" [(ngModel)]="player.name" />
+          <nz-select
+            nzShowSearch
+            nzAllowClear
+            nzPlaceHolder="未识别"
+            [(ngModel)]="player.heroId"
+          >
+            <nz-option
+              *ngFor="let hero of heroes; trackBy: trackHero"
+              [nzValue]="hero.id"
+              [nzLabel]="hero.label"
+            ></nz-option>
+          </nz-select>
+          <nz-input-number [(ngModel)]="player.kills" [nzMin]="0"></nz-input-number>
+          <nz-input-number [(ngModel)]="player.deaths" [nzMin]="0"></nz-input-number>
+          <nz-input-number [(ngModel)]="player.assists" [nzMin]="0"></nz-input-number>
+          <nz-input-number [(ngModel)]="player.economy" [nzMin]="0"></nz-input-number>
+          <nz-input-number [(ngModel)]="player.lastHits" [nzMin]="0"></nz-input-number>
+        </div>
+      </section>
+    </ng-container>
   </ng-container>
 </nz-modal>
 

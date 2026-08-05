@@ -6,7 +6,10 @@
   "homepage_url": "https://github.com/luweiCN/blrec",
   "permissions": ["storage"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
-  "host_permissions": ["https://live.bilibili.com/*"],
+  "host_permissions": [
+    "https://live.bilibili.com/*",
+    "https://www.bilibili.com/video/*"
+  ],
   "icons": { "128": "icons/icon-128.png" },
   "background": { "service_worker": "background.js", "type": "module" },
   "options_page": "options.html",
@@ -14,6 +17,12 @@
     {
       "matches": ["https://live.bilibili.com/*"],
       "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.bilibili.com/video/*"],
+      "js": ["video-content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

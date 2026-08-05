@@ -8,7 +8,19 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 
 from loguru import logger
 
@@ -160,6 +172,15 @@ class HeroRematchClaim:
 @dataclass(frozen=True)
 class RecordedPlayerBackfillClaim:
     match_id: int
+
+
+@dataclass(frozen=True)
+class ManualMatchMarkerRecord:
+    id: int
+    session_id: int
+    part_id: int
+    part_index: int
+    at_ms: int
 
 
 @dataclass(frozen=True)
@@ -1066,6 +1087,170 @@ class VaingloryRepository:
         assert job is not None
         return job
 
+    async def find_video_part(
+        self, bvid: str, page: int
+    ) -> Optional[ManualMatchMarkerRecord]:
+        normalized_bvid = bvid.strip()
+        if not normalized_bvid or page < 1:
+            return None
+        row = await self._database.fetchone(
+            'SELECT target.session_id,target.part_id,target.part_index '
+            'FROM ('
+            'SELECT part.session_id,part.id AS part_id,part.part_index,0 priority '
+            'FROM vainglory_video_sources source '
+            'JOIN recording_parts part ON part.id=source.part_id '
+            'WHERE source.bvid=? AND source.page=? '
+            'UNION ALL '
+            'SELECT part.session_id,part.id,part.part_index,1 '
+            'FROM vainglory_archive_imports imported '
+            'JOIN vainglory_archive_parts archived '
+            'ON archived.import_id=imported.id '
+            'JOIN recording_parts part ON part.id=archived.recording_part_id '
+            'WHERE imported.bvid=? AND archived.page=? '
+            'UNION ALL '
+            'SELECT part.session_id,part.id,part.part_index,2 '
+            'FROM upload_jobs upload '
+            'JOIN upload_parts remote ON remote.job_id=upload.id '
+            'JOIN recording_parts part ON part.session_id=upload.session_id '
+            'AND part.part_index=remote.part_index '
+            'WHERE upload.bvid=? AND remote.cid IS NOT NULL AND ('
+            'SELECT COUNT(*) FROM upload_parts counted '
+            'WHERE counted.job_id=upload.id AND counted.cid IS NOT NULL '
+            'AND counted.part_index<=remote.part_index)=?'
+            ') target ORDER BY target.priority LIMIT 1',
+            (
+                normalized_bvid,
+                int(page),
+                normalized_bvid,
+                int(page),
+                normalized_bvid,
+                int(page),
+            ),
+        )
+        if row is None:
+            return None
+        return ManualMatchMarkerRecord(
+            id=0,
+            session_id=int(row['session_id']),
+            part_id=int(row['part_id']),
+            part_index=int(row['part_index']),
+            at_ms=0,
+        )
+
+    async def find_session_part(
+        self, session_id: int, part_index: int
+    ) -> Optional[ManualMatchMarkerRecord]:
+        if session_id <= 0 or part_index <= 0:
+            return None
+        row = await self._database.fetchone(
+            'SELECT session_id,id AS part_id,part_index FROM recording_parts '
+            'WHERE session_id=? AND part_index=? ORDER BY id LIMIT 1',
+            (int(session_id), int(part_index)),
+        )
+        if row is None:
+            return None
+        return ManualMatchMarkerRecord(
+            id=0,
+            session_id=int(row['session_id']),
+            part_id=int(row['part_id']),
+            part_index=int(row['part_index']),
+            at_ms=0,
+        )
+
+    async def create_manual_match_marker_for_video(
+        self, *, bvid: str, page: int, at_ms: int
+    ) -> ManualMatchMarkerRecord:
+        target = await self.find_video_part(bvid, page)
+        if target is None:
+            raise VaingloryNotFound('这个稿件分 P 尚未进入对局索引')
+        return await self.create_manual_match_marker(
+            target.session_id,
+            part_index=target.part_index,
+            at_ms=at_ms,
+            source='browser_extension',
+        )
+
+    async def create_manual_match_marker(
+        self,
+        session_id: int,
+        *,
+        part_index: int,
+        at_ms: int,
+        source: Literal['browser_extension', 'dashboard'],
+    ) -> ManualMatchMarkerRecord:
+        if session_id <= 0 or part_index <= 0:
+            raise ValueError('直播场次或分 P 编号无效')
+        if at_ms < 0:
+            raise ValueError('对局时间点无效')
+        now = self._now()
+
+        def create(connection: sqlite3.Connection) -> ManualMatchMarkerRecord:
+            part = connection.execute(
+                'SELECT id,record_duration_seconds FROM recording_parts '
+                'WHERE session_id=? AND part_index=?',
+                (int(session_id), int(part_index)),
+            ).fetchone()
+            if part is None:
+                raise VaingloryNotFound('这场直播不存在该分 P')
+            duration = part['record_duration_seconds']
+            if duration is not None and at_ms > int(duration) * 1_000 + 5_000:
+                raise ValueError('对局时间点超出该分 P 时长')
+            part_id = int(part['id'])
+            connection.execute(
+                'DELETE FROM vainglory_scan_suppressions WHERE session_id=?',
+                (int(session_id),),
+            )
+            connection.execute(
+                'INSERT INTO vainglory_manual_match_markers('
+                'session_id,part_id,at_ms,source,created_at,updated_at) '
+                'VALUES(?,?,?,?,?,?) ON CONFLICT(part_id,at_ms) DO UPDATE SET '
+                'source=excluded.source,updated_at=excluded.updated_at',
+                (int(session_id), part_id, int(at_ms), source, now, now),
+            )
+            marker = connection.execute(
+                'SELECT id FROM vainglory_manual_match_markers '
+                'WHERE part_id=? AND at_ms=?',
+                (part_id, int(at_ms)),
+            ).fetchone()
+            assert marker is not None
+            self._ensure_scan_job(connection, int(session_id), now)
+            current = connection.execute(
+                'SELECT state FROM vainglory_part_jobs WHERE part_id=?', (part_id,)
+            ).fetchone()
+            if current is not None and str(current['state']) == 'analyzing':
+                connection.execute(
+                    "UPDATE vainglory_part_jobs SET request_kind='manual',"
+                    'algorithm_version=?,updated_at=? WHERE part_id=?',
+                    (self.ALGORITHM_VERSION - 1, now, part_id),
+                )
+            else:
+                connection.execute(
+                    'INSERT INTO vainglory_part_jobs('
+                    'part_id,session_id,state,request_kind,progress,'
+                    'algorithm_version,match_count,error,requested_at,started_at,'
+                    'completed_at,updated_at) '
+                    "VALUES(?,?,'pending','manual',0,?,0,NULL,?,NULL,NULL,?) "
+                    'ON CONFLICT(part_id) DO UPDATE SET '
+                    "state='pending',request_kind='manual',progress=0,"
+                    'algorithm_version=excluded.algorithm_version,match_count=0,'
+                    'error=NULL,requested_at=excluded.requested_at,started_at=NULL,'
+                    'completed_at=NULL,updated_at=excluded.updated_at',
+                    (part_id, int(session_id), self.ALGORITHM_VERSION, now, now),
+                )
+                connection.execute(
+                    'DELETE FROM vainglory_ocr_jobs WHERE part_id=?', (part_id,)
+                )
+            self._refresh_session_job(connection, int(session_id), now)
+            return ManualMatchMarkerRecord(
+                id=int(marker['id']),
+                session_id=int(session_id),
+                part_id=part_id,
+                part_index=int(part_index),
+                at_ms=int(at_ms),
+            )
+
+        return await self._database.write(create)
+
     async def discover_ready_parts(self) -> int:
         now = self._now()
 
@@ -1136,6 +1321,10 @@ class VaingloryRepository:
                 'SELECT job.part_id,job.session_id,part.part_index,'
                 'part.source_path,part.final_path,session.title AS session_title,'
                 'part.record_duration_seconds,'
+                '(SELECT GROUP_CONCAT(marker.at_ms) '
+                'FROM vainglory_manual_match_markers marker '
+                'WHERE marker.part_id=job.part_id ORDER BY marker.at_ms) '
+                'AS manual_candidate_times_ms,'
                 '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,'
                 '0)),0) FROM recording_parts all_part '
                 'WHERE all_part.session_id=job.session_id) '
@@ -1208,6 +1397,9 @@ class VaingloryRepository:
                     else row['source_path']
                 ),
                 title=str(row['session_title'] or ''),
+                manual_candidate_times_ms=self._marker_times(
+                    row['manual_candidate_times_ms']
+                ),
             )
             return ScanClaim(
                 session_id=session_id,
@@ -1845,7 +2037,8 @@ class VaingloryRepository:
 
         def complete(connection: sqlite3.Connection) -> None:
             job = connection.execute(
-                'SELECT state,session_id FROM vainglory_part_jobs WHERE part_id=?',
+                'SELECT state,session_id,request_kind,algorithm_version '
+                'FROM vainglory_part_jobs WHERE part_id=?',
                 (int(part_id),),
             ).fetchone()
             if job is None:
@@ -1868,6 +2061,16 @@ class VaingloryRepository:
                     (int(part_id),),
                 ).fetchall()
             }
+            match_overrides = tuple(
+                (int(row['result_at_ms']), self._override_payload(row['payload_json']))
+                for row in connection.execute(
+                    'SELECT result_at_ms,payload_json '
+                    'FROM vainglory_match_overrides WHERE part_id=? '
+                    'ORDER BY result_at_ms',
+                    (int(part_id),),
+                ).fetchall()
+            )
+            used_match_overrides: Set[int] = set()
             used_manual_overrides: Set[Tuple[int, str, int]] = set()
             obsolete_frame_paths.extend(
                 str(row['result_frame_path'])
@@ -2032,14 +2235,40 @@ class VaingloryRepository:
                             player.confidence,
                         ),
                     )
+                nearby_override = min(
+                    (
+                        (abs(at_ms - int(match.result_at_ms)), index, payload)
+                        for index, (at_ms, payload) in enumerate(match_overrides)
+                        if index not in used_match_overrides
+                        and abs(at_ms - int(match.result_at_ms)) <= 30_000
+                    ),
+                    default=None,
+                    key=lambda item: (item[0], item[1]),
+                )
+                if nearby_override is not None:
+                    _distance, override_index, override_payload = nearby_override
+                    used_match_overrides.add(override_index)
+                    self._apply_match_override(connection, match_id, override_payload)
             if matches:
                 self._ensure_session_player(connection, session_id, now)
-            connection.execute(
-                "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
-                'match_count=?,error=NULL,completed_at=?,updated_at=? '
-                'WHERE part_id=?',
-                (len(matches), now, now, int(part_id)),
+            rerun_requested = (
+                str(job['request_kind']) == 'manual'
+                and int(job['algorithm_version']) < self.ALGORITHM_VERSION
             )
+            if rerun_requested:
+                connection.execute(
+                    "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
+                    'algorithm_version=?,match_count=?,error=NULL,requested_at=?,'
+                    'started_at=NULL,completed_at=NULL,updated_at=? WHERE part_id=?',
+                    (self.ALGORITHM_VERSION, len(matches), now, now, int(part_id)),
+                )
+            else:
+                connection.execute(
+                    "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
+                    'match_count=?,error=NULL,completed_at=?,updated_at=? '
+                    'WHERE part_id=?',
+                    (len(matches), now, now, int(part_id)),
+                )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '
                 'WHERE session_id=?',
@@ -2583,7 +2812,8 @@ class VaingloryRepository:
 
         def update(connection: sqlite3.Connection) -> None:
             match = connection.execute(
-                'SELECT session_id,team_size,left_color,right_color '
+                'SELECT session_id,result_part_id,result_at_ms,team_size,'
+                'left_color,right_color '
                 'FROM vainglory_matches WHERE id=?',
                 (int(match_id),),
             ).fetchone()
@@ -2617,6 +2847,13 @@ class VaingloryRepository:
                     int(match_id),
                 ),
             )
+            self._merge_match_override(
+                connection,
+                part_id=int(match['result_part_id']),
+                result_at_ms=int(match['result_at_ms']),
+                patch={'recorded_player': {'side': side, 'slot': int(slot)}},
+                now=self._now(),
+            )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '
                 'WHERE session_id=?',
@@ -2638,7 +2875,9 @@ class VaingloryRepository:
 
         def update(connection: sqlite3.Connection) -> None:
             match = connection.execute(
-                'SELECT session_id FROM vainglory_matches WHERE id=?', (int(match_id),)
+                'SELECT session_id,result_part_id,result_at_ms '
+                'FROM vainglory_matches WHERE id=?',
+                (int(match_id),),
             ).fetchone()
             if match is None:
                 raise VaingloryNotFound('对局不存在')
@@ -2655,6 +2894,17 @@ class VaingloryRepository:
             ).rowcount
             if changed != 1:
                 raise VaingloryNotFound('对局中的玩家位置不存在')
+            self._merge_match_override(
+                connection,
+                part_id=int(match['result_part_id']),
+                result_at_ms=int(match['result_at_ms']),
+                patch={
+                    'players': {
+                        '{}:{}'.format(side, int(slot)): {'hero_id': int(hero_id)}
+                    }
+                },
+                now=self._now(),
+            )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '
                 'WHERE session_id=?',
@@ -2668,12 +2918,39 @@ class VaingloryRepository:
         normalized = title.strip()
         if len(normalized) > 200:
             raise ValueError('match title is too long')
-        count = await self._database.execute(
-            'UPDATE vainglory_matches SET custom_title=? WHERE id=?',
-            (normalized or None, int(match_id)),
-        )
-        if count != 1:
-            raise VaingloryNotFound('对局不存在')
+        return await self.update_match_fields(match_id, {'title': normalized})
+
+    async def update_match_fields(
+        self, match_id: int, changes: Mapping[str, Any]
+    ) -> MatchRecord:
+        patch = self._normalize_match_override(changes)
+        if not patch:
+            raise ValueError('没有需要保存的对局信息')
+        now = self._now()
+
+        def update(connection: sqlite3.Connection) -> None:
+            match = connection.execute(
+                'SELECT session_id,result_part_id,result_at_ms '
+                'FROM vainglory_matches WHERE id=?',
+                (int(match_id),),
+            ).fetchone()
+            if match is None:
+                raise VaingloryNotFound('对局不存在')
+            self._merge_match_override(
+                connection,
+                part_id=int(match['result_part_id']),
+                result_at_ms=int(match['result_at_ms']),
+                patch=patch,
+                now=now,
+            )
+            self._apply_match_override(connection, int(match_id), patch)
+            connection.execute(
+                'UPDATE vainglory_publications SET needs_refresh=1 '
+                'WHERE session_id=?',
+                (int(match['session_id']),),
+            )
+
+        await self._database.write(update)
         return await self.get_match(match_id)
 
     async def update_session_title(
@@ -3576,6 +3853,308 @@ class VaingloryRepository:
         return normalized
 
     @staticmethod
+    def _override_payload(value: object) -> Dict[str, Any]:
+        try:
+            payload = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning('Ignored invalid Vainglory match override payload')
+            return {}
+        if not isinstance(payload, dict):
+            logger.warning('Ignored non-object Vainglory match override payload')
+            return {}
+        return dict(payload)
+
+    @staticmethod
+    def _normalize_match_override(changes: Mapping[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            'title',
+            'game_mode',
+            'duration_seconds',
+            'result_text',
+            'end_reason',
+            'winner_color',
+            'match_kind',
+            'view_context',
+            'stats_eligible',
+            'left_kills',
+            'right_kills',
+            'left_economy',
+            'right_economy',
+            'players',
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError('存在不支持修改的对局字段')
+        patch: Dict[str, Any] = {}
+        if 'title' in changes:
+            title = str(changes['title'] or '').strip()
+            if len(title) > 200:
+                raise ValueError('对局标题过长')
+            patch['title'] = title
+        enums = {
+            'game_mode': ('3v3', '5v5', 'aram', 'other', 'unknown'),
+            'end_reason': ('normal', 'surrender', 'unknown'),
+            'winner_color': ('teal', 'orange', 'unknown'),
+            'match_kind': ('pvp', 'bot', 'practice', 'unknown'),
+            'view_context': ('played', 'observed', 'unknown'),
+        }
+        for name, choices in enums.items():
+            if name not in changes:
+                continue
+            value = str(changes[name])
+            if value not in choices:
+                raise ValueError('对局字段 {} 无效'.format(name))
+            patch[name] = value
+        if 'result_text' in changes:
+            result_text = str(changes['result_text'] or '').strip()
+            if len(result_text) > 32:
+                raise ValueError('对局结果文字过长')
+            patch['result_text'] = result_text
+        if 'stats_eligible' in changes:
+            if type(changes['stats_eligible']) is not bool:
+                raise ValueError('是否计入统计的值无效')
+            patch['stats_eligible'] = bool(changes['stats_eligible'])
+        nullable_numbers = (
+            'duration_seconds',
+            'left_kills',
+            'right_kills',
+            'left_economy',
+            'right_economy',
+        )
+        for name in nullable_numbers:
+            if name not in changes:
+                continue
+            value = changes[name]
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError('对局数值 {} 无效'.format(name))
+            if name == 'duration_seconds' and value == 0:
+                raise ValueError('对局时长必须大于 0')
+            patch[name] = value
+        if 'players' in changes:
+            players = changes['players']
+            if not isinstance(players, Sequence) or isinstance(players, (str, bytes)):
+                raise ValueError('玩家信息无效')
+            normalized_players: Dict[str, Dict[str, Any]] = {}
+            for raw_player in players:
+                if not isinstance(raw_player, Mapping):
+                    raise ValueError('玩家信息无效')
+                side = str(raw_player.get('side') or '')
+                slot = raw_player.get('slot')
+                if side not in ('left', 'right') or type(slot) is not int:
+                    raise ValueError('玩家位置无效')
+                if slot < 1 or slot > 5:
+                    raise ValueError('玩家位置无效')
+                player_patch: Dict[str, Any] = {}
+                if 'name' in raw_player:
+                    name = str(raw_player.get('name') or '').strip()
+                    if len(name) > 80:
+                        raise ValueError('玩家名过长')
+                    player_patch['name'] = name
+                for field_name in (
+                    'hero_id',
+                    'kills',
+                    'deaths',
+                    'assists',
+                    'economy',
+                    'last_hits',
+                ):
+                    if field_name not in raw_player:
+                        continue
+                    value = raw_player[field_name]
+                    minimum = 1 if field_name == 'hero_id' else 0
+                    if value is not None and (
+                        type(value) is not int or value < minimum
+                    ):
+                        raise ValueError('玩家数值 {} 无效'.format(field_name))
+                    player_patch[field_name] = value
+                if player_patch:
+                    normalized_players['{}:{}'.format(side, slot)] = player_patch
+            if normalized_players:
+                patch['players'] = normalized_players
+        return patch
+
+    @staticmethod
+    def _merge_match_override(
+        connection: sqlite3.Connection,
+        *,
+        part_id: int,
+        result_at_ms: int,
+        patch: Mapping[str, Any],
+        now: int,
+    ) -> None:
+        row = connection.execute(
+            'SELECT payload_json,created_at FROM vainglory_match_overrides '
+            'WHERE part_id=? AND result_at_ms=?',
+            (int(part_id), int(result_at_ms)),
+        ).fetchone()
+        payload = (
+            {}
+            if row is None
+            else VaingloryRepository._override_payload(row['payload_json'])
+        )
+        for name, value in patch.items():
+            if name == 'players' and isinstance(value, Mapping):
+                current_players = payload.get('players')
+                merged_players = (
+                    dict(current_players) if isinstance(current_players, dict) else {}
+                )
+                for position, player_patch in value.items():
+                    current_player = merged_players.get(position)
+                    merged_player = (
+                        dict(current_player) if isinstance(current_player, dict) else {}
+                    )
+                    if isinstance(player_patch, Mapping):
+                        merged_player.update(player_patch)
+                    merged_players[str(position)] = merged_player
+                payload['players'] = merged_players
+            elif name == 'recorded_player' and isinstance(value, Mapping):
+                payload[name] = dict(value)
+            else:
+                payload[name] = value
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+        connection.execute(
+            'INSERT INTO vainglory_match_overrides('
+            'part_id,result_at_ms,payload_json,created_at,updated_at) '
+            'VALUES(?,?,?,?,?) ON CONFLICT(part_id,result_at_ms) DO UPDATE SET '
+            'payload_json=excluded.payload_json,updated_at=excluded.updated_at',
+            (int(part_id), int(result_at_ms), encoded, now, now),
+        )
+
+    @staticmethod
+    def _apply_match_override(
+        connection: sqlite3.Connection, match_id: int, payload: Mapping[str, Any]
+    ) -> None:
+        match = connection.execute(
+            'SELECT result_at_ms,left_color,right_color FROM vainglory_matches '
+            'WHERE id=?',
+            (int(match_id),),
+        ).fetchone()
+        if match is None:
+            return
+        assignments: List[str] = []
+        values: List[Any] = []
+        columns = {
+            'game_mode': 'game_mode',
+            'duration_seconds': 'duration_seconds',
+            'result_text': 'result_text',
+            'end_reason': 'end_reason',
+            'match_kind': 'match_kind',
+            'view_context': 'view_context',
+            'left_kills': 'left_kills',
+            'right_kills': 'right_kills',
+            'left_economy': 'left_economy',
+            'right_economy': 'right_economy',
+        }
+        for name, column in columns.items():
+            if name in payload:
+                assignments.append('{}=?'.format(column))
+                values.append(payload[name])
+        if 'game_mode' in payload:
+            team_size = {'3v3': 3, 'aram': 3, '5v5': 5}.get(str(payload['game_mode']))
+            if team_size is not None:
+                assignments.append('team_size=?')
+                values.append(team_size)
+        if 'title' in payload:
+            assignments.append('custom_title=?')
+            values.append(str(payload['title']) or None)
+        if 'duration_seconds' in payload:
+            duration = payload['duration_seconds']
+            assignments.append('started_at_ms=?')
+            values.append(
+                0
+                if duration is None
+                else max(0, int(match['result_at_ms']) - int(duration) * 1_000)
+            )
+        if 'winner_color' in payload:
+            winner_color = str(payload['winner_color'])
+            winner_side = (
+                'left'
+                if str(match['left_color']) == winner_color
+                else 'right' if str(match['right_color']) == winner_color else 'unknown'
+            )
+            assignments.append('winner_side=?')
+            values.append(winner_side)
+        if 'stats_eligible' in payload:
+            eligible = bool(payload['stats_eligible'])
+            assignments.extend(('stats_eligible=?', 'stats_exclusion_reason=?'))
+            values.extend((1 if eligible else 0, None if eligible else 'manual'))
+        recorded_player = payload.get('recorded_player')
+        if isinstance(recorded_player, Mapping):
+            side = str(recorded_player.get('side') or '')
+            slot = recorded_player.get('slot')
+            exists = connection.execute(
+                'SELECT 1 FROM vainglory_match_players '
+                'WHERE match_id=? AND side=? AND slot=?',
+                (int(match_id), side, slot),
+            ).fetchone()
+            if exists is not None:
+                assignments.extend(
+                    (
+                        'recorded_player_side=?',
+                        'recorded_player_slot=?',
+                        'recorded_player_confidence=1',
+                        "recorded_player_source='manual'",
+                    )
+                )
+                values.extend((side, slot))
+        if assignments:
+            connection.execute(
+                'UPDATE vainglory_matches SET {} WHERE id=?'.format(
+                    ','.join(assignments)
+                ),
+                tuple(values) + (int(match_id),),
+            )
+        players = payload.get('players')
+        if not isinstance(players, Mapping):
+            return
+        for position, player_patch in players.items():
+            side, separator, slot_text = str(position).partition(':')
+            if not separator or side not in ('left', 'right'):
+                continue
+            try:
+                slot = int(slot_text)
+            except ValueError:
+                continue
+            if not isinstance(player_patch, Mapping):
+                continue
+            player_assignments: List[str] = []
+            player_values: List[Any] = []
+            if 'name' in player_patch:
+                name = str(player_patch['name'])
+                player_assignments.extend(('player_name=?', 'normalized_name=?'))
+                player_values.extend((name, normalize_player_name(name)))
+            for name, column in (
+                ('kills', 'kills'),
+                ('deaths', 'deaths'),
+                ('assists', 'assists'),
+                ('economy', 'economy'),
+                ('last_hits', 'last_hits'),
+            ):
+                if name in player_patch:
+                    player_assignments.append('{}=?'.format(column))
+                    player_values.append(player_patch[name])
+            if 'hero_id' in player_patch:
+                hero_id = player_patch['hero_id']
+                if (
+                    hero_id is None
+                    or connection.execute(
+                        "SELECT 1 FROM vainglory_heroes WHERE id=? AND label<>''",
+                        (hero_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    player_assignments.extend(('hero_id=?', "hero_source='manual'"))
+                    player_values.append(hero_id)
+            if player_assignments:
+                connection.execute(
+                    'UPDATE vainglory_match_players SET {} '
+                    'WHERE match_id=? AND side=? AND slot=?'.format(
+                        ','.join(player_assignments)
+                    ),
+                    tuple(player_values) + (int(match_id), side, slot),
+                )
+
+    @staticmethod
     def _match_player(row: sqlite3.Row) -> MatchPlayerRecord:
         return MatchPlayerRecord(
             side=str(row['side']),
@@ -3857,6 +4436,20 @@ class VaingloryRepository:
             if page > 0 and duration > 0:
                 segments[page] = duration
         return tuple(sorted(segments.items(), reverse=True))
+
+    @staticmethod
+    def _marker_times(value: object) -> Tuple[int, ...]:
+        if value is None:
+            return ()
+        times = set()
+        for encoded in str(value).split(','):
+            try:
+                at_ms = int(encoded)
+            except ValueError:
+                continue
+            if at_ms >= 0:
+                times.add(at_ms)
+        return tuple(sorted(times))
 
     @staticmethod
     def _upload_title(value: object) -> str:

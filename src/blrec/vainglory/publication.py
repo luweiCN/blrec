@@ -327,33 +327,96 @@ class VaingloryPublicationService:
     async def retry_failed_step(self, session_id: int, step: str) -> None:
         if session_id <= 0:
             raise ValueError('直播场次编号无效')
-        columns = {'chapter': 'chapter_state', 'pin': 'pin_state'}
+        columns = {
+            'description': 'description_state',
+            'chapter': 'chapter_state',
+            'pin': 'pin_state',
+        }
         column = columns.get(step)
-        if column is None:
+        if column is None and step != 'comments':
             raise ValueError('不支持重试这个发布步骤')
+        plan: Optional[PublicationPlan] = None
+        if step == 'comments':
+            current = await self._database.fetchone(
+                'SELECT session_id,bvid FROM vainglory_publications '
+                'WHERE session_id=? ORDER BY id DESC LIMIT 1',
+                (session_id,),
+            )
+            if current is None:
+                raise ValueError('这场直播没有可重试的发布任务')
+            matches = await self._session_matches(int(current['session_id']))
+            matches = tuple(
+                match for match in matches if match.bvid == str(current['bvid'])
+            )
+            if not matches:
+                raise ValueError('这场直播暂无可发布的对局')
+            plan = build_publication_plan(matches)
         now = self._now()
 
         def retry(connection: sqlite3.Connection) -> Tuple[int, str]:
             publication = connection.execute(
-                'SELECT id,bvid,state,chapter_state,pin_state '
+                'SELECT id,bvid,state,chapter_state,description_state,pin_state '
                 'FROM vainglory_publications WHERE session_id=? '
                 'ORDER BY id DESC LIMIT 1',
                 (session_id,),
             ).fetchone()
             if publication is None:
                 raise ValueError('这场直播没有可重试的发布任务')
-            if str(publication['state']) != 'failed':
-                raise ValueError('发布任务当前不是失败状态')
-            current_state = str(publication[column])
-            if current_state == 'confirmed':
-                raise ValueError('这个发布步骤已经完成，无需重试')
-            connection.execute(
-                'UPDATE vainglory_publications SET state=\'prepared\','
-                '{}=\'prepared\',attempt_count=0,next_attempt_at=0,error=NULL,'
-                'updated_at=? WHERE id=?'.format(column),
-                (now, int(publication['id'])),
-            )
-            return int(publication['id']), str(publication['bvid'])
+            if str(publication['state']) == 'running':
+                raise ValueError('发布任务正在执行，请稍后再试')
+            publication_id = int(publication['id'])
+            if step == 'comments':
+                assert plan is not None
+                connection.execute(
+                    'INSERT INTO vainglory_publication_stale_comments('
+                    'publication_id,ordinal,content,rpid,state,attempt_count,'
+                    'next_attempt_at,error,created_at,updated_at) '
+                    'SELECT publication_id,ordinal,content,rpid,'
+                    "CASE WHEN rpid IS NULL THEN 'unknown_outcome' "
+                    "ELSE 'prepared' END,0,0,NULL,?,? "
+                    'FROM vainglory_publication_comments '
+                    'WHERE publication_id=? AND ('
+                    'rpid IS NOT NULL OR state IN ('
+                    "'in_flight','unknown_outcome'))",
+                    (now, now, publication_id),
+                )
+                connection.execute(
+                    'DELETE FROM vainglory_publication_comments '
+                    'WHERE publication_id=?',
+                    (publication_id,),
+                )
+                for ordinal, item in enumerate(plan.comments):
+                    connection.execute(
+                        'INSERT INTO vainglory_publication_comments('
+                        'publication_id,ordinal,content,match_ids_json,'
+                        'uploaded_pictures_json,state,created_at,updated_at) '
+                        "VALUES(?,?,?,?,?,'prepared',?,?)",
+                        (
+                            publication_id,
+                            ordinal,
+                            item.content,
+                            json.dumps(item.match_ids, separators=(',', ':')),
+                            '[]',
+                            now,
+                            now,
+                        ),
+                    )
+                connection.execute(
+                    "UPDATE vainglory_publications SET state='prepared',"
+                    "comment_cleanup_state='prepared',pin_state='prepared',"
+                    'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
+                    'updated_at=? WHERE id=?',
+                    (now, publication_id),
+                )
+            else:
+                assert column is not None
+                connection.execute(
+                    'UPDATE vainglory_publications SET state=\'prepared\','
+                    '{}=\'prepared\',attempt_count=0,next_attempt_at=0,error=NULL,'
+                    'updated_at=? WHERE id=?'.format(column),
+                    (now, publication_id),
+                )
+            return publication_id, str(publication['bvid'])
 
         publication_id, bvid = await self._database.write(retry)
         logger.info(
@@ -387,6 +450,12 @@ class VaingloryPublicationService:
                 "UPDATE vainglory_publications SET pin_state='prepared',"
                 "error='进程中断后将重新确认置顶',updated_at=? "
                 "WHERE pin_state='in_flight' AND state!='confirmed'",
+                (now,),
+            ).rowcount
+            changed += connection.execute(
+                "UPDATE vainglory_publications SET comment_cleanup_state='prepared',"
+                "error='进程中断后将重新枚举并清理旧评论',updated_at=? "
+                "WHERE comment_cleanup_state='in_flight'",
                 (now,),
             ).rowcount
             return changed
@@ -624,7 +693,7 @@ class VaingloryPublicationService:
                     'upload_job_id=?,aid=?,source_kind=?,payload_hash=?,'
                     "description_block=?,state='prepared',"
                     "chapter_state='prepared',description_state='prepared',"
-                    "pin_state='prepared',"
+                    "comment_cleanup_state='prepared',pin_state='prepared',"
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
                     'needs_refresh=0,updated_at=? WHERE id=?',
                     (
@@ -643,8 +712,10 @@ class VaingloryPublicationService:
                     'INSERT INTO vainglory_publications('
                     'account_id,session_id,upload_job_id,aid,bvid,source_kind,'
                     'payload_hash,description_block,state,description_state,'
-                    'pin_state,needs_refresh,created_at,updated_at) '
-                    "VALUES(?,?,?,?,?,?,?,?,'prepared','prepared','prepared',0,?,?)",
+                    'comment_cleanup_state,pin_state,needs_refresh,created_at,'
+                    'updated_at) '
+                    "VALUES(?,?,?,?,?,?,?,?,'prepared','prepared','prepared',"
+                    "'prepared',0,?,?)",
                     (
                         selected.account_id,
                         selected.session_id,
@@ -809,6 +880,9 @@ class VaingloryPublicationService:
                     'attempt_count=attempt_count+1,error=NULL,updated_at=? WHERE id=?',
                     (self._now(), publication_id),
                 )
+                if str(publication['comment_cleanup_state']) != 'confirmed':
+                    if not await self._prepare_comment_cleanup(publication, bundle):
+                        return
                 stale_comment = await self._next_stale_comment(publication_id)
                 if stale_comment is not None:
                     if int(stale_comment['next_attempt_at']) > self._now():
@@ -862,6 +936,114 @@ class VaingloryPublicationService:
                 int(publication['attempt_count']),
                 '投稿账号或凭据在发布期间发生变化',
             )
+
+    async def _prepare_comment_cleanup(
+        self, publication: Mapping[str, Any], bundle: CredentialBundle
+    ) -> bool:
+        publication_id = int(publication['id'])
+        await self._database.execute(
+            "UPDATE vainglory_publications SET comment_cleanup_state='in_flight',"
+            'updated_at=? WHERE id=?',
+            (self._now(), publication_id),
+        )
+        owned: Dict[int, str] = {}
+        cursor = 0
+        try:
+            for _page in range(100):
+                response = await self._protocol.list_replies(
+                    bundle,
+                    {
+                        'type': 1,
+                        'oid': int(publication['aid']),
+                        'mode': 2,
+                        'next': cursor,
+                        'ps': 20,
+                    },
+                )
+                entries = _reply_entries(response)
+                for reply in entries:
+                    if not _owned_root_reply(
+                        reply,
+                        account_uid=int(publication['account_uid']),
+                        aid=int(publication['aid']),
+                    ):
+                        continue
+                    rpid = _positive_int(reply.get('rpid'))
+                    if rpid is None:
+                        continue
+                    content = reply.get('content')
+                    message = (
+                        str(content.get('message') or '')
+                        if isinstance(content, Mapping)
+                        else ''
+                    )
+                    owned[rpid] = message[:1000] or '本账号历史顶层评论'
+                next_cursor, is_end = _reply_next_cursor(response)
+                if is_end or (next_cursor is None and len(entries) < 20):
+                    break
+                if next_cursor is None or next_cursor == cursor:
+                    raise ProtocolContractError('comment list cursor did not advance')
+                cursor = next_cursor
+            else:
+                raise ProtocolContractError('comment list has too many pages')
+        except (BiliApiError, DefinitelyNotSent, RemoteOutcomeUnknown):
+            await self._database.execute(
+                "UPDATE vainglory_publications SET comment_cleanup_state='prepared' "
+                'WHERE id=?',
+                (publication_id,),
+            )
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                '读取历史顶层评论失败，将自动重试',
+            )
+            return False
+        except ProtocolContractError:
+            await self._database.execute(
+                "UPDATE vainglory_publications SET comment_cleanup_state='prepared' "
+                'WHERE id=?',
+                (publication_id,),
+            )
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                '历史顶层评论数据异常，将自动重试',
+                minimum_delay=3600,
+            )
+            return False
+        now = self._now()
+
+        def persist(connection: sqlite3.Connection) -> None:
+            for ordinal, (rpid, content) in enumerate(sorted(owned.items())):
+                exists = connection.execute(
+                    'SELECT 1 FROM vainglory_publication_stale_comments '
+                    'WHERE publication_id=? AND rpid=? LIMIT 1',
+                    (publication_id, rpid),
+                ).fetchone()
+                if exists is not None:
+                    continue
+                connection.execute(
+                    'INSERT INTO vainglory_publication_stale_comments('
+                    'publication_id,ordinal,content,rpid,state,attempt_count,'
+                    'next_attempt_at,error,created_at,updated_at) '
+                    "VALUES(?,?,?,?,'prepared',0,0,NULL,?,?)",
+                    (publication_id, ordinal, content, rpid, now, now),
+                )
+            connection.execute(
+                "UPDATE vainglory_publications SET comment_cleanup_state='confirmed',"
+                'updated_at=? WHERE id=?',
+                (now, publication_id),
+            )
+
+        await self._database.write(persist)
+        logger.info(
+            'Vainglory owned root comments enumerated: publication_id={} '
+            'bvid={} comments={}',
+            publication_id,
+            str(publication['bvid']),
+            len(owned),
+        )
+        return True
 
     async def _publication_ready(self, publication_id: int) -> bool:
         return bool(
@@ -2276,6 +2458,38 @@ def _reply_entries(response: Mapping[str, Any]) -> Tuple[Mapping[str, Any], ...]
     if isinstance(upper, Mapping):
         entries.extend(entry for entry in upper.values() if isinstance(entry, Mapping))
     return tuple(entries)
+
+
+def _owned_root_reply(reply: Mapping[str, Any], *, account_uid: int, aid: int) -> bool:
+    owner_uid = _positive_int(reply.get('mid'))
+    if owner_uid is None:
+        member = reply.get('member')
+        owner_uid = (
+            _positive_int(member.get('mid')) if isinstance(member, Mapping) else None
+        )
+    if owner_uid != account_uid:
+        return False
+    remote_aid = _positive_int(reply.get('oid'))
+    if remote_aid is not None and remote_aid != aid:
+        return False
+    return (
+        _positive_int(reply.get('root')) is None
+        and _positive_int(reply.get('parent')) is None
+    )
+
+
+def _reply_next_cursor(response: Mapping[str, Any]) -> Tuple[Optional[int], bool]:
+    data = response.get('data')
+    if not isinstance(data, Mapping):
+        raise ProtocolContractError('comment list response is incomplete')
+    cursor = data.get('cursor')
+    if not isinstance(cursor, Mapping):
+        return None, False
+    is_end = cursor.get('is_end') in (True, 1, '1')
+    next_cursor = _positive_int(cursor.get('next'))
+    if next_cursor is None and cursor.get('next') in (0, '0'):
+        next_cursor = 0
+    return next_cursor, is_end
 
 
 def _reply_root(response: Mapping[str, Any]) -> Mapping[str, Any]:

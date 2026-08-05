@@ -623,6 +623,7 @@ class BiliAccountRuntime:
             await vainglory_publication.purge_excluded_remote()
             vainglory_service = VaingloryIndexService(
                 vainglory_repository,
+                remote_media_cache=remote_media_cache,
                 analyzer=VaingloryVideoAnalyzer(
                     result_reader=result_reader,
                     hero_recognizer=hero_recognizer,

@@ -37,6 +37,21 @@ export interface HighlightResult {
   readonly name: string;
 }
 
+export interface VideoStatus {
+  readonly indexed: boolean;
+  readonly sessionId: number | null;
+  readonly partId: number | null;
+  readonly partIndex: number | null;
+}
+
+export interface MatchMarkerResult {
+  readonly id: number;
+  readonly sessionId: number;
+  readonly partId: number;
+  readonly partIndex: number;
+  readonly atMs: number;
+}
+
 export class ExtensionApi {
   constructor(
     private readonly backendUrl: string,
@@ -89,6 +104,26 @@ export class ExtensionApi {
       method: 'POST',
       body: payload,
     });
+  }
+
+  videoStatus(bvid: string, page: number): Promise<VideoStatus> {
+    return this.request<VideoStatus>(
+      `/videos/${encodeURIComponent(bvid)}?page=${encodeURIComponent(page)}`
+    );
+  }
+
+  markMatch(
+    bvid: string,
+    page: number,
+    currentTimeMs: number
+  ): Promise<MatchMarkerResult> {
+    return this.request<MatchMarkerResult>(
+      `/videos/${encodeURIComponent(bvid)}/matches`,
+      {
+        method: 'POST',
+        body: { page, currentTimeMs },
+      }
+    );
   }
 
   private async request<T>(

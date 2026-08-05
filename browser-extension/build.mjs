@@ -18,7 +18,7 @@ await build({
   target: ['chrome109'],
 });
 
-for (const name of ['content', 'options']) {
+for (const name of ['content', 'video-content', 'options']) {
   await build({
     entryPoints: [resolve(source, `${name}.ts`)],
     outfile: resolve(output, `${name}.js`),

@@ -247,6 +247,35 @@ class MatchTitleRequest(ApiModel):
     title: str = Field('', max_length=200)
 
 
+class MatchPlayerUpdateRequest(ApiModel):
+    side: Literal['left', 'right']
+    slot: int = Field(..., ge=1, le=5)
+    name: Optional[str] = Field(None, max_length=80)
+    hero_id: Optional[int] = Field(None, ge=1)
+    kills: Optional[int] = Field(None, ge=0)
+    deaths: Optional[int] = Field(None, ge=0)
+    assists: Optional[int] = Field(None, ge=0)
+    economy: Optional[int] = Field(None, ge=0)
+    last_hits: Optional[int] = Field(None, ge=0)
+
+
+class MatchUpdateRequest(ApiModel):
+    title: Optional[str] = Field(None, max_length=200)
+    game_mode: Optional[Literal['3v3', '5v5', 'aram', 'other', 'unknown']] = None
+    duration_seconds: Optional[int] = Field(None, gt=0)
+    result_text: Optional[str] = Field(None, max_length=32)
+    end_reason: Optional[Literal['normal', 'surrender', 'unknown']] = None
+    winner_color: Optional[Literal['teal', 'orange', 'unknown']] = None
+    match_kind: Optional[Literal['pvp', 'bot', 'practice', 'unknown']] = None
+    view_context: Optional[Literal['played', 'observed', 'unknown']] = None
+    stats_eligible: Optional[bool] = None
+    left_kills: Optional[int] = Field(None, ge=0)
+    right_kills: Optional[int] = Field(None, ge=0)
+    left_economy: Optional[int] = Field(None, ge=0)
+    right_economy: Optional[int] = Field(None, ge=0)
+    players: Optional[List[MatchPlayerUpdateRequest]] = Field(None, max_items=10)
+
+
 class PlayerNameRequest(ApiModel):
     name: str = Field(..., max_length=80)
 
@@ -267,6 +296,19 @@ class RecordedPlayerRequest(ApiModel):
 
 class PlayerHeroRequest(ApiModel):
     hero_id: int = Field(..., ge=1)
+
+
+class ManualMatchMarkerRequest(ApiModel):
+    part_index: int = Field(..., ge=1, le=10_000)
+    at_ms: int = Field(..., ge=0, le=604_800_000)
+
+
+class ManualMatchMarkerResponse(ApiModel):
+    id: int
+    session_id: int
+    part_id: int
+    part_index: int
+    at_ms: int
 
 
 class SessionAnchorRequest(ApiModel):
@@ -704,7 +746,7 @@ async def get_scan(
 )
 async def retry_publication_step(
     session_id: int,
-    step: Literal['pin', 'chapter'],
+    step: Literal['description', 'comments', 'pin', 'chapter'],
     _subject: str = Depends(authenticated_manager_subject),
     publication_service: VaingloryPublicationService = Depends(get_publication),
 ) -> Response:
@@ -715,6 +757,31 @@ async def retry_publication_step(
             status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from None
     return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.post(
+    '/sessions/{session_id}/match-markers',
+    response_model=ManualMatchMarkerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def mark_session_match(
+    session_id: int,
+    payload: ManualMatchMarkerRequest,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> ManualMatchMarkerResponse:
+    try:
+        marker = await index.mark_session_match(
+            session_id, part_index=payload.part_index, at_ms=payload.at_ms
+        )
+        return ManualMatchMarkerResponse(**marker.__dict__)
+    except (VaingloryConflict, VaingloryNotFound) as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
 
 
 @router.get('/matches', response_model=MatchListResponse)
@@ -1061,17 +1128,26 @@ async def set_player_hero(
 
 
 @router.patch('/matches/{match_id}', response_model=MatchResponse)
-async def update_match_title(
+async def update_match(
     match_id: int,
-    payload: MatchTitleRequest,
+    payload: MatchUpdateRequest,
     _subject: str = Depends(authenticated_manager_subject),
     index: VaingloryIndexService = Depends(get_service),
 ) -> MatchResponse:
     try:
-        return _match(await index.update_match_title(match_id, payload.title))
+        changes = payload.dict(exclude_unset=True)
+        if set(changes) == {'title'}:
+            return _match(
+                await index.update_match_title(match_id, str(changes['title'] or ''))
+            )
+        return _match(await index.update_match_fields(match_id, changes))
     except (VaingloryConflict, VaingloryNotFound) as error:
         _raise_repository_error(error)
         raise AssertionError('unreachable')
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
 
 
 @router.patch('/sessions/bulk-update', response_model=SessionBulkUpdateResponse)

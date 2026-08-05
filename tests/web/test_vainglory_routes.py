@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator, List, Tuple
 
 import pytest
@@ -34,12 +35,14 @@ class FakeService:
         self.match_filters = {}
         self.session_filters = {}
         self.updated_titles = []
+        self.updated_matches = []
         self.updated_session_titles = []
         self.updated_session_anchors = []
         self.bulk_updates = []
         self.publication_retries = []
         self.suppressed_zero_match_sessions = []
         self.restored_zero_match_sessions = []
+        self.manual_match_markers = []
         self.created_players = []
         self.renamed_players = []
         self.bound_rooms = []
@@ -174,6 +177,18 @@ class FakeService:
     async def update_match_title(self, match_id: int, title: str) -> MatchRecord:
         self.updated_titles.append((match_id, title))
         return stored_match(title=title.strip() or '投稿标题')
+
+    async def update_match_fields(self, match_id: int, changes: object) -> MatchRecord:
+        self.updated_matches.append((match_id, changes))
+        return stored_match()
+
+    async def mark_session_match(
+        self, session_id: int, *, part_index: int, at_ms: int
+    ) -> object:
+        self.manual_match_markers.append((session_id, part_index, at_ms))
+        return SimpleNamespace(
+            id=8, session_id=session_id, part_id=11, part_index=part_index, at_ms=at_ms
+        )
 
     async def update_session_title(
         self, session_id: int, title: str
@@ -380,17 +395,28 @@ def api_client(tmp_path: Path) -> Iterator[Tuple[TestClient, FakeService]]:
         yield client, fake
 
 
-def test_retries_failed_pin_and_chapter_independently(
+def test_retries_or_resends_each_publication_step_independently(
     api_client: Tuple[TestClient, FakeService]
 ) -> None:
     client, fake = api_client
 
+    description = client.post(
+        '/api/v1/vainglory/sessions/9/publication/description/retry'
+    )
+    comments = client.post('/api/v1/vainglory/sessions/9/publication/comments/retry')
     pin = client.post('/api/v1/vainglory/sessions/9/publication/pin/retry')
     chapter = client.post('/api/v1/vainglory/sessions/9/publication/chapter/retry')
 
+    assert description.status_code == 202
+    assert comments.status_code == 202
     assert pin.status_code == 202
     assert chapter.status_code == 202
-    assert fake.publication_retries == [(9, 'pin'), (9, 'chapter')]
+    assert fake.publication_retries == [
+        (9, 'description'),
+        (9, 'comments'),
+        (9, 'pin'),
+        (9, 'chapter'),
+    ]
 
 
 def test_match_filters_use_camel_case_query_names(
@@ -492,6 +518,27 @@ def test_lists_and_updates_confirmed_zero_match_scan_suppressions(
     assert restored.status_code == 204
     assert fake.suppressed_zero_match_sessions == [12]
     assert fake.restored_zero_match_sessions == [12]
+
+
+def test_zero_match_session_can_add_a_manual_match_marker(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    response = client.post(
+        '/api/v1/vainglory/sessions/12/match-markers',
+        json={'partIndex': 2, 'atMs': 754_000},
+    )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        'id': 8,
+        'sessionId': 12,
+        'partId': 11,
+        'partIndex': 2,
+        'atMs': 754_000,
+    }
+    assert fake.manual_match_markers == [(12, 2, 754_000)]
 
 
 def test_lists_anchor_win_loss_statistics(
@@ -622,6 +669,45 @@ def test_updates_match_title_and_returns_timeline_metadata(
     assert payload['resultFrameUrl'] == (
         '/api/v1/vainglory/matches/3/result-frame?v=9-11-960000'
     )
+
+
+def test_updates_all_editable_match_fields(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    response = client.patch(
+        '/api/v1/vainglory/matches/3',
+        json={
+            'gameMode': '5v5',
+            'winnerColor': 'orange',
+            'statsEligible': False,
+            'players': [
+                {'side': 'left', 'slot': 1, 'name': '修正玩家', 'heroId': 7, 'kills': 8}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake.updated_matches == [
+        (
+            3,
+            {
+                'game_mode': '5v5',
+                'winner_color': 'orange',
+                'stats_eligible': False,
+                'players': [
+                    {
+                        'side': 'left',
+                        'slot': 1,
+                        'name': '修正玩家',
+                        'hero_id': 7,
+                        'kills': 8,
+                    }
+                ],
+            },
+        )
+    ]
 
 
 def test_serves_result_frame_inline_or_as_download(

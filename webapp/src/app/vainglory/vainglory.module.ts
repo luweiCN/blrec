@@ -10,6 +10,7 @@ import { NzEmptyModule } from 'ng-zorro-antd/empty';
 import { NzIconModule } from 'ng-zorro-antd/icon';
 import { NzImageModule } from 'ng-zorro-antd/image';
 import { NzInputModule } from 'ng-zorro-antd/input';
+import { NzInputNumberModule } from 'ng-zorro-antd/input-number';
 import { NzModalModule } from 'ng-zorro-antd/modal';
 import { NzPageHeaderModule } from 'ng-zorro-antd/page-header';
 import { NzPaginationModule } from 'ng-zorro-antd/pagination';
@@ -17,6 +18,7 @@ import { NzProgressModule } from 'ng-zorro-antd/progress';
 import { NzPopconfirmModule } from 'ng-zorro-antd/popconfirm';
 import { NzSelectModule } from 'ng-zorro-antd/select';
 import { NzSpinModule } from 'ng-zorro-antd/spin';
+import { NzSwitchModule } from 'ng-zorro-antd/switch';
 import { NzTagModule } from 'ng-zorro-antd/tag';
 import { NzTabsModule } from 'ng-zorro-antd/tabs';
 
@@ -40,6 +42,7 @@ import { VaingloryComponent } from './vainglory.component';
     NzIconModule,
     NzImageModule,
     NzInputModule,
+    NzInputNumberModule,
     NzModalModule,
     NzPageHeaderModule,
     NzPaginationModule,
@@ -47,6 +50,7 @@ import { VaingloryComponent } from './vainglory.component';
     NzPopconfirmModule,
     NzSelectModule,
     NzSpinModule,
+    NzSwitchModule,
     NzTagModule,
     NzTabsModule,
   ],

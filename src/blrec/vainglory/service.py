@@ -8,6 +8,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from loguru import logger
 
+from blrec.bili_upload.remote_media import (
+    RemoteMediaCache,
+    RemoteMediaNotFound,
+    RemoteMediaUnavailable,
+)
+
 from .analyzer import (
     AnalysisCancelled,
     AnalysisStatus,
@@ -29,9 +35,11 @@ from .repository import (
     MatchRecord,
     MatchSessionPage,
     MatchSessionRecord,
+    ManualMatchMarkerRecord,
     PlayerRecord,
     PlayerStatsRecord,
     ScanJob,
+    VaingloryConflict,
     VaingloryRepository,
     ZeroMatchSessionPage,
 )
@@ -43,6 +51,7 @@ class VaingloryIndexService:
         repository: VaingloryRepository,
         *,
         analyzer: Optional[VaingloryVideoAnalyzer] = None,
+        remote_media_cache: Optional[RemoteMediaCache] = None,
         idle_poll_seconds: float = 2,
         realtime_poll_seconds: float = 1,
     ) -> None:
@@ -50,6 +59,7 @@ class VaingloryIndexService:
             raise ValueError('poll intervals must be positive')
         self._repository = repository
         self._analyzer = analyzer or VaingloryVideoAnalyzer()
+        self._remote_media_cache = remote_media_cache
         self._idle_poll_seconds = idle_poll_seconds
         self._realtime_poll_seconds = realtime_poll_seconds
         self._scan_wake = asyncio.Event()
@@ -250,6 +260,48 @@ class VaingloryIndexService:
         await self._repository.restore_zero_match_session(session_id)
         self._scan_wake.set()
 
+    async def find_video_part(
+        self, bvid: str, page: int
+    ) -> Optional[ManualMatchMarkerRecord]:
+        return await self._repository.find_video_part(bvid, page)
+
+    async def mark_video_match(
+        self, *, bvid: str, page: int, at_ms: int
+    ) -> ManualMatchMarkerRecord:
+        target = await self._repository.find_video_part(bvid, page)
+        if target is None:
+            raise VaingloryNotFound('这个稿件分 P 尚未进入对局索引')
+        await self._prepare_manual_marker_media(target.part_id)
+        marker = await self._repository.create_manual_match_marker(
+            target.session_id,
+            part_index=target.part_index,
+            at_ms=at_ms,
+            source='browser_extension',
+        )
+        self._scan_wake.set()
+        return marker
+
+    async def mark_session_match(
+        self, session_id: int, *, part_index: int, at_ms: int
+    ) -> ManualMatchMarkerRecord:
+        target = await self._repository.find_session_part(session_id, part_index)
+        if target is None:
+            raise VaingloryNotFound('这场直播不存在该分 P')
+        await self._prepare_manual_marker_media(target.part_id)
+        marker = await self._repository.create_manual_match_marker(
+            session_id, part_index=part_index, at_ms=at_ms, source='dashboard'
+        )
+        self._scan_wake.set()
+        return marker
+
+    async def _prepare_manual_marker_media(self, part_id: int) -> None:
+        if self._remote_media_cache is None:
+            return
+        try:
+            await self._remote_media_cache.request(part_id)
+        except (RemoteMediaNotFound, RemoteMediaUnavailable) as error:
+            raise VaingloryConflict(str(error)) from error
+
     async def list_recorded_player_reviews(
         self, *, limit: int = 50, offset: int = 0
     ) -> MatchPage:
@@ -296,6 +348,11 @@ class VaingloryIndexService:
 
     async def update_match_title(self, match_id: int, title: str) -> MatchRecord:
         return await self._repository.update_match_title(match_id, title)
+
+    async def update_match_fields(
+        self, match_id: int, changes: Dict[str, Any]
+    ) -> MatchRecord:
+        return await self._repository.update_match_fields(match_id, changes)
 
     async def set_recorded_player(
         self, match_id: int, *, side: str, slot: int

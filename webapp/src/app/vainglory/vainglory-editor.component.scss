@@ -1,0 +1,94 @@
+.index-summary-grid article,
+.index-summary-grid .index-summary-action,
+.player-library-item {
+  background: #fff;
+}
+
+.manual-marker-help {
+  color: #595959;
+}
+
+.manual-marker-fields,
+.match-editor-grid,
+.match-editor-team-totals {
+  display: grid;
+  gap: 12px;
+}
+
+.manual-marker-fields {
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.match-editor-grid,
+.match-editor-team-totals {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.manual-marker-fields label,
+.match-editor-grid label,
+.match-editor-team-totals label {
+  display: grid;
+  gap: 6px;
+}
+
+.manual-marker-fields span,
+.match-editor-grid label > span,
+.match-editor-team-totals label > span {
+  color: #595959;
+  font-weight: 600;
+}
+
+.manual-marker-fields nz-input-number,
+.match-editor-grid nz-input-number,
+.match-editor-grid nz-select,
+.match-editor-team-totals nz-input-number,
+.match-editor-player-row nz-input-number,
+.match-editor-player-row nz-select {
+  width: 100%;
+}
+
+.match-editor-wide,
+.match-editor-switch {
+  grid-column: span 2;
+}
+
+.match-editor-switch {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border: 1px solid #d9d9d9;
+}
+
+.match-editor-team-totals h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.match-editor-players {
+  overflow-x: auto;
+  margin-top: 18px;
+}
+
+.match-editor-player-header,
+.match-editor-player-row {
+  display: grid;
+  grid-template-columns: 48px minmax(120px, 1.4fr) minmax(140px, 1.4fr) repeat(
+      3,
+      70px
+    ) repeat(2, 92px);
+  align-items: center;
+  gap: 8px;
+  min-width: 850px;
+}
+
+.match-editor-player-header {
+  color: #8c8c8c;
+  font-size: 12px;
+}
+
+.match-editor-player-row {
+  padding: 6px 0;
+  border-top: 1px solid #f0f0f0;
+}

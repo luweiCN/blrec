@@ -35,12 +35,27 @@ export interface AddHighlightMessage {
   readonly anchorName: string;
 }
 
+export interface VideoStatusMessage {
+  readonly type: 'VIDEO_STATUS';
+  readonly bvid: string;
+  readonly page: number;
+}
+
+export interface MarkMatchMessage {
+  readonly type: 'MARK_MATCH';
+  readonly bvid: string;
+  readonly page: number;
+  readonly currentTimeMs: number;
+}
+
 export type BackgroundMessage =
   | PairMessage
   | RoomStatusMessage
   | CollectMessage
   | ControlOperationMessage
-  | AddHighlightMessage;
+  | AddHighlightMessage
+  | VideoStatusMessage
+  | MarkMatchMessage;
 
 export type BackgroundResponse<T = unknown> =
   | { readonly ok: true; readonly data: T }

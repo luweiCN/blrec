@@ -28,7 +28,11 @@ export type VaingloryDescriptionState =
   | 'skipped_no_room';
 export type VaingloryPinState = 'prepared' | 'in_flight' | 'confirmed';
 export type VaingloryChapterState = 'prepared' | 'confirmed' | 'skipped';
-export type VaingloryPublicationRetryStep = 'pin' | 'chapter';
+export type VaingloryPublicationRetryStep =
+  | 'description'
+  | 'comments'
+  | 'pin'
+  | 'chapter';
 
 export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
 
@@ -316,6 +320,35 @@ export interface VaingloryMatch {
 export interface VaingloryMatchList {
   readonly total: number;
   readonly items: readonly VaingloryMatch[];
+}
+
+export interface VaingloryMatchPlayerUpdate {
+  readonly side: 'left' | 'right';
+  readonly slot: number;
+  readonly name?: string;
+  readonly heroId?: number | null;
+  readonly kills?: number | null;
+  readonly deaths?: number | null;
+  readonly assists?: number | null;
+  readonly economy?: number | null;
+  readonly lastHits?: number | null;
+}
+
+export interface VaingloryMatchUpdate {
+  readonly title?: string;
+  readonly gameMode?: GameMode;
+  readonly durationSeconds?: number | null;
+  readonly resultText?: string;
+  readonly endReason?: MatchEndReason;
+  readonly winnerColor?: TeamColor | 'unknown';
+  readonly matchKind?: MatchKind;
+  readonly viewContext?: ViewContext;
+  readonly statsEligible?: boolean;
+  readonly leftKills?: number | null;
+  readonly rightKills?: number | null;
+  readonly leftEconomy?: number | null;
+  readonly rightEconomy?: number | null;
+  readonly players?: readonly VaingloryMatchPlayerUpdate[];
 }
 
 export interface VaingloryMatchSession {

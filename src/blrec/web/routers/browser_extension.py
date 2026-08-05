@@ -25,6 +25,8 @@ from blrec.control.operations import ControlJournalClosed, ControlLaneSaturated
 from blrec.logging.audit import audit
 from blrec.task.models import RunningStatus
 from blrec.utils.string import camel_case
+from blrec.vainglory.repository import VaingloryConflict, VaingloryNotFound
+from blrec.vainglory.service import VaingloryIndexService
 from blrec.web import security
 from blrec.web.auth_store import (
     AuthenticationFailed,
@@ -36,6 +38,7 @@ application: Optional[Application] = None
 highlight_service: Optional[HighlightService] = None
 policy_manager: Optional[RoomUploadPolicyManager] = None
 category_catalog: Optional[UploadCategoryCatalog] = None
+vainglory_service: Optional[VaingloryIndexService] = None
 unavailable_reason: Optional[str] = 'Browser extension actions are not ready'
 
 
@@ -87,12 +90,34 @@ class HighlightResponse(ApiModel):
     name: str
 
 
+class VideoStatusResponse(ApiModel):
+    indexed: bool
+    session_id: Optional[int] = None
+    part_id: Optional[int] = None
+    part_index: Optional[int] = None
+
+
+class MatchMarkerRequest(ApiModel):
+    page: int = Field(1, ge=1, le=10_000)
+    current_time_ms: int = Field(..., ge=0, le=604_800_000)
+
+
+class MatchMarkerResponse(ApiModel):
+    id: int
+    session_id: int
+    part_id: int
+    part_index: int
+    at_ms: int
+
+
 def reset() -> None:
     global application, category_catalog, highlight_service, policy_manager
+    global vainglory_service
     application = None
     highlight_service = None
     policy_manager = None
     category_catalog = None
+    vainglory_service = None
 
 
 def _application() -> Application:
@@ -129,6 +154,15 @@ def _categories() -> UploadCategoryCatalog:
             detail=unavailable_reason or 'Upload categories are unavailable',
         )
     return category_catalog
+
+
+def _vainglory() -> VaingloryIndexService:
+    if vainglory_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=unavailable_reason or '对局索引暂未就绪',
+        )
+    return vainglory_service
 
 
 router = APIRouter(prefix='/browser-extension', tags=['browser-extension'])
@@ -175,6 +209,59 @@ async def room_status(
     except Exception:
         recording = False
     return RoomStatusResponse(collected=True, recording=recording)
+
+
+@router.get('/videos/{bvid}', response_model=VideoStatusResponse)
+async def video_status(
+    bvid: str,
+    page: int = 1,
+    _identity: ExtensionIdentity = Depends(security.authenticated_extension),
+    index: VaingloryIndexService = Depends(_vainglory),
+) -> VideoStatusResponse:
+    target = await index.find_video_part(bvid, page)
+    if target is None:
+        return VideoStatusResponse(indexed=False)
+    return VideoStatusResponse(
+        indexed=True,
+        session_id=target.session_id,
+        part_id=target.part_id,
+        part_index=target.part_index,
+    )
+
+
+@router.post(
+    '/videos/{bvid}/matches',
+    response_model=MatchMarkerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def mark_video_match(
+    bvid: str,
+    command: MatchMarkerRequest,
+    identity: ExtensionIdentity = Depends(security.authenticated_extension),
+    index: VaingloryIndexService = Depends(_vainglory),
+) -> MatchMarkerResponse:
+    try:
+        marker = await index.mark_video_match(
+            bvid=bvid, page=command.page, at_ms=command.current_time_ms
+        )
+    except VaingloryNotFound as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+        ) from None
+    except (VaingloryConflict, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
+        ) from None
+    audit(
+        'browser_extension_match_marked',
+        token_id=identity.token_id,
+        bvid=bvid,
+        page=command.page,
+        part_id=marker.part_id,
+        at_ms=marker.at_ms,
+        result='created',
+    )
+    return MatchMarkerResponse(**marker.__dict__)
 
 
 @router.post(

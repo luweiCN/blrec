@@ -823,6 +823,87 @@ async def test_repository_filters_game_mode(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_match_marker_is_included_in_future_scan_claim(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            "id,uid,display_name,credential_ciphertext,credential_version,key_id,"
+            "state,created_at,updated_at) "
+            "VALUES(1,42,'账号',X'00',1,'k','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO vainglory_video_sources('
+            'part_id,account_id,bvid,cid,page,origin,state,retention_kind,'
+            'progress,downloaded_bytes,original_artifact_state,created_at,'
+            'updated_at) '
+            "VALUES(1,1,'BV1abcdefgh',123,1,'archive','missing','analysis',"
+            "0,0,'ready',1,1)"
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        marker = await repository.create_manual_match_marker_for_video(
+            bvid='BV1abcdefgh', page=1, at_ms=45_600
+        )
+        claim = await repository.claim_next()
+
+        assert marker.part_id == 1
+        assert claim is not None
+        assert claim.part.manual_candidate_times_ms == (45_600,)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_match_fields_survive_a_later_rescan(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        original = (await repository.list_matches()).items[0]
+
+        edited = await repository.update_match_fields(
+            original.id,
+            {
+                'game_mode': 'aram',
+                'winner_color': 'orange',
+                'stats_eligible': False,
+                'players': [
+                    {'side': 'left', 'slot': 1, 'name': '人工玩家', 'kills': 99}
+                ],
+            },
+        )
+        assert edited.game_mode == 'aram'
+        assert edited.team_size == 3
+        assert edited.winner_color == 'orange'
+        assert edited.stats_eligible is False
+
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        rescanned = (await repository.list_matches()).items[0]
+
+        assert rescanned.game_mode == 'aram'
+        assert rescanned.winner_color == 'orange'
+        assert rescanned.stats_eligible is False
+        assert rescanned.players[0].name == '人工玩家'
+        assert rescanned.players[0].kills == 99
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_lists_one_summary_per_recording_session(
     tmp_path: Path,
 ) -> None:

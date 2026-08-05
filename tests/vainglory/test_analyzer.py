@@ -351,7 +351,7 @@ def test_aram_detection_samples_the_talent_selection_near_estimated_start() -> N
 
     class Detector:
         def is_visible(self, _frame: RgbFrame) -> bool:
-            return len(Sampler.calls) == 2
+            return len(Sampler.calls) >= 2
 
     sampler = Sampler()
     analyzer = VaingloryVideoAnalyzer(
@@ -368,7 +368,39 @@ def test_aram_detection_samples_the_talent_selection_near_estimated_start() -> N
     )
 
     assert mode == 'aram'
-    assert sampler.calls == [11_000, 13_000]
+    assert sampler.calls == [11_000, 13_000, 15_000]
+
+
+def test_aram_detection_rejects_one_noisy_circle_match() -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+
+    class Sampler:
+        calls = []
+
+        def frame_at(self, _path: str, at_ms: int) -> RgbFrame:
+            self.calls.append(at_ms)
+            return frame
+
+    class Detector:
+        def is_visible(self, _frame: RgbFrame) -> bool:
+            return len(Sampler.calls) == 3
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=sampler,  # type: ignore[arg-type]
+        aram_detector=Detector(),  # type: ignore[arg-type]
+    )
+
+    mode = analyzer._detect_game_mode(
+        'unused',
+        result_at_ms=600_000,
+        duration_seconds=590,
+        video_duration_ms=700_000,
+        team_size=3,
+    )
+
+    assert mode == '3v3'
+    assert sampler.calls == [11_000, 13_000, 15_000]
 
 
 def test_aram_detection_fails_safe_when_match_start_is_outside_the_part() -> None:

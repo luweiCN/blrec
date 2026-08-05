@@ -129,3 +129,38 @@
 .blrec-highlight-toast[data-state="error"] {
   background: rgb(168 30 38 / 96%);
 }
+
+.blrec-match-marker-actions {
+  position: fixed;
+  z-index: 2147483645;
+  right: 24px;
+  bottom: 88px;
+}
+
+.blrec-match-marker-actions button {
+  min-height: 36px;
+  padding: 7px 16px;
+  border: 1px solid rgb(255 255 255 / 24%);
+  border-radius: 18px;
+  background: rgb(24 25 28 / 94%);
+  box-shadow: 0 3px 14px rgb(0 0 0 / 24%);
+  color: #fff;
+  font: 500 14px/20px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.blrec-match-marker-actions button:hover,
+.blrec-match-marker-actions button:focus-visible {
+  border-color: #80c9ff;
+  background: rgb(0 112 192 / 94%);
+}
+
+.blrec-match-marker-actions button:focus-visible {
+  outline: 2px solid #80c9ff;
+  outline-offset: 2px;
+}
+
+.blrec-match-marker-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}

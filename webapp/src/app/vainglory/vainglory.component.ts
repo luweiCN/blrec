@@ -34,6 +34,8 @@ import { TaskData } from '../tasks/shared/task.model';
 import { TaskService } from '../tasks/shared/services/task.service';
 import {
   GameMode,
+  MatchEndReason,
+  MatchKind,
   TeamColor,
   VaingloryAnalysisQueue,
   VaingloryAnchorStats,
@@ -55,6 +57,7 @@ import {
   VaingloryPublicationRetryStep,
   VaingloryScanJob,
   VaingloryZeroMatchSession,
+  ViewContext,
 } from './vainglory.model';
 import { VaingloryService } from './vainglory.service';
 
@@ -156,10 +159,42 @@ type BulkRescanResult =
       readonly error: unknown;
     };
 
+interface MatchPlayerEditDraft {
+  side: 'left' | 'right';
+  slot: number;
+  name: string;
+  heroId: number | null;
+  kills: number | null;
+  deaths: number | null;
+  assists: number | null;
+  economy: number | null;
+  lastHits: number | null;
+}
+
+interface MatchEditDraft {
+  title: string;
+  gameMode: GameMode;
+  durationSeconds: number | null;
+  resultText: string;
+  endReason: MatchEndReason;
+  winnerColor: TeamColor | 'unknown';
+  matchKind: MatchKind;
+  viewContext: ViewContext;
+  statsEligible: boolean;
+  leftKills: number | null;
+  rightKills: number | null;
+  leftEconomy: number | null;
+  rightEconomy: number | null;
+  players: MatchPlayerEditDraft[];
+}
+
 @Component({
   selector: 'app-vainglory',
   templateUrl: './vainglory.component.html',
-  styleUrls: ['./vainglory.component.scss'],
+  styleUrls: [
+    './vainglory.component.scss',
+    './vainglory-editor.component.scss',
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class VaingloryComponent implements OnInit, OnDestroy {
@@ -197,6 +232,16 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   readonly rescanningSessionIds = new Set<number>();
   readonly updatingScanSuppressionSessionIds = new Set<number>();
   readonly retryingPublicationSteps = new Set<string>();
+  readonly savingMatchIds = new Set<number>();
+  matchEditorVisible = false;
+  editingMatch: VaingloryMatch | null = null;
+  matchEditDraft: MatchEditDraft | null = null;
+  savingMatchEdit = false;
+  manualMarkerVisible = false;
+  manualMarkerSession: VaingloryZeroMatchSession | null = null;
+  manualMarkerPartIndex = 1;
+  manualMarkerTime = '';
+  savingManualMarker = false;
   bulkAnchorDraft: string | null = null;
   bulkAnchorModalVisible = false;
   bulkUpdatingAction: BulkUpdateAction | null = null;
@@ -709,9 +754,24 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (session.publicationState !== 'failed') {
       return false;
     }
-    return step === 'pin'
+    return step === 'pin' || step === 'comments'
       ? session.pinState !== 'confirmed'
-      : session.chapterState !== 'confirmed';
+      : step === 'description'
+        ? session.descriptionState !== 'confirmed'
+        : session.chapterState !== 'confirmed';
+  }
+
+  canRetryPublicationStep(session: VaingloryMatchSession): boolean {
+    return (
+      session.publicationState !== null && session.publicationState !== 'running'
+    );
+  }
+
+  publicationRetryLabel(
+    session: VaingloryMatchSession,
+    step: VaingloryPublicationRetryStep,
+  ): string {
+    return this.isPublicationStepFailed(session, step) ? '重试' : '重发';
   }
 
   isPublicationStepRetrying(
@@ -727,7 +787,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     session: VaingloryMatchSession,
     step: VaingloryPublicationRetryStep,
   ): void {
-    if (!this.isPublicationStepFailed(session, step)) {
+    if (!this.canRetryPublicationStep(session)) {
       return;
     }
     const key = this.publicationRetryKey(session.sessionId, step);
@@ -748,15 +808,21 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       .subscribe({
         next: () => {
           this.markPublicationStepQueued(session.sessionId, step);
+          const labels: Readonly<Record<VaingloryPublicationRetryStep, string>> = {
+            description: '简介',
+            comments: '置顶评论',
+            pin: '置顶评论',
+            chapter: '视频分段',
+          };
           this.messages.success(
-            `已重新提交${step === 'pin' ? '置顶评论' : '视频分段'}`,
+            `已重新提交${labels[step]}`,
           );
         },
         error: (error: unknown) => {
           this.messages.error(
             this.errorMessage(
               error,
-              `无法重试${step === 'pin' ? '置顶评论' : '视频分段'}`,
+              '无法重试这个发布步骤',
             ),
           );
         },
@@ -786,7 +852,12 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         return {
           ...session,
           publicationState: 'prepared',
-          pinState: step === 'pin' ? 'prepared' : session.pinState,
+          descriptionState:
+            step === 'description' ? 'prepared' : session.descriptionState,
+          pinState:
+            step === 'pin' || step === 'comments'
+              ? 'prepared'
+              : session.pinState,
           chapterState:
             step === 'chapter' ? 'prepared' : session.chapterState,
         };
@@ -889,6 +960,153 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   detailsFor(sessionId: number): MatchDetailsView | null {
     return this.matchDetails.get(sessionId) ?? null;
+  }
+
+  openMatchEditor(match: VaingloryMatch): void {
+    this.editingMatch = match;
+    this.matchEditDraft = {
+      title: match.title,
+      gameMode: match.gameMode,
+      durationSeconds: match.durationSeconds,
+      resultText: match.resultText,
+      endReason: match.endReason,
+      winnerColor: match.winnerColor,
+      matchKind: match.matchKind,
+      viewContext: match.viewContext,
+      statsEligible: match.statsEligible,
+      leftKills: match.leftKills,
+      rightKills: match.rightKills,
+      leftEconomy: match.leftEconomy,
+      rightEconomy: match.rightEconomy,
+      players: match.players.map((player) => ({
+        side: player.side,
+        slot: player.slot,
+        name: player.name,
+        heroId: player.heroId,
+        kills: player.kills,
+        deaths: player.deaths,
+        assists: player.assists,
+        economy: player.economy,
+        lastHits: player.lastHits,
+      })),
+    };
+    this.matchEditorVisible = true;
+  }
+
+  saveMatchEdit(): void {
+    const match = this.editingMatch;
+    const draft = this.matchEditDraft;
+    if (match === null || draft === null || this.savingMatchEdit) {
+      return;
+    }
+    this.savingMatchEdit = true;
+    this.vainglory
+      .updateMatch(match.id, draft)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.savingMatchEdit = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (saved) => {
+          this.replaceMatchDetails(saved);
+          this.matchEditorVisible = false;
+          this.editingMatch = null;
+          this.matchEditDraft = null;
+          this.loadPlayerStats();
+          this.loadHeroStats();
+          this.messages.success('对局信息已人工修正，后续重扫不会覆盖');
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '对局信息保存失败'));
+        },
+      });
+  }
+
+  toggleMatchStatsEligibility(match: VaingloryMatch): void {
+    if (this.savingMatchIds.has(match.id)) {
+      return;
+    }
+    this.savingMatchIds.add(match.id);
+    this.vainglory
+      .updateMatch(match.id, { statsEligible: !match.statsEligible })
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.savingMatchIds.delete(match.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: (saved) => {
+          this.replaceMatchDetails(saved);
+          this.loadPlayerStats();
+          this.loadHeroStats();
+          this.messages.success(
+            saved.statsEligible ? '已恢复计入统计' : '已设为不计入统计',
+          );
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '统计设置保存失败'));
+        },
+      });
+  }
+
+  openManualMarker(session: VaingloryZeroMatchSession): void {
+    this.manualMarkerSession = session;
+    this.manualMarkerPartIndex = 1;
+    this.manualMarkerTime = '';
+    this.manualMarkerVisible = true;
+  }
+
+  saveManualMarker(): void {
+    const session = this.manualMarkerSession;
+    const atMs = this.parseMarkerTime(this.manualMarkerTime);
+    if (session === null || atMs === null || this.savingManualMarker) {
+      if (atMs === null) {
+        this.messages.error('请输入有效时间，例如 12:34 或 1:02:03');
+      }
+      return;
+    }
+    this.savingManualMarker = true;
+    this.vainglory
+      .markSessionMatch(session.sessionId, this.manualMarkerPartIndex, atMs)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.savingManualMarker = false;
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.manualMarkerVisible = false;
+          this.messages.success('已标记对局并加入人工优先识别队列');
+          this.loadZeroMatchSessions();
+          this.loadSuppressedZeroMatchSessions();
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '对局时间点标记失败'));
+        },
+      });
+  }
+
+  private parseMarkerTime(value: string): number | null {
+    const parts = value.trim().split(':');
+    if (parts.length < 1 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+      return null;
+    }
+    const numbers = parts.map((part) => Number.parseInt(part, 10));
+    if (
+      numbers.some((part) => !Number.isSafeInteger(part)) ||
+      (parts.length > 1 && numbers.slice(1).some((part) => part >= 60))
+    ) {
+      return null;
+    }
+    const seconds = numbers.reduce((total, part) => total * 60 + part, 0);
+    return seconds <= 604_800 ? seconds * 1_000 : null;
   }
 
   private loadSessionDetails(sessionId: number): void {

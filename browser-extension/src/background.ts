@@ -57,20 +57,36 @@ export async function handleBackgroundMessage(
         data: await api.controlOperation(message.operationId),
       };
     }
+    if (message.type === 'ADD_HIGHLIGHT') {
+      return {
+        ok: true,
+        data: await api.addHighlight(message.roomId, {
+          observedAtMs: message.observedAtMs,
+          playerDelayMs: message.playerDelayMs,
+          currentTimeMs: message.currentTimeMs,
+          seekableEndMs: message.seekableEndMs,
+          rawDelayMs: message.rawDelayMs,
+          baselineDelayMs: message.baselineDelayMs,
+          effectiveRewindMs: message.effectiveRewindMs,
+          name: message.name,
+          title: message.title,
+          anchorName: message.anchorName,
+        }),
+      };
+    }
+    if (message.type === 'VIDEO_STATUS') {
+      return {
+        ok: true,
+        data: await api.videoStatus(message.bvid, message.page),
+      };
+    }
     return {
       ok: true,
-      data: await api.addHighlight(message.roomId, {
-        observedAtMs: message.observedAtMs,
-        playerDelayMs: message.playerDelayMs,
-        currentTimeMs: message.currentTimeMs,
-        seekableEndMs: message.seekableEndMs,
-        rawDelayMs: message.rawDelayMs,
-        baselineDelayMs: message.baselineDelayMs,
-        effectiveRewindMs: message.effectiveRewindMs,
-        name: message.name,
-        title: message.title,
-        anchorName: message.anchorName,
-      }),
+      data: await api.markMatch(
+        message.bvid,
+        message.page,
+        message.currentTimeMs
+      ),
     };
   } catch (error) {
     return {

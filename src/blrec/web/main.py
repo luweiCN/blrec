@@ -564,6 +564,7 @@ browser_extension.application = app
 browser_extension.highlight_service = None
 browser_extension.policy_manager = None
 browser_extension.category_catalog = None
+browser_extension.vainglory_service = None
 browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
 vainglory.service = None
 vainglory.publication = None
@@ -754,6 +755,7 @@ async def on_startup() -> None:
         browser_extension.highlight_service = _bili_account_runtime.highlight_service
         browser_extension.policy_manager = _bili_account_runtime.policy_manager
         browser_extension.category_catalog = _bili_account_runtime.category_catalog
+        browser_extension.vainglory_service = _bili_account_runtime.vainglory_service
         browser_extension.unavailable_reason = _bili_account_runtime.unavailable_reason
         vainglory.service = _bili_account_runtime.vainglory_service
         vainglory.publication = _bili_account_runtime.vainglory_publication

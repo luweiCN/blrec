@@ -243,6 +243,7 @@ class FakePublicationProtocol:
         self.picture_calls: List[str] = []
         self.add_reply_calls: List[Mapping[str, Any]] = []
         self.top_reply_calls: List[Mapping[str, Any]] = []
+        self.delete_reply_calls: List[Mapping[str, Any]] = []
         self.list_replies_calls: List[Mapping[str, Any]] = []
         self.chapter_calls: List[Mapping[str, Any]] = []
         self.add_reply_result: Any = {'code': 0, 'data': {'rpid': 501}}
@@ -333,6 +334,12 @@ class FakePublicationProtocol:
         self, _bundle: object, params: Mapping[str, Any]
     ) -> Mapping[str, Any]:
         self.top_reply_calls.append(dict(params))
+        return {'code': 0}
+
+    async def delete_reply(
+        self, _bundle: object, params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        self.delete_reply_calls.append(dict(params))
         return {'code': 0}
 
     async def list_replies(
@@ -610,11 +617,71 @@ async def test_unknown_comment_is_reconciled_without_duplicate_or_image_reupload
 
         assert len(protocol.add_reply_calls) == 1
         assert len(protocol.picture_calls) == 1
-        assert len(protocol.list_replies_calls) == 1
+        assert len(protocol.list_replies_calls) == 2
         assert (
             await database.scalar('SELECT state FROM vainglory_publication_comments')
             == 'confirmed'
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_comment_publish_deletes_all_owned_root_comments_first(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+        protocol.list_replies_result = {
+            'code': 0,
+            'data': {
+                'cursor': {'is_end': True, 'next': 0},
+                'replies': [
+                    {
+                        'rpid': 701,
+                        'oid': 303,
+                        'mid': 42,
+                        'root': 0,
+                        'parent': 0,
+                        'content': {'message': '旧顶层评论'},
+                    },
+                    {
+                        'rpid': 702,
+                        'oid': 303,
+                        'mid': 42,
+                        'root': 701,
+                        'parent': 701,
+                        'content': {'message': '本账号回复'},
+                    },
+                    {
+                        'rpid': 703,
+                        'oid': 303,
+                        'mid': 99,
+                        'root': 0,
+                        'parent': 0,
+                        'content': {'message': '其他人评论'},
+                    },
+                ],
+            },
+        }
+
+        assert await service.run_once() is True
+
+        assert protocol.delete_reply_calls == [{'type': 1, 'oid': 303, 'rpid': 701}]
+        assert protocol.add_reply_calls == []
     finally:
         await database.close()
 
@@ -901,7 +968,7 @@ async def test_manual_pin_retry_only_resets_the_pin_step(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_manual_publication_retry_rejects_a_non_failed_task(
+async def test_manual_publication_retry_allows_resending_a_confirmed_step(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -917,9 +984,25 @@ async def test_manual_publication_retry_rejects_a_non_failed_task(
             clock=lambda: 1000,
         )
         assert await service.run_once() is True
+        await database.execute(
+            "UPDATE vainglory_publications SET state='confirmed',"
+            "chapter_state='confirmed',description_state='confirmed',"
+            "pin_state='confirmed',error=NULL"
+        )
 
-        with pytest.raises(ValueError, match='不是失败状态'):
-            await service.retry_failed_step(1, 'chapter')
+        await service.retry_failed_step(1, 'chapter')
+
+        row = await database.fetchone(
+            'SELECT state,chapter_state,description_state,pin_state,error '
+            'FROM vainglory_publications'
+        )
+        assert dict(row) == {
+            'state': 'prepared',
+            'chapter_state': 'prepared',
+            'description_state': 'confirmed',
+            'pin_state': 'confirmed',
+            'error': None,
+        }
     finally:
         await database.close()
 
