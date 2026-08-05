@@ -237,11 +237,18 @@ class VaingloryIndexService:
         return await self._repository.list_match_sessions(**filters)
 
     async def list_zero_match_sessions(
-        self, *, limit: int = 20, offset: int = 0
+        self, *, limit: int = 20, offset: int = 0, suppressed: bool = False
     ) -> ZeroMatchSessionPage:
         return await self._repository.list_zero_match_sessions(
-            limit=limit, offset=offset
+            limit=limit, offset=offset, suppressed=suppressed
         )
+
+    async def suppress_zero_match_session(self, session_id: int) -> None:
+        await self._repository.suppress_zero_match_session(session_id)
+
+    async def restore_zero_match_session(self, session_id: int) -> None:
+        await self._repository.restore_zero_match_session(session_id)
+        self._scan_wake.set()
 
     async def list_recorded_player_reviews(
         self, *, limit: int = 50, offset: int = 0

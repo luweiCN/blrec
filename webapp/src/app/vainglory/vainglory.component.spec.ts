@@ -160,6 +160,8 @@ describe('VaingloryComponent remote media', () => {
     vainglory = jasmine.createSpyObj<VaingloryService>('VaingloryService', [
       'listMatchSessions',
       'listZeroMatchSessions',
+      'suppressZeroMatchSession',
+      'restoreZeroMatchSession',
       'listMatches',
       'listHeroes',
       'listAnchorStats',
@@ -559,6 +561,41 @@ describe('VaingloryComponent remote media', () => {
     expect(vainglory.listZeroMatchSessions).toHaveBeenCalledTimes(2);
     expect(messages.success).toHaveBeenCalledWith(
       '已加入重新分析队列，并提升为手动优先',
+    );
+  });
+
+  it('confirms a zero-match session should not be scanned again', () => {
+    vainglory.listZeroMatchSessions.and.returnValue(
+      of({
+        total: 1,
+        items: [
+          {
+            sessionId: 12,
+            title: '其他游戏直播',
+            sourceTitle: '其他游戏直播',
+            anchorName: '主播',
+            startedAt: 1_000,
+            completedAt: 2_000,
+            recordingDurationSeconds: 7_200,
+            partCount: 3,
+            bvid: 'BV1zero12345',
+          },
+        ],
+      }),
+    );
+    vainglory.suppressZeroMatchSession.and.returnValue(of(void 0));
+
+    component.loadZeroMatchSessions();
+    component.suppressZeroMatchSession(component.zeroMatchSessions[0]);
+
+    expect(vainglory.suppressZeroMatchSession).toHaveBeenCalledOnceWith(12);
+    expect(vainglory.listZeroMatchSessions.calls.allArgs()).toEqual([
+      [20, 0],
+      [20, 0],
+      [20, 0, true],
+    ]);
+    expect(messages.success).toHaveBeenCalledWith(
+      '已确认无需扫描，今后的批量重扫也会跳过这场直播',
     );
   });
 

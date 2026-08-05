@@ -799,17 +799,23 @@ class VaingloryRepository:
                 'FROM vainglory_matches match '
                 'LEFT JOIN vainglory_part_jobs job '
                 'ON job.part_id=match.result_part_id '
-                'WHERE job.part_id IS NULL OR job.algorithm_version<? '
+                'WHERE (job.part_id IS NULL OR job.algorithm_version<?) '
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
+                'suppression WHERE suppression.session_id=match.session_id) '
                 'UNION '
-                'SELECT DISTINCT session_id FROM vainglory_part_jobs '
-                'WHERE algorithm_version<?',
+                'SELECT DISTINCT job.session_id FROM vainglory_part_jobs job '
+                'WHERE job.algorithm_version<? AND NOT EXISTS('
+                'SELECT 1 FROM vainglory_scan_suppressions suppression '
+                'WHERE suppression.session_id=job.session_id)',
                 (self.ALGORITHM_VERSION, self.ALGORITHM_VERSION),
             ).fetchall()
             import_rows = connection.execute(
                 'SELECT DISTINCT import_id FROM vainglory_archive_parts '
                 'WHERE recording_part_id IN('
-                'SELECT part_id FROM vainglory_part_jobs '
-                'WHERE algorithm_version<?)',
+                'SELECT job.part_id FROM vainglory_part_jobs job '
+                'WHERE job.algorithm_version<? AND NOT EXISTS('
+                'SELECT 1 FROM vainglory_scan_suppressions suppression '
+                'WHERE suppression.session_id=job.session_id))',
                 (self.ALGORITHM_VERSION,),
             ).fetchall()
             obsolete_frame_paths.extend(
@@ -819,7 +825,9 @@ class VaingloryRepository:
                     'WHERE result_frame_path IS NOT NULL AND NOT EXISTS('
                     'SELECT 1 FROM vainglory_part_jobs job '
                     'WHERE job.part_id=vainglory_matches.result_part_id '
-                    'AND job.algorithm_version>=?)',
+                    'AND job.algorithm_version>=?) AND NOT EXISTS('
+                    'SELECT 1 FROM vainglory_scan_suppressions suppression '
+                    'WHERE suppression.session_id=vainglory_matches.session_id)',
                     (self.ALGORITHM_VERSION,),
                 ).fetchall()
             )
@@ -827,25 +835,35 @@ class VaingloryRepository:
                 'DELETE FROM vainglory_matches WHERE NOT EXISTS('
                 'SELECT 1 FROM vainglory_part_jobs job '
                 'WHERE job.part_id=vainglory_matches.result_part_id '
-                'AND job.algorithm_version>=?)',
+                'AND job.algorithm_version>=?) AND NOT EXISTS('
+                'SELECT 1 FROM vainglory_scan_suppressions suppression '
+                'WHERE suppression.session_id=vainglory_matches.session_id)',
                 (self.ALGORITHM_VERSION,),
             ).rowcount
             connection.execute(
                 'DELETE FROM vainglory_ocr_jobs WHERE part_id IN('
-                'SELECT part_id FROM vainglory_part_jobs WHERE algorithm_version<?)',
+                'SELECT job.part_id FROM vainglory_part_jobs job '
+                'WHERE job.algorithm_version<? AND NOT EXISTS('
+                'SELECT 1 FROM vainglory_scan_suppressions suppression '
+                'WHERE suppression.session_id=job.session_id))',
                 (self.ALGORITHM_VERSION,),
             )
             connection.execute(
                 "UPDATE vainglory_archive_parts SET state='queued',progress=0,"
                 'error=NULL,updated_at=? WHERE recording_part_id IN('
-                'SELECT part_id FROM vainglory_part_jobs '
-                'WHERE algorithm_version<?)',
+                'SELECT job.part_id FROM vainglory_part_jobs job '
+                'WHERE job.algorithm_version<? AND NOT EXISTS('
+                'SELECT 1 FROM vainglory_scan_suppressions suppression '
+                'WHERE suppression.session_id=job.session_id))',
                 (now, self.ALGORITHM_VERSION),
             )
             connection.execute(
                 "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
                 'algorithm_version=?,match_count=0,error=NULL,started_at=NULL,'
-                'completed_at=NULL,updated_at=? WHERE algorithm_version<?',
+                'completed_at=NULL,updated_at=? WHERE algorithm_version<? '
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
+                'suppression WHERE suppression.session_id='
+                'vainglory_part_jobs.session_id)',
                 (self.ALGORITHM_VERSION, now, self.ALGORITHM_VERSION),
             )
             for import_row in import_rows:
@@ -983,7 +1001,9 @@ class VaingloryRepository:
             session = connection.execute(
                 'SELECT session.state,session.deletion_state,session.title,'
                 'job.policy_snapshot_json,migration.title AS migration_title,'
-                'imported.title AS import_title '
+                'imported.title AS import_title,'
+                'EXISTS(SELECT 1 FROM vainglory_scan_suppressions suppression '
+                'WHERE suppression.session_id=session.id) AS scan_suppressed '
                 'FROM recording_sessions session '
                 'LEFT JOIN upload_jobs job ON job.session_id=session.id '
                 'LEFT JOIN archive_migration_items migration '
@@ -994,6 +1014,8 @@ class VaingloryRepository:
             ).fetchone()
             if session is None:
                 raise VaingloryNotFound('录播场次不存在')
+            if bool(session['scan_suppressed']):
+                raise VaingloryConflict('该直播已确认无需扫描，请先恢复扫描')
             if is_excluded_title(
                 session['title'],
                 session['migration_title'],
@@ -1066,6 +1088,8 @@ class VaingloryRepository:
                 "AND session.deletion_state='none' "
                 "AND session.state NOT IN ('cancelled','skipped') "
                 "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
+                'suppression WHERE suppression.session_id=session.id) '
                 'AND (job.part_id IS NULL OR job.algorithm_version<?) '
                 'ORDER BY part.created_at,part.id',
                 (self.ALGORITHM_VERSION,),
@@ -1146,6 +1170,8 @@ class VaingloryRepository:
                 'AND part.video_deleted_at IS NULL '
                 "AND session.deletion_state='none' "
                 "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
+                'suppression WHERE suppression.session_id=session.id) '
                 "AND (source.origin IS NULL OR source.origin!='archive' "
                 'OR COALESCE(archive_sync.operator_paused,0)=0) '
                 'AND (archive_part.import_id IS NULL OR NOT EXISTS('
@@ -1308,6 +1334,8 @@ class VaingloryRepository:
                 'AND part.video_deleted_at IS NULL '
                 "AND session.deletion_state='none' "
                 "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
+                'suppression WHERE suppression.session_id=session.id) '
                 "AND (source.origin IS NULL OR source.origin!='archive' "
                 'OR COALESCE(archive_sync.operator_paused,0)=0) '
                 'ORDER BY priority,'
@@ -2225,20 +2253,73 @@ class VaingloryRepository:
             total=total, items=tuple(by_id[value] for value in session_ids)
         )
 
+    async def suppress_zero_match_session(self, session_id: int) -> None:
+        now = self._now()
+
+        def suppress(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                'SELECT session.id,scan.state,scan.match_count,'
+                'EXISTS(SELECT 1 FROM vainglory_matches match '
+                'WHERE match.session_id=session.id) AS has_matches '
+                'FROM recording_sessions session '
+                'LEFT JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
+                'WHERE session.id=?',
+                (int(session_id),),
+            ).fetchone()
+            if row is None:
+                raise VaingloryNotFound('录播场次不存在')
+            if (
+                row['state'] is None
+                or str(row['state']) != 'ready'
+                or int(row['match_count'] or 0) != 0
+                or bool(row['has_matches'])
+            ):
+                raise VaingloryConflict('只能标记扫描完成且没有对局的直播')
+            connection.execute(
+                'INSERT OR IGNORE INTO vainglory_scan_suppressions('
+                'session_id,created_at) VALUES(?,?)',
+                (int(session_id), now),
+            )
+
+        await self._database.write(suppress)
+
+    async def restore_zero_match_session(self, session_id: int) -> None:
+        def restore(connection: sqlite3.Connection) -> None:
+            session = connection.execute(
+                'SELECT 1 FROM recording_sessions WHERE id=?', (int(session_id),)
+            ).fetchone()
+            if session is None:
+                raise VaingloryNotFound('录播场次不存在')
+            connection.execute(
+                'DELETE FROM vainglory_scan_suppressions WHERE session_id=?',
+                (int(session_id),),
+            )
+
+        await self._database.write(restore)
+
     async def list_zero_match_sessions(
-        self, *, limit: int = 20, offset: int = 0
+        self, *, limit: int = 20, offset: int = 0, suppressed: bool = False
     ) -> ZeroMatchSessionPage:
         if limit < 1 or limit > 100:
             raise ValueError('limit must be between 1 and 100')
         if offset < 0:
             raise ValueError('offset must not be negative')
         condition = (
-            "scan.state='ready' AND scan.algorithm_version=? "
+            "scan.state='ready' "
             'AND scan.match_count=0 AND scan.completed_at IS NOT NULL '
             'AND NOT EXISTS(SELECT 1 FROM vainglory_matches match '
-            'WHERE match.session_id=session.id)'
+            'WHERE match.session_id=session.id) '
+            'AND {}EXISTS(SELECT 1 FROM vainglory_scan_suppressions suppression '
+            'WHERE suppression.session_id=session.id)'.format(
+                '' if suppressed else 'NOT '
+            )
         )
-        parameters = (self.ALGORITHM_VERSION,)
+        parameters: Tuple[object, ...]
+        if suppressed:
+            parameters = ()
+        else:
+            condition += ' AND scan.algorithm_version=?'
+            parameters = (self.ALGORITHM_VERSION,)
         total = int(
             await self._database.scalar(
                 'SELECT COUNT(*) FROM vainglory_scan_jobs scan '

@@ -7,7 +7,11 @@ from blrec.bili_upload.database import BiliUploadDatabase
 from blrec.vainglory.analyzer import AnalyzedHero, AnalyzedMatch, ScannedPart
 from blrec.vainglory.hero_recognition import HeroReference
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
-from blrec.vainglory.repository import VaingloryNotFound, VaingloryRepository
+from blrec.vainglory.repository import (
+    VaingloryConflict,
+    VaingloryNotFound,
+    VaingloryRepository,
+)
 from blrec.vainglory.vision import RecordedPlayer, ResultLayout
 
 
@@ -913,6 +917,52 @@ async def test_repository_lists_only_completed_zero_match_sessions(
         assert item.recording_duration_seconds == 900
         assert item.part_count == 2
         assert item.bvid is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_zero_match_session_is_hidden_and_skipped_until_restored(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        claim = await repository.claim_next()
+        assert claim is not None
+        await repository.complete_part(claim.part.id, ())
+
+        await repository.suppress_zero_match_session(1)
+
+        assert (await repository.list_zero_match_sessions()).total == 0
+        suppressed = await repository.list_zero_match_sessions(suppressed=True)
+        assert suppressed.total == 1
+        assert suppressed.items[0].session_id == 1
+        with pytest.raises(VaingloryConflict, match='请先恢复扫描'):
+            await repository.request_scan(1)
+        await database.execute(
+            'UPDATE vainglory_part_jobs SET algorithm_version=? WHERE part_id=1',
+            (repository.ALGORITHM_VERSION - 1,),
+        )
+        assert await repository.invalidate_outdated_results() == 0
+        part_job = await database.fetchone(
+            'SELECT state,algorithm_version FROM vainglory_part_jobs WHERE part_id=1'
+        )
+        assert part_job is not None
+        assert str(part_job['state']) == 'ready'
+        assert int(part_job['algorithm_version']) == repository.ALGORITHM_VERSION - 1
+        assert await repository.discover_ready_parts() == 0
+        assert await repository.claim_next() is None
+
+        await repository.restore_zero_match_session(1)
+        requested = await repository.request_scan(1)
+
+        assert requested.state == 'pending'
+        assert (await repository.list_zero_match_sessions(suppressed=True)).total == 0
     finally:
         await database.close()
 

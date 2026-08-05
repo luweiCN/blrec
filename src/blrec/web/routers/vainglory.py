@@ -807,13 +807,46 @@ async def list_match_sessions(
 async def list_zero_match_sessions(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    suppressed: bool = Query(False),
     _subject: str = Depends(authenticated_manager_subject),
     index: VaingloryIndexService = Depends(get_service),
 ) -> ZeroMatchSessionListResponse:
-    page = await index.list_zero_match_sessions(limit=limit, offset=offset)
+    page = await index.list_zero_match_sessions(
+        limit=limit, offset=offset, suppressed=suppressed
+    )
     return ZeroMatchSessionListResponse(
         total=page.total, items=[_zero_match_session(item) for item in page.items]
     )
+
+
+@router.put(
+    '/sessions/{session_id}/scan-suppression', status_code=status.HTTP_204_NO_CONTENT
+)
+async def suppress_zero_match_session(
+    session_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        await index.suppress_zero_match_session(session_id)
+    except (VaingloryConflict, VaingloryNotFound) as error:
+        _raise_repository_error(error)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    '/sessions/{session_id}/scan-suppression', status_code=status.HTTP_204_NO_CONTENT
+)
+async def restore_zero_match_session(
+    session_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        await index.restore_zero_match_session(session_id)
+    except (VaingloryConflict, VaingloryNotFound) as error:
+        _raise_repository_error(error)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get('/stats/anchors', response_model=List[AnchorStatsResponse])

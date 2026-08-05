@@ -165,6 +165,9 @@ type BulkRescanResult =
 export class VaingloryComponent implements OnInit, OnDestroy {
   sessionsView: SessionsView = { state: 'loading' };
   zeroMatchSessionsView: ZeroMatchSessionsView = { state: 'loading' };
+  suppressedZeroMatchSessionsView: ZeroMatchSessionsView = {
+    state: 'loading',
+  };
   heroesView: HeroesView = { state: 'loading' };
   anchorStatsView: AnchorStatsView = { state: 'loading' };
   playersView: PlayersView = { state: 'loading' };
@@ -192,6 +195,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   readonly pageSize = 20;
   readonly selectedSessionIds = new Set<number>();
   readonly rescanningSessionIds = new Set<number>();
+  readonly updatingScanSuppressionSessionIds = new Set<number>();
   readonly retryingPublicationSteps = new Set<string>();
   bulkAnchorDraft: string | null = null;
   bulkAnchorModalVisible = false;
@@ -222,6 +226,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   zeroMatchReviewVisible = false;
   zeroMatchPageIndex = 1;
   readonly zeroMatchPageSize = 20;
+  suppressedZeroMatchPageIndex = 1;
   archiveManagerVisible = false;
   archiveAccounts: readonly BiliAccount[] = [];
   archiveAccountsLoading = false;
@@ -331,6 +336,18 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   get zeroMatchSessionTotal(): number {
     return this.zeroMatchSessionsView.state === 'ready'
       ? this.zeroMatchSessionsView.total
+      : 0;
+  }
+
+  get suppressedZeroMatchSessions(): readonly VaingloryZeroMatchSession[] {
+    return this.suppressedZeroMatchSessionsView.state === 'ready'
+      ? this.suppressedZeroMatchSessionsView.items
+      : [];
+  }
+
+  get suppressedZeroMatchSessionTotal(): number {
+    return this.suppressedZeroMatchSessionsView.state === 'ready'
+      ? this.suppressedZeroMatchSessionsView.total
       : 0;
   }
 
@@ -512,6 +529,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   openZeroMatchReviews(): void {
     this.zeroMatchReviewVisible = true;
     this.loadZeroMatchSessions();
+    this.loadSuppressedZeroMatchSessions();
   }
 
   zeroMatchPageChanged(pageIndex: number): void {
@@ -543,6 +561,42 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           this.zeroMatchSessionsView = {
             state: 'error',
             message: this.errorMessage(error, '0 局直播加载失败'),
+          };
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
+  suppressedZeroMatchPageChanged(pageIndex: number): void {
+    if (pageIndex === this.suppressedZeroMatchPageIndex) {
+      return;
+    }
+    this.suppressedZeroMatchPageIndex = pageIndex;
+    this.loadSuppressedZeroMatchSessions();
+  }
+
+  loadSuppressedZeroMatchSessions(): void {
+    this.suppressedZeroMatchSessionsView = { state: 'loading' };
+    this.vainglory
+      .listZeroMatchSessions(
+        this.zeroMatchPageSize,
+        (this.suppressedZeroMatchPageIndex - 1) * this.zeroMatchPageSize,
+        true,
+      )
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          this.suppressedZeroMatchSessionsView = {
+            state: 'ready',
+            total: response.total,
+            items: response.items,
+          };
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.suppressedZeroMatchSessionsView = {
+            state: 'error',
+            message: this.errorMessage(error, '已确认直播加载失败'),
           };
           this.changeDetector.markForCheck();
         },
@@ -592,6 +646,58 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         },
         error: (error: unknown) => {
           this.messages.error(this.errorMessage(error, '无法重新分析这场直播'));
+        },
+      });
+  }
+
+  isScanSuppressionUpdating(sessionId: number): boolean {
+    return this.updatingScanSuppressionSessionIds.has(sessionId);
+  }
+
+  suppressZeroMatchSession(session: VaingloryZeroMatchSession): void {
+    this.updateZeroMatchScanSuppression(session.sessionId, true);
+  }
+
+  restoreZeroMatchSession(session: VaingloryZeroMatchSession): void {
+    this.updateZeroMatchScanSuppression(session.sessionId, false);
+  }
+
+  private updateZeroMatchScanSuppression(
+    sessionId: number,
+    suppressed: boolean,
+  ): void {
+    if (this.updatingScanSuppressionSessionIds.has(sessionId)) {
+      return;
+    }
+    this.updatingScanSuppressionSessionIds.add(sessionId);
+    const request = suppressed
+      ? this.vainglory.suppressZeroMatchSession(sessionId)
+      : this.vainglory.restoreZeroMatchSession(sessionId);
+    request
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.updatingScanSuppressionSessionIds.delete(sessionId);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.messages.success(
+            suppressed
+              ? '已确认无需扫描，今后的批量重扫也会跳过这场直播'
+              : '已恢复扫描，可重新分析这场直播',
+          );
+          this.loadZeroMatchSessions();
+          this.loadSuppressedZeroMatchSessions();
+        },
+        error: (error: unknown) => {
+          this.messages.error(
+            this.errorMessage(
+              error,
+              suppressed ? '无法确认无需扫描' : '无法恢复扫描',
+            ),
+          );
         },
       });
   }

@@ -60,6 +60,7 @@ REQUIRED_TABLES = {
     'vainglory_players',
     'vainglory_player_rooms',
     'vainglory_player_room_suppressions',
+    'vainglory_scan_suppressions',
     'vainglory_player_sessions',
     'vainglory_archive_syncs',
     'vainglory_archive_imports',

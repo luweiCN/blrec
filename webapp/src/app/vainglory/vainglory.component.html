@@ -1802,109 +1802,224 @@
   <ng-container *nzModalContent>
     <p class="zero-match-review-help">
       这里只显示整场扫描已经完成、且当前没有任何对局结果的直播。请核对稿件内容，
-      判断它确实没有结算画面，还是需要重新分析。
+      判断它确实没有对局、在播其他游戏，还是需要重新分析。确认无需扫描后，
+      今后的自动扫描和批量重新分析都会跳过这场直播。
     </p>
 
-    <div
-      *ngIf="zeroMatchSessionsView.state === 'loading'"
-      class="loading-state zero-match-review-state"
-    >
-      <nz-spin nzSimple></nz-spin>
-      <span>正在加载 0 局直播…</span>
-    </div>
+    <nz-tabset>
+      <nz-tab [nzTitle]="'待核对（' + zeroMatchSessionTotal + '）'">
+        <div
+          *ngIf="zeroMatchSessionsView.state === 'loading'"
+          class="loading-state zero-match-review-state"
+        >
+          <nz-spin nzSimple></nz-spin>
+          <span>正在加载 0 局直播…</span>
+        </div>
 
-    <nz-alert
-      *ngIf="zeroMatchSessionsView.state === 'error'"
-      nzType="error"
-      nzShowIcon
-      nzMessage="0 局直播加载失败"
-      [nzDescription]="zeroMatchSessionsView.message"
-    ></nz-alert>
+        <nz-alert
+          *ngIf="zeroMatchSessionsView.state === 'error'"
+          nzType="error"
+          nzShowIcon
+          nzMessage="0 局直播加载失败"
+          [nzDescription]="zeroMatchSessionsView.message"
+        ></nz-alert>
 
-    <nz-empty
-      *ngIf="
-        zeroMatchSessionsView.state === 'ready' &&
-        zeroMatchSessions.length === 0
-      "
-      nzNotFoundContent="当前没有需要核对的 0 局直播"
-    ></nz-empty>
+        <nz-empty
+          *ngIf="
+            zeroMatchSessionsView.state === 'ready' &&
+            zeroMatchSessions.length === 0
+          "
+          nzNotFoundContent="当前没有需要核对的 0 局直播"
+        ></nz-empty>
 
-    <section
-      *ngIf="
-        zeroMatchSessionsView.state === 'ready' && zeroMatchSessions.length > 0
-      "
-      class="zero-match-review-list"
-      aria-label="0 局待核对直播列表"
-    >
-      <article
-        *ngFor="
-          let session of zeroMatchSessions;
-          trackBy: trackZeroMatchSession
-        "
-        class="zero-match-review-item"
+        <ng-container
+          *ngIf="
+            zeroMatchSessionsView.state === 'ready' &&
+            zeroMatchSessions.length > 0
+          "
+          [ngTemplateOutlet]="zeroMatchSessionList"
+          [ngTemplateOutletContext]="{
+            items: zeroMatchSessions,
+            suppressed: false
+          }"
+        ></ng-container>
+
+        <div
+          *ngIf="zeroMatchSessionTotal > zeroMatchPageSize"
+          class="pagination-bar zero-match-review-pagination"
+        >
+          <span>共 {{ zeroMatchSessionTotal }} 场待核对</span>
+          <nz-pagination
+            nzSize="small"
+            [nzPageIndex]="zeroMatchPageIndex"
+            [nzPageSize]="zeroMatchPageSize"
+            [nzTotal]="zeroMatchSessionTotal"
+            [nzShowSizeChanger]="false"
+            (nzPageIndexChange)="zeroMatchPageChanged($event)"
+          ></nz-pagination>
+        </div>
+      </nz-tab>
+
+      <nz-tab
+        [nzTitle]="'已确认不扫描（' + suppressedZeroMatchSessionTotal + '）'"
       >
-        <div>
-          <header>
-            <strong>{{ session.title || "未命名录播" }}</strong>
-            <nz-tag nzColor="orange">扫描完成 · 0 局</nz-tag>
-          </header>
-          <span
-            *ngIf="session.sourceTitle && session.sourceTitle !== session.title"
-          >
-            原标题：{{ session.sourceTitle }}
-          </span>
-          <span>
-            主播：{{ session.anchorName || "未知" }} · 直播时间：
-            {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
-          </span>
-          <span>
-            录像时长：{{ formatDuration(session.recordingDurationSeconds) }} ·
-            {{ session.partCount }} 个分 P · 分析完成：
-            {{ session.completedAt * 1000 | date: "yyyy-MM-dd HH:mm:ss" }}
-          </span>
+        <div
+          *ngIf="suppressedZeroMatchSessionsView.state === 'loading'"
+          class="loading-state zero-match-review-state"
+        >
+          <nz-spin nzSimple></nz-spin>
+          <span>正在加载已确认直播…</span>
         </div>
-        <div class="zero-match-review-actions">
-          <a
-            *ngIf="zeroMatchSessionBiliUrl(session) as archiveUrl"
-            nz-button
-            [href]="archiveUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            查看稿件
-          </a>
-          <button
-            nz-button
-            type="button"
-            nz-popconfirm
-            nzPopconfirmTitle="将使用当前算法重新分析这场直播的全部分 P，是否继续？"
-            nzOkText="重新分析"
-            nzCancelText="取消"
-            [nzLoading]="isSessionRescanning(session.sessionId)"
-            [disabled]="isSessionRescanning(session.sessionId)"
-            (nzOnConfirm)="requestSessionRescan(session)"
-          >
-            <i nz-icon nzType="reload"></i>
-            重新分析
-          </button>
-        </div>
-      </article>
-    </section>
 
-    <div
-      *ngIf="zeroMatchSessionTotal > zeroMatchPageSize"
-      class="pagination-bar zero-match-review-pagination"
+        <nz-alert
+          *ngIf="suppressedZeroMatchSessionsView.state === 'error'"
+          nzType="error"
+          nzShowIcon
+          nzMessage="已确认直播加载失败"
+          [nzDescription]="suppressedZeroMatchSessionsView.message"
+        ></nz-alert>
+
+        <nz-empty
+          *ngIf="
+            suppressedZeroMatchSessionsView.state === 'ready' &&
+            suppressedZeroMatchSessions.length === 0
+          "
+          nzNotFoundContent="当前没有已确认无需扫描的直播"
+        ></nz-empty>
+
+        <ng-container
+          *ngIf="
+            suppressedZeroMatchSessionsView.state === 'ready' &&
+            suppressedZeroMatchSessions.length > 0
+          "
+          [ngTemplateOutlet]="zeroMatchSessionList"
+          [ngTemplateOutletContext]="{
+            items: suppressedZeroMatchSessions,
+            suppressed: true
+          }"
+        ></ng-container>
+
+        <div
+          *ngIf="suppressedZeroMatchSessionTotal > zeroMatchPageSize"
+          class="pagination-bar zero-match-review-pagination"
+        >
+          <span>共 {{ suppressedZeroMatchSessionTotal }} 场不再扫描</span>
+          <nz-pagination
+            nzSize="small"
+            [nzPageIndex]="suppressedZeroMatchPageIndex"
+            [nzPageSize]="zeroMatchPageSize"
+            [nzTotal]="suppressedZeroMatchSessionTotal"
+            [nzShowSizeChanger]="false"
+            (nzPageIndexChange)="suppressedZeroMatchPageChanged($event)"
+          ></nz-pagination>
+        </div>
+      </nz-tab>
+    </nz-tabset>
+
+    <ng-template
+      #zeroMatchSessionList
+      let-items="items"
+      let-suppressed="suppressed"
     >
-      <span>共 {{ zeroMatchSessionTotal }} 场待核对</span>
-      <nz-pagination
-        nzSize="small"
-        [nzPageIndex]="zeroMatchPageIndex"
-        [nzPageSize]="zeroMatchPageSize"
-        [nzTotal]="zeroMatchSessionTotal"
-        [nzShowSizeChanger]="false"
-        (nzPageIndexChange)="zeroMatchPageChanged($event)"
-      ></nz-pagination>
-    </div>
+      <section
+        class="zero-match-review-list"
+        [attr.aria-label]="
+          suppressed ? '已确认不扫描直播列表' : '0 局待核对直播列表'
+        "
+      >
+        <article
+          *ngFor="let session of items; trackBy: trackZeroMatchSession"
+          class="zero-match-review-item"
+        >
+          <div>
+            <header>
+              <strong>{{ session.title || "未命名录播" }}</strong>
+              <nz-tag [nzColor]="suppressed ? 'default' : 'orange'">
+                {{ suppressed ? "已确认不扫描" : "扫描完成 · 0 局" }}
+              </nz-tag>
+            </header>
+            <span
+              *ngIf="
+                session.sourceTitle && session.sourceTitle !== session.title
+              "
+            >
+              原标题：{{ session.sourceTitle }}
+            </span>
+            <span>
+              主播：{{ session.anchorName || "未知" }} · 直播时间：
+              {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }}
+            </span>
+            <span>
+              录像时长：{{ formatDuration(session.recordingDurationSeconds) }} ·
+              {{ session.partCount }} 个分 P · 分析完成：
+              {{ session.completedAt * 1000 | date: "yyyy-MM-dd HH:mm:ss" }}
+            </span>
+          </div>
+          <div class="zero-match-review-actions">
+            <a
+              *ngIf="zeroMatchSessionBiliUrl(session) as archiveUrl"
+              nz-button
+              [href]="archiveUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看稿件
+            </a>
+            <button
+              *ngIf="!suppressed"
+              nz-button
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="确认这场直播没有需要识别的对局，并在今后的重扫中跳过？"
+              nzOkText="确认不再扫描"
+              nzCancelText="取消"
+              [nzLoading]="isScanSuppressionUpdating(session.sessionId)"
+              [disabled]="
+                isScanSuppressionUpdating(session.sessionId) ||
+                isSessionRescanning(session.sessionId)
+              "
+              (nzOnConfirm)="suppressZeroMatchSession(session)"
+            >
+              <i nz-icon nzType="stop"></i>
+              确认无需扫描
+            </button>
+            <button
+              *ngIf="!suppressed"
+              nz-button
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="将使用当前算法重新分析这场直播的全部分 P，是否继续？"
+              nzOkText="重新分析"
+              nzCancelText="取消"
+              [nzLoading]="isSessionRescanning(session.sessionId)"
+              [disabled]="
+                isSessionRescanning(session.sessionId) ||
+                isScanSuppressionUpdating(session.sessionId)
+              "
+              (nzOnConfirm)="requestSessionRescan(session)"
+            >
+              <i nz-icon nzType="reload"></i>
+              重新分析
+            </button>
+            <button
+              *ngIf="suppressed"
+              nz-button
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="恢复后，这场直播可以再次被自动或手动扫描，是否继续？"
+              nzOkText="恢复扫描"
+              nzCancelText="取消"
+              [nzLoading]="isScanSuppressionUpdating(session.sessionId)"
+              [disabled]="isScanSuppressionUpdating(session.sessionId)"
+              (nzOnConfirm)="restoreZeroMatchSession(session)"
+            >
+              <i nz-icon nzType="undo"></i>
+              恢复扫描
+            </button>
+          </div>
+        </article>
+      </section>
+    </ng-template>
   </ng-container>
 </nz-modal>
 

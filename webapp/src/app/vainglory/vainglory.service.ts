@@ -48,10 +48,32 @@ export class VaingloryService {
   listZeroMatchSessions(
     limit = 20,
     offset = 0,
+    suppressed = false,
   ): Observable<VaingloryZeroMatchSessionList> {
+    let params = new HttpParams().set('limit', limit).set('offset', offset);
+    if (suppressed) {
+      params = params.set('suppressed', true);
+    }
     return this.http.get<VaingloryZeroMatchSessionList>(
       this.url.makeApiUrl('/api/v1/vainglory/zero-match-sessions'),
-      { params: new HttpParams().set('limit', limit).set('offset', offset) },
+      { params },
+    );
+  }
+
+  suppressZeroMatchSession(sessionId: number): Observable<void> {
+    return this.http.put<void>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/sessions/${sessionId}/scan-suppression`,
+      ),
+      null,
+    );
+  }
+
+  restoreZeroMatchSession(sessionId: number): Observable<void> {
+    return this.http.delete<void>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/sessions/${sessionId}/scan-suppression`,
+      ),
     );
   }
 

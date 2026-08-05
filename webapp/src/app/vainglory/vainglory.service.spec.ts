@@ -96,6 +96,27 @@ describe('VaingloryService', () => {
     );
     expect(request.request.method).toBe('GET');
     request.flush({ total: 0, items: [] });
+
+    service.listZeroMatchSessions(10, 20, true).subscribe();
+    const suppressed = http.expectOne(
+      '/api/v1/vainglory/zero-match-sessions?limit=10&offset=20&suppressed=true',
+    );
+    expect(suppressed.request.method).toBe('GET');
+    suppressed.flush({ total: 0, items: [] });
+
+    service.suppressZeroMatchSession(12).subscribe();
+    const suppress = http.expectOne(
+      '/api/v1/vainglory/sessions/12/scan-suppression',
+    );
+    expect(suppress.request.method).toBe('PUT');
+    suppress.flush(null);
+
+    service.restoreZeroMatchSession(12).subscribe();
+    const restore = http.expectOne(
+      '/api/v1/vainglory/sessions/12/scan-suppression',
+    );
+    expect(restore.request.method).toBe('DELETE');
+    restore.flush(null);
   });
 
   it('loads unresolved heroes and saves a manual hero', () => {

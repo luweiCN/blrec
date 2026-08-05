@@ -38,6 +38,8 @@ class FakeService:
         self.updated_session_anchors = []
         self.bulk_updates = []
         self.publication_retries = []
+        self.suppressed_zero_match_sessions = []
+        self.restored_zero_match_sessions = []
         self.created_players = []
         self.renamed_players = []
         self.bound_rooms = []
@@ -92,6 +94,12 @@ class FakeService:
                 ),
             ),
         )
+
+    async def suppress_zero_match_session(self, session_id: int) -> None:
+        self.suppressed_zero_match_sessions.append(session_id)
+
+    async def restore_zero_match_session(self, session_id: int) -> None:
+        self.restored_zero_match_sessions.append(session_id)
 
     async def list_anchor_stats(self) -> Tuple[AnchorStatsRecord, ...]:
         return (
@@ -448,7 +456,7 @@ def test_lists_completed_zero_match_sessions_for_review(
     )
 
     assert response.status_code == 200
-    assert fake.zero_match_filters == {'limit': 10, 'offset': 20}
+    assert fake.zero_match_filters == {'limit': 10, 'offset': 20, 'suppressed': False}
     assert response.json() == {
         'total': 1,
         'items': [
@@ -465,6 +473,25 @@ def test_lists_completed_zero_match_sessions_for_review(
             }
         ],
     }
+
+
+def test_lists_and_updates_confirmed_zero_match_scan_suppressions(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    listed = client.get(
+        '/api/v1/vainglory/zero-match-sessions', params={'suppressed': 'true'}
+    )
+    suppressed = client.put('/api/v1/vainglory/sessions/12/scan-suppression')
+    restored = client.delete('/api/v1/vainglory/sessions/12/scan-suppression')
+
+    assert listed.status_code == 200
+    assert fake.zero_match_filters == {'limit': 20, 'offset': 0, 'suppressed': True}
+    assert suppressed.status_code == 204
+    assert restored.status_code == 204
+    assert fake.suppressed_zero_match_sessions == [12]
+    assert fake.restored_zero_match_sessions == [12]
 
 
 def test_lists_anchor_win_loss_statistics(
