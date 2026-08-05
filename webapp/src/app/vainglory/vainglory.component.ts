@@ -305,6 +305,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   private readonly destroy$ = new Subject<void>();
   private scanPollTimer: number | null = null;
   private readonly remoteMediaPollingPartIds = new Set<number>();
+  private listRefreshSignature: string | null = null;
 
   constructor(
     private vainglory: VaingloryService,
@@ -516,7 +517,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.loadSessions();
   }
 
-  loadSessions(): void {
+  loadSessions(background = false): void {
     const filters: VaingloryMatchFilters = {
       playerName: this.playerName,
       heroIds: this.heroIds,
@@ -527,12 +528,14 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       anchorName: this.anchorNameFilter,
       statsIncluded: this.statsIncludedFilter,
     };
-    this.sessionsView = { state: 'loading' };
-    this.detailsDrawerVisible = false;
-    this.selectedSession = null;
-    this.matchDetails.clear();
-    this.recordingParts.clear();
-    this.remoteMediaStatuses.clear();
+    if (!background) {
+      this.sessionsView = { state: 'loading' };
+      this.detailsDrawerVisible = false;
+      this.selectedSession = null;
+      this.matchDetails.clear();
+      this.recordingParts.clear();
+      this.remoteMediaStatuses.clear();
+    }
     this.vainglory
       .listMatchSessions(
         filters,
@@ -549,6 +552,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
             items: response.items,
           };
           if (
+            !background &&
             this.sessionId !== null &&
             response.items.some((item) => item.sessionId === this.sessionId)
           ) {
@@ -559,9 +563,18 @@ export class VaingloryComponent implements OnInit, OnDestroy {
               this.openSessionDetails(selected);
             }
           }
+          if (background && this.selectedSession !== null) {
+            this.selectedSession =
+              response.items.find(
+                (item) => item.sessionId === this.selectedSession?.sessionId,
+              ) ?? this.selectedSession;
+          }
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
+          if (background) {
+            return;
+          }
           this.sessionsView = {
             state: 'error',
             message: this.errorMessage(error, '直播场次加载失败'),
@@ -585,8 +598,10 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.loadZeroMatchSessions();
   }
 
-  loadZeroMatchSessions(): void {
-    this.zeroMatchSessionsView = { state: 'loading' };
+  loadZeroMatchSessions(background = false): void {
+    if (!background) {
+      this.zeroMatchSessionsView = { state: 'loading' };
+    }
     this.vainglory
       .listZeroMatchSessions(
         this.zeroMatchPageSize,
@@ -603,6 +618,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
           this.changeDetector.markForCheck();
         },
         error: (error: unknown) => {
+          if (background) {
+            return;
+          }
           this.zeroMatchSessionsView = {
             state: 'error',
             message: this.errorMessage(error, '0 局直播加载失败'),
@@ -2390,10 +2408,41 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (snapshot === null) {
       return;
     }
+    const refreshSignature = this.vaingloryListRefreshSignature(snapshot);
+    const shouldRefreshLists =
+      this.listRefreshSignature !== null &&
+      this.listRefreshSignature !== refreshSignature;
+    this.listRefreshSignature = refreshSignature;
     this.analysisQueue = snapshot.analysisQueue;
     this.indexSummary = snapshot.indexSummary;
     this.indexSampledAt = snapshot.sampledAt;
+    if (shouldRefreshLists) {
+      this.loadSessions(true);
+      this.loadZeroMatchSessions(true);
+    }
     this.changeDetector.markForCheck();
+  }
+
+  private vaingloryListRefreshSignature(
+    snapshot: VaingloryIndexRealtimeSnapshot,
+  ): string {
+    const summary = snapshot.indexSummary;
+    const latestCompletion = snapshot.analysisQueue.recentCompletions[0];
+    return [
+      summary.matchCount,
+      summary.sessionCount,
+      summary.anchorCount,
+      summary.unassignedSessionCount,
+      summary.winCount,
+      summary.lossCount,
+      summary.unknownCount,
+      summary.playerSlotCount,
+      summary.recognizedHeroCount,
+      snapshot.analysisQueue.recentCompletions.length,
+      latestCompletion?.partId ?? 0,
+      latestCompletion?.completedAt ?? 0,
+      latestCompletion?.matchCount ?? 0,
+    ].join(':');
   }
 
   private archiveBackfillSnapshot(
