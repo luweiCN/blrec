@@ -17,9 +17,9 @@ def has_aligned_talent_cards(circles: Sequence[NormalizedCircle]) -> bool:
     candidates = tuple(
         circle
         for circle in circles
-        if 0.08 <= circle[0] <= 0.65
-        and 0.45 <= circle[1] <= 0.60
-        and 0.07 <= circle[2] <= 0.13
+        if 0.05 <= circle[0] <= 0.68
+        and 0.42 <= circle[1] <= 0.62
+        and 0.07 <= circle[2] <= 0.145
     )
     for selected in combinations(candidates, 3):
         ordered = tuple(sorted(selected, key=lambda circle: circle[0]))
@@ -27,11 +27,11 @@ def has_aligned_talent_cards(circles: Sequence[NormalizedCircle]) -> bool:
         radii = tuple(circle[2] for circle in ordered)
         gaps = (ordered[1][0] - ordered[0][0], ordered[2][0] - ordered[1][0])
         if (
-            max(y_values) - min(y_values) <= 0.025
-            and 0.15 <= gaps[0] <= 0.23
-            and 0.15 <= gaps[1] <= 0.23
-            and abs(gaps[0] - gaps[1]) <= 0.025
-            and max(radii) - min(radii) <= 0.025
+            max(y_values) - min(y_values) <= 0.035
+            and 0.18 <= gaps[0] <= 0.28
+            and 0.18 <= gaps[1] <= 0.28
+            and abs(gaps[0] - gaps[1]) <= 0.05
+            and max(radii) - min(radii) <= 0.03
         ):
             return True
     return False

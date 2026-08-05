@@ -579,6 +579,45 @@ def test_fine_scan_checks_the_narrow_boundary_window_first(
     assert statuses[-1] == '第 1/1 个区间：窄区间预览未命中，正在高帧率兜底'
 
 
+def test_small_transition_window_runs_only_one_high_rate_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
+    result = RgbFrame(4, 4, b'\xff\xff\xff' * 16)
+
+    class Sampler:
+        def __init__(self) -> None:
+            self.fine_windows = []
+
+        def result_preview_frames(self, *_args, **_kwargs):
+            raise AssertionError('小变化区间不应重复预览扫描')
+
+        def fine_frames(self, _path: str, window: ScanWindow):
+            self.fine_windows.append((window.start_ms, window.end_ms))
+            for at_ms in range(window.start_ms, window.end_ms, 250):
+                yield TimedFrame(
+                    at_ms=at_ms, frame=result if at_ms == 6_250 else preview
+                )
+
+    sampler = Sampler()
+    analyzer = VaingloryVideoAnalyzer(sampler=sampler)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        analyzer,
+        '_detect_result_layout',
+        lambda frame: hit(0).layout if frame is result else None,
+    )
+
+    scanned = analyzer._scan_window(
+        'unused', ScanWindow(0, 10_000, focus_ms=5_000), window_index=1, window_count=1
+    )
+
+    assert [item.at_ms for item in scanned.hits] == [6_250]
+    assert sampler.fine_windows == [(0, 10_000)]
+    assert scanned.keyframe_preview_frames == 0
+    assert scanned.fallback_preview_frames == 0
+    assert scanned.refinement_frames == 40
+
+
 def test_fine_scan_expands_to_the_full_beta36_window_after_a_narrow_miss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

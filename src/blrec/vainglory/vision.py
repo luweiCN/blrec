@@ -16,6 +16,7 @@ TeamSize = Literal[3, 5]
 _MINIMUM_RESULT_ACTION_CONTRAST = 35
 _MINIMUM_LOW_CONTRAST_RESULT_ACTION = 18
 _MAXIMUM_LOW_CONTRAST_RESULT_ACTION = 30
+_MINIMUM_RESULT_ACTION_BALANCE = 0.45
 GAMEPLAY_HUD_CENTER_VARIANTS: Tuple[Tuple[float, ...], ...] = (
     (0.365, 0.415, 0.465, 0.55, 0.60, 0.65),
     (0.33, 0.395, 0.46, 0.54, 0.605, 0.67),
@@ -249,6 +250,20 @@ def detect_result_layouts(
         action_contrasts = _result_action_contrasts(
             frame, viewport, team_size=team_size
         )
+        action_balance = min(action_contrasts) / max(1.0, max(action_contrasts))
+        if (
+            panel_detection is not None
+            and action_balance < _MINIMUM_RESULT_ACTION_BALANCE
+        ):
+            _log_layout_attempt(
+                frame,
+                viewport,
+                'result_action_balance',
+                team_size=team_size,
+                viewport_contrasts=tuple(round(value, 2) for value in action_contrasts),
+                balance=round(action_balance, 3),
+            )
+            continue
         minimum_action_contrast: float
         if panel_detection is None:
             low_contrast_actions = (

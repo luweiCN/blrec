@@ -2,6 +2,7 @@ from typing import Tuple
 
 from blrec.vainglory.vision import (
     PixelRect,
+    ResultPanelDetection,
     RgbFrame,
     ViewportTransform,
     detect_gameplay_hud,
@@ -185,6 +186,22 @@ def test_result_layout_rejects_scoreboard_with_only_a_surrender_action() -> None
 
     assert (
         detect_result_layout(RgbFrame(frame.width, frame.height, bytes(pixels))) is None
+    )
+
+
+def test_panel_model_cannot_turn_scoreboard_rows_into_result_actions() -> None:
+    frame = synthetic_result_frame(left_teal=True, winner_teal=True)
+    pixels = bytearray(frame.pixels)
+    for left, right in ((260, 405), (555, 700)):
+        fill(pixels, frame.width, PixelRect(left, 379, right, 413), (12, 15, 15))
+        fill(pixels, frame.width, PixelRect(left, 379, right, 382), (40, 40, 40))
+        fill(pixels, frame.width, PixelRect(left, 410, right, 413), (40, 40, 40))
+    scoreboard = RgbFrame(frame.width, frame.height, bytes(pixels))
+    panel = ResultPanelDetection(PixelRect(90, 120, 870, 420), confidence=0.95)
+
+    assert all(
+        layout.viewport.name != 'detected-3v3'
+        for layout in detect_result_layouts(scoreboard, panel_detection=panel)
     )
 
 

@@ -7,6 +7,12 @@ def test_three_aligned_talent_cards_are_recognized() -> None:
     )
 
 
+def test_wide_aram_talent_cards_from_a_recorded_match_are_recognized() -> None:
+    assert has_aligned_talent_cards(
+        ((0.118, 0.525, 0.108), (0.373, 0.522, 0.112), (0.594, 0.530, 0.112))
+    )
+
+
 def test_unrelated_result_icons_are_not_talent_cards() -> None:
     assert not has_aligned_talent_cards(
         (

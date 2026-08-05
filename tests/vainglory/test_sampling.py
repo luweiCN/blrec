@@ -19,6 +19,7 @@ def observation(
     signature: str = 'lineup',
     heroes: Tuple[str, ...] = (),
     view_context: str = 'played',
+    scene: str = '',
 ) -> CoarseObservation:
     return CoarseObservation(
         at_ms=at_seconds * 1_000,
@@ -27,11 +28,61 @@ def observation(
         hero_lineup=heroes,
         team_size=len(heroes) // 2 if heroes else None,
         view_context=view_context if hud else 'unknown',
+        scene_signature=scene,
     )
 
 
-def test_default_hud_probe_interval_is_ten_seconds() -> None:
-    assert FfmpegSampler()._coarse_interval_seconds == 10
+def test_default_hud_probe_interval_is_five_seconds() -> None:
+    assert FfmpegSampler()._coarse_interval_seconds == 5
+
+
+def test_sustained_hud_loss_scans_only_boundary_and_visual_changes() -> None:
+    dark = '0' * 32
+    changed = 'f' * 32
+
+    windows = result_search_windows(
+        (
+            observation(0, hud=True, scene=dark),
+            observation(5, hud=True, scene=dark),
+            observation(10, scene=dark),
+            observation(15, scene=dark),
+            observation(20, scene=dark),
+            observation(25, scene=changed),
+            observation(30, scene=changed),
+        ),
+        duration_ms=35_000,
+        hud_gap_ms=20_000,
+        before_end_ms=5_000,
+    )
+
+    assert windows == (
+        ScanWindow(0, 10_000, view_context='played', focus_ms=5_000),
+        ScanWindow(20_000, 25_000, view_context='played', focus_ms=5_000),
+        ScanWindow(30_000, 35_000, view_context='played', focus_ms=5_000),
+    )
+
+
+def test_hud_return_within_twenty_seconds_suppresses_scoreboard_gap() -> None:
+    signature = '0' * 32
+    windows = result_search_windows(
+        (
+            observation(0, hud=True, scene=signature),
+            observation(5, hud=True, scene=signature),
+            observation(10, scene='f' * 32),
+            observation(15, scene='f' * 32),
+            observation(20, hud=True, scene=signature),
+            observation(25, hud=True, scene=signature),
+            observation(30, scene=signature),
+        ),
+        duration_ms=35_000,
+        hud_gap_ms=20_000,
+        before_end_ms=5_000,
+    )
+
+    assert windows == (
+        ScanWindow(20_000, 30_000, view_context='played', focus_ms=25_000),
+        ScanWindow(30_000, 35_000, view_context='played', focus_ms=25_000),
+    )
 
 
 def test_searches_after_each_gameplay_run_and_at_video_end() -> None:
@@ -155,7 +206,7 @@ def test_conflicting_recognized_lineups_split_games_after_a_long_gap() -> None:
     )
 
 
-def test_conflicting_hero_read_does_not_split_nearby_hud_samples() -> None:
+def test_conflicting_hero_read_splits_nearby_hud_samples() -> None:
     previous = observation(
         100, hud=True, heroes=('Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta')
     )
@@ -163,7 +214,7 @@ def test_conflicting_hero_read_does_not_split_nearby_hud_samples() -> None:
         130, hud=True, heroes=('Delta', 'Epsilon', 'Zeta', 'Alpha', 'Beta', 'Gamma')
     )
 
-    assert same_gameplay_run(previous, current) is True
+    assert same_gameplay_run(previous, current) is False
 
 
 def test_same_heroes_on_opposite_sides_split_after_a_long_hud_gap() -> None:

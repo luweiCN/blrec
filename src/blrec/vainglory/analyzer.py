@@ -395,6 +395,37 @@ def _remaining_result_windows(
     return tuple(windows)
 
 
+def _visual_state_signature(frame: RgbFrame) -> str:
+    return _visual_region_hash(frame, 0.05, 0.15, 0.95, 0.90) + _visual_region_hash(
+        frame, 0.0, 0.62, 1.0, 0.95
+    )
+
+
+def _visual_region_hash(
+    frame: RgbFrame, left: float, top: float, right: float, bottom: float
+) -> str:
+    rect = frame.relative_rect(left, top, right, bottom)
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    rows: List[Tuple[int, ...]] = []
+    for row in range(8):
+        y = rect.top + min(height - 1, (row * 2 + 1) * height // 16)
+        grayscale_values: List[int] = []
+        for column in range(9):
+            x = rect.left + min(width - 1, (column * 2 + 1) * width // 18)
+            offset = (y * frame.width + x) * 3
+            red, green, blue = frame.pixels[offset : offset + 3]
+            grayscale_values.append((red * 3 + green * 6 + blue) // 10)
+        rows.append(tuple(grayscale_values))
+    bits = 0
+    for row_values in rows:
+        for column in range(8):
+            bits <<= 1
+            if row_values[column] < row_values[column + 1]:
+                bits |= 1
+    return '{:016x}'.format(bits)
+
+
 def collapse_analyzed_matches(
     matches: Sequence[AnalyzedMatch], *, maximum_start_gap_ms: int = 90_000
 ) -> Tuple[AnalyzedMatch, ...]:
@@ -429,7 +460,8 @@ def collapse_analyzed_matches(
 
 class VaingloryVideoAnalyzer:
     _RESULT_FALLBACK_INTERVAL_MS = 120_000
-    _HUD_CONTINUITY_MS = 75_000
+    _HUD_CONTINUITY_MS = 20_000
+    _COMPACT_FINE_WINDOW_MS = 12_000
 
     def __init__(
         self,
@@ -513,6 +545,7 @@ class VaingloryVideoAnalyzer:
         coarse_started = time.monotonic()
         observations: List[CoarseObservation] = []
         previous_gameplay: Optional[CoarseObservation] = None
+        previous_probe_had_hud = False
         segment_lineup: Tuple[str, ...] = ()
         lineup_probe_attempts = 0
         last_result_fallback_ms = -self._RESULT_FALLBACK_INTERVAL_MS
@@ -552,7 +585,10 @@ class VaingloryVideoAnalyzer:
             new_hud_segment = hud is not None and (
                 previous_gameplay is None
                 or previous_gameplay.view_context != view_context
-                or timed.at_ms - previous_gameplay.at_ms > self._HUD_CONTINUITY_MS
+                or (
+                    not previous_probe_had_hud
+                    and timed.at_ms - previous_gameplay.at_ms > self._HUD_CONTINUITY_MS
+                )
             )
             if new_hud_segment:
                 segment_lineup = ()
@@ -596,6 +632,7 @@ class VaingloryVideoAnalyzer:
                 visible_portraits=0 if hud is None else hud.visible_portraits,
                 view_context=view_context,
                 hero_lineup=segment_lineup if hud is not None else (),
+                scene_signature=_visual_state_signature(timed.frame),
             )
             similarity = (
                 None
@@ -645,6 +682,7 @@ class VaingloryVideoAnalyzer:
                     observer_hud_hits += 1
             if result_visible:
                 coarse_result_hits += 1
+            previous_probe_had_hud = hud is not None
             coarse_ratio = min(1.0, timed.at_ms / max(1, profile.duration_ms))
             if coarse_ratio >= next_coarse_report:
                 logger.info(
@@ -677,7 +715,12 @@ class VaingloryVideoAnalyzer:
                 progress(min(0.6, timed.at_ms / profile.duration_ms * 0.6))
 
         coarse_seconds = time.monotonic() - coarse_started
-        windows = result_search_windows(observations, duration_ms=profile.duration_ms)
+        windows = result_search_windows(
+            observations,
+            duration_ms=profile.duration_ms,
+            hud_gap_ms=self._HUD_CONTINUITY_MS,
+            before_end_ms=5_000,
+        )
         logger.info(
             'Vainglory coarse scan completed: part_id={} frames={} hud_hits={} '
             'observer_hits={} lineup_probes={} lineup_recognized_slots={} '
@@ -1352,6 +1395,16 @@ class VaingloryVideoAnalyzer:
         status: Optional[Callable[[str], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
     ) -> _WindowScanResult:
+        if window.end_ms - window.start_ms <= self._COMPACT_FINE_WINDOW_MS:
+            return self._scan_compact_window(
+                path,
+                window,
+                part_id=part_id,
+                window_index=window_index,
+                window_count=window_count,
+                status=status,
+                cancelled=cancelled,
+            )
         focused = _focused_result_window(window)
         logger.info(
             'Vainglory fine scan focus: part_id={} window={}/{} '
@@ -1425,6 +1478,59 @@ class VaingloryVideoAnalyzer:
                 focused_scan.refinement_windows + expanded.refinement_windows
             ),
             expanded_fallback=True,
+        )
+
+    def _scan_compact_window(
+        self,
+        path: str,
+        window: ScanWindow,
+        *,
+        part_id: int,
+        window_index: int,
+        window_count: int,
+        status: Optional[Callable[[str], None]],
+        cancelled: Optional[Callable[[], bool]],
+    ) -> _WindowScanResult:
+        pass_started = time.monotonic()
+        if status is not None:
+            status(
+                '第 {}/{} 个区间：正在高帧率核验画面变化'.format(
+                    window_index, window_count
+                )
+            )
+        logger.info(
+            'Vainglory fine scan pass started: part_id={} window={}/{} '
+            'pass=transition_fine scope=compact',
+            part_id,
+            window_index,
+            window_count,
+        )
+        hits: List[ResultHit] = []
+        frame_count = 0
+        for timed in self._sampler.fine_frames(path, window):
+            self._raise_if_cancelled(cancelled)
+            frame_count += 1
+            layout = self._detect_result_layout(timed.frame)
+            if layout is not None:
+                hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
+        collapsed = collapse_result_hits(hits, maximum_gap_ms=5_000)
+        logger.info(
+            'Vainglory fine scan pass completed: part_id={} window={}/{} '
+            'pass=transition_fine scope=compact frames={} hits={} '
+            'elapsed_seconds={:.3f}',
+            part_id,
+            window_index,
+            window_count,
+            frame_count,
+            len(collapsed),
+            time.monotonic() - pass_started,
+        )
+        return _WindowScanResult(
+            hits=collapsed,
+            keyframe_preview_frames=0,
+            fallback_preview_frames=0,
+            refinement_frames=frame_count,
+            refinement_windows=1,
         )
 
     def _scan_window_regions(

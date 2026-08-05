@@ -40,6 +40,7 @@ class CoarseObservation:
     visible_portraits: int = 0
     view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
     hero_lineup: Tuple[str, ...] = ()
+    scene_signature: str = ''
 
 
 @dataclass(frozen=True)
@@ -83,9 +84,11 @@ def same_gameplay_run(
         return False
     if current.at_ms <= previous.at_ms:
         return False
+    lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
+    if lineup_evidence == 'mismatched':
+        return False
     if current.at_ms - previous.at_ms <= maximum_gap_ms:
         return True
-    lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
     return lineup_evidence == 'matched'
 
 
@@ -157,6 +160,14 @@ def result_search_windows(
         raise ValueError('video duration must be positive')
     if hud_gap_ms <= 0:
         raise ValueError('HUD gap must be positive')
+    if any(observation.scene_signature for observation in observations):
+        return _transition_result_search_windows(
+            observations,
+            duration_ms=duration_ms,
+            hud_gap_ms=hud_gap_ms,
+            before_end_ms=before_end_ms,
+            after_end_ms=after_end_ms,
+        )
     windows: List[ScanWindow] = []
     gameplay = sorted(
         (
@@ -209,13 +220,153 @@ def result_search_windows(
     return _merge_windows(windows)
 
 
+def _transition_result_search_windows(
+    observations: Sequence[CoarseObservation],
+    *,
+    duration_ms: int,
+    hud_gap_ms: int,
+    before_end_ms: int,
+    after_end_ms: int,
+    scene_change_bits: int = 24,
+) -> Tuple[ScanWindow, ...]:
+    ordered = tuple(sorted(observations, key=lambda item: item.at_ms))
+    gameplay_indexes = tuple(
+        index
+        for index, observation in enumerate(ordered)
+        if observation.hud_signature is not None
+    )
+    windows: List[ScanWindow] = []
+    if gameplay_indexes:
+        run_last_index = gameplay_indexes[0]
+        run_lineup = ordered[run_last_index].hero_lineup
+        for index in gameplay_indexes[1:]:
+            observation = ordered[index]
+            reference = replace(ordered[run_last_index], hero_lineup=tuple(run_lineup))
+            if observation.at_ms - reference.at_ms <= hud_gap_ms and same_gameplay_run(
+                reference, observation, maximum_gap_ms=hud_gap_ms
+            ):
+                run_lineup = _merge_hero_lineups(run_lineup, observation.hero_lineup)
+                run_last_index = index
+                continue
+            windows.extend(
+                _gameplay_end_transition_windows(
+                    ordered,
+                    last_hud_index=run_last_index,
+                    search_end_ms=min(observation.at_ms, duration_ms),
+                    duration_ms=duration_ms,
+                    before_end_ms=before_end_ms,
+                    after_end_ms=after_end_ms,
+                    hero_lineup=run_lineup,
+                    scene_change_bits=scene_change_bits,
+                )
+            )
+            run_last_index = index
+            run_lineup = observation.hero_lineup
+        windows.extend(
+            _gameplay_end_transition_windows(
+                ordered,
+                last_hud_index=run_last_index,
+                search_end_ms=duration_ms,
+                duration_ms=duration_ms,
+                before_end_ms=before_end_ms,
+                after_end_ms=after_end_ms,
+                hero_lineup=run_lineup,
+                scene_change_bits=scene_change_bits,
+            )
+        )
+    windows.extend(
+        _bounded_window(
+            observation.at_ms - 3_000,
+            observation.at_ms + 3_000,
+            duration_ms,
+            focus_ms=observation.at_ms,
+        )
+        for observation in ordered
+        if observation.result_visible
+    )
+    return _merge_transition_windows(windows)
+
+
+def _gameplay_end_transition_windows(
+    observations: Sequence[CoarseObservation],
+    *,
+    last_hud_index: int,
+    search_end_ms: int,
+    duration_ms: int,
+    before_end_ms: int,
+    after_end_ms: int,
+    hero_lineup: Sequence[str],
+    scene_change_bits: int,
+) -> Tuple[ScanWindow, ...]:
+    last_hud = observations[last_hud_index]
+    bounded_end_ms = min(duration_ms, search_end_ms, last_hud.at_ms + after_end_ms)
+    if bounded_end_ms <= last_hud.at_ms:
+        return ()
+    following = tuple(
+        observation
+        for observation in observations[last_hud_index + 1 :]
+        if last_hud.at_ms < observation.at_ms <= bounded_end_ms
+        and observation.hud_signature is None
+    )
+    first_end_ms = following[0].at_ms if following else bounded_end_ms
+    windows = [
+        _bounded_window(
+            last_hud.at_ms - before_end_ms,
+            first_end_ms,
+            duration_ms,
+            view_context=last_hud.view_context,
+            hero_lineup=hero_lineup,
+            focus_ms=last_hud.at_ms,
+        )
+    ]
+    for previous, current in zip(following, following[1:]):
+        if not _visual_state_changed(
+            previous.scene_signature,
+            current.scene_signature,
+            minimum_bits=scene_change_bits,
+        ):
+            continue
+        windows.append(
+            _bounded_window(
+                previous.at_ms,
+                current.at_ms,
+                duration_ms,
+                view_context=last_hud.view_context,
+                hero_lineup=hero_lineup,
+                focus_ms=last_hud.at_ms,
+            )
+        )
+    if following and following[-1].at_ms < bounded_end_ms:
+        windows.append(
+            _bounded_window(
+                following[-1].at_ms,
+                bounded_end_ms,
+                duration_ms,
+                view_context=last_hud.view_context,
+                hero_lineup=hero_lineup,
+                focus_ms=last_hud.at_ms,
+            )
+        )
+    return tuple(windows)
+
+
+def _visual_state_changed(left: str, right: str, *, minimum_bits: int) -> bool:
+    if not left or len(left) != len(right):
+        return False
+    try:
+        difference = int(left, 16) ^ int(right, 16)
+    except ValueError:
+        return False
+    return bin(difference).count('1') >= minimum_bits
+
+
 class FfmpegSampler:
     def __init__(
         self,
         *,
         ffmpeg: str = 'ffmpeg',
         ffprobe: str = 'ffprobe',
-        coarse_interval_seconds: int = 10,
+        coarse_interval_seconds: int = 5,
         fine_frames_per_second: int = 4,
     ) -> None:
         if coarse_interval_seconds < 1:
@@ -600,6 +751,39 @@ def _merge_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
             hero_lineup=_merge_hero_lineups(previous.hero_lineup, window.hero_lineup),
             focus_ms=(
                 window.focus_ms if window.focus_ms is not None else previous.focus_ms
+            ),
+        )
+    return tuple(merged)
+
+
+def _merge_transition_windows(windows: Sequence[ScanWindow]) -> Tuple[ScanWindow, ...]:
+    ordered = sorted(
+        (window for window in windows if window.end_ms > window.start_ms),
+        key=lambda window: (window.start_ms, window.end_ms),
+    )
+    merged: List[ScanWindow] = []
+    for window in ordered:
+        if not merged or window.start_ms >= merged[-1].end_ms:
+            merged.append(window)
+            continue
+        previous = merged[-1]
+        if previous.view_context != window.view_context and 'unknown' not in (
+            previous.view_context,
+            window.view_context,
+        ):
+            merged.append(window)
+            continue
+        merged[-1] = ScanWindow(
+            start_ms=previous.start_ms,
+            end_ms=max(previous.end_ms, window.end_ms),
+            view_context=(
+                previous.view_context
+                if previous.view_context != 'unknown'
+                else window.view_context
+            ),
+            hero_lineup=_merge_hero_lineups(previous.hero_lineup, window.hero_lineup),
+            focus_ms=(
+                previous.focus_ms if previous.focus_ms is not None else window.focus_ms
             ),
         )
     return tuple(merged)
