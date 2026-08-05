@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_version_matches_preview_beta() -> None:
-    assert blrec.__version__ == '3.0.0-beta.40'
+    assert blrec.__version__ == '3.0.0-beta.41'
 
 
 def test_ocr_runtime_pins_cover_supported_python_wheels() -> None:
@@ -16,13 +16,11 @@ def test_ocr_runtime_pins_cover_supported_python_wheels() -> None:
     assert 'onnxruntime == 1.28.0 ; python_version >= "3.11"' in setup
 
 
-def test_release_notes_describe_vainglory_corrections() -> None:
-    notes = (ROOT / 'docs/releases/3.0.0-beta.40.md').read_text(encoding='utf8')
-    assert '# BLREC 3.0.0-beta.40' in notes
-    assert 'NAS 灰度测试版' in notes
-    assert '标记对局' in notes
-    assert '人工修正' in notes
-    assert '历史顶层评论' in notes
-    assert '算法版本保持 17' in notes
-    assert '数据库迁移 0057' in notes
+def test_release_notes_describe_vainglory_operations() -> None:
+    notes = (ROOT / 'docs/releases/3.0.0-beta.41.md').read_text(encoding='utf8')
+    assert '# BLREC 3.0.0-beta.41' in notes
+    assert '单局重新识别' in notes
+    assert '历史数据接入' in notes
+    assert '算法版本保持 18' in notes
+    assert '数据库迁移 0059' in notes
     assert 'latest' not in notes.lower()
