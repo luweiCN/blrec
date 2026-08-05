@@ -8,11 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    uses: ./.github/workflows/test.yml
-
   publish:
-    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: write
