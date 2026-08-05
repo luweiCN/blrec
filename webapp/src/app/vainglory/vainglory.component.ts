@@ -233,6 +233,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   readonly updatingScanSuppressionSessionIds = new Set<number>();
   readonly retryingPublicationSteps = new Set<string>();
   readonly savingMatchIds = new Set<number>();
+  readonly rerunningMatchIds = new Set<number>();
+  readonly deletingMatchIds = new Set<number>();
   matchEditorVisible = false;
   editingMatch: VaingloryMatch | null = null;
   matchEditDraft: MatchEditDraft | null = null;
@@ -258,7 +260,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   managedRooms: readonly ManagedRoomOption[] = [];
   heroStatsGameMode: GameMode | '' = '3v3';
 
-  heroManagerVisible = false;
   heroReviewVisible = false;
   heroReviewView: HeroReviewView = { state: 'idle' };
   readonly heroReviewDrafts = new Map<string, number>();
@@ -833,7 +834,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
             chapter: '视频分段',
           };
           this.messages.success(
-            `已重新提交${labels[step]}`,
+            `已将${labels[step]}加入发布专用队列，并提升为最高优先级`,
           );
         },
         error: (error: unknown) => {
@@ -1068,6 +1069,71 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         },
         error: (error: unknown) => {
           this.messages.error(this.errorMessage(error, '统计设置保存失败'));
+        },
+      });
+  }
+
+  reanalyzeMatch(match: VaingloryMatch): void {
+    if (this.rerunningMatchIds.has(match.id)) {
+      return;
+    }
+    this.rerunningMatchIds.add(match.id);
+    this.vainglory
+      .reanalyzeMatch(match.id)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.rerunningMatchIds.delete(match.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.replaceMatchDetails({
+            ...match,
+            rerunState: 'pending',
+            rerunError: null,
+          });
+          this.messages.success('已加入单局重新识别队列，并优先处理');
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '单局重新识别提交失败'));
+        },
+      });
+  }
+
+  deleteDetectedMatch(match: VaingloryMatch): void {
+    if (this.deletingMatchIds.has(match.id)) {
+      return;
+    }
+    this.deletingMatchIds.add(match.id);
+    this.vainglory
+      .deleteMatch(match.id)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.deletingMatchIds.delete(match.id);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          const details = this.matchDetails.get(match.sessionId);
+          if (details?.state === 'ready') {
+            this.matchDetails.set(match.sessionId, {
+              state: 'ready',
+              items: details.items.filter((item) => item.id !== match.id),
+            });
+          }
+          this.loadSessions(true);
+          this.loadZeroMatchSessions();
+          this.loadPlayerStats();
+          this.loadHeroStats();
+          this.messages.success('已删除误识别，并记住该时间点不再自动加入');
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '删除对局失败'));
         },
       });
   }
@@ -2419,6 +2485,9 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (shouldRefreshLists) {
       this.loadSessions(true);
       this.loadZeroMatchSessions(true);
+      if (this.detailsDrawerVisible && this.selectedSession !== null) {
+        this.loadSessionDetails(this.selectedSession.sessionId);
+      }
     }
     this.changeDetector.markForCheck();
   }

@@ -323,6 +323,15 @@ class VaingloryIndexService:
     ) -> MatchRecord:
         return await self._repository.update_match_fields(match_id, changes)
 
+    async def request_match_rerun(self, match_id: int) -> None:
+        match = await self._repository.get_match(match_id)
+        await self._prepare_manual_marker_media(match.part_id)
+        await self._repository.request_match_rerun(match_id)
+        self._ocr_wake.set()
+
+    async def delete_match(self, match_id: int) -> None:
+        await self._repository.delete_match(match_id)
+
     async def set_recorded_player(
         self, match_id: int, *, side: str, slot: int
     ) -> MatchRecord:
@@ -624,6 +633,55 @@ class VaingloryIndexService:
         return True
 
     async def _ocr_once(self) -> bool:
+        rerun = await self._repository.claim_next_match_rerun()
+        if rerun is not None:
+            part = rerun.part
+            if not Path(part.path).is_file():
+                await self._repository.fail_match_rerun(
+                    rerun.match_id, '视频文件尚未下载完成，请稍后重试'
+                )
+                return True
+            try:
+                matches = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self._analyzer.recognize_candidate(
+                        part,
+                        at_ms=rerun.result_at_ms,
+                        view_context=rerun.view_context,
+                        cancelled=self._stop.is_set,
+                    ),
+                )
+                if len(matches) != 1:
+                    await self._repository.fail_match_rerun(
+                        rerun.match_id,
+                        '原时间点没有识别到唯一结算画面，'
+                        '已保留原结果',
+                    )
+                    return True
+                await self._repository.complete_match_rerun(
+                    rerun.match_id, matches[0]
+                )
+                logger.info(
+                    'Vainglory single match rerun completed: match_id={} '
+                    'part_id={} at_ms={}',
+                    rerun.match_id,
+                    part.id,
+                    rerun.result_at_ms,
+                )
+            except AnalysisCancelled:
+                await self._repository.fail_match_rerun(
+                    rerun.match_id, '单局重新识别已停止，请重新提交'
+                )
+            except Exception as error:
+                logger.exception(
+                    'Vainglory single match rerun failed for match {}',
+                    rerun.match_id,
+                )
+                await self._repository.fail_match_rerun(
+                    rerun.match_id,
+                    '{}: {}'.format(type(error).__name__, error),
+                )
+            return True
         claim = await self._repository.claim_next_ocr()
         if claim is None:
             return False

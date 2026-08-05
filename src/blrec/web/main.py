@@ -430,6 +430,8 @@ async def _realtime_archive_backfill_snapshot() -> Mapping[str, object]:
                 'quotaDay': status_value.quota_day,
                 'nextPage': status_value.next_page,
                 'discoveryComplete': status_value.discovery_complete,
+                'seasonStartedAt': status_value.season_started_at,
+                'seasonEndedAt': status_value.season_ended_at,
             }
         )
         item_values = await service.list_items(status_value.account_id, limit=30)

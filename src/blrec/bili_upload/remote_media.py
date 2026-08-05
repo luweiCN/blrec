@@ -235,8 +235,12 @@ class RemoteMediaCache:
             "WHERE source.state='ready' AND ("
             '(source.expires_at IS NOT NULL AND source.expires_at<=?) OR '
             "(source.retention_kind='analysis' "
-            "AND analysis.state IN ('ready','failed'))"
-            ') ORDER BY source.part_id',
+            "AND analysis.state IN ('ready','failed'))) "
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_match_rerun_jobs rerun '
+            'JOIN vainglory_matches match ON match.id=rerun.match_id '
+            'WHERE match.result_part_id=source.part_id '
+            "AND rerun.state IN ('pending','running')) "
+            'ORDER BY source.part_id',
             (now,),
         )
         cleaned = 0

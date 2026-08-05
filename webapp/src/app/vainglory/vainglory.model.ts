@@ -65,6 +65,8 @@ export interface VaingloryArchiveSync {
   readonly quotaDay: string | null;
   readonly nextPage: number;
   readonly discoveryComplete: boolean;
+  readonly seasonStartedAt: number | null;
+  readonly seasonEndedAt: number | null;
 }
 
 export interface VaingloryArchiveSyncControl {
@@ -320,6 +322,8 @@ export interface VaingloryMatch {
   readonly recordedPlayerConfidence: number | null;
   readonly recordedPlayerSource: RecordedPlayerSource;
   readonly recordedPlayerState: RecordedPlayerState;
+  readonly rerunState: 'pending' | 'running' | 'failed' | null;
+  readonly rerunError: string | null;
   readonly players: readonly VaingloryMatchPlayer[];
 }
 
@@ -363,6 +367,9 @@ export interface VaingloryMatchSession {
   readonly sourceTitle: string;
   readonly anchorName: string;
   readonly startedAt: number;
+  readonly liveStartedAt: number;
+  readonly partCount: number;
+  readonly recordingDurationSeconds: number;
   readonly matchCount: number;
   readonly tealWinCount: number;
   readonly orangeWinCount: number;
@@ -378,6 +385,8 @@ export interface VaingloryMatchSession {
   readonly descriptionState: VaingloryDescriptionState | null;
   readonly pinState: VaingloryPinState | null;
   readonly chapterState: VaingloryChapterState | null;
+  readonly publicationPriority: boolean;
+  readonly publicationUpdatedAt: number | null;
 }
 
 export interface VaingloryMatchSessionList {

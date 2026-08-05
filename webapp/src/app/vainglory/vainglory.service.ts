@@ -325,6 +325,19 @@ export class VaingloryService {
     );
   }
 
+  reanalyzeMatch(matchId: number): Observable<void> {
+    return this.http.post<void>(
+      this.url.makeApiUrl(`/api/v1/vainglory/matches/${matchId}/reanalyze`),
+      null,
+    );
+  }
+
+  deleteMatch(matchId: number): Observable<void> {
+    return this.http.delete<void>(
+      this.url.makeApiUrl(`/api/v1/vainglory/matches/${matchId}`),
+    );
+  }
+
   updateSessionTitle(
     sessionId: number,
     title: string,

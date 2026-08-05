@@ -181,6 +181,15 @@ class RecordedPlayerBackfillClaim:
 
 
 @dataclass(frozen=True)
+class MatchRerunClaim:
+    match_id: int
+    session_id: int
+    part: VideoPart
+    result_at_ms: int
+    view_context: Literal['played', 'observed', 'unknown']
+
+
+@dataclass(frozen=True)
 class ManualMatchMarkerRecord:
     id: int
     session_id: int
@@ -246,6 +255,8 @@ class MatchRecord:
     stats_eligible: bool = True
     stats_exclusion_reason: Optional[str] = None
     recorded_player_state: str = 'pending'
+    rerun_state: Optional[str] = None
+    rerun_error: Optional[str] = None
     previous_archive_page: Optional[int] = None
     previous_archive_duration_seconds: Optional[int] = None
     previous_archive_segments: Tuple[Tuple[int, int], ...] = ()
@@ -270,6 +281,9 @@ class MatchSessionRecord:
     game_modes: Tuple[str, ...]
     source_title: str = ''
     anchor_name: str = ''
+    live_started_at: int = 0
+    part_count: int = 0
+    recording_duration_seconds: int = 0
     win_count: int = 0
     loss_count: int = 0
     unknown_count: int = 0
@@ -279,6 +293,8 @@ class MatchSessionRecord:
     description_state: Optional[str] = None
     pin_state: Optional[str] = None
     chapter_state: Optional[str] = None
+    publication_priority: bool = False
+    publication_updated_at: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -562,6 +578,10 @@ class VaingloryRepository:
         'match.started_at_ms,match.custom_title,'
         'match.result_frame_path,match.recorded_player_confidence,'
         'match.recorded_player_source,match.recorded_player_detection_version,'
+        '(SELECT rerun.state FROM vainglory_match_rerun_jobs rerun '
+        'WHERE rerun.match_id=match.id) AS rerun_state,'
+        '(SELECT rerun.error FROM vainglory_match_rerun_jobs rerun '
+        'WHERE rerun.match_id=match.id) AS rerun_error,'
         'session.title AS session_title,'
         'session.started_at AS session_started_at,'
         'part.part_index AS part_index,'
@@ -660,6 +680,11 @@ class VaingloryRepository:
         now = self._now()
 
         def recover(connection: sqlite3.Connection) -> int:
+            recovered_matches = connection.execute(
+                "UPDATE vainglory_match_rerun_jobs SET state='pending',"
+                'started_at=NULL,error=NULL,updated_at=? WHERE state=\'running\'',
+                (now,),
+            ).rowcount
             recovered_ocr = connection.execute(
                 "UPDATE vainglory_ocr_jobs SET state='pending',started_at=NULL,"
                 'updated_at=? WHERE state=\'running\'',
@@ -686,7 +711,7 @@ class VaingloryRepository:
             ).fetchall()
             for row in rows:
                 self._refresh_session_job(connection, int(row['session_id']), now)
-            return cursor.rowcount + recovered_ocr
+            return cursor.rowcount + recovered_ocr + recovered_matches
 
         return await self._database.write(recover)
 
@@ -1212,6 +1237,11 @@ class VaingloryRepository:
             connection.execute(
                 'DELETE FROM vainglory_scan_suppressions WHERE session_id=?',
                 (int(session_id),),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_match_suppressions WHERE part_id=? '
+                'AND ABS(at_ms-?)<=5000',
+                (part_id, int(at_ms)),
             )
             connection.execute(
                 'INSERT INTO vainglory_manual_match_markers('
@@ -2174,6 +2204,22 @@ class VaingloryRepository:
             if str(job['state']) != 'analyzing':
                 raise VaingloryConflict('分析任务当前不能写入结果')
             session_id = int(job['session_id'])
+            suppressed_times = tuple(
+                int(row['at_ms'])
+                for row in connection.execute(
+                    'SELECT at_ms FROM vainglory_match_suppressions '
+                    'WHERE part_id=?',
+                    (int(part_id),),
+                ).fetchall()
+            )
+            stored_matches = tuple(
+                match
+                for match in matches
+                if not any(
+                    abs(int(match.result_at_ms) - suppressed_at_ms) <= 5_000
+                    for suppressed_at_ms in suppressed_times
+                )
+            )
             manual_hero_overrides = {
                 (int(row['result_at_ms']), str(row['side']), int(row['slot'])): int(
                     row['hero_id']
@@ -2212,7 +2258,7 @@ class VaingloryRepository:
                 'DELETE FROM vainglory_matches WHERE result_part_id=?', (int(part_id),)
             )
             heroes = self._existing_heroes(connection)
-            for match in matches:
+            for match in stored_matches:
                 if int(match.part_id) != int(part_id):
                     raise VaingloryConflict('结算页不属于当前分 P')
                 hero_ids: Dict[Tuple[str, int], Optional[int]] = {}
@@ -2377,7 +2423,7 @@ class VaingloryRepository:
                     _distance, override_index, override_payload = nearby_override
                     used_match_overrides.add(override_index)
                     self._apply_match_override(connection, match_id, override_payload)
-            if matches:
+            if stored_matches:
                 self._ensure_session_player(connection, session_id, now)
             rerun_requested = (
                 str(job['request_kind']) == 'manual'
@@ -2391,7 +2437,7 @@ class VaingloryRepository:
                     'started_at=NULL,completed_at=NULL,updated_at=? WHERE part_id=?',
                     (
                         self.ALGORITHM_VERSION,
-                        len(matches),
+                        len(stored_matches),
                         candidate_count,
                         now,
                         now,
@@ -2404,7 +2450,7 @@ class VaingloryRepository:
                     'match_count=?,candidate_count=COALESCE(?,candidate_count),'
                     'error=NULL,completed_at=?,updated_at=? '
                     'WHERE part_id=?',
-                    (len(matches), candidate_count, now, now, int(part_id)),
+                    (len(stored_matches), candidate_count, now, now, int(part_id)),
                 )
             connection.execute(
                 'UPDATE vainglory_publications SET needs_refresh=1 '
@@ -2565,6 +2611,14 @@ class VaingloryRepository:
             'SELECT session.id AS session_id,'
             'COALESCE(scan.custom_title,session.title) AS title,'
             'session.title AS source_title,session.anchor_name,session.started_at,'
+            'COALESCE(session.live_start_time,session.started_at) '
+            'AS live_started_at,'
+            '(SELECT COUNT(*) FROM recording_parts source_part '
+            'WHERE source_part.session_id=session.id) AS part_count,'
+            '(SELECT COALESCE(SUM(COALESCE(source_part.record_duration_seconds,'
+            '0)),0) FROM recording_parts source_part '
+            'WHERE source_part.session_id=session.id) '
+            'AS recording_duration_seconds,'
             'COALESCE(scan.stats_included,1) AS stats_included,'
             'COALESCE('
             '(SELECT upload.bvid FROM upload_jobs upload '
@@ -2597,6 +2651,13 @@ class VaingloryRepository:
             'FROM vainglory_publications publication '
             'WHERE publication.session_id=session.id '
             'ORDER BY publication.id DESC LIMIT 1) AS chapter_state,'
+            '(SELECT publication.priority FROM vainglory_publications publication '
+            'WHERE publication.session_id=session.id '
+            'ORDER BY publication.id DESC LIMIT 1) AS publication_priority,'
+            '(SELECT publication.updated_at '
+            'FROM vainglory_publications publication '
+            'WHERE publication.session_id=session.id '
+            'ORDER BY publication.id DESC LIMIT 1) AS publication_updated_at,'
             'COUNT(match.id) AS match_count,'
             "SUM(CASE WHEN {}='teal' THEN 1 ELSE 0 END) AS teal_win_count,"
             "SUM(CASE WHEN {}='orange' THEN 1 ELSE 0 END) AS orange_win_count,"
@@ -2808,6 +2869,374 @@ class VaingloryRepository:
         if not rows:
             raise VaingloryNotFound('对局不存在')
         return (await self._hydrate_matches(rows))[0]
+
+    async def request_match_rerun(self, match_id: int) -> None:
+        now = self._now()
+
+        def request(connection: sqlite3.Connection) -> None:
+            match = connection.execute(
+                'SELECT result_part_id FROM vainglory_matches WHERE id=?',
+                (int(match_id),),
+            ).fetchone()
+            if match is None:
+                raise VaingloryNotFound('对局不存在')
+            connection.execute(
+                'INSERT INTO vainglory_match_rerun_jobs('
+                'match_id,state,error,requested_at,started_at,completed_at,updated_at) '
+                "VALUES(?,'pending',NULL,?,NULL,NULL,?) "
+                'ON CONFLICT(match_id) DO UPDATE SET '
+                "state='pending',error=NULL,requested_at=excluded.requested_at,"
+                'started_at=NULL,completed_at=NULL,updated_at=excluded.updated_at',
+                (int(match_id), now, now),
+            )
+
+        await self._database.write(request)
+
+    async def claim_next_match_rerun(self) -> Optional[MatchRerunClaim]:
+        now = self._now()
+
+        def claim(connection: sqlite3.Connection) -> Optional[MatchRerunClaim]:
+            row = connection.execute(
+                'SELECT job.match_id,match.session_id,match.result_part_id,'
+                'match.result_at_ms,match.view_context,part.part_index,'
+                'part.source_path,part.final_path,session.title '
+                'FROM vainglory_match_rerun_jobs job '
+                'JOIN vainglory_matches match ON match.id=job.match_id '
+                'JOIN recording_parts part ON part.id=match.result_part_id '
+                'JOIN recording_sessions session ON session.id=match.session_id '
+                "WHERE job.state='pending' AND part.artifact_state='ready' "
+                'AND part.video_deleted_at IS NULL '
+                "AND session.deletion_state='none' "
+                'ORDER BY job.requested_at,job.match_id LIMIT 1'
+            ).fetchone()
+            if row is None:
+                return None
+            match_id = int(row['match_id'])
+            changed = connection.execute(
+                "UPDATE vainglory_match_rerun_jobs SET state='running',"
+                'started_at=?,completed_at=NULL,error=NULL,updated_at=? '
+                "WHERE match_id=? AND state='pending'",
+                (now, now, match_id),
+            )
+            if changed.rowcount != 1:
+                return None
+            return MatchRerunClaim(
+                match_id=match_id,
+                session_id=int(row['session_id']),
+                part=VideoPart(
+                    id=int(row['result_part_id']),
+                    index=int(row['part_index']),
+                    path=_preferred_part_path(
+                        row['source_path'], row['final_path']
+                    ),
+                    title=str(row['title'] or ''),
+                ),
+                result_at_ms=int(row['result_at_ms']),
+                view_context=cast(
+                    Literal['played', 'observed', 'unknown'],
+                    str(row['view_context']),
+                ),
+            )
+
+        return await self._database.write(claim)
+
+    async def fail_match_rerun(self, match_id: int, error: str) -> None:
+        now = self._now()
+
+        def fail(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "UPDATE vainglory_match_rerun_jobs SET state='failed',error=?,"
+                'completed_at=?,updated_at=? WHERE match_id=?',
+                (
+                    error.strip()[:500] or '单局重新识别失败',
+                    now,
+                    now,
+                    int(match_id),
+                ),
+            )
+            connection.execute(
+                'UPDATE vainglory_part_jobs SET completed_at=?,updated_at=? '
+                'WHERE part_id=(SELECT result_part_id FROM vainglory_matches '
+                'WHERE id=?)',
+                (now, now, int(match_id)),
+            )
+
+        await self._database.write(fail)
+
+    async def complete_match_rerun(
+        self, match_id: int, recognized: AnalyzedMatch
+    ) -> MatchRecord:
+        now = self._now()
+        written_paths: List[Path] = []
+        obsolete_frame_paths: List[str] = []
+
+        def complete(connection: sqlite3.Connection) -> None:
+            current = connection.execute(
+                'SELECT match.session_id,match.result_part_id,'
+                'match.result_frame_path,match.recorded_player_source '
+                'FROM vainglory_matches match '
+                'JOIN vainglory_match_rerun_jobs job ON job.match_id=match.id '
+                "WHERE match.id=? AND job.state='running'",
+                (int(match_id),),
+            ).fetchone()
+            if current is None:
+                raise VaingloryConflict(
+                    '单局重新识别任务当前不能写入结果'
+                )
+            part_id = int(current['result_part_id'])
+            session_id = int(current['session_id'])
+            if int(recognized.part_id) != part_id:
+                raise VaingloryConflict('重新识别结果不属于原分 P')
+            if current['result_frame_path'] is not None:
+                obsolete_frame_paths.append(str(current['result_frame_path']))
+
+            heroes = self._existing_heroes(connection)
+            hero_ids = {
+                (hero.side, hero.slot): self._resolve_hero(
+                    connection, hero, heroes, now
+                )
+                for hero in recognized.heroes
+            }
+            header = recognized.ocr.header
+            team_size = max(
+                (player.slot for player in recognized.ocr.players), default=0
+            )
+            normalized_team_size = team_size if 1 <= team_size <= 5 else None
+            game_mode = (
+                recognized.game_mode
+                if recognized.game_mode in ('aram', 'other')
+                else (
+                    '3v3'
+                    if normalized_team_size == 3
+                    else '5v5' if normalized_team_size == 5 else 'unknown'
+                )
+            )
+            match_kind = (
+                recognized.match_kind
+                if recognized.match_kind in ('pvp', 'bot', 'practice')
+                else 'unknown'
+            )
+            view_context = (
+                recognized.view_context
+                if recognized.view_context in ('played', 'observed')
+                else 'unknown'
+            )
+            stats_eligible = bool(recognized.stats_eligible)
+            stats_exclusion_reason = (
+                None
+                if stats_eligible
+                else recognized.stats_exclusion_reason.strip()[:64]
+                or 'classification'
+            )
+            started_at_ms = max(
+                0,
+                recognized.result_at_ms - (header.duration_seconds or 0) * 1_000,
+            )
+            result_frame_path: Optional[str] = None
+            if recognized.result_frame_png:
+                result_frame_path = self._result_frame_relative_path(
+                    session_id=session_id,
+                    part_id=part_id,
+                    result_at_ms=recognized.result_at_ms,
+                    content=recognized.result_frame_png,
+                )
+                destination = self._resolve_result_frame_path(result_frame_path)
+                self._write_result_frame(destination, recognized.result_frame_png)
+                written_paths.append(destination)
+
+            recorded_player = (
+                recognized.recorded_player
+                if normalized_team_size in (3, 5)
+                and str(current['recorded_player_source']) != 'manual'
+                else None
+            )
+            assignments = [
+                'result_at_ms=?',
+                'duration_seconds=?',
+                'result_text=?',
+                'end_reason=?',
+                'left_color=?',
+                'right_color=?',
+                'winner_side=?',
+                'left_kills=?',
+                'right_kills=?',
+                'left_economy=?',
+                'right_economy=?',
+                'confidence=?',
+                'game_mode=?',
+                'team_size=?',
+                'started_at_ms=?',
+                'result_frame_path=?',
+                'hero_recognition_version=?',
+                'match_kind=?',
+                'view_context=?',
+                'stats_eligible=?',
+                'stats_exclusion_reason=?',
+            ]
+            values: List[Any] = [
+                recognized.result_at_ms,
+                header.duration_seconds,
+                header.result_text,
+                header.end_reason,
+                recognized.layout.left_color,
+                recognized.layout.right_color,
+                recognized.layout.winner_side,
+                header.left_kills,
+                header.right_kills,
+                header.left_economy,
+                header.right_economy,
+                recognized.confidence,
+                game_mode,
+                normalized_team_size,
+                started_at_ms,
+                result_frame_path,
+                self.HERO_RECOGNITION_VERSION,
+                match_kind,
+                view_context,
+                1 if stats_eligible else 0,
+                stats_exclusion_reason,
+            ]
+            if str(current['recorded_player_source']) != 'manual':
+                assignments.extend(
+                    (
+                        'recorded_player_side=?',
+                        'recorded_player_slot=?',
+                        'recorded_player_confidence=?',
+                        "recorded_player_source='automatic'",
+                        'recorded_player_detection_version=?',
+                    )
+                )
+                values.extend(
+                    (
+                        None if recorded_player is None else recorded_player.side,
+                        None if recorded_player is None else recorded_player.slot,
+                        (
+                            None
+                            if recorded_player is None
+                            else recorded_player.confidence
+                        ),
+                        self.RECORDED_PLAYER_DETECTION_VERSION,
+                    )
+                )
+            connection.execute(
+                'UPDATE vainglory_matches SET {} WHERE id=?'.format(
+                    ','.join(assignments)
+                ),
+                tuple(values) + (int(match_id),),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_match_players WHERE match_id=?',
+                (int(match_id),),
+            )
+            for player in recognized.ocr.players:
+                stats = player.stats
+                connection.execute(
+                    'INSERT INTO vainglory_match_players('
+                    'match_id,side,slot,player_name,normalized_name,hero_id,'
+                    'hero_source,kills,deaths,assists,economy,last_hits,'
+                    'confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (
+                        int(match_id),
+                        player.side,
+                        player.slot,
+                        player.name,
+                        player.normalized_name,
+                        hero_ids.get((player.side, player.slot)),
+                        'automatic',
+                        stats.kills,
+                        stats.deaths,
+                        stats.assists,
+                        stats.economy,
+                        stats.last_hits,
+                        player.confidence,
+                    ),
+                )
+            override = connection.execute(
+                'SELECT payload_json FROM vainglory_match_overrides '
+                'WHERE part_id=? AND ABS(result_at_ms-?)<=30000 '
+                'ORDER BY ABS(result_at_ms-?) LIMIT 1',
+                (part_id, int(recognized.result_at_ms), int(recognized.result_at_ms)),
+            ).fetchone()
+            if override is not None:
+                self._apply_match_override(
+                    connection,
+                    int(match_id),
+                    self._override_payload(override['payload_json']),
+                )
+            connection.execute(
+                'DELETE FROM vainglory_match_rerun_jobs WHERE match_id=?',
+                (int(match_id),),
+            )
+            connection.execute(
+                'UPDATE vainglory_part_jobs SET match_count=('
+                'SELECT COUNT(*) FROM vainglory_matches '
+                'WHERE result_part_id=?),completed_at=?,updated_at=? '
+                'WHERE part_id=?',
+                (part_id, now, now, part_id),
+            )
+            connection.execute(
+                'UPDATE vainglory_publications SET needs_refresh=1 '
+                'WHERE session_id=?',
+                (session_id,),
+            )
+            self._consolidate_heroes(connection, now)
+            self._refresh_session_job(connection, session_id, now)
+
+        await self._database.write(complete)
+        self._remove_result_frame_files(obsolete_frame_paths, keep=written_paths)
+        return await self.get_match(match_id)
+
+    async def delete_match(self, match_id: int) -> None:
+        now = self._now()
+        obsolete_frame_paths: List[str] = []
+
+        def delete(connection: sqlite3.Connection) -> None:
+            match = connection.execute(
+                'SELECT session_id,result_part_id,result_at_ms,result_frame_path '
+                'FROM vainglory_matches WHERE id=?',
+                (int(match_id),),
+            ).fetchone()
+            if match is None:
+                raise VaingloryNotFound('对局不存在')
+            session_id = int(match['session_id'])
+            part_id = int(match['result_part_id'])
+            at_ms = int(match['result_at_ms'])
+            if match['result_frame_path'] is not None:
+                obsolete_frame_paths.append(str(match['result_frame_path']))
+            connection.execute(
+                'INSERT INTO vainglory_match_suppressions(part_id,at_ms,created_at) '
+                'VALUES(?,?,?) ON CONFLICT(part_id,at_ms) DO UPDATE SET '
+                'created_at=excluded.created_at',
+                (part_id, at_ms, now),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_manual_match_markers WHERE part_id=? '
+                'AND ABS(at_ms-?)<=5000',
+                (part_id, at_ms),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_match_overrides WHERE part_id=? '
+                'AND ABS(result_at_ms-?)<=5000',
+                (part_id, at_ms),
+            )
+            connection.execute(
+                'DELETE FROM vainglory_matches WHERE id=?', (int(match_id),)
+            )
+            connection.execute(
+                'UPDATE vainglory_part_jobs SET match_count=('
+                'SELECT COUNT(*) FROM vainglory_matches '
+                'WHERE result_part_id=?),updated_at=? WHERE part_id=?',
+                (part_id, now, part_id),
+            )
+            connection.execute(
+                'UPDATE vainglory_publications SET needs_refresh=1 '
+                'WHERE session_id=?',
+                (session_id,),
+            )
+            self._refresh_session_job(connection, session_id, now)
+
+        await self._database.write(delete)
+        self._remove_result_frame_files(obsolete_frame_paths)
 
     async def result_frame_path(self, match_id: int) -> Optional[Path]:
         row = await self._database.fetchone(
@@ -4345,6 +4774,9 @@ class VaingloryRepository:
             source_title=str(row['source_title'] or ''),
             anchor_name=str(row['anchor_name'] or ''),
             started_at=int(row['started_at']),
+            live_started_at=int(row['live_started_at']),
+            part_count=int(row['part_count'] or 0),
+            recording_duration_seconds=int(row['recording_duration_seconds'] or 0),
             match_count=int(row['match_count']),
             teal_win_count=int(row['teal_win_count'] or 0),
             orange_win_count=int(row['orange_win_count'] or 0),
@@ -4374,6 +4806,12 @@ class VaingloryRepository:
             pin_state=None if row['pin_state'] is None else str(row['pin_state']),
             chapter_state=(
                 None if row['chapter_state'] is None else str(row['chapter_state'])
+            ),
+            publication_priority=bool(row['publication_priority'] or 0),
+            publication_updated_at=(
+                None
+                if row['publication_updated_at'] is None
+                else int(row['publication_updated_at'])
             ),
         )
 
@@ -4550,6 +4988,12 @@ class VaingloryRepository:
             ),
             recorded_player_source=str(row['recorded_player_source']),
             recorded_player_state=recorded_player_state,
+            rerun_state=(
+                None if row['rerun_state'] is None else str(row['rerun_state'])
+            ),
+            rerun_error=(
+                None if row['rerun_error'] is None else str(row['rerun_error'])
+            ),
             players=players,
             previous_archive_page=previous_archive_page,
             previous_archive_duration_seconds=previous_archive_duration_seconds,

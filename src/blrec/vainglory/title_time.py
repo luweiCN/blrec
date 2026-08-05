@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from blrec.compat import ZoneInfo
 
@@ -15,14 +15,21 @@ _SHANGHAI = ZoneInfo('Asia/Shanghai')
 
 
 def current_season_started_at(now: int) -> int:
+    return current_season_window(now)[0]
+
+
+def current_season_window(now: int) -> Tuple[int, int]:
     local = datetime.fromtimestamp(int(now), _SHANGHAI)
     if local.month < 5:
-        month = 1
+        start = datetime(local.year, 1, 1, tzinfo=_SHANGHAI)
+        end = datetime(local.year, 5, 1, tzinfo=_SHANGHAI)
     elif local.month < 9:
-        month = 5
+        start = datetime(local.year, 5, 1, tzinfo=_SHANGHAI)
+        end = datetime(local.year, 9, 1, tzinfo=_SHANGHAI)
     else:
-        month = 9
-    return int(datetime(local.year, month, 1, tzinfo=_SHANGHAI).timestamp())
+        start = datetime(local.year, 9, 1, tzinfo=_SHANGHAI)
+        end = datetime(local.year + 1, 1, 1, tzinfo=_SHANGHAI)
+    return int(start.timestamp()), int(end.timestamp())
 
 
 def resolve_recording_started_at(

@@ -198,7 +198,7 @@ def build_publication_plan(matches: Sequence[MatchRecord]) -> PublicationPlan:
                 for match in ordered
             ],
             'summary': summary,
-            'version': 10,
+            'version': 11,
         },
         ensure_ascii=False,
         separators=(',', ':'),
@@ -405,7 +405,7 @@ class VaingloryPublicationService:
                     "UPDATE vainglory_publications SET state='prepared',"
                     "comment_cleanup_state='prepared',pin_state='prepared',"
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
-                    'updated_at=? WHERE id=?',
+                    'priority=1,updated_at=? WHERE id=?',
                     (now, publication_id),
                 )
             else:
@@ -413,7 +413,7 @@ class VaingloryPublicationService:
                 connection.execute(
                     'UPDATE vainglory_publications SET state=\'prepared\','
                     '{}=\'prepared\',attempt_count=0,next_attempt_at=0,error=NULL,'
-                    'updated_at=? WHERE id=?'.format(column),
+                    'priority=1,updated_at=? WHERE id=?'.format(column),
                     (now, publication_id),
                 )
             return publication_id, str(publication['bvid'])
@@ -601,7 +601,7 @@ class VaingloryPublicationService:
             'AND '
             + _PUBLICATION_READY_PREDICATE
             + ' AND publication.next_attempt_at<=? '
-            'ORDER BY CASE '
+            'ORDER BY publication.priority DESC,CASE '
             "WHEN publication.source_kind='upload' AND NOT EXISTS("
             'SELECT 1 FROM archive_migration_items priority_item '
             'WHERE priority_item.upload_job_id=publication.upload_job_id) THEN 0 '
@@ -695,7 +695,7 @@ class VaingloryPublicationService:
                     "chapter_state='prepared',description_state='prepared',"
                     "comment_cleanup_state='prepared',pin_state='prepared',"
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
-                    'needs_refresh=0,updated_at=? WHERE id=?',
+                    'needs_refresh=0,priority=0,updated_at=? WHERE id=?',
                     (
                         selected.session_id,
                         selected.upload_job_id,
@@ -920,7 +920,7 @@ class VaingloryPublicationService:
                 await self._database.execute(
                     "UPDATE vainglory_publications SET state='confirmed',"
                     "needs_refresh=0,error=CASE WHEN chapter_state='skipped' "
-                    'THEN error ELSE NULL END,updated_at=? WHERE id=?',
+                    'THEN error ELSE NULL END,priority=0,updated_at=? WHERE id=?',
                     (self._now(), publication_id),
                 )
         except (
@@ -2199,8 +2199,11 @@ def _match_line(index: int, match: MatchRecord, *, include_timestamp: bool) -> s
     result = {'teal': '胜　', 'orange': '负　'}.get(match.winner_color, '待定')
     recorded = '、'.join(_heroes_for_color(match, 'teal')) or '未识别'
     opponent = '、'.join(_heroes_for_color(match, 'orange')) or '未识别'
+    mode = {'3v3': '3V3', '5v5': '5V5', 'aram': '大乱斗'}.get(
+        match.game_mode, '模式待确认'
+    )
     label = _circled_match_number(index)
-    line = '{}｜{}｜{} vs {}'.format(label, result, recorded, opponent)
+    line = '{}｜{}｜{}｜{} vs {}'.format(label, result, mode, recorded, opponent)
     timestamp = _native_timestamp(match) if include_timestamp else None
     return line if timestamp is None else '{}｜{}'.format(line, timestamp)
 

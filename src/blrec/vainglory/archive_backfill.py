@@ -15,7 +15,7 @@ from blrec.compat import ZoneInfo
 from .anchor_identity import infer_recorded_anchor
 from .exclusions import is_excluded_title
 from .repository import refresh_session_scan_job
-from .title_time import current_season_started_at, resolve_recording_started_at
+from .title_time import current_season_window, resolve_recording_started_at
 
 
 class ArchiveBackfillNotFound(ValueError):
@@ -44,6 +44,8 @@ class ArchiveSync:
     quota_day: Optional[str] = None
     next_page: int = 1
     discovery_complete: bool = False
+    season_started_at: Optional[int] = None
+    season_ended_at: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -149,12 +151,66 @@ class ArchiveBackfillService:
         self._task = asyncio.create_task(self._run(), name='vainglory-archive-backfill')
 
     async def recover_interrupted(self) -> int:
-        return await self._database.execute(
-            "UPDATE vainglory_archive_imports SET state='queued',"
-            'progress=0,error=NULL,updated_at=? '
-            "WHERE state='downloading' AND page_count=0",
-            (self._now(),),
-        )
+        now = self._now()
+        default_start, default_end = current_season_window(now)
+
+        def recover(connection: sqlite3.Connection) -> int:
+            changed = connection.execute(
+                "UPDATE vainglory_archive_imports SET state='queued',"
+                'progress=0,error=NULL,updated_at=? '
+                "WHERE state='downloading' AND page_count=0",
+                (now,),
+            ).rowcount
+            syncs = connection.execute(
+                'SELECT account_id,state,error,season_started_at,season_ended_at '
+                'FROM vainglory_archive_syncs'
+            ).fetchall()
+            for sync in syncs:
+                account_id = int(sync['account_id'])
+                season_start = (
+                    default_start
+                    if sync['season_started_at'] is None
+                    else int(sync['season_started_at'])
+                )
+                season_end = (
+                    default_end
+                    if sync['season_ended_at'] is None
+                    else int(sync['season_ended_at'])
+                )
+                changed += connection.execute(
+                    'UPDATE vainglory_archive_syncs SET '
+                    'season_started_at=?,season_ended_at=? WHERE account_id=? '
+                    'AND (season_started_at IS NULL OR season_ended_at IS NULL)',
+                    (season_start, season_end, account_id),
+                ).rowcount
+                crossed_boundary = connection.execute(
+                    'SELECT 1 FROM vainglory_archive_imports WHERE account_id=? '
+                    'AND COALESCE(recording_started_at,published_at,created_at)<? '
+                    'LIMIT 1',
+                    (account_id, season_start),
+                ).fetchone()
+                changed += connection.execute(
+                    'DELETE FROM vainglory_archive_imports WHERE account_id=? '
+                    'AND page_count=0 AND session_id IS NULL '
+                    "AND state IN ('queued','failed') "
+                    'AND COALESCE(recording_started_at,published_at,created_at) '
+                    'NOT BETWEEN ? AND ?',
+                    (account_id, season_start, season_end - 1),
+                ).rowcount
+                if (
+                    str(sync['state']) == 'failed'
+                    and crossed_boundary is not None
+                    and 'Bilibili API error -400' in str(sync['error'] or '')
+                ):
+                    changed += connection.execute(
+                        "UPDATE vainglory_archive_syncs SET state='running',"
+                        'error=NULL,completed_at=NULL,discovery_complete=1,'
+                        'updated_at=? WHERE account_id=?',
+                        (now, account_id),
+                    ).rowcount
+            return changed
+
+        return await self._database.write(recover)
 
     async def close(self) -> None:
         task, self._task = self._task, None
@@ -172,18 +228,22 @@ class ArchiveBackfillService:
         if str(account['state']) != 'active':
             raise ArchiveBackfillUnavailable('只能回填当前可用的 B 站账号')
         now = self._now()
+        season_start, season_end = current_season_window(now)
         await self._database.execute(
             'INSERT INTO vainglory_archive_syncs('
             'account_id,state,progress,discovered_count,completed_count,error,'
-            'requested_at,started_at,completed_at,updated_at) '
-            "VALUES(?,'discovering',0,0,0,NULL,?,NULL,NULL,?) "
+            'requested_at,started_at,completed_at,updated_at,'
+            'season_started_at,season_ended_at) '
+            "VALUES(?,'discovering',0,0,0,NULL,?,NULL,NULL,?,?,?) "
             'ON CONFLICT(account_id) DO UPDATE SET '
             "state='discovering',progress=0,discovered_count=0,"
             'completed_count=0,error=NULL,requested_at=excluded.requested_at,'
             'started_at=NULL,completed_at=NULL,updated_at=excluded.updated_at,'
             'operator_paused=0,next_page=1,discovery_complete=0,'
-            'last_page_identity=NULL',
-            (int(account_id), now, now),
+            'last_page_identity=NULL,'
+            'season_started_at=excluded.season_started_at,'
+            'season_ended_at=excluded.season_ended_at',
+            (int(account_id), now, now, season_start, season_end),
         )
         self._next_discovery_at = 0
         self._wake.set()
@@ -280,7 +340,13 @@ class ArchiveBackfillService:
             'LEFT JOIN vainglory_publications publication '
             'ON publication.account_id=imported.account_id '
             'AND publication.bvid=imported.bvid '
-            'WHERE imported.account_id=? '
+            'JOIN vainglory_archive_syncs sync '
+            'ON sync.account_id=imported.account_id '
+            'WHERE imported.account_id=? AND '
+            'COALESCE(imported.recording_started_at,imported.published_at,'
+            'imported.created_at)>=sync.season_started_at AND '
+            'COALESCE(imported.recording_started_at,imported.published_at,'
+            'imported.created_at)<sync.season_ended_at '
             "ORDER BY CASE imported.state WHEN 'downloading' THEN 0 "
             "WHEN 'analyzing' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,"
             'imported.updated_at DESC,imported.id DESC LIMIT ?',
@@ -424,7 +490,8 @@ class ArchiveBackfillService:
         try:
             bundle = await self._bundle_loader(account_id)
             sync = await self._database.fetchone(
-                'SELECT next_page,last_page_identity FROM vainglory_archive_syncs '
+                'SELECT next_page,last_page_identity,season_started_at,'
+                'season_ended_at FROM vainglory_archive_syncs '
                 'WHERE account_id=?',
                 (int(account_id),),
             )
@@ -443,10 +510,24 @@ class ArchiveBackfillService:
                     page_number=page_number,
                     page_size=self.PAGE_SIZE,
                 )
-            archives = tuple(
+            parsed_archives = tuple(
                 archive
                 for archive in (self._parse_archive_entry(entry) for entry in entries)
-                if archive is not None and not is_excluded_title(archive.title)
+                if archive is not None
+            )
+            season_start = int(sync['season_started_at'])
+            season_end = int(sync['season_ended_at'])
+            archive_times = tuple(
+                resolve_recording_started_at(
+                    archive.title, published_at=archive.published_at, fallback=now
+                )
+                for archive in parsed_archives
+            )
+            archives = tuple(
+                archive
+                for archive, recorded_at in zip(parsed_archives, archive_times)
+                if season_start <= recorded_at < season_end
+                and not is_excluded_title(archive.title)
             )
             page_identity = ','.join(archive.bvid for archive in archives)
             repeated = (
@@ -456,13 +537,12 @@ class ArchiveBackfillService:
                 page_number >= self.MAX_PAGES
                 or len(entries) < self.PAGE_SIZE
                 or repeated
+                or (bool(archive_times) and max(archive_times) < season_start)
             )
         except BaseException as error:
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
                 raise
-            await self._fail_sync(
-                account_id, '{}: {}'.format(type(error).__name__, error)
-            )
+            await self._fail_sync(account_id, self._error_text(error))
             return
 
         def persist(connection: sqlite3.Connection) -> None:
@@ -526,8 +606,10 @@ class ArchiveBackfillService:
                 "SUM(CASE WHEN state IN ('ready','skipped') "
                 "OR (state='failed' AND retryable=0) "
                 'THEN 1 ELSE 0 END) AS completed '
-                'FROM vainglory_archive_imports WHERE account_id=?',
-                (account_id,),
+                'FROM vainglory_archive_imports WHERE account_id=? AND '
+                'COALESCE(recording_started_at,published_at,created_at)>=? AND '
+                'COALESCE(recording_started_at,published_at,created_at)<?',
+                (account_id, season_start, season_end),
             ).fetchone()
             assert counts is not None
             total = int(counts['total'])
@@ -558,8 +640,6 @@ class ArchiveBackfillService:
     async def _claim_import(self) -> Optional[sqlite3.Row]:
         now = self._now()
         quota_day = self._quota_day(now)
-        season_start = current_season_started_at(now)
-
         def claim(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
             row = connection.execute(
                 'SELECT imported.*,imported.quota_day AS import_quota_day,'
@@ -576,16 +656,18 @@ class ArchiveBackfillService:
                 "AND sync.state IN ('discovering','running') "
                 'AND sync.operator_paused=0 '
                 'AND (sync.retry_after_at IS NULL OR sync.retry_after_at<=?) AND ('
+                'COALESCE(imported.recording_started_at,imported.published_at,'
+                'imported.created_at)>=sync.season_started_at AND '
+                'COALESCE(imported.recording_started_at,imported.published_at,'
+                'imported.created_at)<sync.season_ended_at) AND ('
                 'imported.quota_day=? OR sync.quota_day IS NULL '
                 'OR sync.quota_day<>? OR sync.daily_used<sync.daily_limit) '
-                'ORDER BY CASE WHEN COALESCE(imported.recording_started_at,'
-                'imported.published_at,imported.created_at)>=? THEN 0 ELSE 1 END,'
-                "CASE imported.state WHEN 'failed' THEN 0 ELSE 1 END,"
+                "ORDER BY CASE imported.state WHEN 'failed' THEN 0 ELSE 1 END,"
                 'COALESCE(imported.next_retry_at,0),'
                 'COALESCE(imported.recording_started_at,imported.published_at,'
                 'imported.created_at) DESC,'
                 'imported.id LIMIT 1',
-                (now, now, quota_day, quota_day, season_start),
+                (now, now, quota_day, quota_day),
             ).fetchone()
             if row is None:
                 return None
@@ -1118,15 +1200,22 @@ class ArchiveBackfillService:
                     )
             syncs = connection.execute(
                 'SELECT account_id,state,discovered_count,completed_count,'
-                'discovery_complete FROM vainglory_archive_syncs '
+                'discovery_complete,season_started_at,season_ended_at '
+                'FROM vainglory_archive_syncs '
                 "WHERE state='running'"
             ).fetchall()
             for sync in syncs:
                 values = connection.execute(
                     'SELECT state,progress,retryable '
                     'FROM vainglory_archive_imports '
-                    'WHERE account_id=?',
-                    (int(sync['account_id']),),
+                    'WHERE account_id=? AND '
+                    'COALESCE(recording_started_at,published_at,created_at)>=? '
+                    'AND COALESCE(recording_started_at,published_at,created_at)<?',
+                    (
+                        int(sync['account_id']),
+                        int(sync['season_started_at']),
+                        int(sync['season_ended_at']),
+                    ),
                 ).fetchall()
                 total = len(values)
                 completed = sum(
@@ -1589,4 +1678,12 @@ class ArchiveBackfillService:
             quota_day=(None if row['quota_day'] is None else str(row['quota_day'])),
             next_page=int(row['next_page']),
             discovery_complete=bool(row['discovery_complete']),
+            season_started_at=(
+                None
+                if row['season_started_at'] is None
+                else int(row['season_started_at'])
+            ),
+            season_ended_at=(
+                None if row['season_ended_at'] is None else int(row['season_ended_at'])
+            ),
         )

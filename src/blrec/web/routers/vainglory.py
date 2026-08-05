@@ -118,6 +118,8 @@ class MatchResponse(ApiModel):
     recorded_player_state: Literal[
         'pending', 'uncertain', 'automatic', 'manual', 'unsupported'
     ]
+    rerun_state: Optional[Literal['pending', 'running', 'failed']]
+    rerun_error: Optional[str]
     players: List[MatchPlayerResponse]
 
 
@@ -132,6 +134,9 @@ class MatchSessionResponse(ApiModel):
     source_title: str
     anchor_name: str
     started_at: int
+    live_started_at: int
+    part_count: int
+    recording_duration_seconds: int
     match_count: int
     teal_win_count: int
     orange_win_count: int
@@ -147,6 +152,8 @@ class MatchSessionResponse(ApiModel):
     description_state: Optional[str]
     pin_state: Optional[str]
     chapter_state: Optional[str]
+    publication_priority: bool
+    publication_updated_at: Optional[int]
 
 
 class MatchSessionListResponse(ApiModel):
@@ -342,6 +349,8 @@ class ArchiveSyncResponse(ApiModel):
     quota_day: Optional[str]
     next_page: int
     discovery_complete: bool
+    season_started_at: Optional[int]
+    season_ended_at: Optional[int]
 
 
 class ArchiveSyncControlRequest(ApiModel):
@@ -493,6 +502,10 @@ def _match(value: MatchRecord) -> MatchResponse:
             Literal['pending', 'uncertain', 'automatic', 'manual', 'unsupported'],
             value.recorded_player_state,
         ),
+        rerun_state=cast(
+            Optional[Literal['pending', 'running', 'failed']], value.rerun_state
+        ),
+        rerun_error=value.rerun_error,
         players=[_player(player) for player in value.players],
     )
 
@@ -504,6 +517,9 @@ def _match_session(value: MatchSessionRecord) -> MatchSessionResponse:
         source_title=value.source_title,
         anchor_name=value.anchor_name,
         started_at=value.started_at,
+        live_started_at=value.live_started_at,
+        part_count=value.part_count,
+        recording_duration_seconds=value.recording_duration_seconds,
         match_count=value.match_count,
         teal_win_count=value.teal_win_count,
         orange_win_count=value.orange_win_count,
@@ -519,6 +535,8 @@ def _match_session(value: MatchSessionRecord) -> MatchSessionResponse:
         description_state=value.description_state,
         pin_state=value.pin_state,
         chapter_state=value.chapter_state,
+        publication_priority=value.publication_priority,
+        publication_updated_at=value.publication_updated_at,
     )
 
 
@@ -1148,6 +1166,36 @@ async def update_match(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
         ) from error
+
+
+@router.post(
+    '/matches/{match_id}/reanalyze', status_code=status.HTTP_202_ACCEPTED
+)
+async def reanalyze_match(
+    match_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        await index.request_match_rerun(match_id)
+    except (VaingloryConflict, VaingloryNotFound) as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.delete('/matches/{match_id}', status_code=status.HTTP_204_NO_CONTENT)
+async def delete_match(
+    match_id: int,
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        await index.delete_match(match_id)
+    except VaingloryNotFound as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch('/sessions/bulk-update', response_model=SessionBulkUpdateResponse)

@@ -39,10 +39,6 @@
       <i nz-icon nzType="cloud-download"></i>
       历史数据接入
     </button>
-    <button nz-button type="button" (click)="heroManagerVisible = true">
-      <i nz-icon nzType="database"></i>
-      英雄库
-    </button>
     <button nz-button type="button" (click)="refreshPage()">
       <i nz-icon nzType="reload"></i>
       刷新
@@ -332,7 +328,11 @@
                   }}
                 </p>
                 <p>
-                  {{ session.startedAt * 1000 | date: "yyyy-MM-dd HH:mm" }} ·
+                  开播：{{
+                    session.liveStartedAt * 1000 | date: "yyyy-MM-dd HH:mm"
+                  }}
+                  · {{ session.partCount }} 个分 P · 视频总时长
+                  {{ formatDuration(session.recordingDurationSeconds) }} ·
                   {{ session.matchCount }} 局 ·
                   {{ sessionModes(session) || "模式待识别" }} · 对局累计
                   {{ formatDuration(session.durationSeconds) }}
@@ -429,6 +429,15 @@
                       {{ publicationRetryLabel(session, "chapter") }}
                     </button>
                   </span>
+                  <nz-tag *ngIf="session.publicationPriority" nzColor="gold">
+                    手动重试优先队列
+                  </nz-tag>
+                  <small *ngIf="session.publicationUpdatedAt">
+                    发布状态更新：{{
+                      session.publicationUpdatedAt * 1000
+                        | date: "MM-dd HH:mm:ss"
+                    }}
+                  </small>
                 </div>
               </div>
               <div class="session-summary">
@@ -695,6 +704,23 @@
                             <strong>{{
                               formatDuration(match.durationSeconds)
                             }}</strong>
+                            <nz-tag
+                              *ngIf="match.rerunState"
+                              [nzColor]="
+                                match.rerunState === 'failed'
+                                  ? 'red'
+                                  : 'processing'
+                              "
+                              [attr.title]="match.rerunError || null"
+                            >
+                              {{
+                                match.rerunState === "failed"
+                                  ? "单局重识别失败"
+                                  : match.rerunState === "running"
+                                    ? "单局识别中"
+                                    : "单局等待识别"
+                              }}
+                            </nz-tag>
                             <button
                               nz-button
                               nzType="link"
@@ -732,6 +758,37 @@
                               (click)="openMatchEditor(match)"
                             >
                               编辑对局
+                            </button>
+                            <button
+                              nz-button
+                              nzType="link"
+                              type="button"
+                              nz-popconfirm
+                              nzPopconfirmTitle="只重新识别这一局原来的结算时间点，不会重扫整场直播，是否继续？"
+                              [nzLoading]="
+                                rerunningMatchIds.has(match.id) ||
+                                match.rerunState === 'pending' ||
+                                match.rerunState === 'running'
+                              "
+                              [disabled]="deletingMatchIds.has(match.id)"
+                              (nzOnConfirm)="reanalyzeMatch(match)"
+                            >
+                              重新识别这一局
+                            </button>
+                            <button
+                              nz-button
+                              nzType="link"
+                              nzDanger
+                              type="button"
+                              nz-popconfirm
+                              nzPopconfirmTitle="确认这是误识别并删除？以后整场重扫也会跳过这个时间点。"
+                              nzOkText="删除误识别"
+                              nzCancelText="取消"
+                              [nzLoading]="deletingMatchIds.has(match.id)"
+                              [disabled]="rerunningMatchIds.has(match.id)"
+                              (nzOnConfirm)="deleteDetectedMatch(match)"
+                            >
+                              删除误识别
                             </button>
                             <button
                               nz-button
@@ -1301,9 +1358,10 @@
 >
   <ng-container *nzModalContent>
     <p class="archive-manager-help">
-      选择当前保存迁移后稿件的投稿账号。系统会下载新稿件的最高画质并逐个分 P
-      分析，短分 P 也会正常检查结算画面。识别结果会回填到同一个新稿件的简介和置顶评论，
-      分析完成即删除临时视频。进程异常退出后会从未完成任务继续。
+      选择当前保存迁移后稿件的投稿账号。系统只发现并接入当前赛季的稿件，
+      下载最高画质后逐个分 P 分析，短分 P 也会正常检查结算画面。
+      识别结果会回填到同一个新稿件的简介和置顶评论，分析完成即删除临时视频；
+      进程异常退出后会从未完成任务继续。
     </p>
     <nz-alert
       *ngIf="archiveAccountsError"
@@ -1335,6 +1393,13 @@
             >
               <span>{{ archiveSyncLabel(sync) }}</span>
               <span *ngIf="sync.operatorPaused">任务已暂停</span>
+              <span *ngIf="sync.seasonStartedAt && sync.seasonEndedAt">
+                本轮范围：{{
+                  sync.seasonStartedAt * 1000 | date: "yyyy-MM-dd"
+                }}
+                至
+                {{ sync.seasonEndedAt * 1000 | date: "yyyy-MM-dd" }}
+              </span>
               <span>
                 今日已领取 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个 ·
                 已扫描至第 {{ sync.nextPage - 1 }} 页
@@ -1344,9 +1409,13 @@
                 nzSize="small"
                 [nzPercent]="archiveSyncPercent(sync)"
               ></nz-progress>
-              <span *ngIf="sync.error" class="error-text">
-                {{ sync.error }}
-              </span>
+              <nz-alert
+                *ngIf="sync.error"
+                nzType="error"
+                nzShowIcon
+                nzMessage="历史稿件发现失败，新的下载领取已暂停"
+                [nzDescription]="sync.error"
+              ></nz-alert>
             </ng-container>
             <ng-template #notSynced>
               <span>尚未接入</span>
@@ -1809,35 +1878,6 @@
       当前先显示前 {{ recordedPlayerReviews.length }} 条，共
       {{ recordedPlayerReviewTotal }} 条；确认后重新打开会继续加载下一批。
     </p>
-  </ng-container>
-</nz-modal>
-
-<nz-modal
-  [(nzVisible)]="heroManagerVisible"
-  nzTitle="英雄库"
-  [nzFooter]="null"
-  [nzWidth]="860"
-  (nzOnCancel)="heroManagerVisible = false"
->
-  <ng-container *nzModalContent>
-    <p class="hero-manager-help">
-      固定使用 57 个标准高清英雄头像；当前已加载 {{ heroes.length }}
-      项。低置信度结果会保留为未识别，不会生成错误英雄或覆盖标准头像。
-    </p>
-    <nz-alert
-      *ngIf="heroesView.state === 'error'"
-      nzType="error"
-      [nzMessage]="heroesView.message"
-    ></nz-alert>
-    <div class="hero-grid">
-      <div
-        *ngFor="let hero of heroes; trackBy: trackHero"
-        class="hero-library-item"
-      >
-        <img [src]="hero.thumbnailUrl" alt="" />
-        <strong>{{ hero.label }}</strong>
-      </div>
-    </div>
   </ng-container>
 </nz-modal>
 

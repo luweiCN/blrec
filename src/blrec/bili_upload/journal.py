@@ -383,6 +383,8 @@ _T = TypeVar('_T')
 
 
 class RecordingJournalBridge:
+    SHORT_RECONNECT_GRACE_SECONDS = 180
+
     def __init__(
         self,
         database: BiliUploadDatabase,
@@ -446,6 +448,27 @@ class RecordingJournalBridge:
                     'ORDER BY id DESC LIMIT 1',
                     (room_id, live_start_time),
                 ).fetchone()
+                if row is None:
+                    anchor_uid = None if metadata is None else metadata.anchor_uid
+                    row = connection.execute(
+                        'SELECT id,broadcast_session_key,cancellation_generation '
+                        'FROM recording_sessions '
+                        'WHERE room_id=? '
+                        "AND source_kind='live' AND state IN ('open','closed') "
+                        "AND deletion_state='none' AND ended_at IS NOT NULL "
+                        'AND ended_at>=? '
+                        'AND (? IS NULL OR anchor_uid IS NULL OR anchor_uid=?) '
+                        'AND NOT EXISTS(SELECT 1 FROM upload_jobs '
+                        'WHERE upload_jobs.session_id=recording_sessions.id '
+                        'AND upload_jobs.preupload_finalized=1) '
+                        'ORDER BY ended_at DESC,id DESC LIMIT 1',
+                        (
+                            room_id,
+                            now - self.SHORT_RECONNECT_GRACE_SECONDS,
+                            anchor_uid,
+                            anchor_uid,
+                        ),
+                    ).fetchone()
                 if row is not None:
                     key = str(row['broadcast_session_key'])
                 else:

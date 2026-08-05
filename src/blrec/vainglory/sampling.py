@@ -93,7 +93,14 @@ def same_gameplay_run(
     lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
     if lineup_evidence == 'mismatched':
         return False
-    if current.at_ms - previous.at_ms <= maximum_gap_ms:
+    elapsed_ms = current.at_ms - previous.at_ms
+    if elapsed_ms <= min(maximum_gap_ms, 75_000):
+        return True
+    if (
+        elapsed_ms <= maximum_gap_ms
+        and hud_lineup_similarity(previous.hud_signature, current.hud_signature)
+        >= 0.92
+    ):
         return True
     return lineup_evidence == 'matched'
 

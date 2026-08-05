@@ -476,7 +476,7 @@ def collapse_analyzed_matches(
 class VaingloryVideoAnalyzer:
     _RESULT_FALLBACK_INTERVAL_MS = 120_000
     _HUD_CONTINUITY_MS = 20_000
-    _NOISY_HUD_CONTINUITY_MS = 75_000
+    _HUD_CONTINUITY_LEVELS_MS = (20_000, 75_000, 150_000, 300_000)
     _MAX_RESULT_WINDOWS_PER_HOUR = 60
     _MIN_RESULT_WINDOWS_BEFORE_RELAXING = 30
     _COMPACT_FINE_WINDOW_MS = 12_000
@@ -527,6 +527,27 @@ class VaingloryVideoAnalyzer:
             scanned,
             progress=recognition_progress,
             status_callback=status_callback,
+            cancelled=cancelled,
+        )
+
+    def recognize_candidate(
+        self,
+        part: VideoPart,
+        *,
+        at_ms: int,
+        view_context: Literal['played', 'observed', 'unknown'] = 'unknown',
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[AnalyzedMatch, ...]:
+        profile = self._sampler.probe(part.path)
+        candidate_at_ms = max(0, min(int(at_ms), max(0, profile.duration_ms - 1)))
+        return self.recognize_scanned_part(
+            part,
+            ScannedPart(
+                video_duration_ms=profile.duration_ms,
+                candidate_times_ms=(candidate_at_ms,),
+                candidate_view_contexts=(view_context,),
+                candidate_hero_lineups=((),),
+            ),
             cancelled=cancelled,
         )
 
@@ -810,37 +831,52 @@ class VaingloryVideoAnalyzer:
             )
             // 3_600_000,
         )
-        relaxed_hud_continuity = primary_window_count > maximum_expected_windows
-        if relaxed_hud_continuity:
-            relaxed_windows = result_search_windows(
-                observations,
-                duration_ms=profile.duration_ms,
-                hud_gap_ms=self._NOISY_HUD_CONTINUITY_MS,
-                before_end_ms=5_000,
-            )
-            if len(relaxed_windows) < primary_window_count:
-                windows = relaxed_windows
+        selected_hud_gap_ms = self._HUD_CONTINUITY_MS
+        window_attempts = [(selected_hud_gap_ms, primary_window_count)]
+        if primary_window_count > maximum_expected_windows:
+            for hud_gap_ms in self._HUD_CONTINUITY_LEVELS_MS[1:]:
+                candidate_windows = result_search_windows(
+                    observations,
+                    duration_ms=profile.duration_ms,
+                    hud_gap_ms=hud_gap_ms,
+                    before_end_ms=5_000,
+                )
+                window_attempts.append((hud_gap_ms, len(candidate_windows)))
                 logger.warning(
-                    'Vainglory noisy HUD transitions compacted: part_id={} '
-                    'duration_ms={} primary_gap_ms={} primary_windows={} '
-                    'threshold={} relaxed_gap_ms={} relaxed_windows={}',
+                    'Vainglory noisy HUD transition level evaluated: part_id={} '
+                    'duration_ms={} gap_ms={} windows={} threshold={}',
                     part.id,
                     profile.duration_ms,
-                    self._HUD_CONTINUITY_MS,
-                    primary_window_count,
+                    hud_gap_ms,
+                    len(candidate_windows),
                     maximum_expected_windows,
-                    self._NOISY_HUD_CONTINUITY_MS,
-                    len(windows),
                 )
-            else:
-                relaxed_hud_continuity = False
+                if len(candidate_windows) < len(windows):
+                    windows = candidate_windows
+                    selected_hud_gap_ms = hud_gap_ms
+                if len(windows) <= maximum_expected_windows:
+                    break
+        relaxed_hud_continuity = selected_hud_gap_ms != self._HUD_CONTINUITY_MS
+        if relaxed_hud_continuity:
+            logger.warning(
+                'Vainglory noisy HUD transitions compacted: part_id={} '
+                'duration_ms={} primary_windows={} threshold={} '
+                'selected_gap_ms={} selected_windows={} attempts={}',
+                part.id,
+                profile.duration_ms,
+                primary_window_count,
+                maximum_expected_windows,
+                selected_hud_gap_ms,
+                len(windows),
+                tuple(window_attempts),
+            )
         logger.info(
             'Vainglory coarse scan completed: part_id={} frames={} hud_hits={} '
             'observer_hits={} lineup_probes={} lineup_recognized_slots={} '
             'hud_detection_seconds={:.3f} lineup_seconds={:.3f} '
             'result_fallback_probes={} result_fallback_seconds={:.3f} '
             'transition_result_probes={} result_hits={} primary_windows={} '
-            'windows={} relaxed_hud_continuity={} '
+            'windows={} selected_hud_gap_ms={} window_attempts={} '
             'elapsed_seconds={:.3f}',
             part.id,
             len(observations),
@@ -859,7 +895,8 @@ class VaingloryVideoAnalyzer:
             sum(item.result_visible for item in observations),
             primary_window_count,
             len(windows),
-            relaxed_hud_continuity,
+            selected_hud_gap_ms,
+            tuple(window_attempts),
             coarse_seconds,
         )
         self._emit_status(
