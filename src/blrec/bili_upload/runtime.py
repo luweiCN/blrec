@@ -579,29 +579,43 @@ class BiliAccountRuntime:
                 clock=self._clock,
             )
             await remote_media_cache.start()
-            hero_recognizer: Optional[SiftHeroRecognizer]
-            try:
-                hero_recognizer = SiftHeroRecognizer(load_hero_references())
-            except (ImportError, OSError, RuntimeError, ValueError) as error:
-                hero_recognizer = None
-                logger.warning(
-                    'Vainglory hero recognizer unavailable; continuing without '
-                    'hero labels: reason={!r}',
-                    error,
-                )
-            ocr_url = os.environ.get('BLREC_VAINGLORY_OCR_URL', '').strip()
-            result_reader = (
-                None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
+            remote_worker_enabled = (
+                os.environ.get('BLREC_VAINGLORY_WORKER_MODE', '').strip().lower()
+                == 'remote'
             )
-            try:
-                result_panel_detector = load_result_panel_detector()
-            except (ImportError, OSError, RuntimeError, ValueError) as error:
-                result_panel_detector = None
-                logger.warning(
-                    'Vainglory result panel detector unavailable; using legacy '
-                    'layout rules: reason={!r}',
-                    error,
+            if (
+                remote_worker_enabled
+                and not os.environ.get('BLREC_ANALYSIS_WORKER_TOKEN', '').strip()
+            ):
+                raise RuntimeError(
+                    'BLREC_ANALYSIS_WORKER_TOKEN is required in remote worker mode'
                 )
+            hero_recognizer: Optional[SiftHeroRecognizer] = None
+            result_reader: Optional[Any] = None
+            result_panel_detector: Optional[Any] = None
+            if not remote_worker_enabled:
+                try:
+                    hero_recognizer = SiftHeroRecognizer(load_hero_references())
+                except (ImportError, OSError, RuntimeError, ValueError) as error:
+                    logger.warning(
+                        'Vainglory hero recognizer unavailable; continuing without '
+                        'hero labels: reason={!r}',
+                        error,
+                    )
+                ocr_url = os.environ.get('BLREC_VAINGLORY_OCR_URL', '').strip()
+                result_reader = (
+                    None
+                    if not ocr_url
+                    else GlmOcrResultReader(GlmOcrClient(ocr_url))
+                )
+                try:
+                    result_panel_detector = load_result_panel_detector()
+                except (ImportError, OSError, RuntimeError, ValueError) as error:
+                    logger.warning(
+                        'Vainglory result panel detector unavailable; using legacy '
+                        'layout rules: reason={!r}',
+                        error,
+                    )
             result_frame_root = os.environ.get(
                 'BLREC_VAINGLORY_RESULT_FRAME_ROOT', ''
             ).strip()
@@ -624,6 +638,7 @@ class BiliAccountRuntime:
             vainglory_service = VaingloryIndexService(
                 vainglory_repository,
                 remote_media_cache=remote_media_cache,
+                remote_worker_enabled=remote_worker_enabled,
                 analyzer=VaingloryVideoAnalyzer(
                     result_reader=result_reader,
                     hero_recognizer=hero_recognizer,

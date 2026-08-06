@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional, cast
+import base64
+import time
+from typing import Any, Dict, List, Literal, Optional, cast
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.exceptions import HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from blrec.analysis_worker.codec import (
+    decode_hero,
+    decode_match,
+    decode_matches,
+    decode_recorded_player,
+)
 from blrec.utils.string import camel_case
+from blrec.vainglory.analyzer import AnalysisStatus
 from blrec.vainglory.archive_backfill import (
     ArchiveBackfillItem,
     ArchiveBackfillNotFound,
@@ -36,6 +46,7 @@ from blrec.vainglory.repository import (
 )
 from blrec.vainglory.service import VaingloryIndexService
 
+from .. import security
 from .bili_accounts import authenticated_manager_subject
 
 service: Optional[VaingloryIndexService] = None
@@ -61,6 +72,28 @@ class ScanJobResponse(ApiModel):
     started_at: Optional[int]
     completed_at: Optional[int]
     updated_at: int
+
+
+class AnalysisWorkerHeartbeatRequest(ApiModel):
+    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    item_id: int = Field(..., ge=1)
+    progress: float = Field(0, ge=0, le=0.99)
+    runtime_status: Optional[Dict[str, Any]] = None
+
+
+class AnalysisWorkerCompleteRequest(ApiModel):
+    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    item_id: int = Field(..., ge=1)
+    candidate_count: int = Field(0, ge=0)
+    matches: List[Dict[str, Any]] = Field(default_factory=list)
+    heroes: List[Dict[str, Any]] = Field(default_factory=list)
+    recorded_player: Optional[Dict[str, Any]] = None
+
+
+class AnalysisWorkerFailureRequest(ApiModel):
+    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    item_id: int = Field(..., ge=1)
+    error: str = Field(..., min_length=1, max_length=500)
 
 
 class MatchPlayerResponse(ApiModel):
@@ -636,6 +669,117 @@ def _raise_repository_error(error: ValueError) -> None:
 
 
 router = APIRouter(prefix='/vainglory', tags=['vainglory'])
+
+
+def _remote_media_path(part_id: int) -> str:
+    expires_at = int(time.time()) + 12 * 60 * 60
+    query = urlencode(
+        {
+            'media_token': security.media_access_token(part_id, expires_at),
+            'media_expires': expires_at,
+        }
+    )
+    return '/api/v1/recording-sessions/parts/{}/media?{}'.format(part_id, query)
+
+
+@router.post('/worker/claim', response_model=None)
+async def claim_analysis_work(
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        claim = await index.claim_remote_work()
+    except VaingloryConflict as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    if claim is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    payload: Dict[str, Any] = {
+        'kind': claim.kind,
+        'itemId': claim.item_id,
+        'sessionId': claim.session_id,
+        'resultAtMs': claim.result_at_ms,
+        'viewContext': claim.view_context,
+        'partDurationSeconds': claim.part_duration_seconds,
+        'recordingDurationSeconds': claim.recording_duration_seconds,
+    }
+    if claim.part is not None:
+        payload['part'] = {
+            'id': claim.part.id,
+            'index': claim.part.index,
+            'title': claim.part.title,
+            'manualCandidateTimesMs': list(claim.part.manual_candidate_times_ms),
+            'mediaPath': _remote_media_path(claim.part.id),
+        }
+    if claim.frame_png:
+        payload['framePng'] = base64.b64encode(claim.frame_png).decode('ascii')
+    return JSONResponse(payload)
+
+
+@router.post('/worker/heartbeat', status_code=status.HTTP_204_NO_CONTENT)
+async def heartbeat_analysis_work(
+    payload: AnalysisWorkerHeartbeatRequest,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    runtime_status = None
+    if payload.runtime_status is not None:
+        try:
+            runtime_status = AnalysisStatus(**payload.runtime_status)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Worker 运行状态无效：{}'.format(error),
+            ) from None
+    await index.heartbeat_remote_work(
+        payload.kind, payload.item_id, payload.progress, runtime_status
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post('/worker/complete', status_code=status.HTTP_204_NO_CONTENT)
+async def complete_analysis_work(
+    payload: AnalysisWorkerCompleteRequest,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        if payload.kind == 'part':
+            await index.complete_remote_part(
+                payload.item_id,
+                decode_matches(payload.matches),
+                candidate_count=payload.candidate_count,
+            )
+        elif payload.kind == 'match_rerun':
+            if len(payload.matches) != 1:
+                raise VaingloryConflict('单局重新识别必须返回一场对局')
+            await index.complete_remote_match_rerun(
+                payload.item_id, decode_match(payload.matches[0])
+            )
+        elif payload.kind == 'hero_rematch':
+            await index.complete_remote_hero_rematch(
+                payload.item_id, tuple(decode_hero(hero) for hero in payload.heroes)
+            )
+        else:
+            await index.complete_remote_recorded_player_backfill(
+                payload.item_id, decode_recorded_player(payload.recorded_player)
+            )
+    except (KeyError, TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Worker 返回结果无效：{}'.format(error),
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post('/worker/fail', status_code=status.HTTP_204_NO_CONTENT)
+async def fail_analysis_work(
+    payload: AnalysisWorkerFailureRequest,
+    _worker: str = Depends(security.authenticated_analysis_worker),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    await index.fail_remote_work(payload.kind, payload.item_id, payload.error)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

@@ -709,7 +709,9 @@ async def on_startup() -> None:
     settings_apply_started = False
     try:
         security.configure(
-            _admin_auth_store, bootstrap_api_key=_env_settings.api_key or ''
+            _admin_auth_store,
+            bootstrap_api_key=_env_settings.api_key or '',
+            worker_token=os.environ.get('BLREC_ANALYSIS_WORKER_TOKEN', ''),
         )
         auth.configure(
             _admin_auth_store,

@@ -174,6 +174,17 @@ class ScannedPart:
 
 
 @dataclass(frozen=True)
+class DenseScanResult:
+    scanned_part: ScannedPart
+    decoded_frames: int
+    result_frames: int
+    probe_seconds: float
+    decode_seconds: float
+    detection_seconds: float
+    total_seconds: float
+
+
+@dataclass(frozen=True)
 class AnalysisStatus:
     stage: Literal[
         'probing', 'coarse_scan', 'fine_scan', 'ocr_waiting', 'ocr_recognition'
@@ -1156,6 +1167,93 @@ class VaingloryVideoAnalyzer:
             candidate_times_ms=tuple(item[0] for item in candidate_entries),
             candidate_view_contexts=tuple(item[1] for item in candidate_entries),
             candidate_hero_lineups=tuple(item[2] for item in candidate_entries),
+        )
+
+    def scan_part_dense(
+        self,
+        part: VideoPart,
+        *,
+        progress: Optional[Callable[[float], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> DenseScanResult:
+        scan_started = time.monotonic()
+        probe_started = time.monotonic()
+        profile = self._sampler.probe(part.path)
+        probe_seconds = time.monotonic() - probe_started
+        window = ScanWindow(start_ms=0, end_ms=profile.duration_ms)
+        frames = iter(self._sampler.fine_frames(part.path, window))
+        hits: List[ResultHit] = []
+        decoded_frames = 0
+        decode_seconds = 0.0
+        detection_seconds = 0.0
+        next_progress = 0.01
+        logger.info(
+            'Vainglory dense scan started: part_id={} duration_ms={}',
+            part.id,
+            profile.duration_ms,
+        )
+        while True:
+            self._raise_if_cancelled(cancelled)
+            decode_started = time.monotonic()
+            try:
+                timed = next(frames)
+            except StopIteration:
+                decode_seconds += time.monotonic() - decode_started
+                break
+            decode_seconds += time.monotonic() - decode_started
+            decoded_frames += 1
+            detection_started = time.monotonic()
+            layout = self._detect_result_layout(timed.frame)
+            detection_seconds += time.monotonic() - detection_started
+            if layout is not None:
+                hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
+            ratio = min(1.0, timed.at_ms / max(1, profile.duration_ms))
+            if ratio >= next_progress:
+                if progress is not None:
+                    progress(ratio)
+                while next_progress <= ratio:
+                    next_progress += 0.01
+        if progress is not None:
+            progress(1.0)
+
+        candidates = list(collapse_result_hits(hits, maximum_gap_ms=5_000))
+        candidate_times_ms = [candidate.at_ms for candidate in candidates]
+        for manual_at_ms in part.manual_candidate_times_ms:
+            if 0 <= manual_at_ms < profile.duration_ms and not any(
+                abs(candidate_at_ms - manual_at_ms) <= 5_000
+                for candidate_at_ms in candidate_times_ms
+            ):
+                candidate_times_ms.append(manual_at_ms)
+        candidate_times_ms.sort()
+        total_seconds = time.monotonic() - scan_started
+        logger.info(
+            'Vainglory dense scan completed: part_id={} frames={} '
+            'result_frames={} candidates={} probe_seconds={:.3f} '
+            'decode_seconds={:.3f} detection_seconds={:.3f} '
+            'total_seconds={:.3f}',
+            part.id,
+            decoded_frames,
+            len(hits),
+            len(candidate_times_ms),
+            probe_seconds,
+            decode_seconds,
+            detection_seconds,
+            total_seconds,
+        )
+        scanned_part = ScannedPart(
+            video_duration_ms=profile.duration_ms,
+            candidate_times_ms=tuple(candidate_times_ms),
+            candidate_view_contexts=tuple('unknown' for _ in candidate_times_ms),
+            candidate_hero_lineups=tuple(() for _ in candidate_times_ms),
+        )
+        return DenseScanResult(
+            scanned_part=scanned_part,
+            decoded_frames=decoded_frames,
+            result_frames=len(hits),
+            probe_seconds=probe_seconds,
+            decode_seconds=decode_seconds,
+            detection_seconds=detection_seconds,
+            total_seconds=total_seconds,
         )
 
     def recognize_scanned_part(

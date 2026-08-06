@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -21,6 +21,7 @@ from .analyzer import (
     AnalyzedHero,
     AnalyzedMatch,
     VaingloryVideoAnalyzer,
+    VideoPart,
 )
 from .hero_recognition import load_hero_references
 from .repository import (
@@ -42,6 +43,20 @@ from .repository import (
     VaingloryRepository,
     ZeroMatchSessionPage,
 )
+from .vision import RecordedPlayer
+
+
+@dataclass(frozen=True)
+class RemoteAnalysisClaim:
+    kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
+    item_id: int
+    part: Optional[VideoPart] = None
+    session_id: Optional[int] = None
+    result_at_ms: Optional[int] = None
+    view_context: Literal['played', 'observed', 'unknown'] = 'unknown'
+    frame_png: bytes = b''
+    part_duration_seconds: Optional[int] = None
+    recording_duration_seconds: Optional[int] = None
 
 
 class VaingloryIndexService:
@@ -51,6 +66,7 @@ class VaingloryIndexService:
         *,
         analyzer: Optional[VaingloryVideoAnalyzer] = None,
         remote_media_cache: Optional[RemoteMediaCache] = None,
+        remote_worker_enabled: bool = False,
         idle_poll_seconds: float = 2,
         realtime_poll_seconds: float = 1,
     ) -> None:
@@ -59,6 +75,8 @@ class VaingloryIndexService:
         self._repository = repository
         self._analyzer = analyzer or VaingloryVideoAnalyzer()
         self._remote_media_cache = remote_media_cache
+        self._remote_worker_enabled = bool(remote_worker_enabled)
+        self._remote_worker_last_seen = 0.0
         self._idle_poll_seconds = idle_poll_seconds
         self._realtime_poll_seconds = realtime_poll_seconds
         self._scan_wake = asyncio.Event()
@@ -77,6 +95,12 @@ class VaingloryIndexService:
 
     @property
     def worker_state(self) -> str:
+        if self._remote_worker_enabled:
+            return (
+                'running'
+                if time.monotonic() - self._remote_worker_last_seen <= 90
+                else 'stopped'
+            )
         tasks = tuple(
             task for task in (self._scan_task, self._ocr_task) if task is not None
         )
@@ -106,6 +130,12 @@ class VaingloryIndexService:
             )
         await self._repository.sync_hero_references(references)
         self._stop.clear()
+        if self._remote_worker_enabled:
+            recovered = await self._repository.prepare_remote_worker()
+            logger.info(
+                'Vainglory remote analysis worker mode enabled: recovered={}', recovered
+            )
+            return
         self._scan_wake.set()
         self._ocr_wake.set()
         self._scan_task = asyncio.create_task(
@@ -127,6 +157,125 @@ class VaingloryIndexService:
         await asyncio.gather(*tasks)
         self._scan_task = None
         self._ocr_task = None
+
+    @property
+    def remote_worker_enabled(self) -> bool:
+        return self._remote_worker_enabled
+
+    def _require_remote_worker(self) -> None:
+        if not self._remote_worker_enabled:
+            raise VaingloryConflict('远程分析 Worker 未启用')
+        self._remote_worker_last_seen = time.monotonic()
+
+    async def claim_remote_work(self) -> Optional[RemoteAnalysisClaim]:
+        self._require_remote_worker()
+        recovered = await self._repository.recover_stale_remote_work(180)
+        if recovered:
+            logger.warning('Recovered stale remote Vainglory work: count={}', recovered)
+
+        rerun = await self._repository.claim_next_match_rerun()
+        if rerun is not None:
+            return RemoteAnalysisClaim(
+                kind='match_rerun',
+                item_id=rerun.match_id,
+                part=rerun.part,
+                session_id=rerun.session_id,
+                result_at_ms=rerun.result_at_ms,
+                view_context=rerun.view_context,
+            )
+
+        if not await self._repository.has_realtime_pending():
+            recorded_player = await self._repository.next_recorded_player_backfill()
+            if recorded_player is not None:
+                path = await self._repository.result_frame_path(
+                    recorded_player.match_id
+                )
+                if path is not None:
+                    return RemoteAnalysisClaim(
+                        kind='recorded_player_backfill',
+                        item_id=recorded_player.match_id,
+                        frame_png=path.read_bytes(),
+                    )
+                await self._repository.complete_recorded_player_backfill(
+                    recorded_player.match_id, None
+                )
+
+            hero = await self._repository.next_hero_rematch()
+            if hero is not None:
+                path = await self._repository.result_frame_path(hero.match_id)
+                if path is not None:
+                    return RemoteAnalysisClaim(
+                        kind='hero_rematch',
+                        item_id=hero.match_id,
+                        frame_png=path.read_bytes(),
+                    )
+                await self._repository.complete_hero_rematch(hero.match_id, ())
+
+        claim = await self._repository.claim_next()
+        if claim is None:
+            return None
+        return RemoteAnalysisClaim(
+            kind='part',
+            item_id=claim.part.id,
+            part=claim.part,
+            session_id=claim.session_id,
+            part_duration_seconds=claim.part_duration_seconds,
+            recording_duration_seconds=claim.recording_duration_seconds,
+        )
+
+    async def heartbeat_remote_work(
+        self,
+        kind: str,
+        item_id: int,
+        progress: float,
+        status: Optional[AnalysisStatus] = None,
+    ) -> None:
+        self._require_remote_worker()
+        if kind == 'part':
+            await self._repository.update_progress(item_id, progress)
+            if status is not None:
+                self._record_runtime_status(item_id, status)
+        elif kind == 'match_rerun':
+            await self._repository.touch_match_rerun(item_id)
+
+    async def complete_remote_part(
+        self, part_id: int, matches: Sequence[AnalyzedMatch], *, candidate_count: int
+    ) -> None:
+        self._require_remote_worker()
+        await self._repository.complete_part(
+            part_id, matches, candidate_count=candidate_count
+        )
+        self._clear_runtime_status(part_id)
+
+    async def complete_remote_match_rerun(
+        self, match_id: int, match: AnalyzedMatch
+    ) -> None:
+        self._require_remote_worker()
+        await self._repository.complete_match_rerun(match_id, match)
+
+    async def complete_remote_hero_rematch(
+        self, match_id: int, heroes: Sequence[AnalyzedHero]
+    ) -> None:
+        self._require_remote_worker()
+        await self._repository.complete_hero_rematch(match_id, heroes)
+
+    async def complete_remote_recorded_player_backfill(
+        self, match_id: int, player: Optional[RecordedPlayer]
+    ) -> None:
+        self._require_remote_worker()
+        await self._repository.complete_recorded_player_backfill(match_id, player)
+
+    async def fail_remote_work(self, kind: str, item_id: int, error: str) -> None:
+        self._require_remote_worker()
+        if kind == 'match_rerun':
+            await self._repository.fail_match_rerun(item_id, error)
+        elif kind == 'part':
+            await self._repository.fail(item_id, error)
+            self._clear_runtime_status(item_id)
+        elif kind == 'hero_rematch':
+            await self._repository.complete_hero_rematch(item_id, ())
+        elif kind == 'recorded_player_backfill':
+            await self._repository.complete_recorded_player_backfill(item_id, None)
 
     async def request_scan(self, session_id: int) -> ScanJob:
         job = await self._repository.request_scan(session_id)

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.luwei.blrec-analysis-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WORKER_VENV__/bin/blrec-analysis-worker</string>
+    <string>run</string>
+    <string>--server</string>
+    <string>http://192.168.50.24:2234</string>
+    <string>--token-file</string>
+    <string>__WORKER_TOKEN_FILE__</string>
+    <string>--ocr-url</string>
+    <string>http://127.0.0.1:18080</string>
+    <string>--fps</string>
+    <string>4</string>
+    <string>--execution-provider</string>
+    <string>coreml</string>
+    <string>--cache-dir</string>
+    <string>__WORKER_CACHE_DIR__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>__WORKER_LOG_DIR__/worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>__WORKER_LOG_DIR__/worker-error.log</string>
+</dict>
+</plist>

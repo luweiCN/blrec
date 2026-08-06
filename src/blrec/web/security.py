@@ -14,6 +14,7 @@ from fastapi.exceptions import HTTPException
 from .auth_store import AdminAuthStore, ExtensionIdentity
 
 api_key = ''
+analysis_worker_token = ''
 auth_store: Optional[AdminAuthStore] = None
 
 SESSION_COOKIE_NAME = 'blrec_session'
@@ -40,21 +41,26 @@ _RECORDING_THUMBNAIL_PATH = re.compile(
     r'^/api/v1/recording-sessions/parts/(\d+)/thumbnail$'
 )
 _HIGHLIGHT_MEDIA_PATH = re.compile(r'^/api/v1/highlights/clips/(\d+)/media$')
+_ANALYSIS_WORKER_PATH_PREFIX = '/api/v1/vainglory/worker/'
 
 
-def configure(store: AdminAuthStore, *, bootstrap_api_key: str = '') -> None:
-    global api_key, auth_store
+def configure(
+    store: AdminAuthStore, *, bootstrap_api_key: str = '', worker_token: str = ''
+) -> None:
+    global analysis_worker_token, api_key, auth_store
     auth_store = store
     api_key = bootstrap_api_key
+    analysis_worker_token = worker_token.strip()
     whitelist.clear()
     blacklist.clear()
     attempting_clients.clear()
 
 
 def reset() -> None:
-    global api_key, auth_store
+    global analysis_worker_token, api_key, auth_store
     auth_store = None
     api_key = ''
+    analysis_worker_token = ''
     whitelist.clear()
     blacklist.clear()
     attempting_clients.clear()
@@ -134,6 +140,9 @@ async def authenticate(
                 return
     if _valid_signed_media_request(request):
         return
+    if _valid_analysis_worker_request(request):
+        request.state.analysis_worker = True
+        return
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME, '')
     session = auth_store.authenticate_session(session_token)
@@ -168,6 +177,15 @@ def authenticated_extension(request: Request) -> ExtensionIdentity:
     return identity
 
 
+def authenticated_analysis_worker(request: Request) -> str:
+    if getattr(request.state, 'analysis_worker', False) is not True:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Analysis worker authentication is required',
+        )
+    return 'analysis-worker'
+
+
 def _media_signing_key() -> bytes:
     if auth_store is not None:
         return auth_store.media_signing_key
@@ -192,6 +210,17 @@ def _valid_signed_media_request(request: Request) -> bool:
     except ValueError:
         return False
     return valid_media_access(resource_id, expires_at, token, snapshot_id)
+
+
+def _valid_analysis_worker_request(request: Request) -> bool:
+    if not request.url.path.startswith(_ANALYSIS_WORKER_PATH_PREFIX):
+        return False
+    token = request.headers.get('x-blrec-analysis-worker-token', '')
+    return bool(
+        analysis_worker_token
+        and token
+        and secrets.compare_digest(token, analysis_worker_token)
+    )
 
 
 def _signed_media_resource_id(path: str) -> Optional[int]:

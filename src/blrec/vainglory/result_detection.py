@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Any, Optional, Protocol, Sequence
 
 from .vision import PixelRect, ResultPanelDetection, RgbFrame
 
@@ -29,6 +29,7 @@ class OnnxResultPanelDetector:
         *,
         confidence_threshold: float = 0.55,
         input_size: int = 640,
+        providers: Optional[Sequence[str]] = None,
     ) -> None:
         if not 0 < confidence_threshold < 1:
             raise ValueError('结算页检测置信度阈值必须在 0 和 1 之间')
@@ -44,7 +45,9 @@ class OnnxResultPanelDetector:
         options.inter_op_num_threads = 1
         self._numpy = numpy
         self._session = onnxruntime.InferenceSession(
-            str(path), sess_options=options, providers=('CPUExecutionProvider',)
+            str(path),
+            sess_options=options,
+            providers=tuple(providers or ('CPUExecutionProvider',)),
         )
         self._input_name = self._session.get_inputs()[0].name
         self._confidence_threshold = confidence_threshold
@@ -108,8 +111,10 @@ class OnnxResultPanelDetector:
         )
 
 
-def load_result_panel_detector() -> Optional[OnnxResultPanelDetector]:
+def load_result_panel_detector(
+    *, providers: Optional[Sequence[str]] = None
+) -> Optional[OnnxResultPanelDetector]:
     path = result_panel_model_path()
     if not path.is_file():
         return None
-    return OnnxResultPanelDetector(path)
+    return OnnxResultPanelDetector(path, providers=providers)

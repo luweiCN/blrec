@@ -715,6 +715,64 @@ class VaingloryRepository:
 
         return await self._database.write(recover)
 
+    async def prepare_remote_worker(self) -> int:
+        """Move unfinished local scan/OCR work back to the whole-part queue."""
+        now = self._now()
+
+        def prepare(connection: sqlite3.Connection) -> int:
+            session_rows = connection.execute(
+                "SELECT DISTINCT session_id FROM vainglory_part_jobs "
+                "WHERE state='analyzing'"
+            ).fetchall()
+            ocr_count = connection.execute('DELETE FROM vainglory_ocr_jobs').rowcount
+            part_count = connection.execute(
+                "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
+                'error=NULL,started_at=NULL,completed_at=NULL,updated_at=? '
+                "WHERE state='analyzing'",
+                (now,),
+            ).rowcount
+            rerun_count = connection.execute(
+                "UPDATE vainglory_match_rerun_jobs SET state='pending',"
+                'started_at=NULL,error=NULL,updated_at=? '
+                "WHERE state='running'",
+                (now,),
+            ).rowcount
+            for row in session_rows:
+                self._refresh_session_job(connection, int(row['session_id']), now)
+            return ocr_count + part_count + rerun_count
+
+        return await self._database.write(prepare)
+
+    async def recover_stale_remote_work(self, stale_after_seconds: int) -> int:
+        if stale_after_seconds < 1:
+            raise ValueError('stale timeout must be positive')
+        now = self._now()
+        cutoff = now - int(stale_after_seconds)
+
+        def recover(connection: sqlite3.Connection) -> int:
+            session_rows = connection.execute(
+                'SELECT DISTINCT session_id FROM vainglory_part_jobs '
+                "WHERE state='analyzing' AND updated_at<?",
+                (cutoff,),
+            ).fetchall()
+            part_count = connection.execute(
+                "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
+                'error=NULL,started_at=NULL,completed_at=NULL,updated_at=? '
+                "WHERE state='analyzing' AND updated_at<?",
+                (now, cutoff),
+            ).rowcount
+            rerun_count = connection.execute(
+                "UPDATE vainglory_match_rerun_jobs SET state='pending',"
+                'started_at=NULL,error=NULL,updated_at=? '
+                "WHERE state='running' AND updated_at<?",
+                (now, cutoff),
+            ).rowcount
+            for row in session_rows:
+                self._refresh_session_job(connection, int(row['session_id']), now)
+            return part_count + rerun_count
+
+        return await self._database.write(recover)
+
     async def purge_excluded_content(self) -> int:
         def purge(connection: sqlite3.Connection) -> Dict[str, int]:
             session_ids = set()
@@ -2962,6 +3020,13 @@ class VaingloryRepository:
             )
 
         await self._database.write(fail)
+
+    async def touch_match_rerun(self, match_id: int) -> None:
+        await self._database.execute(
+            'UPDATE vainglory_match_rerun_jobs SET updated_at=? '
+            "WHERE match_id=? AND state='running'",
+            (self._now(), int(match_id)),
+        )
 
     async def complete_match_rerun(
         self, match_id: int, recognized: AnalyzedMatch
