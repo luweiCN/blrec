@@ -14,8 +14,10 @@ from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Set, Tupl
 from .dashboard_rating import (
     CARRYOVER_RATE,
     CREDIBLE_LEVEL,
+    MINIMUM_OUTCOME_DELTA,
     PRIOR_MATCHES,
     PROVISIONAL_MATCHES,
+    RATING_MODEL_VERSION,
     BayesianRating,
     calculate_bayesian_rating,
 )
@@ -375,8 +377,7 @@ def _standings_for_rows(
             )
             performance = modes[mode]
             rating = calculate_bayesian_rating(
-                wins=performance.wins,
-                matches=performance.matches,
+                results=performance.results or (),
                 baseline=baselines[mode],
                 previous_ability=previous_ability,
                 carryover_rate=carryover_rate,
@@ -482,11 +483,12 @@ def build_dashboard_snapshot(
         'sourceLastMatchId': source_last_match_id,
         'sourceMatchCount': len(rows),
         'ratingModel': {
-            'version': 1,
+            'version': RATING_MODEL_VERSION,
             'priorMatches': PRIOR_MATCHES,
             'carryoverRate': CARRYOVER_RATE,
             'credibleLevel': CREDIBLE_LEVEL,
             'provisionalMatches': PROVISIONAL_MATCHES,
+            'minimumOutcomeDelta': MINIMUM_OUTCOME_DELTA,
         },
         'currentSeasonKey': current_season.key,
         'seasons': [_season_option(season, current_season.key) for season in seasons]

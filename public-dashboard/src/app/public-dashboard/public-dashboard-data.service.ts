@@ -130,12 +130,15 @@ function isRatingModel(value: unknown): value is RatingModel {
   if (!isObject(value)) {
     return false;
   }
-  return (
-    value['version'] === 1 &&
+  const commonModel =
     value['priorMatches'] === 20 &&
     value['carryoverRate'] === 0.25 &&
     value['credibleLevel'] === 0.9 &&
-    value['provisionalMatches'] === 5
+    value['provisionalMatches'] === 5;
+  return (
+    commonModel &&
+    (value['version'] === 1 ||
+      (value['version'] === 2 && value['minimumOutcomeDelta'] === 1))
   );
 }
 

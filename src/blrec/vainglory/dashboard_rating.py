@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 __all__ = (
     'CARRYOVER_RATE',
     'CREDIBLE_LEVEL',
+    'MINIMUM_OUTCOME_DELTA',
     'PRIOR_MATCHES',
     'PROVISIONAL_MATCHES',
+    'RATING_MODEL_VERSION',
     'BayesianRating',
     'calculate_bayesian_rating',
 )
@@ -18,6 +20,8 @@ PRIOR_MATCHES = 20
 CARRYOVER_RATE = 0.25
 CREDIBLE_LEVEL = 0.9
 PROVISIONAL_MATCHES = 5
+MINIMUM_OUTCOME_DELTA = 1
+RATING_MODEL_VERSION = 2
 _LOWER_QUANTILE = 1.0 - CREDIBLE_LEVEL
 _SCORE_SCALE = 1000
 
@@ -110,20 +114,20 @@ def _beta_quantile(probability: float, alpha: float, beta: float) -> float:
 
 def calculate_bayesian_rating(
     *,
-    wins: int,
-    matches: int,
+    results: Sequence[str],
     baseline: float,
     previous_ability: Optional[float],
     carryover_rate: float = CARRYOVER_RATE,
 ) -> Optional[BayesianRating]:
-    if matches < 0 or wins < 0 or wins > matches:
-        raise ValueError('Bayesian rating record is invalid')
     if not 0.0 < baseline < 1.0:
         raise ValueError('Bayesian rating baseline must be between zero and one')
     if previous_ability is not None and not 0.0 <= previous_ability <= 1.0:
         raise ValueError('Bayesian previous ability must be between zero and one')
     if not 0.0 <= carryover_rate <= 1.0:
         raise ValueError('Bayesian carryover rate must be between zero and one')
+    if any(result not in ('W', 'L') for result in results):
+        raise ValueError('Bayesian rating result must be W or L')
+    matches = len(results)
     if matches == 0:
         return None
 
@@ -132,11 +136,23 @@ def calculate_bayesian_rating(
         prior_mean = (
             baseline * (1.0 - carryover_rate) + previous_ability * carryover_rate
         )
-    alpha = prior_mean * PRIOR_MATCHES + wins
-    beta = (1.0 - prior_mean) * PRIOR_MATCHES + matches - wins
+    alpha = prior_mean * PRIOR_MATCHES
+    beta = (1.0 - prior_mean) * PRIOR_MATCHES
+    score = round(_beta_quantile(_LOWER_QUANTILE, alpha, beta) * _SCORE_SCALE)
+    for result in results:
+        if result == 'W':
+            alpha += 1.0
+        else:
+            beta += 1.0
+        target_score = round(
+            _beta_quantile(_LOWER_QUANTILE, alpha, beta) * _SCORE_SCALE
+        )
+        if result == 'W':
+            score = max(target_score, score + MINIMUM_OUTCOME_DELTA)
+        else:
+            score = min(target_score, score - MINIMUM_OUTCOME_DELTA)
+        score = max(0, min(_SCORE_SCALE, score))
     ability = alpha / (alpha + beta)
-    lower_bound = _beta_quantile(_LOWER_QUANTILE, alpha, beta)
-    score = max(0, min(_SCORE_SCALE, round(lower_bound * _SCORE_SCALE)))
     return BayesianRating(
         ability=ability, score=score, provisional=matches < PROVISIONAL_MATCHES
     )

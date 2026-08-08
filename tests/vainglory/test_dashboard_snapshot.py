@@ -333,9 +333,10 @@ async def test_historical_backfill_recalculates_every_later_season(
         assert with_autumn['ratingModel'] == {
             'carryoverRate': 0.25,
             'credibleLevel': 0.9,
+            'minimumOutcomeDelta': 1,
             'priorMatches': 20,
             'provisionalMatches': 5,
-            'version': 1,
+            'version': 2,
         }
     finally:
         await database.close()

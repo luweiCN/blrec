@@ -43,6 +43,51 @@ describe('DashboardDataService', () => {
     ]);
   });
 
+  it('keeps accepting version 1 snapshots during the rollout', async () => {
+    const legacySnapshot = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      ratingModel: {
+        version: 1,
+        priorMatches: 20,
+        carryoverRate: 0.25,
+        credibleLevel: 0.9,
+        provisionalMatches: 5,
+      },
+    };
+    spyOn(window, 'fetch').and.returnValues(
+      Promise.resolve(jsonResponse(MANIFEST)),
+      Promise.resolve(jsonResponse(legacySnapshot)),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+  });
+
+  it('rejects version 2 rating metadata without its outcome delta', async () => {
+    spyOn(console, 'error');
+    const invalidSnapshot = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      ratingModel: {
+        version: 2,
+        priorMatches: 20,
+        carryoverRate: 0.25,
+        credibleLevel: 0.9,
+        provisionalMatches: 5,
+      },
+    };
+    spyOn(window, 'fetch').and.returnValues(
+      Promise.resolve(jsonResponse(MANIFEST)),
+      Promise.resolve(jsonResponse(invalidSnapshot)),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('error');
+  });
+
   it('rejects a manifest that points outside the data directory', async () => {
     spyOn(console, 'error');
     spyOn(window, 'fetch').and.returnValue(

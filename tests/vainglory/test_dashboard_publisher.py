@@ -117,6 +117,32 @@ def test_current_remote_manifest_skips_export_and_upload(tmp_path: Path) -> None
     assert store.events == ['load-manifest']
 
 
+def test_force_republishes_a_current_remote_manifest(tmp_path: Path) -> None:
+    snapshot = json_bytes({'snapshotId': 'snapshot-current'})
+    remote = manifest_bytes('snapshot-current', '2026-08-08', 30, snapshot)
+    store = FakeStore(remote)
+    exporter = Exporter(snapshot_id='snapshot-recalculated', source_last_match_id=30)
+
+    result = publish_dashboard_once(
+        tmp_path / 'database.sqlite3',
+        tmp_path / 'state',
+        store,
+        now=datetime(2026, 8, 8, 10, tzinfo=SHANGHAI),
+        exporter=exporter,
+        force=True,
+    )
+
+    assert result.published is True
+    assert result.snapshot_id == 'snapshot-recalculated'
+    assert exporter.calls == 1
+    assert store.events == [
+        'load-manifest',
+        'put-snapshot:snapshots/snapshot-recalculated.json',
+        'put-manifest',
+        'load-manifest',
+    ]
+
+
 def test_snapshot_is_uploaded_before_manifest_commit(tmp_path: Path) -> None:
     old_snapshot = json_bytes({'snapshotId': 'snapshot-old'})
     store = FakeStore(manifest_bytes('snapshot-old', '2026-08-07', 10, old_snapshot))

@@ -26,6 +26,7 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('直播样本榜');
     expect(page.textContent).toContain('不会因此自动进入玩家排行榜');
     expect(page.textContent).toContain('90% 可信下界');
+    expect(page.textContent).toContain('胜利至少 +1，失败至少 -1');
     expect(page.textContent).toContain('历史数据正在持续同步中');
     expect(page.textContent).toContain('当前公开数据的主体');
     expect(page.textContent).toContain('5V5 战绩匹配尚未完成');

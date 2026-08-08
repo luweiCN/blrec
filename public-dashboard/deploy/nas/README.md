@@ -64,6 +64,27 @@ worker 从现有 `settings.toml` 读取网络分工。旧配置尚无
 BLREC 网络管理页单独修改“排行榜数据发布”。固定线路会同时绑定源地址和该
 网卡 DNS；未选网卡时使用并记录系统默认网卡。
 
+## 人工重算当天数据
+
+算法升级或数据修正后需要在同一天重新发布时，先停掉常驻 worker，避免单例锁
+阻止一次性任务，再显式使用 `--force`：
+
+```bash
+docker compose --project-name blrec-dashboard \
+  --env-file publisher.env \
+  -f compose.yml stop dashboard-publisher
+docker compose --project-name blrec-dashboard \
+  --env-file publisher.env \
+  -f compose.yml run --rm dashboard-publisher --once --force
+docker compose --project-name blrec-dashboard \
+  --env-file publisher.env \
+  -f compose.yml up -d dashboard-publisher
+```
+
+`--force` 只允许与 `--once` 同用。它会忽略本地当天待发布快照并重新读取
+SQLite，但仍执行源数据水位防回退、不可变快照优先和 manifest 最后提交校验；
+常驻每日任务不会自动强制覆盖当天数据。
+
 ## 停止与回滚
 
 ```bash

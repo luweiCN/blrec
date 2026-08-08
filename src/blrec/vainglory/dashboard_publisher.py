@@ -122,10 +122,12 @@ def _pending_export(
     state_directory: Path,
     now: datetime,
     exporter: Callable[..., DashboardExportResult],
+    *,
+    reuse_existing: bool = True,
 ) -> DashboardExportResult:
     pending = state_directory.expanduser().resolve() / 'pending'
     manifest_path = pending / 'manifest.json'
-    if manifest_path.is_file():
+    if reuse_existing and manifest_path.is_file():
         content = manifest_path.read_bytes()
         manifest = _manifest(content, '本地待发布 manifest')
         if manifest['publicationDate'] == now.astimezone(SHANGHAI).date().isoformat():
@@ -147,6 +149,7 @@ def publish_dashboard_once(
     *,
     now: Optional[datetime] = None,
     exporter: Callable[..., DashboardExportResult] = export_dashboard_files,
+    force: bool = False,
 ) -> DashboardPublicationResult:
     generated_at = now or datetime.now(tz=SHANGHAI)
     if generated_at.tzinfo is None:
@@ -162,7 +165,7 @@ def publish_dashboard_once(
         remote_date = date.fromisoformat(str(remote_manifest['publicationDate']))
         if remote_date > today:
             raise DashboardPublishError('远端 manifest 的发布日期来自未来')
-        if remote_date == today:
+        if remote_date == today and not force:
             return DashboardPublicationResult(
                 published=False,
                 publication_date=today,
@@ -172,7 +175,9 @@ def publish_dashboard_once(
                 uploaded_bytes=0,
             )
 
-    exported = _pending_export(database_path, state_directory, generated_at, exporter)
+    exported = _pending_export(
+        database_path, state_directory, generated_at, exporter, reuse_existing=not force
+    )
     local_manifest_content = exported.manifest_path.read_bytes()
     local_manifest = _manifest(local_manifest_content, '本地待发布 manifest')
     snapshot = _validate_snapshot(exported.snapshot_path, local_manifest)
@@ -403,7 +408,7 @@ def _required_environment(name: str) -> str:
 
 
 def _publish(
-    configuration: _WorkerConfiguration, now: datetime
+    configuration: _WorkerConfiguration, now: datetime, *, force: bool = False
 ) -> DashboardPublicationResult:
     settings = Settings.load(str(configuration.settings))
     route_manager = NetworkRouteManager(lambda: settings.network)
@@ -418,7 +423,7 @@ def _publish(
     )
     try:
         result = publish_dashboard_once(
-            configuration.database, configuration.state, store, now=now
+            configuration.database, configuration.state, store, now=now, force=force
         )
     finally:
         store.close()
@@ -470,6 +475,11 @@ def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='每日生成并发布虚荣排行榜 JSON')
     parser.add_argument('--once', action='store_true', help='只检查并发布一次')
     parser.add_argument(
+        '--force',
+        action='store_true',
+        help='与 --once 同用，强制重新生成并发布今天的快照',
+    )
+    parser.add_argument(
         '--database',
         type=Path,
         default=Path(os.environ.get('DASHBOARD_DATABASE', '/cfg/blrec.sqlite3')),
@@ -517,6 +527,8 @@ def main() -> None:
     arguments = _parse_args()
     if arguments.retry_seconds <= 0:
         raise DashboardPublishError('重试间隔必须大于 0')
+    if arguments.force and not arguments.once:
+        raise DashboardPublishError('--force 必须与 --once 同时使用')
     configuration = _WorkerConfiguration(
         database=arguments.database,
         settings=arguments.settings,
@@ -530,7 +542,7 @@ def main() -> None:
     )
     with _exclusive_worker_lock(configuration.state):
         if arguments.once:
-            _publish(configuration, datetime.now(tz=SHANGHAI))
+            _publish(configuration, datetime.now(tz=SHANGHAI), force=arguments.force)
         else:
             _worker_loop(configuration)
 

@@ -40,13 +40,23 @@ export interface Performance {
   readonly provisional: boolean;
 }
 
-export interface RatingModel {
-  readonly version: 1;
+interface RatingModelBase {
   readonly priorMatches: 20;
   readonly carryoverRate: 0.25;
   readonly credibleLevel: 0.9;
   readonly provisionalMatches: 5;
 }
+
+export interface RatingModelV1 extends RatingModelBase {
+  readonly version: 1;
+}
+
+export interface RatingModelV2 extends RatingModelBase {
+  readonly version: 2;
+  readonly minimumOutcomeDelta: 1;
+}
+
+export type RatingModel = RatingModelV1 | RatingModelV2;
 
 export interface HeroUsage {
   readonly name: string;
