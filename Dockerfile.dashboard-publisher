@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+ARG BLREC_BASE_IMAGE=ghcr.io/luweicn/blrec:3.0.0-beta.43
+
+FROM python:3.11-slim-bookworm AS wheel-builder
+WORKDIR /build
+COPY pyproject.toml setup.py setup.cfg MANIFEST.in README.md LICENSE ./
+COPY src ./src
+RUN python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
+
+FROM ${BLREC_BASE_IMAGE}
+WORKDIR /app
+COPY --from=wheel-builder /wheels /wheels
+RUN python -m pip install --no-cache-dir --no-deps --force-reinstall \
+        /wheels/blrec-*.whl && \
+    python -m pip install --no-cache-dir oss2==2.19.1 && \
+    rm -rf /wheels
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/luweiCN/blrec" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.opencontainers.image.description="Vainglory dashboard data publisher"
+ENV TZ=Asia/Shanghai \
+    BLREC_CONFIG=/cfg/settings.toml \
+    DASHBOARD_DATABASE=/cfg/blrec.sqlite3 \
+    DASHBOARD_STATE=/state \
+    OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com \
+    OSS_BUCKET=luwei-vainglory \
+    OSS_PREFIX=data \
+    DASHBOARD_SCHEDULE_HOUR=0 \
+    DASHBOARD_SCHEDULE_MINUTE=5 \
+    DASHBOARD_RETRY_SECONDS=900
+VOLUME ["/cfg", "/state"]
+STOPSIGNAL SIGTERM
+HEALTHCHECK NONE
+ENTRYPOINT ["python", "-m", "blrec.vainglory.dashboard_publisher"]

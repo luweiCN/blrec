@@ -4,7 +4,8 @@ export type NetworkPurpose =
   | 'recording'
   | 'upload'
   | 'biliApi'
-  | 'archiveDownload';
+  | 'archiveDownload'
+  | 'dashboardPublish';
 
 export interface NetworkProbe {
   reachable: boolean;

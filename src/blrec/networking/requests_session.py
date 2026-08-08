@@ -9,7 +9,7 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import NewConnectionError
 from urllib3.util import connection
 
-from .manager import NetworkRouteManager, RouteSelection
+from .manager import NetworkPurpose, NetworkRouteManager, RouteSelection
 from .resolver import SyncSourceBoundResolver
 
 Resolver = Callable[[str], Sequence[str]]
@@ -127,14 +127,21 @@ class SourceAddressAdapter(HTTPAdapter):
 
 class RoutedRequestsSession(requests.Session):
     def __init__(
-        self, manager: NetworkRouteManager, *, affinity_key: Optional[str] = None
+        self,
+        manager: NetworkRouteManager,
+        *,
+        purpose: NetworkPurpose = 'recording',
+        anonymous: bool = True,
+        affinity_key: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.trust_env = False
         self._manager = manager
+        self._purpose = purpose
+        self._anonymous = anonymous
         self._route_sessions: Dict[Optional[str], requests.Session] = {}
         self._route_lock = RLock()
-        self._affinity_root = affinity_key or 'recording:{}'.format(id(self))
+        self._affinity_root = affinity_key or '{}:{}'.format(purpose, id(self))
         self._affinity_generation = 0
 
     @property
@@ -142,33 +149,33 @@ class RoutedRequestsSession(requests.Session):
         return '{}:{}'.format(self._affinity_root, self._affinity_generation)
 
     def begin_live(self) -> None:
-        self._manager.release_affinity('recording', self._affinity_key)
+        self._manager.release_affinity(self._purpose, self._affinity_key)
         self._affinity_generation += 1
 
     def request(  # type: ignore[override]
         self, method: str, url: str, **kwargs: Any
     ) -> requests.Response:
         selection = self._manager.select(
-            'recording', anonymous=True, affinity_key=self._affinity_key
+            self._purpose, anonymous=self._anonymous, affinity_key=self._affinity_key
         )
         session = self._session_for(selection)
         try:
             response = session.request(method, url, **kwargs)
         except (requests.RequestException, OSError) as error:
             if is_route_connection_failure(error):
-                self._manager.report_failure('recording', selection.interface_name)
+                self._manager.report_failure(self._purpose, selection.interface_name)
             raise
-        self._manager.report_success('recording', selection.interface_name)
+        self._manager.report_success(self._purpose, selection.interface_name)
         response.raw = _MeteredRaw(
             response.raw,
             lambda count: self._manager.traffic_meter.record(
-                selection.interface_name, 'recording', 'down', count
+                selection.interface_name, self._purpose, 'down', count
             ),
         )
         return response
 
     def close(self) -> None:
-        self._manager.release_affinity('recording', self._affinity_key)
+        self._manager.release_affinity(self._purpose, self._affinity_key)
         with self._route_lock:
             sessions, self._route_sessions = self._route_sessions, {}
         for session in sessions.values():

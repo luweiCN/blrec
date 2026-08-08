@@ -26,9 +26,14 @@ npm run lint
 npm run build
 ```
 
-生产构建位于 `dist/`，其中已包含当次构建使用的 `/data/` 快照和头像。部署时
-将该目录上传到阿里云 OSS；日常数据发布只替换 `/data/manifest.json`、新增
-不可变快照并同步 `/data/avatars/`，无需重新发布站点代码。
+生产构建位于 `dist/`。本地 `public-data/` 有快照时，构建可用于完整预览；
+GitHub 的生产发布会拒绝上传其中的 `/data/`，只更新页面和静态资源。日常数据
+发布只替换 `/data/manifest.json` 并新增不可变快照，现有玩家头像与访问统计由
+各自独立链路维护，无需重新发布站点代码。
+
+生产环境已将页面和数据拆成独立发布链路。GitHub Actions 只发布页面文件，
+NAS worker 每天生成并发布排行榜 JSON；工程化配置、权限边界和恢复流程见
+[`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 站点 `favicon.ico` 使用《虚荣》官方网站提供的多尺寸品牌图标，来源为
 `https://www.vainglorygame.com/wp-content/themes/vainglory/images/favicon.ico`。

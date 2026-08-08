@@ -1,0 +1,21 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "oss:GetObject",
+      "Resource": [
+        "acs:oss:*:1159986474652925:luwei-vainglory/data/manifest.json",
+        "acs:oss:*:1159986474652925:luwei-vainglory/data/snapshots/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "oss:PutObject",
+      "Resource": [
+        "acs:oss:*:1159986474652925:luwei-vainglory/data/manifest.json",
+        "acs:oss:*:1159986474652925:luwei-vainglory/data/snapshots/*"
+      ]
+    }
+  ]
+}

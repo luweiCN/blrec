@@ -15,6 +15,7 @@ from blrec.networking.aiohttp_session import AiohttpSessionPool
 from blrec.networking.manager import NetworkInterface, NetworkRouteManager
 from blrec.networking.requests_session import (
     ResolvedHTTPConnection,
+    RoutedRequestsSession,
     SourceAddressAdapter,
 )
 from blrec.networking.resolver import SourceBoundResolver
@@ -74,6 +75,7 @@ def test_purposes_have_independent_routes() -> None:
         upload={'interface': 'lan2'},
         bili_api={'interface': 'lan1'},
         archive_download={'interface': 'lan2'},
+        dashboard_publish={'interface': 'lan1'},
     )
     manager = NetworkRouteManager(lambda: settings, interface_provider=_interfaces)
 
@@ -83,6 +85,25 @@ def test_purposes_have_independent_routes() -> None:
     assert manager.select('upload').interface_name == 'lan2'
     assert manager.select('bili_api').interface_name == 'lan1'
     assert manager.select('archive_download').interface_name == 'lan2'
+    assert manager.select('dashboard_publish').interface_name == 'lan1'
+
+
+def test_dashboard_publish_route_inherits_existing_upload_route() -> None:
+    settings = NetworkSettings(
+        upload={'mode': 'fixed', 'interface': 'lan2', 'failoverEnabled': False}
+    )
+
+    assert settings.dashboard_publish.mode == 'fixed'
+    assert settings.dashboard_publish.interface == 'lan2'
+    assert settings.dashboard_publish.failover_enabled is False
+
+
+def test_dashboard_publish_route_inherits_a_parsed_upload_route() -> None:
+    settings = NetworkSettings(
+        upload=NetworkRouteSettings(interface='lan1', failover_enabled=False)
+    )
+
+    assert settings.dashboard_publish.interface == 'lan1'
 
 
 def test_every_route_selection_is_audited_with_replayable_context(
@@ -401,6 +422,29 @@ def test_source_address_adapter_passes_binding_to_urllib3() -> None:
         '192.168.2.10',
         0,
     )
+
+
+def test_requests_session_uses_the_selected_non_recording_purpose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = NetworkRouteManager(
+        lambda: NetworkSettings(dashboard_publish={'interface': 'lan1'}),
+        interface_provider=_interfaces,
+    )
+    session = RoutedRequestsSession(
+        manager,
+        purpose='dashboard_publish',
+        anonymous=False,
+        affinity_key='publication',
+    )
+    response = Mock(raw=Mock())
+    route_session = Mock()
+    route_session.request.return_value = response
+    monkeypatch.setattr(session, '_session_for', lambda _selection: route_session)
+
+    assert session.get('https://oss.example/manifest.json') is response
+    assert manager.traffic_meter.snapshot() == []
+    session.close()
 
 
 def test_resolved_http_connection_connects_to_resolved_ip_without_changing_host(

@@ -62,6 +62,11 @@ export class NetworkComponent implements OnInit, OnDestroy {
       name: '历史稿件下载',
       help: '固定线路使用 3 路下载；多线路并行时，每条开启“历史下载”的线路固定运行 3 路，可单独暂停。',
     },
+    {
+      key: 'dashboardPublish',
+      name: '排行榜数据发布',
+      help: '每天生成公开排行榜 JSON 并上传到 OSS；整次发布固定使用同一线路，线路故障时停止并稍后重试。',
+    },
   ];
 
   interfaces: NetworkInterface[] = [];
@@ -217,7 +222,12 @@ export class NetworkComponent implements OnInit, OnDestroy {
   }
 
   supportsRoundRobin(purpose: NetworkPurpose): boolean {
-    return !['upload', 'biliApi', 'archiveDownload'].includes(purpose);
+    return ![
+      'upload',
+      'biliApi',
+      'archiveDownload',
+      'dashboardPublish',
+    ].includes(purpose);
   }
 
   supportsParallel(purpose: NetworkPurpose): boolean {
@@ -308,6 +318,7 @@ export class NetworkComponent implements OnInit, OnDestroy {
     const copied = JSON.parse(JSON.stringify(settings)) as NetworkSettings;
     copied.upload.failoverEnabled = false;
     copied.archiveDownload.failoverEnabled = false;
+    copied.dashboardPublish.failoverEnabled = false;
     return copied;
   }
 }

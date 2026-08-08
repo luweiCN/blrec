@@ -30,7 +30,13 @@ if TYPE_CHECKING:
     from blrec.setting.models import NetworkRouteSettings, NetworkSettings
 
 NetworkPurpose = Literal[
-    'room_status', 'danmaku', 'recording', 'upload', 'bili_api', 'archive_download'
+    'room_status',
+    'danmaku',
+    'recording',
+    'upload',
+    'bili_api',
+    'archive_download',
+    'dashboard_publish',
 ]
 
 _PROBE_HEADERS = {
@@ -280,6 +286,7 @@ class NetworkRouteManager:
             'upload',
             'bili_api',
             'archive_download',
+            'dashboard_publish',
         )
         for purpose in purposes:
             route = self._route_settings(purpose)
@@ -290,7 +297,11 @@ class NetworkRouteManager:
                 selection = self.select(purpose)
             except NetworkUnavailable:
                 selection = None
-            if route.failover_enabled and purpose not in ('upload', 'archive_download'):
+            if route.failover_enabled and purpose not in (
+                'upload',
+                'archive_download',
+                'dashboard_publish',
+            ):
                 states.append(
                     NetworkNotificationState(
                         event='network_failover',
@@ -378,6 +389,7 @@ class NetworkRouteManager:
             'upload',
             'bili_api',
             'archive_download',
+            'dashboard_publish',
         )
         for purpose in purposes:
             if result.reachable:
@@ -493,6 +505,7 @@ class NetworkRouteManager:
             allow_failover = route.failover_enabled and purpose not in (
                 'upload',
                 'archive_download',
+                'dashboard_publish',
             )
             if allow_failover:
                 fallback = next(

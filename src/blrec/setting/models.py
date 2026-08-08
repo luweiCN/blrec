@@ -357,6 +357,21 @@ class NetworkSettings(BaseModel):
     upload: NetworkRouteSettings = NetworkRouteSettings()
     bili_api: NetworkRouteSettings = NetworkRouteSettings()
     archive_download: NetworkRouteSettings = NetworkRouteSettings()
+    dashboard_publish: NetworkRouteSettings = NetworkRouteSettings()
+
+    @root_validator(pre=True)
+    def _inherit_dashboard_publish_route(
+        cls, values: Dict[str, object]
+    ) -> Dict[str, object]:
+        migrated = dict(values)
+        if 'dashboard_publish' in migrated or 'dashboardPublish' in migrated:
+            return migrated
+        upload = migrated.get('upload')
+        if isinstance(upload, dict):
+            migrated['dashboard_publish'] = dict(upload)
+        elif isinstance(upload, NetworkRouteSettings):
+            migrated['dashboard_publish'] = upload.dict()
+        return migrated
 
     @root_validator(pre=True)
     def _inherit_archive_download_route(
@@ -385,7 +400,7 @@ class NetworkSettings(BaseModel):
     def _credential_routes_must_be_fixed(
         cls, values: Dict[str, object]
     ) -> Dict[str, object]:
-        for field in ('upload', 'bili_api'):
+        for field in ('upload', 'bili_api', 'dashboard_publish'):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.mode != 'fixed':
                 raise ValueError('{} network route must use fixed mode'.format(field))
@@ -402,7 +417,7 @@ class NetworkSettings(BaseModel):
                 raise ValueError(
                     '{} network route cannot use parallel mode'.format(field)
                 )
-        for field in ('upload', 'archive_download'):
+        for field in ('upload', 'archive_download', 'dashboard_publish'):
             route = values.get(field)
             if isinstance(route, NetworkRouteSettings) and route.failover_enabled:
                 values[field] = route.copy(update={'failover_enabled': False})

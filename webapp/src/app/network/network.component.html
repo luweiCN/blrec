@@ -203,7 +203,9 @@
           <nz-switch
             [(ngModel)]="route(purpose.key).failoverEnabled"
             [nzDisabled]="
-              purpose.key === 'upload' || purpose.key === 'archiveDownload'
+              purpose.key === 'upload' ||
+              purpose.key === 'archiveDownload' ||
+              purpose.key === 'dashboardPublish'
             "
           ></nz-switch>
         </div>

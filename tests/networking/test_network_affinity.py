@@ -182,6 +182,8 @@ def test_account_and_upload_routes_reject_round_robin_configuration() -> None:
         NetworkSettings(bili_api={'mode': 'round_robin'})
     with pytest.raises(ValidationError):
         NetworkSettings(archive_download={'mode': 'round_robin'})
+    with pytest.raises(ValidationError):
+        NetworkSettings(dashboard_publish={'mode': 'round_robin'})
 
 
 def test_archive_download_route_is_sticky_and_never_fails_over() -> None:
