@@ -8,15 +8,17 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.exceptions import HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
+from loguru import logger
 from pydantic import BaseModel, Field
 
-from blrec.analysis_worker.codec import (
+from blrec.utils.string import camel_case
+from blrec.vainglory.analysis_protocol import (
     decode_hero,
     decode_match,
     decode_matches,
     decode_recorded_player,
+    decode_training_candidates,
 )
-from blrec.utils.string import camel_case
 from blrec.vainglory.analyzer import AnalysisStatus
 from blrec.vainglory.archive_backfill import (
     ArchiveBackfillItem,
@@ -88,6 +90,7 @@ class AnalysisWorkerCompleteRequest(ApiModel):
     matches: List[Dict[str, Any]] = Field(default_factory=list)
     heroes: List[Dict[str, Any]] = Field(default_factory=list)
     recorded_player: Optional[Dict[str, Any]] = None
+    training_candidates: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AnalysisWorkerFailureRequest(ApiModel):
@@ -746,10 +749,23 @@ async def complete_analysis_work(
 ) -> Response:
     try:
         if payload.kind == 'part':
+            try:
+                training_candidates = decode_training_candidates(
+                    payload.training_candidates[:60]
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    'Ignored invalid worker training candidates: part_id={} '
+                    'error={!r}',
+                    payload.item_id,
+                    error,
+                )
+                training_candidates = ()
             await index.complete_remote_part(
                 payload.item_id,
                 decode_matches(payload.matches),
                 candidate_count=payload.candidate_count,
+                training_candidates=training_candidates,
             )
         elif payload.kind == 'match_rerun':
             if len(payload.matches) != 1:

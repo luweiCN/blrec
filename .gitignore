@@ -145,6 +145,9 @@ _*/
 # local git worktrees
 .worktrees/
 
+# local Reasonix runtime state
+.reasonix/
+
 # vscode
 .vscode/
 .history/

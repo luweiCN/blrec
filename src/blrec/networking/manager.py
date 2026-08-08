@@ -27,7 +27,7 @@ from .resolver import SourceBoundResolver
 from .traffic import TrafficMeter
 
 if TYPE_CHECKING:
-    from blrec.setting.models import NetworkRouteSettings, NetworkSettings
+    from .config import NetworkRouteSettings, NetworkSettings
 
 NetworkPurpose = Literal[
     'room_status',
@@ -180,7 +180,7 @@ class NetworkRouteManager:
         interface = interfaces.get(interface_name)
         if interface is None:
             raise KeyError(interface_name)
-        from blrec.setting.models import NetworkInterfaceSettings
+        from .config import NetworkInterfaceSettings
 
         current = self._settings_provider()
         updated = current.copy(deep=True)

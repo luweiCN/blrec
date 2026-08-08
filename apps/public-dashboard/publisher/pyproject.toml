@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blrec-dashboard-publisher"
+version = "0.1.0"
+description = "Snapshot exporter and OSS publisher for the BLREC public dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "blrec>=3.0.0b43,<4.0.0",
+  "oss2==2.19.1",
+  "requests>=2.24.0,<3.0.0",
+]
+
+[project.optional-dependencies]
+avatars = ["numpy>=1.24,<3.0", "opencv-python-headless>=4.8,<4.12"]
+test = ["pytest>=7.4.4,<9.0.0"]
+
+[project.scripts]
+blrec-dashboard-export = "blrec_dashboard_publisher.snapshot:main"
+blrec-dashboard-publisher = "blrec_dashboard_publisher.publisher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

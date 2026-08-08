@@ -1,0 +1,169 @@
+name: Test BLREC Server
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - apps/blrec-server/**
+      - src/**
+      - scripts/**
+      - tests/**
+      - Dockerfile
+      - setup.cfg
+      - pyproject.toml
+      - MANIFEST.in
+      - compose.synology.yml
+      - synology.env.example
+      - .github/workflows/test-server.yml
+  pull_request:
+    paths:
+      - apps/blrec-server/**
+      - src/**
+      - scripts/**
+      - tests/**
+      - Dockerfile
+      - setup.cfg
+      - pyproject.toml
+      - MANIFEST.in
+      - compose.synology.yml
+      - synology.env.example
+      - .github/workflows/test-server.yml
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.10', '3.11']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install backend dependencies
+        run: python -m pip install '.[dev]'
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Check formatting
+        run: black --check src tests scripts
+
+      - name: Check import order
+        run: isort --check-only src tests scripts
+
+      - name: Lint
+        run: flake8 src tests scripts
+
+      - name: Type check
+        if: matrix.python-version == '3.8'
+        run: mypy src/blrec
+
+  highlight-media:
+    name: Highlight media regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install FFmpeg and backend dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install '.[dev]'
+
+      - name: Run real highlight media matrix
+        env:
+          BLREC_RUN_HIGHLIGHT_MEDIA_TESTS: '1'
+        run: python -m pytest tests/bili_upload/test_highlight_cut_ffmpeg.py -q
+
+  frontend:
+    name: Administration web application
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/blrec-server/webapp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: apps/blrec-server/webapp/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test -- --watch=false --browsers=ChromeHeadless
+
+      - name: Build
+        run: npm run build
+
+  docker:
+    name: Server image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build server image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/blrec-server/Dockerfile
+          load: true
+          tags: blrec-server:release-test
+          build-args: |
+            VERSION=3.0.0-beta.44
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=blrec-server
+          cache-to: type=gha,mode=max,scope=blrec-server
+
+      - name: Verify server image boundary
+        run: |
+          docker run --rm --entrypoint python blrec-server:release-test -c \
+            "import importlib.util,pathlib; names=('cv2','numpy','onnxruntime','rapidocr'); assert all(importlib.util.find_spec(name) is None for name in names); assert not tuple(pathlib.Path('/usr/local/lib/python3.11/site-packages/blrec').rglob('*.onnx'))"
+          test "$(docker run --rm --entrypoint sh blrec-server:release-test -c 'command -v blrec-analysis-worker || true')" = ""
+
+      - name: Report server image size
+        shell: bash
+        run: |
+          size_bytes="$(docker image inspect blrec-server:release-test --format '{{.Size}}')"
+          python - "$size_bytes" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import sys
+
+          size_mib = int(sys.argv[1]) / 1024 / 1024
+          print(f'## BLREC Server image\n\nUncompressed size: {size_mib:.1f} MiB')
+          PY
+
+      - name: Smoke test server image
+        run: scripts/docker-smoke.sh blrec-server:release-test

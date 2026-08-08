@@ -12,6 +12,7 @@ from blrec.vainglory.analyzer import (
     ResultHit,
     VaingloryVideoAnalyzer,
     VideoPart,
+    _remember_training_candidate,
     classify_match_kind,
     collapse_analyzed_matches,
     collapse_result_hits,
@@ -21,6 +22,15 @@ from blrec.vainglory.analyzer import (
 from blrec.vainglory.hero_recognition import HeroMatch
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
 from blrec.vainglory.sampling import ScanWindow, TimedFrame, VideoProfile
+from blrec.vainglory.stage_classifier import (
+    CONTENT_VAINGLORY,
+    MODE_3V3,
+    MODE_ARAM,
+    STAGE_GAMEPLAY,
+    STAGE_PRE_MATCH,
+    ClassifiedObservation,
+    StagePrediction,
+)
 from blrec.vainglory.vision import (
     GameplayHud,
     HeroFrame,
@@ -75,6 +85,128 @@ def test_result_hits_collapse_repeated_frames_and_overlapping_windows() -> None:
     )
 
     assert [item.at_ms for item in collapsed] == [10_500, 40_250]
+
+
+def test_opening_probe_keeps_bp_and_hard_negative_training_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    observations = (
+        ClassifiedObservation(0, STAGE_PRE_MATCH, 0.9, MODE_ARAM, CONTENT_VAINGLORY),
+        ClassifiedObservation(
+            5_000, STAGE_PRE_MATCH, 0.9, MODE_ARAM, CONTENT_VAINGLORY
+        ),
+        ClassifiedObservation(10_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+        ClassifiedObservation(30_000, STAGE_GAMEPLAY, 0.9, MODE_3V3, CONTENT_VAINGLORY),
+    )
+
+    class Sampler:
+        def fine_frames(self, _path: str, _window: ScanWindow):
+            for at_ms in (0, 2_500, 7_500):
+                yield TimedFrame(at_ms=at_ms, frame=frame)
+
+    predictions = iter(
+        (
+            StagePrediction(0, 1, STAGE_PRE_MATCH, 0.9, MODE_ARAM, 0.8),
+            StagePrediction(0, 1, STAGE_PRE_MATCH, 0.95, MODE_ARAM, 0.85),
+            StagePrediction(0, 1, STAGE_GAMEPLAY, 0.9, MODE_3V3, 0.7),
+        )
+    )
+
+    class Classifier:
+        def classify(self, _frame: RgbFrame) -> StagePrediction:
+            return next(predictions)
+
+    monkeypatch.setattr(analyzer_module, 'smooth_stages', lambda _items: observations)
+    monkeypatch.setattr(analyzer_module, '_pre_match_anchors', lambda _items: ())
+    monkeypatch.setattr(
+        analyzer_module, '_confirmed_anchors', lambda _anchors, _items: ()
+    )
+    monkeypatch.setattr(
+        analyzer_module,
+        'gameplay_runs',
+        lambda _items: ((observations[0], observations[-1]),),
+    )
+    monkeypatch.setattr(
+        analyzer_module, '_segment_ranges', lambda _runs, _anchors: ((0, 30_000),)
+    )
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda _frame: b'\xff\xd8candidate\xff\xd9'
+    )
+    analyzer = VaingloryVideoAnalyzer(
+        sampler=Sampler(), stage_classifier=Classifier()  # type: ignore[arg-type]
+    )
+
+    _modes, candidates = analyzer._probe_run_modes('unused', observations)
+
+    assert len(candidates) == 3
+    assert [item.suggested_label for item in candidates] == [
+        'bp_aram',
+        'bp_aram',
+        'not_bp',
+    ]
+    assert all(item.image_jpeg.startswith(b'\xff\xd8') for item in candidates)
+
+
+def test_key_screen_training_candidates_are_spaced_and_keep_strongest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    candidates = []
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda _frame: b'\xff\xd8candidate\xff\xd9'
+    )
+
+    assert _remember_training_candidate(
+        candidates,
+        task='key_screen_review',
+        suggested_label='scoreboard',
+        at_ms=10_000,
+        segment_start_ms=0,
+        frame=frame,
+        model_version='multi-v2',
+        suggestion_confidence=0.6,
+        stage_class='scoreboard',
+        stage_confidence=0.6,
+        selection_reason='粗扫候选',
+        minimum_gap_ms=20_000,
+        maximum_per_label=2,
+    )
+    assert not _remember_training_candidate(
+        candidates,
+        task='key_screen_review',
+        suggested_label='scoreboard',
+        at_ms=15_000,
+        segment_start_ms=0,
+        frame=frame,
+        model_version='multi-v2',
+        suggestion_confidence=0.5,
+        stage_class='scoreboard',
+        stage_confidence=0.5,
+        selection_reason='较弱候选',
+        minimum_gap_ms=20_000,
+        maximum_per_label=2,
+    )
+    assert _remember_training_candidate(
+        candidates,
+        task='key_screen_review',
+        suggested_label='scoreboard',
+        at_ms=16_000,
+        segment_start_ms=0,
+        frame=frame,
+        model_version='multi-v2',
+        suggestion_confidence=0.9,
+        stage_class='scoreboard',
+        stage_confidence=0.9,
+        selection_reason='较强候选',
+        minimum_gap_ms=20_000,
+        maximum_per_label=2,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].task == 'key_screen_review'
+    assert candidates[0].at_ms == 16_000
+    assert candidates[0].suggestion_confidence == 0.9
 
 
 def test_result_hit_keeps_layout_from_the_strongest_frame() -> None:

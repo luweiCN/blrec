@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>虚荣视觉标注工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 左侧导航 -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-name">虚荣视觉标注工作台</div>
+      <div class="brand-sub">Vainglory Vision Lab</div>
+    </div>
+    <nav id="side-nav">
+      <button class="nav-item active" data-view="source">数据源</button>
+      <button class="nav-item" data-view="label" data-task="mode_gate">光栅专项</button>
+      <button class="nav-item" data-view="label" data-task="result_detector">通用标注</button>
+      <button class="nav-item" data-view="bp-review">BP 模型复核</button>
+      <button class="nav-item" data-view="key-screen-review">结算／计分板复核</button>
+      <button class="nav-item" data-view="inspect">数据检查</button>
+      <button class="nav-item" data-view="datasets">数据集版本</button>
+      <button class="nav-item" data-view="pairs">同局判断</button>
+      <button class="nav-item" data-view="records" id="nav-records">训练与模型</button>
+    </nav>
+    <div class="side-foot muted small">task: <span id="task-name">result_detector</span></div>
+  </aside>
+
+  <!-- 主区 -->
+  <main id="main">
+    <!-- ============ 数据源视图 ============ -->
+    <section class="view active" id="view-source">
+      <header class="view-header">
+        <h2>数据源</h2>
+        <div class="toolbar">
+          <button id="btn-sync">同步 NAS 视频清单</button>
+          <span id="sync-msg" class="muted"></span>
+          <span class="spacer"></span>
+          <label>主播 <input id="filter-streamer" placeholder="筛选主播名" style="width:160px"></label>
+          <label>房间号 <input id="filter-room" placeholder="房间号" style="width:110px"></label>
+          <label>文件大小
+            <select id="filter-size">
+              <option value="1073741824" selected>大于 1GB(推荐抽帧)</option>
+              <option value="">全部</option>
+              <option value="104857600">大于 100MB</option>
+              <option value="536870912">大于 500MB</option>
+              <option value="2147483648">大于 2GB</option>
+            </select>
+          </label>
+        </div>
+      </header>
+      <div class="toolbar">
+        <span class="muted">抽帧配方:</span>
+        <select id="extract-strategy"></select>
+        <span id="strategy-hint" class="muted small"></span>
+      </div>
+      <div class="toolbar">
+        <label title="uniform_every_n_seconds 专用:全片每多少秒抽 1 帧。默认 5 秒,2 小时视频约 1440 帧">间隔(秒) <input id="p-interval-sec" type="number" value="5" min="1" max="60" style="width:60px"></label>
+        <label title="模型命中结算面板的时间点,前后各抽多少秒(含淡入/完整/遮挡各阶段)">候选窗口(秒) <input id="p-window" type="number" value="5" min="1" max="30" style="width:60px"></label>
+        <label title="窗口/区间内每秒抽多少帧:4 = 每 250ms 一帧,足够覆盖结算页变化;8 更密但近重复帧多">密集帧率 <input id="p-fps" type="number" value="4" min="1" max="10" style="width:60px"></label>
+        <label title="随机背景负样本数:每个视频建议 100~300,别超过 500(近重复帧多);量靠视频数量累积">随机负样本数 <input id="p-count" type="number" value="200" min="20" max="1000" style="width:70px"></label>
+        <label title="dense_interval 专用:起止毫秒时间戳,逗号分隔。例:600000,660000 = 第 600~660 秒(1 秒 = 1000ms)">起止(ms,逗号分隔) <input id="p-interval" placeholder="如 600000,660000" style="width:180px"></label>
+        <label title="manual_timestamps 专用:精确毫秒时间点,逗号分隔,每点抽 1 帧。例:120000,240500">手动时间点(ms,逗号分隔) <input id="p-timestamps" placeholder="如 120000,240500" style="width:200px"></label>
+        <button id="btn-extract" class="primary">抽帧选中视频</button>
+        <button id="btn-auto" class="primary" title="每个主播自动选 5 个 >1GB 视频,每 5 秒抽一帧(并行 3 路)">⚡ 自动选视频并抽帧</button>
+        <button id="btn-cancel" disabled>取消</button>
+        <button id="btn-group" title="对已抽帧视频自动事件分组">自动分组事件</button>
+      </div>
+      <div id="extract-progress" class="progress-box hidden"></div>
+      <div class="table-wrap">
+        <table id="video-table">
+          <thead><tr>
+            <th><input type="checkbox" id="check-all"></th>
+            <th>主播</th><th>文件名</th><th>时长</th><th>大小</th>
+            <th>帧数</th><th>已标</th><th>状态</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ 标注视图 ============ -->
+    <section class="view" id="view-label">
+      <header class="view-header">
+        <div class="toolbar tight">
+          <span class="task-badge" id="lbl-task">result_detector</span>
+          <span id="lbl-video" class="muted">未选择</span>
+          <span id="lbl-time" class="muted">--</span>
+          <span class="spacer"></span>
+          <span id="lbl-progress" class="muted">0/0</span>
+          <span id="save-state" class="save-state">已自动保存</span>
+          <button id="btn-undo" title="Cmd/Ctrl+Z">撤销</button>
+        </div>
+        <div class="toolbar tight" id="queue-toolbar">
+          <label>队列
+            <select id="queue-select">
+              <option value="unlabeled">未标注帧</option>
+              <option value="draft">未完成草稿</option>
+              <option value="needs_review">待复核</option>
+              <option value="all">全部帧</option>
+              <option value="result_pos">结算正样本(已标)</option>
+              <option value="scoreboard">积分板(已标)</option>
+              <option value="event">当前事件帧</option>
+            </select>
+          </label>
+          <button id="btn-prev">←</button>
+          <button id="btn-next">→</button>
+          <span class="spacer"></span>
+          <button id="btn-fit" title="F">适应画布</button>
+          <span class="hint-line muted">队列模式:标完用 ←/→ 切换 · 快捷键 R结算 S积分板 D死亡板 G战斗 V虚荣 X非虚荣 U待复核 Enter完成并下一张</span>
+        </div>
+      </header>
+      <!-- 视频列表(实时打标入口) -->
+      <div id="live-list-box">
+        <div id="gate-round-intro" class="gate-round-intro hidden"></div>
+        <div class="toolbar">
+          <span class="muted" id="live-list-hint">全部 &gt;1GB 视频,自己选要打标的文件:点「进入打标」后先下载到本地(约 2~5 分钟,只下一次);「本地」列标 ✓ 表示已下载,再进秒开。每个视频的进度自动保存</span>
+          <span class="spacer"></span>
+          <button id="btn-live-refresh">刷新列表</button>
+        </div>
+        <div class="table-wrap">
+          <table id="live-table">
+            <thead id="live-table-head"><tr>
+              <th>主播</th><th>文件名</th><th>大小</th><th>时长</th>
+              <th>本地</th><th>打标进度</th><th>已标/总帧</th><th>上次位置</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- 实时打标工作区 -->
+      <div id="live-work-box" class="hidden">
+        <div class="toolbar">
+          <button id="btn-live-back">← 返回视频列表</button>
+          <span class="task-badge" id="live-video-name"></span>
+          <span class="spacer"></span>
+          <label>间隔(秒,可小数) <input id="live-interval" type="number" value="5" min="0.2" max="60" step="0.5" style="width:60px"></label>
+          <button id="btn-live-next-video">下一个视频</button>
+        </div>
+        <!-- 本地视频下载(下载后以帧方式浏览/播放) -->
+        <div id="local-video-box">
+          <div id="download-box" class="hidden">
+            <div class="progress-box">
+              <div>正在把视频下载到本地(下载一次后,后续取帧/播放全部本地、丝滑)…</div>
+              <div class="bar"><div id="download-bar" style="width:0%"></div></div>
+            </div>
+          </div>
+          <div class="toolbar wrap-btns">
+            <span class="muted small">时间跳转(秒)</span>
+            <button class="jump-btn" data-ms="-60000">-60</button>
+            <button class="jump-btn" data-ms="-30000">-30</button>
+            <button class="jump-btn" data-ms="-20000">-20</button>
+            <button class="jump-btn" data-ms="-10000">-10</button>
+            <button class="jump-btn" data-ms="-5000">-5</button>
+            <button class="jump-btn" data-ms="-2000">-2</button>
+            <button class="jump-btn" data-ms="-1000">-1</button>
+            <button class="jump-btn" data-ms="-500">-0.5</button>
+            <button class="jump-btn" data-ms="-250">-0.25</button>
+            <button class="jump-btn" data-ms="-200">-0.2</button>
+            <button class="jump-btn" data-ms="-100">-0.1</button>
+            <button id="btn-live-play" class="primary">▶ 播放(每秒一帧)</button>
+            <button class="jump-btn" data-ms="100">+0.1</button>
+            <button class="jump-btn" data-ms="200">+0.2</button>
+            <button class="jump-btn" data-ms="250">+0.25</button>
+            <button class="jump-btn" data-ms="500">+0.5</button>
+            <button class="jump-btn" data-ms="1000">+1</button>
+            <button class="jump-btn" data-ms="2000">+2</button>
+            <button class="jump-btn" data-ms="5000">+5</button>
+            <button class="jump-btn" data-ms="10000">+10</button>
+            <button class="jump-btn" data-ms="20000">+20</button>
+            <button class="jump-btn" data-ms="30000">+30</button>
+            <button class="jump-btn" data-ms="60000">+60</button>
+          </div>
+          <div class="toolbar">
+            <span class="muted small" id="live-work-hint">播放=每秒取一帧前进一个间隔;时间按钮=跳到该时间点的帧。当前帧就是打标帧,右侧标注后点「完成并下一张」</span>
+            <span class="spacer"></span>
+            <button id="btn-live-prev" title="在已标记(完成)的帧之间导航">◀ 上一已标帧</button>
+            <button id="btn-live-next" title="在已标记(完成)的帧之间导航">下一已标帧 ▶</button>
+            <span id="live-pos" class="muted"></span>
+            <span id="live-info" class="muted"></span>
+          </div>
+        </div>
+        <div id="label-layout">
+        <div id="canvas-box">
+          <div id="canvas-wrap">
+            <img id="frame-img" alt="" draggable="false">
+          </div>
+          <div id="model-hint" class="model-hint hidden"></div>
+        </div>
+        <aside id="inspector">
+          <div id="insp-scroll">
+          <!-- 3V3 / 大乱斗光栅专项（与通用标注独立保存） -->
+          <div id="gate-inspector" class="hidden">
+            <div class="insp-status">
+              <span class="task-badge">光栅专项</span>
+              <span id="gate-save-state" class="status-badge muted">未标</span>
+            </div>
+            <div class="insp-block">
+              <h3 id="gate-round-name">本轮任务</h3>
+              <p id="gate-video-mode" class="gate-mode-hint"></p>
+              <p class="hint small">先用时间按钮找到地图入口。一张图里有几处清楚可见的光栅，就分别圈几处；每个框只包住一处光栅。</p>
+            </div>
+            <div class="insp-block">
+              <h3>这张画面属于哪一种？</h3>
+              <div class="gate-actions">
+                <button id="btn-gate-blocked" class="gate-choice gate-blocked">
+                  <b>有黄色光栅</b><span>点这里，连续拖框圈住每一处光栅（B）</span>
+                </button>
+                <button id="btn-gate-open" class="gate-choice gate-open">
+                  <b>入口清楚，但没有光栅</b><span>圈光栅本来会挡住的入口位置（O）</span>
+                </button>
+                <button id="btn-gate-no-evidence" class="gate-choice">
+                  <b>没有可标记位置，跳过这张</b><span>不拿去训练，直接下一帧（N）</span>
+                </button>
+              </div>
+              <p id="gate-draw-hint" class="hint small">选上面一种后，在左边画面拖框；有多处就连续画多个。</p>
+            </div>
+            <div class="insp-block">
+              <p class="hint small">“入口没拍到”会单独记录，不会被误当成 3V3 负样本；原来的结算、界面和模式标签也不会被改动。</p>
+              <div class="row">
+                <button id="btn-gate-clear" class="opt">清除本张全部专项标注</button>
+                <button id="btn-gate-next" class="primary" disabled>下一帧 →</button>
+              </div>
+            </div>
+          </div>
+          <!-- 状态徽标(右上角) -->
+          <div class="insp-status">
+            <span class="task-badge">结算检测</span>
+            <span id="save-state" class="status-badge muted">—</span>
+          </div>
+          <div class="insp-block">
+            <h3>1. 是否为虚荣画面</h3>
+            <p class="hint small">先回答这个:画面里是虚荣游戏(或其界面)吗?</p>
+            <div class="btn-grid" id="grp-family"></div>
+          </div>
+          <div class="insp-block hidden" id="blk-nonvg">
+            <h3>非虚荣类型 <small>(推荐填写)</small></h3>
+            <div class="btn-grid" id="grp-nonvg"></div>
+          </div>
+          <div class="insp-block hidden" id="blk-stage">
+            <h3>2. 对局阶段 <small class="required">必填</small></h3>
+            <p class="hint small" id="stage-hint"></p>
+            <div class="btn-grid" id="grp-stage"></div>
+          </div>
+          <div class="insp-block hidden" id="blk-screen">
+            <h3>3. 具体界面 <small class="required">必填</small></h3>
+            <p class="hint small" id="screen-hint"></p>
+            <div class="btn-grid" id="grp-screen"></div>
+            <p class="hint small scoreboard-hint hidden" id="hard-neg-hint">✓ 已标记为结算模型重点负样本(hard negative)</p>
+          </div>
+          <div class="insp-block hidden" id="blk-extra">
+            <h3>4. 辅助属性</h3>
+            <div class="field">
+              <label>游戏模式 <small>(不确定可不选)</small></label>
+              <div class="btn-grid" id="grp-mode"></div>
+            </div>
+            <div class="field">
+              <label>真人/人机</label>
+              <div class="btn-grid" id="grp-matchkind"></div>
+            </div>
+            <div class="field">
+              <label>视角</label>
+              <div class="btn-grid" id="grp-view"></div>
+            </div>
+            <div class="field">
+              <label>画质异常 <small>(可多选,正常不选)</small></label>
+              <div class="btn-grid" id="grp-quality"></div>
+            </div>
+            <div class="field hidden" id="blk-ocr">
+              <label>结算框评估 <small>(仅结算页)</small></label>
+              <div class="field sub"><label>OCR 是否可用</label>
+                <div class="btn-grid" id="grp-ocr"></div></div>
+              <div class="field sub"><label>结算框清晰度</label>
+                <div class="btn-grid" id="grp-clarity"></div></div>
+              <div class="field sub"><label>结算框遮挡</label>
+                <div class="btn-grid" id="grp-occlusion"></div></div>
+              <div class="field sub hidden" id="blk-occluder">
+                <label>遮挡物 <small>(可多选)</small></label>
+                <div class="btn-grid" id="grp-occluder"></div>
+              </div>
+            </div>
+            <details class="more-fields">
+              <summary>更多属性(黑边等)</summary>
+              <div class="field"><label>黑边</label><select id="sel-bars"></select></div>
+            </details>
+          </div>
+          <div class="insp-block">
+            <h3>5. 边界框</h3>
+            <p class="hint small">viewport=游戏画面范围;result_panel=结算面板(结算页必画);
+              scoreboard_panel=积分板面板;shop_panel=商店面板;equipment_panel=出装面板(选择出装界面)。
+              点绘制后在画布上拖拽。</p>
+            <div id="box-toolbar" class="btn-grid"></div>
+          </div>
+          <div class="insp-block">
+            <h3>6. 事件归属 <small>(已自动分组的事件)</small></h3>
+            <p class="hint small">代表帧=本事件里最清晰的一张(训练优先);传播=把本帧属性复制到同事件其他帧。</p>
+            <div class="row">
+              <button id="btn-representative">标记为事件代表帧</button>
+              <button id="btn-propagate">传播辅助属性到本事件</button>
+            </div>
+            <p class="hint small" id="lbl-event-info"></p>
+          </div>
+          <div class="insp-block">
+            <h3>7. 备注 <small>(可选)</small></h3>
+            <textarea id="notes" rows="2"></textarea>
+          </div>
+          <!-- 底部固定操作栏(footer) -->
+          </div>
+          <div id="insp-actions">
+            <div id="complete-hint" class="hint small required hidden"></div>
+            <div class="row">
+              <button id="btn-undo">撤销</button>
+              <button id="btn-review" class="opt">标记待复核</button>
+              <button id="btn-clear-annotation" class="opt" title="清除本帧的标注,回到未标注状态">清除标注</button>
+              <button id="btn-prev-skip" class="opt" title="不保存当前帧,往前退一帧">← 上一帧</button>
+              <button id="btn-next-skip" class="opt" title="不标记当前帧,直接跳过到下一帧">下一帧(跳过) →</button>
+              <button id="btn-done-next" class="primary" disabled>完成并下一张</button>
+            </div>
+          </div>
+        </aside>
+        <!-- 模型测试面板(替代标注表单) -->
+        <aside id="test-panel" class="hidden">
+          <div id="test-scroll">
+            <h3>🧪 模型测试</h3>
+            <p class="hint small">先用上方时间跳转/播放找到目标帧,选模型后点「运行测试」查看输出。</p>
+            <div class="field">
+              <label>选择模型</label>
+              <select id="test-model" class="full"></select>
+            </div>
+            <div class="field">
+              <label>置信度阈值(检测模型) <input id="test-conf" type="number" value="0.25" min="0" max="1" step="0.05" style="width:70px"></label>
+            </div>
+            <button id="btn-run-test" class="primary full">▶ 运行测试</button>
+            <div id="test-result" class="test-result"></div>
+          </div>
+        </aside>
+      </div>
+      <!-- 底部时间轴 -->
+      <div id="timeline">
+        <div class="tl-toolbar">
+          <button id="btn-play">播放</button>
+          <button id="btn-step-prev">⏮ 帧</button>
+          <button id="btn-step-next">帧 ⏭</button>
+          <span id="tl-event-label" class="muted"></span>
+          <span class="spacer"></span>
+          <button id="btn-tl-prev">上一事件</button>
+          <button id="btn-tl-next">下一事件</button>
+        </div>
+        <div id="tl-strip"></div>
+      </div>
+    </section>
+
+    <!-- ============ BP 主动学习复核视图 ============ -->
+    <section class="view" id="view-bp-review">
+      <header class="view-header">
+        <h2>BP 模型复核</h2>
+        <div class="toolbar">
+          <button id="btn-bp-sync-worker" class="primary">同步 MacBook worker 候选</button>
+          <span id="bp-worker-sync-state" class="muted"></span>
+          <label>扫描现有未标帧 <input id="bp-scan-limit" type="number" value="3000" min="100" max="50000" style="width:80px"></label>
+          <label>最多收集 <input id="bp-item-limit" type="number" value="300" min="10" max="2000" style="width:70px"></label>
+          <button id="btn-bp-collect">让本机 multi-v2 扫描旧帧</button>
+          <span id="bp-collect-state" class="muted"></span>
+          <button id="btn-bp-export">导出已确认训练集</button>
+          <span id="bp-export-state" class="muted"></span>
+        </div>
+        <div class="toolbar tight">
+          <label>队列
+            <select id="bp-review-filter">
+              <option value="pending">待确认</option>
+              <option value="confirmed">已确认</option>
+              <option value="skipped">已跳过</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <button id="btn-bp-refresh">刷新</button>
+          <button id="btn-bp-prev">←</button>
+          <button id="btn-bp-next">→</button>
+          <span id="bp-review-progress" class="muted">0/0</span>
+          <span class="spacer"></span>
+          <span id="bp-review-counts" class="muted"></span>
+        </div>
+        <p class="hint small">画面情况默认就是“清晰”，正常图片不用点二级选项，直接选模式即可。只有特殊图片才先点“有遮挡、小窗、遮挡＋小窗或模式看不清”，再选模式。模型建议只是预标，人工确认后才进入训练数据；“模式看不清”的图片会保存，但不会进入模式分类训练集。快捷键保持不变：1=3V3、2=大乱斗、3=5V5、N=不是BP、S=图片无效／跳过、Enter=确认模型建议。</p>
+      </header>
+      <div id="bp-review-layout">
+        <div id="bp-review-canvas">
+          <img id="bp-review-img" alt="BP 待复核画面" draggable="false">
+          <div id="bp-review-empty" class="empty-state">还没有待确认候选。先同步 MacBook worker 候选。</div>
+        </div>
+        <aside id="bp-review-panel">
+          <div id="bp-review-meta" class="muted small"></div>
+          <div class="bp-prediction-card">
+            <div class="muted small">模型预标</div>
+            <div id="bp-suggestion" class="bp-suggestion">--</div>
+            <div id="bp-model-detail" class="small"></div>
+          </div>
+          <div class="bp-reason-card">
+            <div class="muted small">为什么挑中这张</div>
+            <div id="bp-selection-reason">--</div>
+          </div>
+          <div class="bp-condition-card">
+            <div class="muted small">二级选项：画面情况（默认清晰，不用点）</div>
+            <div class="bp-condition-actions">
+              <button data-bp-condition="clear">清晰（默认）</button>
+              <button data-bp-condition="occluded">有遮挡</button>
+              <button data-bp-condition="windowed">小窗／非全屏</button>
+              <button data-bp-condition="occluded_windowed">遮挡＋小窗</button>
+              <button data-bp-condition="unreadable">模式看不清（不训练）</button>
+            </div>
+            <div id="bp-condition-state" class="muted small"></div>
+          </div>
+          <button id="btn-bp-confirm-suggestion" class="primary bp-confirm">确认模型建议</button>
+          <div class="bp-review-actions">
+            <button data-bp-label="bp_3v3">1　这是 3V3 BP</button>
+            <button data-bp-label="bp_aram">2　这是大乱斗 BP</button>
+            <button data-bp-label="bp_5v5">3　这是 5V5 BP</button>
+            <button data-bp-label="not_bp">N　不是选英雄画面</button>
+            <button data-bp-label="skip">S　图片无效／暂时跳过</button>
+          </div>
+          <div id="bp-review-save-state" class="muted small"></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ 结算页 / 计分板主动学习复核视图 ============ -->
+    <section class="view" id="view-key-screen-review">
+      <header class="view-header">
+        <h2>结算页／计分板复核</h2>
+        <div class="toolbar">
+          <button id="btn-key-sync-worker" class="primary">同步 MacBook worker 候选</button>
+          <span id="key-worker-sync-state" class="muted"></span>
+          <button id="btn-key-export">导出已确认训练集</button>
+          <span id="key-export-state" class="muted"></span>
+        </div>
+        <div class="toolbar tight">
+          <label>队列
+            <select id="key-review-filter">
+              <option value="pending">待确认</option>
+              <option value="confirmed">已确认</option>
+              <option value="skipped">已跳过</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <button id="btn-key-refresh">刷新</button>
+          <button id="btn-key-prev">←</button>
+          <button id="btn-key-next">→</button>
+          <span id="key-review-progress" class="muted">0/0</span>
+          <span class="spacer"></span>
+          <span id="key-review-counts" class="muted"></span>
+        </div>
+        <p class="hint small">这是一个三分类复核队列：真正赛后结算页、对局中临时打开的计分板、其他画面。默认画面清晰，直接点类型即可；遮挡或完全看不清时再点二级选项。快捷键：1=结算页、2=计分板、N=其他、S=图片无效／跳过、Enter=确认模型建议。</p>
+      </header>
+      <div id="key-review-layout">
+        <div id="key-review-canvas">
+          <img id="key-review-img" alt="结算页或计分板待复核画面" draggable="false">
+          <div id="key-review-empty" class="empty-state">还没有待确认候选。同步 MacBook worker 候选后会自动出现。</div>
+        </div>
+        <aside id="key-review-panel">
+          <div id="key-review-meta" class="muted small"></div>
+          <div class="bp-prediction-card">
+            <div class="muted small">模型预标</div>
+            <div id="key-suggestion" class="bp-suggestion">--</div>
+          </div>
+          <div class="bp-reason-card">
+            <div class="muted small">为什么挑中这张</div>
+            <div id="key-selection-reason">--</div>
+          </div>
+          <div class="bp-condition-card">
+            <div class="muted small">二级选项：画面情况（默认清晰，不用点）</div>
+            <div class="key-condition-actions">
+              <button data-key-condition="clear">清晰（默认）</button>
+              <button data-key-condition="occluded">有遮挡</button>
+              <button data-key-condition="unreadable">看不清（不训练）</button>
+            </div>
+            <div id="key-condition-state" class="muted small"></div>
+          </div>
+          <button id="btn-key-confirm-suggestion" class="primary bp-confirm">确认模型建议</button>
+          <div class="key-review-actions">
+            <button data-key-label="result_page">1　这是赛后结算页</button>
+            <button data-key-label="scoreboard">2　这是对局中计分板</button>
+            <button data-key-label="other">N　都不是／其他画面</button>
+            <button data-key-label="skip">S　图片无效／暂时跳过</button>
+          </div>
+          <div id="key-review-save-state" class="muted small"></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ 数据检查视图 ============ -->
+    <section class="view" id="view-inspect">
+      <header class="view-header"><h2>数据检查</h2></header>
+      <div id="stats-grid"></div>
+      <div id="stats-issues"></div>
+    </section>
+
+    <!-- ============ 数据集版本视图 ============ -->
+    <section class="view" id="view-datasets">
+      <header class="view-header">
+        <h2>数据集版本</h2>
+        <div class="toolbar">
+          <button id="btn-export" class="primary">导出 result-detector 数据集(JSONL+YOLO+COCO)</button>
+          <label><input type="checkbox" id="export-neg" checked> 包含负样本</label>
+          <span id="export-result" class="muted"></span>
+        </div>
+      </header>
+      <table id="datasets-table">
+        <thead><tr><th>版本</th><th>任务</th><th>创建时间</th><th>总数</th><th>正/负</th><th>切分</th><th>路径</th><th>commit</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="hint small">导出切分以整段视频为单位(train/val/test ≈ 8:1:1),同一视频/事件的帧不会跨集合泄漏。版本不可变,禁止覆盖。</p>
+    </section>
+
+    <!-- ============ 同局判断视图 ============ -->
+    <section class="view" id="view-pairs">
+      <header class="view-header">
+        <h2>同局判断</h2>
+        <div class="toolbar">
+          <button id="btn-pair-refresh">刷新候选</button>
+          <span class="muted">选择两张帧,标记是否同一局</span>
+        </div>
+      </header>
+      <div id="pair-area">
+        <div class="pair-cell">
+          <img id="pair-a-img" alt="帧A"><div class="pair-ctrl">
+            <input id="pair-a" placeholder="帧 id">
+          </div>
+        </div>
+        <div class="pair-actions">
+          <button class="primary" id="btn-pair-same">同一局</button>
+          <button id="btn-pair-diff">不同局</button>
+          <button id="btn-pair-uncertain">不确定</button>
+        </div>
+        <div class="pair-cell">
+          <img id="pair-b-img" alt="帧B"><div class="pair-ctrl">
+            <input id="pair-b" placeholder="帧 id">
+          </div>
+        </div>
+      </div>
+      <table id="pairs-table">
+        <thead><tr><th>A</th><th>B</th><th>标签</th><th>时间</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- ============ 训练记录视图 ============ -->
+    <section class="view" id="view-records">
+      <header class="view-header">
+        <h2>训练与模型</h2>
+        <div class="toolbar">
+          <button id="btn-training-refresh">刷新数据量与进度</button>
+          <span id="training-global-state" class="muted"></span>
+        </div>
+        <p class="hint small">点击训练时会先冻结“这一刻”的数据集快照，再启动后台训练。之后继续打标不会改变正在训练的内容；新增数据后再次点击，会生成新的数据集版本和训练记录，旧模型完整保留。</p>
+      </header>
+      <div id="training-task-grid"></div>
+      <h3 class="section-title">训练记录</h3>
+      <div class="table-wrap training-table-wrap">
+        <table id="training-runs-table">
+          <thead><tr><th>模型</th><th>数据快照</th><th>状态</th><th>进度</th><th>指标</th><th>模型文件</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <details id="training-log-box" class="training-log-box hidden" open>
+        <summary>训练日志（最近 200 行）</summary>
+        <pre id="training-log"></pre>
+      </details>
+    </section>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

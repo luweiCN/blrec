@@ -16,7 +16,7 @@
 ## 当前实现和真实基线
 
 - 当前代码：`src/blrec/vainglory/result_detection.py`。
-- 当前模型：`src/blrec/data/vainglory/result-panel.onnx`。
+- 当前模型：`apps/analysis-worker/src/blrec_analysis_worker/models/result-panel.onnx`。
 - 当前 Worker 会对整段视频按 4 FPS 解码，用 ONNX Runtime 的 CoreML Provider 逐帧调用模型，然后把相邻命中合并。
 - 一段 87 分 46 秒的真实视频共扫描 21,065 帧，CoreML 扫描耗时约 449 秒。旧模型命中 147 帧，合并为 11 段；其中只有 2 段是真结算页，另外 7 段是游戏内积分板，2 段是其他游戏画面。已知的 2 个真结算页都被找到。
 - 因此首要问题是积分板等 hard negative 的误报；优化精度时不能丢掉短暂、半透明、窗口化或低画质的真结算页。

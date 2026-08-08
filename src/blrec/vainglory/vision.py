@@ -5,7 +5,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from statistics import median
-from typing import Iterator, List, Literal, Optional, Sequence, Tuple, cast
+from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple, cast
 
 from loguru import logger
 
@@ -974,6 +974,31 @@ def png_bytes(frame: RgbFrame) -> bytes:
             _png_chunk(b'IEND', b''),
         )
     )
+
+
+def jpeg_bytes(
+    frame: RgbFrame, *, maximum_width: int = 960, quality: int = 85
+) -> bytes:
+    """把训练候选压成适合局域网上传的 JPEG，避免上传原始大图。"""
+    if maximum_width <= 0:
+        raise ValueError('maximum JPEG width must be positive')
+    if quality < 1 or quality > 100:
+        raise ValueError('JPEG quality must be between 1 and 100')
+    import importlib
+
+    cv2: Any = importlib.import_module('cv2')
+    numpy: Any = importlib.import_module('numpy')
+    image = numpy.frombuffer(frame.pixels, dtype=numpy.uint8).reshape(
+        frame.height, frame.width, 3
+    )
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    if frame.width > maximum_width:
+        height = max(1, round(frame.height * maximum_width / frame.width))
+        image = cv2.resize(image, (maximum_width, height), interpolation=cv2.INTER_AREA)
+    encoded, payload = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not encoded:
+        raise RuntimeError('failed to encode JPEG')
+    return bytes(payload)
 
 
 def stack_vertical(

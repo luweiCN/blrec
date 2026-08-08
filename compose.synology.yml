@@ -1,6 +1,6 @@
 services:
   blrec-next:
-    image: ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.43}
+    image: ghcr.io/luweicn/blrec-server:${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.44}
     pull_policy: always
     container_name: blrec-next
     network_mode: host
@@ -13,7 +13,7 @@ services:
       BLREC_FORWARDED_ALLOW_IPS: ${BLREC_FORWARDED_ALLOW_IPS:-127.0.0.1}
       BLREC_CREDENTIAL_KEY_FILE: /cfg/credential.key
       BLREC_VAINGLORY_RESULT_FRAME_ROOT: /result-frames
-      BLREC_VAINGLORY_WORKER_MODE: ${BLREC_VAINGLORY_WORKER_MODE:-local}
+      BLREC_VAINGLORY_WORKER_MODE: ${BLREC_VAINGLORY_WORKER_MODE:-remote}
       BLREC_ANALYSIS_WORKER_TOKEN: ${BLREC_ANALYSIS_WORKER_TOKEN:-}
     volumes:
       - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg

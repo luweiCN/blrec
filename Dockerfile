@@ -3,8 +3,8 @@
 ARG BUILDPLATFORM=linux/amd64
 FROM --platform=$BUILDPLATFORM node:18-bookworm-slim AS webapp-builder
 WORKDIR /build
-COPY webapp ./webapp
-RUN cd webapp && \
+COPY apps/blrec-server/webapp ./apps/blrec-server/webapp
+RUN cd apps/blrec-server/webapp && \
     npm ci && \
     npm run build && \
     rm -rf node_modules /root/.npm

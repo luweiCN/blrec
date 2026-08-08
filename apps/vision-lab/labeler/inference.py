@@ -1,0 +1,364 @@
+"""模型推理服务:加载 ONNX 模型,对帧做检测/分类推理,输出原始与格式化结果。
+
+模型注册表约定(models/*.onnx 文件名前缀):
+- result-detector-*  检测(结算面板),imgsz 640
+- stage-cls-*        阶段分类(6 类),imgsz 224
+- mode-cls-*         模式分类(3 类),imgsz 224
+其他文件按通用条目列出(无任务信息)。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+from PIL import Image
+
+from .config import MODELS_DIR
+
+# 类别名(按 ultralytics 训练的字母序:与 ONNX 输出索引一致)
+STAGE_CLASSES = ['in_match', 'not_vainglory', 'out_of_match',
+                 'post_match', 'pre_match', 'transition']
+MODE_CLASSES = ['3v3', '5v5', 'aram']
+
+STAGE_LABELS = {
+    'gameplay': '对局中', 'scoreboard': '积分板',
+    'result_page': '结算页', 'victory_defeat': '胜负动画',
+    'pre_match': '赛前(排队/选英雄)', 'out_of_match': '游戏外(大厅等)',
+    'transition': '转场(切APP/黑屏/重连)', 'talent_select': '天赋选择(必大乱斗)',
+    'in_match': '对局中', 'not_vainglory': '非虚荣画面',
+    'post_match': '赛后(结算/胜负动画)',
+}
+MODE_LABELS = {'3v3': '3v3', 'aram': '大乱斗', '5v5': '5v5'}
+CONTENT_LABELS = {'vainglory': '虚荣', 'not_vainglory': '非虚荣'}
+BP_CLASSES = ['bp_3v3', 'bp_5v5', 'bp_aram', 'not_bp']
+BP_LABELS = {
+    'bp_3v3': '3V3 BP', 'bp_aram': '大乱斗 BP',
+    'bp_5v5': '5V5 BP', 'not_bp': '非 BP',
+}
+KEY_SCREEN_CLASSES = ['other', 'result_page', 'scoreboard']
+KEY_SCREEN_LABELS = {
+    'other': '其他画面', 'result_page': '赛后结算页',
+    'scoreboard': '对局中计分板',
+}
+
+# 内置注册表:文件名关键字 → 任务与类别(文件名以 -cls- 或 -detector- 区分)
+TASK_HINTS = [
+    ('mode-gate-detector', 'detect', [], {'mode_gate': '黄色光栅'}, 640),
+    ('result-detector', 'detect', STAGE_CLASSES,
+     {'result_panel': '结算面板'}, 640),
+    ('result-panel', 'detect', STAGE_CLASSES,
+     {'result_panel': '结算面板'}, 640),
+    ('stage-cls', 'classify', STAGE_CLASSES, STAGE_LABELS, 224),
+    ('mode-cls', 'classify', MODE_CLASSES, MODE_LABELS, 224),
+    ('bp-classifier', 'classify', BP_CLASSES, BP_LABELS, 224),
+    ('key-screen-classifier', 'classify', KEY_SCREEN_CLASSES,
+     KEY_SCREEN_LABELS, 224),
+    ('multi-v2', 'multi', ['content', 'stage', 'mode'],
+     {'content': CONTENT_LABELS, 'stage': STAGE_LABELS,
+      'mode': MODE_LABELS}, 224),
+]
+
+_sessions: Dict[str, Any] = {}  # name -> onnxruntime.InferenceSession
+_torch_models: Dict[str, Any] = {}  # name -> (nn.Module, device)
+
+MULTI_CLASSES = {
+    'content': ['vainglory', 'not_vainglory'],
+    # 顺序必须与 train_multi.py 的 STAGE_CLS 一致
+    'stage': ['gameplay', 'scoreboard', 'result_page', 'victory_defeat',
+              'pre_match', 'out_of_match', 'transition', 'talent_select'],
+    'mode': ['3v3', 'aram', '5v5'],
+}
+
+# 对局中/胜负动画的同地图界面:mode 预测 3v3 时实际可能是大乱斗(待确认)
+MODE_AMBIGUOUS_STAGES = {'gameplay', 'victory_defeat'}
+
+
+def _load_session(name: str) -> Any:
+    if name in _sessions:
+        return _sessions[name]
+    import onnxruntime as ort
+    path = MODELS_DIR / f'{name}.onnx'
+    if not path.exists():
+        raise FileNotFoundError(f'模型不存在: {path}')
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    so.intra_op_num_threads = 4
+    _sessions[name] = ort.InferenceSession(str(path), so,
+                                           providers=['CPUExecutionProvider'])
+    return _sessions[name]
+
+
+def clear_model_cache() -> None:
+    """发布新测试模型后让下一次推理重新加载文件。"""
+    _sessions.clear()
+    _torch_models.clear()
+
+
+def list_models() -> List[Dict[str, Any]]:
+    if not MODELS_DIR.exists():
+        return []
+    out = []
+    for p in sorted(list(MODELS_DIR.glob('*.onnx')) + list(MODELS_DIR.glob('*.pt'))):
+        name = p.stem
+        task, classes, labels, imgsz = 'unknown', [], {}, 640
+        for kw, t, cls, lb, sz in TASK_HINTS:
+            if name.startswith(kw):
+                task, classes, labels, imgsz = t, cls, lb, sz
+                break
+        out.append({
+            'name': name, 'file': p.name, 'size_mb': round(p.stat().st_size / 1e6, 1),
+            'task': task, 'imgsz': imgsz,
+            'classes': classes, 'labels': labels,
+        })
+    return out
+
+
+def _letterbox(img: Image.Image, size: int) -> np.ndarray:
+    """等比缩放 + 灰边填充到 size×size,返回 CHW float32 [0,1] 及缩放信息。"""
+    w, h = img.size
+    scale = min(size / w, size / h)
+    nw, nh = int(round(w * scale)), int(round(h * scale))
+    img2 = img.resize((nw, nh), Image.BILINEAR)
+    canvas = Image.new('RGB', (size, size), (114, 114, 114))
+    canvas.paste(img2, ((size - nw) // 2, (size - nh) // 2))
+    arr = np.asarray(canvas, dtype=np.float32) / 255.0
+    return arr.transpose(2, 0, 1)[None], scale, (size - nw) // 2, (size - nh) // 2
+
+
+def _softmax(x: np.ndarray) -> np.ndarray:
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+
+def _finalize_probs(logits: np.ndarray) -> np.ndarray:
+    """分类输出归一化:已是概率分布(和≈1)则直接用,否则做 softmax。
+
+    ultralytics 导出的 ONNX 分类模型自带 softmax;对已归一化的输出
+    再 softmax 会把分布拉平,必须检测。
+    """
+    if abs(float(logits.sum()) - 1.0) < 0.01:
+        return logits
+    return _softmax(logits)
+
+
+def _parse_detect(outputs: np.ndarray, conf_thr: float = 0.25,
+                  imgsz: int = 640, orig_size=(0, 0),
+                  class_name: str = 'result_panel',
+                  class_label: str = '结算面板'):
+    """解析 YOLOv8 检测输出 [1,4+nc,8400] → 归一化框列表。
+
+    outputs: [1, 5, 8400] = [cx, cy, w, h, conf](单类)。
+    返回 dets 列表(xywh_norm + xyxy_px + conf),供测试与推理共用。
+    """
+    pred = outputs[0]  # (5, 8400)
+    cx, cy, bw, bh, confs = pred[0], pred[1], pred[2], pred[3], pred[4]
+    boxes = np.stack([
+        cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2,
+    ], axis=1)
+    valid = confs >= conf_thr
+    boxes, confs = boxes[valid], confs[valid]
+    keep = _nms(boxes, confs)
+    w, h = orig_size
+    scale = min(imgsz / w, imgsz / h) if w and h else 1.0
+    nw, nh = int(w * scale), int(h * scale)
+    pad_x, pad_y = (imgsz - nw) // 2, (imgsz - nh) // 2
+    dets = []
+    for i in keep:
+        x1, y1, x2, y2 = boxes[i]
+        x1 = (x1 - pad_x) / scale
+        y1 = (y1 - pad_y) / scale
+        x2 = (x2 - pad_x) / scale
+        y2 = (y2 - pad_y) / scale
+        x1, x2 = max(0, x1), min(w, x2)
+        y1, y2 = max(0, y1), min(h, y2)
+        dets.append({
+            'class': class_name,
+            'label': class_label,
+            'conf': round(float(confs[i]), 4),
+            'xyxy_px': [round(float(v), 1) for v in (x1, y1, x2, y2)],
+            'xywh_norm': [round(float(v), 4) for v in
+                          (x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h)],
+        })
+    return dets
+
+
+def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float = 0.45) -> List[int]:
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(int(i))
+        if order.size == 1:
+            break
+        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
+        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
+        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+        inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+        area_i = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
+        area_o = (boxes[order[1:], 2] - boxes[order[1:], 0]) * (
+            boxes[order[1:], 3] - boxes[order[1:], 1])
+        iou = inter / (area_i + area_o - inter + 1e-9)
+        order = order[1:][iou <= iou_thr]
+    return keep
+
+
+def run_detect(name: str, frame_path: Path, conf_thr: float = 0.25,
+               imgsz: int = 640) -> Dict[str, Any]:
+    """检测推理(单类,结算面板)。"""
+    sess = _load_session(name)
+    img = Image.open(frame_path).convert('RGB')
+    x, scale, pad_x, pad_y = _letterbox(img, imgsz)
+    outputs = sess.run(None, {sess.get_inputs()[0].name: x})[0]  # (1,4+nc,8400)
+    is_gate = name.startswith('mode-gate-detector')
+    dets = _parse_detect(
+        outputs,
+        conf_thr,
+        imgsz,
+        img.size,
+        class_name='mode_gate' if is_gate else 'result_panel',
+        class_label='黄色光栅' if is_gate else '结算面板',
+    )
+    confs_all = outputs[0][4]
+    return {'task': 'detect', 'found': len(dets) > 0,
+            'detections': dets,
+            'raw_shape': list(outputs.shape),
+            'raw_top_conf': round(float(confs_all.max()), 4)
+            if len(confs_all) else 0.0}
+
+
+def run_classify(name: str, frame_path: Path,
+                 classes: List[str], labels: Dict[str, str],
+                 imgsz: int = 224) -> Dict[str, Any]:
+    """分类推理,返回 top-5 概率 + 原始 logits。"""
+    sess = _load_session(name)
+    img = Image.open(frame_path).convert('RGB')
+    img2 = img.resize((imgsz, imgsz), Image.BILINEAR)
+    arr = np.asarray(img2, dtype=np.float32) / 255.0
+    x = arr.transpose(2, 0, 1)[None]
+    logits = sess.run(None, {sess.get_inputs()[0].name: x})[0][0]
+    probs = _finalize_probs(logits)
+    order = probs.argsort()[::-1][:5]
+    top = [{
+        'class': classes[i],
+        'label': labels.get(classes[i], classes[i]),
+        'prob': round(float(probs[i]), 4),
+    } for i in order]
+    return {
+        'task': 'classify',
+        'top1': top[0],
+        'top5': top,
+        'raw_logits': [round(float(v), 4) for v in logits.tolist()],
+        'raw_probs': [round(float(v), 4) for v in probs.tolist()],
+    }
+
+
+def _load_torch_model(name: str):
+    """加载 multi 任务模型(torch .pt),返回 (model, device)。"""
+    if name in _torch_models:
+        return _torch_models[name]
+    import torch
+    from torchvision import transforms
+    path = MODELS_DIR / f'{name}.pt'
+    if not path.exists():
+        raise FileNotFoundError(f'模型不存在: {path}')
+    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    # 与 train_multi.py 的 MultiHeadModel 结构一致
+    import torch.nn as nn
+    import torchvision.models
+    # 与 train_multi.py 的 MultiHeadModel 结构一致
+    backbone = torchvision.models.resnet18(weights=None)
+    feat = backbone.fc.in_features
+    backbone.fc = nn.Identity()
+
+    class _MultiHead(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = backbone
+            self.content_head = nn.Linear(feat, len(MULTI_CLASSES['content']))
+            self.stage_head = nn.Linear(feat, len(MULTI_CLASSES['stage']))
+            self.mode_head = nn.Linear(feat, len(MULTI_CLASSES['mode']))
+
+        def forward(self, x):
+            f = self.backbone(x)
+            return (self.content_head(f), self.stage_head(f),
+                    self.mode_head(f))
+
+    model = _MultiHead()
+    model.load_state_dict(torch.load(path, map_location=device))
+    model.eval().to(device)
+    _torch_models[name] = (model, device)
+    return model, device
+
+
+def run_multi(name: str, frame_path: Path,
+              imgsz: int = 224) -> Dict[str, Any]:
+    """多输出头推理:content(虚荣/非虚荣) + stage(6 类) + mode(3 类)。"""
+    import torch
+    from torchvision import transforms
+    model, device = _load_torch_model(name)
+    tf = transforms.Compose([
+        transforms.Resize((imgsz, imgsz)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    from PIL import Image
+    img = Image.open(frame_path).convert('RGB')
+    x = tf(img)[None].to(device)
+    with torch.no_grad():
+        out_c, out_s, out_m = model(x)
+    heads = {
+        'content': (out_c, MULTI_CLASSES['content'], CONTENT_LABELS),
+        'stage': (out_s, MULTI_CLASSES['stage'], STAGE_LABELS),
+        'mode': (out_m, MULTI_CLASSES['mode'], MODE_LABELS),
+    }
+    result: Dict[str, Any] = {'task': 'multi'}
+    for hname, (logits, classes, labels) in heads.items():
+        probs = _finalize_probs(logits[0].cpu().numpy())
+        order = probs.argsort()[::-1][:5]
+        top = [{
+            'class': classes[i],
+            'label': labels.get(classes[i], classes[i]),
+            'prob': round(float(probs[i]), 4),
+        } for i in order]
+        result[hname] = {
+            'top1': top[0],
+            'top5': top,
+            'raw_probs': [round(float(v), 4) for v in probs.tolist()],
+        }
+    # 分层模式输出:对局中/胜负动画(同地图)判 3v3 时,实际可能是大乱斗
+    st = result['stage']['top1']['class']
+    if st in MODE_AMBIGUOUS_STAGES and result['mode']['top1']['class'] == '3v3':
+        result['mode']['ambiguous'] = True
+        result['mode']['note'] = '对局中画面:可能是 3v3 或大乱斗(同地图),' \
+                                  '需用积分板/结算页/天赋选择确认'
+    # 确定性规则:识别出天赋选择界面 → 模式必为大乱斗(覆盖 mode 头)
+    if st == 'talent_select':
+        result['mode'] = {
+            'top1': {'class': 'aram', 'label': '大乱斗', 'prob': 1.0},
+            'top5': [{'class': 'aram', 'label': '大乱斗', 'prob': 1.0}],
+            'raw_probs': [],
+            'rule_override': True,
+            'note': '天赋选择界面是大乱斗特有(规则锁定)',
+        }
+    return result
+
+
+def run_model(name: str, frame_path: Path,
+              conf_thr: float = 0.25) -> Dict[str, Any]:
+    """按模型注册表自动选择任务并推理。"""
+    meta = next((m for m in list_models() if m['name'] == name), None)
+    if meta is None:
+        raise FileNotFoundError(f'未知模型: {name}')
+    if meta['task'] == 'detect':
+        return {'model': name, **run_detect(name, frame_path, conf_thr,
+                                            meta['imgsz'])}
+    if meta['task'] == 'classify':
+        return {'model': name,
+                **run_classify(name, frame_path, meta['classes'],
+                               meta['labels'], meta['imgsz'])}
+    if meta['task'] == 'multi':
+        return {'model': name, **run_multi(name, frame_path, meta['imgsz'])}
+    raise RuntimeError(f'模型 {name} 任务类型未知,无法推理')

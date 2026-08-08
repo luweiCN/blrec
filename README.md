@@ -78,11 +78,15 @@
 
 ## Docker
 
-Docker 测试版使用公开镜像 [`ghcr.io/luweicn/blrec:3.0.0-beta.43`](https://github.com/luweicn/blrec/pkgs/container/blrec)。请仅使用仓库中的 `compose.synology.yml` 部署；首次安装、凭据密钥初始化、升级与回滚步骤见 [群晖双网络部署](docs/operations/synology-multi-network.md)。
+BLREC Server 使用独立公开镜像
+[`ghcr.io/luweicn/blrec-server:3.0.0-beta.44`](https://github.com/luweicn/blrec/pkgs/container/blrec-server)。
+镜像只由 GitHub Actions 构建，NAS 直接从 GHCR 拉取。请仅使用仓库中的
+`compose.synology.yml` 部署；首次安装、凭据密钥初始化、升级与回滚步骤见
+[群晖双网络部署](docs/operations/synology-multi-network.md)。
 
 ## 使用方法
 
-BLREC 浏览器工具的安装、连接和撤销授权步骤见 [插件说明](browser-extension/README.md)。
+BLREC 浏览器工具的安装、连接和撤销授权步骤见 [插件说明](apps/browser-extension/README.md)。
 
 ### 命令行参数用法
 

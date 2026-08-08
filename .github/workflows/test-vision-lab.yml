@@ -1,0 +1,70 @@
+name: Test Vision Lab
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - apps/vision-lab/**
+      - .github/workflows/test-vision-lab.yml
+  pull_request:
+    paths:
+      - apps/vision-lab/**
+      - .github/workflows/test-vision-lab.yml
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: apps/vision-lab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: apps/vision-lab/pyproject.toml
+
+      - name: Install package and build tools
+        run: python -m pip install '.[test]' build
+
+      - name: Test
+        run: python -m unittest discover -s tests -v
+
+      - name: Build wheel and source package
+        run: python -m build
+
+      - name: Verify packages exclude mutable data and model weights
+        run: |
+          python - <<'PY'
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          archives = tuple(Path('dist').iterdir())
+          assert any(path.suffix == '.whl' for path in archives)
+          assert any(path.name.endswith('.tar.gz') for path in archives)
+          for archive in archives:
+              if archive.suffix == '.whl':
+                  with zipfile.ZipFile(archive) as handle:
+                      names = handle.namelist()
+              elif archive.name.endswith('.tar.gz'):
+                  with tarfile.open(archive, 'r:gz') as handle:
+                      names = handle.getnames()
+              else:
+                  continue
+              forbidden = [
+                  name
+                  for name in names
+                  if '/data/' in name or name.endswith(('.onnx', '.pt'))
+              ]
+              assert not forbidden, f'{archive}: {forbidden}'
+          PY

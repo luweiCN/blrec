@@ -1,0 +1,46 @@
+name: Test Browser Extension
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - apps/browser-extension/**
+      - .github/workflows/test-browser-extension.yml
+  pull_request:
+    paths:
+      - apps/browser-extension/**
+      - .github/workflows/test-browser-extension.yml
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/browser-extension
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: apps/browser-extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build

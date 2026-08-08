@@ -4,7 +4,9 @@
 
 Python 后端采用 `src` 布局，代码位于 `src/blrec/`。其中 `cli/` 提供命令行入口，`web/` 实现 FastAPI 接口，`bili/` 负责 B 站交互，`flv/` 与 `hls/` 处理录制格式，任务、设置和通知逻辑分别放在对应子包中。模板及随包发布的静态资源位于 `src/blrec/data/`。
 
-Angular 前端位于 `webapp/src/app/`，图片和图标存放在 `webapp/src/assets/`，测试以 `*.spec.ts` 形式与被测代码就近放置。生产构建会写入 `src/blrec/data/webapp/`；其中带哈希的文件应视为生成产物。Python 打包与质量工具配置集中在 `setup.cfg`、`pyproject.toml`、`.flake8` 和 `mypy.ini`。
+Angular 管理端位于 `apps/blrec-server/webapp/src/app/`，图片和图标存放在 `apps/blrec-server/webapp/src/assets/`，测试以 `*.spec.ts` 形式与被测代码就近放置。生产构建会写入 `src/blrec/data/webapp/`；其中带哈希的文件应视为生成产物。Python 打包与质量工具配置集中在 `setup.cfg`、`pyproject.toml`、`.flake8` 和 `mypy.ini`。
+
+五个独立产品均位于 `apps/`：`blrec-server/`、`analysis-worker/`、`public-dashboard/`、`browser-extension/` 和 `vision-lab/`。每个产品使用自己的依赖、测试与发布 workflow；Analysis Worker 独立拥有推理模型和运行依赖，Public Dashboard 的静态站点与数据 Publisher 分别构建。边界说明见 `apps/README.md`。
 
 ## 构建、测试与开发命令
 
@@ -12,9 +14,11 @@ Angular 前端位于 `webapp/src/app/`，图片和图标存放在 `webapp/src/as
 - `pip install -e '.[dev]'`：以可编辑模式安装后端及开发工具。
 - `blrec`：启动应用，默认界面为 `http://localhost:2233`。
 - `black --check src && isort --check-only src && flake8 src && mypy src/blrec`：运行后端格式、导入、静态检查及类型检查。
-- `python -m build`：在 `dist/` 中生成 wheel 和源码包。
-- `cd webapp && npm ci`：按锁文件安装前端依赖。
-- 在 `webapp/` 中运行 `npm start` 启动开发服务器，运行 `npm test -- --watch=false --browsers=ChromeHeadless` 执行一次无头测试，运行 `npx ng lint` 检查代码，运行 `npm run build` 生成生产包。
+- 正式 wheel、源码包、插件 ZIP 和容器镜像只通过 `.github/workflows/` 中对应的 GitHub Actions workflow 构建；本机不生成发布制品。
+- `cd apps/blrec-server/webapp && npm ci`：按锁文件安装管理端依赖。
+- 在 `apps/blrec-server/webapp/` 中运行 `npm start` 启动开发服务器，运行 `npm test -- --watch=false --browsers=ChromeHeadless` 执行一次无头测试，运行 `npx ng lint` 检查代码，运行 `npm run build` 生成生产包。
+- Analysis Worker 源码测试使用 `PYTHONPATH=src:apps/analysis-worker/src .venv/bin/python -m pytest apps/analysis-worker/tests`；Public Dashboard Publisher 使用 `PYTHONPATH=src:apps/public-dashboard/publisher/src .venv/bin/python -m pytest apps/public-dashboard/publisher/tests`。
+- Public Dashboard 静态站点在 `apps/public-dashboard/` 中运行 `npm test`、`npm run lint` 和 `npm run build`。
 
 ## 编码风格与命名约定
 
@@ -34,6 +38,12 @@ Python 使用四空格缩进、类型注解和 88 字符行宽，并遵循 Black
 - 固定线路必须同时绑定用户所选网卡的源地址和 DNS 解析，并在整次上传、下载、直播场次或认证会话内保持出口稳定；只绑定传输连接、仍用系统默认线路解析 DNS 不算完成网络切换。轮换线路仅用于允许轮换的匿名读取或轮询，并按请求批次、连接或场次维持粘性，不能在同一任务中途换出口。
 - 未选择网卡时允许使用系统默认路由，但必须解析并记录实际默认网卡，流量不得因 `interface=None` 被丢弃。所有出站任务都要记录用途、选中线路、源地址、选路原因和上下行流量。
 - 新增网络用途必须同时提供旧配置迁移策略、前端用途说明以及固定、轮换、系统默认和重启恢复场景的验证；不得让已有部署因为新增空配置而静默切换到另一条宽带。
+
+## 本机 Docker 约束
+
+- 永远不要启动、打开或操作用户电脑上的 Docker Desktop、OrbStack、Colima 或其他本机容器运行时，也不要执行会连接或唤醒本机 Docker daemon 的命令。
+- 任何产品的正式打包、容器镜像构建或发布验证只能使用 GitHub Actions workflow；不得在用户电脑上构建或拉取镜像，也不得把本机镜像传到 NAS。本机只允许运行不依赖容器运行时的源码测试和开发构建。
+- NAS 部署时应由 NAS 直接从镜像仓库拉取已经由 GitHub Actions 发布的镜像。
 
 ## NAS 运维
 

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-EXTENSION = ROOT / 'browser-extension'
+EXTENSION = ROOT / 'apps/browser-extension'
 
 
 def test_store_manifest_uses_the_blrec_icon_and_minimum_permissions() -> None:
@@ -19,10 +19,12 @@ def test_store_manifest_uses_the_blrec_icon_and_minimum_permissions() -> None:
     assert package['name'] == 'blrec-browser-extension'
 
 
-def test_build_copies_the_existing_blrec_icon() -> None:
+def test_build_copies_the_extension_owned_icon() -> None:
     build_script = (EXTENSION / 'build.mjs').read_text(encoding='utf8')
 
-    assert "webapp/src/assets/icons/icon-128x128.png" in build_script
+    assert (EXTENSION / 'src/icons/icon-128.png').is_file()
+    assert "resolve(source, 'icons', 'icon-128.png')" in build_script
+    assert 'blrec-server' not in build_script
     assert "resolve(output, 'icons', 'icon-128.png')" in build_script
 
 

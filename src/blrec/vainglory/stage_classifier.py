@@ -135,9 +135,9 @@ class StageClassifier:
 
 
 def load_stage_classifier(
-    *, providers: Optional[Sequence[str]] = None
+    *, model_path: Optional[Path] = None, providers: Optional[Sequence[str]] = None
 ) -> Optional[StageClassifier]:
-    path = stage_classifier_model_path()
+    path = stage_classifier_model_path() if model_path is None else Path(model_path)
     if not path.is_file():
         return None
     return StageClassifier(path, providers=providers)

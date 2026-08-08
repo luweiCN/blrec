@@ -617,10 +617,18 @@ class BiliAccountRuntime:
             result_frame_root = os.environ.get(
                 'BLREC_VAINGLORY_RESULT_FRAME_ROOT', ''
             ).strip()
+            training_candidate_root = os.environ.get(
+                'BLREC_VAINGLORY_TRAINING_CANDIDATE_ROOT', ''
+            ).strip()
             vainglory_repository = VaingloryRepository(
                 database,
                 result_frame_root=(
                     None if not result_frame_root else Path(result_frame_root)
+                ),
+                training_candidate_root=(
+                    None
+                    if not training_candidate_root
+                    else Path(training_candidate_root)
                 ),
                 clock=self._clock,
             )

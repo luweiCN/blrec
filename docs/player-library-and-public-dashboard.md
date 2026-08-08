@@ -4,7 +4,7 @@
 
 本期把对局统计的主身份从会变化的直播名称提升为稳定的“玩家”，并允许管理员维护玩家展示名、创建玩家、绑定或改绑直播间。对局录像、OCR、B 站账号和管理能力仍只存在于本地 BLREC。
 
-公网化只发布排行榜所需的只读数据，不把 NAS、SQLite 文件或当前管理 API 暴露到互联网。公开榜单源码位于仓库根目录的 `public-dashboard/`，它是一个拥有独立 `package.json`、构建产物和发布流程的 Angular 应用。原有 `webapp/` 只负责 BLREC 后台管理，随 NAS 镜像发布，不包含公开榜单路由。
+公网化只发布排行榜所需的只读数据，不把 NAS、SQLite 文件或当前管理 API 暴露到互联网。公开榜单源码位于 `apps/public-dashboard/`，它是一个拥有独立 `package.json`、构建产物和发布流程的 Angular 应用。`apps/blrec-server/webapp/` 只负责 BLREC 后台管理，随 NAS 镜像发布，不包含公开榜单路由。
 
 当前已完成真实 SQLite 快照导出器、数据契约测试、独立静态看板的快照加载，以及阿里云 OSS/CDN、HTTPS 和证书自动续签同步；NAS 每日发布协调器待配置。
 
@@ -142,7 +142,7 @@ LIVE INDEX 不是排名分数，而是当前公开快照的状态区，固定展
              阿里云 CDN + vg.luwei.host
 ```
 
-静态前端由 `public-dashboard/` 独立执行 `npm ci && npm run build`，构建产物和数据快照发布到同一 Bucket。BLREC 的 `webapp/` 仍只是 NAS 后台管理页，不会被公网发布。日常数据更新只上传 `data/`；站点代码有新的已验证构建时，同一协调器再同步静态资源，不在 NAS 上自动 `git pull` 未经验证的代码。
+静态前端由 `apps/public-dashboard/` 独立执行 `npm ci && npm run build`，构建产物和数据快照发布到同一 Bucket。`apps/blrec-server/webapp/` 仍只是 NAS 后台管理页，不会被公网发布。日常数据更新只上传 `data/`；站点代码有新的已验证构建时，同一协调器再同步静态资源，不在 NAS 上自动 `git pull` 未经验证的代码。
 
 这个方案不占用原阿里云服务器端口，也不在云服务器上运行榜单站点、Docker 或公网 API。`vg.luwei.host` 通过 CNAME 指向 CDN 加速域名；OSS 是回源站，不直接暴露 NAS。云服务器只复用现有 Nginx UI 的通配符证书，并由 systemd oneshot 定时任务将续签结果同步到 CDN。
 

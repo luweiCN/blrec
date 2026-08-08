@@ -26,7 +26,13 @@ from loguru import logger
 
 from blrec.bili_upload.database import BiliUploadDatabase
 
-from .analyzer import AnalyzedHero, AnalyzedMatch, ScannedPart, VideoPart
+from .analyzer import (
+    AnalyzedHero,
+    AnalyzedMatch,
+    ScannedPart,
+    TrainingCandidate,
+    VideoPart,
+)
 from .catalog import identify_builtin_hero
 from .exclusions import EXCLUDED_TITLE_MARKER, is_excluded_title
 from .hero_recognition import HeroReference
@@ -582,6 +588,26 @@ class VaingloryRepository:
     HERO_RECOGNITION_VERSION = 5
     RECORDED_PLAYER_DETECTION_VERSION = 3
     _REALTIME_WINDOW_SECONDS = 24 * 60 * 60
+    _PUBLICATION_ANALYSIS_DEBT = (
+        '(EXISTS(SELECT 1 FROM vainglory_publications publication '
+        'WHERE publication.session_id=job.session_id '
+        'AND publication.needs_refresh=1) OR EXISTS('
+        'SELECT 1 FROM upload_jobs published_job '
+        'JOIN bili_accounts published_account '
+        'ON published_account.id=published_job.account_id '
+        'WHERE published_job.session_id=job.session_id '
+        "AND published_account.state='active' "
+        "AND published_job.state IN ('waiting_review','approved','completed') "
+        "AND published_job.submit_state='confirmed' "
+        'AND COALESCE(published_job.aid,0)>0 '
+        "AND COALESCE(published_job.bvid,'')<>'' "
+        'AND EXISTS(SELECT 1 FROM upload_parts published_part '
+        'WHERE published_part.job_id=published_job.id '
+        'AND published_part.cid IS NOT NULL) '
+        'AND NOT EXISTS(SELECT 1 FROM vainglory_publications existing '
+        'WHERE existing.account_id=published_job.account_id '
+        'AND existing.bvid=published_job.bvid)))'
+    )
     _MATCH_SELECT = (
         'SELECT match.id,match.session_id,match.result_part_id,'
         'match.result_at_ms,match.duration_seconds,match.result_text,'
@@ -681,6 +707,7 @@ class VaingloryRepository:
         database: BiliUploadDatabase,
         *,
         result_frame_root: Optional[Path] = None,
+        training_candidate_root: Optional[Path] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._database = database
@@ -688,6 +715,11 @@ class VaingloryRepository:
             Path(database.path).parent / 'vainglory-result-frames'
             if result_frame_root is None
             else Path(result_frame_root)
+        ).resolve()
+        self._training_candidate_root = (
+            Path(database.path).parent / 'vainglory-training-candidates'
+            if training_candidate_root is None
+            else Path(training_candidate_root)
         ).resolve()
         self._clock = clock
 
@@ -1455,12 +1487,10 @@ class VaingloryRepository:
                 "WHEN session.state='open' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
                 'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+                'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
                 "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
-                "source.origin!='archive' AND source.cache_path IS NULL)) THEN 3 "
-                'WHEN session.started_at>=? THEN 4 '
-                'WHEN EXISTS(SELECT 1 FROM vainglory_publications publication '
-                'WHERE publication.session_id=job.session_id '
-                'AND publication.needs_refresh=1) THEN 5 '
+                "source.origin!='archive' AND source.cache_path IS NULL)) THEN 4 "
+                'WHEN session.started_at>=? THEN 5 '
                 "WHEN source.origin IS NULL OR (source.origin!='archive' "
                 'AND source.cache_path IS NULL) THEN 6 '
                 'ELSE 7 END AS priority '
@@ -1622,9 +1652,7 @@ class VaingloryRepository:
                 "WHEN session.state='open' THEN 1 "
                 "WHEN (source.origin IS NULL OR source.origin!='archive') "
                 'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
-                'WHEN EXISTS(SELECT 1 FROM vainglory_publications publication '
-                'WHERE publication.session_id=job.session_id '
-                'AND publication.needs_refresh=1) THEN 3 '
+                'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
                 "WHEN source.origin='archive' THEN 4 ELSE 5 END AS priority "
                 'FROM vainglory_ocr_jobs ocr '
                 'JOIN vainglory_part_jobs job ON job.part_id=ocr.part_id '
@@ -1827,12 +1855,10 @@ class VaingloryRepository:
             "WHEN session.state='open' THEN 1 "
             "WHEN (source.origin IS NULL OR source.origin!='archive') "
             'AND migration_item.id IS NULL AND session.started_at>=? THEN 2 '
+            'WHEN ' + self._PUBLICATION_ANALYSIS_DEBT + ' THEN 3 '
             "WHEN session.started_at>=? AND (source.origin IS NULL OR ("
-            "source.origin!='archive' AND source.cache_path IS NULL)) THEN 3 "
-            'WHEN session.started_at>=? THEN 4 '
-            'WHEN EXISTS(SELECT 1 FROM vainglory_publications publication '
-            'WHERE publication.session_id=job.session_id '
-            'AND publication.needs_refresh=1) THEN 5 '
+            "source.origin!='archive' AND source.cache_path IS NULL)) THEN 4 "
+            'WHEN session.started_at>=? THEN 5 '
             "WHEN source.origin IS NULL OR (source.origin!='archive' "
             'AND source.cache_path IS NULL) THEN 6 '
             'ELSE 7 END'
@@ -2311,15 +2337,23 @@ class VaingloryRepository:
         matches: Sequence[AnalyzedMatch],
         *,
         candidate_count: Optional[int] = None,
+        training_candidates: Sequence[TrainingCandidate] = (),
     ) -> None:
         now = self._now()
         written_paths: List[Path] = []
+        written_training_candidates: List[Path] = []
         obsolete_frame_paths: List[str] = []
 
         def complete(connection: sqlite3.Connection) -> None:
             job = connection.execute(
-                'SELECT state,session_id,request_kind,algorithm_version '
-                'FROM vainglory_part_jobs WHERE part_id=?',
+                'SELECT job.state,job.session_id,job.request_kind,'
+                'job.algorithm_version,session.title,session.anchor_name,'
+                'session.room_id,part.part_index,'
+                "COALESCE(NULLIF(part.final_path,''),part.source_path) AS source_path "
+                'FROM vainglory_part_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                'JOIN recording_parts part ON part.id=job.part_id '
+                'WHERE job.part_id=?',
                 (int(part_id),),
             ).fetchone()
             if job is None:
@@ -2327,6 +2361,63 @@ class VaingloryRepository:
             if str(job['state']) != 'analyzing':
                 raise VaingloryConflict('分析任务当前不能写入结果')
             session_id = int(job['session_id'])
+            for candidate in training_candidates[:60]:
+                try:
+                    relative_path = self._training_candidate_relative_path(
+                        session_id=session_id,
+                        part_id=part_id,
+                        at_ms=candidate.at_ms,
+                        content=candidate.image_jpeg,
+                        task=candidate.task,
+                    )
+                    destination = self._resolve_training_candidate_path(relative_path)
+                    source_path = str(job['source_path'] or '')
+                    filename = Path(source_path).name or 'part-{}'.format(
+                        int(job['part_index'])
+                    )
+                    metadata = {
+                        'schema_version': 1,
+                        'task': candidate.task,
+                        'source_id': 'part-{}:{}:{}'.format(
+                            part_id,
+                            candidate.at_ms,
+                            hashlib.sha256(candidate.image_jpeg).hexdigest()[:16],
+                        ),
+                        'session_id': session_id,
+                        'part_id': int(part_id),
+                        'part_index': int(job['part_index']),
+                        'at_ms': int(candidate.at_ms),
+                        'segment_start_ms': int(candidate.segment_start_ms),
+                        'streamer': str(job['anchor_name'] or ''),
+                        'room_id': str(job['room_id'] or ''),
+                        'session_title': str(job['title'] or ''),
+                        'filename': filename,
+                        'model_version': candidate.model_version,
+                        'suggested_label': candidate.suggested_label,
+                        'suggestion_confidence': candidate.suggestion_confidence,
+                        'stage_class': candidate.stage_class,
+                        'stage_confidence': candidate.stage_confidence,
+                        'mode_class': candidate.mode_class,
+                        'mode_confidence': candidate.mode_confidence,
+                        'selection_reason': candidate.selection_reason,
+                        'image_path': relative_path,
+                        'image_sha256': hashlib.sha256(
+                            candidate.image_jpeg
+                        ).hexdigest(),
+                        'created_at': now,
+                    }
+                    self._write_training_candidate(
+                        destination, candidate.image_jpeg, metadata
+                    )
+                    written_training_candidates.append(destination)
+                except (OSError, ValueError) as error:
+                    logger.warning(
+                        'Vainglory training candidate storage skipped: '
+                        'part_id={} at_ms={} error={!r}',
+                        part_id,
+                        candidate.at_ms,
+                        error,
+                    )
             suppressed_times = tuple(
                 int(row['at_ms'])
                 for row in connection.execute(
@@ -2591,6 +2682,14 @@ class VaingloryRepository:
                 part_id,
                 len(written_paths),
                 self._result_frame_root,
+            )
+        if written_training_candidates:
+            logger.info(
+                'Vainglory training candidates stored: part_id={} frames={} '
+                'directory={}',
+                part_id,
+                len(written_training_candidates),
+                self._training_candidate_root,
             )
 
     async def get_job(self, session_id: int) -> Optional[ScanJob]:
@@ -4298,6 +4397,80 @@ class VaingloryRepository:
             with tempfile.NamedTemporaryFile(
                 mode='wb',
                 prefix='.result-frame-',
+                suffix='.tmp',
+                dir=str(destination.parent),
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(str(temporary_path), str(destination))
+            os.chmod(destination, 0o600)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _training_candidate_relative_path(
+        *,
+        session_id: int,
+        part_id: int,
+        at_ms: int,
+        content: bytes,
+        task: str = 'bp_review',
+    ) -> str:
+        if task not in ('bp_review', 'key_screen_review'):
+            raise ValueError('unknown training candidate task')
+        digest = hashlib.sha256(content).hexdigest()[:16]
+        return '{}/session-{}/part-{}/{:012d}-{}.jpg'.format(
+            task, session_id, part_id, at_ms, digest
+        )
+
+    def _resolve_training_candidate_path(self, relative_path: str) -> Path:
+        candidate = Path(relative_path)
+        if candidate.is_absolute() or '..' in candidate.parts:
+            raise ValueError(
+                'training candidate path must stay inside its storage directory'
+            )
+        resolved = (self._training_candidate_root / candidate).resolve()
+        try:
+            resolved.relative_to(self._training_candidate_root)
+        except ValueError as error:
+            raise ValueError(
+                'training candidate path must stay inside its storage directory'
+            ) from error
+        return resolved
+
+    def _write_training_candidate(
+        self, destination: Path, content: bytes, metadata: Mapping[str, Any]
+    ) -> None:
+        if not content:
+            raise ValueError('training candidate image must not be empty')
+        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.chmod(self._training_candidate_root, 0o700)
+        os.chmod(destination.parent, 0o700)
+        if not destination.is_file():
+            self._write_training_candidate_file(
+                destination, content, prefix='.training-image-'
+            )
+        sidecar = destination.with_suffix('.json')
+        payload = json.dumps(
+            metadata, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+        ).encode('utf8')
+        self._write_training_candidate_file(
+            sidecar, payload, prefix='.training-metadata-'
+        )
+
+    @staticmethod
+    def _write_training_candidate_file(
+        destination: Path, content: bytes, *, prefix: str
+    ) -> None:
+        temporary_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='wb',
+                prefix=prefix,
                 suffix='.tmp',
                 dir=str(destination.parent),
                 delete=False,

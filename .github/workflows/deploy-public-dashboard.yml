@@ -4,8 +4,18 @@ on:
   push:
     branches: [master]
     paths:
-      - public-dashboard/**
-      - src/blrec/data/vainglory/heroes/**
+      - apps/public-dashboard/src/**
+      - apps/public-dashboard/public-data/.gitignore
+      - apps/public-dashboard/.eslintrc.json
+      - apps/public-dashboard/angular.json
+      - apps/public-dashboard/karma.conf.js
+      - apps/public-dashboard/package.json
+      - apps/public-dashboard/package-lock.json
+      - apps/public-dashboard/tsconfig*.json
+      - apps/public-dashboard/deploy/aliyun/deploy_site.py
+      - apps/public-dashboard/deploy/aliyun/page-deploy-ram-policy.json
+      - apps/public-dashboard/deploy/aliyun/site-deploy-requirements.txt
+      - apps/public-dashboard/tests/test_site_deploy.py
       - .github/workflows/deploy-public-dashboard.yml
   workflow_dispatch:
 
@@ -26,7 +36,7 @@ jobs:
       url: https://vg.luwei.host
     defaults:
       run:
-        working-directory: public-dashboard
+        working-directory: apps/public-dashboard
     env:
       ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
       ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
@@ -42,14 +52,14 @@ jobs:
         with:
           node-version: 18
           cache: npm
-          cache-dependency-path: public-dashboard/package-lock.json
+          cache-dependency-path: apps/public-dashboard/package-lock.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: public-dashboard/deploy/aliyun/site-deploy-requirements.txt
+          cache-dependency-path: apps/public-dashboard/deploy/aliyun/site-deploy-requirements.txt
 
       - name: Install dependencies
         run: |
@@ -59,7 +69,7 @@ jobs:
       - name: Test
         run: |
           npm test
-          python -m pytest ../tests/vainglory/test_dashboard_site_deploy.py
+          python -m pytest tests/test_site_deploy.py
 
       - name: Lint
         run: npm run lint

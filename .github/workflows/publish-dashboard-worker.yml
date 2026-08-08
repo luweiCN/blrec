@@ -4,14 +4,10 @@ on:
   push:
     branches: [master]
     paths:
-      - Dockerfile.dashboard-publisher
-      - setup.cfg
-      - pyproject.toml
-      - src/blrec/vainglory/dashboard_publisher.py
-      - src/blrec/vainglory/dashboard_snapshot.py
-      - src/blrec/vainglory/dashboard_rating.py
+      - apps/public-dashboard/publisher/**
       - src/blrec/networking/**
-      - src/blrec/setting/**
+      - src/blrec/logging/**
+      - src/blrec/utils/string.py
       - .github/workflows/publish-dashboard-worker.yml
   workflow_dispatch:
 
@@ -23,14 +19,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  quality:
+    uses: ./.github/workflows/test-public-dashboard.yml
+
   publish:
+    needs: quality
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/luweicn/blrec
+      IMAGE: ghcr.io/luweicn/blrec-dashboard-publisher
 
     steps:
       - name: Checkout
@@ -53,14 +53,14 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.dashboard-publisher
+          file: apps/public-dashboard/publisher/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             VERSION=dashboard-${{ github.sha }}
             REVISION=${{ github.sha }}
           tags: |
-            ${{ env.IMAGE }}:dashboard-publisher-master
-            ${{ env.IMAGE }}:dashboard-publisher-${{ github.sha }}
+            ${{ env.IMAGE }}:master
+            ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=dashboard-publisher
           cache-to: type=gha,mode=max,scope=dashboard-publisher

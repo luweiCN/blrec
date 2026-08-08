@@ -4,46 +4,66 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / '.github/workflows'
 
 
-def test_test_workflow_is_reusable_and_covers_runtime_python() -> None:
-    workflow = (WORKFLOWS / 'test.yml').read_text(encoding='utf8')
+def test_server_workflow_covers_runtime_python_and_server_image() -> None:
+    workflow = (WORKFLOWS / 'test-server.yml').read_text(encoding='utf8')
     assert 'workflow_call:' in workflow
     assert "'3.11'" in workflow
-    assert 'scripts/docker-smoke.sh blrec:release-test' in workflow
-    assert 'VERSION=3.0.0-beta.43' in workflow
+    assert 'working-directory: apps/blrec-server/webapp' in workflow
+    assert 'uses: docker/build-push-action@' in workflow
+    assert 'file: apps/blrec-server/Dockerfile' in workflow
+    assert 'cache-from: type=gha,scope=blrec-server' in workflow
+    assert 'load: true' in workflow
+    assert 'Uncompressed size:' in workflow
+    assert 'scripts/docker-smoke.sh blrec-server:release-test' in workflow
     assert 'name: Highlight media regression' in workflow
     assert 'timeout-minutes: 15' in workflow
     assert 'BLREC_RUN_HIGHLIGHT_MEDIA_TESTS' in workflow
     assert 'test_highlight_cut_ffmpeg.py' in workflow
+    assert 'apps/browser-extension' not in workflow
 
 
-def test_test_workflow_checks_the_browser_extension_independently() -> None:
-    workflow = (WORKFLOWS / 'test.yml').read_text(encoding='utf8')
-    assert 'name: Browser extension' in workflow
-    assert 'cache-dependency-path: browser-extension/package-lock.json' in workflow
-    assert 'working-directory: browser-extension' in workflow
-    assert 'npm ci' in workflow
-    assert 'npm test' in workflow
-    assert 'npm run typecheck' in workflow
-    assert 'npm run build' in workflow
+def test_browser_extension_has_independent_test_and_release_workflows() -> None:
+    test = (WORKFLOWS / 'test-browser-extension.yml').read_text(encoding='utf8')
+    release = (WORKFLOWS / 'release-browser-extension.yml').read_text(encoding='utf8')
+    assert 'cache-dependency-path: apps/browser-extension/package-lock.json' in test
+    assert 'working-directory: apps/browser-extension' in test
+    for command in ('npm ci', 'npm test', 'npm run typecheck', 'npm run build'):
+        assert command in test
+    assert "tags: ['extension-v*.*.*']" in release
+    assert 'uses: ./.github/workflows/test-browser-extension.yml' in release
+    assert 'blrec-browser-extension-${{ steps.version.outputs.value }}.zip' in release
+    assert 'docker/build-push-action' not in release
 
 
-def test_release_workflow_has_independent_exact_image_contract() -> None:
-    workflow = (WORKFLOWS / 'release.yml').read_text(encoding='utf8')
-    assert "tags: ['v*.*.*']" in workflow
-    assert 'uses: ./.github/workflows/test.yml' not in workflow
-    assert 'needs: quality' not in workflow
+def test_server_release_has_independent_exact_image_contract() -> None:
+    workflow = (WORKFLOWS / 'release-server.yml').read_text(encoding='utf8')
+    assert "tags: ['server-v*.*.*']" in workflow
     assert 'packages: write' in workflow
     assert 'linux/amd64,linux/arm64' in workflow
-    assert 'ghcr.io/luweicn/blrec' in workflow
+    assert 'ghcr.io/luweicn/blrec-server' in workflow
+    assert 'file: apps/blrec-server/Dockerfile' in workflow
+    assert 'uses: ./.github/workflows/test-server.yml' in workflow
     assert ':beta' in workflow
     assert ':latest' not in workflow
     assert 'gh release create' in workflow
-    assert 'BLREC_EXTENSION_VERSION="$manifest_version" npm run build' in workflow
-    assert 'blrec-browser-extension-${{ steps.version.outputs.value }}.zip' in workflow
+    assert 'browser-extension' not in workflow
     assert 'compose.synology.yml synology.env.example' in workflow
 
 
+def test_vision_lab_has_independent_test_and_release_workflows() -> None:
+    test = (WORKFLOWS / 'test-vision-lab.yml').read_text(encoding='utf8')
+    release = (WORKFLOWS / 'release-vision-lab.yml').read_text(encoding='utf8')
+    assert 'working-directory: apps/vision-lab' in test
+    assert "python-version: '3.14'" in test
+    assert 'python -m unittest discover' in test
+    assert 'python -m build' in test
+    assert "tags: ['vision-lab-v*.*.*']" in release
+    assert 'uses: ./.github/workflows/test-vision-lab.yml' in release
+
+
 def test_legacy_automatic_publishers_cannot_run_for_tag() -> None:
+    assert not (WORKFLOWS / 'release.yml').exists()
+    assert not (WORKFLOWS / 'test.yml').exists()
     assert not (WORKFLOWS / 'docker-hub.yml').exists()
     assert not (WORKFLOWS / 'ghcr.yml').exists()
     for name in ('pypi.yml', 'portable.yml'):

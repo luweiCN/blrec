@@ -1,0 +1,23 @@
+services:
+  dashboard-publisher:
+    image: ghcr.io/luweicn/blrec-dashboard-publisher:${DASHBOARD_PUBLISHER_IMAGE_TAG:-master}
+    pull_policy: missing
+    container_name: blrec-dashboard-publisher
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - ${DASHBOARD_PUBLISHER_ENV_FILE:-/volume1/docker/blrec-next/secrets/dashboard-publisher.env}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      BLREC_CONFIG: /cfg/settings.toml
+      DASHBOARD_DATABASE: /cfg/blrec.sqlite3
+      DASHBOARD_STATE: /state
+      OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
+      OSS_BUCKET: luwei-vainglory
+      OSS_PREFIX: data
+      DASHBOARD_SCHEDULE_HOUR: ${DASHBOARD_SCHEDULE_HOUR:-0}
+      DASHBOARD_SCHEDULE_MINUTE: ${DASHBOARD_SCHEDULE_MINUTE:-5}
+      DASHBOARD_RETRY_SECONDS: ${DASHBOARD_RETRY_SECONDS:-900}
+    volumes:
+      - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg:ro
+      - ${DASHBOARD_PUBLISHER_STATE_DIR:-/volume1/docker/blrec-next/dashboard-publisher/state}:/state

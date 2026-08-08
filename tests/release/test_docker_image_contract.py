@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_dockerfile_builds_frontend_wheel_and_runtime_separately() -> None:
-    dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf8')
+    dockerfile = (ROOT / 'apps/blrec-server/Dockerfile').read_text(encoding='utf8')
     assert 'AS webapp-builder' in dockerfile
     assert 'AS wheel-builder' in dockerfile
     assert 'AS runtime' in dockerfile
@@ -29,7 +29,19 @@ def test_synology_compose_persists_sibling_favorites_directory() -> None:
 
 def test_docker_context_excludes_local_and_generated_state() -> None:
     ignored = (ROOT / '.dockerignore').read_text(encoding='utf8')
-    for value in ('.git', '.venv', 'webapp/node_modules', 'src/blrec/data/webapp'):
+    for value in (
+        '.git',
+        '.venv',
+        'apps/blrec-server/webapp/node_modules',
+        'apps/browser-extension',
+        'apps/vision-lab',
+        'apps/analysis-worker',
+        'apps/public-dashboard/node_modules',
+        'apps/public-dashboard/dist',
+        'apps/public-dashboard/public-data',
+        'apps/public-dashboard/src',
+        'src/blrec/data/webapp',
+    ):
         assert value in ignored
 
 

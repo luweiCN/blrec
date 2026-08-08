@@ -1,10 +1,16 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from blrec.bili_upload.database import BiliUploadDatabase
-from blrec.vainglory.analyzer import AnalyzedHero, AnalyzedMatch, ScannedPart
+from blrec.vainglory.analyzer import (
+    AnalyzedHero,
+    AnalyzedMatch,
+    ScannedPart,
+    TrainingCandidate,
+)
 from blrec.vainglory.hero_recognition import HeroReference
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
 from blrec.vainglory.repository import (
@@ -65,6 +71,95 @@ async def seed_part(
         "VALUES(?,?,?,?,?,1,'ready',1,1)",
         (part_id, session_id, 'run:{}'.format(session_id), part_index, str(path)),
     )
+
+
+@pytest.mark.asyncio
+async def test_complete_part_stores_worker_training_candidate_sidecar(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        candidate_root = tmp_path / 'training-candidates'
+        repository = VaingloryRepository(
+            database, training_candidate_root=candidate_root, clock=lambda: 100
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        image = b'\xff\xd8candidate\xff\xd9'
+        candidate = TrainingCandidate(
+            at_ms=12_000,
+            segment_start_ms=10_000,
+            image_jpeg=image,
+            model_version='multi-v2',
+            suggested_label='bp_3v3',
+            suggestion_confidence=0.8,
+            stage_class='pre_match',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.8,
+            selection_reason='worker 测试候选',
+        )
+
+        await repository.complete_part(1, (), training_candidates=(candidate,))
+
+        images = list(candidate_root.rglob('*.jpg'))
+        sidecars = list(candidate_root.rglob('*.json'))
+        assert len(images) == len(sidecars) == 1
+        assert images[0].read_bytes() == image
+        metadata = json.loads(sidecars[0].read_text(encoding='utf8'))
+        assert metadata['suggested_label'] == 'bp_3v3'
+        assert metadata['streamer'] == '样本主播'
+        assert metadata['image_path'].endswith(images[0].name)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_training_candidate_storage_failure_does_not_fail_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        candidate = TrainingCandidate(
+            at_ms=12_000,
+            segment_start_ms=10_000,
+            image_jpeg=b'\xff\xd8candidate\xff\xd9',
+            model_version='multi-v2',
+            suggested_label='bp_3v3',
+            suggestion_confidence=0.8,
+            stage_class='pre_match',
+            stage_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.8,
+            selection_reason='worker 测试候选',
+        )
+
+        def fail_candidate_write(*_args: object) -> None:
+            raise OSError('只让候选写入失败')
+
+        monkeypatch.setattr(
+            repository, '_write_training_candidate', fail_candidate_write
+        )
+
+        await repository.complete_part(1, (), training_candidates=(candidate,))
+
+        state = await database.scalar(
+            'SELECT state FROM vainglory_part_jobs WHERE part_id=1'
+        )
+        assert state == 'ready'
+    finally:
+        await database.close()
 
 
 def analyzed_match() -> AnalyzedMatch:
@@ -456,6 +551,66 @@ async def test_repository_prioritizes_open_recording_over_older_backlog(
         assert claim.session_id == 2
         assert claim.part.id == 2
         assert claim.realtime is True
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_prioritizes_published_video_without_publication_task(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        backlog_video = tmp_path / 'backlog.mp4'
+        published_video = tmp_path / 'published.mp4'
+        backlog_video.write_bytes(b'backlog')
+        published_video.write_bytes(b'published')
+        await seed_session(database, backlog_video, session_id=1)
+        await seed_session(database, published_video, session_id=2)
+        await database.execute(
+            "INSERT INTO bili_accounts("
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            "state,created_at,updated_at) VALUES(1,42,'账号',X'00',1,'key',"
+            "'active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,created_at,updated_at) '
+            "VALUES(2,2,1,'{}','approved','confirmed',302,'BV1published',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'job_id,part_index,source_path,artifact_state,upload_state,'
+            'remote_filename,cid) '
+            "VALUES(2,1,?,'ready','confirmed','published-p1',402)",
+            (str(published_video),),
+        )
+        repository = VaingloryRepository(database, clock=lambda: 2_000_000_000)
+
+        await repository.discover_ready_parts()
+        status = await repository.analysis_queue_status()
+        claim = await repository.claim_next()
+
+        assert status.queued[0].session_id == 2
+        assert claim is not None
+        assert claim.session_id == 2
+        await repository.enqueue_ocr(
+            claim.part.id,
+            ScannedPart(video_duration_ms=1_000, candidate_times_ms=(500,)),
+        )
+        backlog_claim = await repository.claim_next()
+        assert backlog_claim is not None
+        await repository.enqueue_ocr(
+            backlog_claim.part.id,
+            ScannedPart(video_duration_ms=1_000, candidate_times_ms=(500,)),
+        )
+
+        ocr_claim = await repository.claim_next_ocr()
+
+        assert ocr_claim is not None
+        assert ocr_claim.session_id == 2
     finally:
         await database.close()
 

@@ -20,6 +20,7 @@ from .analyzer import (
     AnalysisStatus,
     AnalyzedHero,
     AnalyzedMatch,
+    TrainingCandidate,
     VaingloryVideoAnalyzer,
     VideoPart,
 )
@@ -242,11 +243,19 @@ class VaingloryIndexService:
             await self._repository.touch_match_rerun(item_id)
 
     async def complete_remote_part(
-        self, part_id: int, matches: Sequence[AnalyzedMatch], *, candidate_count: int
+        self,
+        part_id: int,
+        matches: Sequence[AnalyzedMatch],
+        *,
+        candidate_count: int,
+        training_candidates: Sequence[TrainingCandidate] = (),
     ) -> None:
         self._require_remote_worker()
         await self._repository.complete_part(
-            part_id, matches, candidate_count=candidate_count
+            part_id,
+            matches,
+            candidate_count=candidate_count,
+            training_candidates=training_candidates,
         )
         self._clear_runtime_status(part_id)
 

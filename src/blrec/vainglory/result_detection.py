@@ -111,9 +111,9 @@ class OnnxResultPanelDetector:
 
 
 def load_result_panel_detector(
-    *, providers: Optional[Sequence[str]] = None
+    *, model_path: Optional[Path] = None, providers: Optional[Sequence[str]] = None
 ) -> Optional[OnnxResultPanelDetector]:
-    path = result_panel_model_path()
+    path = result_panel_model_path() if model_path is None else Path(model_path)
     if not path.is_file():
         return None
     return OnnxResultPanelDetector(path, providers=providers)

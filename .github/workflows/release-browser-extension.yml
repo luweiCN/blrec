@@ -1,0 +1,79 @@
+name: Publish Browser Extension release
+
+on:
+  push:
+    tags: ['extension-v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/test-browser-extension.yml
+
+  publish:
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: apps/browser-extension/package-lock.json
+
+      - name: Validate extension version
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#extension-v}"
+          package_version="$(node -p 'require("./apps/browser-extension/package.json").version')"
+          test "$version" = "$package_version"
+          manifest_version="$(python - "$version" <<'PY'
+          import re
+          import sys
+
+          value = sys.argv[1]
+          match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?', value)
+          if match is None:
+              raise SystemExit('unsupported extension version: ' + value)
+          parts = [match.group(1), match.group(2), match.group(3)]
+          if match.group(4) is not None:
+              parts.append(match.group(4))
+          print('.'.join(parts))
+          PY
+          )"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build extension package
+        working-directory: apps/browser-extension
+        env:
+          BLREC_EXTENSION_VERSION: ${{ steps.version.outputs.manifest }}
+        run: |
+          npm ci
+          npm run build
+          cd dist
+          zip -r "../blrec-browser-extension-${{ steps.version.outputs.value }}.zip" .
+
+      - name: Create extension release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          prerelease=()
+          if [[ "$version" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "apps/browser-extension/blrec-browser-extension-${version}.zip" \
+            --verify-tag \
+            --generate-notes \
+            --title "BLREC Browser Extension ${version}" \
+            "${prerelease[@]}"

@@ -1,0 +1,1771 @@
+"""虚荣视觉标注工作台 —— FastAPI 入口。
+
+启动:  .venv/bin/python -m labeler.server
+打开:  http://127.0.0.1:8800
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from . import __version__
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """开发工具:静态文件不缓存,避免前端改了不生效。"""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Any:
+        resp = super().file_response(*args, **kwargs)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+from contextlib import asynccontextmanager
+
+from . import (
+    bp_review,
+    config,
+    db,
+    events,
+    export as export_mod,
+    inference as inference_mod,
+    local,
+    stats as stats_mod,
+    training,
+    worker_candidates,
+)
+from .extract import (
+    _state, cancel_extraction, extract_videos_multi, live_next_frame,
+    sync_videos, task_state,
+)
+from .nas import NasClient
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # 启动时恢复遗留状态:上次进程被中断的任务标记为可重试
+    try:
+        conn = db.connect(config.DB_PATH)
+        conn.execute(
+            "UPDATE extraction_jobs SET status='failed', "
+            "error=COALESCE(error,'') || '; server restart' "
+            "WHERE status='running'")
+        conn.execute(
+            "UPDATE videos SET status='pending', "
+            "error='抽帧被服务重启中断,请重新抽帧' "
+            "WHERE status='extracting'")
+        conn.execute(
+            "UPDATE training_runs SET status='interrupted', "
+            "error='标注服务重启，训练进程已中断', finished_at=? "
+            "WHERE status IN ('queued', 'running')",
+            (db.now(),),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        yield
+    finally:
+        _training_manager.shutdown()
+
+
+app = FastAPI(title='虚荣视觉标注工作台', version=__version__, lifespan=lifespan)
+
+_db_lock = threading.RLock()
+_sync_state: Dict[str, Any] = {'running': False, 'error': None, 'videos': 0}
+_bp_collect_lock = threading.RLock()
+_bp_collect_state: Dict[str, Any] = {
+    'running': False,
+    'model': '',
+    'scanned': 0,
+    'total': 0,
+    'selected': 0,
+    'inserted': 0,
+    'failed': 0,
+    'error': None,
+}
+_worker_candidate_sync_lock = threading.RLock()
+_worker_candidate_sync_state: Dict[str, Any] = {
+    'running': False,
+    'total': 0,
+    'processed': 0,
+    'inserted': 0,
+    'updated': 0,
+    'downloaded': 0,
+    'failed': 0,
+    'last_error': '',
+    'error': None,
+}
+_training_manager = training.TrainingManager(config.DB_PATH)
+_training_start_lock = threading.RLock()
+
+
+def _conn():
+    return db.connect(config.DB_PATH)
+
+
+def _nas() -> NasClient:
+    return NasClient()
+
+
+# ---------- 配置与任务 ----------
+
+@app.get('/api/config')
+def api_config() -> Dict[str, Any]:
+    return {
+        'content_families': config.CONTENT_FAMILIES,
+        'non_vainglory_types': config.NON_VAINGLORY_TYPES,
+        'game_stages': config.GAME_STAGES,
+        'stage_screen_types': config.STAGE_SCREEN_TYPES,
+        'annotation_statuses': config.ANNOTATION_STATUSES,
+        'game_modes': config.GAME_MODES,
+        'match_kinds': config.MATCH_KINDS,
+        'view_contexts': config.VIEW_CONTEXTS,
+        'quality_flags': config.QUALITY_FLAGS,
+        'black_bars': config.BLACK_BARS,
+        'ocr_usable': config.OCR_USABLE,
+        'result_clarity': config.RESULT_CLARITY,
+        'result_occlusion': config.RESULT_OCCLUSION,
+        'occluder_types': config.OCCLUDER_TYPES,
+        'box_types': config.BOX_TYPES,
+        'strategies': config.STRATEGIES,
+        'scoreboard_vs_result_hint': config.SCOREBOARD_VS_RESULT_HINT,
+        'nas_rec_dir': config.NAS_REC_DIR,
+    }
+
+
+@app.get('/api/tasks')
+def api_tasks() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return [dict(r) for r in conn.execute(
+                'SELECT * FROM annotation_tasks ORDER BY rowid').fetchall()]
+        finally:
+            conn.close()
+
+
+# ---------- 视频 ----------
+
+@app.get('/api/videos/auto-pick')
+def api_auto_pick(per_streamer: int = Query(5, ge=1, le=20),
+                  min_size_bytes: Optional[int] = Query(1073741824),
+                  strategy: Optional[str] = None) -> Dict[str, Any]:
+    """自动挑选:每个主播取 N 个 >= 阈值的视频(按大小降序,优先完整场次)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            videos = db.list_videos(conn, min_size_bytes=min_size_bytes)
+            by_streamer: Dict[str, List[Dict[str, Any]]] = {}
+            for v in videos:
+                by_streamer.setdefault(v['streamer'], []).append(v)
+            picks: List[Dict[str, Any]] = []
+            for streamer, vs in sorted(by_streamer.items()):
+                vs.sort(key=lambda x: -x['size_bytes'])
+                for v in vs[:per_streamer]:
+                    picks.append(v)
+            total_frames = sum(
+                int(v['duration_seconds'] / 5) + 1 if v['duration_seconds'] else 0
+                for v in picks)
+            return {
+                'video_ids': [v['id'] for v in picks],
+                'videos': len(picks),
+                'streamers': len(by_streamer),
+                'picks': [{'id': v['id'], 'streamer': v['streamer'],
+                           'filename': v['filename'],
+                           'size_bytes': v['size_bytes'],
+                           'duration_seconds': v['duration_seconds']}
+                          for v in picks],
+                'estimated_frames': total_frames,
+            }
+        finally:
+            conn.close()
+
+
+@app.get('/api/videos')
+def api_videos(status: Optional[str] = None, streamer: Optional[str] = None,
+               room_id: Optional[str] = None, bvid: Optional[str] = None,
+               min_size_bytes: Optional[int] = None) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return db.list_videos(conn, status=status, streamer=streamer,
+                                  room_id=room_id, bvid=bvid,
+                                  min_size_bytes=min_size_bytes)
+        finally:
+            conn.close()
+
+
+@app.post('/api/sync')
+def api_sync() -> Dict[str, Any]:
+    if _sync_state['running']:
+        raise HTTPException(409, '同步任务已在运行')
+
+    def _run() -> None:
+        _sync_state['running'] = True
+        _sync_state['error'] = None
+        try:
+            nas = _nas()
+            with _db_lock:
+                conn = _conn()
+                try:
+                    videos = sync_videos(conn, nas)
+                finally:
+                    conn.close()
+            _sync_state['videos'] = len(videos)
+        except Exception as exc:  # noqa: BLE001
+            _sync_state['error'] = str(exc)
+        finally:
+            _sync_state['running'] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {'started': True}
+
+
+@app.get('/api/sync/state')
+def api_sync_state() -> Dict[str, Any]:
+    return dict(_sync_state)
+
+
+# ---------- 抽帧 ----------
+
+@app.post('/api/extract')
+def api_extract(body: Dict[str, Any]) -> Dict[str, Any]:
+    video_ids = [int(x) for x in body.get('video_ids', [])]
+    strategy = body.get('strategy', 'existing_model_hits')
+    if not video_ids:
+        raise HTTPException(400, '未选择视频')
+    if strategy not in config.STRATEGIES:
+        raise HTTPException(400, f'未知抽帧策略: {strategy}')
+    if task_state()['running']:
+        raise HTTPException(409, '已有抽帧任务在运行,请等待完成或取消')
+    params = body.get('params', {}) or {}
+
+    def _run() -> None:
+        try:
+            nas = _nas()
+            with _db_lock:
+                conn = _conn()
+                try:
+                    extract_videos_multi(conn, nas, video_ids, strategy, params)
+                finally:
+                    conn.close()
+        except Exception:  # noqa: BLE001
+            pass  # 状态经 task_state 暴露
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {'started': True, 'video_ids': video_ids, 'strategy': strategy}
+
+
+@app.get('/api/extract/state')
+def api_extract_state() -> Dict[str, Any]:
+    return task_state()
+
+
+@app.post('/api/extract/cancel')
+def api_extract_cancel() -> Dict[str, Any]:
+    cancel_extraction()
+    return {'cancelled': True}
+
+
+@app.get('/api/extraction-jobs')
+def api_extraction_jobs(limit: int = 50) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            rows = conn.execute(
+                'SELECT j.*, v.streamer, v.filename FROM extraction_jobs j '
+                'JOIN videos v ON v.id = j.video_id '
+                'ORDER BY j.id DESC LIMIT ?', (limit,)
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d['params'] = json.loads(d['params'] or '{}')
+                out.append(d)
+            return out
+        finally:
+            conn.close()
+
+
+# ---------- 帧 ----------
+
+@app.get('/api/frames')
+def api_frames(video_id: Optional[int] = None, event_id: Optional[int] = None,
+               labeled: Optional[int] = None, status: Optional[str] = None,
+               screen_type: Optional[str] = None,
+               strategy: Optional[str] = None,
+               representative_only: bool = False,
+               limit: int = Query(200, ge=1, le=100000),
+               offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            frames = db.query_frames(
+                conn, video_id=video_id, event_id=event_id, labeled=labeled,
+                status=status,
+                screen_type=screen_type, strategy=strategy,
+                representative_only=representative_only,
+                limit=limit, offset=offset,
+            )
+            return {'frames': frames}
+        finally:
+            conn.close()
+
+
+@app.get('/api/frames/{frame_id}')
+def api_frame(frame_id: int) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            f = db.get_frame(conn, frame_id)
+            if not f:
+                raise HTTPException(404, '帧不存在')
+            f['annotation'] = db.get_annotation(conn, frame_id)
+            f['boxes'] = db.get_boxes(conn, frame_id)
+            preds = conn.execute(
+                'SELECT model_version, pred_type, confidence, bbox FROM '
+                'model_predictions WHERE frame_id = ? ORDER BY id', (frame_id,)
+            ).fetchall()
+            f['predictions'] = [dict(r) for r in preds]
+            return f
+        finally:
+            conn.close()
+
+
+@app.get('/api/frames/{frame_id}/image')
+def api_frame_image(frame_id: int) -> FileResponse:
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT frame_path FROM frames WHERE id = ?', (frame_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise HTTPException(404, '帧不存在')
+    return FileResponse(row['frame_path'], media_type='image/jpeg')
+
+
+@app.get('/api/frames/{frame_id}/thumb')
+def api_frame_thumb(frame_id: int) -> FileResponse:
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT thumb_path, frame_path FROM frames WHERE id = ?',
+                (frame_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise HTTPException(404, '帧不存在')
+    path = row['thumb_path'] if row['thumb_path'] and Path(row['thumb_path']).exists() \
+        else row['frame_path']
+    return FileResponse(path, media_type='image/jpeg')
+
+
+@app.post('/api/frames/{frame_id}/representative')
+def api_set_representative(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    value = 1 if body.get('value', True) else 0
+    with _db_lock:
+        conn = _conn()
+        try:
+            cur = conn.execute(
+                'UPDATE frames SET is_representative = ? WHERE id = ?',
+                (value, frame_id))
+            conn.commit()
+            if not cur.rowcount:
+                raise HTTPException(404, '帧不存在')
+            return {'representative': value}
+        finally:
+            conn.close()
+
+
+# ---------- 事件 ----------
+
+@app.post('/api/live/frame')
+def api_live_frame(body: Dict[str, Any]) -> Dict[str, Any]:
+    """实时抽帧:抽指定视频的下一帧(间隔 interval_ms),入库并返回帧信息。
+
+    与上一帧内容重复时返回 {'duplicate': True}(前端可自动重试)。
+    SSH 网络操作在数据库锁外执行,入库用独立连接。
+    """
+    video_id = int(body.get('video_id', 0))
+    if not video_id:
+        raise HTTPException(400, '缺少 video_id')
+    after_ms = int(body.get('after_ms', -5000))
+    interval_ms = int(body.get('interval_ms', 5000))
+    last_sha = body.get('last_sha') or None
+    # 查视频(锁内,快)
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT remote_path, duration_seconds FROM videos WHERE id = ?',
+                (video_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise HTTPException(404, '视频不存在')
+    nas = _nas()
+    try:
+        # SSH 抽帧在锁外
+        work_conn = db.connect(config.DB_PATH)
+        try:
+            result = live_next_frame(
+                work_conn, nas, video_id, after_ms=after_ms,
+                interval_ms=interval_ms, last_sha=last_sha)
+        finally:
+            work_conn.close()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f'抽帧失败: {exc}')
+    return result
+
+
+@app.get('/api/live/videos')
+def api_live_videos() -> Dict[str, Any]:
+    """实时打标视频列表:全部 >1GB 视频 + 各自打标进度。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            videos = db.list_videos(conn, min_size_bytes=1073741824)
+            progress = db.all_video_progress(conn)
+            labeled = {r['video_id']: r['c'] for r in conn.execute(
+                'SELECT video_id, COUNT(*) c FROM frames WHERE labeled = 1 '
+                'GROUP BY video_id').fetchall()}
+            total = {r['video_id']: r['c'] for r in conn.execute(
+                'SELECT video_id, COUNT(*) c FROM frames GROUP BY video_id').fetchall()}
+            # 本地已下载的 mp4 集合(一次目录扫描)
+            local_ready = set()
+            if config.LOCAL_VIDEO_DIR.exists():
+                local_ready = {
+                    int(p.stem) for p in config.LOCAL_VIDEO_DIR.glob('*.mp4')
+                    if p.stat().st_size > 1024 * 1024}
+            for v in videos:
+                p = progress.get(v['id'], {})
+                v['last_pts_ms'] = p.get('last_pts_ms')
+                v['last_frame_id'] = p.get('last_frame_id')
+                v['labeled_count'] = labeled.get(v['id'], 0)
+                v['frame_count'] = total.get(v['id'], 0)
+                v['local_ready'] = v['id'] in local_ready
+                v['progress_pct'] = (
+                    round(p['last_pts_ms'] / (v['duration_seconds'] * 1000) * 100)
+                    if p.get('last_pts_ms') is not None and v['duration_seconds'] > 0
+                    else None)
+            return {'videos': videos, 'count': len(videos)}
+        finally:
+            conn.close()
+
+
+@app.put('/api/live/videos/{video_id}/progress')
+def api_save_video_progress(video_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            db.save_video_progress(
+                conn, video_id,
+                last_pts_ms=body.get('last_pts_ms'),
+                last_frame_id=body.get('last_frame_id'),
+            )
+            return {'saved': True}
+        finally:
+            conn.close()
+
+
+@app.get('/api/live/state')
+def api_live_state() -> Dict[str, Any]:
+    """读取实时打标进度(队列、当前视频、位置)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            return db.load_live_state(conn)
+        finally:
+            conn.close()
+
+
+@app.put('/api/live/state')
+def api_save_live_state(body: Dict[str, Any]) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            db.save_live_state(
+                conn,
+                queue=[int(x) for x in body.get('queue', [])],
+                queue_index=int(body.get('queue_index', 0)),
+                video_id=body.get('video_id'),
+                last_pts_ms=body.get('last_pts_ms'),
+                last_frame_id=body.get('last_frame_id'),
+            )
+            return {'saved': True}
+        finally:
+            conn.close()
+
+
+@app.post('/api/live/videos/{video_id}/download')
+def api_download_video(video_id: int) -> Dict[str, Any]:
+    """把视频下载到本地并转 mp4(后台),用于本地播放与丝滑抽帧。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT remote_path FROM videos WHERE id = ?',
+                (video_id,)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        raise HTTPException(404, '视频不存在')
+    if local.local_mp4_exists(video_id):
+        return {'started': False, 'status': 'done'}
+    nas = _nas()
+    local.start_download(nas, video_id)
+    return {'started': True, 'status': 'downloading'}
+
+
+@app.get('/api/live/videos/{video_id}/download-state')
+def api_download_state(video_id: int) -> Dict[str, Any]:
+    return local.download_state(video_id)
+
+
+@app.get('/api/media/{video_id}')
+def api_media(video_id: int) -> FileResponse:
+    """本地 mp4 流(支持 Range,浏览器可拖动进度条)。"""
+    mp4 = local._mp4_path(video_id)  # noqa: SLF001
+    if not mp4.exists():
+        raise HTTPException(404, '视频未下载')
+    return FileResponse(str(mp4), media_type='video/mp4')
+
+
+@app.post('/api/live/frame-local')
+def api_live_frame_local(body: Dict[str, Any]) -> Dict[str, Any]:
+    """本地抽帧:在已下载的 mp4 上 seek 抽一帧入库。"""
+    video_id = int(body.get('video_id', 0))
+    pts_ms = int(body.get('pts_ms', 0))
+    interval_ms = int(body.get('interval_ms', 5000))
+    if not video_id:
+        raise HTTPException(400, '缺少 video_id')
+    with _db_lock:
+        conn = _conn()
+        try:
+            result = local.local_frame(conn, video_id, pts_ms,
+                                       interval_ms=interval_ms)
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+    return result
+
+
+# ---------- 3V3 / 大乱斗光栅专项 ----------
+
+@app.get('/api/mode-gate/rounds/active')
+def api_active_mode_gate_round() -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            result = db.get_active_mode_gate_round(conn)
+            if not result:
+                raise HTTPException(404, '还没有启用的光栅打标轮次')
+            for video in result['videos']:
+                video['local_ready'] = local.local_mp4_exists(video['video_id'])
+                duration = float(video['duration_seconds'] or 0)
+                last_pts = video.get('last_pts_ms')
+                video['progress_pct'] = (
+                    round(last_pts / (duration * 1000) * 100)
+                    if last_pts is not None and duration > 0
+                    else None
+                )
+            return result
+        finally:
+            conn.close()
+
+
+@app.get('/api/mode-gate/rounds/{round_id}/frames/{frame_id}')
+def api_mode_gate_annotation(round_id: str, frame_id: int) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            frame = db.get_frame(conn, frame_id)
+            if not frame:
+                raise HTTPException(404, '帧不存在')
+            member = conn.execute(
+                'SELECT expected_mode FROM mode_gate_round_videos '
+                'WHERE round_id = ? AND video_id = ?',
+                (round_id, frame['video_id']),
+            ).fetchone()
+            if not member:
+                raise HTTPException(404, '该帧不属于本轮挑选的视频')
+            return {
+                'annotation': db.get_mode_gate_annotation(
+                    conn, round_id=round_id, frame_id=frame_id),
+                'expected_mode': member['expected_mode'],
+            }
+        finally:
+            conn.close()
+
+
+@app.put('/api/mode-gate/rounds/{round_id}/frames/{frame_id}')
+def api_save_mode_gate_annotation(round_id: str, frame_id: int,
+                                  body: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = str(body.get('evidence') or '')
+    boxes: Optional[List[Dict[str, Any]]] = None
+    raw_boxes = body.get('boxes')
+    if raw_boxes is not None:
+        if not isinstance(raw_boxes, list):
+            raise HTTPException(400, 'boxes 必须是边界框数组')
+        boxes = []
+        try:
+            for raw_box in raw_boxes:
+                if not isinstance(raw_box, dict):
+                    raise TypeError
+                boxes.append({
+                    name: float(raw_box[name]) for name in ('x', 'y', 'w', 'h')
+                })
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, '每个边界框都必须包含数字 x/y/w/h')
+    coords: Dict[str, Optional[float]] = {}
+    try:
+        for name in ('x', 'y', 'w', 'h'):
+            value = body.get(name)
+            coords[name] = None if value is None else float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'x/y/w/h 必须是数字')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                annotation = db.save_mode_gate_annotation(
+                    conn,
+                    round_id=round_id,
+                    frame_id=frame_id,
+                    evidence=evidence,
+                    boxes=boxes,
+                    x=coords['x'],
+                    y=coords['y'],
+                    w=coords['w'],
+                    h=coords['h'],
+                    notes=str(body.get('notes') or ''),
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            db.audit(
+                conn,
+                'mode_gate_label',
+                frame_id=frame_id,
+                detail=json.dumps(annotation, ensure_ascii=False),
+            )
+            return annotation
+        finally:
+            conn.close()
+
+
+@app.delete('/api/mode-gate/rounds/{round_id}/frames/{frame_id}')
+def api_delete_mode_gate_annotation(round_id: str,
+                                    frame_id: int) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            db.delete_mode_gate_annotation(
+                conn, round_id=round_id, frame_id=frame_id)
+            db.audit(
+                conn, 'mode_gate_label', frame_id=frame_id,
+                detail=json.dumps({'round_id': round_id, 'deleted': True}),
+            )
+            return {'deleted': True}
+        finally:
+            conn.close()
+
+
+@app.get('/api/mode-gate/rounds/{round_id}/videos/{video_id}/frames')
+def api_mode_gate_frames(round_id: str,
+                         video_id: int) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            member = conn.execute(
+                'SELECT 1 FROM mode_gate_round_videos '
+                'WHERE round_id = ? AND video_id = ?',
+                (round_id, video_id),
+            ).fetchone()
+            if not member:
+                raise HTTPException(404, '视频不在本轮任务中')
+            return {
+                'frames': db.list_mode_gate_frames(
+                    conn, round_id=round_id, video_id=video_id)
+            }
+        finally:
+            conn.close()
+
+
+@app.get('/api/videos/{video_id}/viewport-box')
+def api_video_viewport_box(video_id: int) -> Dict[str, Any]:
+    """该视频最新一帧的 viewport 框(用于跨帧自动继承)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT b.x, b.y, b.w, b.h FROM boxes b "
+                "JOIN frames f ON f.id = b.frame_id "
+                "WHERE f.video_id = ? AND b.box_type = 'viewport' "
+                "ORDER BY f.timestamp_ms DESC LIMIT 1",
+                (video_id,)).fetchone()
+            return {'box': dict(row) if row else None}
+        finally:
+            conn.close()
+
+
+@app.get('/api/videos/{video_id}/streamer-boxes')
+def api_video_streamer_boxes(video_id: int) -> Dict[str, Any]:
+    """该视频所属主播的默认框(跨视频记忆)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT v.streamer FROM videos v WHERE v.id = ?',
+                (video_id,)).fetchone()
+            if not row or not row['streamer']:
+                return {'streamer': None, 'boxes': {}}
+            boxes = {r['box_type']: dict(r) for r in conn.execute(
+                'SELECT box_type, x, y, w, h FROM streamer_boxes '
+                'WHERE streamer = ?', (row['streamer'],)).fetchall()}
+            return {'streamer': row['streamer'], 'boxes': boxes}
+        finally:
+            conn.close()
+
+
+@app.delete('/api/videos/{video_id}/streamer-box/{box_type}')
+def api_delete_streamer_box(video_id: int, box_type: str) -> Dict[str, Any]:
+    """删除该视频所属主播的某类默认框(清框时同步,避免下帧又带出)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                'SELECT streamer FROM videos WHERE id = ?', (video_id,)).fetchone()
+            if row and row['streamer']:
+                conn.execute(
+                    'DELETE FROM streamer_boxes WHERE streamer = ? AND box_type = ?',
+                    (row['streamer'], box_type))
+                conn.commit()
+            return {'deleted': True}
+        finally:
+            conn.close()
+
+
+@app.post('/api/videos/{video_id}/backfill-boxes')
+def api_backfill_boxes(video_id: int) -> Dict[str, Any]:
+    """用主播默认框补齐已标帧缺失的框(商店/积分板/结算/游戏窗口)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            v = conn.execute('SELECT streamer FROM videos WHERE id = ?',
+                             (video_id,)).fetchone()
+            if not v or not v['streamer']:
+                return {'filled': 0, 'note': '视频不存在'}
+            defaults = {r['box_type']: r for r in conn.execute(
+                'SELECT box_type, x, y, w, h FROM streamer_boxes '
+                'WHERE streamer = ?', (v['streamer'],)).fetchall()}
+            if not defaults:
+                return {'filled': 0, 'note': '该主播还没有默认框,先画一次'}
+            # screen_type → 需要的框类型(未列出的类型不需要面板框)
+            need = {
+                'ingame_shop': 'shop_panel',
+                'equipment_select': 'equipment_panel',
+                'talent_select': 'talent_panel',
+                'scoreboard': 'scoreboard_panel',
+                'death_scoreboard': 'scoreboard_panel',
+                'result_page': 'result_panel',
+            }
+            rows = conn.execute(
+                'SELECT a.frame_id, a.screen_type, a.content_family '
+                'FROM annotations a JOIN frames f ON f.id = a.frame_id '
+                "WHERE f.video_id = ? AND a.annotation_status = 'complete' "
+                'AND a.screen_type IS NOT NULL',
+                (video_id,)).fetchall()
+            filled = 0
+            for r in rows:
+                bt = need.get(r['screen_type'])
+                if bt and bt in defaults:
+                    exists = conn.execute(
+                        'SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = ?',
+                        (r['frame_id'], bt)).fetchone()
+                    if not exists:
+                        d = defaults[bt]
+                        conn.execute(
+                            'INSERT INTO boxes (frame_id, box_type, x, y, w, h) '
+                            'VALUES (?, ?, ?, ?, ?, ?)',
+                            (r['frame_id'], bt, d['x'], d['y'], d['w'], d['h']))
+                        filled += 1
+                # 游戏窗口:虚荣画面都可补(非虚荣画面没有游戏窗口)
+                if (r['content_family'] == 'vainglory'
+                        and 'viewport' in defaults):
+                    exists = conn.execute(
+                        'SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = ?',
+                        (r['frame_id'], 'viewport')).fetchone()
+                    if not exists:
+                        d = defaults['viewport']
+                        conn.execute(
+                            'INSERT INTO boxes (frame_id, box_type, x, y, w, h) '
+                            'VALUES (?, ?, ?, ?, ?, ?)',
+                            (r['frame_id'], 'viewport',
+                             d['x'], d['y'], d['w'], d['h']))
+                        filled += 1
+            conn.commit()
+            return {'filled': filled}
+        finally:
+            conn.close()
+
+
+@app.delete('/api/frames/{frame_id}/annotation')
+def api_clear_annotation(frame_id: int) -> Dict[str, Any]:
+    """清除当前帧的标注(回到未标注状态):删标注、删所有框、脱离事件。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            conn.execute('DELETE FROM annotations WHERE frame_id = ?', (frame_id,))
+            conn.execute('DELETE FROM boxes WHERE frame_id = ?', (frame_id,))
+            # 脱离所属事件;若事件因此没有其他帧,删除该事件
+            row = conn.execute(
+                'SELECT event_id FROM frames WHERE id = ?', (frame_id,)
+            ).fetchone()
+            if row and row['event_id']:
+                conn.execute(
+                    'UPDATE frames SET event_id = NULL WHERE id = ?', (frame_id,)
+                )
+                other = conn.execute(
+                    'SELECT COUNT(*) c FROM frames WHERE event_id = ?',
+                    (row['event_id'],),
+                ).fetchone()['c']
+                if other == 0:
+                    conn.execute(
+                        'DELETE FROM events WHERE id = ?', (row['event_id'],)
+                    )
+            conn.execute('UPDATE frames SET labeled = 0 WHERE id = ?', (frame_id,))
+            conn.commit()
+            return {'cleared': True}
+        finally:
+            conn.close()
+
+
+# ---------- BP 主动学习复核 ----------
+
+def _set_worker_candidate_sync_state(**values: Any) -> None:
+    with _worker_candidate_sync_lock:
+        _worker_candidate_sync_state.update(values)
+
+
+def _sync_worker_candidate_queue(*, maximum: int) -> None:
+    _set_worker_candidate_sync_state(
+        running=True, total=0, processed=0, inserted=0, updated=0,
+        downloaded=0, failed=0, last_error='', error=None,
+    )
+    conn = None
+    try:
+        nas = _nas()
+        items = nas.list_training_candidates()
+        _set_worker_candidate_sync_state(total=min(len(items), maximum))
+        conn = _conn()
+        result = worker_candidates.sync_worker_candidates(
+            conn,
+            nas,
+            items,
+            maximum=maximum,
+            progress=lambda values: _set_worker_candidate_sync_state(**values),
+        )
+        _set_worker_candidate_sync_state(**result, running=False)
+    except Exception as exc:  # noqa: BLE001
+        _set_worker_candidate_sync_state(running=False, error=str(exc))
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+@app.post('/api/bp-review/sync-worker')
+def api_sync_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
+    maximum = int(body.get('maximum', 10_000))
+    if not 1 <= maximum <= 20_000:
+        raise HTTPException(400, 'maximum 必须在 1 到 20000 之间')
+    with _worker_candidate_sync_lock:
+        if _worker_candidate_sync_state['running']:
+            raise HTTPException(409, 'worker 候选同步任务已在运行')
+        _worker_candidate_sync_state['running'] = True
+        _worker_candidate_sync_state['error'] = None
+    threading.Thread(
+        target=_sync_worker_candidate_queue,
+        kwargs={'maximum': maximum},
+        daemon=True,
+    ).start()
+    return {'started': True}
+
+
+@app.post('/api/worker-candidates/sync')
+def api_sync_all_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
+    """同步 NAS 上全部专项候选；保留旧 BP 路由兼容已有页面。"""
+    return api_sync_worker_candidates(body)
+
+
+def _set_bp_collect_state(**values: Any) -> None:
+    with _bp_collect_lock:
+        _bp_collect_state.update(values)
+
+
+def _collect_bp_candidates(
+        *, model_name: str, maximum_scan: int, maximum_items: int,
+        maximum_per_video: int, video_ids: List[int]) -> None:
+    _set_bp_collect_state(
+        running=True, model=model_name, scanned=0, total=0, selected=0,
+        inserted=0, failed=0, error=None,
+    )
+    try:
+        with _db_lock:
+            conn = _conn()
+            try:
+                where = ["f.frame_path != ''", 'f.labeled = 0']
+                args: List[Any] = []
+                if video_ids:
+                    placeholders = ','.join('?' for _ in video_ids)
+                    where.append(f'f.video_id IN ({placeholders})')
+                    args.extend(video_ids)
+                rows = [dict(row) for row in conn.execute(
+                    'SELECT f.id AS frame_id, f.video_id, f.timestamp_ms, '
+                    'f.frame_path, f.phash, v.streamer, v.filename '
+                    'FROM frames f JOIN videos v ON v.id = f.video_id '
+                    'WHERE ' + ' AND '.join(where) +
+                    ' ORDER BY f.video_id, f.timestamp_ms',
+                    args,
+                ).fetchall()]
+            finally:
+                conn.close()
+        frames = bp_review.balanced_frame_rows(rows, maximum=maximum_scan)
+        _set_bp_collect_state(total=len(frames))
+        observations = []
+        failed = 0
+        for index, frame in enumerate(frames, start=1):
+            path = Path(frame['frame_path'])
+            try:
+                if not path.is_file():
+                    raise FileNotFoundError(path)
+                prediction = inference_mod.run_model(model_name, path)
+                observations.append(
+                    bp_review.observation_from_prediction(frame, prediction)
+                )
+            except Exception:  # noqa: BLE001
+                failed += 1
+            _set_bp_collect_state(scanned=index, failed=failed)
+        candidates = bp_review.select_candidates(
+            observations,
+            maximum=maximum_items,
+            maximum_per_video=maximum_per_video,
+        )
+        inserted = 0
+        with _db_lock:
+            conn = _conn()
+            try:
+                for candidate in candidates:
+                    inserted += int(db.upsert_bp_review_item(
+                        conn,
+                        frame_id=int(candidate['frame_id']),
+                        model_version=model_name,
+                        suggested_label=candidate['suggested_label'],
+                        suggestion_confidence=candidate['suggestion_confidence'],
+                        stage_class=candidate['stage_class'],
+                        stage_confidence=candidate['stage_confidence'],
+                        pre_match_confidence=candidate['pre_match_confidence'],
+                        mode_class=candidate['mode_class'],
+                        mode_confidence=candidate['mode_confidence'],
+                        mode_margin=candidate['mode_margin'],
+                        selection_reason=candidate['selection_reason'],
+                        priority=candidate['priority'],
+                        raw_prediction=candidate['raw_prediction'],
+                    ))
+            finally:
+                conn.close()
+        _set_bp_collect_state(
+            selected=len(candidates), inserted=inserted, running=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_bp_collect_state(running=False, error=str(exc))
+
+
+@app.post('/api/bp-review/collect')
+def api_collect_bp_review(body: Dict[str, Any]) -> Dict[str, Any]:
+    with _bp_collect_lock:
+        if _bp_collect_state['running']:
+            raise HTTPException(409, 'BP 候选收集任务已在运行')
+    model_name = str(body.get('model_name') or 'multi-v2')
+    maximum_scan = int(body.get('maximum_scan', 3000))
+    maximum_items = int(body.get('maximum_items', 300))
+    maximum_per_video = int(body.get('maximum_per_video', 24))
+    video_ids = [int(value) for value in body.get('video_ids', [])]
+    if not 100 <= maximum_scan <= 50_000:
+        raise HTTPException(400, 'maximum_scan 必须在 100 到 50000 之间')
+    if not 10 <= maximum_items <= 2_000:
+        raise HTTPException(400, 'maximum_items 必须在 10 到 2000 之间')
+    if not 3 <= maximum_per_video <= 100:
+        raise HTTPException(400, 'maximum_per_video 必须在 3 到 100 之间')
+    model = next(
+        (item for item in inference_mod.list_models()
+         if item['name'] == model_name and item['task'] == 'multi'),
+        None,
+    )
+    if model is None:
+        raise HTTPException(400, f'模型 {model_name} 不是可用的多头分类模型')
+    threading.Thread(
+        target=_collect_bp_candidates,
+        kwargs={
+            'model_name': model_name,
+            'maximum_scan': maximum_scan,
+            'maximum_items': maximum_items,
+            'maximum_per_video': maximum_per_video,
+            'video_ids': video_ids,
+        },
+        daemon=True,
+    ).start()
+    return {'started': True, 'model': model_name}
+
+
+@app.get('/api/bp-review/state')
+def api_bp_review_state() -> Dict[str, Any]:
+    with _bp_collect_lock:
+        state = dict(_bp_collect_state)
+    with _worker_candidate_sync_lock:
+        state['worker_sync'] = dict(_worker_candidate_sync_state)
+    with _db_lock:
+        conn = _conn()
+        try:
+            state['review'] = db.bp_review_stats(conn)
+        finally:
+            conn.close()
+    return state
+
+
+@app.get('/api/bp-review/items')
+def api_bp_review_items(
+        status: str = 'pending', limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                items = db.list_bp_review_items(
+                    conn, status=status, limit=limit, offset=offset)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return {'items': items, 'stats': db.bp_review_stats(conn)}
+        finally:
+            conn.close()
+
+
+@app.put('/api/bp-review/items/{frame_id}')
+def api_review_bp_item(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    value = body.get('label')
+    label = None if value in (None, '', 'skip') else str(value)
+    visual_condition = str(body.get('visual_condition') or 'clear')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return db.review_bp_item(
+                    conn,
+                    frame_id=frame_id,
+                    label=label,
+                    visual_condition=visual_condition,
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+# ---------- 结算页 / 计分板主动学习复核 ----------
+
+@app.get('/api/key-screen-review/state')
+def api_key_screen_review_state() -> Dict[str, Any]:
+    with _worker_candidate_sync_lock:
+        state = {'worker_sync': dict(_worker_candidate_sync_state)}
+    with _db_lock:
+        conn = _conn()
+        try:
+            state['review'] = db.key_screen_review_stats(conn)
+        finally:
+            conn.close()
+    return state
+
+
+@app.get('/api/key-screen-review/items')
+def api_key_screen_review_items(
+        status: str = 'pending', limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                items = db.list_key_screen_review_items(
+                    conn, status=status, limit=limit, offset=offset)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return {
+                'items': items,
+                'stats': db.key_screen_review_stats(conn),
+            }
+        finally:
+            conn.close()
+
+
+@app.put('/api/key-screen-review/items/{frame_id}')
+def api_review_key_screen_item(
+        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    value = body.get('label')
+    label = None if value in (None, '', 'skip') else str(value)
+    visual_condition = str(body.get('visual_condition') or 'clear')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return db.review_key_screen_item(
+                    conn,
+                    frame_id=frame_id,
+                    label=label,
+                    visual_condition=visual_condition,
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.get('/api/models')
+def api_models() -> List[Dict[str, Any]]:
+    """可用模型列表(扫描 models/*.onnx)。"""
+    return inference_mod.list_models()
+
+
+@app.post('/api/models/{model_name}/test')
+def api_model_test(model_name: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """对指定帧跑模型推理,返回原始输出 + 格式化结果。"""
+    frame_id = body.get('frame_id')
+    if not frame_id:
+        raise HTTPException(400, '需要 frame_id')
+    with _db_lock:
+        conn = _conn()
+        try:
+            f = db.get_frame(conn, int(frame_id))
+            if not f:
+                raise HTTPException(404, '帧不存在')
+            frame_path = Path(f['frame_path'])
+        finally:
+            conn.close()
+    if not frame_path.exists():
+        raise HTTPException(404, f'帧文件不存在: {frame_path}')
+    try:
+        result = inference_mod.run_model(
+            model_name, frame_path, conf_thr=body.get('conf_thr', 0.25))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:  # 推理异常(模型结构不匹配等)
+        raise HTTPException(500, f'推理失败: {e}')
+    result['frame_id'] = int(frame_id)
+    return result
+
+
+@app.get('/api/events')
+def api_events(video_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return db.event_stats(conn) if not video_id else [
+                e for e in db.event_stats(conn) if e['video_id'] == video_id
+            ]
+        finally:
+            conn.close()
+
+
+@app.get('/api/events/{event_id}')
+def api_event(event_id: int) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            ev = conn.execute(
+                'SELECT e.*, v.streamer, v.remote_path FROM events e '
+                'JOIN videos v ON v.id = e.video_id WHERE e.id = ?',
+                (event_id,)
+            ).fetchone()
+            if not ev:
+                raise HTTPException(404, '事件不存在')
+            frames = db.query_frames(conn, event_id=event_id, limit=1000)
+            return {'event': dict(ev), 'frames': frames}
+        finally:
+            conn.close()
+
+
+@app.post('/api/events/auto-group')
+def api_auto_group(body: Dict[str, Any]) -> Dict[str, Any]:
+    video_id = body.get('video_id')
+    with _db_lock:
+        conn = _conn()
+        try:
+            if video_id:
+                created = events.auto_group(conn, int(video_id))
+            else:
+                created = []
+                for vid, evs in events.group_all_unassigned(conn).items():
+                    created.extend(evs)
+            return {'events': len(created)}
+        finally:
+            conn.close()
+
+
+@app.post('/api/events/{event_id}/merge')
+def api_merge_events(event_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    with_ids = [int(x) for x in body.get('with_ids', [])]
+    with _db_lock:
+        conn = _conn()
+        try:
+            keep = db.merge_events(conn, [event_id] + with_ids)
+            db.audit(conn, 'event_merge', event_id=keep,
+                     detail=f'merged {[event_id] + with_ids}')
+            return {'event_id': keep}
+        finally:
+            conn.close()
+
+
+@app.post('/api/events/{event_id}/split')
+def api_split_event(event_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    at_ms = int(body.get('at_ms', 0))
+    with _db_lock:
+        conn = _conn()
+        try:
+            new_id = db.split_event(conn, event_id, at_ms)
+            db.audit(conn, 'event_split', event_id=event_id,
+                     detail=f'split at {at_ms} -> new {new_id}')
+            return {'event_id': event_id, 'new_event_id': new_id}
+        finally:
+            conn.close()
+
+
+# ---------- 标注(条件式) ----------
+
+def _validate_annotation(body: Dict[str, Any]) -> Dict[str, Any]:
+    """按分层规则清洗并校验标注;矛盾字段自动清空。"""
+    cf = body.get('content_family')
+    if cf not in config.CONTENT_FAMILIES:
+        raise HTTPException(400, f'content_family 必须是 {list(config.CONTENT_FAMILIES)}')
+    data = {
+        'content_family': cf,
+        'non_vainglory_type': None,
+        'game_context': None,
+        'screen_type': None,
+        'game_mode': None,
+        'match_kind': body.get('match_kind') or 'unknown',
+        'view_context': body.get('view_context') or 'unknown',
+        'quality_flags': [f for f in body.get('quality_flags', [])
+                          if f in {x[0] for x in config.QUALITY_FLAGS}],
+        'black_bars': body.get('black_bars') or 'none',
+        'ocr_usable': None,
+        'notes': str(body.get('notes', ''))[:1000],
+    }
+    if cf == 'not_vainglory':
+        nvt = body.get('non_vainglory_type')
+        if nvt is not None and nvt not in config.NON_VAINGLORY_TYPES:
+            raise HTTPException(400, f'未知非虚荣类型: {nvt}')
+        data['non_vainglory_type'] = nvt
+        # 非虚荣时清空游戏内字段
+        data['game_mode'] = None
+        return data
+    if cf == 'uncertain':
+        return data
+    # vainglory:对局阶段未选时允许保存草稿(界面继续引导),仅校验已填值
+    gc = body.get('game_context')
+    if gc is not None and gc not in config.GAME_STAGES:
+        raise HTTPException(400, f'game_context 必须是 {list(config.GAME_STAGES)}')
+    data['game_context'] = gc
+    if gc is None:
+        return data
+    valid = config.STAGE_SCREEN_TYPES.get(gc, {})
+    st = body.get('screen_type')
+    if st is not None and not valid:
+        raise HTTPException(400, f'阶段 {gc} 没有具体界面')
+    if st is not None and st not in valid:
+        raise HTTPException(400, f'screen_type {st} 不属于 {gc}')
+    data['screen_type'] = st
+    # 积分板不允许带结算框(前端也会清,后端兜底)
+    if st in config.SCOREBOARD_HARD_NEGATIVE:
+        data['ocr_usable'] = None
+    gm = body.get('game_mode')
+    if gm is not None and gm not in config.GAME_MODES:
+        raise HTTPException(400, f'game_mode 必须是 {list(config.GAME_MODES)}')
+    data['game_mode'] = gm
+    if st == 'result_page':
+        ocr = body.get('ocr_usable')
+        if ocr is not None and ocr not in config.OCR_USABLE:
+            raise HTTPException(400, f'ocr_usable 必须是 {list(config.OCR_USABLE)}')
+        # 默认值:可 OCR、清晰、无遮挡;只在异常时特意标注
+        data['ocr_usable'] = ocr or 'yes'
+        # 结算框评估字段
+        rc = body.get('result_clarity')
+        if rc is not None and rc not in config.RESULT_CLARITY:
+            raise HTTPException(400, f'result_clarity 必须是 {list(config.RESULT_CLARITY)}')
+        data['result_clarity'] = rc or 'clear'
+        ro = body.get('result_occlusion')
+        if ro is not None and ro not in config.RESULT_OCCLUSION:
+            raise HTTPException(400, f'result_occlusion 必须是 {list(config.RESULT_OCCLUSION)}')
+        data['result_occlusion'] = ro or 'none'
+        occl = [o for o in body.get('occluder_types', [])
+                if o in {x[0] for x in config.OCCLUDER_TYPES}]
+        data['occluder_types'] = occl if ro != 'none' else []
+    else:
+        data['ocr_usable'] = None
+        data['result_clarity'] = None
+        data['result_occlusion'] = None
+        data['occluder_types'] = []
+    return data
+
+
+@app.put('/api/frames/{frame_id}/annotation')
+def api_save_annotation(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    data = _validate_annotation(body)
+    data['talent_mode'] = body.get('talent_mode')
+    status = body.get('annotation_status', 'draft')
+    if status not in config.ANNOTATION_STATUSES:
+        status = 'draft'
+    with _db_lock:
+        conn = _conn()
+        try:
+            if not db.get_frame(conn, frame_id):
+                raise HTTPException(404, '帧不存在')
+            # 兜底清理:界面类型对应唯一面板框;清掉不匹配的
+            expected = {
+                'ingame_shop': 'shop_panel',
+                'equipment_select': 'equipment_panel',
+                'talent_select': 'talent_panel',
+                'scoreboard': 'scoreboard_panel',
+                'death_scoreboard': 'scoreboard_panel',
+                'result_page': 'result_panel',
+            }.get(data['screen_type'])
+            for bt in ('shop_panel', 'scoreboard_panel', 'result_panel',
+                       'equipment_panel', 'talent_panel'):
+                if bt != expected:
+                    db.delete_box(conn, frame_id, bt)
+            # 兜底补框:面板类型但没有对应框时,自动带出主播历史框
+            # (无论前端时序如何,面板标注永远不会无框)
+            if expected and expected not in db.get_boxes(conn, frame_id):
+                srow = conn.execute(
+                    'SELECT v.streamer FROM frames f JOIN videos v '
+                    'ON v.id = f.video_id WHERE f.id = ?', (frame_id,)
+                ).fetchone()
+                if srow and srow['streamer']:
+                    sb = conn.execute(
+                        'SELECT x, y, w, h FROM streamer_boxes '
+                        'WHERE streamer = ? AND box_type = ?',
+                        (srow['streamer'], expected),
+                    ).fetchone()
+                    if sb:
+                        db.save_box(conn, frame_id, expected,
+                                    sb['x'], sb['y'], sb['w'], sb['h'])
+            if data['content_family'] != 'vainglory':
+                # 非虚荣画面没有游戏窗口,也不该有任何面板框
+                for bt in ('viewport', 'result_panel', 'scoreboard_panel',
+                           'shop_panel', 'equipment_panel', 'talent_panel'):
+                    db.delete_box(conn, frame_id, bt)
+            # 撤销快照:记录旧值
+            old = db.get_annotation(conn, frame_id)
+            db.audit(conn, 'label', frame_id=frame_id,
+                     detail=json.dumps(old or {}, ensure_ascii=False))
+            db.save_annotation(conn, frame_id, data, status=status)
+            return db.get_annotation(conn, frame_id)
+        finally:
+            conn.close()
+
+
+@app.put('/api/frames/{frame_id}/box')
+def api_save_box(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    box_type = body.get('box_type')
+    if box_type not in config.BOX_TYPES:
+        raise HTTPException(400, f'box_type 必须是 {list(config.BOX_TYPES)}')
+    try:
+        x, y, w, h = (float(body[k]) for k in ('x', 'y', 'w', 'h'))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, '需要 x/y/w/h 数字')
+    if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < w <= 1 and 0 < h <= 1
+            and x + w <= 1.001 and y + h <= 1.001):
+        raise HTTPException(400, '框坐标必须归一化到 [0,1]')
+    with _db_lock:
+        conn = _conn()
+        try:
+            f = db.get_frame(conn, frame_id)
+            if not f:
+                raise HTTPException(404, '帧不存在')
+            # 非虚荣画面没有游戏窗口/面板框,禁止画框
+            ann = db.get_annotation(conn, frame_id)
+            if ann and ann.get('content_family') == 'not_vainglory':
+                raise HTTPException(
+                    400, '非虚荣画面没有游戏窗口/面板框,不能画框')
+            # 面板框必须与当前标注的界面类型匹配(防预选带框/旧保存竞态写回不匹配的框)
+            # 未标注或尚未选择界面类型时允许先画框(先画框再选类型的流程)
+            panel_required = {
+                'shop_panel': {'ingame_shop'},
+                'equipment_panel': {'equipment_select'},
+                'talent_panel': {'talent_select'},
+                'scoreboard_panel': {'scoreboard', 'death_scoreboard'},
+                'result_panel': {'result_page'},
+            }
+            if box_type in panel_required:
+                st = (ann or {}).get('screen_type')
+                if st and st not in panel_required[box_type]:
+                    raise HTTPException(
+                        400,
+                        f'{box_type} 与当前界面类型 {st} 不匹配,'
+                        '请先切换界面类型再画框')
+            old = db.get_boxes(conn, frame_id).get(box_type)
+            db.audit(conn, 'box', frame_id=frame_id,
+                     detail=json.dumps({'box_type': box_type, 'old': old}))
+            db.save_box(conn, frame_id, box_type, x, y, w, h)
+            return db.get_boxes(conn, frame_id)
+        finally:
+            conn.close()
+
+
+@app.delete('/api/frames/{frame_id}/box')
+def api_delete_box(frame_id: int, box_type: str) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            db.delete_box(conn, frame_id, box_type)
+            db.audit(conn, 'box', frame_id=frame_id, detail=f'delete {box_type}')
+            return {'deleted': box_type}
+        finally:
+            conn.close()
+
+
+@app.post('/api/frames/{frame_id}/propagate')
+def api_propagate(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    """把帧的部分标注字段批量传播到同事件帧。"""
+    fields = [f for f in body.get('fields', [])
+              if f in ('game_mode', 'view_context', 'match_kind', 'quality_flags',
+                       'black_bars', 'viewport_bbox')]
+    if not fields:
+        raise HTTPException(400, '没有可传播字段')
+    with _db_lock:
+        conn = _conn()
+        try:
+            f = db.get_frame(conn, frame_id)
+            if not f:
+                raise HTTPException(404, '帧不存在')
+            event_id = f['event_id']
+            if not event_id:
+                raise HTTPException(400, '该帧不属于任何事件,无法传播')
+            src = db.get_annotation(conn, frame_id) or {}
+            boxes = db.get_boxes(conn, frame_id)
+            targets = [r['id'] for r in conn.execute(
+                'SELECT id FROM frames WHERE event_id = ? AND id != ?',
+                (event_id, frame_id)).fetchall()]
+            count = 0
+            for tid in targets:
+                cur = db.get_annotation(conn, tid) or {}
+                changed = False
+                for fld in fields:
+                    if fld == 'viewport_bbox':
+                        if 'viewport' in boxes:
+                            b = boxes['viewport']
+                            db.save_box(conn, tid, 'viewport', b['x'], b['y'],
+                                        b['w'], b['h'])
+                            changed = True
+                        continue
+                    if fld == 'quality_flags':
+                        cur['quality_flags'] = list(src.get('quality_flags', []))
+                    else:
+                        cur[fld] = src.get(fld)
+                    changed = True
+                if changed:
+                    db.save_annotation(conn, tid, cur)
+                    count += 1
+            db.audit(conn, 'propagate', frame_id=frame_id,
+                     detail=f'fields={fields} targets={count}')
+            return {'propagated': count, 'fields': fields}
+        finally:
+            conn.close()
+
+
+@app.post('/api/undo')
+def api_undo() -> Dict[str, Any]:
+    """撤销最近一次标注/框修改(audit_log 快照恢复)。"""
+    with _db_lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM audit_log WHERE action IN ('label','box') "
+                "ORDER BY id DESC LIMIT 1").fetchone()
+            if not row:
+                return {'undone': False, 'reason': '没有可撤销操作'}
+            if row['action'] == 'label' and row['frame_id']:
+                old = json.loads(row['detail'] or 'null') or {}
+                if old:
+                    db.save_annotation(conn, row['frame_id'], old)
+            elif row['action'] == 'box' and row['frame_id']:
+                detail = json.loads(row['detail'] or '{}')
+                if detail.get('old') is None:
+                    db.delete_box(conn, row['frame_id'], detail['box_type'])
+                else:
+                    b = detail['old']
+                    db.save_box(conn, row['frame_id'], detail['box_type'],
+                                b['x'], b['y'], b['w'], b['h'])
+            conn.execute('DELETE FROM audit_log WHERE id = ?', (row['id'],))
+            conn.commit()
+            return {'undone': True, 'action': row['action'],
+                    'frame_id': row['frame_id']}
+        finally:
+            conn.close()
+
+
+@app.get('/api/audit')
+def api_audit(limit: int = 50) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return db.audit_recent(conn, limit=limit)
+        finally:
+            conn.close()
+
+
+# ---------- 同局配对 ----------
+
+@app.get('/api/pairs')
+def api_pairs(limit: int = 100) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            rows = conn.execute(
+                'SELECT * FROM pair_annotations ORDER BY id DESC LIMIT ?',
+                (limit,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+@app.post('/api/pairs')
+def api_save_pair(body: Dict[str, Any]) -> Dict[str, Any]:
+    a = int(body.get('frame_a_id', 0))
+    b = int(body.get('frame_b_id', 0))
+    label = body.get('label')
+    if label not in ('same_match', 'different_match', 'uncertain'):
+        raise HTTPException(400, 'label 必须是 same_match/different_match/uncertain')
+    if a == b:
+        raise HTTPException(400, '不能配对同一帧')
+    with _db_lock:
+        conn = _conn()
+        try:
+            db.save_pair(conn, a, b, label)
+            db.audit(conn, 'pair', detail=f'{a} x {b} = {label}')
+            return {'saved': True}
+        finally:
+            conn.close()
+
+
+# ---------- 导出与版本 ----------
+
+@app.post('/api/export')
+def api_export(body: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = body.get('task_id', 'result_detector')
+    with _db_lock:
+        conn = _conn()
+        try:
+            if task_id == 'result_detector':
+                return export_mod.export_result_detector(
+                    conn, include_negatives=body.get('include_negatives', True))
+            if task_id == 'bp_review':
+                return export_mod.export_bp_classifier(conn)
+            if task_id == 'key_screen_review':
+                return export_mod.export_key_screen_classifier(conn)
+            if task_id == 'mode_gate':
+                return export_mod.export_mode_gate_detector(conn)
+            return export_mod.export_generic(conn, task_id)
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.get('/api/datasets')
+def api_datasets() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return db.list_dataset_versions(conn)
+        finally:
+            conn.close()
+
+
+# ---------- 训练与本机模型版本 ----------
+
+@app.get('/api/training/tasks')
+def api_training_tasks() -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return training.task_summaries(conn)
+        finally:
+            conn.close()
+
+
+@app.get('/api/training/runs')
+def api_training_runs(
+        limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return {
+                'active_run_id': _training_manager.active_run_id(),
+                'runs': db.list_training_runs(conn, limit=limit),
+            }
+        finally:
+            conn.close()
+
+
+@app.post('/api/training/start')
+def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = str(body.get('task_id') or '')
+    definition = training.TRAINING_TASKS.get(task_id)
+    if definition is None:
+        raise HTTPException(400, f'未知训练任务: {task_id}')
+    epochs = int(body.get('epochs') or definition['epochs'])
+    if not 1 <= epochs <= 500:
+        raise HTTPException(400, 'epochs 必须在 1 到 500 之间')
+    with _training_start_lock:
+        if _training_manager.active_run_id() is not None:
+            raise HTTPException(409, '已有模型正在训练，请等待或先取消')
+        with _db_lock:
+            conn = _conn()
+            try:
+                summary = next(
+                    item for item in training.task_summaries(conn)
+                    if item['id'] == task_id
+                )
+                if not summary['ready']:
+                    raise HTTPException(
+                        400, '当前数据还不能训练：' +
+                        '；'.join(summary['blocking_reasons']))
+                snapshot = training.export_snapshot(conn, task_id)
+                run_id = training.new_run_id(task_id)
+                log_path = (
+                    config.WORK_DIR / 'training-runs' / run_id / 'train.log'
+                )
+                db.create_training_run(
+                    conn,
+                    run_id=run_id,
+                    task_id=task_id,
+                    dataset_version_id=snapshot['version'],
+                    epochs=epochs,
+                    config_json={
+                        'kind': definition['kind'],
+                        'imgsz': definition['imgsz'],
+                        'base_model': definition['base_model'],
+                    },
+                    log_path=str(log_path),
+                )
+                run = db.get_training_run(conn, run_id)
+            except RuntimeError as exc:
+                raise HTTPException(400, str(exc))
+            finally:
+                conn.close()
+        try:
+            _training_manager.start(run_id)
+        except RuntimeError as exc:
+            with _db_lock:
+                conn = _conn()
+                try:
+                    db.update_training_run(
+                        conn,
+                        run_id,
+                        status='failed',
+                        error=str(exc),
+                        finished_at=db.now(),
+                    )
+                finally:
+                    conn.close()
+            raise HTTPException(409, str(exc))
+    assert run is not None
+    return run
+
+
+@app.post('/api/training/runs/{run_id}/cancel')
+def api_cancel_training(run_id: str) -> Dict[str, Any]:
+    try:
+        _training_manager.cancel(run_id)
+    except KeyError as exc:
+        raise HTTPException(409, str(exc))
+    return {'cancel_requested': True, 'run_id': run_id}
+
+
+@app.get('/api/training/runs/{run_id}/log')
+def api_training_log(
+        run_id: str, tail: int = Query(200, ge=1, le=5000)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            run = db.get_training_run(conn, run_id)
+        finally:
+            conn.close()
+    if run is None:
+        raise HTTPException(404, '训练记录不存在')
+    path = Path(run['log_path'])
+    if not path.is_file():
+        return {'run_id': run_id, 'log': ''}
+    lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    return {'run_id': run_id, 'log': '\n'.join(lines[-tail:])}
+
+
+@app.post('/api/training/runs/{run_id}/publish-local')
+def api_publish_local_model(run_id: str) -> Dict[str, str]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                result = training.publish_local_model(conn, run_id)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+    inference_mod.clear_model_cache()
+    return result
+
+
+# ---------- 统计 ----------
+
+@app.get('/api/stats')
+def api_stats() -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return stats_mod.stats(conn)
+        finally:
+            conn.close()
+
+
+# ---------- 静态前端 ----------
+
+_static_dir = Path(__file__).resolve().parent / 'static'
+app.mount('/', NoCacheStaticFiles(directory=str(_static_dir), html=True),
+          name='static')
+
+
+def main() -> None:
+    import uvicorn
+    uvicorn.run(app, host='127.0.0.1', port=8800, log_level='info')
+
+
+if __name__ == '__main__':
+    main()

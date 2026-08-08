@@ -1,0 +1,2 @@
+# 训练环境是可选扩展；ultralytics 会安装 torch，macOS 优先使用 MPS。
+-e .[train]

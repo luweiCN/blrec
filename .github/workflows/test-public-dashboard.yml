@@ -1,0 +1,118 @@
+name: Test Public Dashboard
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - apps/public-dashboard/**
+      - src/blrec/networking/**
+      - src/blrec/logging/**
+      - src/blrec/utils/string.py
+      - .github/workflows/test-public-dashboard.yml
+  pull_request:
+    paths:
+      - apps/public-dashboard/**
+      - src/blrec/networking/**
+      - src/blrec/logging/**
+      - src/blrec/utils/string.py
+      - .github/workflows/test-public-dashboard.yml
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/public-dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: apps/public-dashboard/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: apps/public-dashboard/deploy/aliyun/site-deploy-requirements.txt
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install -r deploy/aliyun/site-deploy-requirements.txt
+
+      - name: Test
+        run: |
+          npm test
+          python -m pytest tests
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  publisher:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            setup.cfg
+            apps/public-dashboard/publisher/pyproject.toml
+
+      - name: Install shared core and Publisher
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m pip install -e 'apps/public-dashboard/publisher[test,avatars]' build
+
+      - name: Test Publisher
+        run: python -m pytest apps/public-dashboard/publisher/tests
+
+      - name: Build Publisher packages
+        run: python -m build apps/public-dashboard/publisher
+
+  image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Publisher image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/public-dashboard/publisher/Dockerfile
+          load: true
+          tags: blrec-dashboard-publisher:test
+          build-args: |
+            VERSION=0.1.0
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=dashboard-publisher
+          cache-to: type=gha,mode=max,scope=dashboard-publisher
+
+      - name: Verify Publisher image boundary
+        run: |
+          docker run --rm --entrypoint python blrec-dashboard-publisher:test -c \
+            "import importlib.util; import blrec_dashboard_publisher.publisher; names=('cv2','onnxruntime','rapidocr','fastapi'); assert all(importlib.util.find_spec(name) is None for name in names)"

@@ -2,7 +2,10 @@
 
 此部署使用主机网络模式，让容器直接看到群晖的物理网卡、内网 IP 和网关。管理页面会监听 `0.0.0.0:2233`，因此两个内网均可通过各自的 NAS IP 访问。应用只为连接绑定源 IP，不会修改群晖路由表。
 
-本文中的 `compose.synology.yml` 只运行一个 `blrec-next` 服务，并从公开镜像 `ghcr.io/luweicn/blrec` 拉取固定版本。Container Manager“项目”导入的也是同一份 Compose；不要另建容器配置。
+本文中的 `compose.synology.yml` 只运行一个 `blrec-next` 服务，并从独立的公开镜像
+`ghcr.io/luweicn/blrec-server` 拉取固定版本。镜像由 GitHub Actions 构建，NAS
+直接从 GHCR 拉取；Container Manager“项目”导入的也是同一份 Compose，不要另建
+容器配置。
 
 ## 前置设置
 
@@ -60,7 +63,7 @@ docker run --rm --entrypoint python \
   -v /volume1/docker/blrec-next/config:/cfg \
   -v /volume1/docker/blrec-next/log:/log \
   -v /volume1/docker/blrec-next/rec:/rec \
-  ghcr.io/luweicn/blrec:3.0.0-beta.43 \
+  ghcr.io/luweicn/blrec-server:3.0.0-beta.44 \
   /app/scripts/migrate_legacy_settings.py \
   /legacy/settings.toml /cfg/settings.toml \
   --rooms 30038570 25654586 21045351 10802797 2604398
@@ -70,7 +73,12 @@ docker run --rm --entrypoint python \
 
 ## 升级
 
-先停止服务并备份 `/cfg` 对应的宿主目录及当前 `.env`，确认备份成功后再修改 `BLREC_IMAGE_TAG`。升级时必须使用目标版本仓库中的 `compose.synology.yml` 替换旧文件，不能只改镜像标签；这样新增的持久化目录才不会落入匿名卷。下面的命令以示例中的目录为准；如果修改过 `BLREC_CONFIG_DIR`，请同步替换 `config_dir`：
+先停止服务并备份 `/cfg` 对应的宿主目录及当前 `.env`，确认备份成功后再修改
+`BLREC_SERVER_IMAGE_TAG`。从旧的合并镜像首次迁移时，如果 `.env` 使用
+`BLREC_IMAGE_TAG`，必须把变量名改为 `BLREC_SERVER_IMAGE_TAG` 并保留原标签值，
+不得让新 Compose 因变量缺失而静默使用默认版本。升级时必须使用目标版本仓库中的 `compose.synology.yml` 替换旧文件，不能只改镜像标签；这样新增的持久化目录才不会
+落入匿名卷。下面的命令以示例中的目录为准；如果修改过 `BLREC_CONFIG_DIR`，请同步
+替换 `config_dir`：
 
 ```bash
 set -eu
@@ -95,7 +103,7 @@ cmp -s .env "$backup_env"
 echo "$backup_id"
 ```
 
-只有上述校验全部成功后，才记录终端输出的 `backup_id`。编辑 `.env`，把 `BLREC_IMAGE_TAG` 改成要升级的固定版本，并确保包含 `BLREC_CLIP_DIR=/volume1/docker/blrec-next/clips` 和 `BLREC_FAVORITES_DIR=/volume1/docker/blrec-next/favorites`。片段目录与永久收藏目录都必须在部署前创建并校验；缺少 `/favorites` 挂载会让收藏落入容器可写层：
+只有上述校验全部成功后，才记录终端输出的 `backup_id`。编辑 `.env`，把 `BLREC_SERVER_IMAGE_TAG` 改成要升级的固定版本，并确保包含 `BLREC_CLIP_DIR=/volume1/docker/blrec-next/clips` 和 `BLREC_FAVORITES_DIR=/volume1/docker/blrec-next/favorites`。片段目录与永久收藏目录都必须在部署前创建并校验；缺少 `/favorites` 挂载会让收藏落入容器可写层：
 
 beta.16 会把旧 `/rec/highlights` 片段复制到 `/clips` 并更新新数据库中的路径，同时保留旧文件供 beta.15 回滚。确认不再需要回滚旧版之前，不要手动删除 `/rec/highlights`。
 
@@ -117,7 +125,7 @@ docker compose --env-file .env -f compose.synology.yml pull
 docker compose --env-file .env -f compose.synology.yml up -d
 ```
 
-Container Manager 的操作顺序相同：先停止项目并通过 File Station 备份配置目录，再备份项目环境、修改 `BLREC_IMAGE_TAG`，最后重新构建项目。不要只使用 `latest`；固定标签才能执行可重复的回滚。
+Container Manager 的操作顺序相同：先停止项目并通过 File Station 备份配置目录，再备份项目环境、修改 `BLREC_SERVER_IMAGE_TAG`，最后重新构建项目。不要只使用 `latest`；固定标签才能执行可重复的回滚。
 
 ## 回滚
 
@@ -135,7 +143,7 @@ test -d "$config_dir"
 test -d "$backup_config_dir"
 test -s "$backup_config_dir/credential.key"
 test -s "$backup_env"
-grep -Eq '^BLREC_IMAGE_TAG=[^[:space:]]+$' "$backup_env"
+grep -Eq '^BLREC_SERVER_IMAGE_TAG=[^[:space:]]+$' "$backup_env"
 test ! -e "$restore_candidate"
 test ! -e "${config_dir}.failed-${failed_id}"
 docker compose --env-file "$backup_env" -f compose.synology.yml config >/dev/null
@@ -155,7 +163,7 @@ docker compose --env-file .env -f compose.synology.yml config >/dev/null
 docker compose --env-file .env -f compose.synology.yml up -d
 ```
 
-恢复的 `.env` 会重新选中已预拉取的旧 `BLREC_IMAGE_TAG`，恢复的配置目录同时带回旧设置、状态和 `credential.key`。任一校验、复制、拉取或移动失败时，`set -eu` 都会阻止后续启动，避免以空配置或不匹配配置启动。在 Container Manager 中也必须先验证配置和环境备份、确认旧镜像可用，再同时还原配置目录和项目环境中的旧标签，最后重新构建项目。
+恢复的 `.env` 会重新选中已预拉取的旧 `BLREC_SERVER_IMAGE_TAG`，恢复的配置目录同时带回旧设置、状态和 `credential.key`。任一校验、复制、拉取或移动失败时，`set -eu` 都会阻止后续启动，避免以空配置或不匹配配置启动。在 Container Manager 中也必须先验证配置和环境备份、确认旧镜像可用，再同时还原配置目录和项目环境中的旧标签，最后重新构建项目。
 
 ## 日志与验收
 

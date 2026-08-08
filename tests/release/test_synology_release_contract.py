@@ -6,7 +6,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_synology_compose_pulls_one_pinned_public_image() -> None:
     compose = (ROOT / 'compose.synology.yml').read_text(encoding='utf8')
     assert 'build:' not in compose
-    assert 'ghcr.io/luweicn/blrec:${BLREC_IMAGE_TAG:-3.0.0-beta.43}' in compose
+    assert (
+        'ghcr.io/luweicn/blrec-server:'
+        '${BLREC_SERVER_IMAGE_TAG:-3.0.0-beta.44}' in compose
+    )
     assert 'container_name: blrec-next' in compose
     assert 'network_mode: host' in compose
     assert 'ports:' not in compose
@@ -17,7 +20,7 @@ def test_synology_compose_pulls_one_pinned_public_image() -> None:
 
 def test_environment_example_contains_no_credential() -> None:
     example = (ROOT / 'synology.env.example').read_text(encoding='utf8')
-    assert 'BLREC_IMAGE_TAG=3.0.0-beta.43' in example
+    assert 'BLREC_SERVER_IMAGE_TAG=3.0.0-beta.44' in example
     assert 'BLREC_ADMIN_USERNAME=admin' in example
     assert 'BLREC_API_KEY=\n' in example
     assert 'BLREC_CREDENTIAL_KEY=' not in example
@@ -85,6 +88,8 @@ def test_upgrade_stops_on_error_and_verifies_secure_backups() -> None:
     assert 'test -d "$favorites_dir"' in upgrade
     assert 'BLREC_CLIP_DIR' in upgrade
     assert 'BLREC_FAVORITES_DIR' in upgrade
+    assert '`BLREC_IMAGE_TAG`' in upgrade
+    assert '改为 `BLREC_SERVER_IMAGE_TAG`' in upgrade
 
 
 def test_rollback_validates_and_stages_restore_before_replacing_config() -> None:
@@ -100,7 +105,7 @@ def test_rollback_validates_and_stages_restore_before_replacing_config() -> None
         'test -d "$backup_config_dir"',
         'test -s "$backup_config_dir/credential.key"',
         'test -s "$backup_env"',
-        "grep -Eq '^BLREC_IMAGE_TAG=[^[:space:]]+$' \"$backup_env\"",
+        "grep -Eq '^BLREC_SERVER_IMAGE_TAG=[^[:space:]]+$' \"$backup_env\"",
         'docker compose --env-file "$backup_env" '
         '-f compose.synology.yml config >/dev/null',
         'docker compose --env-file "$backup_env" ' '-f compose.synology.yml pull',
