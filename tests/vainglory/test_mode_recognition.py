@@ -1,4 +1,22 @@
-from blrec.vainglory.mode_recognition import has_aligned_talent_cards
+import blrec.vainglory.mode_recognition as mode_recognition
+from blrec.vainglory.mode_recognition import (
+    AramTalentSelectionDetector,
+    has_aligned_talent_cards,
+)
+
+
+def test_aram_detector_defers_optional_vision_imports(monkeypatch) -> None:
+    imported = []
+
+    def fail_if_imported(name: str):
+        imported.append(name)
+        raise AssertionError(name)
+
+    monkeypatch.setattr(mode_recognition.importlib, 'import_module', fail_if_imported)
+
+    AramTalentSelectionDetector()
+
+    assert imported == []
 
 
 def test_three_aligned_talent_cards_are_recognized() -> None:

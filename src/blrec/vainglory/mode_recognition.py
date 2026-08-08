@@ -41,10 +41,14 @@ class AramTalentSelectionDetector:
     """Detects the fixed three-card talent selector shown before an ARAM match."""
 
     def __init__(self) -> None:
-        self._cv2: Any = importlib.import_module('cv2')
-        self._numpy: Any = importlib.import_module('numpy')
+        self._cv2: Any = None
+        self._numpy: Any = None
 
     def is_visible(self, frame: RgbFrame) -> bool:
+        if self._cv2 is None:
+            self._cv2 = importlib.import_module('cv2')
+        if self._numpy is None:
+            self._numpy = importlib.import_module('numpy')
         image = self._numpy.frombuffer(frame.pixels, dtype=self._numpy.uint8).reshape(
             frame.height, frame.width, 3
         )
