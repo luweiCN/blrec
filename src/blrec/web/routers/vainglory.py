@@ -702,6 +702,7 @@ async def claim_analysis_work(
         'viewContext': claim.view_context,
         'partDurationSeconds': claim.part_duration_seconds,
         'recordingDurationSeconds': claim.recording_duration_seconds,
+        'anchorName': claim.anchor_name,
     }
     if claim.part is not None:
         payload['part'] = {
@@ -1312,9 +1313,7 @@ async def update_match(
         ) from error
 
 
-@router.post(
-    '/matches/{match_id}/reanalyze', status_code=status.HTTP_202_ACCEPTED
-)
+@router.post('/matches/{match_id}/reanalyze', status_code=status.HTTP_202_ACCEPTED)
 async def reanalyze_match(
     match_id: int,
     _subject: str = Depends(authenticated_manager_subject),
@@ -1326,6 +1325,24 @@ async def reanalyze_match(
         _raise_repository_error(error)
         raise AssertionError('unreachable')
     return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.put(
+    '/matches/{match_id}/review-suppressions/{review_type}',
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def suppress_match_review(
+    match_id: int,
+    review_type: Literal['hero', 'recorded_player'],
+    _subject: str = Depends(authenticated_manager_subject),
+    index: VaingloryIndexService = Depends(get_service),
+) -> Response:
+    try:
+        await index.suppress_match_review(match_id, review_type)
+    except VaingloryNotFound as error:
+        _raise_repository_error(error)
+        raise AssertionError('unreachable')
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete('/matches/{match_id}', status_code=status.HTTP_204_NO_CONTENT)

@@ -1320,13 +1320,15 @@ async def test_legacy_started_payload_uses_original_generation_for_handoff(
 
 @pytest.mark.asyncio
 async def test_restart_of_frozen_live_creates_continuation_session(database) -> None:
-    journal = RecordingJournalBridge(database, clock=lambda: 1_000)
+    now = 1_000
+    journal = RecordingJournalBridge(database, clock=lambda: now)
     first_run = await journal.recording_started(100, live_start_time=900)
     await journal.video_created(first_run, '/rec/p1.flv', record_start_time=901)
     await journal.video_completed(first_run, '/rec/p1.flv')
     await journal.video_postprocessed(first_run, '/rec/p1.flv', '/rec/p1.flv')
     await journal.recording_finished(first_run)
 
+    now += RecordingJournalBridge.SHORT_RECONNECT_GRACE_SECONDS + 1
     restarted_run = await journal.recording_started(100, live_start_time=900)
 
     first_session = await journal.session_for_run(first_run)

@@ -3,6 +3,7 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  HostListener,
   OnDestroy,
   OnInit,
 } from '@angular/core';
@@ -188,6 +189,12 @@ interface MatchEditDraft {
   players: MatchPlayerEditDraft[];
 }
 
+interface AnalysisImageRequest {
+  readonly sessionId: number;
+  readonly partId?: number;
+  readonly title: string;
+}
+
 @Component({
   selector: 'app-vainglory',
   templateUrl: './vainglory.component.html',
@@ -235,6 +242,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   readonly savingMatchIds = new Set<number>();
   readonly rerunningMatchIds = new Set<number>();
   readonly deletingMatchIds = new Set<number>();
+  readonly ignoringReviewKeys = new Set<string>();
   matchEditorVisible = false;
   editingMatch: VaingloryMatch | null = null;
   matchEditDraft: MatchEditDraft | null = null;
@@ -269,6 +277,12 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   savingRecordedPlayerMatchId: number | null = null;
   savingRecordedPlayerSlot: number | null = null;
   analysisTaskModalVisible = false;
+  analysisImageBrowserVisible = false;
+  analysisImageBrowserTitle = '';
+  analysisImageBrowserLoading = false;
+  analysisImageBrowserError: string | null = null;
+  analysisImageBrowserItems: readonly VaingloryMatch[] = [];
+  analysisImageBrowserIndex = 0;
   zeroMatchReviewVisible = false;
   zeroMatchPageIndex = 1;
   readonly zeroMatchPageSize = 20;
@@ -307,6 +321,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   private scanPollTimer: number | null = null;
   private readonly remoteMediaPollingPartIds = new Set<number>();
   private listRefreshSignature: string | null = null;
+  private analysisImageRequestGeneration = 0;
 
   constructor(
     private vainglory: VaingloryService,
@@ -484,6 +499,10 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return sessionId === undefined
       ? null
       : (this.matchDetails.get(sessionId) ?? null);
+  }
+
+  get currentAnalysisImage(): VaingloryMatch | null {
+    return this.analysisImageBrowserItems[this.analysisImageBrowserIndex] ?? null;
   }
 
   applySearch(): void {
@@ -683,6 +702,157 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     this.changeDetector.markForCheck();
   }
 
+  openAnalysisSessionDetails(sessionId: number): void {
+    this.analysisTaskModalVisible = false;
+    this.playerName = '';
+    this.sourceTitle = '';
+    this.anchorNameFilter = null;
+    this.statsIncludedFilter = null;
+    this.heroIds = [];
+    this.winnerColor = null;
+    this.gameMode = null;
+    this.pageIndex = 1;
+    this.selectedSessionIds.clear();
+    if (this.sessionId === sessionId) {
+      this.loadSessions();
+      return;
+    }
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { sessionId },
+    });
+  }
+
+  openAnalysisImageBrowser(request: AnalysisImageRequest): void {
+    const generation = ++this.analysisImageRequestGeneration;
+    this.analysisImageBrowserVisible = true;
+    this.analysisImageBrowserTitle = request.title;
+    this.analysisImageBrowserLoading = true;
+    this.analysisImageBrowserError = null;
+    this.analysisImageBrowserItems = [];
+    this.analysisImageBrowserIndex = 0;
+    this.loadAnalysisImagePage(request, 0, [], generation);
+  }
+
+  closeAnalysisImageBrowser(): void {
+    this.analysisImageBrowserVisible = false;
+    this.analysisImageRequestGeneration += 1;
+  }
+
+  showPreviousAnalysisImage(): void {
+    if (this.analysisImageBrowserIndex > 0) {
+      this.analysisImageBrowserIndex -= 1;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  showNextAnalysisImage(): void {
+    if (
+      this.analysisImageBrowserIndex + 1 <
+      this.analysisImageBrowserItems.length
+    ) {
+      this.analysisImageBrowserIndex += 1;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  selectAnalysisImage(index: number): void {
+    if (index >= 0 && index < this.analysisImageBrowserItems.length) {
+      this.analysisImageBrowserIndex = index;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  analysisImageTitle(match: VaingloryMatch, index: number): string {
+    return `${match.title || `第 ${index + 1} 局`} · P${match.partIndex} · ${this.formatDuration(match.resultAtMs / 1000)}`;
+  }
+
+  @HostListener('document:keydown', ['$event'])
+  handleAnalysisImageKeydown(event: KeyboardEvent): void {
+    if (
+      !this.analysisImageBrowserVisible ||
+      this.analysisImageBrowserLoading ||
+      this.analysisImageBrowserItems.length < 2
+    ) {
+      return;
+    }
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      this.showPreviousAnalysisImage();
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      this.showNextAnalysisImage();
+    }
+  }
+
+  private loadAnalysisImagePage(
+    request: AnalysisImageRequest,
+    offset: number,
+    accumulated: readonly VaingloryMatch[],
+    generation: number,
+  ): void {
+    const filters: VaingloryMatchFilters = {
+      playerName: '',
+      heroIds: [],
+      winnerColor: null,
+      gameMode: null,
+      sessionId: request.sessionId,
+    };
+    this.vainglory
+      .listMatches(filters, 100, offset)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (response) => {
+          if (generation !== this.analysisImageRequestGeneration) {
+            return;
+          }
+          const items = [...accumulated, ...response.items];
+          if (
+            response.items.length > 0 &&
+            items.length < response.total
+          ) {
+            this.loadAnalysisImagePage(
+              request,
+              items.length,
+              items,
+              generation,
+            );
+            return;
+          }
+          this.analysisImageBrowserItems = items
+            .filter(
+              (match) =>
+                match.resultFrameUrl !== null &&
+                (request.partId === undefined ||
+                  match.partId === request.partId),
+            )
+            .sort(
+              (left, right) =>
+                left.partIndex - right.partIndex ||
+                left.resultAtMs - right.resultAtMs ||
+                left.id - right.id,
+            );
+          this.analysisImageBrowserLoading = false;
+          this.analysisImageBrowserError =
+            this.analysisImageBrowserItems.length === 0
+              ? '这项任务当前没有可浏览的对局截图'
+              : null;
+          this.changeDetector.markForCheck();
+        },
+        error: (error: unknown) => {
+          if (generation !== this.analysisImageRequestGeneration) {
+            return;
+          }
+          this.analysisImageBrowserLoading = false;
+          this.analysisImageBrowserError = this.errorMessage(
+            error,
+            '对局截图加载失败',
+          );
+          this.changeDetector.markForCheck();
+        },
+      });
+  }
+
   isSessionRescanning(sessionId: number): boolean {
     return this.rescanningSessionIds.has(sessionId);
   }
@@ -704,6 +874,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: (job) => {
+          this.removeSessionFromReviewQueues(session.sessionId);
           this.messages.success('已加入重新分析队列，并提升为手动优先');
           this.receiveScanJob(job);
           this.loadZeroMatchSessions();
@@ -1094,6 +1265,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
             rerunState: 'pending',
             rerunError: null,
           });
+          this.removeMatchFromReviewQueues(match.id);
           this.messages.success('已加入单局重新识别队列，并优先处理');
         },
         error: (error: unknown) => {
@@ -1686,6 +1858,42 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return `${player.side === 'left' ? '左侧' : '右侧'}第 ${player.slot} 行`;
   }
 
+  reviewIgnoreKey(
+    matchId: number,
+    reviewType: 'hero' | 'recorded_player',
+  ): string {
+    return `${reviewType}:${matchId}`;
+  }
+
+  ignoreMatchReview(
+    match: VaingloryMatch,
+    reviewType: 'hero' | 'recorded_player',
+  ): void {
+    const key = this.reviewIgnoreKey(match.id, reviewType);
+    if (this.ignoringReviewKeys.has(key)) {
+      return;
+    }
+    this.ignoringReviewKeys.add(key);
+    this.vainglory
+      .suppressMatchReview(match.id, reviewType)
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => {
+          this.ignoringReviewKeys.delete(key);
+          this.changeDetector.markForCheck();
+        }),
+      )
+      .subscribe({
+        next: () => {
+          this.removeMatchFromReviewQueue(match.id, reviewType);
+          this.messages.success('已从当前待确认列表忽略，对局和统计数据保持不变');
+        },
+        error: (error: unknown) => {
+          this.messages.error(this.errorMessage(error, '忽略待确认项失败'));
+        },
+      });
+  }
+
   openRecordedPlayerReviews(): void {
     this.recordedPlayerReviewVisible = true;
     this.loadRecordedPlayerReviews();
@@ -1837,6 +2045,79 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   recordedPlayerSaving(match: VaingloryMatch): boolean {
     return this.savingRecordedPlayerMatchId === match.id;
+  }
+
+  private removeMatchFromReviewQueue(
+    matchId: number,
+    reviewType: 'hero' | 'recorded_player',
+  ): void {
+    if (reviewType === 'hero' && this.heroReviewView.state === 'ready') {
+      const items = this.heroReviewView.items.filter(
+        (match) => match.id !== matchId,
+      );
+      this.heroReviewView = {
+        state: 'ready',
+        total: Math.max(
+          0,
+          this.heroReviewView.total -
+            (items.length === this.heroReviewView.items.length ? 0 : 1),
+        ),
+        items,
+      };
+    }
+    if (
+      reviewType === 'recorded_player' &&
+      this.recordedPlayerReviewView.state === 'ready'
+    ) {
+      const items = this.recordedPlayerReviewView.items.filter(
+        (match) => match.id !== matchId,
+      );
+      this.recordedPlayerReviewView = {
+        state: 'ready',
+        total: Math.max(
+          0,
+          this.recordedPlayerReviewView.total -
+            (items.length === this.recordedPlayerReviewView.items.length ? 0 : 1),
+        ),
+        items,
+      };
+    }
+  }
+
+  private removeMatchFromReviewQueues(matchId: number): void {
+    this.removeMatchFromReviewQueue(matchId, 'hero');
+    this.removeMatchFromReviewQueue(matchId, 'recorded_player');
+  }
+
+  private removeSessionFromReviewQueues(sessionId: number): void {
+    if (this.heroReviewView.state === 'ready') {
+      const items = this.heroReviewView.items.filter(
+        (match) => match.sessionId !== sessionId,
+      );
+      this.heroReviewView = {
+        state: 'ready',
+        total: Math.max(
+          0,
+          this.heroReviewView.total -
+            (this.heroReviewView.items.length - items.length),
+        ),
+        items,
+      };
+    }
+    if (this.recordedPlayerReviewView.state === 'ready') {
+      const items = this.recordedPlayerReviewView.items.filter(
+        (match) => match.sessionId !== sessionId,
+      );
+      this.recordedPlayerReviewView = {
+        state: 'ready',
+        total: Math.max(
+          0,
+          this.recordedPlayerReviewView.total -
+            (this.recordedPlayerReviewView.items.length - items.length),
+        ),
+        items,
+      };
+    }
   }
 
   private replaceMatchDetails(saved: VaingloryMatch): void {

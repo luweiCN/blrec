@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_version_matches_preview_beta() -> None:
-    assert blrec.__version__ == '3.0.0-beta.42'
+    assert blrec.__version__ == '3.0.0-beta.43'
 
 
 def test_ocr_runtime_pins_cover_supported_python_wheels() -> None:
@@ -17,10 +17,10 @@ def test_ocr_runtime_pins_cover_supported_python_wheels() -> None:
 
 
 def test_release_notes_describe_vainglory_operations() -> None:
-    notes = (ROOT / 'docs/releases/3.0.0-beta.42.md').read_text(encoding='utf8')
-    assert '# BLREC 3.0.0-beta.42' in notes
-    assert 'MacBook Pro' in notes
-    assert '4 FPS' in notes
+    notes = (ROOT / 'docs/releases/3.0.0-beta.43.md').read_text(encoding='utf8')
+    assert '# BLREC 3.0.0-beta.43' in notes
+    assert '级联扫描' in notes
+    assert '发布 worker' in notes
+    assert '数据库迁移 0060' in notes
     assert '算法版本保持 18' in notes
-    assert '不新增数据库迁移' in notes
     assert 'latest' not in notes.lower()

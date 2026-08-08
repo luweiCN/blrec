@@ -31,15 +31,16 @@ from .repository import (
     AnchorStatsRecord,
     HeroStatsRecord,
     IndexSummary,
+    ManualMatchMarkerRecord,
     MatchPage,
     MatchRecord,
     MatchSessionPage,
     MatchSessionRecord,
-    ManualMatchMarkerRecord,
     PlayerRecord,
     PlayerStatsRecord,
     ScanJob,
     VaingloryConflict,
+    VaingloryNotFound,
     VaingloryRepository,
     ZeroMatchSessionPage,
 )
@@ -57,6 +58,7 @@ class RemoteAnalysisClaim:
     frame_png: bytes = b''
     part_duration_seconds: Optional[int] = None
     recording_duration_seconds: Optional[int] = None
+    anchor_name: str = ''
 
 
 class VaingloryIndexService:
@@ -221,6 +223,7 @@ class VaingloryIndexService:
             session_id=claim.session_id,
             part_duration_seconds=claim.part_duration_seconds,
             recording_duration_seconds=claim.recording_duration_seconds,
+            anchor_name=claim.anchor_name,
         )
 
     async def heartbeat_remote_work(
@@ -327,12 +330,6 @@ class VaingloryIndexService:
         )
 
     def _record_runtime_status(self, part_id: int, status: AnalysisStatus) -> None:
-        event = AnalysisQueueEvent(
-            at=int(time.time()),
-            stage=status.stage,
-            detail=status.detail,
-            elapsed_seconds=status.elapsed_seconds,
-        )
         with self._runtime_lock:
             previous = self._runtime_status.get(part_id)
             if previous is not None:
@@ -346,9 +343,21 @@ class VaingloryIndexService:
                     candidate_count=status.candidate_count or previous.candidate_count,
                 )
             self._runtime_status[part_id] = status
-            events = self._runtime_events.setdefault(part_id, [])
-            events.append(event)
-            del events[:-12]
+            if (
+                previous is None
+                or previous.stage != status.stage
+                or previous.detail != status.detail
+            ):
+                events = self._runtime_events.setdefault(part_id, [])
+                events.append(
+                    AnalysisQueueEvent(
+                        at=int(time.time()),
+                        stage=status.stage,
+                        detail=status.detail,
+                        elapsed_seconds=status.elapsed_seconds,
+                    )
+                )
+                del events[:-12]
 
     def _clear_runtime_status(self, part_id: int) -> None:
         with self._runtime_lock:
@@ -360,6 +369,9 @@ class VaingloryIndexService:
 
     async def list_matches(self, **filters: Any) -> MatchPage:
         return await self._repository.list_matches(**filters)
+
+    async def suppress_match_review(self, match_id: int, review_type: str) -> None:
+        await self._repository.suppress_match_review(match_id, review_type)
 
     async def list_match_sessions(self, **filters: Any) -> MatchSessionPage:
         return await self._repository.list_match_sessions(**filters)
@@ -740,9 +752,7 @@ class VaingloryIndexService:
                     time.monotonic() - task_started,
                 )
             else:
-                await self._repository.complete_part(
-                    part.id, (), candidate_count=0
-                )
+                await self._repository.complete_part(part.id, (), candidate_count=0)
                 elapsed_seconds = time.monotonic() - task_started
                 logger.info(
                     'Vainglory part analysis task completed: session_id={} '
@@ -784,51 +794,50 @@ class VaingloryIndexService:
     async def _ocr_once(self) -> bool:
         rerun = await self._repository.claim_next_match_rerun()
         if rerun is not None:
-            part = rerun.part
+            claimed_rerun = rerun
+            part = claimed_rerun.part
             if not Path(part.path).is_file():
                 await self._repository.fail_match_rerun(
-                    rerun.match_id, '视频文件尚未下载完成，请稍后重试'
+                    claimed_rerun.match_id, '视频文件尚未下载完成，请稍后重试'
                 )
                 return True
             try:
-                matches = await asyncio.get_running_loop().run_in_executor(
+                rerun_matches = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: self._analyzer.recognize_candidate(
                         part,
-                        at_ms=rerun.result_at_ms,
-                        view_context=rerun.view_context,
+                        at_ms=claimed_rerun.result_at_ms,
+                        view_context=claimed_rerun.view_context,
                         cancelled=self._stop.is_set,
                     ),
                 )
-                if len(matches) != 1:
+                if len(rerun_matches) != 1:
                     await self._repository.fail_match_rerun(
-                        rerun.match_id,
-                        '原时间点没有识别到唯一结算画面，'
-                        '已保留原结果',
+                        claimed_rerun.match_id,
+                        '原时间点没有识别到唯一结算画面，' '已保留原结果',
                     )
                     return True
                 await self._repository.complete_match_rerun(
-                    rerun.match_id, matches[0]
+                    claimed_rerun.match_id, rerun_matches[0]
                 )
                 logger.info(
                     'Vainglory single match rerun completed: match_id={} '
                     'part_id={} at_ms={}',
-                    rerun.match_id,
+                    claimed_rerun.match_id,
                     part.id,
-                    rerun.result_at_ms,
+                    claimed_rerun.result_at_ms,
                 )
             except AnalysisCancelled:
                 await self._repository.fail_match_rerun(
-                    rerun.match_id, '单局重新识别已停止，请重新提交'
+                    claimed_rerun.match_id, '单局重新识别已停止，请重新提交'
                 )
             except Exception as error:
                 logger.exception(
                     'Vainglory single match rerun failed for match {}',
-                    rerun.match_id,
+                    claimed_rerun.match_id,
                 )
                 await self._repository.fail_match_rerun(
-                    rerun.match_id,
-                    '{}: {}'.format(type(error).__name__, error),
+                    claimed_rerun.match_id, '{}: {}'.format(type(error).__name__, error)
                 )
             return True
         claim = await self._repository.claim_next_ocr()
@@ -900,9 +909,7 @@ class VaingloryIndexService:
                 ),
             )
             await self._repository.complete_part(
-                part.id,
-                matches,
-                candidate_count=len(scanned.candidate_times_ms),
+                part.id, matches, candidate_count=len(scanned.candidate_times_ms)
             )
             total_seconds = (
                 time.monotonic() - recognition_started

@@ -14,12 +14,11 @@ class ResultPanelDetector(Protocol):
 
 
 def result_panel_model_path() -> Path:
-    return (
-        Path(__file__).resolve().parent.parent
-        / 'data'
-        / 'vainglory'
-        / 'result-panel.onnx'
-    )
+    data_dir = Path(__file__).resolve().parent.parent / 'data' / 'vainglory'
+    preferred = data_dir / 'result-detector-v1.onnx'
+    if preferred.is_file():
+        return preferred
+    return data_dir / 'result-panel.onnx'
 
 
 class OnnxResultPanelDetector:

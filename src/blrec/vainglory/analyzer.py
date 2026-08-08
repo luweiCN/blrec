@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
+from pathlib import Path
 from statistics import mean
 from typing import (
     Any,
@@ -33,6 +35,28 @@ from .sampling import (
     hud_lineup_similarity,
     result_search_windows,
     same_gameplay_run,
+)
+from .stage_classifier import (
+    CONTENT_NOT_VAINGLORY,
+    MODE_3V3,
+    MODE_5V5,
+    MODE_ARAM,
+    STAGE_GAMEPLAY,
+    STAGE_OUT_OF_MATCH,
+    STAGE_PRE_MATCH,
+    STAGE_RESULT_PAGE,
+    STAGE_SCOREBOARD,
+    STAGE_TALENT_SELECT,
+    STAGE_TRANSITION,
+    STAGE_VICTORY_DEFEAT,
+    ClassifiedObservation,
+    StageClassifier,
+    _confirmed_anchors,
+    _pre_match_anchors,
+    _segment_ranges,
+    build_classified_windows,
+    gameplay_runs,
+    smooth_stages,
 )
 from .vision import (
     GameplayHud,
@@ -171,6 +195,7 @@ class ScannedPart:
     candidate_times_ms: Tuple[int, ...]
     candidate_view_contexts: Tuple[Literal['played', 'observed', 'unknown'], ...] = ()
     candidate_hero_lineups: Tuple[Tuple[str, ...], ...] = ()
+    candidate_modes: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -500,6 +525,7 @@ class VaingloryVideoAnalyzer:
         hero_recognizer: Optional[SiftHeroRecognizer] = None,
         aram_detector: Optional[AramDetector] = None,
         result_panel_detector: Optional[ResultPanelDetector] = None,
+        stage_classifier: Optional[StageClassifier] = None,
         minimum_match_seconds: int = 60,
     ) -> None:
         if minimum_match_seconds < 0:
@@ -509,6 +535,7 @@ class VaingloryVideoAnalyzer:
         self._hero_recognizer = hero_recognizer
         self._aram_detector = aram_detector or AramTalentSelectionDetector()
         self._result_panel_detector = result_panel_detector
+        self._stage_classifier = stage_classifier
         self._minimum_match_seconds = minimum_match_seconds
 
     def analyze_part(
@@ -630,7 +657,12 @@ class VaingloryVideoAnalyzer:
             self._raise_if_cancelled(cancelled)
             hud_started = time.monotonic()
             hud_frame = timed.frame
-            if gameplay_viewport is not None:
+            if gameplay_viewport is not None and gameplay_viewport != (
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ):
                 hud_frame = timed.frame.crop(
                     timed.frame.relative_rect(*gameplay_viewport)
                 )
@@ -835,11 +867,7 @@ class VaingloryVideoAnalyzer:
         primary_window_count = len(windows)
         maximum_expected_windows = max(
             self._MIN_RESULT_WINDOWS_BEFORE_RELAXING,
-            (
-                profile.duration_ms * self._MAX_RESULT_WINDOWS_PER_HOUR
-                + 3_600_000
-                - 1
-            )
+            (profile.duration_ms * self._MAX_RESULT_WINDOWS_PER_HOUR + 3_600_000 - 1)
             // 3_600_000,
         )
         selected_hud_gap_ms = self._HUD_CONTINUITY_MS
@@ -1181,7 +1209,7 @@ class VaingloryVideoAnalyzer:
         profile = self._sampler.probe(part.path)
         probe_seconds = time.monotonic() - probe_started
         window = ScanWindow(start_ms=0, end_ms=profile.duration_ms)
-        frames = iter(self._sampler.fine_frames(part.path, window))
+        frames = iter(self._sampler.fine_frames(part.path, window, threads=6))
         hits: List[ResultHit] = []
         decoded_frames = 0
         decode_seconds = 0.0
@@ -1256,6 +1284,611 @@ class VaingloryVideoAnalyzer:
             total_seconds=total_seconds,
         )
 
+    def scan_part_cascade(
+        self,
+        part: VideoPart,
+        *,
+        progress: Optional[Callable[[float], None]] = None,
+        status_callback: Optional[Callable[[AnalysisStatus], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+        debug_dir: Optional[Path] = None,
+    ) -> DenseScanResult:
+        """分类粗扫 + 结算窗口推断 + 窗口内精扫的级联扫描。
+
+        第一阶段以固定间隔全片跑 multi-v2 分类模型，构建阶段时间线；第二阶段
+        基于对局段结束点推断结算画面窗口（不依赖结算帧本身，覆盖用户中途
+        退出等无结算场景——空窗口在精扫后自然丢弃）；第三阶段仅在窗口内
+        以 4 FPS 跑结算面板检测。
+
+        传入 debug_dir 时会把逐帧预测记录为 JSONL，并把被判定为
+        天赋选择(大乱斗信号)或模式为大乱斗的可疑帧截图保存，用于排查误判。
+        """
+        if self._stage_classifier is None:
+            raise RuntimeError('级联扫描需要阶段分类模型')
+        debug_writer: Optional[Any] = None
+        if debug_dir is not None:
+            debug_dir = Path(debug_dir).expanduser().resolve()
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_writer = (debug_dir / 'classify-observations.jsonl').open(
+                'a', encoding='utf8'
+            )
+        try:
+            return self._scan_part_cascade(
+                part,
+                progress=progress,
+                status_callback=status_callback,
+                cancelled=cancelled,
+                debug_dir=debug_dir,
+                debug_writer=debug_writer,
+            )
+        finally:
+            if debug_writer is not None:
+                debug_writer.close()
+
+    def _probe_run_modes(
+        self,
+        path: str,
+        observations: Sequence[ClassifiedObservation],
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict[int, str]:
+        """对每个对局段的开局窗口以 4 FPS 高帧率采样做模式探测。
+
+        窗口覆盖"最后一张英雄卡片 ~ 进游戏后 20 秒"：大乱斗的天赋选择
+        界面必然出现在该窗口（3v3/5v5 没有），多帧投票确认；选英雄界面
+        大乱斗版与普通版画面不同，mode 头也是辅助信号。窗口内的零星
+        噪声帧（单帧 talent/aram）达不到阈值，不会误判。
+        """
+        if self._stage_classifier is None:
+            return {}
+        smoothed = smooth_stages(observations)
+        anchors = _confirmed_anchors(_pre_match_anchors(smoothed), smoothed)
+        segments = _segment_ranges(gameplay_runs(smoothed), anchors)
+        result: Dict[int, str] = {}
+        for segment_start_ms, segment_end_ms in segments:
+            pre_match_frames = tuple(
+                item
+                for item in smoothed
+                if item.stage == STAGE_PRE_MATCH
+                and segment_start_ms <= item.at_ms < segment_end_ms
+            )
+            if pre_match_frames:
+                window_start = max(segment_start_ms, pre_match_frames[-1].at_ms - 5_000)
+            else:
+                window_start = segment_start_ms
+            window_end = min(segment_end_ms, window_start + 25_000)
+            if window_end <= window_start:
+                continue
+            talent_frames = 0
+            five_frames = 0
+            pre_match_modes: Counter[int] = Counter()
+            probed_frames = 0
+            try:
+                for timed in self._sampler.fine_frames(
+                    path, ScanWindow(start_ms=window_start, end_ms=window_end)
+                ):
+                    self._raise_if_cancelled(cancelled)
+                    prediction = self._stage_classifier.classify(timed.frame)
+                    probed_frames += 1
+                    if (
+                        prediction.stage == STAGE_TALENT_SELECT
+                        and prediction.mode == MODE_ARAM
+                    ):
+                        talent_frames += 1
+                    if (
+                        prediction.stage in (STAGE_SCOREBOARD, STAGE_RESULT_PAGE)
+                        and prediction.mode == MODE_5V5
+                    ):
+                        five_frames += 1
+                    if prediction.stage == STAGE_PRE_MATCH:
+                        pre_match_modes[prediction.mode] += 1
+            except RuntimeError as error:
+                logger.warning(
+                    'Vainglory run opening probe skipped: start_ms={} error={!r}',
+                    segment_start_ms,
+                    error,
+                )
+                continue
+            if talent_frames >= 2:
+                mode = 'aram'
+            elif five_frames >= 2:
+                mode = '5v5'
+            else:
+                mode = 'unknown'
+                total_pre_match = sum(pre_match_modes.values())
+                if total_pre_match >= 8:
+                    dominant_mode, dominant_count = pre_match_modes.most_common(1)[0]
+                    if dominant_count >= total_pre_match * 0.5:
+                        mode = {
+                            MODE_3V3: '3v3',
+                            MODE_ARAM: 'aram',
+                            MODE_5V5: '5v5',
+                        }.get(dominant_mode, 'unknown')
+            if mode != 'unknown':
+                result[segment_start_ms] = mode
+            logger.info(
+                'Vainglory run opening mode probe: segment_start_ms={} '
+                'window_start_ms={} window_end_ms={} frames={} '
+                'talent_frames={} five_frames={} pre_match_modes={} mode={}',
+                segment_start_ms,
+                window_start,
+                window_end,
+                probed_frames,
+                talent_frames,
+                five_frames,
+                dict(pre_match_modes),
+                mode,
+            )
+        return result
+
+    def _exit_regression(
+        self,
+        path: str,
+        observations: Sequence[ClassifiedObservation],
+        hits: List[ResultHit],
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """退出信号回归扫描。
+
+        对局中→游戏外/转场/非虚荣的切换意味着前面必然出现过结算画面
+        （对局结束才能退出），但结算帧可能被误判为 gameplay（长时间空白，
+        如 840 案例的 109 秒）。因此从退出信号帧一直往前扫到该局最近的
+        选英雄界面锚点（无锚点则扫到对局段开始），以 4 FPS 跑结算面板
+        检测，命中帧直接加入 hits。回归区间上限 30 分钟作为保险。
+        """
+        if self._result_panel_detector is None:
+            return 0
+        smoothed = smooth_stages(observations)
+        anchors = _confirmed_anchors(_pre_match_anchors(smoothed), smoothed)
+        runs = gameplay_runs(smoothed)
+        in_match_stages = (STAGE_GAMEPLAY, STAGE_PRE_MATCH, STAGE_TALENT_SELECT)
+        exit_frames = []
+        for index, item in enumerate(observations):
+            is_exit = (
+                item.stage in (STAGE_OUT_OF_MATCH, STAGE_TRANSITION)
+                or item.content == CONTENT_NOT_VAINGLORY
+            )
+            if not is_exit or index == 0:
+                continue
+            previous = observations[index - 1]
+            if (
+                previous.stage not in in_match_stages
+                or previous.content == CONTENT_NOT_VAINGLORY
+            ):
+                continue
+            exit_frames.append(item)
+        if not exit_frames:
+            return 0
+        added = 0
+        for exit_item in exit_frames:
+            anchor_start = next(
+                (
+                    anchor[0].at_ms
+                    for anchor in reversed(anchors)
+                    if anchor[0].at_ms < exit_item.at_ms
+                ),
+                None,
+            )
+            has_confirmed_anchor = anchor_start is not None
+            if anchor_start is None:
+                run = next(
+                    (run for run in reversed(runs) if run[0].at_ms <= exit_item.at_ms),
+                    None,
+                )
+                anchor_start = run[0].at_ms if run is not None else 0
+            scan_start = max(0, anchor_start, exit_item.at_ms - 30 * 60_000)
+            scan_end = exit_item.at_ms
+            if scan_end <= scan_start:
+                continue
+            if has_confirmed_anchor and any(
+                scan_start <= hit.at_ms <= scan_end for hit in hits
+            ):
+                continue
+            regression_hits = 0
+            for timed in self._sampler.fine_frames(
+                path, ScanWindow(start_ms=scan_start, end_ms=scan_end)
+            ):
+                self._raise_if_cancelled(cancelled)
+                layout = self._detect_result_layout(timed.frame)
+                if layout is not None:
+                    hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
+                    regression_hits += 1
+            added += regression_hits
+            logger.info(
+                'Vainglory regression scan: exit_at_ms={} scan_start_ms={} '
+                'scan_end_ms={} hits={}',
+                exit_item.at_ms,
+                scan_start,
+                scan_end,
+                regression_hits,
+            )
+        return added
+
+    def _tail_regression(
+        self,
+        path: str,
+        hits: List[ResultHit],
+        segments: Sequence[Tuple[int, int]],
+        anchors: Sequence[Tuple[ClassifiedObservation, ClassifiedObservation]],
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """段尾窗口无命中时的自动回归。
+
+        结算画面可能被误判为 gameplay（段尾位置被高估），段尾窗口
+        （前推 40s）覆盖不到真实结算。此时从该段最近的锚点（无锚点则
+        段起点）到段尾窗口起点做 4 FPS 结算面板检测，命中帧直接加入
+        hits（由后续 collapse 统一处理）。
+        """
+        if self._result_panel_detector is None:
+            return 0
+        added = 0
+        for seg_start, seg_end in segments:
+            tail_start = seg_end - 40_000
+            tail_end = seg_end + 25_000
+            if any(tail_start <= hit.at_ms <= tail_end for hit in hits):
+                continue
+            anchor_ms = next(
+                (
+                    anchor[0].at_ms
+                    for anchor in reversed(anchors)
+                    if anchor[0].at_ms <= seg_start
+                ),
+                seg_start,
+            )
+            scan_start = max(seg_start, anchor_ms)
+            scan_end = tail_start
+            if scan_end <= scan_start:
+                continue
+            regression_hits = 0
+            for timed in self._sampler.fine_frames(
+                path, ScanWindow(start_ms=scan_start, end_ms=scan_end)
+            ):
+                self._raise_if_cancelled(cancelled)
+                layout = self._detect_result_layout(timed.frame)
+                if layout is not None:
+                    hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
+                    regression_hits += 1
+            added += regression_hits
+            logger.info(
+                'Vainglory tail regression scan: seg_start_ms={} seg_end_ms={} '
+                'anchor_ms={} scan_start_ms={} scan_end_ms={} hits={}',
+                seg_start,
+                seg_end,
+                anchor_ms,
+                scan_start,
+                scan_end,
+                regression_hits,
+            )
+        return added
+
+    def _scan_part_cascade(
+        self,
+        part: VideoPart,
+        *,
+        progress: Optional[Callable[[float], None]] = None,
+        status_callback: Optional[Callable[[AnalysisStatus], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+        debug_dir: Optional[Path] = None,
+        debug_writer: Optional[Any] = None,
+    ) -> DenseScanResult:
+        assert self._stage_classifier is not None
+        classifier = self._stage_classifier
+        scan_started = time.monotonic()
+        probe_started = time.monotonic()
+        profile = self._sampler.probe(part.path)
+        probe_seconds = time.monotonic() - probe_started
+        classify_started = time.monotonic()
+        observations: List[ClassifiedObservation] = []
+        next_progress = 0.01
+        next_status_progress = 0.1
+        logger.info(
+            'Vainglory cascade scan started: part_id={} duration_ms={}',
+            part.id,
+            profile.duration_ms,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='coarse_scan',
+                detail='开始每 5 秒取一帧分类粗扫整段视频',
+                elapsed_seconds=time.monotonic() - scan_started,
+            ),
+        )
+        for timed in self._sampler.classify_frames(part.path):
+            self._raise_if_cancelled(cancelled)
+            prediction = classifier.classify(timed.frame)
+            observations.append(
+                ClassifiedObservation(
+                    at_ms=timed.at_ms,
+                    stage=prediction.stage,
+                    stage_conf=prediction.stage_conf,
+                    mode=prediction.mode,
+                    content=prediction.content,
+                )
+            )
+            if debug_writer is not None:
+                debug_writer.write(
+                    json.dumps(
+                        {
+                            'at_ms': timed.at_ms,
+                            'content': prediction.content,
+                            'content_conf': round(prediction.content_conf, 4),
+                            'stage': prediction.stage,
+                            'stage_conf': round(prediction.stage_conf, 4),
+                            'mode': prediction.mode,
+                            'mode_conf': round(prediction.mode_conf, 4),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + '\n'
+                )
+                debug_writer.flush()
+                if (
+                    prediction.stage == STAGE_TALENT_SELECT
+                    or prediction.mode == MODE_ARAM
+                ) and debug_dir is not None:
+                    frame_path = debug_dir / 'suspect-{:09d}ms.png'.format(timed.at_ms)
+                    frame_path.write_bytes(png_bytes(timed.frame))
+                    logger.info(
+                        'Vainglory cascade debug suspect frame saved: part_id={} '
+                        'at_ms={} stage={} stage_conf={:.3f} mode={} mode_conf={:.3f} '
+                        'path={}',
+                        part.id,
+                        timed.at_ms,
+                        prediction.stage,
+                        prediction.stage_conf,
+                        prediction.mode,
+                        prediction.mode_conf,
+                        frame_path,
+                    )
+            ratio = min(1.0, timed.at_ms / max(1, profile.duration_ms))
+            if ratio >= next_progress:
+                if progress is not None:
+                    progress(ratio * 0.6)
+                while next_progress <= ratio:
+                    next_progress += 0.01
+            if ratio >= next_status_progress:
+                self._emit_status(
+                    status_callback,
+                    AnalysisStatus(
+                        stage='coarse_scan',
+                        detail='分类粗扫 {}% · 已采样 {} 帧'.format(
+                            min(100, round(ratio * 100)), len(observations)
+                        ),
+                        elapsed_seconds=time.monotonic() - scan_started,
+                        coarse_frames=len(observations),
+                    ),
+                )
+                while next_status_progress <= ratio:
+                    next_status_progress += 0.1
+        classify_seconds = time.monotonic() - classify_started
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='coarse_scan',
+                detail='分类采样完成，正在确认对局段与模式',
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+            ),
+        )
+        run_modes = self._probe_run_modes(part.path, observations, cancelled=cancelled)
+        windows = list(
+            build_classified_windows(
+                observations, duration_ms=profile.duration_ms, run_modes=run_modes
+            )
+        )
+        smoothed = smooth_stages(observations)
+        anchor_segments = _segment_ranges(
+            gameplay_runs(smoothed),
+            _confirmed_anchors(_pre_match_anchors(smoothed), smoothed),
+        )
+        segment_anchors = _confirmed_anchors(_pre_match_anchors(smoothed), smoothed)
+        logger.info(
+            'Vainglory classify pass completed: part_id={} frames={} '
+            'gameplay_frames={} result_signal_frames={} windows={} '
+            'classify_seconds={:.3f}',
+            part.id,
+            len(observations),
+            sum(item.stage == STAGE_GAMEPLAY for item in observations),
+            sum(
+                item.stage in (STAGE_RESULT_PAGE, STAGE_VICTORY_DEFEAT)
+                for item in observations
+            ),
+            len(windows),
+            classify_seconds,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='coarse_scan',
+                detail='分类完成：识别 {} 个对局段，生成 {} 个精扫区间'.format(
+                    len(anchor_segments), len(windows)
+                ),
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+                gameplay_runs=len(anchor_segments),
+                result_windows=len(windows),
+                total_windows=len(windows),
+            ),
+        )
+        hits: List[ResultHit] = []
+        decoded_frames = 0
+        detection_seconds = 0.0
+        scanned_window_ms = 0
+        total_window_ms = sum(window.end_ms - window.start_ms for window in windows)
+        fine_started = time.monotonic()
+        logger.info(
+            'Vainglory guided fine scan started: part_id={} windows={} '
+            'search_duration_ms={}',
+            part.id,
+            len(windows),
+            total_window_ms,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='fine_scan',
+                detail='开始用 4 FPS 精扫 {} 个结算区间'.format(len(windows)),
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+                gameplay_runs=len(anchor_segments),
+                result_windows=len(windows),
+                total_windows=len(windows),
+            ),
+        )
+        for window_index, window in enumerate(windows, 1):
+            self._raise_if_cancelled(cancelled)
+            scan_window = ScanWindow(
+                start_ms=window.start_ms, end_ms=window.end_ms, view_context='unknown'
+            )
+            for timed in self._sampler.fine_frames(part.path, scan_window):
+                self._raise_if_cancelled(cancelled)
+                decoded_frames += 1
+                detection_started = time.monotonic()
+                layout = self._detect_result_layout(timed.frame)
+                detection_seconds += time.monotonic() - detection_started
+                if layout is not None:
+                    hits.append(ResultHit(at_ms=timed.at_ms, layout=layout))
+            scanned_window_ms += window.end_ms - window.start_ms
+            logger.info(
+                'Vainglory guided fine scan window completed: part_id={} '
+                'window={}/{} start_ms={} end_ms={} mode={} '
+                'hits_so_far={}',
+                part.id,
+                window_index,
+                len(windows),
+                window.start_ms,
+                window.end_ms,
+                window.mode,
+                len(collapse_result_hits(hits)),
+            )
+            if progress is not None:
+                progress(0.6 + scanned_window_ms / max(1, total_window_ms) * 0.4)
+            self._emit_status(
+                status_callback,
+                AnalysisStatus(
+                    stage='fine_scan',
+                    detail='精扫 {}/{} · 累计找到 {} 个结算画面'.format(
+                        window_index, len(windows), len(collapse_result_hits(hits))
+                    ),
+                    elapsed_seconds=time.monotonic() - scan_started,
+                    coarse_frames=len(observations),
+                    gameplay_runs=len(anchor_segments),
+                    result_windows=len(windows),
+                    current_window=window_index,
+                    total_windows=len(windows),
+                    candidate_count=len(collapse_result_hits(hits)),
+                ),
+            )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='fine_scan',
+                detail='区间精扫完成，正在做段尾与退出回归补漏',
+                elapsed_seconds=time.monotonic() - scan_started,
+                coarse_frames=len(observations),
+                gameplay_runs=len(anchor_segments),
+                result_windows=len(windows),
+                current_window=len(windows),
+                total_windows=len(windows),
+                candidate_count=len(collapse_result_hits(hits)),
+            ),
+        )
+        tail_regression_added = self._tail_regression(
+            part.path, hits, anchor_segments, segment_anchors, cancelled=cancelled
+        )
+        if tail_regression_added:
+            logger.info(
+                'Vainglory tail regression added hits: part_id={} extra={}',
+                part.id,
+                tail_regression_added,
+            )
+        exit_regression_added = self._exit_regression(
+            part.path, observations, hits, cancelled=cancelled
+        )
+        if exit_regression_added:
+            logger.info(
+                'Vainglory exit regression added hits: part_id={} extra={}',
+                part.id,
+                exit_regression_added,
+            )
+        fine_seconds = time.monotonic() - fine_started
+        candidates = list(collapse_result_hits(hits, maximum_gap_ms=5_000))
+        candidate_entries: List[Tuple[int, str]] = []
+        for candidate in candidates:
+            matching_windows = tuple(
+                item
+                for item in windows
+                if item.start_ms <= candidate.at_ms < item.end_ms
+            )
+            matched_window = matching_windows[0] if matching_windows else None
+            candidate_entries.append(
+                (
+                    candidate.at_ms,
+                    'unknown' if matched_window is None else matched_window.mode,
+                )
+            )
+        for manual_at_ms in part.manual_candidate_times_ms:
+            if 0 <= manual_at_ms < profile.duration_ms and not any(
+                abs(candidate_at_ms - manual_at_ms) <= 5_000
+                for candidate_at_ms, _mode in candidate_entries
+            ):
+                candidate_entries.append((manual_at_ms, 'unknown'))
+        candidate_entries.sort(key=lambda item: item[0])
+        candidate_times_ms = [item[0] for item in candidate_entries]
+        candidate_modes = [item[1] for item in candidate_entries]
+        total_seconds = time.monotonic() - scan_started
+        logger.info(
+            'Vainglory cascade scan completed: part_id={} classify_frames={} '
+            'decoded_frames={} result_frames={} windows={} candidates={} '
+            'probe_seconds={:.3f} classify_seconds={:.3f} '
+            'detection_seconds={:.3f} total_seconds={:.3f}',
+            part.id,
+            len(observations),
+            decoded_frames,
+            len(hits),
+            len(windows),
+            len(candidate_times_ms),
+            probe_seconds,
+            classify_seconds,
+            detection_seconds,
+            total_seconds,
+        )
+        self._emit_status(
+            status_callback,
+            AnalysisStatus(
+                stage='fine_scan',
+                detail='级联扫描完成：{} 个区间得到 {} 个结算候选'.format(
+                    len(windows), len(candidate_times_ms)
+                ),
+                elapsed_seconds=total_seconds,
+                coarse_frames=len(observations),
+                gameplay_runs=len(anchor_segments),
+                result_windows=len(windows),
+                current_window=len(windows),
+                total_windows=len(windows),
+                candidate_count=len(candidate_times_ms),
+            ),
+        )
+        scanned_part = ScannedPart(
+            video_duration_ms=profile.duration_ms,
+            candidate_times_ms=tuple(candidate_times_ms),
+            candidate_view_contexts=tuple('unknown' for _ in candidate_times_ms),
+            candidate_hero_lineups=tuple(() for _ in candidate_times_ms),
+            candidate_modes=tuple(candidate_modes),
+        )
+        return DenseScanResult(
+            scanned_part=scanned_part,
+            decoded_frames=decoded_frames,
+            result_frames=len(hits),
+            probe_seconds=probe_seconds,
+            decode_seconds=classify_seconds + fine_seconds,
+            detection_seconds=detection_seconds,
+            total_seconds=total_seconds,
+        )
+
     def recognize_scanned_part(
         self,
         part: VideoPart,
@@ -1264,6 +1897,7 @@ class VaingloryVideoAnalyzer:
         progress: Optional[Callable[[float], None]] = None,
         status_callback: Optional[Callable[[AnalysisStatus], None]] = None,
         cancelled: Optional[Callable[[], bool]] = None,
+        debug_dir: Optional[Path] = None,
     ) -> Tuple[AnalyzedMatch, ...]:
         recognition_run_started = time.monotonic()
         candidates = scanned.candidate_times_ms
@@ -1276,6 +1910,11 @@ class VaingloryVideoAnalyzer:
             scanned.candidate_hero_lineups
             if len(scanned.candidate_hero_lineups) == len(candidates)
             else tuple(() for _ in candidates)
+        )
+        candidate_modes = (
+            scanned.candidate_modes
+            if len(scanned.candidate_modes) == len(candidates)
+            else tuple('' for _ in candidates)
         )
         matches: List[AnalyzedMatch] = []
         rejected_layout = 0
@@ -1309,7 +1948,10 @@ class VaingloryVideoAnalyzer:
             candidate_at_ms,
             candidate_view_context,
             candidate_lineup,
-        ) in enumerate(zip(candidates, candidate_contexts, candidate_lineups)):
+            candidate_mode,
+        ) in enumerate(
+            zip(candidates, candidate_contexts, candidate_lineups, candidate_modes)
+        ):
             self._raise_if_cancelled(cancelled)
             item_started = time.monotonic()
             logger.info(
@@ -1346,6 +1988,11 @@ class VaingloryVideoAnalyzer:
                 progress(index / max(1, len(candidates)))
             frame_started = time.monotonic()
             frame = self._sampler.frame_at(part.path, candidate_at_ms)
+            if debug_dir is not None:
+                frame_path = Path(debug_dir) / 'candidate-{:09d}ms.png'.format(
+                    candidate_at_ms
+                )
+                frame_path.write_bytes(png_bytes(frame))
             layouts = self._detect_result_layouts(frame)
             candidate_frame_seconds += time.monotonic() - frame_started
             if not layouts:
@@ -1380,6 +2027,7 @@ class VaingloryVideoAnalyzer:
             )
             header_ocr_seconds += time.monotonic() - header_started
             layout, header = self._select_ocr_context(layouts, attempts)
+            header_team_size = layout.team_size
             nearby_started = time.monotonic()
             nearby_contexts = self._sample_nearby_result_frames(
                 part.path, at_ms=candidate_at_ms, duration_ms=scanned.video_duration_ms
@@ -1392,19 +2040,53 @@ class VaingloryVideoAnalyzer:
             )
             frame, layout = ranked_contexts[0]
             name_frames = tuple(item[0] for item in ranked_contexts[1:])
+            best_layouts = {layout.team_size: layout}
+            for detected_layout in self._detect_result_layouts(frame):
+                previous = best_layouts.get(detected_layout.team_size)
+                if previous is None or detected_layout.confidence > previous.confidence:
+                    best_layouts[detected_layout.team_size] = detected_layout
+            recognition_layouts = sorted(
+                best_layouts.values(), key=lambda item: item.confidence, reverse=True
+            )
             match_started = time.monotonic()
             try:
-                recognized = self._recognize_frame(
-                    frame,
-                    part=part,
-                    at_ms=candidate_at_ms,
-                    layout=layout,
-                    header=header,
-                    name_frames=name_frames,
-                    hero_frames=name_frames,
-                    video_duration_ms=scanned.video_duration_ms,
-                    view_context=candidate_view_context,
-                )
+                recognized: Optional[AnalyzedMatch] = None
+                last_rejection: Optional[_ResultEvidenceRejected] = None
+                for recognition_layout in recognition_layouts:
+                    try:
+                        recognized = self._recognize_frame(
+                            frame,
+                            part=part,
+                            at_ms=candidate_at_ms,
+                            layout=recognition_layout,
+                            header=(
+                                header
+                                if recognition_layout.team_size == header_team_size
+                                else None
+                            ),
+                            name_frames=name_frames,
+                            hero_frames=name_frames,
+                            video_duration_ms=scanned.video_duration_ms,
+                            view_context=candidate_view_context,
+                            game_mode_hint=candidate_mode,
+                        )
+                    except _ResultEvidenceRejected as rejected:
+                        last_rejection = rejected
+                        logger.info(
+                            'Vainglory result OCR layout retry: part_id={} '
+                            'at_ms={} rejected_team_size={} observed_players={}',
+                            part.id,
+                            candidate_at_ms,
+                            recognition_layout.team_size,
+                            rejected.result.observed_player_count,
+                        )
+                        continue
+                    layout = recognition_layout
+                    break
+                if recognized is None:
+                    if last_rejection is None:
+                        raise RuntimeError('结算候选没有可用的版式')
+                    raise last_rejection
             except _ResultEvidenceRejected as rejected:
                 match_recognition_seconds += time.monotonic() - match_started
                 rejected_evidence += 1
@@ -2110,6 +2792,7 @@ class VaingloryVideoAnalyzer:
         hero_frames: Sequence[RgbFrame] = (),
         video_duration_ms: int,
         view_context: Literal['played', 'observed', 'unknown'] = 'unknown',
+        game_mode_hint: str = '',
     ) -> AnalyzedMatch:
         ocr_started = time.monotonic()
         if layout.viewport.ocr_profile == 'wide':
@@ -2164,7 +2847,13 @@ class VaingloryVideoAnalyzer:
             duration_seconds=recognized.header.duration_seconds,
             video_duration_ms=video_duration_ms,
             team_size=layout.team_size,
+            hint=game_mode_hint,
         )
+        populated_players = sum(
+            bool(player.name or player.raw_name) for player in recognized.players
+        )
+        if populated_players >= 10:
+            game_mode = '5v5'
         resolved_view_context: Literal['played', 'observed', 'unknown'] = (
             'played'
             if view_context == 'unknown' and recorded_player is not None
@@ -2231,14 +2920,66 @@ class VaingloryVideoAnalyzer:
         duration_seconds: Optional[int],
         video_duration_ms: int,
         team_size: TeamSize,
+        hint: str = '',
     ) -> str:
         if team_size == 5:
             return '5v5'
+        if hint in ('5v5', 'aram'):
+            return hint
         if duration_seconds is None:
-            return 'unknown'
+            return '3v3' if hint == '3v3' else 'unknown'
         estimated_start_ms = result_at_ms - duration_seconds * 1_000
         if estimated_start_ms < 0:
-            return 'unknown'
+            return '3v3' if hint == '3v3' else 'unknown'
+        if self._stage_classifier is None:
+            return self._legacy_game_mode(
+                path,
+                estimated_start_ms=estimated_start_ms,
+                video_duration_ms=video_duration_ms,
+            )
+        classifier = self._stage_classifier
+        window_start = max(0, estimated_start_ms - 180_000)
+        window_end = min(video_duration_ms, estimated_start_ms)
+        if window_end <= window_start:
+            return '3v3'
+        pre_match_modes: Counter[int] = Counter()
+        talent_frames = 0
+        for timed in self._sampler.fine_frames(
+            path, ScanWindow(start_ms=window_start, end_ms=window_end)
+        ):
+            prediction = classifier.classify(timed.frame)
+            if prediction.stage == STAGE_PRE_MATCH:
+                pre_match_modes[prediction.mode] += 1
+            elif (
+                prediction.stage == STAGE_TALENT_SELECT and prediction.mode == MODE_ARAM
+            ):
+                talent_frames += 1
+        logger.info(
+            'Vainglory game mode opening window: result_at_ms={} '
+            'estimated_start_ms={} window_start_ms={} window_end_ms={} '
+            'pre_match_modes={} talent_frames={}',
+            result_at_ms,
+            estimated_start_ms,
+            window_start,
+            window_end,
+            dict(pre_match_modes),
+            talent_frames,
+        )
+        if talent_frames >= 2:
+            return 'aram'
+        if pre_match_modes:
+            total = sum(pre_match_modes.values())
+            dominant_mode, dominant_count = pre_match_modes.most_common(1)[0]
+            if total >= 8 and dominant_count >= total * 0.5:
+                if dominant_mode == MODE_5V5:
+                    return '5v5'
+                if dominant_mode == MODE_ARAM:
+                    return 'aram'
+        return '3v3'
+
+    def _legacy_game_mode(
+        self, path: str, *, estimated_start_ms: int, video_duration_ms: int
+    ) -> str:
         sampled_at: List[int] = []
         talent_hits = 0
         for offset_ms in (1_000, 3_000, 5_000):
@@ -2910,7 +3651,7 @@ class VaingloryVideoAnalyzer:
         if team_size not in (3, 5):
             return False
         header = result.header
-        return all(
+        if not all(
             value is not None
             for value in (
                 header.left_kills,
@@ -2918,31 +3659,35 @@ class VaingloryVideoAnalyzer:
                 header.left_economy,
                 header.right_economy,
             )
-        )
+        ):
+            return False
+        observed_players = result.observed_player_count
+        if observed_players is None:
+            return True
+        return observed_players <= 6 if team_size == 3 else observed_players > 6
 
     def _select_ocr_context(
         self,
         layouts: Sequence[ResultLayout],
         attempts: Sequence[Tuple[ResultLayout, ResultHeader]],
     ) -> Tuple[ResultLayout, Optional[ResultHeader]]:
-        primary_layout = layouts[0]
+        primary_layout = max(layouts, key=lambda item: item.confidence)
         accepted = tuple(
             (attempt_layout, header)
             for attempt_layout, header in attempts
-            if self._is_completed_match(header)
+            if attempt_layout.team_size == primary_layout.team_size
+            and self._is_completed_match(header)
         )
         if not accepted:
             return primary_layout, None
-        accepted_team_size = accepted[0][0].team_size
-        layout = next(item for item in layouts if item.team_size == accepted_team_size)
         header = merge_result_headers(
             tuple(
                 (attempt_header, attempt_layout.confidence)
                 for attempt_layout, attempt_header in attempts
-                if attempt_layout.team_size == accepted_team_size
+                if attempt_layout.team_size == primary_layout.team_size
             )
         )
-        return layout, header
+        return primary_layout, header
 
     @staticmethod
     def _is_result_header(header: ResultHeader) -> bool:

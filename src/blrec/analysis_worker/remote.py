@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, cast
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, cast
 from urllib.parse import urljoin
 
 import requests
@@ -140,46 +140,106 @@ class _Heartbeat:
             self._runtime_status = runtime_status
 
     def _run(self) -> None:
+        last_status: Optional[AnalysisStatus] = None
         while not self._stop.wait(self._interval_seconds):
             with self._lock:
                 progress = self._progress
                 runtime_status = self._runtime_status
+            send_status = runtime_status
+            if runtime_status is not None and runtime_status == last_status:
+                send_status = None
             try:
-                self._client.heartbeat(
-                    self._kind, self._item_id, progress, runtime_status
-                )
+                self._client.heartbeat(self._kind, self._item_id, progress, send_status)
             except requests.RequestException as error:
                 logger.warning('分析 Worker 心跳发送失败：{!r}', error)
+            else:
+                if send_status is not None:
+                    last_status = send_status
 
 
 class RemoteAnalysisWorker:
     def __init__(
         self,
-        client: AnalysisWorkerClient,
+        client_factory: Callable[[], AnalysisWorkerClient],
         analyzer: VaingloryVideoAnalyzer,
         *,
         cache_dir: Path,
         poll_seconds: float = 5,
+        concurrency: int = 1,
+        debug_dir: Optional[Path] = None,
+        special_anchors: Sequence[str] = (),
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError('轮询间隔必须为正数')
-        self._client = client
+        if concurrency < 1:
+            raise ValueError('并发任务数必须大于 0')
+        self._client_factory = client_factory
         self._analyzer = analyzer
         self._cache_dir = cache_dir.expanduser().resolve()
         self._poll_seconds = poll_seconds
+        self._concurrency = concurrency
+        self._debug_dir = (
+            None if debug_dir is None else Path(debug_dir).expanduser().resolve()
+        )
+        self._special_anchors = tuple(
+            anchor.strip() for anchor in special_anchors if anchor.strip()
+        )
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
 
     def run(self, *, once: bool = False) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            'Mac 分析 Worker 已启动：worker_id={} cache={}',
+            'Mac 分析 Worker 已启动：worker_id={} cache={} concurrency={}',
             socket.gethostname(),
             self._cache_dir,
+            self._concurrency,
         )
-        while True:
+        if once or self._concurrency == 1:
+            client = self._client_factory()
             try:
-                claim = self._client.claim()
+                self._run_loop(client, worker_id=0, once=once)
+            finally:
+                client.close()
+            return
+        threads = [
+            threading.Thread(
+                target=self._worker_thread,
+                args=(index,),
+                name='analysis-worker-{}'.format(index),
+                daemon=True,
+            )
+            for index in range(self._concurrency)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    def _worker_thread(self, worker_id: int) -> None:
+        client = self._client_factory()
+        try:
+            self._run_loop(client, worker_id=worker_id, once=False)
+        finally:
+            client.close()
+
+    def _run_loop(
+        self, client: AnalysisWorkerClient, *, worker_id: int, once: bool
+    ) -> None:
+        logger.info(
+            '分析 Worker 线程已启动：worker_id={} worker={}',
+            socket.gethostname(),
+            worker_id,
+        )
+        while not self._stop.is_set():
+            try:
+                claim = client.claim()
             except requests.RequestException as error:
-                logger.warning('无法从 NAS 领取分析任务：{!r}', error)
+                logger.warning(
+                    'Worker {} 无法从 NAS 领取分析任务：{!r}', worker_id, error
+                )
                 if once:
                     raise
                 time.sleep(self._poll_seconds)
@@ -187,31 +247,43 @@ class RemoteAnalysisWorker:
             if claim is None:
                 if once:
                     return
-                time.sleep(self._poll_seconds)
+                if self._stop.wait(self._poll_seconds):
+                    return
                 continue
-            self._process_claim(claim)
+            self._process_claim(client, claim, worker_id=worker_id)
             if once:
                 return
 
-    def _process_claim(self, claim: Mapping[str, Any]) -> None:
+    def _process_claim(
+        self, client: AnalysisWorkerClient, claim: Mapping[str, Any], *, worker_id: int
+    ) -> None:
         kind = str(claim['kind'])
         item_id = int(claim['itemId'])
         started = time.monotonic()
-        logger.info('开始处理分析任务：kind={} item_id={}', kind, item_id)
+        logger.info(
+            '开始处理分析任务：kind={} item_id={} worker={}', kind, item_id, worker_id
+        )
         try:
-            with _Heartbeat(self._client, kind=kind, item_id=item_id) as heartbeat:
-                payload = self._analyze(claim, heartbeat)
-                self._client.complete(payload)
+            with _Heartbeat(client, kind=kind, item_id=item_id) as heartbeat:
+                payload = self._analyze(client, claim, heartbeat)
+                upload_started = time.monotonic()
+                client.complete(payload)
+                upload_seconds = time.monotonic() - upload_started
             logger.info(
-                '分析任务完成：kind={} item_id={} elapsed_seconds={:.3f}',
+                '分析任务完成：kind={} item_id={} worker={} '
+                'elapsed_seconds={:.3f} upload_seconds={:.3f}',
                 kind,
                 item_id,
+                worker_id,
                 time.monotonic() - started,
+                upload_seconds,
             )
         except Exception as error:
-            logger.exception('分析任务失败：kind={} item_id={}', kind, item_id)
+            logger.exception(
+                '分析任务失败：kind={} item_id={} worker={}', kind, item_id, worker_id
+            )
             try:
-                self._client.fail(
+                client.fail(
                     kind=kind,
                     item_id=item_id,
                     error='{}: {}'.format(type(error).__name__, error),
@@ -220,13 +292,23 @@ class RemoteAnalysisWorker:
                 logger.warning('分析失败状态未能写回 NAS：{!r}', report_error)
 
     def _analyze(
-        self, claim: Mapping[str, Any], heartbeat: _Heartbeat
+        self,
+        client: AnalysisWorkerClient,
+        claim: Mapping[str, Any],
+        heartbeat: _Heartbeat,
     ) -> Dict[str, Any]:
+        started = time.monotonic()
         kind = str(claim['kind'])
         item_id = int(claim['itemId'])
         if kind == 'hero_rematch':
             content = base64.b64decode(str(claim['framePng']), validate=True)
             heroes = self._analyzer.recognize_saved_heroes(content)
+            logger.info(
+                'Vainglory 小任务耗时明细：kind={} item_id={} total={:.3f}s',
+                kind,
+                item_id,
+                time.monotonic() - started,
+            )
             return {
                 'kind': kind,
                 'itemId': item_id,
@@ -235,6 +317,12 @@ class RemoteAnalysisWorker:
         if kind == 'recorded_player_backfill':
             content = base64.b64decode(str(claim['framePng']), validate=True)
             player = self._analyzer.detect_saved_recorded_player(content)
+            logger.info(
+                'Vainglory 小任务耗时明细：kind={} item_id={} total={:.3f}s',
+                kind,
+                item_id,
+                time.monotonic() - started,
+            )
             return {
                 'kind': kind,
                 'itemId': item_id,
@@ -245,6 +333,7 @@ class RemoteAnalysisWorker:
         part_id = int(part_payload['id'])
         video = self._cache_dir / 'part-{}.media'.format(part_id)
         try:
+            download_seconds = 0.0
             if not video.is_file():
                 heartbeat.update(
                     0.01,
@@ -254,7 +343,9 @@ class RemoteAnalysisWorker:
                         elapsed_seconds=0,
                     ),
                 )
-                self._client.download(str(part_payload['mediaPath']), video)
+                download_started = time.monotonic()
+                client.download(str(part_payload['mediaPath']), video)
+                download_seconds = time.monotonic() - download_started
             part = VideoPart(
                 id=part_id,
                 index=int(part_payload['index']),
@@ -279,17 +370,29 @@ class RemoteAnalysisWorker:
                     'matches': [encode_match(matches[0])],
                 }
 
+            anchor_name = str(claim.get('anchorName', '')).strip()
+            dense_mode = bool(anchor_name) and anchor_name in self._special_anchors
+
             def dense_progress(value: float) -> None:
+                heartbeat.update(0.02 + value * 0.68)
+
+            if dense_mode:
                 heartbeat.update(
-                    0.02 + value * 0.68,
+                    0.02,
                     AnalysisStatus(
-                        stage='fine_scan',
-                        detail='Mac Worker 正在以 4 FPS 全量扫描结算界面',
+                        stage='coarse_scan',
+                        detail='特殊主播：以 4 FPS 全量扫描结算界面',
                         elapsed_seconds=0,
                     ),
                 )
-
-            dense = self._analyzer.scan_part_dense(part, progress=dense_progress)
+                dense = self._analyzer.scan_part_dense(part, progress=dense_progress)
+            else:
+                dense = self._analyzer.scan_part_cascade(
+                    part,
+                    progress=dense_progress,
+                    status_callback=heartbeat.update_status,
+                    debug_dir=self._debug_dir,
+                )
             heartbeat.update(
                 0.70,
                 AnalysisStatus(
@@ -302,11 +405,28 @@ class RemoteAnalysisWorker:
                     total_candidates=len(dense.scanned_part.candidate_times_ms),
                 ),
             )
+            recognition_started = time.monotonic()
             matches = self._analyzer.recognize_scanned_part(
                 part,
                 dense.scanned_part,
                 progress=lambda value: heartbeat.update(0.70 + value * 0.29),
                 status_callback=heartbeat.update_status,
+                debug_dir=self._debug_dir,
+            )
+            recognition_seconds = time.monotonic() - recognition_started
+            logger.info(
+                'Vainglory 任务耗时明细：kind={} item_id={} download={:.3f}s '
+                'dense={:.3f}s recognition={:.3f}s total={:.3f}s '
+                'decoded_frames={} candidates={} matches={}',
+                kind,
+                item_id,
+                download_seconds,
+                dense.total_seconds,
+                recognition_seconds,
+                time.monotonic() - started,
+                dense.decoded_frames,
+                len(dense.scanned_part.candidate_times_ms),
+                len(matches),
             )
             return {
                 'kind': kind,

@@ -1633,7 +1633,7 @@
 >
   <ng-container *nzModalContent>
     <p class="recorded-player-review-help">
-      这里只显示仍有英雄空位的结算画面。请按阵营和行号选择英雄；人工结果会触发稿件内容刷新，并且不会被后续自动识别或整段重扫覆盖。
+      这里只显示仍有英雄空位的结算画面。可用新算法重试整场或单局；“忽略”只移出此列表，不会删除对局或统计数据。
     </p>
     <nz-alert
       *ngIf="heroReviewView.state === 'error'"
@@ -1689,6 +1689,45 @@
               B站播放
             </a>
           </header>
+          <div class="match-review-actions">
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="用新算法重新分析整场直播？所有分 P 都会进入手动优先队列。"
+              [nzLoading]="isSessionRescanning(match.sessionId)"
+              (nzOnConfirm)="requestSessionRescan(match)"
+            >
+              整场重试
+            </button>
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="只用新算法重新识别这一局当前的结算时间点？"
+              [nzLoading]="
+                rerunningMatchIds.has(match.id) ||
+                match.rerunState === 'pending' ||
+                match.rerunState === 'running'
+              "
+              (nzOnConfirm)="reanalyzeMatch(match)"
+            >
+              单局重试
+            </button>
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="只从“未识别英雄”列表忽略；对局、截图和统计都会保留。"
+              [nzLoading]="ignoringReviewKeys.has(reviewIgnoreKey(match.id, 'hero'))"
+              (nzOnConfirm)="ignoreMatchReview(match, 'hero')"
+            >
+              忽略
+            </button>
+          </div>
           <div class="hero-review-positions">
             <article
               *ngFor="
@@ -1751,7 +1790,7 @@
 >
   <ng-container *nzModalContent>
     <p class="recorded-player-review-help">
-      这里只显示高亮差异不足、算法主动放弃的结算画面。请从蓝绿色主播队中选择被录制者所在的一行；人工确认结果不会被后续自动识别覆盖。
+      这里只显示算法无法可靠判断主播英雄的结算画面。可用新算法重试整场或单局；“忽略”只移出此列表，不会删除对局或统计数据。
     </p>
     <nz-alert
       *ngIf="recordedPlayerReviewView.state === 'error'"
@@ -1820,6 +1859,49 @@
               B站播放
             </a>
           </header>
+          <div class="match-review-actions">
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="用新算法重新分析整场直播？所有分 P 都会进入手动优先队列。"
+              [nzLoading]="isSessionRescanning(match.sessionId)"
+              (nzOnConfirm)="requestSessionRescan(match)"
+            >
+              整场重试
+            </button>
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="只用新算法重新识别这一局当前的结算时间点？"
+              [nzLoading]="
+                rerunningMatchIds.has(match.id) ||
+                match.rerunState === 'pending' ||
+                match.rerunState === 'running'
+              "
+              (nzOnConfirm)="reanalyzeMatch(match)"
+            >
+              单局重试
+            </button>
+            <button
+              nz-button
+              nzSize="small"
+              type="button"
+              nz-popconfirm
+              nzPopconfirmTitle="只从“主播英雄待确认”列表忽略；对局、截图和统计都会保留。"
+              [nzLoading]="
+                ignoringReviewKeys.has(
+                  reviewIgnoreKey(match.id, 'recorded_player')
+                )
+              "
+              (nzOnConfirm)="ignoreMatchReview(match, 'recorded_player')"
+            >
+              忽略
+            </button>
+          </div>
           <div
             class="recorded-player-candidates"
             style="display: grid; gap: 6px"
@@ -2309,10 +2391,88 @@
       [queue]="queue"
       [sampledAt]="indexSampledAt"
       (playPart)="openAnalysisPart($event)"
+      (viewSession)="openAnalysisSessionDetails($event)"
+      (browseMatches)="openAnalysisImageBrowser($event)"
     ></app-vainglory-analysis-task-center>
     <ng-template #analysisQueueLoading>
       <nz-spin nzSimple></nz-spin>
     </ng-template>
+  </ng-container>
+</nz-modal>
+
+<nz-modal
+  [nzVisible]="analysisImageBrowserVisible"
+  [nzTitle]="analysisImageBrowserTitle"
+  [nzFooter]="null"
+  [nzWidth]="1120"
+  (nzOnCancel)="closeAnalysisImageBrowser()"
+>
+  <ng-container *nzModalContent>
+    <div *ngIf="analysisImageBrowserLoading" class="loading-state">
+      <nz-spin nzSimple></nz-spin>
+      <span>正在加载对局截图…</span>
+    </div>
+    <nz-alert
+      *ngIf="analysisImageBrowserError as imageError"
+      nzType="info"
+      nzShowIcon
+      [nzMessage]="imageError"
+    ></nz-alert>
+    <section
+      *ngIf="currentAnalysisImage as currentImage"
+      class="analysis-image-browser"
+      aria-label="对局图片浏览器"
+    >
+      <figure>
+        <img
+          [src]="currentImage.resultFrameUrl || ''"
+          [alt]="analysisImageTitle(currentImage, analysisImageBrowserIndex)"
+        />
+        <figcaption>
+          <strong>
+            {{ analysisImageTitle(currentImage, analysisImageBrowserIndex) }}
+          </strong>
+          <span>
+            第 {{ analysisImageBrowserIndex + 1 }} / {{ analysisImageBrowserItems.length }}
+            张 · 可用键盘左右键切换
+          </span>
+        </figcaption>
+      </figure>
+      <nav aria-label="切换对局截图">
+        <button
+          nz-button
+          type="button"
+          [disabled]="analysisImageBrowserIndex === 0"
+          (click)="showPreviousAnalysisImage()"
+        >
+          上一张
+        </button>
+        <button
+          nz-button
+          type="button"
+          [disabled]="
+            analysisImageBrowserIndex + 1 >= analysisImageBrowserItems.length
+          "
+          (click)="showNextAnalysisImage()"
+        >
+          下一张
+        </button>
+      </nav>
+      <div class="analysis-image-thumbnails" aria-label="全部对局截图">
+        <button
+          *ngFor="let image of analysisImageBrowserItems; let imageIndex = index"
+          type="button"
+          [class.is-current]="imageIndex === analysisImageBrowserIndex"
+          [attr.aria-current]="
+            imageIndex === analysisImageBrowserIndex ? 'true' : null
+          "
+          [attr.aria-label]="analysisImageTitle(image, imageIndex)"
+          (click)="selectAnalysisImage(imageIndex)"
+        >
+          <img [src]="image.resultFrameUrl || ''" alt="" loading="lazy" />
+        </button>
+      </div>
+    </section>
   </ng-container>
 </nz-modal>
 

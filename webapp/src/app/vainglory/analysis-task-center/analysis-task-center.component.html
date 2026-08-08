@@ -7,7 +7,7 @@
     <div>
       <strong>新录播优先处理</strong>
       <span>
-        页面会持续显示当前步骤、阶段产物和最近处理记录
+        级联扫描：5 秒分类粗扫 → 4 FPS 结算精扫 → OCR、英雄与主播识别
         <ng-container *ngIf="sampledAt !== null">
           · SSE 更新于 {{ sampledAt * 1000 | date: "HH:mm:ss" }}
         </ng-container>
@@ -139,9 +139,9 @@
       </section>
 
       <dl *ngIf="active.runtimeStage" class="analysis-stage-metrics">
-        <div><dt>粗扫帧</dt><dd>{{ active.coarseFrames }}</dd></div>
-        <div><dt>游戏片段</dt><dd>{{ active.gameplayRuns }}</dd></div>
-        <div><dt>疑似区间</dt><dd>{{ active.resultWindows }}</dd></div>
+        <div><dt>分类采样帧</dt><dd>{{ active.coarseFrames }}</dd></div>
+        <div><dt>推断对局段</dt><dd>{{ active.gameplayRuns }}</dd></div>
+        <div><dt>精扫区间</dt><dd>{{ active.resultWindows }}</dd></div>
         <div>
           <dt>
             {{ active.runtimeStage === "ocr_recognition" ? "候选验证" : "精扫进度" }}
@@ -153,9 +153,9 @@
             <dd>{{ active.currentWindow }}/{{ active.totalWindows }}</dd>
           </ng-template>
         </div>
-        <div><dt>结算候选</dt><dd>{{ active.candidateCount }}</dd></div>
-        <div><dt>已排除候选</dt><dd>{{ active.rejectedCandidates }}</dd></div>
-        <div><dt>本 P 识别通过</dt><dd>{{ active.recognizedMatches }}</dd></div>
+        <div><dt>结算画面</dt><dd>{{ active.candidateCount }}</dd></div>
+        <div><dt>OCR 已排除</dt><dd>{{ active.rejectedCandidates }}</dd></div>
+        <div><dt>本 P 已确认</dt><dd>{{ active.recognizedMatches }}</dd></div>
       </dl>
 
       <section
@@ -190,7 +190,7 @@
     <header class="analysis-section-heading">
       <div>
         <h3 id="recent-completion-title">最近完成</h3>
-        <span>数据库中共 {{ taskQueue.recentCompletions.length }} 个已完成分 P</span>
+        <span>展示最近 {{ taskQueue.recentCompletions.length }} 个已完成分 P</span>
       </div>
     </header>
     <ol class="analysis-completion-list">
@@ -203,6 +203,15 @@
             <time>
               完成于 {{ completion.completedAt * 1000 | date: "MM-dd HH:mm:ss" }}
             </time>
+            <button
+              nz-button
+              nzType="link"
+              nzSize="small"
+              type="button"
+              (click)="requestDetails(completion.sessionId)"
+            >
+              查看直播详情
+            </button>
             <a
               *ngIf="biliUrl(completion) as archiveUrl; else completedLocalPlayback"
               nz-button
@@ -249,6 +258,23 @@
             <dd>{{ formatDuration(completion.elapsedSeconds) }}</dd>
           </div>
         </dl>
+        <button
+          *ngIf="completion.matchPreviews.length > 0"
+          type="button"
+          class="analysis-image-strip"
+          title="打开图片浏览器，默认从第一张开始"
+          (click)="requestImageBrowser(completion, 'part')"
+        >
+          <span class="analysis-image-strip-thumbnails">
+            <img
+              *ngFor="let preview of completion.matchPreviews; let previewIndex = index"
+              [src]="preview.resultFrameUrl"
+              [alt]="previewAlt(preview, previewIndex)"
+              loading="lazy"
+            />
+          </span>
+          <strong>浏览 {{ completion.imageCount }} 张对局截图</strong>
+        </button>
       </li>
     </ol>
   </section>
@@ -295,29 +321,40 @@
                 </ng-container>
               </span>
             </div>
-            <a
-              *ngIf="biliUrl(queued) as archiveUrl; else queuedLocalPlayback"
-              nz-button
-              nzType="link"
-              nzSize="small"
-              [href]="archiveUrl"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              查看稿件
-            </a>
-            <ng-template #queuedLocalPlayback>
+            <div class="analysis-queued-actions">
               <button
-                *ngIf="queued.localVideoAvailable"
                 nz-button
                 nzType="link"
                 nzSize="small"
                 type="button"
-                (click)="requestPlayback(queued)"
+                (click)="requestDetails(queued.sessionId)"
               >
-                播放
+                查看直播详情
               </button>
-            </ng-template>
+              <a
+                *ngIf="biliUrl(queued) as archiveUrl; else queuedLocalPlayback"
+                nz-button
+                nzType="link"
+                nzSize="small"
+                [href]="archiveUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                查看稿件
+              </a>
+              <ng-template #queuedLocalPlayback>
+                <button
+                  *ngIf="queued.localVideoAvailable"
+                  nz-button
+                  nzType="link"
+                  nzSize="small"
+                  type="button"
+                  (click)="requestPlayback(queued)"
+                >
+                  播放
+                </button>
+              </ng-template>
+            </div>
           </div>
           <dl>
             <div>
@@ -347,6 +384,23 @@
               <dd>{{ queued.requestedAt * 1000 | date: "MM-dd HH:mm" }}</dd>
             </div>
           </dl>
+          <button
+            *ngIf="queued.matchPreviews.length > 0"
+            type="button"
+            class="analysis-image-strip"
+            title="打开图片浏览器，默认从第一张开始"
+            (click)="requestImageBrowser(queued, 'session')"
+          >
+            <span class="analysis-image-strip-thumbnails">
+              <img
+                *ngFor="let preview of queued.matchPreviews; let previewIndex = index"
+                [src]="preview.resultFrameUrl"
+                [alt]="previewAlt(preview, previewIndex)"
+                loading="lazy"
+              />
+            </span>
+            <strong>浏览 {{ queued.imageCount }} 张对局截图</strong>
+          </button>
         </div>
       </li>
     </ol>

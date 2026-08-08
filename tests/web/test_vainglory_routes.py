@@ -42,6 +42,7 @@ class FakeService:
         self.publication_retries = []
         self.suppressed_zero_match_sessions = []
         self.restored_zero_match_sessions = []
+        self.suppressed_match_reviews = []
         self.manual_match_markers = []
         self.created_players = []
         self.renamed_players = []
@@ -103,6 +104,9 @@ class FakeService:
 
     async def restore_zero_match_session(self, session_id: int) -> None:
         self.restored_zero_match_sessions.append(session_id)
+
+    async def suppress_match_review(self, match_id: int, review_type: str) -> None:
+        self.suppressed_match_reviews.append((match_id, review_type))
 
     async def list_anchor_stats(self) -> Tuple[AnchorStatsRecord, ...]:
         return (
@@ -669,6 +673,19 @@ def test_updates_match_title_and_returns_timeline_metadata(
     assert payload['resultFrameUrl'] == (
         '/api/v1/vainglory/matches/3/result-frame?v=9-11-960000'
     )
+
+
+def test_suppresses_one_review_queue_without_deleting_the_match(
+    api_client: Tuple[TestClient, FakeService]
+) -> None:
+    client, fake = api_client
+
+    response = client.put(
+        '/api/v1/vainglory/matches/3/review-suppressions/recorded_player'
+    )
+
+    assert response.status_code == 204
+    assert fake.suppressed_match_reviews == [(3, 'recorded_player')]
 
 
 def test_updates_all_editable_match_fields(

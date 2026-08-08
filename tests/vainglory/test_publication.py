@@ -106,8 +106,8 @@ def test_publication_uses_clean_description_and_comment_native_timestamps() -> N
     assert '红方玩家' not in plan.description_block
     assert DESCRIPTION_BEGIN not in plan.description_block
     assert DESCRIPTION_END not in plan.description_block
-    assert '①｜胜　｜凯恩 vs 骷髅' in plan.description_block
-    assert '②｜负　｜凯恩 vs 骷髅' in plan.description_block
+    assert '①｜胜　｜3V3｜凯恩 vs 骷髅' in plan.description_block
+    assert '②｜负　｜3V3｜凯恩 vs 骷髅' in plan.description_block
     assert '#02:00' not in plan.description_block
     assert '1/2/3' not in plan.description_block
     assert '经济' not in plan.description_block
@@ -116,8 +116,8 @@ def test_publication_uses_clean_description_and_comment_native_timestamps() -> N
         plan.description_block
     )
     assert plan.comments[0].content.startswith('共 2 局｜1 胜 1 负\n')
-    assert '①｜胜　｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
-    assert '②｜负　｜凯恩 vs 骷髅｜2#02:00' in plan.comments[0].content
+    assert '①｜胜　｜3V3｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
+    assert '②｜负　｜3V3｜凯恩 vs 骷髅｜2#02:00' in plan.comments[0].content
     assert plan.comments[0].match_ids == (1, 2)
 
 
@@ -133,8 +133,8 @@ def test_unknown_result_is_not_counted_as_a_loss() -> None:
     plan = build_publication_plan((match(1, winner_color='unknown'),))
 
     assert '共 1 局｜0 胜 0 负｜1 局结果未确认' in plan.description_block
-    assert '①｜待定｜凯恩 vs 骷髅' in plan.description_block
-    assert '①｜待定｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
+    assert '①｜待定｜3V3｜凯恩 vs 骷髅' in plan.description_block
+    assert '①｜待定｜3V3｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
 
 
 def test_chapter_uses_full_chinese_hero_name_with_game_number() -> None:
@@ -175,7 +175,7 @@ def test_native_timestamp_supports_hours_and_multipart_seek() -> None:
     )
 
     assert '3#01:02:03' not in plan.description_block
-    assert '①｜胜　｜凯恩 vs 骷髅｜3#01:02:03' in plan.comments[0].content
+    assert '①｜胜　｜3V3｜凯恩 vs 骷髅｜3#01:02:03' in plan.comments[0].content
 
 
 def test_very_long_archive_keeps_every_result_in_first_comment() -> None:
@@ -1008,7 +1008,7 @@ async def test_manual_publication_retry_allows_resending_a_confirmed_step(
 
 
 @pytest.mark.asyncio
-async def test_failed_publication_blocks_new_discovery_for_same_account(
+async def test_failed_publication_does_not_block_new_discovery_for_same_account(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -1025,14 +1025,14 @@ async def test_failed_publication_blocks_new_discovery_for_same_account(
             clock=lambda: 1000,
         )
 
-        assert await service.run_once() is False
-        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 1
+        assert await service.run_once() is True
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 2
     finally:
         await database.close()
 
 
 @pytest.mark.asyncio
-async def test_failed_publication_blocks_already_discovered_sibling(
+async def test_failed_publication_does_not_block_already_discovered_sibling(
     tmp_path: Path,
 ) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -1051,8 +1051,37 @@ async def test_failed_publication_blocks_already_discovered_sibling(
         assert await service.run_once() is True
         await insert_failed_publication(database)
 
-        assert await service.run_once() is False
-        assert protocol.edit_calls == []
+        assert await service.run_once() is True
+        assert protocol.chapter_calls
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_uses_separate_discovery_and_delivery_workers(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        await service.start()
+
+        assert service._discovery_task is not None
+        assert service._delivery_task is not None
+        assert service._discovery_task is not service._delivery_task
+        assert service._discovery_task.get_name() == 'vainglory-publication-discovery'
+        assert service._delivery_task.get_name() == 'vainglory-publication-delivery'
+        await service.close()
     finally:
         await database.close()
 

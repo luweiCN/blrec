@@ -16,6 +16,7 @@ from blrec.vainglory.glm_ocr import GlmOcrClient, GlmOcrResultReader
 from blrec.vainglory.hero_recognition import SiftHeroRecognizer, load_hero_references
 from blrec.vainglory.result_detection import load_result_panel_detector
 from blrec.vainglory.sampling import FfmpegSampler
+from blrec.vainglory.stage_classifier import load_stage_classifier
 
 from .remote import AnalysisWorkerClient, RemoteAnalysisWorker, load_worker_token
 
@@ -32,6 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument('--scan-only', action='store_true')
     scan.add_argument('--ocr-url', default=None)
     scan.add_argument('--frames-dir', type=Path, default=None)
+    scan.add_argument('--debug-dir', type=Path, default=None)
     scan.add_argument('--json-output', type=Path, default=None)
     run = commands.add_parser('run', help='从 NAS 领取并处理对局分析任务')
     run.add_argument('--server', default=os.environ.get('BLREC_SERVER_URL', ''))
@@ -44,7 +46,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         '--cache-dir', type=Path, default=Path('~/Library/Caches/BLRECAnalysisWorker')
     )
+    run.add_argument('--debug-dir', type=Path, default=None)
+    run.add_argument(
+        '--special-anchors',
+        default=os.environ.get('BLREC_SPECIAL_ANCHORS', ''),
+        help='特殊主播名单（逗号分隔）：这些主播用 4 FPS 全量扫描',
+    )
     run.add_argument('--poll-seconds', type=float, default=5)
+    run.add_argument('--concurrency', type=int, default=1)
     run.add_argument('--once', action='store_true')
     return parser
 
@@ -67,6 +76,9 @@ def _build_analyzer(
     detector = load_result_panel_detector(providers=providers)
     if detector is None:
         raise RuntimeError('结算界面模型不存在，不能执行全量扫描')
+    stage_classifier = load_stage_classifier(providers=providers)
+    if stage_classifier is None:
+        raise RuntimeError('阶段分类模型不存在，不能执行级联扫描')
     references = load_hero_references()
     hero_recognizer = SiftHeroRecognizer(references) if references else None
     result_reader = None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
@@ -75,6 +87,7 @@ def _build_analyzer(
         result_reader=result_reader,
         hero_recognizer=hero_recognizer,
         result_panel_detector=detector,
+        stage_classifier=stage_classifier,
     )
 
 
@@ -134,7 +147,9 @@ def _scan_file(arguments: argparse.Namespace) -> int:
         last_percent = percent
         print('全量扫描进度：{}%'.format(percent), file=sys.stderr, flush=True)
 
-    dense = analyzer.scan_part_dense(part, progress=report)
+    dense = analyzer.scan_part_cascade(
+        part, progress=report, debug_dir=arguments.debug_dir
+    )
     recognition_started = time.monotonic()
     matches = (
         ()
@@ -196,19 +211,24 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
     ).strip()
     if not ocr_url:
         raise ValueError('Mac Worker 必须配置本机 OCR 服务地址')
+    if not 1 <= arguments.concurrency <= 8:
+        raise ValueError('并发任务数必须在 1 到 8 之间')
     token = load_worker_token(arguments.token_file)
     providers = _execution_providers(arguments.execution_provider)
     analyzer = _build_analyzer(fps=arguments.fps, ocr_url=ocr_url, providers=providers)
-    client = AnalysisWorkerClient(server_url, token)
-    try:
-        RemoteAnalysisWorker(
-            client,
-            analyzer,
-            cache_dir=arguments.cache_dir,
-            poll_seconds=arguments.poll_seconds,
-        ).run(once=arguments.once)
-    finally:
-        client.close()
+    RemoteAnalysisWorker(
+        lambda: AnalysisWorkerClient(server_url, token),
+        analyzer,
+        cache_dir=arguments.cache_dir,
+        poll_seconds=arguments.poll_seconds,
+        concurrency=arguments.concurrency,
+        debug_dir=arguments.debug_dir,
+        special_anchors=tuple(
+            item.strip()
+            for item in str(arguments.special_anchors).split(',')
+            if item.strip()
+        ),
+    ).run(once=arguments.once)
     return 0
 
 

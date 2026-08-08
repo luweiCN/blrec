@@ -332,6 +332,18 @@ export class VaingloryService {
     );
   }
 
+  suppressMatchReview(
+    matchId: number,
+    reviewType: 'hero' | 'recorded_player',
+  ): Observable<void> {
+    return this.http.put<void>(
+      this.url.makeApiUrl(
+        `/api/v1/vainglory/matches/${matchId}/review-suppressions/${reviewType}`,
+      ),
+      null,
+    );
+  }
+
   deleteMatch(matchId: number): Observable<void> {
     return this.http.delete<void>(
       this.url.makeApiUrl(`/api/v1/vainglory/matches/${matchId}`),

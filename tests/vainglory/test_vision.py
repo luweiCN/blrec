@@ -357,6 +357,49 @@ def test_result_hero_crops_follow_both_sides_and_three_slots() -> None:
     assert all((hero.frame.width, hero.frame.height) == (96, 96) for hero in heroes)
 
 
+def test_result_hero_crop_preserves_avatar_shape_with_non_uniform_viewport() -> None:
+    width, height = 1920, 1080
+    pixels = bytearray(bytes((5, 5, 5)) * width * height)
+    viewport = ViewportTransform(
+        name='detected-5v5',
+        left=0,
+        top=-0.2,
+        width=1,
+        height=1.38,
+        ocr_profile='standard',
+    )
+    center_x = round(0.454 * width)
+    center_y = round(((0.503 - viewport.top) / viewport.height) * height)
+    marker = (240, 30, 180)
+    fill(
+        pixels,
+        width,
+        PixelRect(center_x - 12, center_y - 12, center_x + 12, center_y + 12),
+        marker,
+    )
+
+    hero = extract_result_heroes(
+        RgbFrame(width, height, bytes(pixels)), viewport=viewport, team_size=5
+    )[2]
+    marker_pixels = [
+        (x, y)
+        for y in range(hero.frame.height)
+        for x in range(hero.frame.width)
+        if hero.frame.pixels[
+            (y * hero.frame.width + x) * 3 : (y * hero.frame.width + x) * 3 + 3
+        ]
+        == bytes(marker)
+    ]
+    marker_width = (
+        max(x for x, _ in marker_pixels) - min(x for x, _ in marker_pixels) + 1
+    )
+    marker_height = (
+        max(y for _, y in marker_pixels) - min(y for _, y in marker_pixels) + 1
+    )
+
+    assert abs(marker_width - marker_height) <= 2
+
+
 def test_result_hero_crops_can_search_a_nearby_layout_offset() -> None:
     frame = synthetic_result_frame(left_teal=True, winner_teal=True)
     pixels = bytearray(frame.pixels)

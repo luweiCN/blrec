@@ -9,7 +9,7 @@ def test_test_workflow_is_reusable_and_covers_runtime_python() -> None:
     assert 'workflow_call:' in workflow
     assert "'3.11'" in workflow
     assert 'scripts/docker-smoke.sh blrec:release-test' in workflow
-    assert 'VERSION=3.0.0-beta.42' in workflow
+    assert 'VERSION=3.0.0-beta.43' in workflow
     assert 'name: Highlight media regression' in workflow
     assert 'timeout-minutes: 15' in workflow
     assert 'BLREC_RUN_HIGHLIGHT_MEDIA_TESTS' in workflow
@@ -27,11 +27,11 @@ def test_test_workflow_checks_the_browser_extension_independently() -> None:
     assert 'npm run build' in workflow
 
 
-def test_release_workflow_has_test_gate_and_exact_image_contract() -> None:
+def test_release_workflow_has_independent_exact_image_contract() -> None:
     workflow = (WORKFLOWS / 'release.yml').read_text(encoding='utf8')
     assert "tags: ['v*.*.*']" in workflow
-    assert 'uses: ./.github/workflows/test.yml' in workflow
-    assert 'needs: quality' in workflow
+    assert 'uses: ./.github/workflows/test.yml' not in workflow
+    assert 'needs: quality' not in workflow
     assert 'packages: write' in workflow
     assert 'linux/amd64,linux/arm64' in workflow
     assert 'ghcr.io/luweicn/blrec' in workflow

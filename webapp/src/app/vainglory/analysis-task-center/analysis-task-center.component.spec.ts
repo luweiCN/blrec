@@ -37,9 +37,26 @@ describe('AnalysisTaskCenterComponent', () => {
       rejectedCandidates: 0,
       recognizedMatches: 0,
       events: [],
+      imageCount: 2,
+      matchPreviews: [],
     };
     component.sampledAt = 1_500;
 
     expect(component.elapsedSeconds(item)).toBe(300);
+    expect(component.stageLabel(item)).toBe('4 FPS 结算精扫');
+
+    let browserRequest: unknown;
+    let sessionRequest: number | undefined;
+    component.browseMatches.subscribe((value) => (browserRequest = value));
+    component.viewSession.subscribe((value) => (sessionRequest = value));
+
+    component.requestImageBrowser(item, 'session');
+    component.requestDetails(item.sessionId);
+
+    expect(browserRequest).toEqual({
+      sessionId: 9,
+      title: '直播标题 · 已识别对局',
+    });
+    expect(sessionRequest).toBe(9);
   });
 });

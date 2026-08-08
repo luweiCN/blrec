@@ -230,9 +230,7 @@ def detect_active_content_rect(frame: RgbFrame) -> PixelRect:
     minimum_row_bright = max(2, round(len(sampled_x) * 0.10))
     minimum_column_bright = max(2, round(len(sampled_y) * 0.10))
     content_rows = tuple(
-        index
-        for index, bright in enumerate(row_bright)
-        if bright >= minimum_row_bright
+        index for index, bright in enumerate(row_bright) if bright >= minimum_row_bright
     )
     content_columns = tuple(
         index
@@ -288,12 +286,15 @@ def detect_active_content_rect(frame: RgbFrame) -> PixelRect:
         if column_has_content(x)
     )
     candidate = PixelRect(left, top, right, bottom)
-    materially_cropped = max(
-        candidate.left / frame.width,
-        candidate.top / frame.height,
-        (frame.width - candidate.right) / frame.width,
-        (frame.height - candidate.bottom) / frame.height,
-    ) >= 0.025
+    materially_cropped = (
+        max(
+            candidate.left / frame.width,
+            candidate.top / frame.height,
+            (frame.width - candidate.right) / frame.width,
+            (frame.height - candidate.bottom) / frame.height,
+        )
+        >= 0.025
+    )
     sufficiently_large = (
         candidate.right - candidate.left >= frame.width * 0.55
         and candidate.bottom - candidate.top >= frame.height * 0.50
@@ -354,10 +355,11 @@ def detect_result_layouts(
         )
         action_balance = min(action_contrasts) / max(1.0, max(action_contrasts))
         strong_actions = sum(value >= 30 for value in action_contrasts)
+        minimum_strong_actions = 2 if team_size == 5 else 3
         if (
             panel_detection is not None
             and action_balance < _MINIMUM_RESULT_ACTION_BALANCE
-            and strong_actions < 3
+            and strong_actions < minimum_strong_actions
         ):
             _log_layout_attempt(
                 frame,
@@ -385,7 +387,9 @@ def detect_result_layouts(
             minimum_action_contrast = max(
                 6.0, reference_contrast * min(1.0, frame.height / 1080)
             )
-        if min(action_contrasts) < minimum_action_contrast:
+        if min(action_contrasts) < minimum_action_contrast and not (
+            panel_detection is not None and strong_actions >= 2
+        ):
             _log_layout_attempt(
                 frame,
                 viewport,
@@ -442,13 +446,9 @@ def _panel_viewport(
 
 
 def _detected_panel_team_sizes(detection: ResultPanelDetection) -> Tuple[TeamSize, ...]:
-    panel_width = detection.rect.right - detection.rect.left
-    panel_height = detection.rect.bottom - detection.rect.top
-    aspect_ratio = panel_width / panel_height
-    if aspect_ratio <= 2.1:
-        return (5,)
-    if aspect_ratio >= 2.3:
-        return (3,)
+    # The detector box follows the visible scoreboard content, whose height varies
+    # with capture layout and animation state. It is therefore not team-size
+    # evidence: validate both layouts and let OCR/player rows decide.
     return (3, 5)
 
 
@@ -735,14 +735,18 @@ def extract_result_heroes(
     )
     for side, center_x in sides:
         for slot, center_y in enumerate(row_centers, 1):
+            rect = viewport.source_rect(
+                frame,
+                center_x - half_width,
+                center_y - 0.057,
+                center_x + half_width,
+                center_y + 0.057,
+            )
+            side_length = min(rect.right - rect.left, rect.bottom - rect.top)
+            left = rect.left + (rect.right - rect.left - side_length) // 2
+            top = rect.top + (rect.bottom - rect.top - side_length) // 2
             crop = frame.crop(
-                viewport.source_rect(
-                    frame,
-                    center_x - half_width,
-                    center_y - 0.057,
-                    center_x + half_width,
-                    center_y + 0.057,
-                )
+                PixelRect(left, top, left + side_length, top + side_length)
             ).resize_nearest(96, 96)
             result.append(HeroFrame(side=side, slot=slot, frame=crop))
     return tuple(result)

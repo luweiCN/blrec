@@ -604,9 +604,7 @@ class BiliAccountRuntime:
                     )
                 ocr_url = os.environ.get('BLREC_VAINGLORY_OCR_URL', '').strip()
                 result_reader = (
-                    None
-                    if not ocr_url
-                    else GlmOcrResultReader(GlmOcrClient(ocr_url))
+                    None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
                 )
                 try:
                     result_panel_detector = load_result_panel_detector()

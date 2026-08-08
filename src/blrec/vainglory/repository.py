@@ -64,6 +64,7 @@ class ScanClaim:
     realtime: bool
     part_duration_seconds: Optional[int] = None
     recording_duration_seconds: int = 0
+    anchor_name: str = ''
 
     @property
     def parts(self) -> Tuple[VideoPart, ...]:
@@ -89,6 +90,16 @@ class AnalysisQueueEvent:
 
 
 @dataclass(frozen=True)
+class AnalysisMatchPreview:
+    match_id: int
+    session_id: int
+    part_id: int
+    part_index: int
+    result_at_ms: int
+    title: str
+
+
+@dataclass(frozen=True)
 class AnalysisQueueCompletion:
     completed_at: int
     session_id: int
@@ -103,6 +114,8 @@ class AnalysisQueueCompletion:
     bvid: Optional[str] = None
     archive_page: Optional[int] = None
     local_video_available: bool = False
+    image_count: int = 0
+    match_previews: Tuple[AnalysisMatchPreview, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,6 +155,8 @@ class AnalysisQueueItem:
     bvid: Optional[str] = None
     archive_page: Optional[int] = None
     local_video_available: bool = False
+    image_count: int = 0
+    match_previews: Tuple[AnalysisMatchPreview, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1160,6 +1175,11 @@ class VaingloryRepository:
             ).fetchone()
             if analyzing is not None:
                 raise VaingloryConflict('该录播正在分析')
+            connection.execute(
+                'DELETE FROM vainglory_match_review_suppressions WHERE match_id IN ('
+                'SELECT id FROM vainglory_matches WHERE session_id=?)',
+                (int(session_id),),
+            )
             self._ensure_scan_job(connection, int(session_id), now)
             connection.executemany(
                 'INSERT INTO vainglory_part_jobs('
@@ -1421,6 +1441,7 @@ class VaingloryRepository:
             row = connection.execute(
                 'SELECT job.part_id,job.session_id,part.part_index,'
                 'part.source_path,part.final_path,session.title AS session_title,'
+                'session.anchor_name AS session_anchor_name,'
                 'part.record_duration_seconds,'
                 '(SELECT GROUP_CONCAT(marker.at_ms) '
                 'FROM vainglory_manual_match_markers marker '
@@ -1508,6 +1529,7 @@ class VaingloryRepository:
                     else int(row['record_duration_seconds'])
                 ),
                 recording_duration_seconds=int(row['recording_duration_seconds']),
+                anchor_name=str(row['session_anchor_name'] or ''),
             )
 
         return await self._database.write(claim)
@@ -1673,9 +1695,7 @@ class VaingloryRepository:
                 part=VideoPart(
                     id=part_id,
                     index=int(row['part_index']),
-                    path=_preferred_part_path(
-                        row['source_path'], row['final_path']
-                    ),
+                    path=_preferred_part_path(row['source_path'], row['final_path']),
                     title=str(row['session_title'] or ''),
                 ),
                 scanned=ScannedPart(
@@ -1978,7 +1998,8 @@ class VaingloryRepository:
                 'JOIN recording_parts part ON part.id=job.part_id '
                 'JOIN recording_sessions session ON session.id=job.session_id '
                 "WHERE job.state='ready' AND job.completed_at IS NOT NULL "
-                'ORDER BY job.completed_at DESC,job.part_id DESC'
+                'ORDER BY job.completed_at DESC,job.part_id DESC LIMIT ?',
+                (limit,),
             ).fetchall()
             part_ids = {
                 int(row['part_id'])
@@ -2017,9 +2038,7 @@ class VaingloryRepository:
                     'WHERE eligible.session_id=part.session_id '
                     'AND eligible.part_index<=part.part_index '
                     'AND eligible.upload_excluded_reason IS NULL)) AS archive_page '
-                    'FROM recording_parts part WHERE part.id IN ('
-                    + placeholders
-                    + ')',
+                    'FROM recording_parts part WHERE part.id IN (' + placeholders + ')',
                     tuple(sorted(part_ids)),
                 ).fetchall()
                 for media in media_rows:
@@ -2035,11 +2054,53 @@ class VaingloryRepository:
                         or int(media['archive_page']) < 1
                         else int(media['archive_page'])
                     )
-                    media_by_part[int(media['id'])] = (
-                        bvid,
-                        page,
-                        local_available,
+                    media_by_part[int(media['id'])] = (bvid, page, local_available)
+            session_ids = {
+                int(row['session_id'])
+                for row in (*active_rows, *queued_rows, *completion_rows)
+            }
+            previews_by_session: Dict[int, List[AnalysisMatchPreview]] = {}
+            previews_by_part: Dict[int, List[AnalysisMatchPreview]] = {}
+            image_count_by_session: Dict[int, int] = {}
+            image_count_by_part: Dict[int, int] = {}
+            if session_ids:
+                placeholders = ','.join('?' for _ in session_ids)
+                preview_rows = connection.execute(
+                    'SELECT match.id AS match_id,match.session_id,'
+                    'match.result_part_id AS part_id,part.part_index,'
+                    "match.result_at_ms,COALESCE(match.custom_title,'') AS title "
+                    'FROM vainglory_matches match '
+                    'JOIN recording_parts part ON part.id=match.result_part_id '
+                    'WHERE match.result_frame_path IS NOT NULL '
+                    'AND match.session_id IN ('
+                    + placeholders
+                    + ') ORDER BY match.session_id,part.part_index,'
+                    'match.result_at_ms,match.id',
+                    tuple(sorted(session_ids)),
+                ).fetchall()
+                for preview_row in preview_rows:
+                    preview = AnalysisMatchPreview(
+                        match_id=int(preview_row['match_id']),
+                        session_id=int(preview_row['session_id']),
+                        part_id=int(preview_row['part_id']),
+                        part_index=int(preview_row['part_index']),
+                        result_at_ms=int(preview_row['result_at_ms']),
+                        title=str(preview_row['title'] or ''),
                     )
+                    session_id = preview.session_id
+                    part_id = preview.part_id
+                    image_count_by_session[session_id] = (
+                        image_count_by_session.get(session_id, 0) + 1
+                    )
+                    image_count_by_part[part_id] = (
+                        image_count_by_part.get(part_id, 0) + 1
+                    )
+                    session_previews = previews_by_session.setdefault(session_id, [])
+                    if len(session_previews) < 4:
+                        session_previews.append(preview)
+                    part_previews = previews_by_part.setdefault(part_id, [])
+                    if len(part_previews) < 4:
+                        part_previews.append(preview)
             counts = {
                 category_names[int(row['category_rank'])]: int(row['count'])
                 for row in count_rows
@@ -2077,6 +2138,10 @@ class VaingloryRepository:
                     bvid=bvid,
                     archive_page=archive_page,
                     local_video_available=local_available,
+                    image_count=image_count_by_session.get(int(row['session_id']), 0),
+                    match_previews=tuple(
+                        previews_by_session.get(int(row['session_id']), ())
+                    ),
                 )
 
             def completion(row: sqlite3.Row) -> AnalysisQueueCompletion:
@@ -2111,6 +2176,8 @@ class VaingloryRepository:
                     bvid=bvid,
                     archive_page=archive_page,
                     local_video_available=local_available,
+                    image_count=image_count_by_part.get(int(row['part_id']), 0),
+                    match_previews=tuple(previews_by_part.get(int(row['part_id']), ())),
                 )
 
             return AnalysisQueueStatus(
@@ -2122,9 +2189,7 @@ class VaingloryRepository:
                 archive_pending=counts.get('archive', 0),
                 migration_pending=counts.get('migration', 0),
                 backlog_pending=counts.get('backlog', 0),
-                recent_completions=tuple(
-                    completion(row) for row in completion_rows
-                ),
+                recent_completions=tuple(completion(row) for row in completion_rows),
             )
 
         return await self._database.read(read)
@@ -2265,8 +2330,7 @@ class VaingloryRepository:
             suppressed_times = tuple(
                 int(row['at_ms'])
                 for row in connection.execute(
-                    'SELECT at_ms FROM vainglory_match_suppressions '
-                    'WHERE part_id=?',
+                    'SELECT at_ms FROM vainglory_match_suppressions ' 'WHERE part_id=?',
                     (int(part_id),),
                 ).fetchall()
             )
@@ -2332,15 +2396,13 @@ class VaingloryRepository:
                 recorded_player = (
                     match.recorded_player if normalized_team_size in (3, 5) else None
                 )
-                game_mode = (
-                    match.game_mode
-                    if match.game_mode in ('aram', 'other')
-                    else (
+                game_mode = match.game_mode
+                if game_mode not in ('aram', 'other', '3v3', '5v5'):
+                    game_mode = (
                         '3v3'
                         if normalized_team_size == 3
                         else '5v5' if normalized_team_size == 5 else 'unknown'
                     )
-                )
                 match_kind = (
                     match.match_kind
                     if match.match_kind in ('pvp', 'bot', 'practice')
@@ -2608,11 +2670,24 @@ class VaingloryRepository:
             game_mode=game_mode,
             session_id=session_id,
         )
-        conditions = [
-            'EXISTS(SELECT 1 FROM vainglory_matches match '
-            'WHERE match.session_id=session.id AND ' + ' AND '.join(where) + ')'
-        ]
-        session_parameters: List[object] = list(parameters)
+        exact_session_lookup = (
+            session_id is not None
+            and not normalize_player_name(player_name)
+            and not hero_ids
+            and winner_color is None
+            and end_reason is None
+            and game_mode is None
+        )
+        if exact_session_lookup:
+            assert session_id is not None
+            conditions = ['session.id=?']
+            session_parameters: List[object] = [int(session_id)]
+        else:
+            conditions = [
+                'EXISTS(SELECT 1 FROM vainglory_matches match '
+                'WHERE match.session_id=session.id AND ' + ' AND '.join(where) + ')'
+            ]
+            session_parameters = list(parameters)
         normalized_title = source_title.strip()
         if normalized_title:
             escaped_title = (
@@ -2724,7 +2799,7 @@ class VaingloryRepository:
             'SUM(COALESCE(match.duration_seconds,0)) AS duration_seconds,'
             'GROUP_CONCAT(DISTINCT match.game_mode) AS game_modes '
             'FROM recording_sessions session '
-            'JOIN vainglory_matches match ON match.session_id=session.id '
+            'LEFT JOIN vainglory_matches match ON match.session_id=session.id '
             'LEFT JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
             'WHERE session.id IN ({}) GROUP BY session.id'.format(
                 winner_color_sql, winner_color_sql, placeholders
@@ -2876,7 +2951,10 @@ class VaingloryRepository:
         condition = (
             'match.team_size IN (3,5) AND match.result_frame_path IS NOT NULL '
             'AND match.recorded_player_detection_version>=? '
-            'AND match.recorded_player_side IS NULL'
+            'AND match.recorded_player_side IS NULL AND NOT EXISTS('
+            'SELECT 1 FROM vainglory_match_review_suppressions suppression '
+            "WHERE suppression.match_id=match.id "
+            "AND suppression.review_type='recorded_player')"
         )
         parameters = (self.RECORDED_PLAYER_DETECTION_VERSION,)
         total = int(
@@ -2903,7 +2981,11 @@ class VaingloryRepository:
         condition = (
             'match.result_frame_path IS NOT NULL AND EXISTS('
             'SELECT 1 FROM vainglory_match_players player '
-            'WHERE player.match_id=match.id AND player.hero_id IS NULL)'
+            'WHERE player.match_id=match.id AND player.hero_id IS NULL) '
+            'AND NOT EXISTS('
+            'SELECT 1 FROM vainglory_match_review_suppressions suppression '
+            "WHERE suppression.match_id=match.id "
+            "AND suppression.review_type='hero')"
         )
         total = int(
             await self._database.scalar(
@@ -2928,6 +3010,25 @@ class VaingloryRepository:
             raise VaingloryNotFound('对局不存在')
         return (await self._hydrate_matches(rows))[0]
 
+    async def suppress_match_review(self, match_id: int, review_type: str) -> None:
+        if review_type not in ('hero', 'recorded_player'):
+            raise ValueError('review type must be hero or recorded_player')
+        now = self._now()
+
+        def suppress(connection: sqlite3.Connection) -> None:
+            match = connection.execute(
+                'SELECT 1 FROM vainglory_matches WHERE id=?', (int(match_id),)
+            ).fetchone()
+            if match is None:
+                raise VaingloryNotFound('对局不存在')
+            connection.execute(
+                'INSERT OR IGNORE INTO vainglory_match_review_suppressions('
+                'match_id,review_type,created_at) VALUES(?,?,?)',
+                (int(match_id), review_type, now),
+            )
+
+        await self._database.write(suppress)
+
     async def request_match_rerun(self, match_id: int) -> None:
         now = self._now()
 
@@ -2938,6 +3039,10 @@ class VaingloryRepository:
             ).fetchone()
             if match is None:
                 raise VaingloryNotFound('对局不存在')
+            connection.execute(
+                'DELETE FROM vainglory_match_review_suppressions WHERE match_id=?',
+                (int(match_id),),
+            )
             connection.execute(
                 'INSERT INTO vainglory_match_rerun_jobs('
                 'match_id,state,error,requested_at,started_at,completed_at,updated_at) '
@@ -2984,15 +3089,12 @@ class VaingloryRepository:
                 part=VideoPart(
                     id=int(row['result_part_id']),
                     index=int(row['part_index']),
-                    path=_preferred_part_path(
-                        row['source_path'], row['final_path']
-                    ),
+                    path=_preferred_part_path(row['source_path'], row['final_path']),
                     title=str(row['title'] or ''),
                 ),
                 result_at_ms=int(row['result_at_ms']),
                 view_context=cast(
-                    Literal['played', 'observed', 'unknown'],
-                    str(row['view_context']),
+                    Literal['played', 'observed', 'unknown'], str(row['view_context'])
                 ),
             )
 
@@ -3005,12 +3107,7 @@ class VaingloryRepository:
             connection.execute(
                 "UPDATE vainglory_match_rerun_jobs SET state='failed',error=?,"
                 'completed_at=?,updated_at=? WHERE match_id=?',
-                (
-                    error.strip()[:500] or '单局重新识别失败',
-                    now,
-                    now,
-                    int(match_id),
-                ),
+                (error.strip()[:500] or '单局重新识别失败', now, now, int(match_id)),
             )
             connection.execute(
                 'UPDATE vainglory_part_jobs SET completed_at=?,updated_at=? '
@@ -3045,9 +3142,7 @@ class VaingloryRepository:
                 (int(match_id),),
             ).fetchone()
             if current is None:
-                raise VaingloryConflict(
-                    '单局重新识别任务当前不能写入结果'
-                )
+                raise VaingloryConflict('单局重新识别任务当前不能写入结果')
             part_id = int(current['result_part_id'])
             session_id = int(current['session_id'])
             if int(recognized.part_id) != part_id:
@@ -3056,7 +3151,7 @@ class VaingloryRepository:
                 obsolete_frame_paths.append(str(current['result_frame_path']))
 
             heroes = self._existing_heroes(connection)
-            hero_ids = {
+            hero_ids: Dict[Tuple[str, int], Optional[int]] = {
                 (hero.side, hero.slot): self._resolve_hero(
                     connection, hero, heroes, now
                 )
@@ -3067,15 +3162,13 @@ class VaingloryRepository:
                 (player.slot for player in recognized.ocr.players), default=0
             )
             normalized_team_size = team_size if 1 <= team_size <= 5 else None
-            game_mode = (
-                recognized.game_mode
-                if recognized.game_mode in ('aram', 'other')
-                else (
+            game_mode = recognized.game_mode
+            if game_mode not in ('aram', 'other', '3v3', '5v5'):
+                game_mode = (
                     '3v3'
                     if normalized_team_size == 3
                     else '5v5' if normalized_team_size == 5 else 'unknown'
                 )
-            )
             match_kind = (
                 recognized.match_kind
                 if recognized.match_kind in ('pvp', 'bot', 'practice')
@@ -3090,12 +3183,10 @@ class VaingloryRepository:
             stats_exclusion_reason = (
                 None
                 if stats_eligible
-                else recognized.stats_exclusion_reason.strip()[:64]
-                or 'classification'
+                else recognized.stats_exclusion_reason.strip()[:64] or 'classification'
             )
             started_at_ms = max(
-                0,
-                recognized.result_at_ms - (header.duration_seconds or 0) * 1_000,
+                0, recognized.result_at_ms - (header.duration_seconds or 0) * 1_000
             )
             result_frame_path: Optional[str] = None
             if recognized.result_frame_png:
@@ -3190,8 +3281,7 @@ class VaingloryRepository:
                 tuple(values) + (int(match_id),),
             )
             connection.execute(
-                'DELETE FROM vainglory_match_players WHERE match_id=?',
-                (int(match_id),),
+                'DELETE FROM vainglory_match_players WHERE match_id=?', (int(match_id),)
             )
             for player in recognized.ocr.players:
                 stats = player.stats
@@ -4556,8 +4646,9 @@ class VaingloryRepository:
             if name not in changes:
                 continue
             value = changes[name]
-            if value is not None and (type(value) is not int or value < 0):
-                raise ValueError('对局数值 {} 无效'.format(name))
+            if value is not None:
+                if type(value) is not int or cast(int, value) < 0:
+                    raise ValueError('对局数值 {} 无效'.format(name))
             if name == 'duration_seconds' and value == 0:
                 raise ValueError('对局时长必须大于 0')
             patch[name] = value
@@ -4593,10 +4684,9 @@ class VaingloryRepository:
                         continue
                     value = raw_player[field_name]
                     minimum = 1 if field_name == 'hero_id' else 0
-                    if value is not None and (
-                        type(value) is not int or value < minimum
-                    ):
-                        raise ValueError('玩家数值 {} 无效'.format(field_name))
+                    if value is not None:
+                        if type(value) is not int or cast(int, value) < minimum:
+                            raise ValueError('玩家数值 {} 无效'.format(field_name))
                     player_patch[field_name] = value
                 if player_patch:
                     normalized_players['{}:{}'.format(side, slot)] = player_patch

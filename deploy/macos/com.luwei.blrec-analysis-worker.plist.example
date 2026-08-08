@@ -20,6 +20,8 @@
     <string>coreml</string>
     <string>--cache-dir</string>
     <string>__WORKER_CACHE_DIR__</string>
+    <string>--concurrency</string>
+    <string>1</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

@@ -640,6 +640,7 @@ class ArchiveBackfillService:
     async def _claim_import(self) -> Optional[sqlite3.Row]:
         now = self._now()
         quota_day = self._quota_day(now)
+
         def claim(connection: sqlite3.Connection) -> Optional[sqlite3.Row]:
             row = connection.execute(
                 'SELECT imported.*,imported.quota_day AS import_quota_day,'

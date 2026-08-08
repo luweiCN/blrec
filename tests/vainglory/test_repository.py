@@ -127,6 +127,88 @@ def analyzed_match() -> AnalyzedMatch:
 
 
 @pytest.mark.asyncio
+async def test_review_suppression_hides_only_the_selected_queue_and_rerun_restores_it(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+        match_id = int(await database.scalar('SELECT id FROM vainglory_matches'))
+        await database.execute(
+            'UPDATE vainglory_match_players SET hero_id=NULL '
+            'WHERE match_id=? AND side=\'left\' AND slot=1',
+            (match_id,),
+        )
+        await database.execute(
+            'UPDATE vainglory_matches SET recorded_player_side=NULL,'
+            'recorded_player_slot=NULL,recorded_player_detection_version=? '
+            'WHERE id=?',
+            (repository.RECORDED_PLAYER_DETECTION_VERSION, match_id),
+        )
+
+        assert (await repository.list_hero_reviews()).total == 1
+        assert (await repository.list_recorded_player_reviews()).total == 1
+
+        await repository.suppress_match_review(match_id, 'hero')
+
+        assert (await repository.list_hero_reviews()).total == 0
+        assert (await repository.list_recorded_player_reviews()).total == 1
+        assert (await repository.get_match(match_id)).id == match_id
+
+        await repository.request_scan(1)
+
+        assert (await repository.list_hero_reviews()).total == 1
+
+        await repository.suppress_match_review(match_id, 'hero')
+        await repository.request_match_rerun(match_id)
+
+        assert (await repository.list_hero_reviews()).total == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_review_suppression_rejects_unknown_type(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        with pytest.raises(ValueError, match='review type'):
+            await repository.suppress_match_review(1, 'unknown')
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_session_lookup_includes_a_live_before_matches_exist(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        page = await repository.list_match_sessions(session_id=1)
+
+        assert page.total == 1
+        assert page.items[0].session_id == 1
+        assert page.items[0].match_count == 0
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_ocr_queue_preserves_observed_candidate_context(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
@@ -661,6 +743,11 @@ async def test_analysis_queue_exposes_live_time_durations_and_confirmed_matches(
         assert active.part_duration_seconds == 1800
         assert active.recording_duration_seconds == 5400
         assert active.match_count == 1
+        assert active.image_count == 1
+        assert len(active.match_previews) == 1
+        assert active.match_previews[0].part_id == 1
+        assert status.recent_completions[0].image_count == 1
+        assert status.recent_completions[0].match_previews[0].match_id > 0
     finally:
         await database.close()
 

@@ -77,6 +77,7 @@ class ResultOcr:
     header: ResultHeader
     players: Tuple[OcrPlayer, ...]
     raw_text: str = ''
+    observed_player_count: Optional[int] = None
 
 
 @dataclass(frozen=True)

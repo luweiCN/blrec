@@ -310,6 +310,23 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
         queue_status = await index_service.analysis_queue_status()
         summary = await index_service.index_summary()
 
+        def match_preview(value: Any) -> Dict[str, object]:
+            return {
+                'matchId': value.match_id,
+                'partId': value.part_id,
+                'partIndex': value.part_index,
+                'resultAtMs': value.result_at_ms,
+                'title': value.title,
+                'resultFrameUrl': (
+                    '/api/v1/vainglory/matches/{}/result-frame?v={}-{}-{}'.format(
+                        value.match_id,
+                        value.session_id,
+                        value.part_id,
+                        value.result_at_ms,
+                    )
+                ),
+            }
+
         def queue_item(value: Any) -> Dict[str, object]:
             return {
                 'partId': value.part_id,
@@ -346,6 +363,10 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                 'bvid': value.bvid,
                 'archivePage': value.archive_page,
                 'localVideoAvailable': value.local_video_available,
+                'imageCount': value.image_count,
+                'matchPreviews': [
+                    match_preview(preview) for preview in value.match_previews
+                ],
                 'events': [
                     {
                         'at': event.at,
@@ -376,6 +397,10 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                     'bvid': value.bvid,
                     'archivePage': value.archive_page,
                     'localVideoAvailable': value.local_video_available,
+                    'imageCount': value.image_count,
+                    'matchPreviews': [
+                        match_preview(preview) for preview in value.match_previews
+                    ],
                 }
                 for value in queue_status.recent_completions
             ],

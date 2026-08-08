@@ -307,22 +307,38 @@ class VaingloryPublicationService:
         self._action_interval_seconds = action_interval_seconds
         self._picture_interval_seconds = picture_interval_seconds
         self._sleeper = sleeper
-        self._wake = asyncio.Event()
-        self._task: Optional[asyncio.Task[None]] = None
+        self._worker_lock = asyncio.Lock()
+        self._discovery_wake = asyncio.Event()
+        self._delivery_wake = asyncio.Event()
+        self._discovery_task: Optional[asyncio.Task[None]] = None
+        self._delivery_task: Optional[asyncio.Task[None]] = None
 
     async def start(self) -> None:
-        if self._task is not None:
+        if self._discovery_task is not None or self._delivery_task is not None:
             return
         await self.recover_interrupted()
-        self._wake.set()
-        self._task = asyncio.create_task(self._run(), name='vainglory-publication')
+        self._discovery_wake.set()
+        self._delivery_wake.set()
+        self._discovery_task = asyncio.create_task(
+            self._run_discovery(), name='vainglory-publication-discovery'
+        )
+        self._delivery_task = asyncio.create_task(
+            self._run_delivery(), name='vainglory-publication-delivery'
+        )
 
     async def close(self) -> None:
-        task, self._task = self._task, None
-        if task is None:
+        tasks = tuple(
+            task
+            for task in (self._discovery_task, self._delivery_task)
+            if task is not None
+        )
+        self._discovery_task = None
+        self._delivery_task = None
+        if not tasks:
             return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def retry_failed_step(self, session_id: int, step: str) -> None:
         if session_id <= 0:
@@ -427,7 +443,7 @@ class VaingloryPublicationService:
             bvid,
             step,
         )
-        self._wake.set()
+        self._delivery_wake.set()
 
     async def recover_interrupted(self) -> int:
         now = self._now()
@@ -572,6 +588,13 @@ class VaingloryPublicationService:
     async def run_once(self) -> bool:
         if await self._discover():
             return True
+        return await self._run_delivery_once()
+
+    async def _run_delivery_once(self) -> bool:
+        async with self._worker_lock:
+            return await self._run_delivery_once_locked()
+
+    async def _run_delivery_once_locked(self) -> bool:
         work_query = (
             'SELECT publication.*,account.state AS account_state,'
             'account.credential_version,account.uid AS account_uid '
@@ -581,9 +604,6 @@ class VaingloryPublicationService:
             "WHERE publication.state IN ('prepared','running','paused') "
             'AND publication.needs_refresh=0 '
             'AND instr(COALESCE(session.title,\'\'),?)=0 '
-            'AND NOT EXISTS(SELECT 1 FROM vainglory_publications failed '
-            'WHERE failed.account_id=publication.account_id '
-            "AND failed.state='failed') "
             'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
             'JOIN archive_migration_jobs paused_job '
             'ON paused_job.id=paused_item.migration_id '
@@ -623,27 +643,50 @@ class VaingloryPublicationService:
             return True
         return False
 
-    async def _run(self) -> None:
+    async def _run_discovery(self) -> None:
         while True:
             try:
-                progressed = await self.run_once()
+                progressed = await self._discover()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception('Vainglory publication worker iteration failed')
+                logger.exception('Vainglory publication discovery worker failed')
+                progressed = False
+            if progressed:
+                continue
+            try:
+                await asyncio.wait_for(
+                    self._discovery_wake.wait(), timeout=self._idle_poll_seconds
+                )
+            except asyncio.TimeoutError:
+                pass
+            self._discovery_wake.clear()
+
+    async def _run_delivery(self) -> None:
+        while True:
+            try:
+                progressed = await self._run_delivery_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Vainglory publication delivery worker failed')
                 progressed = False
             if progressed:
                 await self._sleeper(self._action_interval_seconds)
                 continue
             try:
                 await asyncio.wait_for(
-                    self._wake.wait(), timeout=self._idle_poll_seconds
+                    self._delivery_wake.wait(), timeout=self._idle_poll_seconds
                 )
             except asyncio.TimeoutError:
                 pass
-            self._wake.clear()
+            self._delivery_wake.clear()
 
     async def _discover(self) -> bool:
+        async with self._worker_lock:
+            return await self._discover_locked()
+
+    async def _discover_locked(self) -> bool:
         candidate = await self._next_candidate()
         if candidate is None:
             return False
@@ -748,7 +791,10 @@ class VaingloryPublicationService:
                 )
             return True
 
-        return await self._database.write(persist)
+        persisted = await self._database.write(persist)
+        if persisted:
+            self._delivery_wake.set()
+        return persisted
 
     async def _next_candidate(self) -> Optional[_Candidate]:
         common = (
@@ -758,9 +804,6 @@ class VaingloryPublicationService:
             + _SESSION_ARCHIVES_COMPLETE
             + ' '
             "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
-            'AND NOT EXISTS(SELECT 1 FROM vainglory_publications failed '
-            'WHERE failed.account_id={account}.account_id '
-            "AND failed.state='failed') "
             'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
             'JOIN archive_migration_jobs paused_job '
             'ON paused_job.id=paused_item.migration_id '
@@ -810,7 +853,7 @@ class VaingloryPublicationService:
             'ORDER BY CASE WHEN EXISTS('
             'SELECT 1 FROM archive_migration_items priority_item '
             'WHERE priority_item.upload_job_id=job.id) THEN 1 ELSE 0 END,'
-            'session.started_at DESC,job.id DESC LIMIT 1',
+            'session.started_at,job.id LIMIT 1',
             (
                 VaingloryRepository.ALGORITHM_VERSION,
                 VaingloryRepository.HERO_RECOGNITION_VERSION,
@@ -830,7 +873,7 @@ class VaingloryPublicationService:
                 'AND imported.session_id IS NOT NULL '
                 'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
                 'WHERE job.session_id=imported.session_id) '
-                'ORDER BY imported.published_at DESC,imported.id DESC LIMIT 1',
+                'ORDER BY imported.published_at,imported.id LIMIT 1',
                 (
                     VaingloryRepository.ALGORITHM_VERSION,
                     VaingloryRepository.HERO_RECOGNITION_VERSION,

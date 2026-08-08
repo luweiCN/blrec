@@ -60,6 +60,8 @@ function match(): VaingloryMatch {
     recordedPlayerConfidence: null,
     recordedPlayerSource: 'automatic',
     recordedPlayerState: 'pending',
+    rerunState: null,
+    rerunError: null,
     players: [],
   };
 }
@@ -186,6 +188,8 @@ describe('VaingloryComponent remote media', () => {
       'listRecordedPlayerReviews',
       'setRecordedPlayer',
       'setPlayerHero',
+      'reanalyzeMatch',
+      'suppressMatchReview',
     ]);
     recordings = jasmine.createSpyObj<RecordingSessionService>(
       'RecordingSessionService',
@@ -319,6 +323,48 @@ describe('VaingloryComponent remote media', () => {
     expect(recordings.requestRemoteMedia).not.toHaveBeenCalled();
   });
 
+  it('opens the analysis image browser at the first image and uses arrow keys', () => {
+    const earlier = match();
+    const later = { ...match(), id: 4, resultAtMs: 700_000 };
+    vainglory.listMatches.and.returnValue(
+      of({ total: 2, items: [later, earlier] }),
+    );
+
+    component.openAnalysisImageBrowser({
+      sessionId: 9,
+      title: '直播标题 · 已识别对局',
+    });
+
+    expect(component.analysisImageBrowserVisible).toBeTrue();
+    expect(component.analysisImageBrowserIndex).toBe(0);
+    expect(component.currentAnalysisImage?.id).toBe(3);
+
+    component.handleAnalysisImageKeydown(
+      new KeyboardEvent('keydown', { key: 'ArrowRight' }),
+    );
+
+    expect(component.analysisImageBrowserIndex).toBe(1);
+    expect(component.currentAnalysisImage?.id).toBe(4);
+  });
+
+  it('ignores one review without deleting its match', () => {
+    component.heroReviewView = {
+      state: 'ready',
+      total: 1,
+      items: [match()],
+    };
+    vainglory.suppressMatchReview.and.returnValue(of(void 0));
+
+    component.ignoreMatchReview(match(), 'hero');
+
+    expect(vainglory.suppressMatchReview).toHaveBeenCalledOnceWith(3, 'hero');
+    expect(component.heroReviewTotal).toBe(0);
+    expect(component.heroReviews).toEqual([]);
+    expect(messages.success).toHaveBeenCalledWith(
+      '已从当前待确认列表忽略，对局和统计数据保持不变',
+    );
+  });
+
   it('lets the user start historical backfill for a chosen account', () => {
     const account: BiliAccount = {
       id: 7,
@@ -350,6 +396,8 @@ describe('VaingloryComponent remote media', () => {
         quotaDay: '1970-01-01',
         nextPage: 2,
         discoveryComplete: true,
+        seasonStartedAt: null,
+        seasonEndedAt: null,
       }),
     );
     vainglory.requestArchiveSync.and.returnValue(
@@ -370,6 +418,8 @@ describe('VaingloryComponent remote media', () => {
         quotaDay: null,
         nextPage: 1,
         discoveryComplete: false,
+        seasonStartedAt: null,
+        seasonEndedAt: null,
       }),
     );
 
@@ -389,6 +439,9 @@ describe('VaingloryComponent remote media', () => {
       sourceTitle: '原始直播标题',
       anchorName: '主播',
       startedAt: 1_000,
+      liveStartedAt: 1_000,
+      partCount: 1,
+      recordingDurationSeconds: 585,
       matchCount: 1,
       tealWinCount: 1,
       orangeWinCount: 0,
@@ -402,6 +455,8 @@ describe('VaingloryComponent remote media', () => {
       descriptionState: null,
       pinState: null,
       chapterState: null,
+      publicationPriority: false,
+      publicationUpdatedAt: null,
     };
     vainglory.listMatches.and.returnValue(of({ total: 1, items: [match()] }));
 
@@ -433,6 +488,9 @@ describe('VaingloryComponent remote media', () => {
       sourceTitle: '原始直播标题',
       anchorName: '主播',
       startedAt: 1_000,
+      liveStartedAt: 1_000,
+      partCount: 1,
+      recordingDurationSeconds: 585,
       matchCount: 1,
       tealWinCount: 1,
       orangeWinCount: 0,
@@ -446,6 +504,8 @@ describe('VaingloryComponent remote media', () => {
       descriptionState: null,
       pinState: null,
       chapterState: null,
+      publicationPriority: false,
+      publicationUpdatedAt: null,
     };
     const saved = { ...summary, title: '整场新标题' };
     vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));
@@ -469,6 +529,9 @@ describe('VaingloryComponent remote media', () => {
       sourceTitle: '原始直播标题',
       anchorName: '',
       startedAt: 1_000,
+      liveStartedAt: 1_000,
+      partCount: 1,
+      recordingDurationSeconds: 585,
       matchCount: 1,
       tealWinCount: 1,
       orangeWinCount: 0,
@@ -482,6 +545,8 @@ describe('VaingloryComponent remote media', () => {
       descriptionState: null,
       pinState: null,
       chapterState: null,
+      publicationPriority: false,
+      publicationUpdatedAt: null,
     };
     const saved = { ...summary, anchorName: '玩不明白' };
     vainglory.listMatches.and.returnValue(of({ total: 0, items: [] }));
@@ -606,6 +671,9 @@ describe('VaingloryComponent remote media', () => {
       sourceTitle: '原始直播标题',
       anchorName: '主播',
       startedAt: 1_000,
+      liveStartedAt: 1_000,
+      partCount: 1,
+      recordingDurationSeconds: 585,
       matchCount: 1,
       tealWinCount: 1,
       orangeWinCount: 0,
@@ -619,6 +687,8 @@ describe('VaingloryComponent remote media', () => {
       descriptionState: 'confirmed',
       pinState: 'in_flight',
       chapterState: 'confirmed',
+      publicationPriority: false,
+      publicationUpdatedAt: null,
     };
     component.sessionsView = { state: 'ready', total: 1, items: [failed] };
     vainglory.retryPublicationStep.and.returnValue(of(void 0));
@@ -629,7 +699,9 @@ describe('VaingloryComponent remote media', () => {
     expect(component.isPublicationStepRetrying(9, 'pin')).toBeFalse();
     expect(component.sessions[0].publicationState).toBe('prepared');
     expect(component.sessions[0].pinState).toBe('prepared');
-    expect(messages.success).toHaveBeenCalledWith('已重新提交置顶评论');
+    expect(messages.success).toHaveBeenCalledWith(
+      '已将置顶评论加入发布专用队列，并提升为最高优先级',
+    );
   });
 
   it('creates a player, renames it, and manages its room binding', () => {

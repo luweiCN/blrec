@@ -417,6 +417,7 @@ def parse_glm_result(text: str, *, team_size: int = 3) -> ResultOcr:
         header=header,
         players=_players_from_positions(positioned, team_size=team_size),
         raw_text=text,
+        observed_player_count=len(_KDA_PATTERN.findall(text)),
     )
 
 
@@ -473,6 +474,14 @@ def merge_glm_results(
         players=tuple(players),
         raw_text='\n'.join(
             candidate.raw_text for candidate in candidates if candidate.raw_text
+        ),
+        observed_player_count=max(
+            (
+                candidate.observed_player_count
+                for candidate in candidates
+                if candidate.observed_player_count is not None
+            ),
+            default=None,
         ),
     )
 

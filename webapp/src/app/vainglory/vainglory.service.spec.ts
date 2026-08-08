@@ -134,6 +134,14 @@ describe('VaingloryService', () => {
     expect(saved.request.method).toBe('PATCH');
     expect(saved.request.body).toEqual({ heroId: 7 });
     saved.flush({});
+
+    service.suppressMatchReview(9, 'hero').subscribe();
+    const ignored = http.expectOne(
+      '/api/v1/vainglory/matches/9/review-suppressions/hero',
+    );
+    expect(ignored.request.method).toBe('PUT');
+    expect(ignored.request.body).toBeNull();
+    ignored.flush(null);
   });
 
   it('updates one title for a recording session', () => {

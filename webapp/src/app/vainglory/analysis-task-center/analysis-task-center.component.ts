@@ -12,6 +12,7 @@ import {
   VaingloryAnalysisQueueCompletion,
   VaingloryAnalysisQueueEvent,
   VaingloryAnalysisQueueItem,
+  VaingloryAnalysisMatchPreview,
 } from '../vainglory.model';
 
 @Component({
@@ -26,6 +27,12 @@ export class AnalysisTaskCenterComponent {
   @Output() playPart = new EventEmitter<{
     readonly sessionId: number;
     readonly partId: number;
+  }>();
+  @Output() viewSession = new EventEmitter<number>();
+  @Output() browseMatches = new EventEmitter<{
+    readonly sessionId: number;
+    readonly partId?: number;
+    readonly title: string;
   }>();
 
   workerLabel(queue: VaingloryAnalysisQueue): string {
@@ -55,16 +62,22 @@ export class AnalysisTaskCenterComponent {
     if (item.state === 'pending') {
       return '等待扫描视频';
     }
-    if (item.stage === 'ocr_waiting') {
-      return '已定位结算画面，等待 OCR';
+    const runtimeLabels = {
+      probing: '读取视频信息',
+      coarse_scan: '5 秒分类粗扫',
+      fine_scan: '4 FPS 结算精扫',
+      ocr_waiting: '等待 OCR',
+      ocr_recognition: 'OCR、英雄与主播识别',
+      '': '',
+    } as const;
+    if (item.runtimeStage) {
+      return runtimeLabels[item.runtimeStage];
     }
-    if (item.stage === 'ocr_recognition') {
-      return 'OCR 与英雄识别';
-    }
-    if (item.progress < 0.42) {
-      return '粗扫视频';
-    }
-    return '定位结算画面';
+    return item.stage === 'ocr_waiting'
+      ? '已定位结算画面，等待 OCR'
+      : item.stage === 'ocr_recognition'
+        ? 'OCR、英雄与主播识别'
+        : '扫描视频';
   }
 
   percent(item: VaingloryAnalysisQueueItem): number {
@@ -102,6 +115,28 @@ export class AnalysisTaskCenterComponent {
     item: VaingloryAnalysisQueueItem | VaingloryAnalysisQueueCompletion,
   ): void {
     this.playPart.emit({ sessionId: item.sessionId, partId: item.partId });
+  }
+
+  requestDetails(sessionId: number): void {
+    this.viewSession.emit(sessionId);
+  }
+
+  requestImageBrowser(
+    item: VaingloryAnalysisQueueItem | VaingloryAnalysisQueueCompletion,
+    scope: 'session' | 'part',
+  ): void {
+    this.browseMatches.emit({
+      sessionId: item.sessionId,
+      ...(scope === 'part' ? { partId: item.partId } : {}),
+      title:
+        scope === 'part'
+          ? `${item.title || '未命名直播'} · P${item.partIndex} 对局截图`
+          : `${item.title || '未命名直播'} · 已识别对局`,
+    });
+  }
+
+  previewAlt(preview: VaingloryAnalysisMatchPreview, index: number): string {
+    return `${preview.title || `第 ${index + 1} 局`}，P${preview.partIndex}，结算画面`;
   }
 
   formatDuration(seconds: number | null): string {

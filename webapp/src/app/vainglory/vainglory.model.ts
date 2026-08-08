@@ -143,6 +143,15 @@ export interface VaingloryAnalysisQueueEvent {
   readonly elapsedSeconds: number;
 }
 
+export interface VaingloryAnalysisMatchPreview {
+  readonly matchId: number;
+  readonly partId: number;
+  readonly partIndex: number;
+  readonly resultAtMs: number;
+  readonly title: string;
+  readonly resultFrameUrl: string;
+}
+
 export interface VaingloryAnalysisQueueCompletion {
   readonly completedAt: number;
   readonly sessionId: number;
@@ -157,6 +166,8 @@ export interface VaingloryAnalysisQueueCompletion {
   readonly bvid?: string | null;
   readonly archivePage?: number | null;
   readonly localVideoAvailable?: boolean;
+  readonly imageCount: number;
+  readonly matchPreviews: readonly VaingloryAnalysisMatchPreview[];
 }
 
 export interface VaingloryAnalysisQueueItem {
@@ -195,6 +206,8 @@ export interface VaingloryAnalysisQueueItem {
   readonly bvid?: string | null;
   readonly archivePage?: number | null;
   readonly localVideoAvailable?: boolean;
+  readonly imageCount: number;
+  readonly matchPreviews: readonly VaingloryAnalysisMatchPreview[];
 }
 
 export interface VaingloryAnalysisQueue {

@@ -82,12 +82,6 @@ def same_gameplay_run(
         return False
     if previous.view_context != current.view_context:
         return False
-    if (
-        previous.team_size is not None
-        and current.team_size is not None
-        and previous.team_size != current.team_size
-    ):
-        return False
     if current.at_ms <= previous.at_ms:
         return False
     lineup_evidence = hero_lineup_evidence(previous.hero_lineup, current.hero_lineup)
@@ -98,8 +92,7 @@ def same_gameplay_run(
         return True
     if (
         elapsed_ms <= maximum_gap_ms
-        and hud_lineup_similarity(previous.hud_signature, current.hud_signature)
-        >= 0.92
+        and hud_lineup_similarity(previous.hud_signature, current.hud_signature) >= 0.92
     ):
         return True
     return lineup_evidence == 'matched'
@@ -269,9 +262,7 @@ def _transition_result_search_windows(
             if (
                 not result_between
                 and observation.at_ms - reference.at_ms <= hud_gap_ms
-                and same_gameplay_run(
-                    reference, observation, maximum_gap_ms=hud_gap_ms
-                )
+                and same_gameplay_run(reference, observation, maximum_gap_ms=hud_gap_ms)
             ):
                 run_lineup = _merge_hero_lineups(run_lineup, observation.hero_lineup)
                 run_last_index = index
@@ -468,7 +459,28 @@ class FfmpegSampler:
             skip_frame='nokey',
         )
 
-    def fine_frames(self, path: str, window: ScanWindow) -> Iterator[TimedFrame]:
+    def classify_frames(
+        self, path: str, *, interval_seconds: int = 5
+    ) -> Iterator[TimedFrame]:
+        if interval_seconds < 1:
+            raise ValueError('classify interval must be positive')
+        profile = self.probe(path)
+        width, height = fit_frame_dimensions(profile.width, profile.height, 480, 270)
+        yield from self._frames(
+            path,
+            width=width,
+            height=height,
+            filter_value='fps=1/{},scale={}:{}:flags=fast_bilinear'.format(
+                interval_seconds, width, height
+            ),
+            frame_step_ms=interval_seconds * 1_000,
+            skip_frame='nokey',
+            threads=6,
+        )
+
+    def fine_frames(
+        self, path: str, window: ScanWindow, *, threads: int = 1
+    ) -> Iterator[TimedFrame]:
         if window.end_ms <= window.start_ms:
             return
         fps = self._fine_frames_per_second
@@ -484,6 +496,7 @@ class FfmpegSampler:
             frame_step_ms=1_000 // fps,
             start_ms=window.start_ms,
             duration_ms=window.end_ms - window.start_ms,
+            threads=threads,
         )
 
     def result_preview_frames(
@@ -636,9 +649,10 @@ class FfmpegSampler:
         skip_frame: Optional[str] = None,
         start_ms: int = 0,
         duration_ms: Optional[int] = None,
+        threads: int = 1,
     ) -> Iterator[TimedFrame]:
         resolved = self._regular_file(path)
-        command = [self._ffmpeg, '-nostdin', '-v', 'error', '-threads', '1']
+        command = [self._ffmpeg, '-nostdin', '-v', 'error', '-threads', str(threads)]
         if skip_frame is not None:
             command.extend(('-skip_frame', skip_frame))
         if start_ms:

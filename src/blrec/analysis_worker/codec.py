@@ -124,7 +124,7 @@ def encode_match(match: AnalyzedMatch) -> Dict[str, Any]:
 
 
 def _optional_int(value: object) -> Optional[int]:
-    return None if value is None else int(value)
+    return None if value is None else int(cast(Any, value))
 
 
 def decode_match(payload: Mapping[str, Any]) -> AnalyzedMatch:
