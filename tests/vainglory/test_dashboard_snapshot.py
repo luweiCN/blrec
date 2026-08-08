@@ -45,6 +45,7 @@ async def seed_match(
     anchor_name: str,
     stats_included: bool = True,
     match_stats_eligible: bool = True,
+    team_size: int = 3,
 ) -> None:
     session_id = match_id
     run_id = 'run:{}'.format(match_id)
@@ -108,7 +109,7 @@ async def seed_match(
             'left' if won else 'right',
             started_at + 1,
             game_mode,
-            3,
+            team_size,
             0,
             1 if match_stats_eligible else 0,
             None if match_stats_eligible else 'bot',
@@ -264,6 +265,49 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             '游戏昵称'
         )
         assert snapshot['sourceLastMatchId'] == 4
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_excludes_mode_and_team_size_conflicts(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_player(database, 10, '玩家', 100)
+        for match_id, game_mode, team_size in (
+            (1, '3v3', 3),
+            (2, '5v5', 5),
+            (3, 'aram', 3),
+            (4, '5v5', 3),
+            (5, '3v3', 5),
+        ):
+            await seed_match(
+                database,
+                tmp_path,
+                match_id=match_id,
+                room_id=100,
+                started_at=timestamp(2026, 8, match_id),
+                game_mode=game_mode,
+                won=True,
+                hero_id=None,
+                anchor_name='主播',
+                team_size=team_size,
+            )
+
+        snapshot = await database.read(
+            lambda connection: build_dashboard_snapshot(
+                connection, now=datetime(2026, 8, 8, 10, 30, tzinfo=SHANGHAI)
+            )
+        )
+
+        player = snapshot['standings']['2026-summer']['players'][0]
+        assert snapshot['sourceMatchCount'] == 3
+        assert snapshot['sourceLastMatchId'] == 3
+        assert player['modes']['all']['matches'] == 3
+        assert player['modes']['3v3']['matches'] == 1
+        assert player['modes']['5v5']['matches'] == 1
+        assert player['modes']['brawl']['matches'] == 1
     finally:
         await database.close()
 

@@ -295,6 +295,9 @@ def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
         "AND length(trim(hero.label))>0 WHERE scan.stats_included=1 "
         'AND match.stats_eligible=1 '
         "AND match.game_mode IN ('3v3','5v5','aram','other') "
+        "AND ((match.game_mode='3v3' AND match.team_size=3) "
+        "OR (match.game_mode='5v5' AND match.team_size=5) "
+        "OR match.game_mode IN ('aram','other')) "
         "AND CASE match.winner_side WHEN 'left' THEN match.left_color "
         "WHEN 'right' THEN match.right_color END IN ('teal','orange') "
         'ORDER BY session.started_at,session.id,match.started_at_ms,match.id'
