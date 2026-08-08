@@ -1,7 +1,7 @@
 services:
   dashboard-publisher:
     image: ghcr.io/luweicn/blrec:${DASHBOARD_PUBLISHER_IMAGE_TAG:-dashboard-publisher-master}
-    pull_policy: always
+    pull_policy: missing
     container_name: blrec-dashboard-publisher
     network_mode: host
     restart: unless-stopped
