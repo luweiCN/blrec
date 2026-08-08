@@ -18,13 +18,26 @@ COPY --from=webapp-builder /build/src/blrec/data/webapp ./src/blrec/data/webapp
 RUN find src/blrec/data/vainglory -maxdepth 1 -name '*.onnx' -delete && \
     python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
+FROM python:3.11-slim-bookworm AS dependency-builder
+WORKDIR /build
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY apps/blrec-server/requirements.txt /tmp/server-requirements.txt
+RUN python -m pip wheel --no-cache-dir \
+    --wheel-dir /dependency-wheels \
+    -r /tmp/server-requirements.txt
+
 FROM python:3.11-slim-bookworm AS runtime
 WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg iproute2 && \
     rm -rf /var/lib/apt/lists/*
 COPY apps/blrec-server/requirements.txt /tmp/server-requirements.txt
-RUN python -m pip install --no-cache-dir -r /tmp/server-requirements.txt && \
+RUN --mount=type=bind,from=dependency-builder,source=/dependency-wheels,target=/dependency-wheels \
+    python -m pip install --no-cache-dir --no-index \
+        --find-links=/dependency-wheels \
+        -r /tmp/server-requirements.txt && \
     rm /tmp/server-requirements.txt
 RUN --mount=type=bind,from=wheel-builder,source=/wheels,target=/wheels \
     wheel="$(find /wheels -maxdepth 1 -name 'blrec-*.whl' -print -quit)" && \

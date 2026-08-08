@@ -19,6 +19,21 @@ def test_dockerfile_builds_frontend_wheel_and_runtime_separately() -> None:
     assert '"/favorites"' in dockerfile
 
 
+def test_dockerfile_builds_native_dependency_wheels_outside_runtime() -> None:
+    dockerfile = (ROOT / 'apps/blrec-server/Dockerfile').read_text(encoding='utf8')
+    builder, runtime = dockerfile.split(
+        'FROM python:3.11-slim-bookworm AS runtime', maxsplit=1
+    )
+
+    assert 'AS dependency-builder' in builder
+    assert 'gcc libc6-dev' in builder
+    assert '--wheel-dir /dependency-wheels' in builder
+    assert 'from=dependency-builder,source=/dependency-wheels' in runtime
+    assert '--no-index' in runtime
+    assert '--find-links=/dependency-wheels' in runtime
+    assert 'gcc libc6-dev' not in runtime
+
+
 def test_synology_compose_persists_sibling_favorites_directory() -> None:
     compose = (ROOT / 'compose.synology.yml').read_text(encoding='utf8')
     environment = (ROOT / 'synology.env.example').read_text(encoding='utf8')
