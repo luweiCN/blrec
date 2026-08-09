@@ -73,8 +73,11 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.profile-kda-value')?.textContent).toContain(
       '145 局有效',
     );
-    expect(page.querySelector('.profile-tier-metric')?.textContent).toContain(
+    expect(page.querySelector('.profile-heading-tier')?.textContent).toContain(
       '登峰造极 · 铜',
+    );
+    expect(page.querySelector('.profile-heading-tier')?.textContent).toContain(
+      '20,580',
     );
     const heroLinks = Array.from(
       page.querySelectorAll('.profile-hero-link'),
@@ -82,7 +85,7 @@ describe('PlayerDetailPageComponent', () => {
     expect(heroLinks.some((value) => value.includes('凯恩'))).toBeTrue();
     expect(page.querySelectorAll('.trend-point').length).toBe(3);
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
-      '+6',
+      '+180',
     );
     expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
     expect(page.querySelector('.peer-comparison')?.textContent).toMatch(

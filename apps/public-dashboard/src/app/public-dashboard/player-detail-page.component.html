@@ -8,7 +8,7 @@
   </nav>
 
   <ng-container *ngIf="player as profile; else playerNotFound">
-    <header class="profile-heading">
+    <header class="profile-heading player-profile-heading">
       <div class="profile-player-identity">
         <app-player-avatar
           class="profile-avatar"
@@ -34,6 +34,13 @@
           <dd>#{{ profile.id }}</dd>
         </div>
       </dl>
+      <div class="profile-heading-tier">
+        <app-skill-tier-badge
+          variant="showcase"
+          [ratingScore]="performance.ratingScore"
+          [provisional]="performance.provisional"
+        ></app-skill-tier-badge>
+      </div>
     </header>
 
     <app-leaderboard-filters
@@ -63,14 +70,9 @@
             >{{ rankMovementText }}</small>
           </dd>
         </div>
-        <div class="profile-tier-metric">
-          <dt>站内段位</dt>
-          <dd>
-            <app-skill-tier-badge
-              [ratingScore]="performance.ratingScore"
-              [provisional]="performance.provisional"
-            ></app-skill-tier-badge>
-          </dd>
+        <div>
+          <dt>积分</dt>
+          <dd>{{ displayScore(performance.ratingScore) | number: "1.0-0" }}</dd>
         </div>
         <div>
           <dt>对局</dt>
@@ -104,7 +106,7 @@
       <header>
         <div>
           <p>RATING TREND</p>
-          <h2 id="player-rating-trend-title">榜单分趋势</h2>
+          <h2 id="player-rating-trend-title">积分趋势</h2>
         </div>
         <span>
           最近 {{ playerTrend.points.length }} 次数据发布 · {{ modeLabel() }}
@@ -133,8 +135,8 @@
         <div class="rating-trend-visual">
           <div class="rating-trend-frame">
             <div class="rating-trend-scale" aria-hidden="true">
-              <span>{{ trendMaximumScore }}</span>
-              <span>{{ trendMinimumScore }}</span>
+              <span>{{ trendMaximumScore | number: "1.0-0" }}</span>
+              <span>{{ trendMinimumScore | number: "1.0-0" }}</span>
             </div>
             <div class="rating-trend-plot">
               <svg
@@ -162,7 +164,7 @@
                     [attr.r]="pointIndex === trendChartPoints.length - 1 ? 5 : 3.5"
                   >
                     <title>
-                      {{ formatTrendDate(point.publicationDate) }}：{{ point.ratingScore }} 分，第 {{ point.rank }} 名
+                      {{ formatTrendDate(point.publicationDate) }}：{{ displayScore(point.ratingScore) | number: "1.0-0" }}，第 {{ point.rank }} 名
                     </title>
                   </circle>
                 </g>
@@ -339,7 +341,7 @@
             <tr>
               <th scope="col">榜单周期</th>
               <th scope="col">排名</th>
-              <th scope="col" title="由榜单分映射，不是游戏官方段位">
+              <th scope="col" title="由积分映射，不是游戏官方段位">
                 站内段位
               </th>
               <th scope="col">对局</th>

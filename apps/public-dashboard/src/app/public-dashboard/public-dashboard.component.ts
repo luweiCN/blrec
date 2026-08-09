@@ -36,6 +36,7 @@ import {
   PlayerStanding,
   SeasonKey,
 } from './public-dashboard.models';
+import { SkillTier, skillTierForRatingScore } from './skill-tier';
 
 const EMPTY_PERFORMANCE: Performance = {
   matches: 0,
@@ -207,6 +208,10 @@ export class PublicDashboardComponent implements OnDestroy {
 
   podiumRank(player: PlayerStanding): number {
     return this.rankings.findIndex((standing) => standing.id === player.id) + 1;
+  }
+
+  playerSkillTier(player: PlayerStanding): SkillTier | null {
+    return skillTierForRatingScore(this.playerPerformance(player).ratingScore);
   }
 
   trackMode(_index: number, mode: { readonly key: ModeFilter }): ModeFilter {

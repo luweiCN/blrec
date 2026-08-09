@@ -1,26 +1,22 @@
 <ng-container *ngIf="skillTier as tier; else unavailable">
   <span
     class="skill-tier-badge"
-    [class.skill-tier-badge--featured]="variant === 'featured'"
     [class.skill-tier-badge--icon]="variant === 'icon'"
-    [class.skill-tier-badge--podium]="variant === 'podium'"
+    [class.skill-tier-badge--showcase]="variant === 'showcase'"
     [attr.aria-label]="description(tier)"
     [title]="description(tier)"
   >
     <img
       [src]="tier.imageUrl"
       alt=""
-      width="256"
-      height="256"
+      width="512"
+      height="512"
       decoding="async"
     />
     <span *ngIf="variant !== 'icon'" class="skill-tier-copy">
       <strong>{{ tier.name }} · {{ tier.divisionLabel }}</strong>
       <small>
-        {{ tier.tier }} 段
-        <ng-container *ngIf="variant !== 'podium'">
-          · 榜单分 {{ tier.ratingScore }}
-        </ng-container>
+        {{ tier.tier }} 段 · {{ tier.displayScore | number: "1.0-0" }}
         <em *ngIf="provisional">定位中</em>
       </small>
     </span>

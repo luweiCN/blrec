@@ -74,6 +74,11 @@ describe('PublicDashboardComponent', () => {
       '重复建档',
     );
     expect(page.querySelectorAll('.rating-score-cell img').length).toBe(10);
+    expect(page.querySelectorAll('.podium-emblem').length).toBe(3);
+    expect(page.querySelectorAll('.podium-avatar').length).toBe(3);
+    expect(page.querySelector('.detail-tier img')).not.toBeNull();
+    expect(page.textContent).not.toContain('榜单分');
+    expect(page.textContent).not.toContain('段位分');
   });
 
   it('updates the ranking when the global game mode changes', () => {

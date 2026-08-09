@@ -46,6 +46,10 @@ import {
   SeasonKey,
   SeasonOption,
 } from './public-dashboard.models';
+import {
+  displayScoreForRatingDelta,
+  displayScoreForRatingScore,
+} from './skill-tier';
 
 interface PlayerSeasonRecord {
   readonly season: SeasonOption;
@@ -85,6 +89,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   readonly averageHeroEconomy = heroAverageEconomy;
+  readonly displayScore = displayScoreForRatingScore;
   readonly heroKda = heroKda;
   readonly peerComparisonKind = heroPeerComparisonKind;
   readonly peerComparisonText = heroPeerComparisonText;
@@ -194,7 +199,9 @@ export class PlayerDetailPageComponent implements OnDestroy {
     if (delta === null) {
       return '—';
     }
-    return delta > 0 ? `+${delta}` : delta.toString();
+    const displayDelta = displayScoreForRatingDelta(delta);
+    const formattedDelta = displayDelta.toLocaleString('zh-CN');
+    return displayDelta > 0 ? `+${formattedDelta}` : formattedDelta;
   }
 
   get ratingDeltaKind(): 'up' | 'down' | 'same' | 'pending' {
@@ -242,12 +249,16 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get trendMinimumScore(): number | null {
-    const scores = this.playerTrend.points.map((point) => point.ratingScore);
+    const scores = this.playerTrend.points.map(
+      (point) => displayScoreForRatingScore(point.ratingScore) ?? 0,
+    );
     return scores.length === 0 ? null : Math.min(...scores);
   }
 
   get trendMaximumScore(): number | null {
-    const scores = this.playerTrend.points.map((point) => point.ratingScore);
+    const scores = this.playerTrend.points.map(
+      (point) => displayScoreForRatingScore(point.ratingScore) ?? 0,
+    );
     return scores.length === 0 ? null : Math.max(...scores);
   }
 
@@ -262,7 +273,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get trendChartLabel(): string {
-    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的榜单分趋势`;
+    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的积分趋势`;
   }
 
   get modeBreakdown(): readonly ModeBreakdown[] {

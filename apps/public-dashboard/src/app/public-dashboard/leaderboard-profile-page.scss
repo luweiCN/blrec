@@ -21,6 +21,22 @@
     var(--surface-1);
 }
 
+.player-profile-heading {
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 0.55fr) 236px;
+  gap: 28px;
+}
+
+.profile-heading-tier {
+  --skill-tier-showcase-size: 156px;
+
+  display: grid;
+  align-self: stretch;
+  place-items: center;
+  min-width: 0;
+  padding-left: 28px;
+  border-left: 1px solid var(--line-soft);
+}
+
 .profile-player-identity {
   display: flex;
   gap: 20px;
@@ -208,10 +224,6 @@
       color: var(--gold);
     }
   }
-}
-
-.profile-summary .profile-tier-metric dd {
-  margin-top: 3px;
 }
 
 .rating-trend-card {

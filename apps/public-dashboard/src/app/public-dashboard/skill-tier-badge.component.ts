@@ -4,9 +4,10 @@ import { SkillTier, skillTierForRatingScore } from './skill-tier';
 
 export type SkillTierBadgeVariant =
   | 'compact'
-  | 'featured'
   | 'icon'
-  | 'podium';
+  | 'showcase';
+
+const SCORE_FORMATTER = new Intl.NumberFormat('zh-CN');
 
 @Component({
   selector: 'app-skill-tier-badge',
@@ -26,8 +27,7 @@ export class SkillTierBadgeComponent {
   description(skillTier: SkillTier): string {
     return (
       `站内段位：${skillTier.name}${skillTier.divisionLabel}，` +
-      `${skillTier.tier} 段；榜单分 ${skillTier.ratingScore}，` +
-      `换算旧分 ${skillTier.legacyPoints}`
+      `${skillTier.tier} 段，${SCORE_FORMATTER.format(skillTier.displayScore)}`
     );
   }
 }

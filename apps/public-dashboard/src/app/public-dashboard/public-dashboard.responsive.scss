@@ -174,8 +174,8 @@
     &.first {
       padding-bottom: 20px;
 
-      .podium-portrait {
-        width: 92px;
+      .podium-emblem {
+        width: 104px;
         height: 104px;
       }
 
@@ -185,18 +185,27 @@
     }
   }
 
-  .podium-portrait {
-    width: 70px;
-    height: 80px;
+  .podium-emblem {
+    width: 78px;
+    height: 78px;
   }
 
-  .podium-tier {
-    max-width: 100%;
+  .podium-avatar {
+    width: 24px;
+    height: 24px;
   }
 
   .podium-name {
-    width: 100%;
-    text-align: center;
+    min-width: 0;
+    font-size: 0.72rem;
+  }
+
+  .podium-tier-name {
+    font-size: 0.5rem;
+  }
+
+  .podium-score {
+    font-size: 0.45rem;
   }
 
   .summary-strip {

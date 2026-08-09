@@ -31,18 +31,30 @@
           "
         >
           <span class="podium-rank">#{{ podiumRank(player) }}</span>
-          <app-player-avatar
-            class="podium-portrait"
-            [playerId]="player.id"
-            [heroName]="playerPerformance(player).topHero"
-          ></app-player-avatar>
-          <strong class="podium-name">{{ player.name }}</strong>
-          <app-skill-tier-badge
-            class="podium-tier"
-            variant="podium"
-            [ratingScore]="playerPerformance(player).ratingScore"
-            [provisional]="playerPerformance(player).provisional"
-          ></app-skill-tier-badge>
+          <ng-container *ngIf="playerSkillTier(player) as tier">
+            <img
+              class="podium-emblem"
+              [src]="tier.imageUrl"
+              alt=""
+              width="512"
+              height="512"
+              decoding="async"
+            />
+            <span class="podium-player">
+              <app-player-avatar
+                class="podium-avatar"
+                [playerId]="player.id"
+                [heroName]="playerPerformance(player).topHero"
+              ></app-player-avatar>
+              <strong class="podium-name">{{ player.name }}</strong>
+            </span>
+            <strong class="podium-tier-name">
+              {{ tier.name }} · {{ tier.divisionLabel }}
+            </strong>
+            <small class="podium-score">
+              {{ tier.tier }} 段 · {{ tier.displayScore | number: "1.0-0" }}
+            </small>
+          </ng-container>
         </a>
         <p *ngIf="podiumPlayers.length === 0" class="ranking-empty">
           当前模式还没有已收录玩家。
@@ -83,7 +95,7 @@
         <div>
           <p class="section-kicker">PLAYER RANKING</p>
           <h2 id="players-title">玩家榜</h2>
-          <p>按榜单分展示当前模式下的玩家表现。</p>
+          <p>按积分展示当前模式下的玩家表现。</p>
         </div>
         <a class="full-ranking-link" routerLink="/players">
           Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位
@@ -104,7 +116,7 @@
               <th scope="col" class="optional-column">代表英雄</th>
               <th scope="col">近五局</th>
               <th scope="col">对局</th>
-              <th scope="col" title="由榜单分映射，不是游戏官方段位">
+              <th scope="col" title="由积分映射，不是游戏官方段位">
                 段位
               </th>
               <th scope="col">胜率</th>
@@ -230,8 +242,8 @@
         </div>
 
         <app-skill-tier-badge
-          class="featured-tier"
-          variant="featured"
+          class="detail-tier"
+          variant="showcase"
           [ratingScore]="selectedPerformance().ratingScore"
           [provisional]="selectedPerformance().provisional"
         ></app-skill-tier-badge>

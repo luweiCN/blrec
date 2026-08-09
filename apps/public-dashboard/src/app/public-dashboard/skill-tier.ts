@@ -3,11 +3,11 @@ export type SkillTierDivision = 'bronze' | 'silver' | 'gold';
 export interface SkillTier {
   readonly division: SkillTierDivision;
   readonly divisionLabel: string;
+  readonly displayScore: number;
   readonly englishName: string;
   readonly imageUrl: string;
-  readonly legacyPoints: number;
-  readonly maximumPoints: number;
-  readonly minimumPoints: number;
+  readonly maximumScore: number;
+  readonly minimumScore: number;
   readonly name: string;
   readonly ratingScore: number;
   readonly tier: number;
@@ -24,8 +24,9 @@ interface DivisionDefinition {
 }
 
 const RATING_SCORE_MAXIMUM = 1000;
-const LEGACY_POINT_MULTIPLIER = 3;
-const LEGACY_POINT_MAXIMUM = 3000;
+const DISPLAY_SCORE_MULTIPLIER = 30;
+const HISTORICAL_POINT_DISPLAY_SCALE = 10;
+const DISPLAY_SCORE_MAXIMUM = 30_000;
 
 const SKILL_TIER_START_POINTS = [
   0, 109, 218, 327, 436, 545, 654, 763, 872, 981, 1090, 1200,
@@ -55,20 +56,19 @@ const DIVISIONS: readonly DivisionDefinition[] = [
 export function skillTierForRatingScore(
   ratingScore: number | null,
 ): SkillTier | null {
-  if (ratingScore === null || !Number.isFinite(ratingScore)) {
+  const normalizedScore = normalizeRatingScore(ratingScore);
+  if (normalizedScore === null) {
     return null;
   }
 
-  const normalizedScore = Math.round(
-    Math.min(RATING_SCORE_MAXIMUM, Math.max(0, ratingScore)),
-  );
-  const legacyPoints = Math.round(
-    normalizedScore * LEGACY_POINT_MULTIPLIER,
-  );
+  const displayScore = normalizedScore * DISPLAY_SCORE_MULTIPLIER;
   let skillTierIndex = 0;
 
   for (let index = 1; index < SKILL_TIER_START_POINTS.length; index += 1) {
-    if (legacyPoints < SKILL_TIER_START_POINTS[index]) {
+    if (
+      displayScore <
+      SKILL_TIER_START_POINTS[index] * HISTORICAL_POINT_DISPLAY_SCALE
+    ) {
       break;
     }
     skillTierIndex = index;
@@ -82,16 +82,42 @@ export function skillTierForRatingScore(
   return {
     division: division.key,
     divisionLabel: division.label,
+    displayScore,
     englishName: tierName.english,
     imageUrl:
       `assets/skill-tiers/tier-${tier.toString().padStart(2, '0')}-` +
       `${division.key}.webp`,
-    legacyPoints,
-    maximumPoints:
-      nextStart === undefined ? LEGACY_POINT_MAXIMUM : nextStart - 1,
-    minimumPoints: SKILL_TIER_START_POINTS[skillTierIndex],
+    maximumScore:
+      nextStart === undefined
+        ? DISPLAY_SCORE_MAXIMUM
+        : nextStart * HISTORICAL_POINT_DISPLAY_SCALE - 1,
+    minimumScore:
+      SKILL_TIER_START_POINTS[skillTierIndex] *
+      HISTORICAL_POINT_DISPLAY_SCALE,
     name: tierName.localized,
     ratingScore: normalizedScore,
     tier,
   };
+}
+
+export function displayScoreForRatingScore(
+  ratingScore: number | null,
+): number | null {
+  const normalizedScore = normalizeRatingScore(ratingScore);
+  return normalizedScore === null
+    ? null
+    : normalizedScore * DISPLAY_SCORE_MULTIPLIER;
+}
+
+export function displayScoreForRatingDelta(ratingDelta: number): number {
+  return Math.round(ratingDelta * DISPLAY_SCORE_MULTIPLIER);
+}
+
+function normalizeRatingScore(ratingScore: number | null): number | null {
+  if (ratingScore === null || !Number.isFinite(ratingScore)) {
+    return null;
+  }
+  return Math.round(
+    Math.min(RATING_SCORE_MAXIMUM, Math.max(0, ratingScore)),
+  );
 }

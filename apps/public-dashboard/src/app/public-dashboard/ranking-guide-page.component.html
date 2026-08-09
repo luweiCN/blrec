@@ -4,12 +4,12 @@
       <p class="guide-kicker">RANKING METHODOLOGY</p>
       <h1>这份榜单，<br />记录的是什么？</h1>
       <p class="guide-lead">
-        它是一份基于主播公开直播与录播生成的“直播样本榜”，不是《虚荣》官方全服榜。这里说明数据从哪里来、谁会进入排名，以及榜单分为何不同于原始胜率。
+        它是一份基于主播公开直播与录播生成的“直播样本榜”，不是《虚荣》官方全服榜。这里说明数据从哪里来、谁会进入排名，以及积分为何不同于原始胜率。
       </p>
     </div>
     <div class="guide-meta" aria-label="说明版本">
       <span>规则版本</span>
-      <strong>RANKING / 03</strong>
+      <strong>RANKING / 04</strong>
       <small>更新于 2026-08-10</small>
     </div>
   </header>
@@ -21,8 +21,8 @@
         <a [routerLink]="[]" fragment="source">数据从哪里来</a>
         <a [routerLink]="[]" fragment="scope">谁会进入榜单</a>
         <a [routerLink]="[]" fragment="period">赛季与模式</a>
-        <a [routerLink]="[]" fragment="rating">榜单分算法</a>
-        <a [routerLink]="[]" fragment="tier">段位图如何换算</a>
+        <a [routerLink]="[]" fragment="rating">评分算法</a>
+        <a [routerLink]="[]" fragment="tier">积分与段位如何换算</a>
         <a [routerLink]="[]" fragment="limits">误差与变化</a>
         <a [routerLink]="[]" fragment="faq">常见问题</a>
       </nav>
@@ -166,7 +166,7 @@
             <strong>先加入 20 场，再加入本赛季实际胜负</strong>
           </div>
           <div>
-            <span>榜单分</span>
+            <span>内部评分</span>
             <strong>后验分布的 90% 可信下界 × 1000</strong>
           </div>
           <div>
@@ -186,7 +186,7 @@
           </li>
           <li>
             <span>03</span>
-            <p>按直播开始时间逐场计算；整数取整没有变化时，胜场至少加 1 分、负场至少减 1 分。</p>
+            <p>按直播开始时间逐场计算；整数取整没有变化时，内部评分胜场至少加 1、负场至少减 1，对外显示为至少变化 30 积分。</p>
           </li>
           <li>
             <span>04</span>
@@ -223,20 +223,20 @@
         </div>
 
         <div class="plain-callout">
-          胜率高但场次少的玩家，榜单分可能低于胜率略低但样本稳定的玩家。英雄熟练度同样会把 KDA 与经济的小样本向中位收缩；缺失字段按中性值处理，不会当成 0。逐场最低变化只补足整数显示精度，不取代可信下界，也不会让少量连胜直接占据榜首。
+          胜率高但场次少的玩家，内部评分可能低于胜率略低但样本稳定的玩家。英雄熟练度同样会把 KDA 与经济的小样本向中位收缩；缺失字段按中性值处理，不会当成 0。逐场最低变化只补足整数显示精度，不取代可信下界，也不会让少量连胜直接占据榜首。
         </div>
       </section>
 
       <section id="tier" class="content-section">
         <p class="section-index">05 / SKILL TIER</p>
-        <h2>段位图是榜单分的怀旧映射</h2>
+        <h2>段位图是积分的怀旧映射</h2>
         <p>
-          本站仍使用 0–1000 的榜单分进行排序，再把它线性换算到《虚荣》旧版
-          0–3000 段位分：一分榜单分对应三分旧分。换算后按旧版 30
-          个铜、银、金分界选择原版段位徽章。
+          本站仍使用 0–1000 的内部评分进行排序，对外显示时线性放大到
+          0–30,000：一分内部评分对应 30 积分。旧版《虚荣》的 0–3000
+          积分分界同步放大十倍，再按原有 30 个铜、银、金档位选择徽章。
         </p>
 
-        <div class="tier-examples" aria-label="榜单分换算段位示例">
+        <div class="tier-examples" aria-label="积分换算段位示例">
           <div>
             <app-skill-tier-badge [ratingScore]="400"></app-skill-tier-badge>
           </div>
@@ -251,26 +251,26 @@
         <div class="key-statement">
           <strong>这是站内段位，不是玩家当年的官方游戏段位。</strong>
           <p>
-            段位图只改变榜单分的呈现方式，不参与评分、赛季继承或排序。数字榜单分仍用于趋势曲线和同分时的细微比较。
+            0–30,000 积分和段位图都属于呈现层，不参与评分、赛季继承或排序；排序结果仍来自同一套内部评分。
           </p>
         </div>
 
         <div class="formula-panel">
           <div>
             <span>换算公式</span>
-            <strong>榜单分 × 3 = 怀旧段位分</strong>
+            <strong>内部评分 × 30 = 展示积分</strong>
           </div>
           <div>
             <span>十段 · 铜</span>
-            <strong>旧分 2400 起，对应榜单分 800 起</strong>
+            <strong>24,000 起，对应内部评分 800 起</strong>
           </div>
           <div>
             <span>十段 · 银</span>
-            <strong>旧分 2600 起，对应榜单分约 867 起</strong>
+            <strong>26,000 起，对应内部评分约 867 起</strong>
           </div>
           <div>
             <span>十段 · 金</span>
-            <strong>旧分 2800 起，对应榜单分约 934 起</strong>
+            <strong>28,000 起，对应内部评分约 934 起</strong>
           </div>
         </div>
 
@@ -320,7 +320,7 @@
           </details>
           <details>
             <summary>我的胜率更高，为什么排名更低？</summary>
-            <p>玩家榜看的是贝叶斯可信下界，不是只看原始胜率。场次、整体基线、上赛季继承和当前样本稳定度都会影响榜单分。</p>
+            <p>玩家榜看的是贝叶斯可信下界，不是只看原始胜率。场次、整体基线、上赛季继承和当前样本稳定度都会影响积分。</p>
           </details>
           <details>
             <summary>为什么找不到某个英雄或英雄数据很少？</summary>
@@ -353,7 +353,7 @@
             target="_blank"
             rel="noopener noreferrer"
           >
-            历史资料：1.22 段位分界
+            历史资料：1.22 积分分界
           </a>
           <a
             href="https://www.vainglorygame.com/news/a-word-on-the-api-and-vainglory-esports/"

@@ -54,27 +54,6 @@
   }
 }
 
-.skill-tier-badge--featured {
-  grid-template-columns: 70px minmax(0, 1fr);
-  gap: 10px;
-
-  img {
-    width: 70px;
-    height: 70px;
-  }
-
-  .skill-tier-copy {
-    strong {
-      color: var(--gold);
-      font-size: 0.73rem;
-    }
-
-    small {
-      font-size: 0.52rem;
-    }
-  }
-}
-
 .skill-tier-badge--icon {
   display: inline-block;
 
@@ -84,24 +63,29 @@
   }
 }
 
-.skill-tier-badge--podium {
-  grid-template-columns: 30px minmax(0, 1fr);
-  gap: 4px;
+.skill-tier-badge--showcase {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
 
   img {
-    width: 30px;
-    height: 30px;
+    width: var(--skill-tier-showcase-size, 128px);
+    height: var(--skill-tier-showcase-size, 128px);
   }
 
   .skill-tier-copy {
-    gap: 1px;
+    justify-items: center;
+    gap: 3px;
+    width: 100%;
 
     strong {
-      font-size: 0.52rem;
+      color: var(--gold);
+      font-size: 0.76rem;
     }
 
     small {
-      font-size: 0.45rem;
+      font-size: 0.56rem;
     }
   }
 }
