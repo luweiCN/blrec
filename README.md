@@ -79,7 +79,7 @@
 ## Docker
 
 BLREC Server 使用独立公开镜像
-[`ghcr.io/luweicn/blrec-server:3.0.0-beta.45`](https://github.com/luweicn/blrec/pkgs/container/blrec-server)。
+[`ghcr.io/luweicn/blrec-server:3.0.0-beta.46`](https://github.com/luweicn/blrec/pkgs/container/blrec-server)。
 镜像只由 GitHub Actions 构建，NAS 直接从 GHCR 拉取。请仅使用仓库中的
 `compose.synology.yml` 部署；首次安装、凭据密钥初始化、升级与回滚步骤见
 [群晖双网络部署](docs/operations/synology-multi-network.md)。

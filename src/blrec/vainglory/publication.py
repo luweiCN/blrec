@@ -70,28 +70,50 @@ _WAITING_DESCRIPTION = '等待对局分析完成后生成发布内容'
 _SESSION_ARCHIVES_COMPLETE = (
     'NOT EXISTS(SELECT 1 FROM vainglory_archive_imports source_import '
     'WHERE source_import.session_id=session.id AND ('
-    "source_import.state!='ready' OR source_import.page_count<=0 OR "
+    "source_import.state NOT IN ('ready','skipped') OR ("
+    "source_import.state='ready' AND (source_import.page_count<=0 OR "
     'source_import.completed_page_count!=source_import.page_count OR ('
     'SELECT COUNT(*) FROM vainglory_archive_parts source_part '
     'WHERE source_part.import_id=source_import.id '
-    "AND source_part.state='ready')!=source_import.page_count))"
+    "AND source_part.state='ready')!=source_import.page_count))))"
 )
-_PUBLICATION_READY_PREDICATE = (
+_PUBLICATION_ANALYSIS_READY_PREDICATE = (
     'EXISTS(SELECT 1 FROM vainglory_scan_jobs source_scan '
     'WHERE source_scan.session_id=session.id '
-    "AND source_scan.state='ready') AND "
+    "AND source_scan.state='ready')"
+)
+_PUBLICATION_TERMINAL_EMPTY_PREDICATE = (
+    'EXISTS(SELECT 1 FROM vainglory_archive_imports empty_import '
+    'WHERE empty_import.session_id=session.id '
+    'AND empty_import.account_id=publication.account_id '
+    'AND empty_import.bvid=publication.bvid '
+    "AND empty_import.state='skipped') AND NOT EXISTS("
+    'SELECT 1 FROM recording_parts local_part '
+    'WHERE local_part.session_id=session.id '
+    "AND local_part.artifact_state='ready' "
+    'AND local_part.video_deleted_at IS NULL)'
+)
+_PUBLICATION_READY_PREDICATE = (
+    '('
+    + _PUBLICATION_ANALYSIS_READY_PREDICATE
+    + ' OR ('
+    + _PUBLICATION_TERMINAL_EMPTY_PREDICATE
+    + ')) AND '
     + _SESSION_ARCHIVES_COMPLETE
     + " AND (publication.source_kind!='archive' OR EXISTS("
     'SELECT 1 FROM vainglory_archive_imports source_import '
     'WHERE source_import.session_id=session.id '
     'AND source_import.account_id=publication.account_id '
     'AND source_import.bvid=publication.bvid '
-    "AND source_import.state='ready' AND source_import.page_count>0 "
+    "AND (source_import.state='skipped' OR ("
+    "source_import.state='ready' AND source_import.page_count>0 "
     'AND source_import.completed_page_count=source_import.page_count '
     'AND (SELECT COUNT(*) FROM vainglory_archive_parts source_part '
     'WHERE source_part.import_id=source_import.id '
-    "AND source_part.state='ready')=source_import.page_count)) "
+    "AND source_part.state='ready')=source_import.page_count)))) "
     "AND (publication.source_kind!='upload' OR ("
+    + _PUBLICATION_TERMINAL_EMPTY_PREDICATE
+    + ') OR ('
     'publication.upload_job_id IS NOT NULL AND EXISTS('
     'SELECT 1 FROM upload_parts expected_upload '
     'WHERE expected_upload.job_id=publication.upload_job_id '
@@ -132,6 +154,7 @@ class _Candidate:
     aid: int
     bvid: str
     source_kind: str
+    analysis_ready: bool
 
 
 @dataclass(frozen=True)
@@ -837,8 +860,12 @@ class VaingloryPublicationService:
         if candidate is None:
             return created > 0
         selected = candidate
-        matches = await self._session_matches(selected.session_id)
-        matches = tuple(match for match in matches if match.bvid == selected.bvid)
+        matches: Tuple[MatchRecord, ...] = ()
+        if selected.analysis_ready:
+            session_matches = await self._session_matches(selected.session_id)
+            matches = tuple(
+                match for match in session_matches if match.bvid == selected.bvid
+            )
         plan = await self._build_plan(selected.bvid, matches)
         now = self._now()
 
@@ -1079,7 +1106,9 @@ class VaingloryPublicationService:
         row = await self._database.fetchone(
             'SELECT publication.account_id,publication.session_id,'
             'publication.upload_job_id,publication.aid,publication.bvid,'
-            'publication.source_kind FROM vainglory_publications publication '
+            'publication.source_kind,'
+            + _PUBLICATION_ANALYSIS_READY_PREDICATE
+            + ' AS analysis_ready FROM vainglory_publications publication '
             'JOIN recording_sessions session ON session.id=publication.session_id '
             'JOIN bili_accounts account ON account.id=publication.account_id '
             "WHERE account.state='active' AND (publication.needs_refresh=1 "
@@ -1106,6 +1135,7 @@ class VaingloryPublicationService:
             aid=int(row['aid']),
             bvid=str(row['bvid']),
             source_kind=str(row['source_kind']),
+            analysis_ready=bool(row['analysis_ready']),
         )
 
     async def _session_matches(self, session_id: int) -> Tuple[MatchRecord, ...]:
@@ -1363,10 +1393,16 @@ class VaingloryPublicationService:
                     minimum_delay=3600,
                 )
                 return
-            matches = await self._session_matches(int(publication['session_id']))
-            matches = tuple(
-                match for match in matches if match.bvid == str(publication['bvid'])
-            )
+            matches: Tuple[MatchRecord, ...] = ()
+            if int(publication['match_count']) > 0:
+                session_matches = await self._session_matches(
+                    int(publication['session_id'])
+                )
+                matches = tuple(
+                    match
+                    for match in session_matches
+                    if match.bvid == str(publication['bvid'])
+                )
             targets = _chapter_targets(matches, pages)
             target_by_page = {page.page: cards for page, cards in targets}
             chapter_count = sum(

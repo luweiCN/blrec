@@ -507,6 +507,128 @@ async def test_sixty_first_migration_preserves_history_and_requeues_publications
 
 
 @pytest.mark.asyncio
+async def test_sixty_second_migration_retries_failed_analysis_except_ignored(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 62):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',1,1)"
+        )
+        for session_id in (1, 2):
+            connection.execute(
+                'INSERT INTO recording_sessions('
+                'id,room_id,broadcast_session_key,state,started_at,title) '
+                "VALUES(?,?,?,'closed',1,'直播回放')",
+                (session_id, 100 + session_id, '{}:1'.format(100 + session_id)),
+            )
+            connection.execute(
+                'INSERT INTO recording_runs('
+                'id,session_id,state,started_at,ended_at) '
+                "VALUES(?,?,'finished',1,2)",
+                ('run:{}'.format(session_id), session_id),
+            )
+            connection.execute(
+                'INSERT INTO recording_parts('
+                'id,session_id,run_id,part_index,source_path,record_start_time,'
+                'artifact_state,created_at,updated_at) '
+                "VALUES(?,?,?,1,?,1,'ready',1,2)",
+                (
+                    session_id,
+                    session_id,
+                    'run:{}'.format(session_id),
+                    '/rec/{}.mp4'.format(session_id),
+                ),
+            )
+            connection.execute(
+                'INSERT INTO vainglory_scan_jobs('
+                'session_id,state,progress,algorithm_version,match_count,error,'
+                'requested_at,started_at,completed_at,updated_at) '
+                "VALUES(?,'failed',0,5,0,'旧分析失败',1,1,2,2)",
+                (session_id,),
+            )
+            connection.execute(
+                'INSERT INTO vainglory_part_jobs('
+                'part_id,session_id,state,request_kind,progress,algorithm_version,'
+                'match_count,error,requested_at,started_at,completed_at,updated_at) '
+                "VALUES(?,?,'failed','automatic',0,5,0,'旧分析失败',1,1,2,2)",
+                (session_id, session_id),
+            )
+        connection.execute(
+            'INSERT INTO vainglory_scan_suppressions(session_id,created_at) '
+            'VALUES(2,2)'
+        )
+        connection.execute(
+            'INSERT INTO vainglory_publications('
+            'id,account_id,session_id,aid,bvid,source_kind,payload_hash,'
+            'description_block,state,description_state,pin_state,chapter_state,'
+            'comment_cleanup_state,needs_refresh,plan_state,force_republish,'
+            'created_at,updated_at) '
+            "VALUES(1,1,1,303,'BV1abcdefgh','upload',?,'旧发布内容','confirmed',"
+            "'confirmed','confirmed','confirmed','confirmed',0,'ready',0,1,2)",
+            ('a' * 64,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        retry = await database.fetchone(
+            'SELECT state,error,started_at,completed_at '
+            'FROM vainglory_part_jobs WHERE part_id=1'
+        )
+        assert dict(retry) == {
+            'state': 'pending',
+            'error': None,
+            'started_at': None,
+            'completed_at': None,
+        }
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_scan_jobs WHERE session_id=1'
+            )
+            == 'pending'
+        )
+        ignored = await database.fetchone(
+            'SELECT state,error FROM vainglory_part_jobs WHERE part_id=2'
+        )
+        assert dict(ignored) == {'state': 'failed', 'error': '旧分析失败'}
+        publication = await database.fetchone(
+            'SELECT state,plan_state,needs_refresh,force_republish,error '
+            'FROM vainglory_publications WHERE id=1'
+        )
+        assert dict(publication) == {
+            'state': 'prepared',
+            'plan_state': 'waiting_analysis',
+            'needs_refresh': 1,
+            'force_republish': 1,
+            'error': '等待失败分析任务重新处理',
+        }
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 62
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_media_library_schema_constraints_and_list_index(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

@@ -917,6 +917,105 @@ async def test_service_discovers_direct_historical_archive_without_upload_job(
 
 
 @pytest.mark.asyncio
+async def test_skipped_archive_without_video_becomes_zero_match_publication(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute('DELETE FROM vainglory_matches')
+        await database.execute('DELETE FROM vainglory_analysis_revisions')
+        await database.execute('DELETE FROM vainglory_part_jobs')
+        await database.execute('DELETE FROM vainglory_scan_jobs')
+        await database.execute('DELETE FROM upload_parts')
+        await database.execute('DELETE FROM upload_jobs')
+        await database.execute('DELETE FROM recording_parts')
+        await database.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,content_classification,'
+            'classification_reason,retryable,created_at,updated_at) '
+            "VALUES(1,1,303,'BV1abcdefgh','历史稿件',1,1,'skipped',1,0,0,"
+            "'unknown','稿件没有可分析的分 P',0,1,1)"
+        )
+        protocol = FakePublicationProtocol()
+        protocol.description = (
+            '用户简介\n\n共 1 局｜1 胜 0 负\n①｜胜　｜3V3｜凯恩 vs 骷髅'
+        )
+        protocol.chapter_cards = (
+            {'from': 0, 'to': 120, 'content': '直播开始'},
+            {'from': 120, 'to': 1200, 'content': '第一局｜胜｜凯恩｜3V3'},
+        )
+        protocol.list_replies_result = {
+            'code': 0,
+            'data': {
+                'cursor': {'is_end': True, 'next': 0},
+                'replies': [
+                    {
+                        'rpid': 701,
+                        'oid': 303,
+                        'mid': 42,
+                        'root': 0,
+                        'parent': 0,
+                        'content': {'message': '旧自动评论'},
+                    }
+                ],
+            },
+        }
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+
+        publication = await database.fetchone(
+            'SELECT source_kind,plan_state,match_count,needs_refresh '
+            'FROM vainglory_publications'
+        )
+        assert dict(publication) == {
+            'source_kind': 'archive',
+            'plan_state': 'ready',
+            'match_count': 0,
+            'needs_refresh': 0,
+        }
+        revision = await database.fetchone(
+            'SELECT reason,state,match_count,analysis_snapshot_json '
+            'FROM vainglory_publication_revisions'
+        )
+        assert dict(revision) == {
+            'reason': 'initial',
+            'state': 'prepared',
+            'match_count': 0,
+            'analysis_snapshot_json': (
+                '{"bvid":"BV1abcdefgh","matches":[],"version":1}'
+            ),
+        }
+        for _ in range(8):
+            if (
+                await database.scalar('SELECT state FROM vainglory_publications')
+                == 'confirmed'
+            ):
+                break
+            assert await service.run_once() is True
+        assert protocol.description == '用户简介'
+        assert protocol.chapter_batches[-1] == ()
+        assert protocol.delete_reply_calls == [{'type': 1, 'oid': 303, 'rpid': 701}]
+        assert protocol.add_reply_calls == []
+        assert (
+            await database.scalar('SELECT state FROM vainglory_publications')
+            == 'confirmed'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_published_upload_gets_task_before_analysis_is_ready(
     tmp_path: Path,
 ) -> None:
