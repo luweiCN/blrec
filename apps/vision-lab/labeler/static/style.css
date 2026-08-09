@@ -507,6 +507,7 @@ tr:hover td { background: var(--panel2); }
 
 .candidate-review-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 7px;

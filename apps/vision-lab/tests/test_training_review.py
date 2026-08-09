@@ -239,6 +239,44 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
         )
         self.assertEqual(reviewed['result_panel_label'], 'result_panel')
 
+    def test_result_quality_is_saved_and_cleared_for_non_result_frames(self):
+        frame_id = self.frame(1)
+        db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.2, 0.8, 0.6)
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='match_flow',
+            match_mode_label='unreadable',
+            hero_select_label='not_select',
+            result_panel_label='result_panel',
+            ocr_usable='no',
+            result_occlusion='occluded',
+            occluder_types=['platform_ui'],
+            status='confirmed',
+        )
+
+        self.assertEqual(reviewed['ocr_usable'], 'no')
+        self.assertEqual(reviewed['result_occlusion'], 'occluded')
+        self.assertEqual(reviewed['occluder_types'], ['platform_ui'])
+
+        reviewed = db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label='not_match_flow',
+            match_mode_label=None,
+            hero_select_label='not_select',
+            result_panel_label='no_result_panel',
+            ocr_usable='no',
+            result_occlusion='occluded',
+            occluder_types=['platform_ui'],
+            status='confirmed',
+        )
+
+        self.assertEqual(reviewed['ocr_usable'], 'yes')
+        self.assertEqual(reviewed['result_occlusion'], 'none')
+        self.assertEqual(reviewed['occluder_types'], [])
+
     def test_hero_select_and_result_panel_cannot_both_be_positive(self):
         frame_id = self.frame(1)
         db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.2, 0.8, 0.6)
@@ -517,6 +555,14 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         review = nas.reviews[0][1]
         self.assertEqual(review['schema_version'], 2)
         self.assertEqual(review['labels']['match_mode_label'], 'aram')
+        self.assertEqual(
+            review['result_quality'],
+            {
+                'ocr_usable': 'yes',
+                'result_occlusion': 'none',
+                'occluder_types': [],
+            },
+        )
         self.assertEqual(review['source_ids'], ['part-7:12000:test'])
         source = db.get_training_review_item(self.conn, frame_id)['sources'][0]
         self.assertEqual(source['sync_state'], 'clean')
@@ -692,6 +738,11 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
                 'result_panel_label': 'result_panel',
             },
             'result_box': {'x': 0.1, 'y': 0.2, 'w': 0.8, 'h': 0.6},
+            'result_quality': {
+                'ocr_usable': 'no',
+                'result_occlusion': 'occluded',
+                'occluder_types': ['platform_ui'],
+            },
             'notes': '',
             'reviewed_at': '2026-08-09T12:00:00',
         }
@@ -704,6 +755,9 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         item = db.get_training_review_item(self.conn, frame_id)
         self.assertEqual(item['result_panel_label'], 'result_panel')
         self.assertIn('result_panel', item['boxes'])
+        self.assertEqual(item['ocr_usable'], 'no')
+        self.assertEqual(item['result_occlusion'], 'occluded')
+        self.assertEqual(item['occluder_types'], ['platform_ui'])
 
 
 class ResultArchiveNas:
