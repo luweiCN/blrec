@@ -300,6 +300,10 @@ function candidateDefaultDraft(item) {
     }
   }
   draft.hero_layout_label ||= 'none';
+  draft.ocr_usable = item.ocr_usable || 'yes';
+  draft.result_occlusion = item.result_occlusion || 'none';
+  draft.occluder_types = Array.isArray(item.occluder_types)
+    ? [...item.occluder_types] : [];
   return draft;
 }
 
@@ -1321,6 +1325,100 @@ function renderCandidateHeroContextControls() {
   }
 }
 
+function candidateResultQualitySummary() {
+  if (!candidateDraft) return '异常：无';
+  const parts = [];
+  if (candidateDraft.ocr_usable === 'no') parts.push('OCR 不可用');
+  else if (candidateDraft.ocr_usable === 'unknown') parts.push('OCR 不确定');
+  if (candidateDraft.result_occlusion === 'occluded') {
+    const labels = Object.fromEntries(CFG.occluder_types || []);
+    const types = (candidateDraft.occluder_types || [])
+      .map((value) => labels[value]).filter(Boolean);
+    parts.push(types.length ? `遮挡：${types.join('、')}` : '有遮挡');
+  } else if (candidateDraft.result_occlusion === 'unknown') {
+    parts.push('遮挡不确定');
+  }
+  return parts.length ? parts.join(' · ') : '异常：无';
+}
+
+function appendCandidateResultQualityRow(
+  panel, title, values, selectedValues, onSelect,
+) {
+  const row = document.createElement('div');
+  row.className = 'candidate-result-quality-row';
+  const label = document.createElement('span');
+  label.className = 'candidate-result-quality-label';
+  label.textContent = title;
+  row.appendChild(label);
+  const buttons = document.createElement('div');
+  buttons.className = 'candidate-result-quality-buttons';
+  Object.entries(values).forEach(([value, text]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = text;
+    const selected = selectedValues.has(value);
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    button.onclick = (event) => {
+      event.preventDefault();
+      onSelect(value);
+    };
+    buttons.appendChild(button);
+  });
+  row.appendChild(buttons);
+  panel.appendChild(row);
+}
+
+function renderCandidateResultQualityDetails(details) {
+  details.innerHTML = '';
+  const summary = document.createElement('summary');
+  summary.textContent = candidateResultQualitySummary();
+  summary.title = '展开填写结算遮挡和 OCR 可用性';
+  details.appendChild(summary);
+  const panel = document.createElement('div');
+  panel.className = 'candidate-result-quality-panel';
+  appendCandidateResultQualityRow(
+    panel, 'OCR', CFG.ocr_usable,
+    new Set([candidateDraft.ocr_usable || 'yes']),
+    (value) => {
+      candidateDraft.ocr_usable = value;
+      renderCandidateResultQualityDetails(details);
+    },
+  );
+  appendCandidateResultQualityRow(
+    panel, '遮挡', CFG.result_occlusion,
+    new Set([candidateDraft.result_occlusion || 'none']),
+    (value) => {
+      candidateDraft.result_occlusion = value;
+      if (value !== 'occluded') candidateDraft.occluder_types = [];
+      renderCandidateResultQualityDetails(details);
+    },
+  );
+  if (candidateDraft.result_occlusion === 'occluded') {
+    appendCandidateResultQualityRow(
+      panel, '遮挡物', Object.fromEntries(CFG.occluder_types || []),
+      new Set(candidateDraft.occluder_types || []),
+      (value) => {
+        const selected = new Set(candidateDraft.occluder_types || []);
+        if (selected.has(value)) selected.delete(value);
+        else selected.add(value);
+        candidateDraft.occluder_types = [...selected];
+        renderCandidateResultQualityDetails(details);
+      },
+    );
+  }
+  details.appendChild(panel);
+}
+
+function createCandidateResultQualityDetails() {
+  const details = document.createElement('details');
+  details.className = 'candidate-result-quality';
+  details.classList.toggle(
+    'hidden', candidateDraft.result_panel_label !== 'result_panel');
+  renderCandidateResultQualityDetails(details);
+  return details;
+}
+
 function renderCandidateChoices() {
   const item = currentCandidate();
   const actions = $('#candidate-label-actions');
@@ -1334,9 +1432,15 @@ function renderCandidateChoices() {
         candidateDraft.match_flow_label !== 'match_flow') {
       group.classList.add('hidden');
     }
+    const headingRow = document.createElement('div');
+    headingRow.className = 'candidate-review-heading';
     const heading = document.createElement('h4');
     heading.textContent = field.title;
-    group.appendChild(heading);
+    headingRow.appendChild(heading);
+    if (field.key === 'result_panel_label') {
+      headingRow.appendChild(createCandidateResultQualityDetails());
+    }
+    group.appendChild(headingRow);
     const buttons = document.createElement('div');
     buttons.className = 'candidate-review-buttons';
     const suggestion = candidateSuggestedValue(item, field);
@@ -1431,6 +1535,9 @@ function selectCandidateReviewLabel(field, value) {
     candidateDraft.hero_select_label = 'not_select';
     candidateDraft.hero_layout_label = 'result_page';
   } else if (field === 'result_panel_label' && value !== 'result_panel') {
+    candidateDraft.ocr_usable = 'yes';
+    candidateDraft.result_occlusion = 'none';
+    candidateDraft.occluder_types = [];
     if (candidateDraft.hero_layout_label === 'result_page') {
       candidateDraft.hero_layout_label = 'none';
     }
