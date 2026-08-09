@@ -8,96 +8,171 @@
   </nav>
 
   <ng-container *ngIf="player as profile; else playerNotFound">
-    <header class="profile-heading player-profile-heading">
-      <div class="profile-player-identity">
-        <app-player-avatar
-          class="profile-avatar"
-          [playerId]="profile.id"
-          [heroName]="
-            performance.topHero ||
-            (profile.heroPool.length > 0 ? profile.heroPool[0].name : '')
-          "
-        ></app-player-avatar>
-        <div>
-          <p>PLAYER ARCHIVE</p>
-          <h1>{{ profile.name }}</h1>
-          <span>{{ profile.roomLabel }}</span>
+    <div class="player-profile-overview">
+      <header class="profile-heading player-profile-heading">
+        <div class="profile-player-identity">
+          <app-player-avatar
+            class="profile-avatar"
+            [playerId]="profile.id"
+            [heroName]="
+              performance.topHero ||
+              (profile.heroPool.length > 0 ? profile.heroPool[0].name : '')
+            "
+          ></app-player-avatar>
+          <div>
+            <p>PLAYER ARCHIVE</p>
+            <h1>{{ profile.name }}</h1>
+            <span>{{ profile.roomLabel }}</span>
+          </div>
         </div>
-      </div>
-      <dl class="identity-meta">
-        <div>
-          <dt>游戏名称 / 历史别名</dt>
-          <dd>{{ profile.aliases.join(" / ") || "暂无已识别别名" }}</dd>
-        </div>
-        <div>
-          <dt>稳定玩家 ID</dt>
-          <dd>#{{ profile.id }}</dd>
-        </div>
-      </dl>
-      <div class="profile-heading-tier">
-        <app-skill-tier-badge
-          variant="showcase"
-          [ratingScore]="performance.ratingScore"
-          [provisional]="performance.provisional"
-        ></app-skill-tier-badge>
-      </div>
-    </header>
+        <dl class="identity-meta">
+          <div>
+            <dt>游戏名称 / 历史别名</dt>
+            <dd>{{ profile.aliases.join(" / ") || "暂无已识别别名" }}</dd>
+          </div>
+          <div>
+            <dt>稳定玩家 ID</dt>
+            <dd>#{{ profile.id }}</dd>
+          </div>
+        </dl>
+      </header>
 
-    <app-leaderboard-filters
-      class="profile-filters"
-      [activeSeason]="activeSeason"
-      [seasonOptions]="seasonOptions"
-      (activeSeasonChange)="selectSeason($event)"
-    ></app-leaderboard-filters>
+      <app-leaderboard-filters
+        class="profile-filters"
+        [activeSeason]="activeSeason"
+        [seasonOptions]="seasonOptions"
+        (activeSeasonChange)="selectSeason($event)"
+      ></app-leaderboard-filters>
 
-    <section class="profile-summary player-profile-summary" aria-label="玩家当前数据">
-      <div class="profile-context">
-        <span>{{ selectedSeason.shortLabel }}</span>
-        <strong>{{ modeLabel() }}</strong>
-        <small>{{ selectedSeason.period }}</small>
-      </div>
-      <dl>
-        <div>
-          <dt>当前排名</dt>
-          <dd class="profile-rank-value">
-            <span>{{ rank === null ? "未入榜" : "#" + rank }}</span>
-            <small
-              [class.up]="rankMovement.kind === 'up'"
-              [class.down]="rankMovement.kind === 'down'"
-              [class.new]="rankMovement.kind === 'new'"
-              [attr.aria-label]="rankMovement.label"
-              [title]="rankMovement.label"
-            >{{ rankMovementText }}</small>
-          </dd>
+      <section class="profile-summary player-profile-summary" aria-label="玩家当前数据">
+        <div class="profile-context">
+          <span>{{ selectedSeason.shortLabel }}</span>
+          <strong>{{ modeLabel() }}</strong>
+          <small>{{ selectedSeason.period }}</small>
         </div>
-        <div>
-          <dt>积分</dt>
-          <dd>{{ displayScore(performance.ratingScore) | number: "1.0-0" }}</dd>
-        </div>
-        <div>
-          <dt>对局</dt>
-          <dd>{{ performance.matches }}</dd>
-        </div>
-        <div>
-          <dt>胜 / 负</dt>
-          <dd>{{ performance.wins }} / {{ performance.matches - performance.wins }}</dd>
-        </div>
-        <div>
-          <dt>胜率</dt>
-          <dd class="accent">{{ winRate(performance) | percent: "1.0-1" }}</dd>
-        </div>
-        <div>
-          <dt title="仅统计 K / D / A 均识别完整的场次">KDA</dt>
-          <dd class="profile-kda-value">
-            <ng-container *ngIf="kdaSummary as kda; else noPlayerKda">
-              <span class="accent">{{ kda.value | number: "1.2-2" }}</span>
-              <small>{{ kda.matches }} 局有效</small>
-            </ng-container>
-            <ng-template #noPlayerKda><span>—</span></ng-template>
-          </dd>
-        </div>
-      </dl>
-    </section>
+        <dl>
+          <div>
+            <dt>当前排名</dt>
+            <dd class="profile-rank-value">
+              <span>{{ rank === null ? "未入榜" : "#" + rank }}</span>
+              <small
+                [class.up]="rankMovement.kind === 'up'"
+                [class.down]="rankMovement.kind === 'down'"
+                [class.new]="rankMovement.kind === 'new'"
+                [attr.aria-label]="rankMovement.label"
+                [title]="rankMovement.label"
+              >{{ rankMovementText }}</small>
+            </dd>
+          </div>
+          <div>
+            <dt>排位分</dt>
+            <dd>{{ displayScore(performance.ratingScore) | number: "1.0-0" }}</dd>
+          </div>
+          <div>
+            <dt>对局</dt>
+            <dd>{{ performance.matches }}</dd>
+          </div>
+          <div>
+            <dt>胜 / 负</dt>
+            <dd>{{ performance.wins }} / {{ performance.matches - performance.wins }}</dd>
+          </div>
+          <div>
+            <dt>胜率</dt>
+            <dd class="accent">{{ winRate(performance) | percent: "1.0-1" }}</dd>
+          </div>
+          <div>
+            <dt title="仅统计 K / D / A 均识别完整的场次">KDA</dt>
+            <dd class="profile-kda-value">
+              <ng-container *ngIf="kdaSummary as kda; else noPlayerKda">
+                <span class="accent">{{ kda.value | number: "1.2-2" }}</span>
+                <small>{{ kda.matches }} 局有效</small>
+              </ng-container>
+              <ng-template #noPlayerKda><span>—</span></ng-template>
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <aside
+        class="profile-rank-showcase"
+        [attr.aria-label]="profile.name + '当前排位等级'"
+      >
+        <ng-container *ngIf="profileRank as rank; else noProfileRank">
+          <div class="profile-rank-art">
+            <img
+              [src]="rank.skillTier.imageUrl"
+              alt=""
+              width="512"
+              height="512"
+              decoding="async"
+            />
+            <div class="profile-rank-title">
+              <span>
+                {{ rank.skillTier.tier }} 段 · 排位等级
+                <em *ngIf="performance.provisional">定位中</em>
+              </span>
+              <strong>
+                {{ rank.skillTier.name }} · {{ rank.skillTier.divisionLabel }}
+              </strong>
+            </div>
+          </div>
+
+          <div
+            class="profile-rank-progress"
+            [class.profile-rank-progress--bronze]="rank.skillTier.division === 'bronze'"
+            [class.profile-rank-progress--silver]="rank.skillTier.division === 'silver'"
+            [class.profile-rank-progress--gold]="rank.skillTier.division === 'gold'"
+            [style.--score-position]="rank.progressPosition + '%'"
+            role="progressbar"
+            [attr.aria-valuemin]="rank.tierMinimumScore"
+            [attr.aria-valuemax]="rank.tierMaximumScore"
+            [attr.aria-valuenow]="rank.skillTier.displayScore"
+            [attr.aria-valuetext]="
+              (rank.skillTier.displayScore | number: '1.0-0') +
+              ' 排位分，' +
+              rank.skillTier.name +
+              rank.skillTier.divisionLabel
+            "
+          >
+            <output class="profile-rank-score">
+              {{ rank.skillTier.displayScore | number: "1.0-0" }}
+            </output>
+            <span class="profile-rank-pointer" aria-hidden="true"></span>
+            <span class="profile-rank-track" aria-hidden="true">
+              <span
+                class="profile-rank-fill"
+                [style.width.%]="rank.progressPosition"
+              ></span>
+              <span
+                class="profile-rank-boundary"
+                [style.left.%]="rank.silverBoundaryPosition"
+              ></span>
+              <span
+                class="profile-rank-boundary"
+                [style.left.%]="rank.goldBoundaryPosition"
+              ></span>
+            </span>
+            <span class="profile-rank-labels" aria-hidden="true">
+              <span
+                [class.current]="rank.skillTier.division === 'bronze'"
+                [style.left.%]="rank.bronzeLabelPosition"
+              >铜</span>
+              <span
+                [class.current]="rank.skillTier.division === 'silver'"
+                [style.left.%]="rank.silverLabelPosition"
+              >银</span>
+              <span
+                [class.current]="rank.skillTier.division === 'gold'"
+                [style.left.%]="rank.goldLabelPosition"
+              >金</span>
+            </span>
+          </div>
+        </ng-container>
+        <ng-template #noProfileRank>
+          <p class="profile-rank-unavailable">当前模式暂无排位等级</p>
+        </ng-template>
+      </aside>
+    </div>
 
     <section
       class="profile-card rating-trend-card"
@@ -106,7 +181,7 @@
       <header>
         <div>
           <p>RATING TREND</p>
-          <h2 id="player-rating-trend-title">积分趋势</h2>
+          <h2 id="player-rating-trend-title">排位分趋势</h2>
         </div>
         <span>
           最近 {{ playerTrend.points.length }} 次数据发布 · {{ modeLabel() }}
@@ -341,7 +416,7 @@
             <tr>
               <th scope="col">榜单周期</th>
               <th scope="col">排名</th>
-              <th scope="col" title="由积分映射，不是游戏官方段位">
+              <th scope="col" title="本站排位分的怀旧映射，不是玩家过去的官方段位">
                 站内段位
               </th>
               <th scope="col">对局</th>

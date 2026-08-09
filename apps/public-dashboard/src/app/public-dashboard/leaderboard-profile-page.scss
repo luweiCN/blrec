@@ -22,19 +22,11 @@
 }
 
 .player-profile-heading {
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 0.55fr) 236px;
+  grid-area: heading;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.52fr);
   gap: 28px;
-}
-
-.profile-heading-tier {
-  --skill-tier-showcase-size: 156px;
-
-  display: grid;
-  align-self: stretch;
-  place-items: center;
-  min-width: 0;
-  padding-left: 28px;
-  border-left: 1px solid var(--line-soft);
+  min-height: 190px;
+  margin-top: 0;
 }
 
 .profile-player-identity {
@@ -162,7 +154,21 @@
 }
 
 .player-profile-summary dl {
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(3, 1fr);
+
+  div {
+    min-height: 78px;
+    padding: 13px 16px;
+
+    &:nth-child(n + 4) {
+      border-top: 1px solid var(--line-soft);
+    }
+  }
+}
+
+.player-profile-summary {
+  grid-area: summary;
+  grid-template-columns: 170px minmax(0, 1fr);
 }
 
 .profile-kda-value {

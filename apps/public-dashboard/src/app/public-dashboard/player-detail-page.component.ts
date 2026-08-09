@@ -49,6 +49,8 @@ import {
 import {
   displayScoreForRatingDelta,
   displayScoreForRatingScore,
+  SkillTierProgress,
+  skillTierProgressForRatingScore,
 } from './skill-tier';
 
 interface PlayerSeasonRecord {
@@ -81,6 +83,7 @@ const TREND_CHART_PADDING_Y = 18;
   styleUrls: [
     './leaderboard-detail-page.scss',
     './leaderboard-profile-page.scss',
+    './player-rank-showcase.scss',
     './leaderboard-profile-responsive.scss',
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -145,6 +148,10 @@ export class PlayerDetailPageComponent implements OnDestroy {
 
   get performance(): Performance {
     return this.seasonPlayer?.modes[this.activeMode] ?? EMPTY_PERFORMANCE;
+  }
+
+  get profileRank(): SkillTierProgress | null {
+    return skillTierProgressForRatingScore(this.performance.ratingScore);
   }
 
   get kdaSummary(): PlayerKdaSummary | null {
@@ -273,7 +280,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   }
 
   get trendChartLabel(): string {
-    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的积分趋势`;
+    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的排位分趋势`;
   }
 
   get modeBreakdown(): readonly ModeBreakdown[] {

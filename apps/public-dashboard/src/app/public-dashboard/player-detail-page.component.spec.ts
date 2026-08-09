@@ -73,19 +73,25 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.profile-kda-value')?.textContent).toContain(
       '145 局有效',
     );
-    expect(page.querySelector('.profile-heading-tier')?.textContent).toContain(
+    expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
       '登峰造极 · 铜',
     );
-    expect(page.querySelector('.profile-heading-tier')?.textContent).toContain(
-      '20,580',
+    expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
+      '2,058',
     );
+    const rankProgress = page.querySelector('.profile-rank-progress');
+    expect(rankProgress?.getAttribute('role')).toBe('progressbar');
+    expect(rankProgress?.getAttribute('aria-valuemin')).toBe('2000');
+    expect(rankProgress?.getAttribute('aria-valuemax')).toBe('2400');
+    expect(rankProgress?.getAttribute('aria-valuenow')).toBe('2058');
+    expect(page.querySelectorAll('.profile-rank-labels > span').length).toBe(3);
     const heroLinks = Array.from(
       page.querySelectorAll('.profile-hero-link'),
     ).map((element) => element.textContent ?? '');
     expect(heroLinks.some((value) => value.includes('凯恩'))).toBeTrue();
     expect(page.querySelectorAll('.trend-point').length).toBe(3);
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
-      '+180',
+      '+18',
     );
     expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
     expect(page.querySelector('.peer-comparison')?.textContent).toMatch(

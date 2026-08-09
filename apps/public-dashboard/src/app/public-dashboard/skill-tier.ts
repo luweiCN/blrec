@@ -13,6 +13,18 @@ export interface SkillTier {
   readonly tier: number;
 }
 
+export interface SkillTierProgress {
+  readonly bronzeLabelPosition: number;
+  readonly goldBoundaryPosition: number;
+  readonly goldLabelPosition: number;
+  readonly progressPosition: number;
+  readonly silverBoundaryPosition: number;
+  readonly silverLabelPosition: number;
+  readonly skillTier: SkillTier;
+  readonly tierMaximumScore: number;
+  readonly tierMinimumScore: number;
+}
+
 interface SkillTierName {
   readonly english: string;
   readonly localized: string;
@@ -24,9 +36,8 @@ interface DivisionDefinition {
 }
 
 const RATING_SCORE_MAXIMUM = 1000;
-const DISPLAY_SCORE_MULTIPLIER = 30;
-const HISTORICAL_POINT_DISPLAY_SCALE = 10;
-const DISPLAY_SCORE_MAXIMUM = 30_000;
+const DISPLAY_SCORE_MULTIPLIER = 3;
+const DISPLAY_SCORE_MAXIMUM = 3_000;
 
 const SKILL_TIER_START_POINTS = [
   0, 109, 218, 327, 436, 545, 654, 763, 872, 981, 1090, 1200,
@@ -65,10 +76,7 @@ export function skillTierForRatingScore(
   let skillTierIndex = 0;
 
   for (let index = 1; index < SKILL_TIER_START_POINTS.length; index += 1) {
-    if (
-      displayScore <
-      SKILL_TIER_START_POINTS[index] * HISTORICAL_POINT_DISPLAY_SCALE
-    ) {
+    if (displayScore < SKILL_TIER_START_POINTS[index]) {
       break;
     }
     skillTierIndex = index;
@@ -90,13 +98,64 @@ export function skillTierForRatingScore(
     maximumScore:
       nextStart === undefined
         ? DISPLAY_SCORE_MAXIMUM
-        : nextStart * HISTORICAL_POINT_DISPLAY_SCALE - 1,
-    minimumScore:
-      SKILL_TIER_START_POINTS[skillTierIndex] *
-      HISTORICAL_POINT_DISPLAY_SCALE,
+        : nextStart - 1,
+    minimumScore: SKILL_TIER_START_POINTS[skillTierIndex],
     name: tierName.localized,
     ratingScore: normalizedScore,
     tier,
+  };
+}
+
+export function skillTierProgressForRatingScore(
+  ratingScore: number | null,
+): SkillTierProgress | null {
+  const skillTier = skillTierForRatingScore(ratingScore);
+  if (skillTier === null) {
+    return null;
+  }
+
+  const tierStartIndex = (skillTier.tier - 1) * DIVISIONS.length;
+  const tierMinimumScore = SKILL_TIER_START_POINTS[tierStartIndex];
+  const silverMinimumScore = SKILL_TIER_START_POINTS[tierStartIndex + 1];
+  const goldMinimumScore = SKILL_TIER_START_POINTS[tierStartIndex + 2];
+  const tierMaximumScore =
+    SKILL_TIER_START_POINTS[tierStartIndex + DIVISIONS.length] ??
+    DISPLAY_SCORE_MAXIMUM;
+
+  return {
+    bronzeLabelPosition: scorePosition(
+      (tierMinimumScore + silverMinimumScore) / 2,
+      tierMinimumScore,
+      tierMaximumScore,
+    ),
+    goldBoundaryPosition: scorePosition(
+      goldMinimumScore,
+      tierMinimumScore,
+      tierMaximumScore,
+    ),
+    goldLabelPosition: scorePosition(
+      (goldMinimumScore + tierMaximumScore) / 2,
+      tierMinimumScore,
+      tierMaximumScore,
+    ),
+    progressPosition: scorePosition(
+      skillTier.displayScore,
+      tierMinimumScore,
+      tierMaximumScore,
+    ),
+    silverBoundaryPosition: scorePosition(
+      silverMinimumScore,
+      tierMinimumScore,
+      tierMaximumScore,
+    ),
+    silverLabelPosition: scorePosition(
+      (silverMinimumScore + goldMinimumScore) / 2,
+      tierMinimumScore,
+      tierMaximumScore,
+    ),
+    skillTier,
+    tierMaximumScore,
+    tierMinimumScore,
   };
 }
 
@@ -119,5 +178,12 @@ function normalizeRatingScore(ratingScore: number | null): number | null {
   }
   return Math.round(
     Math.min(RATING_SCORE_MAXIMUM, Math.max(0, ratingScore)),
+  );
+}
+
+function scorePosition(score: number, minimum: number, maximum: number): number {
+  return Math.min(
+    100,
+    Math.max(0, ((score - minimum) / (maximum - minimum)) * 100),
   );
 }
