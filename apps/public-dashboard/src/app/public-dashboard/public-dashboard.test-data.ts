@@ -1,6 +1,8 @@
 import { heroesForSeason, playersForSeason } from './public-dashboard.mock-data';
 import {
   DashboardSnapshot,
+  DashboardTrendPublication,
+  DashboardTrends,
   SeasonKey,
   SeasonOption,
   SeasonStandings,
@@ -66,4 +68,41 @@ export const TEST_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   currentSeasonKey: '2026-summer',
   seasons: SEASONS,
   standings,
+};
+
+function trendPublication(
+  snapshotId: string,
+  publicationDate: string,
+  rank: number,
+  ratingScore: number,
+): DashboardTrendPublication {
+  const standing = { playerId: 1, rank, ratingScore };
+  return {
+    snapshotId,
+    publicationDate,
+    sourceLastMatchId: 12345,
+    standings: {
+      '2026-summer': {
+        all: [standing],
+        '3v3': [standing],
+        brawl: [],
+        '5v5': [],
+      },
+    },
+  };
+}
+
+export const TEST_DASHBOARD_TRENDS: DashboardTrends = {
+  schemaVersion: 1,
+  updatedAt: TEST_DASHBOARD_SNAPSHOT.generatedAt,
+  publications: [
+    trendPublication('20260801T020500Z-trend', '2026-08-01', 3, 672),
+    trendPublication('20260802T020500Z-trend', '2026-08-02', 2, 680),
+    trendPublication(
+      TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      TEST_DASHBOARD_SNAPSHOT.publicationDate,
+      1,
+      686,
+    ),
+  ],
 };

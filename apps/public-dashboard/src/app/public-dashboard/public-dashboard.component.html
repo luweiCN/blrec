@@ -123,6 +123,17 @@
             >
               <td class="rank-cell" [class.medal]="rank < 3">
                 <strong>{{ (rank + 1).toString().padStart(2, "0") }}</strong>
+                <ng-container *ngIf="rankMovement(player) as movement">
+                  <small
+                    *ngIf="movement.kind !== 'pending'"
+                    class="rank-movement"
+                    [class.up]="movement.kind === 'up'"
+                    [class.down]="movement.kind === 'down'"
+                    [class.new]="movement.kind === 'new'"
+                    [attr.aria-label]="movement.label"
+                    [title]="movement.label"
+                  >{{ movement.text }}</small>
+                </ng-container>
               </td>
               <td>
                 <a

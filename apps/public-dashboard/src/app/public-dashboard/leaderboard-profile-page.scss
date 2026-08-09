@@ -169,6 +169,162 @@
   }
 }
 
+.profile-rank-value {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.53rem;
+    font-weight: 750;
+
+    &.up {
+      color: var(--cyan);
+    }
+
+    &.down {
+      color: var(--rose);
+    }
+
+    &.new {
+      color: var(--gold);
+    }
+  }
+}
+
+.rating-trend-card {
+  overflow: hidden;
+}
+
+.rating-trend-layout {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 28px;
+  align-items: stretch;
+  margin-top: 22px;
+}
+
+.rating-trend-summary {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--line-soft);
+
+  div {
+    display: grid;
+    align-content: center;
+    min-height: 84px;
+    padding: 16px 18px;
+    background: var(--surface-2);
+  }
+
+  dt {
+    color: var(--ink-muted);
+    font-size: 0.57rem;
+  }
+
+  dd {
+    margin: 6px 0 0;
+    color: var(--ink);
+    font-size: 1.12rem;
+    font-weight: 760;
+
+    &.up {
+      color: var(--cyan);
+    }
+
+    &.down {
+      color: var(--rose);
+    }
+  }
+}
+
+.rating-trend-visual {
+  min-width: 0;
+}
+
+.rating-trend-frame {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.rating-trend-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 3px 0 23px;
+  color: var(--ink-muted);
+  font-size: 0.52rem;
+  text-align: right;
+}
+
+.rating-trend-plot {
+  min-width: 0;
+
+  svg {
+    display: block;
+    width: 100%;
+    height: 168px;
+    overflow: visible;
+  }
+}
+
+.trend-grid-line {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.trend-line {
+  fill: none;
+  stroke: var(--cyan);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.trend-point {
+  fill: var(--surface-1);
+  stroke: var(--cyan);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+
+  &.current {
+    fill: var(--gold);
+    stroke: var(--gold);
+  }
+}
+
+.rating-trend-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  color: var(--ink-muted);
+  font-size: 0.52rem;
+
+  &.single {
+    justify-content: center;
+  }
+}
+
+.trend-start-note {
+  margin: 9px 0 0 44px;
+  color: var(--ink-muted);
+  font-size: 0.56rem;
+}
+
+.trend-empty {
+  display: grid;
+  min-height: 132px;
+  place-content: center;
+}
+
 .profile-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

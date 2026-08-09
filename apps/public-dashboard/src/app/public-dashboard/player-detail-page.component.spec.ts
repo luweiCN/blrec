@@ -12,7 +12,10 @@ import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.co
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { DashboardDataService } from './public-dashboard-data.service';
-import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
+import {
+  TEST_DASHBOARD_SNAPSHOT,
+  TEST_DASHBOARD_TRENDS,
+} from './public-dashboard.test-data';
 
 describe('PlayerDetailPageComponent', () => {
   let fixture: ComponentFixture<PlayerDetailPageComponent>;
@@ -31,7 +34,10 @@ describe('PlayerDetailPageComponent', () => {
       providers: [
         {
           provide: DashboardDataService,
-          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+          useValue: {
+            snapshot: TEST_DASHBOARD_SNAPSHOT,
+            trends: TEST_DASHBOARD_TRENDS,
+          },
         },
         {
           provide: ActivatedRoute,
@@ -62,6 +68,10 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('h1')?.textContent).toContain('星河');
     expect(page.querySelector('.profile-hero-link')?.textContent).toContain(
       '凯恩',
+    );
+    expect(page.querySelectorAll('.trend-point').length).toBe(3);
+    expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
+      '+6',
     );
   });
 

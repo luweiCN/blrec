@@ -63,6 +63,19 @@
     grid-template-columns: 1fr;
   }
 
+  .rating-trend-layout {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .rating-trend-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    div {
+      min-height: 76px;
+    }
+  }
+
   .mode-stat-grid {
     grid-template-columns: 1fr;
 
@@ -222,5 +235,19 @@
     & > span {
       min-height: 58px;
     }
+  }
+
+  .rating-trend-frame {
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .rating-trend-plot svg {
+    height: 142px;
+  }
+
+  .trend-start-note {
+    margin-left: 38px;
+    line-height: 1.55;
   }
 }

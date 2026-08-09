@@ -1,6 +1,11 @@
-import { getPlayerRankings } from './public-dashboard.data';
+import {
+  getPlayerRankings,
+  getPlayerTrend,
+  getRankMovement,
+} from './public-dashboard.data';
 import {
   DashboardSnapshot,
+  DashboardTrends,
   Performance,
   PlayerStanding,
 } from './public-dashboard.models';
@@ -52,4 +57,86 @@ describe('public dashboard player rankings', () => {
       lowSample.id,
     ]);
   });
+
+  it('compares each mode with the previous committed publication', () => {
+    const trends: DashboardTrends = {
+      schemaVersion: 1,
+      updatedAt: '2026-08-03T02:05:00Z',
+      publications: [
+        trendPublication('snapshot-1', '2026-08-01', 1, 3, 610),
+        trendPublication('snapshot-2', '2026-08-02', 1, 2, 618),
+        trendPublication(
+          TEST_DASHBOARD_SNAPSHOT.snapshotId,
+          '2026-08-03',
+          1,
+          1,
+          625,
+        ),
+      ],
+    };
+
+    const trend = getPlayerTrend(
+      trends,
+      TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      '2026-summer',
+      '3v3',
+      1,
+    );
+
+    expect(trend.points.map((point) => point.ratingScore)).toEqual([
+      610, 618, 625,
+    ]);
+    expect(trend.rankDelta).toBe(1);
+    expect(trend.ratingDelta).toBe(7);
+    expect(getRankMovement(trend)).toEqual({
+      kind: 'up',
+      text: '↑1',
+      label: '较上次数据发布上升 1 名',
+    });
+  });
+
+  it('does not combine another mode or an uncommitted snapshot', () => {
+    const trends: DashboardTrends = {
+      schemaVersion: 1,
+      updatedAt: '2026-08-04T02:05:00Z',
+      publications: [
+        trendPublication('snapshot-1', '2026-08-02', 1, 2, 618),
+        trendPublication('snapshot-uncommitted', '2026-08-04', 1, 1, 630),
+      ],
+    };
+
+    const trend = getPlayerTrend(
+      trends,
+      TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      '2026-summer',
+      '3v3',
+      1,
+    );
+
+    expect(trend.points).toEqual([]);
+    expect(getRankMovement(trend).kind).toBe('pending');
+  });
 });
+
+function trendPublication(
+  snapshotId: string,
+  publicationDate: string,
+  playerId: number,
+  rank: number,
+  ratingScore: number,
+): DashboardTrends['publications'][number] {
+  const standing = { playerId, rank, ratingScore };
+  return {
+    snapshotId,
+    publicationDate,
+    sourceLastMatchId: 100,
+    standings: {
+      '2026-summer': {
+        all: [standing],
+        '3v3': [standing],
+        brawl: [],
+        '5v5': [],
+      },
+    },
+  };
+}

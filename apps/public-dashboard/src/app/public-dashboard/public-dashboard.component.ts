@@ -12,9 +12,12 @@ import {
   getHeroRankings,
   getModeBreakdown,
   getPlayerRankings,
+  getPlayerTrend,
+  getRankMovement,
   heroImage,
   modeLabel,
   OVERVIEW_LIMIT,
+  RankMovement,
   seasonOption,
   selectedHeroWinRate,
   winRate,
@@ -188,6 +191,18 @@ export class PublicDashboardComponent implements OnDestroy {
 
   ratingScore(value: Performance): number {
     return value.ratingScore ?? 0;
+  }
+
+  rankMovement(player: PlayerStanding): RankMovement {
+    return getRankMovement(
+      getPlayerTrend(
+        this.data.trends,
+        this.data.snapshot.snapshotId,
+        this.activeSeason,
+        this.activeMode,
+        player.id,
+      ),
+    );
   }
 
   modeLabel(): string {

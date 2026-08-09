@@ -175,7 +175,28 @@ table {
     font-size: 0.82rem;
     letter-spacing: 0.03em;
   }
+}
 
+.rank-movement {
+  display: block;
+  width: fit-content;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 0.52rem;
+  font-weight: 750;
+  line-height: 1;
+
+  &.up {
+    color: var(--cyan);
+  }
+
+  &.down {
+    color: var(--rose);
+  }
+
+  &.new {
+    color: var(--gold);
+  }
 }
 
 .player-select {

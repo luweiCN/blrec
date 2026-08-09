@@ -32,6 +32,30 @@ export interface DashboardManifest {
   readonly bytes: number;
 }
 
+export interface DashboardTrendStanding {
+  readonly playerId: number;
+  readonly rank: number;
+  readonly ratingScore: number;
+}
+
+export interface DashboardTrendPublication {
+  readonly snapshotId: string;
+  readonly publicationDate: string;
+  readonly sourceLastMatchId: number;
+  readonly standings: Readonly<
+    Record<
+      string,
+      Readonly<Record<ModeFilter, readonly DashboardTrendStanding[]>>
+    >
+  >;
+}
+
+export interface DashboardTrends {
+  readonly schemaVersion: 1;
+  readonly updatedAt: string;
+  readonly publications: readonly DashboardTrendPublication[];
+}
+
 export interface Performance {
   readonly matches: number;
   readonly wins: number;

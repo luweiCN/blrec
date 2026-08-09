@@ -229,7 +229,28 @@ a {
     color: var(--ink-soft);
     font-size: 0.8rem;
   }
+}
 
+.rank-movement {
+  display: block;
+  width: fit-content;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 0.52rem;
+  font-weight: 750;
+  line-height: 1;
+
+  &.up {
+    color: var(--cyan);
+  }
+
+  &.down {
+    color: var(--rose);
+  }
+
+  &.new {
+    color: var(--gold);
+  }
 }
 
 .directory-player {

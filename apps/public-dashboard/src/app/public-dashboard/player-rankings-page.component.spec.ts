@@ -11,7 +11,10 @@ import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.co
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
 import { DashboardDataService } from './public-dashboard-data.service';
-import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
+import {
+  TEST_DASHBOARD_SNAPSHOT,
+  TEST_DASHBOARD_TRENDS,
+} from './public-dashboard.test-data';
 
 describe('PlayerRankingsPageComponent', () => {
   let fixture: ComponentFixture<PlayerRankingsPageComponent>;
@@ -30,7 +33,10 @@ describe('PlayerRankingsPageComponent', () => {
       providers: [
         {
           provide: DashboardDataService,
-          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+          useValue: {
+            snapshot: TEST_DASHBOARD_SNAPSHOT,
+            trends: TEST_DASHBOARD_TRENDS,
+          },
         },
         {
           provide: DASHBOARD_MODE_STORAGE,
@@ -106,5 +112,14 @@ describe('PlayerRankingsPageComponent', () => {
 
     expect(links.length).toBe(component.visibleRows.length);
     expect(links[0].href).toContain('/players/');
+  });
+
+  it('keeps rank movement in the rank column', () => {
+    const movement = fixture.nativeElement.querySelector(
+      '.directory-rank .rank-movement',
+    ) as HTMLElement;
+
+    expect(movement.textContent).toContain('↑1');
+    expect(movement.closest('td')?.getAttribute('data-label')).toBe('排名');
   });
 });

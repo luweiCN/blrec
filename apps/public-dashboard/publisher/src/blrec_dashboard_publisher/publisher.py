@@ -11,7 +11,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Mapping, Optional, Protocol
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Set,
+    Tuple,
+)
 
 import requests
 
@@ -25,6 +36,7 @@ __all__ = (
     'DashboardPublicationResult',
     'DashboardPublishError',
     'OssDashboardStore',
+    'build_dashboard_trends',
     'next_publication_at',
     'publish_dashboard_once',
 )
@@ -33,6 +45,8 @@ __all__ = (
 LOGGER = logging.getLogger('dashboard-publisher')
 SNAPSHOT_PATH = re.compile(r'snapshots/[a-zA-Z0-9-]+\.json\Z')
 DEFAULT_RETRY_SECONDS = 15 * 60
+TREND_MODES = ('all', '3v3', 'brawl', '5v5')
+MAX_TREND_PUBLICATIONS = 30
 
 
 class DashboardPublishError(RuntimeError):
@@ -43,7 +57,13 @@ class DashboardStore(Protocol):
     def load_manifest(self) -> Optional[bytes]:
         pass
 
+    def load_trends(self) -> Optional[bytes]:
+        pass
+
     def put_snapshot(self, path: str, content: bytes, sha256: str) -> int:
+        pass
+
+    def put_trends(self, content: bytes) -> int:
         pass
 
     def put_manifest(self, content: bytes) -> int:
@@ -117,6 +137,198 @@ def _validate_snapshot(path: Path, manifest: Mapping[str, Any]) -> Mapping[str, 
     return snapshot
 
 
+def _json_bytes(value: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        + '\n'
+    ).encode('utf-8')
+
+
+def _trend_document(content: bytes) -> Mapping[str, Any]:
+    value = _json_mapping(content, '远端趋势数据')
+    publications = value.get('publications')
+    if (
+        value.get('schemaVersion') != 1
+        or not isinstance(value.get('updatedAt'), str)
+        or not isinstance(publications, list)
+        or len(publications) > MAX_TREND_PUBLICATIONS
+    ):
+        raise DashboardPublishError('远端趋势数据版本或字段无效')
+
+    previous_date: Optional[date] = None
+    for publication in publications:
+        if not isinstance(publication, Mapping):
+            raise DashboardPublishError('远端趋势数据发布记录无效')
+        snapshot_id = publication.get('snapshotId')
+        publication_date = publication.get('publicationDate')
+        source_last_match_id = publication.get('sourceLastMatchId')
+        standings = publication.get('standings')
+        if (
+            not isinstance(snapshot_id, str)
+            or re.fullmatch(r'[a-zA-Z0-9-]+', snapshot_id) is None
+            or not isinstance(publication_date, str)
+            or type(source_last_match_id) is not int
+            or source_last_match_id < 0
+            or not isinstance(standings, Mapping)
+        ):
+            raise DashboardPublishError('远端趋势数据发布记录字段无效')
+        try:
+            parsed_date = date.fromisoformat(publication_date)
+        except ValueError as exc:
+            raise DashboardPublishError('远端趋势数据发布日期无效') from exc
+        if previous_date is not None and parsed_date <= previous_date:
+            raise DashboardPublishError('远端趋势数据发布日期没有递增')
+        previous_date = parsed_date
+
+        for season_key, modes in standings.items():
+            if not isinstance(season_key, str) or not isinstance(modes, Mapping):
+                raise DashboardPublishError('远端趋势数据赛季字段无效')
+            for mode in TREND_MODES:
+                rows = modes.get(mode)
+                if not isinstance(rows, list):
+                    raise DashboardPublishError('远端趋势数据模式字段无效')
+                seen_players: Set[int] = set()
+                for index, row in enumerate(rows):
+                    if not isinstance(row, Mapping):
+                        raise DashboardPublishError('远端趋势数据玩家记录无效')
+                    player_id = row.get('playerId')
+                    rank = row.get('rank')
+                    rating_score = row.get('ratingScore')
+                    if (
+                        type(player_id) is not int
+                        or player_id <= 0
+                        or player_id in seen_players
+                        or type(rank) is not int
+                        or rank != index + 1
+                        or type(rating_score) is not int
+                        or not 0 <= rating_score <= 1000
+                    ):
+                        raise DashboardPublishError('远端趋势数据玩家字段无效')
+                    seen_players.add(player_id)
+    return value
+
+
+def _ranked_trend_rows(
+    players: List[Any], season_key: str, mode: str
+) -> List[Mapping[str, int]]:
+    candidates: List[Tuple[int, int, int, float]] = []
+    seen_players: Set[int] = set()
+    for player in players:
+        if not isinstance(player, Mapping):
+            raise DashboardPublishError('快照 {} 玩家字段无效'.format(season_key))
+        player_id = player.get('id')
+        modes = player.get('modes')
+        if (
+            type(player_id) is not int
+            or player_id <= 0
+            or player_id in seen_players
+            or not isinstance(modes, Mapping)
+        ):
+            raise DashboardPublishError('快照 {} 玩家字段无效'.format(season_key))
+        seen_players.add(player_id)
+        performance = modes.get(mode)
+        if not isinstance(performance, Mapping):
+            raise DashboardPublishError(
+                '快照 {} {} 模式字段无效'.format(season_key, mode)
+            )
+        rating_score = performance.get('ratingScore')
+        matches = performance.get('matches')
+        wins = performance.get('wins')
+        if (
+            type(matches) is not int
+            or matches < 0
+            or type(wins) is not int
+            or not 0 <= wins <= matches
+            or (
+                rating_score is not None
+                and (
+                    type(rating_score) is not int
+                    or not 0 <= rating_score <= 1000
+                    or matches == 0
+                )
+            )
+        ):
+            raise DashboardPublishError(
+                '快照 {} {} 模式数据无效'.format(season_key, mode)
+            )
+        if rating_score is None:
+            continue
+        candidates.append(
+            (player_id, rating_score, matches, wins / matches if matches else 0.0)
+        )
+
+    candidates.sort(key=lambda row: (-row[1], -row[2], -row[3], row[0]))
+    return [
+        {'playerId': row[0], 'rank': index + 1, 'ratingScore': row[1]}
+        for index, row in enumerate(candidates)
+    ]
+
+
+def _trend_publication(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    snapshot_id = snapshot.get('snapshotId')
+    publication_date = snapshot.get('publicationDate')
+    source_last_match_id = snapshot.get('sourceLastMatchId')
+    standings = snapshot.get('standings')
+    if (
+        not isinstance(snapshot_id, str)
+        or re.fullmatch(r'[a-zA-Z0-9-]+', snapshot_id) is None
+        or not isinstance(publication_date, str)
+        or type(source_last_match_id) is not int
+        or source_last_match_id < 0
+        or not isinstance(standings, Mapping)
+    ):
+        raise DashboardPublishError('待发布快照无法生成趋势数据')
+    try:
+        date.fromisoformat(publication_date)
+    except ValueError as exc:
+        raise DashboardPublishError('待发布快照发布日期无效') from exc
+
+    public_standings: Dict[str, Mapping[str, List[Mapping[str, int]]]] = {}
+    for season_key, season_standings in standings.items():
+        if not isinstance(season_key, str) or not isinstance(season_standings, Mapping):
+            raise DashboardPublishError('待发布快照赛季字段无效')
+        players = season_standings.get('players')
+        if not isinstance(players, list):
+            raise DashboardPublishError('待发布快照 {} 玩家列表无效'.format(season_key))
+        public_standings[season_key] = {
+            mode: _ranked_trend_rows(players, season_key, mode) for mode in TREND_MODES
+        }
+    return {
+        'snapshotId': snapshot_id,
+        'publicationDate': publication_date,
+        'sourceLastMatchId': source_last_match_id,
+        'standings': public_standings,
+    }
+
+
+def build_dashboard_trends(
+    snapshot: Mapping[str, Any], existing_content: Optional[bytes]
+) -> bytes:
+    generated_at = snapshot.get('generatedAt')
+    if not isinstance(generated_at, str) or not generated_at:
+        raise DashboardPublishError('待发布快照缺少生成时间')
+    current = _trend_publication(snapshot)
+    current_date = date.fromisoformat(str(current['publicationDate']))
+    publications: List[Mapping[str, Any]] = []
+    if existing_content is not None:
+        existing = _trend_document(existing_content)
+        existing_publications = existing['publications']
+        assert isinstance(existing_publications, list)
+        for publication in existing_publications:
+            assert isinstance(publication, Mapping)
+            publication_date = date.fromisoformat(str(publication['publicationDate']))
+            if publication_date > current_date:
+                raise DashboardPublishError('远端趋势数据包含未来记录')
+            if publication_date != current_date:
+                publications.append(publication)
+    publications.append(current)
+    publications.sort(key=lambda value: str(value['publicationDate']))
+    publications = publications[-MAX_TREND_PUBLICATIONS:]
+    return _json_bytes(
+        {'schemaVersion': 1, 'updatedAt': generated_at, 'publications': publications}
+    )
+
+
 def _pending_export(
     database_path: Path,
     state_directory: Path,
@@ -188,11 +400,13 @@ def publish_dashboard_once(
     ):
         raise DashboardPublishError('数据源进度发生回退，已停止覆盖远端榜单')
 
+    trends_content = build_dashboard_trends(snapshot, store.load_trends())
     uploaded_bytes = store.put_snapshot(
         str(local_manifest['snapshotPath']),
         exported.snapshot_path.read_bytes(),
         str(local_manifest['sha256']),
     )
+    uploaded_bytes += store.put_trends(trends_content)
     uploaded_bytes += store.put_manifest(local_manifest_content)
     committed = store.load_manifest()
     if committed != local_manifest_content:
@@ -313,6 +527,9 @@ class OssDashboardStore:
     def load_manifest(self) -> Optional[bytes]:
         return self._optional_object(self._key('manifest.json'))
 
+    def load_trends(self) -> Optional[bytes]:
+        return self._optional_object(self._key('trends.json'))
+
     def put_snapshot(self, path: str, content: bytes, sha256: str) -> int:
         if SNAPSHOT_PATH.fullmatch(path) is None:
             raise DashboardPublishError('快照对象路径无效：{}'.format(path))
@@ -351,6 +568,22 @@ class OssDashboardStore:
         if not 200 <= int(result.status) < 300:
             raise DashboardPublishError(
                 'OSS manifest 上传失败：HTTP {}'.format(result.status)
+            )
+        return len(content)
+
+    def put_trends(self, content: bytes) -> int:
+        result = self._bucket.put_object(
+            self._key('trends.json'),
+            content,
+            headers={
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Content-Type': 'application/json; charset=utf-8',
+            },
+            progress_callback=self._progress(),
+        )
+        if not 200 <= int(result.status) < 300:
+            raise DashboardPublishError(
+                'OSS 趋势数据上传失败：HTTP {}'.format(result.status)
             )
         return len(content)
 

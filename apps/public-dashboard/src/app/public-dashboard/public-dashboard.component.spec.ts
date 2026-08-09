@@ -9,7 +9,10 @@ import {
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
-import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
+import {
+  TEST_DASHBOARD_SNAPSHOT,
+  TEST_DASHBOARD_TRENDS,
+} from './public-dashboard.test-data';
 
 describe('PublicDashboardComponent', () => {
   let fixture: ComponentFixture<PublicDashboardComponent>;
@@ -26,7 +29,10 @@ describe('PublicDashboardComponent', () => {
       providers: [
         {
           provide: DashboardDataService,
-          useValue: { snapshot: TEST_DASHBOARD_SNAPSHOT },
+          useValue: {
+            snapshot: TEST_DASHBOARD_SNAPSHOT,
+            trends: TEST_DASHBOARD_TRENDS,
+          },
         },
         {
           provide: DASHBOARD_MODE_STORAGE,
@@ -86,6 +92,15 @@ describe('PublicDashboardComponent', () => {
     );
     expect(page.querySelector('.row-detail-link')).toBeNull();
     expect(page.textContent).not.toContain('→');
+  });
+
+  it('shows rank movement against the previous data publication', () => {
+    const movement = fixture.nativeElement.querySelector(
+      '.rank-cell .rank-movement',
+    ) as HTMLElement;
+
+    expect(movement.textContent).toContain('↑1');
+    expect(movement.getAttribute('aria-label')).toContain('较上次数据发布');
   });
 
   it('limits the featured player hero pool to six heroes', () => {

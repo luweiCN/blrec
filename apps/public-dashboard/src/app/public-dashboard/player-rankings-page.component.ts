@@ -10,9 +10,12 @@ import { DashboardModeService } from './dashboard-mode.service';
 import {
   DETAIL_PAGE_SIZE,
   getPlayerRankingRows,
+  getPlayerTrend,
+  getRankMovement,
   heroImage,
   modeLabel,
   playerMatchesQuery,
+  RankMovement,
   seasonOption,
   winRate,
 } from './public-dashboard.data';
@@ -144,6 +147,18 @@ export class PlayerRankingsPageComponent implements OnDestroy {
 
   winRate(value: { readonly matches: number; readonly wins: number }): number {
     return winRate(value);
+  }
+
+  rankMovement(player: PlayerStanding): RankMovement {
+    return getRankMovement(
+      getPlayerTrend(
+        this.data.trends,
+        this.data.snapshot.snapshotId,
+        this.activeSeason,
+        this.activeMode,
+        player.id,
+      ),
+    );
   }
 
   modeLabel(): string {

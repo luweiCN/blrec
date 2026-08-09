@@ -12,8 +12,13 @@ import {
   findPlayer,
   getModeBreakdown,
   getPlayerRankings,
+  getPlayerTrend,
+  getRankMovement,
   heroImage,
   modeLabel,
+  PlayerTrend,
+  PlayerTrendPoint,
+  RankMovement,
   playerForSeason,
   seasonOption,
   winRate,
@@ -37,6 +42,11 @@ interface PlayerSeasonRecord {
   readonly rank: number | null;
 }
 
+interface TrendChartPoint extends PlayerTrendPoint {
+  readonly x: number;
+  readonly y: number;
+}
+
 const EMPTY_PERFORMANCE: Performance = {
   matches: 0,
   wins: 0,
@@ -44,6 +54,11 @@ const EMPTY_PERFORMANCE: Performance = {
   ratingScore: null,
   provisional: false,
 };
+
+const TREND_CHART_WIDTH = 640;
+const TREND_CHART_HEIGHT = 180;
+const TREND_CHART_PADDING_X = 18;
+const TREND_CHART_PADDING_Y = 18;
 
 @Component({
   selector: 'app-player-detail-page',
@@ -122,6 +137,110 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return index < 0 ? null : index + 1;
   }
 
+  get playerTrend(): PlayerTrend {
+    return getPlayerTrend(
+      this.data.trends,
+      this.data.snapshot.snapshotId,
+      this.activeSeason,
+      this.activeMode,
+      this.playerId ?? 0,
+    );
+  }
+
+  get rankMovement(): RankMovement {
+    return getRankMovement(this.playerTrend);
+  }
+
+  get rankMovementText(): string {
+    switch (this.rankMovement.kind) {
+      case 'new':
+        return '新上榜';
+      case 'same':
+        return '排名持平';
+      case 'up':
+      case 'down':
+        return this.rankMovement.text;
+      case 'pending':
+        return '待累计';
+    }
+  }
+
+  get ratingDeltaText(): string {
+    const delta = this.playerTrend.ratingDelta;
+    if (delta === null) {
+      return '—';
+    }
+    return delta > 0 ? `+${delta}` : delta.toString();
+  }
+
+  get ratingDeltaKind(): 'up' | 'down' | 'same' | 'pending' {
+    const delta = this.playerTrend.ratingDelta;
+    if (delta === null) {
+      return 'pending';
+    }
+    if (delta > 0) {
+      return 'up';
+    }
+    return delta < 0 ? 'down' : 'same';
+  }
+
+  get trendChartPoints(): readonly TrendChartPoint[] {
+    const points = this.playerTrend.points;
+    if (points.length === 0) {
+      return [];
+    }
+    const scores = points.map((point) => point.ratingScore);
+    const minimum = Math.min(...scores);
+    const maximum = Math.max(...scores);
+    const padding = maximum === minimum ? 5 : Math.max(2, (maximum - minimum) * 0.12);
+    const domainMinimum = minimum - padding;
+    const domainMaximum = maximum + padding;
+    const domainRange = domainMaximum - domainMinimum;
+    return points.map((point, index) => ({
+      ...point,
+      x:
+        points.length === 1
+          ? TREND_CHART_WIDTH / 2
+          : TREND_CHART_PADDING_X +
+            (index / (points.length - 1)) *
+              (TREND_CHART_WIDTH - TREND_CHART_PADDING_X * 2),
+      y:
+        TREND_CHART_PADDING_Y +
+        ((domainMaximum - point.ratingScore) / domainRange) *
+          (TREND_CHART_HEIGHT - TREND_CHART_PADDING_Y * 2),
+    }));
+  }
+
+  get trendPolyline(): string {
+    return this.trendChartPoints
+      .map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`)
+      .join(' ');
+  }
+
+  get trendMinimumScore(): number | null {
+    const scores = this.playerTrend.points.map((point) => point.ratingScore);
+    return scores.length === 0 ? null : Math.min(...scores);
+  }
+
+  get trendMaximumScore(): number | null {
+    const scores = this.playerTrend.points.map((point) => point.ratingScore);
+    return scores.length === 0 ? null : Math.max(...scores);
+  }
+
+  get trendFirstDate(): string {
+    return this.formatTrendDate(this.playerTrend.points[0]?.publicationDate);
+  }
+
+  get trendLastDate(): string {
+    return this.formatTrendDate(
+      this.playerTrend.points[this.playerTrend.points.length - 1]?.publicationDate,
+    );
+  }
+
+  get trendChartLabel(): string {
+    return `${this.player?.name ?? '玩家'}在${this.selectedSeason.label}${this.modeLabel()}的榜单分趋势`;
+  }
+
   get modeBreakdown(): readonly ModeBreakdown[] {
     return this.seasonPlayer === undefined
       ? []
@@ -181,6 +300,14 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return modeLabel(this.activeMode);
   }
 
+  formatTrendDate(value: string | undefined): string {
+    if (value === undefined) {
+      return '';
+    }
+    const [, month, day] = value.split('-');
+    return `${Number(month)}月${Number(day)}日`;
+  }
+
   trackMode(_index: number, mode: ModeBreakdown): ModeFilter {
     return mode.key;
   }
@@ -195,5 +322,9 @@ export class PlayerDetailPageComponent implements OnDestroy {
 
   trackResult(index: number, _result: MatchResult): number {
     return index;
+  }
+
+  trackTrendPoint(_index: number, point: TrendChartPoint): string {
+    return point.publicationDate;
   }
 }

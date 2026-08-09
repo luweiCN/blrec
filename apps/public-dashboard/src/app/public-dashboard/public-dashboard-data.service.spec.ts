@@ -1,5 +1,8 @@
 import { DashboardDataService } from './public-dashboard-data.service';
-import { DashboardManifest } from './public-dashboard.models';
+import {
+  DashboardManifest,
+  DashboardTrends,
+} from './public-dashboard.models';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
 const MANIFEST: DashboardManifest = {
@@ -11,6 +14,19 @@ const MANIFEST: DashboardManifest = {
   sourceLastMatchId: TEST_DASHBOARD_SNAPSHOT.sourceLastMatchId,
   sha256: 'a'.repeat(64),
   bytes: 1024,
+};
+
+const TRENDS: DashboardTrends = {
+  schemaVersion: 1,
+  updatedAt: TEST_DASHBOARD_SNAPSHOT.generatedAt,
+  publications: [
+    {
+      snapshotId: TEST_DASHBOARD_SNAPSHOT.snapshotId,
+      publicationDate: TEST_DASHBOARD_SNAPSHOT.publicationDate,
+      sourceLastMatchId: TEST_DASHBOARD_SNAPSHOT.sourceLastMatchId,
+      standings: {},
+    },
+  ],
 };
 
 function jsonResponse(value: unknown): Response {
@@ -26,6 +42,7 @@ describe('DashboardDataService', () => {
     const fetchSpy = spyOn(window, 'fetch').and.returnValues(
       Promise.resolve(jsonResponse(MANIFEST)),
       Promise.resolve(jsonResponse(TEST_DASHBOARD_SNAPSHOT)),
+      Promise.resolve(jsonResponse(TRENDS)),
     );
     const service = new DashboardDataService();
 
@@ -41,6 +58,11 @@ describe('DashboardDataService', () => {
       `data/${MANIFEST.snapshotPath}`,
       { cache: 'force-cache' },
     ]);
+    expect(fetchSpy.calls.argsFor(2)).toEqual([
+      `data/trends.json?v=${TEST_DASHBOARD_SNAPSHOT.snapshotId}`,
+      { cache: 'no-store' },
+    ]);
+    expect(service.trends).toBe(TRENDS);
   });
 
   it('keeps accepting version 1 snapshots during the rollout', async () => {
@@ -57,12 +79,28 @@ describe('DashboardDataService', () => {
     spyOn(window, 'fetch').and.returnValues(
       Promise.resolve(jsonResponse(MANIFEST)),
       Promise.resolve(jsonResponse(legacySnapshot)),
+      Promise.resolve(jsonResponse(TRENDS)),
     );
     const service = new DashboardDataService();
 
     await service.load();
 
     expect(service.state.kind).toBe('ready');
+  });
+
+  it('keeps the ranking available when trend data is missing or invalid', async () => {
+    spyOn(console, 'warn');
+    spyOn(window, 'fetch').and.returnValues(
+      Promise.resolve(jsonResponse(MANIFEST)),
+      Promise.resolve(jsonResponse(TEST_DASHBOARD_SNAPSHOT)),
+      Promise.resolve(jsonResponse({ schemaVersion: 99 })),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+    expect(service.trends).toBeNull();
   });
 
   it('rejects version 2 rating metadata without its outcome delta', async () => {

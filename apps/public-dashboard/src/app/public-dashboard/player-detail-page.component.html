@@ -52,7 +52,16 @@
       <dl>
         <div>
           <dt>当前排名</dt>
-          <dd>{{ rank === null ? "未入榜" : "#" + rank }}</dd>
+          <dd class="profile-rank-value">
+            <span>{{ rank === null ? "未入榜" : "#" + rank }}</span>
+            <small
+              [class.up]="rankMovement.kind === 'up'"
+              [class.down]="rankMovement.kind === 'down'"
+              [class.new]="rankMovement.kind === 'new'"
+              [attr.aria-label]="rankMovement.label"
+              [title]="rankMovement.label"
+            >{{ rankMovementText }}</small>
+          </dd>
         </div>
         <div>
           <dt>榜单分</dt>
@@ -71,6 +80,95 @@
           <dd class="accent">{{ winRate(performance) | percent: "1.0-1" }}</dd>
         </div>
       </dl>
+    </section>
+
+    <section
+      class="profile-card rating-trend-card"
+      aria-labelledby="player-rating-trend-title"
+    >
+      <header>
+        <div>
+          <p>RATING TREND</p>
+          <h2 id="player-rating-trend-title">榜单分趋势</h2>
+        </div>
+        <span>
+          最近 {{ playerTrend.points.length }} 次数据发布 · {{ modeLabel() }}
+        </span>
+      </header>
+
+      <div *ngIf="playerTrend.current as current; else noRatingTrend" class="rating-trend-layout">
+        <dl class="rating-trend-summary">
+          <div>
+            <dt>当前榜单分</dt>
+            <dd>{{ current.ratingScore }}</dd>
+          </div>
+          <div>
+            <dt>较上次发布</dt>
+            <dd
+              [class.up]="ratingDeltaKind === 'up'"
+              [class.down]="ratingDeltaKind === 'down'"
+            >{{ ratingDeltaText }}</dd>
+          </div>
+        </dl>
+
+        <div class="rating-trend-visual">
+          <div class="rating-trend-frame">
+            <div class="rating-trend-scale" aria-hidden="true">
+              <span>{{ trendMaximumScore }}</span>
+              <span>{{ trendMinimumScore }}</span>
+            </div>
+            <div class="rating-trend-plot">
+              <svg
+                viewBox="0 0 640 180"
+                preserveAspectRatio="none"
+                role="img"
+                [attr.aria-label]="trendChartLabel"
+              >
+                <line class="trend-grid-line" x1="0" y1="18" x2="640" y2="18"></line>
+                <line class="trend-grid-line" x1="0" y1="90" x2="640" y2="90"></line>
+                <line class="trend-grid-line" x1="0" y1="162" x2="640" y2="162"></line>
+                <polyline
+                  *ngIf="trendChartPoints.length > 1"
+                  class="trend-line"
+                  [attr.points]="trendPolyline"
+                ></polyline>
+                <g
+                  *ngFor="let point of trendChartPoints; let pointIndex = index; trackBy: trackTrendPoint"
+                >
+                  <circle
+                    class="trend-point"
+                    [class.current]="pointIndex === trendChartPoints.length - 1"
+                    [attr.cx]="point.x"
+                    [attr.cy]="point.y"
+                    [attr.r]="pointIndex === trendChartPoints.length - 1 ? 5 : 3.5"
+                  >
+                    <title>
+                      {{ formatTrendDate(point.publicationDate) }}：{{ point.ratingScore }} 分，第 {{ point.rank }} 名
+                    </title>
+                  </circle>
+                </g>
+              </svg>
+              <div
+                class="rating-trend-axis"
+                [class.single]="trendFirstDate === trendLastDate"
+                aria-hidden="true"
+              >
+                <span>{{ trendFirstDate }}</span>
+                <span *ngIf="trendFirstDate !== trendLastDate">{{ trendLastDate }}</span>
+              </div>
+            </div>
+          </div>
+          <p *ngIf="playerTrend.points.length === 1" class="trend-start-note">
+            已记录本次发布；下一次数据发布后会形成变化曲线。
+          </p>
+        </div>
+      </div>
+
+      <ng-template #noRatingTrend>
+        <p class="profile-empty trend-empty">
+          当前模式尚无趋势记录，数据发布后会自动开始累计。
+        </p>
+      </ng-template>
     </section>
 
     <div class="profile-grid">

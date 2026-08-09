@@ -3,6 +3,9 @@ import {
   COMPETITIVE_MODE_OPTIONS,
   DashboardSnapshot,
   DashboardSummary,
+  DashboardTrendPublication,
+  DashboardTrendStanding,
+  DashboardTrends,
   HeroRankingRow,
   HeroStanding,
   HeroUsage,
@@ -20,6 +23,37 @@ import { matchesSearchSegments } from './public-dashboard.search';
 export const HERO_MIN_MATCHES = 20;
 export const OVERVIEW_LIMIT = 10;
 export const DETAIL_PAGE_SIZE = 10;
+
+export interface PlayerTrendPoint {
+  readonly publicationDate: string;
+  readonly rank: number;
+  readonly ratingScore: number;
+}
+
+export interface PlayerTrend {
+  readonly points: readonly PlayerTrendPoint[];
+  readonly current: PlayerTrendPoint | null;
+  readonly previous: PlayerTrendPoint | null;
+  readonly hasBaseline: boolean;
+  readonly rankDelta: number | null;
+  readonly ratingDelta: number | null;
+}
+
+export type RankMovement =
+  | { readonly kind: 'pending'; readonly text: '—'; readonly label: string }
+  | { readonly kind: 'new'; readonly text: '新'; readonly label: string }
+  | { readonly kind: 'same'; readonly text: '—'; readonly label: string }
+  | { readonly kind: 'up'; readonly text: string; readonly label: string }
+  | { readonly kind: 'down'; readonly text: string; readonly label: string };
+
+const EMPTY_PLAYER_TREND: PlayerTrend = {
+  points: [],
+  current: null,
+  previous: null,
+  hasBaseline: false,
+  rankDelta: null,
+  ratingDelta: null,
+};
 
 export function winRate(value: {
   readonly matches: number;
@@ -54,6 +88,110 @@ export function getPlayerRankingRows(
     rank: index + 1,
     player,
   }));
+}
+
+function trendStanding(
+  publication: DashboardTrendPublication,
+  season: SeasonKey,
+  mode: ModeFilter,
+  playerId: number,
+): DashboardTrendStanding | undefined {
+  return publication.standings[season]?.[mode].find(
+    (standing) => standing.playerId === playerId,
+  );
+}
+
+export function getPlayerTrend(
+  trends: DashboardTrends | null | undefined,
+  currentSnapshotId: string,
+  season: SeasonKey,
+  mode: ModeFilter,
+  playerId: number,
+): PlayerTrend {
+  if (trends === null || trends === undefined) {
+    return EMPTY_PLAYER_TREND;
+  }
+  const currentIndex = trends.publications.findIndex(
+    (publication) => publication.snapshotId === currentSnapshotId,
+  );
+  if (currentIndex < 0) {
+    return EMPTY_PLAYER_TREND;
+  }
+  const currentPublication = trends.publications[currentIndex];
+  const currentStanding = trendStanding(
+    currentPublication,
+    season,
+    mode,
+    playerId,
+  );
+  if (currentStanding === undefined) {
+    return EMPTY_PLAYER_TREND;
+  }
+
+  const points: PlayerTrendPoint[] = [];
+  let previous: PlayerTrendPoint | null = null;
+  for (let index = 0; index <= currentIndex; index += 1) {
+    const publication = trends.publications[index];
+    const standing = trendStanding(publication, season, mode, playerId);
+    if (standing === undefined) {
+      continue;
+    }
+    const point: PlayerTrendPoint = {
+      publicationDate: publication.publicationDate,
+      rank: standing.rank,
+      ratingScore: standing.ratingScore,
+    };
+    points.push(point);
+    if (index < currentIndex) {
+      previous = point;
+    }
+  }
+  const current = points[points.length - 1];
+  return {
+    points,
+    current,
+    previous,
+    hasBaseline: currentIndex > 0,
+    rankDelta: previous === null ? null : previous.rank - current.rank,
+    ratingDelta:
+      previous === null ? null : current.ratingScore - previous.ratingScore,
+  };
+}
+
+export function getRankMovement(trend: PlayerTrend): RankMovement {
+  if (!trend.hasBaseline) {
+    return {
+      kind: 'pending',
+      text: '—',
+      label: '趋势将在下一次数据发布后生成',
+    };
+  }
+  if (trend.previous === null) {
+    return {
+      kind: 'new',
+      text: '新',
+      label: '较上次数据发布新上榜',
+    };
+  }
+  if (trend.rankDelta === null || trend.rankDelta === 0) {
+    return {
+      kind: 'same',
+      text: '—',
+      label: '较上次数据发布排名不变',
+    };
+  }
+  if (trend.rankDelta > 0) {
+    return {
+      kind: 'up',
+      text: `↑${trend.rankDelta}`,
+      label: `较上次数据发布上升 ${trend.rankDelta} 名`,
+    };
+  }
+  return {
+    kind: 'down',
+    text: `↓${Math.abs(trend.rankDelta)}`,
+    label: `较上次数据发布下降 ${Math.abs(trend.rankDelta)} 名`,
+  };
 }
 
 export function getHeroRankings(

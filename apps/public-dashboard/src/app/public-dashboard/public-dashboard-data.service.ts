@@ -4,6 +4,8 @@ import { environment } from '../../environments/environment';
 import {
   DashboardManifest,
   DashboardSnapshot,
+  DashboardTrendPublication,
+  DashboardTrends,
   HeroPerformance,
   HeroStanding,
   HeroUsage,
@@ -21,6 +23,7 @@ export type DashboardLoadState =
       readonly kind: 'ready';
       readonly manifest: DashboardManifest;
       readonly snapshot: DashboardSnapshot;
+      readonly trends: DashboardTrends | null;
     }
   | { readonly kind: 'error'; readonly message: string };
 
@@ -39,6 +42,10 @@ export class DashboardDataService {
     return this.state.kind === 'ready' ? this.state.snapshot : null;
   }
 
+  get trends(): DashboardTrends | null {
+    return this.state.kind === 'ready' ? this.state.trends : null;
+  }
+
   async load(): Promise<void> {
     this.state = { kind: 'loading' };
     try {
@@ -55,7 +62,8 @@ export class DashboardDataService {
       if (snapshot.snapshotId !== manifest.snapshotId) {
         throw new Error('dashboard manifest and snapshot do not match');
       }
-      this.state = { kind: 'ready', manifest, snapshot };
+      const trends = await loadTrends(baseUrl, snapshot.snapshotId);
+      this.state = { kind: 'ready', manifest, snapshot, trends };
     } catch (error: unknown) {
       console.error('Unable to load dashboard data', error);
       this.state = {
@@ -205,6 +213,87 @@ function isHeroStanding(value: unknown): value is HeroStanding {
     typeof value['name'] === 'string' &&
     hasModes(value['modes'], isHeroPerformance)
   );
+}
+
+function isTrendStandingList(value: unknown): boolean {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  const playerIds = new Set<number>();
+  return value.every((standing, index) => {
+    if (
+      !isObject(standing) ||
+      !isNonNegativeInteger(standing['playerId']) ||
+      standing['playerId'] === 0 ||
+      playerIds.has(standing['playerId']) ||
+      standing['rank'] !== index + 1 ||
+      !isNonNegativeInteger(standing['ratingScore']) ||
+      standing['ratingScore'] > 1000
+    ) {
+      return false;
+    }
+    playerIds.add(standing['playerId']);
+    return true;
+  });
+}
+
+function isTrendPublication(value: unknown): value is DashboardTrendPublication {
+  if (
+    !isObject(value) ||
+    typeof value['snapshotId'] !== 'string' ||
+    !/^[a-zA-Z0-9-]+$/u.test(value['snapshotId']) ||
+    typeof value['publicationDate'] !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/u.test(value['publicationDate']) ||
+    !isNonNegativeInteger(value['sourceLastMatchId']) ||
+    !isObject(value['standings'])
+  ) {
+    return false;
+  }
+  return Object.entries(value['standings']).every(
+    ([season, modes]) =>
+      isSeasonKey(season) && hasModes(modes, isTrendStandingList),
+  );
+}
+
+function parseTrends(value: unknown): DashboardTrends {
+  if (
+    !isObject(value) ||
+    value['schemaVersion'] !== 1 ||
+    typeof value['updatedAt'] !== 'string' ||
+    !Array.isArray(value['publications']) ||
+    value['publications'].length > 30 ||
+    !value['publications'].every(isTrendPublication)
+  ) {
+    throw new Error('dashboard trends have an unsupported format');
+  }
+  const dates = value['publications'].map(
+    (publication) => publication.publicationDate,
+  );
+  if (dates.some((date, index) => index > 0 && date <= dates[index - 1])) {
+    throw new Error('dashboard trend publications are not chronological');
+  }
+  return value as unknown as DashboardTrends;
+}
+
+async function loadTrends(
+  baseUrl: string,
+  snapshotId: string,
+): Promise<DashboardTrends | null> {
+  try {
+    const value = await fetchJson(
+      `${baseUrl}/trends.json?v=${encodeURIComponent(snapshotId)}`,
+      'no-store',
+    );
+    const trends = parseTrends(value);
+    return trends.publications.some(
+      (publication) => publication.snapshotId === snapshotId,
+    )
+      ? trends
+      : null;
+  } catch (error: unknown) {
+    console.warn('Unable to load dashboard trends', error);
+    return null;
+  }
 }
 
 function parseManifest(value: unknown): DashboardManifest {
