@@ -3341,7 +3341,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     return {
       pending: '等待分析',
       analyzing: '正在分析',
-      ready: `已识别 ${job.matchCount} 局`,
+      ready: `已识别 ${job.matchCount} 局 · ${job.partCount} 个有效分 P`,
       failed: '分析失败',
     }[job.state];
   }

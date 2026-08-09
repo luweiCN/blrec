@@ -97,6 +97,12 @@
             <ng-container *ngIf="scanJob as job">
               <span>{{ scanStateLabel(job) }}</span>
               <span *ngIf="job.error" class="error-text">{{ job.error }}</span>
+              <span *ngIf="job.ignoredPartCount > 0" class="ignored-text">
+                原始 {{ job.originalPartCount }} 个分 P，已忽略
+                {{ job.ignoredPartCount }} 个损坏分 P：{{
+                  job.ignoredPartReasons.join("；")
+                }}
+              </span>
             </ng-container>
           </div>
           <nz-progress
@@ -331,7 +337,12 @@
                   开播：{{
                     session.liveStartedAt * 1000 | date: "yyyy-MM-dd HH:mm"
                   }}
-                  · {{ session.partCount }} 个分 P · 视频总时长
+                  · {{ session.partCount }} 个有效分 P
+                  <ng-container *ngIf="session.ignoredPartCount > 0">
+                    （原始 {{ session.originalPartCount }} 个，忽略
+                    {{ session.ignoredPartCount }} 个）
+                  </ng-container>
+                  · 视频总时长
                   {{ formatDuration(session.recordingDurationSeconds) }} ·
                   {{ session.matchCount }} 局 ·
                   {{ sessionModes(session) || "模式待识别" }} · 对局累计

@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, cast
+from typing import Any, Callable, Dict, Literal, Mapping, Optional, Sequence, cast
 from urllib.parse import urljoin
 
 import requests
@@ -20,6 +20,7 @@ from blrec.vainglory.analysis_protocol import (
     encode_training_candidate,
 )
 from blrec.vainglory.analyzer import AnalysisStatus, VaingloryVideoAnalyzer, VideoPart
+from blrec.vainglory.sampling import UnusableVideoError
 
 
 class AnalysisWorkerClient:
@@ -91,11 +92,23 @@ class AnalysisWorkerClient:
         )
         response.raise_for_status()
 
-    def fail(self, *, kind: str, item_id: int, error: str) -> None:
+    def fail(
+        self,
+        *,
+        kind: str,
+        item_id: int,
+        error: str,
+        failure_kind: Literal['task_error', 'unusable_media'] = 'task_error',
+    ) -> None:
         response = self._session.post(
             self._url('api/v1/vainglory/worker/fail'),
             headers=self._headers,
-            json={'kind': kind, 'itemId': item_id, 'error': error[:500]},
+            json={
+                'kind': kind,
+                'itemId': item_id,
+                'error': error[:500],
+                'failureKind': failure_kind,
+            },
             timeout=(10, 30),
         )
         response.raise_for_status()
@@ -291,6 +304,11 @@ class RemoteAnalysisWorker:
                     kind=kind,
                     item_id=item_id,
                     error='{}: {}'.format(type(error).__name__, error),
+                    failure_kind=(
+                        'unusable_media'
+                        if isinstance(error, UnusableVideoError)
+                        else 'task_error'
+                    ),
                 )
             except requests.RequestException as report_error:
                 logger.warning('分析失败状态未能写回 NAS：{!r}', report_error)

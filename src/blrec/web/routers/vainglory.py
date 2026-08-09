@@ -77,6 +77,10 @@ class ScanJobResponse(ApiModel):
     started_at: Optional[int]
     completed_at: Optional[int]
     updated_at: int
+    part_count: int
+    original_part_count: int
+    ignored_part_count: int
+    ignored_part_reasons: List[str]
 
 
 class AnalysisWorkerHeartbeatRequest(ApiModel):
@@ -100,6 +104,7 @@ class AnalysisWorkerFailureRequest(ApiModel):
     kind: Literal['part', 'match_rerun', 'hero_rematch', 'recorded_player_backfill']
     item_id: int = Field(..., ge=1)
     error: str = Field(..., min_length=1, max_length=500)
+    failure_kind: Literal['task_error', 'unusable_media'] = 'task_error'
 
 
 class MatchPlayerResponse(ApiModel):
@@ -175,6 +180,8 @@ class MatchSessionResponse(ApiModel):
     started_at: int
     live_started_at: int
     part_count: int
+    original_part_count: int
+    ignored_part_count: int
     recording_duration_seconds: int
     match_count: int
     teal_win_count: int
@@ -569,6 +576,8 @@ def _match_session(
         started_at=value.started_at,
         live_started_at=value.live_started_at,
         part_count=value.part_count,
+        original_part_count=value.original_part_count,
+        ignored_part_count=value.ignored_part_count,
         recording_duration_seconds=value.recording_duration_seconds,
         match_count=value.match_count,
         teal_win_count=value.teal_win_count,
@@ -828,7 +837,9 @@ async def fail_analysis_work(
     _worker: str = Depends(security.authenticated_analysis_worker),
     index: VaingloryIndexService = Depends(get_service),
 ) -> Response:
-    await index.fail_remote_work(payload.kind, payload.item_id, payload.error)
+    await index.fail_remote_work(
+        payload.kind, payload.item_id, payload.error, payload.failure_kind
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
