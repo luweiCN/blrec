@@ -44,7 +44,7 @@ jobs:
       - name: Install shared core and Worker
         working-directory: .
         run: |
-          python -m pip install -e '.[dev]'
+          python -m pip install '.[dev]'
           python -m pip install -e 'apps/analysis-worker[test]' build
 
       - name: Test Worker and analysis engine
