@@ -7,13 +7,26 @@ COPY apps/public-dashboard/publisher/pyproject.toml \
 COPY apps/public-dashboard/publisher/src ./src
 RUN python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
+FROM python:3.11-slim-bookworm AS dependency-builder
+WORKDIR /build
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY apps/public-dashboard/publisher/requirements.txt /tmp/requirements.txt
+RUN python -m pip wheel --no-cache-dir \
+    --wheel-dir /dependency-wheels \
+    -r /tmp/requirements.txt
+
 FROM python:3.11-slim-bookworm AS runtime
 WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends iproute2 && \
     rm -rf /var/lib/apt/lists/*
 COPY apps/public-dashboard/publisher/requirements.txt /tmp/requirements.txt
-RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt && \
+RUN --mount=type=bind,from=dependency-builder,source=/dependency-wheels,target=/dependency-wheels \
+    python -m pip install --no-cache-dir --no-index \
+        --find-links=/dependency-wheels \
+        -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt
 
 # Publisher 共用 Server 的网络选路契约，但不安装 Server 应用或它的运行依赖。
