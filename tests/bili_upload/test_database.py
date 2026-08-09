@@ -623,7 +623,7 @@ async def test_sixty_second_migration_retries_failed_analysis_except_ignored(
             'force_republish': 1,
             'error': '等待失败分析任务重新处理',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 63
+        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 64
     finally:
         await database.close()
 

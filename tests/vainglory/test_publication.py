@@ -287,6 +287,16 @@ def test_description_never_truncates_existing_user_text() -> None:
 class FakePublicationProtocol:
     def __init__(self) -> None:
         self.description = '  原简介\n第二行  '
+        self.public_archive_calls: List[str] = []
+        self.public_archive_result: Any = {
+            'code': 0,
+            'data': {
+                'aid': 303,
+                'bvid': 'BV1abcdefgh',
+                'pubdate': 900,
+                'pages': [{'cid': 401, 'page': 1, 'duration': 1200}],
+            },
+        }
         self.edit_calls: List[Mapping[str, Any]] = []
         self.picture_calls: List[str] = []
         self.add_reply_calls: List[Mapping[str, Any]] = []
@@ -301,6 +311,14 @@ class FakePublicationProtocol:
             'code': 0,
             'data': {'replies': []},
         }
+
+    async def public_archive_view(
+        self, _bundle: object, *, bvid: str
+    ) -> Mapping[str, Any]:
+        self.public_archive_calls.append(bvid)
+        if isinstance(self.public_archive_result, Exception):
+            raise self.public_archive_result
+        return self.public_archive_result
 
     async def archive_view(
         self, _bundle: object, _params: Mapping[str, Any]
@@ -643,6 +661,116 @@ async def test_upload_publication_waits_until_bilibili_review_is_approved(
 
         await database.execute("UPDATE upload_jobs SET state='approved'")
         assert await service.run_once() is True
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_publication_waits_until_archive_is_publicly_visible(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        protocol.public_archive_result = BiliApiError(-404)
+        now = [1000]
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: now[0],
+        )
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        publication = await database.fetchone(
+            'SELECT state,next_attempt_at,error,public_visible_at '
+            'FROM vainglory_publications'
+        )
+        assert dict(publication) == {
+            'state': 'paused',
+            'next_attempt_at': 1300,
+            'error': '稿件尚未公开，公开可访问后自动处理简介、评论和视频分段',
+            'public_visible_at': None,
+        }
+        status = (await service.publication_statuses((1,)))[1]
+        assert status.code == 'waiting_publication'
+        assert status.recommended_action == 'wait'
+        assert protocol.public_archive_calls == ['BV1abcdefgh']
+        assert protocol.list_replies_calls == []
+        assert protocol.chapter_batches == []
+        assert protocol.edit_calls == []
+        assert protocol.add_reply_calls == []
+
+        assert await service.run_once() is False
+        protocol.public_archive_result = {
+            'code': 0,
+            'data': {
+                'aid': 303,
+                'bvid': 'BV1abcdefgh',
+                'pubdate': 1200,
+                'pages': [{'cid': 401, 'page': 1, 'duration': 1200}],
+            },
+        }
+        now[0] = 1300
+        assert await service.run_once() is True
+        assert protocol.public_archive_calls == ['BV1abcdefgh', 'BV1abcdefgh']
+        assert protocol.chapter_batches
+        assert (
+            await database.scalar(
+                'SELECT public_visible_at FROM vainglory_publications'
+            )
+            == 1300
+        )
+
+        assert await service.run_once() is True
+        assert len(protocol.public_archive_calls) == 2
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_publication_waits_for_scheduled_publication_time(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        protocol.public_archive_result = {
+            'code': 0,
+            'data': {
+                'aid': 303,
+                'bvid': 'BV1abcdefgh',
+                'pubdate': 1200,
+                'pages': [{'cid': 401, 'page': 1, 'duration': 1200}],
+            },
+        }
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        assert protocol.public_archive_calls == ['BV1abcdefgh']
+        assert protocol.list_replies_calls == []
+        assert protocol.chapter_batches == []
+        assert (
+            await database.scalar('SELECT error FROM vainglory_publications')
+            == '稿件尚未公开，公开可访问后自动处理简介、评论和视频分段'
+        )
     finally:
         await database.close()
 
