@@ -8,6 +8,7 @@ services:
     env_file:
       - ${DASHBOARD_PUBLISHER_ENV_FILE:-/volume1/docker/blrec-next/secrets/dashboard-publisher.env}
     environment:
+      PYTHONPATH: /app
       TZ: ${TZ:-Asia/Shanghai}
       BLREC_CONFIG: /cfg/settings.toml
       DASHBOARD_DATABASE: /cfg/blrec.sqlite3
