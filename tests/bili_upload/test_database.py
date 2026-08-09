@@ -61,6 +61,7 @@ REQUIRED_TABLES = {
     'vainglory_match_suppressions',
     'vainglory_match_rerun_jobs',
     'vainglory_match_review_suppressions',
+    'vainglory_analysis_revisions',
     'vainglory_match_players',
     'vainglory_players',
     'vainglory_player_rooms',
@@ -74,6 +75,7 @@ REQUIRED_TABLES = {
     'vainglory_publications',
     'vainglory_publication_comments',
     'vainglory_publication_stale_comments',
+    'vainglory_publication_revisions',
     'archive_migration_jobs',
     'archive_migration_items',
 }
@@ -421,6 +423,85 @@ async def test_migration_enables_wal_constraints_and_claim_indexes(
             await database.execute(
                 'UPDATE upload_jobs SET lease_generation=-1 WHERE id=1'
             )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_sixty_first_migration_preserves_history_and_requeues_publications(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 61):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',10,20)"
+        )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title) '
+            "VALUES(1,100,'100:1','closed',10,'直播回放')"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_publications('
+            'id,account_id,session_id,aid,bvid,source_kind,payload_hash,'
+            'description_block,state,description_state,pin_state,chapter_state,'
+            'comment_cleanup_state,needs_refresh,created_at,updated_at) '
+            "VALUES(1,1,1,303,'BV1abcdefgh','upload',?,'旧发布内容','confirmed',"
+            "'skipped_no_room','confirmed','skipped','confirmed',0,10,20)",
+            ('a' * 64,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        publication = await database.fetchone(
+            'SELECT state,description_state,pin_state,chapter_state,'
+            'comment_cleanup_state,needs_refresh,force_republish,plan_state,'
+            'active_revision_id,published_revision_id '
+            'FROM vainglory_publications WHERE id=1'
+        )
+        assert dict(publication) == {
+            'state': 'prepared',
+            'description_state': 'prepared',
+            'pin_state': 'prepared',
+            'chapter_state': 'prepared',
+            'comment_cleanup_state': 'prepared',
+            'needs_refresh': 1,
+            'force_republish': 1,
+            'plan_state': 'ready',
+            'active_revision_id': 1,
+            'published_revision_id': 1,
+        }
+        revision = await database.fetchone(
+            'SELECT payload_hash,reason,state,confirmed_at '
+            'FROM vainglory_publication_revisions WHERE id=1'
+        )
+        assert dict(revision) == {
+            'payload_hash': 'a' * 64,
+            'reason': 'legacy',
+            'state': 'confirmed',
+            'confirmed_at': 20,
+        }
     finally:
         await database.close()
 

@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Tuple
@@ -119,6 +120,31 @@ def test_publication_uses_clean_description_and_comment_native_timestamps() -> N
     assert '①｜胜　｜3V3｜凯恩 vs 骷髅｜1#02:00' in plan.comments[0].content
     assert '②｜负　｜3V3｜凯恩 vs 骷髅｜2#02:00' in plan.comments[0].content
     assert plan.comments[0].match_ids == (1, 2)
+
+
+def test_publication_hash_ignores_database_ids_but_tracks_result_picture() -> None:
+    first = match(1)
+    reinserted = replace(first, id=999)
+
+    original = build_publication_plan((first,), frame_hashes={first.id: 'a' * 64})
+    same_output = build_publication_plan(
+        (reinserted,), frame_hashes={reinserted.id: 'a' * 64}
+    )
+    changed_picture = build_publication_plan(
+        (reinserted,), frame_hashes={reinserted.id: 'b' * 64}
+    )
+
+    assert same_output.payload_hash == original.payload_hash
+    assert changed_picture.payload_hash != original.payload_hash
+
+
+def test_zero_match_publication_plan_is_a_real_clear_revision() -> None:
+    plan = build_publication_plan((), bvid='BV1abcdefgh')
+
+    assert plan.match_count == 0
+    assert plan.comments == ()
+    assert plan.description_block == '共 0 局｜0 胜 0 负'
+    assert json.loads(plan.analysis_snapshot_json)['matches'] == []
 
 
 def test_publication_omits_unreliable_direct_link() -> None:
@@ -246,6 +272,8 @@ class FakePublicationProtocol:
         self.delete_reply_calls: List[Mapping[str, Any]] = []
         self.list_replies_calls: List[Mapping[str, Any]] = []
         self.chapter_calls: List[Mapping[str, Any]] = []
+        self.chapter_batches: List[Tuple[Mapping[str, Any], ...]] = []
+        self.chapter_cards: Tuple[Mapping[str, Any], ...] = ()
         self.add_reply_result: Any = {'code': 0, 'data': {'rpid': 501}}
         self.list_replies_result: Mapping[str, Any] = {
             'code': 0,
@@ -285,7 +313,10 @@ class FakePublicationProtocol:
         self, _bundle: object, *, aid: int, cid: int
     ) -> Mapping[str, Any]:
         assert (aid, cid) == (303, 401)
-        return {'code': 0, 'data': {'catalog': []}}
+        return {
+            'code': 0,
+            'data': {'catalog': [{'type': 2, 'cards': list(self.chapter_cards)}]},
+        }
 
     async def submit_archive_chapters(
         self,
@@ -297,6 +328,8 @@ class FakePublicationProtocol:
         permanent: bool,
     ) -> Mapping[str, Any]:
         assert (aid, cid, permanent) == (303, 401, True)
+        self.chapter_batches.append(tuple(cards))
+        self.chapter_cards = tuple(cards)
         self.chapter_calls.extend(cards)
         return {'code': 0}
 
@@ -489,6 +522,148 @@ async def test_service_preserves_description_posts_picture_and_pins_once(
         assert (
             await database.scalar('SELECT state FROM vainglory_publications')
             == 'confirmed'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_zero_match_reanalysis_clears_old_generated_content_and_keeps_history(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+        old_block = str(
+            await database.scalar(
+                'SELECT description_block FROM vainglory_publications'
+            )
+        )
+        protocol.description = '用户简介\n\n' + old_block
+        protocol.chapter_cards = (
+            {'from': 0, 'to': 120, 'content': '直播开始'},
+            {'from': 120, 'to': 1200, 'content': '第一局｜胜｜凯恩｜3V3'},
+        )
+        protocol.list_replies_result = {
+            'code': 0,
+            'data': {
+                'cursor': {'is_end': True, 'next': 0},
+                'replies': [
+                    {
+                        'rpid': 701,
+                        'oid': 303,
+                        'mid': 42,
+                        'root': 0,
+                        'parent': 0,
+                        'content': {'message': '旧自动评论'},
+                    }
+                ],
+            },
+        }
+
+        await repository.request_scan(1)
+        claim = await repository.claim_next()
+        assert claim is not None and claim.part.id == 1
+        await repository.complete_part(1, ())
+
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_analysis_revisions')
+            == 2
+        )
+        assert await service.run_once() is True
+        assert (
+            await database.scalar('SELECT match_count FROM vainglory_publications') == 0
+        )
+
+        for _ in range(6):
+            if (
+                await database.scalar('SELECT state FROM vainglory_publications')
+                == 'confirmed'
+            ):
+                break
+            assert await service.run_once() is True
+
+        assert protocol.description == '用户简介'
+        assert protocol.chapter_batches[-1] == ()
+        assert protocol.delete_reply_calls == [{'type': 1, 'oid': 303, 'rpid': 701}]
+        assert protocol.add_reply_calls == []
+        assert protocol.top_reply_calls == []
+        assert (
+            await database.scalar('SELECT state FROM vainglory_publications')
+            == 'confirmed'
+        )
+        revisions = await database.fetchall(
+            'SELECT reason,state,match_count FROM vainglory_publication_revisions '
+            'ORDER BY revision_no'
+        )
+        assert [dict(row) for row in revisions] == [
+            {'reason': 'initial', 'state': 'prepared', 'match_count': 1},
+            {'reason': 'changed', 'state': 'confirmed', 'match_count': 0},
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_unchanged_reanalysis_records_revision_without_remote_republish(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+        for _ in range(6):
+            assert await service.run_once() is True
+        remote_calls = (
+            len(protocol.edit_calls),
+            len(protocol.add_reply_calls),
+            len(protocol.chapter_batches),
+        )
+        active_revision_id = await database.scalar(
+            'SELECT active_revision_id FROM vainglory_publications'
+        )
+
+        await database.execute('UPDATE vainglory_publications SET needs_refresh=1')
+        assert await service.run_once() is True
+
+        assert remote_calls == (
+            len(protocol.edit_calls),
+            len(protocol.add_reply_calls),
+            len(protocol.chapter_batches),
+        )
+        assert (
+            await database.scalar(
+                'SELECT reason FROM vainglory_publication_revisions '
+                'ORDER BY revision_no DESC LIMIT 1'
+            )
+            == 'unchanged'
+        )
+        assert (
+            await database.scalar(
+                'SELECT active_revision_id FROM vainglory_publications'
+            )
+            == active_revision_id
         )
     finally:
         await database.close()
@@ -742,6 +917,46 @@ async def test_service_discovers_direct_historical_archive_without_upload_job(
 
 
 @pytest.mark.asyncio
+async def test_published_upload_gets_task_before_analysis_is_ready(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute('DELETE FROM vainglory_matches')
+        await database.execute(
+            "UPDATE vainglory_part_jobs SET state='pending',progress=0"
+        )
+        await database.execute(
+            "UPDATE vainglory_scan_jobs SET state='analyzing',progress=0"
+        )
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+
+        row = await database.fetchone(
+            'SELECT source_kind,plan_state,needs_refresh,force_republish '
+            'FROM vainglory_publications'
+        )
+        assert dict(row) == {
+            'source_kind': 'upload',
+            'plan_state': 'waiting_analysis',
+            'needs_refresh': 1,
+            'force_republish': 1,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_historical_publication_waits_for_every_archive_page(
     tmp_path: Path,
 ) -> None:
@@ -795,8 +1010,12 @@ async def test_historical_publication_waits_for_every_archive_page(
             clock=lambda: 1000,
         )
 
-        assert await service.run_once() is False
-        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 0
+        assert await service.run_once() is True
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 1
+        assert (
+            await database.scalar('SELECT plan_state FROM vainglory_publications')
+            == 'waiting_analysis'
+        )
 
         await database.execute(
             "UPDATE vainglory_archive_parts SET state='ready',progress=1,error=NULL"
@@ -849,7 +1068,9 @@ async def test_old_complete_hero_matches_are_publishable(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_old_incomplete_hero_matches_wait_for_rematch(tmp_path: Path) -> None:
+async def test_old_incomplete_hero_matches_publish_current_best_result(
+    tmp_path: Path,
+) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
     try:
@@ -870,8 +1091,12 @@ async def test_old_incomplete_hero_matches_wait_for_rematch(tmp_path: Path) -> N
             clock=lambda: 1000,
         )
 
-        assert await service.run_once() is False
-        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 0
+        assert await service.run_once() is True
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_publications') == 1
+        assert (
+            await database.scalar('SELECT plan_state FROM vainglory_publications')
+            == 'ready'
+        )
     finally:
         await database.close()
 
@@ -1114,7 +1339,11 @@ async def test_paused_migration_also_pauses_its_publication(tmp_path: Path) -> N
             clock=lambda: 1000,
         )
 
-        assert await service.run_once() is False
+        assert await service.run_once() is True
+        assert (
+            await database.scalar('SELECT plan_state FROM vainglory_publications')
+            == 'waiting_analysis'
+        )
         await database.execute(
             'UPDATE archive_migration_jobs SET operator_paused=0 WHERE id=1'
         )

@@ -49,6 +49,92 @@ class VaingloryConflict(ValueError):
     pass
 
 
+def _analysis_revision_snapshot(matches: Sequence[AnalyzedMatch]) -> Tuple[str, str]:
+    payload = {
+        'matches': [
+            {
+                'part_id': int(match.part_id),
+                'part_index': int(match.part_index),
+                'result_at_ms': int(match.result_at_ms),
+                'layout': {
+                    'left_color': match.layout.left_color,
+                    'right_color': match.layout.right_color,
+                    'winner_color': match.layout.winner_color,
+                    'winner_side': match.layout.winner_side,
+                    'team_size': match.layout.team_size,
+                },
+                'header': {
+                    'result_text': match.ocr.header.result_text,
+                    'end_reason': match.ocr.header.end_reason,
+                    'duration_seconds': match.ocr.header.duration_seconds,
+                    'left_kills': match.ocr.header.left_kills,
+                    'right_kills': match.ocr.header.right_kills,
+                    'left_economy': match.ocr.header.left_economy,
+                    'right_economy': match.ocr.header.right_economy,
+                },
+                'players': [
+                    {
+                        'side': player.side,
+                        'slot': int(player.slot),
+                        'name': player.name,
+                        'normalized_name': player.normalized_name,
+                        'raw_name': player.raw_name,
+                        'kills': player.stats.kills,
+                        'deaths': player.stats.deaths,
+                        'assists': player.stats.assists,
+                        'economy': player.stats.economy,
+                        'last_hits': player.stats.last_hits,
+                        'confidence': float(player.confidence),
+                    }
+                    for player in match.ocr.players
+                ],
+                'heroes': [
+                    {
+                        'side': hero.side,
+                        'slot': int(hero.slot),
+                        'fingerprint': hero.fingerprint,
+                        'label': hero.label,
+                        'confidence': float(hero.confidence),
+                        'thumbnail_sha256': hashlib.sha256(
+                            hero.thumbnail_png
+                        ).hexdigest(),
+                    }
+                    for hero in match.heroes
+                ],
+                'confidence': float(match.confidence),
+                'game_mode': match.game_mode,
+                'recorded_player': (
+                    None
+                    if match.recorded_player is None
+                    else {
+                        'side': match.recorded_player.side,
+                        'slot': int(match.recorded_player.slot),
+                        'confidence': float(match.recorded_player.confidence),
+                    }
+                ),
+                'match_kind': match.match_kind,
+                'view_context': match.view_context,
+                'stats_eligible': bool(match.stats_eligible),
+                'stats_exclusion_reason': match.stats_exclusion_reason,
+                'result_frame_sha256': (
+                    None
+                    if not match.result_frame_png
+                    else hashlib.sha256(match.result_frame_png).hexdigest()
+                ),
+            }
+            for match in sorted(
+                matches,
+                key=lambda item: (item.part_index, item.result_at_ms, item.part_id),
+            )
+        ],
+        'version': 1,
+    }
+    snapshot_json = json.dumps(
+        payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+    )
+    return snapshot_json, hashlib.sha256(snapshot_json.encode('utf8')).hexdigest()
+
+
 @dataclass(frozen=True)
 class ScanJob:
     session_id: int
@@ -2432,6 +2518,31 @@ class VaingloryRepository:
                     abs(int(match.result_at_ms) - suppressed_at_ms) <= 5_000
                     for suppressed_at_ms in suppressed_times
                 )
+            )
+            snapshot_json, snapshot_hash = _analysis_revision_snapshot(stored_matches)
+            revision_no = int(
+                connection.execute(
+                    'SELECT COALESCE(MAX(revision_no),0)+1 '
+                    'FROM vainglory_analysis_revisions WHERE part_id=?',
+                    (int(part_id),),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                'INSERT INTO vainglory_analysis_revisions('
+                'session_id,part_id,revision_no,request_kind,algorithm_version,'
+                'match_count,snapshot_hash,snapshot_json,created_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?)',
+                (
+                    session_id,
+                    int(part_id),
+                    revision_no,
+                    str(job['request_kind']),
+                    int(job['algorithm_version']),
+                    len(stored_matches),
+                    snapshot_hash,
+                    snapshot_json,
+                    now,
+                ),
             )
             manual_hero_overrides = {
                 (int(row['result_at_ms']), str(row['side']), int(row['slot'])): int(

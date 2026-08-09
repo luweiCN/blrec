@@ -65,6 +65,7 @@ _GENERATED_LINK_LINE = re.compile(
     r'^第\d+局：https://www\.bilibili\.com/video/BV[0-9A-Za-z]+' r'\?p=\d+&t=\d+$'
 )
 _GENERATED_TRUNCATION = '…其余对局请见置顶评论'
+_WAITING_DESCRIPTION = '等待对局分析完成后生成发布内容'
 
 _SESSION_ARCHIVES_COMPLETE = (
     'NOT EXISTS(SELECT 1 FROM vainglory_archive_imports source_import '
@@ -118,6 +119,9 @@ class PublicationPlan:
     payload_hash: str
     description_block: str
     comments: Tuple[PublicationCommentPlan, ...]
+    match_count: int
+    analysis_snapshot_json: str
+    comments_json: str
 
 
 @dataclass(frozen=True)
@@ -137,7 +141,13 @@ class _ChapterPage:
     duration_seconds: Optional[int]
 
 
-def build_publication_plan(matches: Sequence[MatchRecord]) -> PublicationPlan:
+def build_publication_plan(
+    matches: Sequence[MatchRecord],
+    *,
+    bvid: Optional[str] = None,
+    frame_hashes: Optional[Mapping[int, Optional[str]]] = None,
+) -> PublicationPlan:
+    known_frame_hashes = frame_hashes or {}
     ordered = tuple(
         sorted(
             matches,
@@ -145,15 +155,38 @@ def build_publication_plan(matches: Sequence[MatchRecord]) -> PublicationPlan:
                 match.archive_page or match.part_index,
                 match.started_at_ms,
                 match.result_at_ms,
-                match.id,
+                _match_line(0, match, include_timestamp=True),
+                known_frame_hashes.get(match.id) or '',
             ),
         )
     )
     if not ordered:
-        raise ValueError('publication needs at least one match')
+        summary = '共 0 局｜0 胜 0 负'
+        snapshot_json = json.dumps(
+            {'bvid': bvid, 'matches': [], 'version': 1},
+            ensure_ascii=False,
+            separators=(',', ':'),
+            sort_keys=True,
+        )
+        identity = json.dumps(
+            {
+                'chapters': [],
+                'comments': [],
+                'description': '',
+                'snapshot': json.loads(snapshot_json),
+                'version': 12,
+            },
+            ensure_ascii=False,
+            separators=(',', ':'),
+            sort_keys=True,
+        ).encode('utf8')
+        return PublicationPlan(
+            hashlib.sha256(identity).hexdigest(), summary, (), 0, snapshot_json, '[]'
+        )
     bvids = {match.bvid for match in ordered}
-    if len(bvids) != 1 or None in bvids:
+    if len(bvids) != 1 or None in bvids or (bvid is not None and bvid not in bvids):
         raise ValueError('publication matches must belong to one archive')
+    bvid = str(ordered[0].bvid)
     wins = sum(match.winner_color == 'teal' for match in ordered)
     losses = sum(match.winner_color == 'orange' for match in ordered)
     unknown = len(ordered) - wins - losses
@@ -174,44 +207,82 @@ def build_publication_plan(matches: Sequence[MatchRecord]) -> PublicationPlan:
         _match_line(index, match, include_timestamp=True)
         for index, match in enumerate(ordered, 1)
     )
+    description_parts = [summary]
+    if description_links:
+        description_parts.extend(('对局跳转', *description_links))
+    description_parts.extend(('逐局对阵', *description_lines))
+    description_block = '\n'.join(description_parts)
+    snapshot = {
+        'bvid': bvid,
+        'matches': [
+            {
+                'page': match.archive_page,
+                'part_index': match.part_index,
+                'anchor': _match_anchor(match),
+                'start': match.started_at_ms,
+                'result': match.result_at_ms,
+                'winner': match.winner_color,
+                'game_mode': match.game_mode,
+                'players': [
+                    [
+                        player.side,
+                        player.slot,
+                        player.hero_label,
+                        player.is_recorded_player,
+                    ]
+                    for player in match.players
+                ],
+                'result_frame_sha256': known_frame_hashes.get(
+                    match.id, 'present' if match.has_result_frame else None
+                ),
+            }
+            for match in ordered
+        ],
+        'version': 1,
+    }
+    snapshot_json = json.dumps(
+        snapshot, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+    )
+    comments = _comment_plans(summary, ordered, comment_lines)
+    comment_snapshots = [
+        {
+            'content': comment.content,
+            'pictures': [
+                known_frame_hashes.get(match_id) for match_id in comment.match_ids
+            ],
+        }
+        for comment in comments
+    ]
+    comments_json = json.dumps(
+        comment_snapshots, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+    )
     identity = json.dumps(
         {
-            'matches': [
+            'chapters': [
                 {
-                    'id': match.id,
-                    'page': match.archive_page,
+                    'content': _chapter_content(index, match),
                     'anchor': _match_anchor(match),
-                    'start': match.started_at_ms,
-                    'result': match.result_at_ms,
-                    'winner': match.winner_color,
-                    'game_mode': match.game_mode,
-                    'players': [
-                        [
-                            player.side,
-                            player.slot,
-                            player.hero_label,
-                            player.is_recorded_player,
-                        ]
-                        for player in match.players
-                    ],
                 }
-                for match in ordered
+                for index, match in enumerate(ordered, 1)
             ],
-            'summary': summary,
-            'version': 11,
+            'comments': comment_snapshots,
+            'description': description_block,
+            'snapshot': snapshot,
+            'version': 12,
         },
         ensure_ascii=False,
         separators=(',', ':'),
         sort_keys=True,
     ).encode('utf8')
     payload_hash = hashlib.sha256(identity).hexdigest()
-    description_parts = [summary]
-    if description_links:
-        description_parts.extend(('对局跳转', *description_links))
-    description_parts.extend(('逐局对阵', *description_lines))
-    description_block = '\n'.join(description_parts)
-    comments = _comment_plans(summary, ordered, comment_lines)
-    return PublicationPlan(payload_hash, description_block, comments)
+    return PublicationPlan(
+        payload_hash,
+        description_block,
+        comments,
+        len(ordered),
+        snapshot_json,
+        comments_json,
+    )
 
 
 def merge_archive_description(
@@ -317,6 +388,7 @@ class VaingloryPublicationService:
         if self._discovery_task is not None or self._delivery_task is not None:
             return
         await self.recover_interrupted()
+        await self.ensure_publication_tasks()
         self._discovery_wake.set()
         self._delivery_wake.set()
         self._discovery_task = asyncio.create_task(
@@ -351,22 +423,23 @@ class VaingloryPublicationService:
         column = columns.get(step)
         if column is None and step != 'comments':
             raise ValueError('不支持重试这个发布步骤')
+        await self.ensure_publication_tasks()
         plan: Optional[PublicationPlan] = None
         if step == 'comments':
             current = await self._database.fetchone(
-                'SELECT session_id,bvid FROM vainglory_publications '
+                'SELECT session_id,bvid,plan_state FROM vainglory_publications '
                 'WHERE session_id=? ORDER BY id DESC LIMIT 1',
                 (session_id,),
             )
             if current is None:
                 raise ValueError('这场直播没有可重试的发布任务')
+            if str(current['plan_state']) != 'ready':
+                raise ValueError('这场直播的对局分析尚未完成')
             matches = await self._session_matches(int(current['session_id']))
             matches = tuple(
                 match for match in matches if match.bvid == str(current['bvid'])
             )
-            if not matches:
-                raise ValueError('这场直播暂无可发布的对局')
-            plan = build_publication_plan(matches)
+            plan = await self._build_plan(str(current['bvid']), matches)
         now = self._now()
 
         def retry(connection: sqlite3.Connection) -> Tuple[int, str]:
@@ -419,10 +492,14 @@ class VaingloryPublicationService:
                     )
                 connection.execute(
                     "UPDATE vainglory_publications SET state='prepared',"
-                    "comment_cleanup_state='prepared',pin_state='prepared',"
+                    'comment_cleanup_state=\'prepared\',pin_state=?,'
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
                     'priority=1,updated_at=? WHERE id=?',
-                    (now, publication_id),
+                    (
+                        'confirmed' if not plan.comments else 'prepared',
+                        now,
+                        publication_id,
+                    ),
                 )
             else:
                 assert column is not None
@@ -590,6 +667,73 @@ class VaingloryPublicationService:
             return True
         return await self._run_delivery_once()
 
+    async def ensure_publication_tasks(self) -> int:
+        now = self._now()
+
+        def ensure(connection: sqlite3.Connection) -> int:
+            before = connection.total_changes
+            connection.execute(
+                'INSERT OR IGNORE INTO vainglory_publications('
+                'account_id,session_id,upload_job_id,aid,bvid,source_kind,'
+                'payload_hash,description_block,state,description_state,'
+                'comment_cleanup_state,pin_state,needs_refresh,priority,'
+                'plan_state,match_count,force_republish,created_at,updated_at) '
+                "SELECT job.account_id,job.session_id,job.id,job.aid,job.bvid,'upload',"
+                "? ,?,'prepared','prepared','prepared','prepared',1,1,"
+                "'waiting_analysis',0,1,?,? "
+                'FROM upload_jobs job '
+                'JOIN recording_sessions session ON session.id=job.session_id '
+                "WHERE job.submit_state='confirmed' AND job.aid>0 "
+                "AND job.bvid IS NOT NULL AND job.bvid<>'' "
+                "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+                "AND instr(COALESCE(session.title,''),?)=0 "
+                'AND instr(COALESCE(job.policy_snapshot_json,\'\'),?)=0',
+                (
+                    '0' * 64,
+                    _WAITING_DESCRIPTION,
+                    now,
+                    now,
+                    EXCLUDED_TITLE_MARKER,
+                    EXCLUDED_TITLE_MARKER,
+                ),
+            )
+            connection.execute(
+                'INSERT OR IGNORE INTO vainglory_publications('
+                'account_id,session_id,upload_job_id,aid,bvid,source_kind,'
+                'payload_hash,description_block,state,description_state,'
+                'comment_cleanup_state,pin_state,needs_refresh,priority,'
+                'plan_state,match_count,force_republish,created_at,updated_at) '
+                'SELECT imported.account_id,imported.session_id,NULL,imported.aid,'
+                "imported.bvid,'archive',? ,?,'prepared','prepared','prepared',"
+                "'prepared',1,1,'waiting_analysis',0,1,?,? "
+                'FROM vainglory_archive_imports imported '
+                'JOIN recording_sessions session ON session.id=imported.session_id '
+                'WHERE imported.session_id IS NOT NULL '
+                "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+                'AND instr(COALESCE(session.title,\'\'),?)=0 '
+                'AND instr(COALESCE(imported.title,\'\'),?)=0 '
+                'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
+                'WHERE job.session_id=imported.session_id)',
+                (
+                    '0' * 64,
+                    _WAITING_DESCRIPTION,
+                    now,
+                    now,
+                    EXCLUDED_TITLE_MARKER,
+                    EXCLUDED_TITLE_MARKER,
+                ),
+            )
+            return connection.total_changes - before
+
+        created = await self._database.write(ensure)
+        if created:
+            logger.info(
+                'Vainglory publication tasks guaranteed for published archives: '
+                'created={}',
+                created,
+            )
+        return created
+
     async def _run_delivery_once(self) -> bool:
         async with self._worker_lock:
             return await self._run_delivery_once_locked()
@@ -603,6 +747,7 @@ class VaingloryPublicationService:
             'JOIN recording_sessions session ON session.id=publication.session_id '
             "WHERE publication.state IN ('prepared','running','paused') "
             'AND publication.needs_refresh=0 '
+            "AND publication.plan_state='ready' "
             'AND instr(COALESCE(session.title,\'\'),?)=0 '
             'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
             'JOIN archive_migration_jobs paused_job '
@@ -687,32 +832,91 @@ class VaingloryPublicationService:
             return await self._discover_locked()
 
     async def _discover_locked(self) -> bool:
+        created = await self.ensure_publication_tasks()
         candidate = await self._next_candidate()
         if candidate is None:
-            return False
+            return created > 0
         selected = candidate
         matches = await self._session_matches(selected.session_id)
         matches = tuple(match for match in matches if match.bvid == selected.bvid)
-        if not matches:
-            return False
-        plan = build_publication_plan(matches)
+        plan = await self._build_plan(selected.bvid, matches)
         now = self._now()
 
         def persist(connection: sqlite3.Connection) -> bool:
             current = connection.execute(
-                'SELECT id,payload_hash FROM vainglory_publications '
+                'SELECT id,payload_hash,state,plan_state,force_republish,'
+                'active_revision_id FROM vainglory_publications '
                 'WHERE account_id=? AND bvid=?',
                 (selected.account_id, selected.bvid),
             ).fetchone()
-            if current is not None:
+            if current is None:
+                cursor = connection.execute(
+                    'INSERT INTO vainglory_publications('
+                    'account_id,session_id,upload_job_id,aid,bvid,source_kind,'
+                    'payload_hash,description_block,state,description_state,'
+                    'comment_cleanup_state,pin_state,needs_refresh,plan_state,'
+                    'match_count,force_republish,created_at,updated_at) '
+                    "VALUES(?,?,?,?,?,?,?,?,'prepared','prepared','prepared',?,"
+                    "0,'ready',?,0,?,?)",
+                    (
+                        selected.account_id,
+                        selected.session_id,
+                        selected.upload_job_id,
+                        selected.aid,
+                        selected.bvid,
+                        selected.source_kind,
+                        plan.payload_hash,
+                        plan.description_block,
+                        'confirmed' if not plan.comments else 'prepared',
+                        plan.match_count,
+                        now,
+                        now,
+                    ),
+                )
+                publication_id = int(cursor.lastrowid)
+                previous_payload_hash: Optional[str] = None
+                reason = 'initial'
+                must_apply = True
+            else:
                 publication_id = int(current['id'])
-                if str(current['payload_hash']) == plan.payload_hash:
+                previous_payload_hash = (
+                    None
+                    if str(current['plan_state']) == 'waiting_analysis'
+                    else str(current['payload_hash'])
+                )
+                same_payload = str(current['payload_hash']) == plan.payload_hash
+                must_apply = (
+                    not same_payload
+                    or bool(current['force_republish'])
+                    or str(current['state']) != 'confirmed'
+                    or str(current['plan_state']) != 'ready'
+                )
+                if not must_apply:
+                    self._insert_publication_revision(
+                        connection,
+                        publication_id=publication_id,
+                        plan=plan,
+                        previous_payload_hash=previous_payload_hash,
+                        reason='unchanged',
+                        state='unchanged',
+                        now=now,
+                    )
                     connection.execute(
                         'UPDATE vainglory_publications SET needs_refresh=0,'
+                        "plan_state='ready',match_count=?,force_republish=0,"
                         'updated_at=? WHERE id=?',
-                        (now, publication_id),
+                        (plan.match_count, now, publication_id),
                     )
                     return True
+                reason = (
+                    'initial'
+                    if str(current['plan_state']) == 'waiting_analysis'
+                    else (
+                        'forced'
+                        if bool(current['force_republish']) or same_payload
+                        else 'changed'
+                    )
+                )
                 connection.execute(
                     'INSERT INTO vainglory_publication_stale_comments('
                     'publication_id,ordinal,content,rpid,state,attempt_count,'
@@ -731,14 +935,25 @@ class VaingloryPublicationService:
                     'WHERE publication_id=?',
                     (publication_id,),
                 )
+            revision_id = self._insert_publication_revision(
+                connection,
+                publication_id=publication_id,
+                plan=plan,
+                previous_payload_hash=previous_payload_hash,
+                reason=reason,
+                state='prepared',
+                now=now,
+            )
+            if current is not None:
                 connection.execute(
                     'UPDATE vainglory_publications SET session_id=?,'
                     'upload_job_id=?,aid=?,source_kind=?,payload_hash=?,'
                     "description_block=?,state='prepared',"
                     "chapter_state='prepared',description_state='prepared',"
-                    "comment_cleanup_state='prepared',pin_state='prepared',"
+                    'comment_cleanup_state=\'prepared\',pin_state=?,'
                     'root_rpid=NULL,attempt_count=0,next_attempt_at=0,error=NULL,'
-                    'needs_refresh=0,priority=0,updated_at=? WHERE id=?',
+                    "needs_refresh=0,plan_state='ready',match_count=?,"
+                    'force_republish=0,active_revision_id=?,updated_at=? WHERE id=?',
                     (
                         selected.session_id,
                         selected.upload_job_id,
@@ -746,33 +961,19 @@ class VaingloryPublicationService:
                         selected.source_kind,
                         plan.payload_hash,
                         plan.description_block,
+                        'confirmed' if not plan.comments else 'prepared',
+                        plan.match_count,
+                        revision_id,
                         now,
                         publication_id,
                     ),
                 )
             else:
-                cursor = connection.execute(
-                    'INSERT INTO vainglory_publications('
-                    'account_id,session_id,upload_job_id,aid,bvid,source_kind,'
-                    'payload_hash,description_block,state,description_state,'
-                    'comment_cleanup_state,pin_state,needs_refresh,created_at,'
-                    'updated_at) '
-                    "VALUES(?,?,?,?,?,?,?,?,'prepared','prepared','prepared',"
-                    "'prepared',0,?,?)",
-                    (
-                        selected.account_id,
-                        selected.session_id,
-                        selected.upload_job_id,
-                        selected.aid,
-                        selected.bvid,
-                        selected.source_kind,
-                        plan.payload_hash,
-                        plan.description_block,
-                        now,
-                        now,
-                    ),
+                connection.execute(
+                    'UPDATE vainglory_publications SET active_revision_id=? '
+                    'WHERE id=?',
+                    (revision_id, publication_id),
                 )
-                publication_id = int(cursor.lastrowid)
             for ordinal, item in enumerate(plan.comments):
                 connection.execute(
                     'INSERT INTO vainglory_publication_comments('
@@ -796,90 +997,104 @@ class VaingloryPublicationService:
             self._delivery_wake.set()
         return persisted
 
+    async def _build_plan(
+        self, bvid: str, matches: Sequence[MatchRecord]
+    ) -> PublicationPlan:
+        frame_hashes: Dict[int, Optional[str]] = {}
+        for match in matches:
+            if not match.has_result_frame:
+                frame_hashes[match.id] = None
+                continue
+            path = await self._repository.result_frame_path(match.id)
+            if path is None:
+                frame_hashes[match.id] = None
+                continue
+            try:
+                content = await asyncio.get_running_loop().run_in_executor(
+                    None, Path(path).read_bytes
+                )
+            except OSError:
+                logger.warning(
+                    'Vainglory publication frame fingerprint unavailable: '
+                    'match_id={} path={}',
+                    match.id,
+                    path,
+                )
+                frame_hashes[match.id] = None
+            else:
+                frame_hashes[match.id] = hashlib.sha256(content).hexdigest()
+        return build_publication_plan(matches, bvid=bvid, frame_hashes=frame_hashes)
+
+    @staticmethod
+    def _insert_publication_revision(
+        connection: sqlite3.Connection,
+        *,
+        publication_id: int,
+        plan: PublicationPlan,
+        previous_payload_hash: Optional[str],
+        reason: str,
+        state: str,
+        now: int,
+    ) -> int:
+        revision_no = int(
+            connection.execute(
+                'SELECT COALESCE(MAX(revision_no),0)+1 '
+                'FROM vainglory_publication_revisions WHERE publication_id=?',
+                (publication_id,),
+            ).fetchone()[0]
+        )
+        analysis_revision_ids = [
+            int(row[0])
+            for row in connection.execute(
+                'SELECT MAX(id) FROM vainglory_analysis_revisions '
+                'WHERE session_id=(SELECT session_id FROM vainglory_publications '
+                'WHERE id=?) GROUP BY part_id ORDER BY part_id',
+                (publication_id,),
+            ).fetchall()
+        ]
+        cursor = connection.execute(
+            'INSERT INTO vainglory_publication_revisions('
+            'publication_id,revision_no,previous_payload_hash,payload_hash,'
+            'match_count,analysis_revision_ids_json,analysis_snapshot_json,'
+            'description_block,comments_json,reason,state,created_at) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                publication_id,
+                revision_no,
+                previous_payload_hash,
+                plan.payload_hash,
+                plan.match_count,
+                json.dumps(analysis_revision_ids, separators=(',', ':')),
+                plan.analysis_snapshot_json,
+                plan.description_block,
+                plan.comments_json,
+                reason,
+                state,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid)
+
     async def _next_candidate(self) -> Optional[_Candidate]:
-        common = (
-            'JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
-            "JOIN bili_accounts account ON account.id={account}.account_id "
-            "WHERE account.state='active' AND scan.state='ready' AND "
-            + _SESSION_ARCHIVES_COMPLETE
-            + ' '
-            "AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
+        row = await self._database.fetchone(
+            'SELECT publication.account_id,publication.session_id,'
+            'publication.upload_job_id,publication.aid,publication.bvid,'
+            'publication.source_kind FROM vainglory_publications publication '
+            'JOIN recording_sessions session ON session.id=publication.session_id '
+            'JOIN bili_accounts account ON account.id=publication.account_id '
+            "WHERE account.state='active' AND (publication.needs_refresh=1 "
+            "OR publication.plan_state='waiting_analysis') AND "
+            + _PUBLICATION_READY_PREDICATE
+            + " AND instr(COALESCE(session.title,''),'直播剪辑')=0 "
             'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
             'JOIN archive_migration_jobs paused_job '
             'ON paused_job.id=paused_item.migration_id '
             'WHERE paused_item.session_id=session.id '
             'AND paused_job.operator_paused=1) '
-            'AND scan.algorithm_version>=? AND EXISTS('
-            'SELECT 1 FROM vainglory_matches match '
-            'WHERE match.session_id=session.id) AND NOT EXISTS('
-            'SELECT 1 FROM vainglory_matches match '
-            'WHERE match.session_id=session.id '
-            'AND match.hero_recognition_version<? AND EXISTS('
-            'SELECT 1 FROM vainglory_match_players player '
-            'WHERE player.match_id=match.id '
-            'AND player.hero_id IS NULL)) AND NOT EXISTS('
-            'SELECT 1 FROM vainglory_matches match '
-            'WHERE match.session_id=session.id '
-            'AND match.recorded_player_detection_version<?) '
-            'AND (NOT EXISTS('
-            'SELECT 1 FROM vainglory_publications publication '
-            'WHERE publication.account_id={account}.account_id '
-            'AND publication.bvid={account}.bvid) OR EXISTS('
-            'SELECT 1 FROM vainglory_publications publication '
-            'WHERE publication.account_id={account}.account_id '
-            'AND publication.bvid={account}.bvid '
-            'AND publication.needs_refresh=1)) '
+            'ORDER BY publication.priority DESC,CASE '
+            "WHEN publication.source_kind='upload' THEN 0 ELSE 1 END,"
+            'session.started_at,publication.id LIMIT 1'
         )
-        row = await self._database.fetchone(
-            'SELECT job.account_id,job.session_id,job.id AS upload_job_id,'
-            "job.aid,job.bvid,'upload' AS source_kind "
-            'FROM upload_jobs job '
-            'JOIN recording_sessions session ON session.id=job.session_id '
-            + common.format(account='job')
-            + "AND job.state IN ('waiting_review','approved','completed') "
-            "AND job.submit_state='confirmed' AND job.aid>0 AND job.bvid<>'' "
-            'AND EXISTS(SELECT 1 FROM upload_parts expected_upload '
-            'WHERE expected_upload.job_id=job.id '
-            'AND expected_upload.cid IS NOT NULL) '
-            'AND NOT EXISTS(SELECT 1 FROM upload_parts expected_upload '
-            'WHERE expected_upload.job_id=job.id '
-            'AND expected_upload.cid IS NOT NULL AND NOT EXISTS('
-            'SELECT 1 FROM recording_parts expected_recording '
-            'JOIN vainglory_part_jobs expected_analysis '
-            'ON expected_analysis.part_id=expected_recording.id '
-            'WHERE expected_recording.session_id=session.id '
-            'AND expected_recording.part_index=expected_upload.part_index '
-            "AND expected_analysis.state='ready')) "
-            'ORDER BY CASE WHEN EXISTS('
-            'SELECT 1 FROM archive_migration_items priority_item '
-            'WHERE priority_item.upload_job_id=job.id) THEN 1 ELSE 0 END,'
-            'session.started_at,job.id LIMIT 1',
-            (
-                VaingloryRepository.ALGORITHM_VERSION,
-                VaingloryRepository.HERO_RECOGNITION_VERSION,
-                VaingloryRepository.RECORDED_PLAYER_DETECTION_VERSION,
-            ),
-        )
-        if row is None:
-            row = await self._database.fetchone(
-                'SELECT imported.account_id,imported.session_id,'
-                "NULL AS upload_job_id,imported.aid,imported.bvid,'archive' "
-                'AS source_kind FROM vainglory_archive_imports imported '
-                'JOIN recording_sessions session '
-                'ON session.id=imported.session_id '
-                + common.format(account='imported')
-                + "AND imported.state='ready' AND imported.page_count>0 "
-                'AND imported.completed_page_count=imported.page_count '
-                'AND imported.session_id IS NOT NULL '
-                'AND NOT EXISTS(SELECT 1 FROM upload_jobs job '
-                'WHERE job.session_id=imported.session_id) '
-                'ORDER BY imported.published_at,imported.id LIMIT 1',
-                (
-                    VaingloryRepository.ALGORITHM_VERSION,
-                    VaingloryRepository.HERO_RECOGNITION_VERSION,
-                    VaingloryRepository.RECORDED_PLAYER_DETECTION_VERSION,
-                ),
-            )
         if row is None:
             return None
         return _Candidate(
@@ -937,13 +1152,10 @@ class VaingloryPublicationService:
                         return
                     await self._remove_stale_comment(publication, stale_comment, bundle)
                     return
-                if str(publication['chapter_state']) not in ('confirmed', 'skipped'):
+                if str(publication['chapter_state']) != 'confirmed':
                     await self._publish_chapters(publication, bundle)
                     return
-                if str(publication['description_state']) not in (
-                    'confirmed',
-                    'skipped_no_room',
-                ):
+                if str(publication['description_state']) != 'confirmed':
                     await self._publish_description(publication, bundle)
                     return
                 comment = await self._next_comment(publication_id)
@@ -960,12 +1172,34 @@ class VaingloryPublicationService:
                 if str(publication['pin_state']) != 'confirmed':
                     await self._publish_pin(publication, bundle)
                     return
-                await self._database.execute(
-                    "UPDATE vainglory_publications SET state='confirmed',"
-                    "needs_refresh=0,error=CASE WHEN chapter_state='skipped' "
-                    'THEN error ELSE NULL END,priority=0,updated_at=? WHERE id=?',
-                    (self._now(), publication_id),
-                )
+                now = self._now()
+
+                def confirm(connection: sqlite3.Connection) -> None:
+                    current = connection.execute(
+                        'SELECT active_revision_id FROM vainglory_publications '
+                        'WHERE id=?',
+                        (publication_id,),
+                    ).fetchone()
+                    revision_id = (
+                        None
+                        if current is None or current['active_revision_id'] is None
+                        else int(current['active_revision_id'])
+                    )
+                    if revision_id is not None:
+                        connection.execute(
+                            "UPDATE vainglory_publication_revisions SET "
+                            "state='confirmed',confirmed_at=? WHERE id=?",
+                            (now, revision_id),
+                        )
+                    connection.execute(
+                        "UPDATE vainglory_publications SET state='confirmed',"
+                        'needs_refresh=0,error=NULL,priority=0,'
+                        'published_revision_id=active_revision_id,updated_at=? '
+                        'WHERE id=?',
+                        (now, publication_id),
+                    )
+
+                await self._database.write(confirm)
         except (
             AccountNotFound,
             AccountPaused,
@@ -1094,7 +1328,10 @@ class VaingloryPublicationService:
                 'SELECT EXISTS(SELECT 1 FROM vainglory_publications publication '
                 'JOIN recording_sessions session '
                 'ON session.id=publication.session_id '
-                'WHERE publication.id=? AND ' + _PUBLICATION_READY_PREDICATE + ')',
+                "WHERE publication.id=? AND publication.needs_refresh=0 "
+                "AND publication.plan_state='ready' AND "
+                + _PUBLICATION_READY_PREDICATE
+                + ')',
                 (int(publication_id),),
             )
         )
@@ -1118,19 +1355,35 @@ class VaingloryPublicationService:
                     bundle, bvid=str(publication['bvid'])
                 )
                 pages = _merge_chapter_pages(pages, _chapter_pages(public))
+            if not pages:
+                await self._retry_publication(
+                    publication_id,
+                    int(publication['attempt_count']),
+                    '暂时无法取得稿件分 P，视频分段将自动重试',
+                    minimum_delay=3600,
+                )
+                return
             matches = await self._session_matches(int(publication['session_id']))
             matches = tuple(
                 match for match in matches if match.bvid == str(publication['bvid'])
             )
             targets = _chapter_targets(matches, pages)
-            if not targets:
-                await self._set_chapter_state(
+            target_by_page = {page.page: cards for page, cards in targets}
+            chapter_count = sum(
+                str(card.get('content') or '') != '直播开始'
+                for _page, cards in targets
+                for card in cards
+            )
+            if matches and chapter_count < len(matches):
+                await self._retry_publication(
                     publication_id,
-                    'skipped',
-                    error='没有可写入 B 站章节的有效对局时间点',
+                    int(publication['attempt_count']),
+                    '部分对局缺少有效时间点，视频分段不会跳过并将自动重试',
+                    minimum_delay=3600,
                 )
                 return
-            for target_index, (page, cards) in enumerate(targets):
+            for target_index, page in enumerate(pages):
+                cards = target_by_page.get(page.page, ())
                 current = await self._protocol.archive_cards(
                     bundle, aid=int(publication['aid']), cid=page.cid
                 )
@@ -1152,7 +1405,7 @@ class VaingloryPublicationService:
                     cards=cards,
                     permanent=True,
                 )
-                if self._picture_interval_seconds and target_index + 1 < len(targets):
+                if self._picture_interval_seconds and target_index + 1 < len(pages):
                     await self._sleeper(self._picture_interval_seconds)
         except DefinitelyNotSent:
             await self._retry_publication(
@@ -1171,14 +1424,14 @@ class VaingloryPublicationService:
                 await self._handle_api_error(publication_id, publication, error)
             else:
                 logger.warning(
-                    'Skipped unsupported Bilibili chapters: bvid={} code={}',
+                    'Bilibili chapters rejected and will retry: bvid={} code={}',
                     str(publication['bvid']),
                     error.code,
                 )
-                await self._set_chapter_state(
+                await self._retry_publication(
                     publication_id,
-                    'skipped',
-                    error='B 站章节接口拒绝写入（{}）{}'.format(
+                    int(publication['attempt_count']),
+                    'B 站章节接口拒绝写入（{}）{}，将继续重试'.format(
                         error.code,
                         (
                             ''
@@ -1186,6 +1439,7 @@ class VaingloryPublicationService:
                             else '：{}'.format(error.public_message)
                         ),
                     ),
+                    minimum_delay=6 * 3600,
                 )
         except ProtocolContractError:
             await self._retry_publication(
@@ -1224,13 +1478,25 @@ class VaingloryPublicationService:
             await self._fail(publication_id, '稿件详情结构不符合预期')
             return
         block = str(publication['description_block'])
-        if description_contains_block(current, block):
-            await self._set_description_state(publication_id, 'confirmed')
-            return
-        merged = merge_archive_description(current, block)
-        if merged is None:
-            await self._set_description_state(publication_id, 'skipped_no_room')
-            return
+        merged: Optional[str]
+        if int(publication['match_count']) == 0:
+            merged = remove_generated_description(current, block)
+            if merged == current:
+                await self._set_description_state(publication_id, 'confirmed')
+                return
+        else:
+            if description_contains_block(current, block):
+                await self._set_description_state(publication_id, 'confirmed')
+                return
+            merged = merge_archive_description(current, block)
+            if merged is None:
+                await self._retry_publication(
+                    publication_id,
+                    int(publication['attempt_count']),
+                    '稿件简介没有空间，任务不会跳过并将继续重试',
+                    minimum_delay=6 * 3600,
+                )
+                return
         if merged == current:
             await self._set_description_state(publication_id, 'confirmed')
             return
@@ -1726,9 +1992,6 @@ class VaingloryPublicationService:
         rpid: int,
     ) -> None:
         publication_id = int(publication['id'])
-        if int(comment['attempt_count']) >= 3:
-            await self._fail(publication_id, 'B 站连续未附加结算图，已停止重复发布')
-            return
         try:
             await self._protocol.delete_reply(
                 bundle, {'type': 1, 'oid': int(publication['aid']), 'rpid': rpid}
@@ -1889,10 +2152,16 @@ class VaingloryPublicationService:
         )
 
     async def _fail(self, publication_id: int, message: str) -> None:
+        now = self._now()
         await self._database.execute(
-            "UPDATE vainglory_publications SET state='failed',error=?,updated_at=? "
-            'WHERE id=?',
-            (message[:500], self._now(), publication_id),
+            "UPDATE vainglory_publications SET state='paused',next_attempt_at=?,"
+            'error=?,updated_at=? WHERE id=?',
+            (
+                now + 6 * 3600,
+                '{}，任务保留并将继续重试'.format(message)[:500],
+                now,
+                publication_id,
+            ),
         )
 
     async def _set_description_state(self, publication_id: int, state: str) -> None:

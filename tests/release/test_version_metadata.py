@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_version_matches_preview_beta() -> None:
-    assert blrec.__version__ == '3.0.0-beta.44'
+    assert blrec.__version__ == '3.0.0-beta.45'
 
 
 def test_server_and_worker_runtime_pins_cover_supported_python_wheels() -> None:
@@ -25,10 +25,10 @@ def test_server_and_worker_runtime_pins_cover_supported_python_wheels() -> None:
 
 
 def test_release_notes_describe_vainglory_operations() -> None:
-    notes = (ROOT / 'docs/releases/3.0.0-beta.44.md').read_text(encoding='utf8')
-    assert '# BLREC 3.0.0-beta.44' in notes
-    assert '发布债务' in notes
-    assert '发布 worker' in notes
-    assert '独立镜像' in notes
-    assert '不新增数据库迁移' in notes
+    notes = (ROOT / 'docs/releases/3.0.0-beta.45.md').read_text(encoding='utf8')
+    assert '# BLREC 3.0.0-beta.45' in notes
+    assert '发布任务完整性' in notes
+    assert '不可变快照' in notes
+    assert '零对局' in notes
+    assert '全量核对重发' in notes
     assert 'latest' not in notes.lower()
