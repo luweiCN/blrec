@@ -24,27 +24,27 @@ a {
 .arena-hero {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 0.86fr) minmax(520px, 1.14fr);
-  gap: 64px;
+  grid-template-columns: minmax(0, 0.82fr) minmax(540px, 1.18fr);
+  gap: 72px;
   align-items: center;
-  width: min(100% - 64px, 1240px);
+  width: min(calc(100% - var(--content-gutter)), var(--content-width));
   margin: 0 auto;
-  padding: 72px 0 60px;
+  padding: 78px 0 64px;
 }
 
 .season {
   display: flex;
   gap: 12px;
   align-items: center;
-  margin: 0 0 20px;
+  margin: 0 0 22px;
   color: var(--ink-muted);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 650;
   letter-spacing: 0.05em;
 
   span {
     color: var(--cyan);
-    letter-spacing: 0.12em;
+    letter-spacing: 0.08em;
   }
 }
 
@@ -53,48 +53,50 @@ a {
     max-width: 8.5ch;
     margin: 0;
     color: var(--ink);
-    font-size: 4.35rem;
-    font-weight: 770;
-    letter-spacing: -0.045em;
-    line-height: 1.02;
+    font-size: 4.15rem;
+    font-weight: 780;
+    letter-spacing: -0.035em;
+    line-height: 1.04;
     text-wrap: balance;
   }
 }
 
 .hero-intro {
   max-width: 35rem;
-  margin: 24px 0 30px;
-  color: var(--ink-muted);
-  font-size: 0.94rem;
-  line-height: 1.8;
+  margin: 26px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+  line-height: 1.82;
   text-wrap: pretty;
 }
 
 .podium-panel {
   position: relative;
-  min-height: 388px;
+  min-height: 404px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-1);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 50% 28%, oklch(40% 0.15 294 / 0.18), transparent 15rem),
+    linear-gradient(180deg, var(--surface-1), oklch(13.5% 0.035 285));
 
   &::before {
     position: absolute;
-    top: -80px;
+    top: -110px;
     left: 50%;
-    width: 320px;
-    height: 260px;
+    width: 380px;
+    height: 300px;
     border-radius: 50%;
-    background: oklch(50% 0.16 294 / 0.18);
+    background: oklch(50% 0.16 294 / 0.12);
     content: "";
-    filter: blur(20px);
+    filter: blur(18px);
     transform: translateX(-50%);
   }
 
   &::after {
     position: absolute;
     right: 7%;
-    bottom: 52px;
+    bottom: 51px;
     left: 7%;
     height: 1px;
     background: linear-gradient(
@@ -114,7 +116,7 @@ a {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    padding: 24px 26px 0;
+      padding: 26px 28px 0;
 
     div {
       display: grid;
@@ -126,13 +128,13 @@ a {
       color: var(--ink-muted);
       font-size: 0.63rem;
       font-weight: 650;
-      letter-spacing: 0.09em;
+      letter-spacing: 0.07em;
     }
 
     div > strong {
       color: var(--ink-soft);
-      font-size: 0.82rem;
-      letter-spacing: 0.05em;
+      font-size: 0.86rem;
+      letter-spacing: 0.03em;
     }
   }
 }
@@ -143,8 +145,8 @@ a {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end;
-  min-height: 315px;
-  padding: 32px 24px 50px;
+  min-height: 326px;
+  padding: 34px 26px 50px;
 }
 
 .podium-slot {
@@ -170,15 +172,15 @@ a {
   }
 
   &.first {
-    padding-bottom: 24px;
+    padding-bottom: 28px;
 
     .podium-rank {
       color: var(--gold);
     }
 
     .podium-emblem {
-      width: 142px;
-      height: 142px;
+      width: 154px;
+      height: 154px;
     }
 
     .podium-avatar {
@@ -206,8 +208,8 @@ a {
 
 .podium-emblem {
   display: block;
-  width: 110px;
-  height: 110px;
+  width: 116px;
+  height: 116px;
   object-fit: contain;
   filter: drop-shadow(0 7px 12px oklch(6% 0.02 280 / 0.62));
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -219,14 +221,14 @@ a {
   align-items: center;
   justify-content: center;
   max-width: 100%;
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .podium-avatar {
   display: block;
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--line);
   border-radius: 50%;
 }
@@ -242,7 +244,7 @@ a {
 
 .podium-tier-name {
   max-width: 100%;
-  margin-top: 7px;
+  margin-top: 8px;
   overflow: hidden;
   color: var(--ink-soft);
   font-size: 0.62rem;
@@ -261,12 +263,12 @@ a {
   grid-template-columns: 170px minmax(0, 1fr) auto;
   gap: 28px;
   align-items: center;
-  width: min(100% - 64px, 1240px);
+  width: min(calc(100% - var(--content-gutter)), var(--content-width));
   margin: 0 auto;
-  padding: 20px 24px;
+  padding: 22px 26px;
   border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: var(--surface-1);
+  border-radius: var(--radius-md);
+  background: oklch(16.5% 0.041 283 / 0.78);
 
   dl {
     display: grid;
@@ -274,21 +276,21 @@ a {
     margin: 0;
 
     div {
-      padding: 2px 26px;
+      padding: 2px 28px;
       border-left: 1px solid var(--line-soft);
     }
   }
 
   dt {
     color: var(--ink-muted);
-    font-size: 0.66rem;
+    font-size: 0.64rem;
   }
 
   dd {
     margin: 5px 0 0;
     color: var(--ink);
-    font-size: 1.45rem;
-    font-weight: 730;
+    font-size: 1.55rem;
+    font-weight: 760;
     letter-spacing: -0.025em;
   }
 }
@@ -296,9 +298,9 @@ a {
 .summary-label {
   span {
     color: var(--cyan);
-    font-size: 0.64rem;
-    font-weight: 800;
-    letter-spacing: 0.13em;
+    font-size: 0.7rem;
+    font-weight: 740;
+    letter-spacing: 0.03em;
   }
 
   p {
@@ -311,7 +313,7 @@ a {
 .snapshot-note {
   margin: 0;
   color: var(--gold);
-  font-size: 0.6rem;
+  font-size: 0.61rem;
   font-weight: 800;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.06em;
 }

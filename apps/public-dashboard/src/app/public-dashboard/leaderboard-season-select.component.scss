@@ -1,7 +1,7 @@
 :host {
   position: relative;
   display: grid;
-  gap: 8px;
+  gap: 9px;
   min-width: 0;
 }
 
@@ -20,7 +20,7 @@ button {
 
 .control-label {
   color: var(--ink-muted);
-  font-size: 0.63rem;
+  font-size: 0.62rem;
   font-weight: 700;
 }
 
@@ -34,11 +34,11 @@ button {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  min-height: 54px;
-  padding: 7px 15px;
+  min-height: 58px;
+  padding: 8px 16px;
   border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
   color: var(--ink);
   cursor: pointer;
   text-align: left;
@@ -53,8 +53,8 @@ button {
 
   strong {
     overflow: hidden;
-    font-size: 0.74rem;
-    font-weight: 720;
+    font-size: 0.76rem;
+    font-weight: 740;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -70,7 +70,7 @@ button {
 
   &:hover {
     border-color: var(--cyan-strong);
-    background: var(--surface-3);
+    background: var(--surface-2);
   }
 }
 
@@ -105,8 +105,8 @@ button {
   padding: 5px;
   overflow-y: auto;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
   box-shadow: 0 6px 8px oklch(6% 0.02 286 / 0.38);
   list-style: none;
 
@@ -116,10 +116,10 @@ button {
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    min-height: 54px;
+    min-height: 56px;
     padding: 8px 10px;
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--ink-soft);
     cursor: pointer;

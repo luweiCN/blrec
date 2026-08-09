@@ -195,18 +195,22 @@
     }
 
     tbody {
-      display: block;
+      display: grid;
+      gap: 10px;
+      padding: 10px;
     }
 
     tr {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 14px 10px;
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line-soft);
+      padding: 16px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-control);
+      background: var(--surface-2);
 
       &:last-child {
-        border-bottom: 0;
+        border-bottom: 1px solid var(--line-soft);
       }
     }
 
@@ -335,7 +339,7 @@
   }
 
   .profile-card {
-    padding: 20px;
+    padding: 20px 18px;
 
     & > header {
       display: block;
@@ -352,7 +356,7 @@
     padding: 0;
 
     & > header {
-      padding: 20px;
+      padding: 20px 18px 16px;
     }
   }
 

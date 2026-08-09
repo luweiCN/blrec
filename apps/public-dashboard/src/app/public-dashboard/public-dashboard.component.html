@@ -65,7 +65,7 @@
 
   <section class="summary-strip" aria-label="数据概览">
     <div class="summary-label">
-      <span>LIVE INDEX</span>
+      <span>本期概览</span>
       <p>{{ seasonPeriod }}</p>
     </div>
     <dl>
@@ -86,14 +86,14 @@
         <dd>{{ summary.heroCount }}</dd>
       </div>
     </dl>
-    <p class="snapshot-note">真实数据 · 每日快照</p>
+    <p class="snapshot-note">真实数据 · 持续更新</p>
   </section>
 
   <section id="players" class="players-section" aria-labelledby="players-title">
     <div class="ranking-panel">
       <header class="section-heading">
         <div>
-          <p class="section-kicker">PLAYER RANKING</p>
+          <p class="section-kicker">本期排名</p>
           <h2 id="players-title">玩家榜</h2>
           <p>按排位分展示当前模式下的玩家表现。</p>
         </div>
@@ -214,7 +214,7 @@
       aria-labelledby="player-detail-title"
     >
       <header class="detail-header">
-        <span>PLAYER PROFILE</span>
+        <span>榜首档案</span>
         <strong>#{{ selectedPlayerRank.toString().padStart(2, "0") }}</strong>
       </header>
 
@@ -325,7 +325,7 @@
   <section id="heroes" class="heroes-section" aria-labelledby="heroes-title">
     <header class="section-heading">
       <div>
-        <p class="section-kicker">HERO PERFORMANCE</p>
+        <p class="section-kicker">英雄数据</p>
         <h2 id="heroes-title">英雄榜</h2>
         <p>当前按胜率展示，完整榜单还可按英雄使用次数查看。</p>
       </div>

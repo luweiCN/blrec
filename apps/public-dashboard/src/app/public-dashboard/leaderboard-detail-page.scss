@@ -18,9 +18,9 @@ a {
 }
 
 .leaderboard-page {
-  width: min(100% - 64px, 1240px);
+  width: min(calc(100% - var(--content-gutter)), var(--content-width));
   margin: 0 auto;
-  padding: 30px 0 44px;
+  padding: 34px 0 52px;
   color: var(--ink);
 }
 
@@ -29,7 +29,7 @@ a {
   gap: 9px;
   align-items: center;
   color: var(--ink-muted);
-  font-size: 0.67rem;
+  font-size: 0.65rem;
 
   a {
     color: var(--cyan);
@@ -46,14 +46,14 @@ a {
   gap: 40px;
   align-items: flex-end;
   justify-content: space-between;
-  margin: 30px 0 28px;
+  margin: 34px 0 30px;
 
   h1 {
     margin: 0;
     color: var(--ink);
-    font-size: 2.5rem;
-    font-weight: 760;
-    letter-spacing: -0.035em;
+    font-size: 2.4rem;
+    font-weight: 770;
+    letter-spacing: -0.03em;
     line-height: 1.08;
     text-wrap: balance;
   }
@@ -62,7 +62,7 @@ a {
     max-width: 42rem;
     margin: 12px 0 0;
     color: var(--ink-muted);
-    font-size: 0.82rem;
+    font-size: 0.84rem;
     line-height: 1.7;
     text-wrap: pretty;
   }
@@ -72,12 +72,12 @@ a {
   display: grid;
   flex: none;
   gap: 5px;
-  min-width: 210px;
+  min-width: 220px;
   margin: 0;
-  padding: 13px 15px;
+  padding: 14px 16px;
   border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  background: var(--surface-1);
+  border-radius: var(--radius-md);
+  background: oklch(16.5% 0.041 283 / 0.74);
 
   strong {
     color: var(--gold);
@@ -91,11 +91,11 @@ a {
 }
 
 .directory-panel {
-  margin-top: 20px;
+  margin-top: 24px;
   overflow: hidden;
   border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  background: var(--surface-1);
+  border-radius: var(--radius-lg);
+  background: oklch(16.5% 0.041 283 / 0.92);
 }
 
 .directory-toolbar {
@@ -103,19 +103,19 @@ a {
   grid-template-columns: minmax(180px, 1fr) minmax(260px, 340px) auto;
   gap: 22px;
   align-items: end;
-  padding: 24px 26px 20px;
+  padding: 26px 28px 22px;
 
   h2 {
     margin: 0;
     color: var(--ink);
-    font-size: 1.05rem;
-    font-weight: 720;
+    font-size: 1.12rem;
+    font-weight: 750;
   }
 
   div > p {
     margin: 6px 0 0;
     color: var(--ink-muted);
-    font-size: 0.63rem;
+    font-size: 0.65rem;
   }
 }
 
@@ -142,10 +142,10 @@ a {
 
   & > div {
     display: flex;
-    min-height: 42px;
+    min-height: 44px;
     padding: 3px;
     border: 1px solid var(--line);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     background: var(--surface-2);
   }
 
@@ -184,13 +184,17 @@ a {
   }
 
   input {
-    min-height: 42px;
+    min-height: 44px;
     padding: 0 12px;
     border: 1px solid var(--line);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     background: var(--surface-2);
     color: var(--ink);
-    font-size: 0.72rem;
+    font-size: 0.74rem;
+
+    &:hover {
+      border-color: var(--cyan-strong);
+    }
 
     &::placeholder {
       color: var(--ink-muted);
@@ -234,7 +238,7 @@ a {
   }
 
   th {
-    padding: 12px 14px;
+    padding: 13px 15px;
     border-top: 1px solid var(--line-soft);
     border-bottom: 1px solid var(--line-soft);
     background: var(--void);
@@ -246,22 +250,22 @@ a {
   }
 
   td {
-    height: 65px;
-    padding: 9px 14px;
+    height: 72px;
+    padding: 10px 15px;
     border-bottom: 1px solid var(--line-soft);
     color: var(--ink-muted);
-    font-size: 0.72rem;
+    font-size: 0.74rem;
   }
 
   tbody tr {
-    transition: background 150ms ease;
+    transition: background 160ms var(--ease-out);
 
     &:hover {
-      background: var(--surface-2);
+      background: oklch(22.5% 0.05 280 / 0.68);
     }
 
     &.podium-row {
-      background: oklch(83% 0.145 82 / 0.035);
+      background: var(--gold-wash);
 
       .directory-rank strong {
         color: var(--gold);
@@ -317,10 +321,10 @@ a {
 
   .directory-player-avatar {
     flex: none;
-    width: 34px;
-    height: 34px;
+    width: 38px;
+    height: 38px;
     border: 1px solid var(--line);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
   }
 
   & > span:last-child {
@@ -330,7 +334,7 @@ a {
 
   strong {
     color: var(--ink);
-    font-size: 0.78rem;
+    font-size: 0.8rem;
   }
 
   small {
@@ -366,8 +370,8 @@ a {
   }
 
   img {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border: 1px solid var(--line);
     border-radius: 4px;
     object-fit: cover;
@@ -375,8 +379,8 @@ a {
 
   &.hero-identity {
     img {
-      width: 42px;
-      height: 42px;
+      width: 46px;
+      height: 46px;
     }
 
     strong {
@@ -430,15 +434,15 @@ a {
   gap: 6px;
   align-items: center;
   justify-content: flex-end;
-  padding: 18px 24px;
+  padding: 20px 26px;
   border-top: 1px solid var(--line-soft);
 
   button {
     min-width: 42px;
-    min-height: 42px;
+    min-height: 40px;
     padding: 0 12px;
     border: 1px solid var(--line-soft);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--surface-2);
     color: var(--ink-muted);
     cursor: pointer;

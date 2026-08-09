@@ -1,6 +1,6 @@
 @media (max-width: 760px) {
   .leaderboard-page {
-    width: min(100% - 32px, 1240px);
+    width: min(calc(100% - var(--content-gutter)), var(--content-width));
     padding-top: 24px;
   }
 
@@ -9,19 +9,18 @@
     margin-top: 24px;
 
     h1 {
-      font-size: 2.05rem;
+      font-size: 2rem;
     }
   }
 
   .page-context {
-    width: fit-content;
-    margin-top: 18px;
+    display: none;
   }
 
   .directory-toolbar {
     grid-template-columns: 1fr auto;
     gap: 18px 14px;
-    padding: 20px;
+    padding: 22px;
 
     .search-control {
       grid-column: 1 / -1;
@@ -82,18 +81,27 @@
     }
 
     tbody {
-      display: block;
+      display: grid;
+      gap: 10px;
+      padding: 10px;
     }
 
     tr {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 16px 12px;
-      padding: 17px 18px;
-      border-bottom: 1px solid var(--line-soft);
+      padding: 18px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-md);
+      background: var(--surface-2);
 
       &:last-child {
-        border-bottom: 0;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      &.podium-row {
+        border-color: oklch(70% 0.115 77 / 0.44);
+        background: var(--gold-wash);
       }
     }
 
@@ -110,7 +118,7 @@
         margin-bottom: 6px;
         color: var(--ink-muted);
         content: attr(data-label);
-        font-size: 0.53rem;
+        font-size: 0.54rem;
         font-weight: 650;
       }
     }
@@ -219,7 +227,7 @@
 @media (max-width: 480px) {
   .page-heading {
     h1 {
-      font-size: 1.85rem;
+      font-size: 1.82rem;
     }
 
     div > p {
@@ -229,6 +237,18 @@
 
   .page-context {
     width: 100%;
+  }
+
+  .directory-panel {
+    overflow: visible;
+    border: 0;
+    background: transparent;
+  }
+
+  .directory-toolbar {
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-lg);
+    background: var(--surface-1);
   }
 
   .directory-toolbar {
@@ -251,10 +271,6 @@
       grid-row: auto;
       grid-column: auto;
     }
-  }
-
-  .result-status {
-    grid-row: 2;
   }
 
   .pagination {

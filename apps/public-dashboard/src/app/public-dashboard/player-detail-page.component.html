@@ -20,7 +20,7 @@
             "
           ></app-player-avatar>
           <div>
-            <p>PLAYER ARCHIVE</p>
+            <p>玩家档案</p>
             <h1>{{ profile.name }}</h1>
             <span>{{ profile.roomLabel }}</span>
           </div>
@@ -180,7 +180,7 @@
     >
       <header>
         <div>
-          <p>RATING TREND</p>
+          <p>评分变化</p>
           <h2 id="player-rating-trend-title">排位分趋势</h2>
         </div>
         <span>
@@ -271,7 +271,7 @@
       <section class="profile-card" aria-labelledby="player-mode-title">
         <header>
           <div>
-            <p>MODE DISTRIBUTION</p>
+            <p>对局构成</p>
             <h2 id="player-mode-title">模式构成</h2>
           </div>
           <span>所选赛季 · 全部模式</span>
@@ -293,7 +293,7 @@
       <section class="profile-card" aria-labelledby="player-form-title">
         <header>
           <div>
-            <p>RECENT FORM</p>
+            <p>最近表现</p>
             <h2 id="player-form-title">近期状态</h2>
           </div>
           <span>最近五局已识别结果</span>
@@ -316,7 +316,7 @@
     <section class="profile-card profile-table-card" aria-labelledby="hero-pool-detail-title">
       <header>
         <div>
-          <p>HERO POOL</p>
+          <p>英雄池</p>
           <h2 id="hero-pool-detail-title">英雄熟练度</h2>
         </div>
         <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
@@ -404,7 +404,7 @@
     <section class="profile-card profile-table-card" aria-labelledby="player-history-title">
       <header>
         <div>
-          <p>SEASON HISTORY</p>
+          <p>历史表现</p>
           <h2 id="player-history-title">赛季记录</h2>
         </div>
         <span>{{ modeLabel() }} · 随顶部模式同步</span>
@@ -452,7 +452,7 @@
 
   <ng-template #playerNotFound>
     <section class="profile-not-found" role="alert">
-      <p>PLAYER NOT FOUND</p>
+      <p>未找到玩家</p>
       <h1>没有找到这个玩家档案</h1>
       <a routerLink="/players">返回玩家榜</a>
     </section>

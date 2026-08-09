@@ -12,7 +12,7 @@
       <div class="profile-player-identity">
         <img class="profile-hero-image" [src]="heroImage(profile.name)" alt="" />
         <div>
-          <p>HERO ARCHIVE</p>
+          <p>英雄档案</p>
           <h1>{{ identity?.aliases?.[0] || identity?.officialName || profile.name }}</h1>
           <span>{{ identity?.officialName || profile.name }} · {{ profile.name }}</span>
         </div>
@@ -69,7 +69,7 @@
     <section class="profile-card" aria-labelledby="hero-mode-title">
       <header>
         <div>
-          <p>MODE PERFORMANCE</p>
+          <p>模式表现</p>
           <h2 id="hero-mode-title">各模式表现</h2>
         </div>
         <span>{{ selectedSeason.label }}</span>
@@ -92,7 +92,7 @@
     <section class="profile-card profile-table-card" aria-labelledby="hero-players-title">
       <header>
         <div>
-          <p>PLAYER SPECIALISTS</p>
+          <p>玩家专精</p>
           <h2 id="hero-players-title">玩家熟练度排行</h2>
         </div>
         <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
@@ -188,7 +188,7 @@
     <section class="profile-card profile-table-card" aria-labelledby="hero-history-title">
       <header>
         <div>
-          <p>SEASON HISTORY</p>
+          <p>历史表现</p>
           <h2 id="hero-history-title">赛季记录</h2>
         </div>
         <span>{{ modeLabel() }} · 随顶部模式同步</span>
@@ -224,7 +224,7 @@
 
   <ng-template #heroNotFound>
     <section class="profile-not-found" role="alert">
-      <p>HERO NOT FOUND</p>
+      <p>未找到英雄</p>
       <h1>没有找到这个英雄档案</h1>
       <a routerLink="/heroes">返回英雄榜</a>
     </section>

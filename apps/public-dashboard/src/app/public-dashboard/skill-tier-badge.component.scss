@@ -7,8 +7,8 @@
 
 .skill-tier-badge {
   display: inline-grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 7px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 9px;
   align-items: center;
   max-width: 100%;
   color: var(--ink);
@@ -16,8 +16,8 @@
 
   img {
     display: block;
-    width: 38px;
-    height: 38px;
+    width: 42px;
+    height: 42px;
     object-fit: contain;
     filter: drop-shadow(0 4px 8px oklch(6% 0.02 280 / 0.55));
   }
@@ -37,13 +37,13 @@
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.65rem;
+    font-size: 0.68rem;
     font-weight: 730;
   }
 
   small {
     color: var(--ink-muted);
-    font-size: 0.5rem;
+    font-size: 0.53rem;
   }
 
   em {
@@ -58,8 +58,8 @@
   display: inline-block;
 
   img {
-    width: 42px;
-    height: 42px;
+    width: 46px;
+    height: 46px;
   }
 }
 
@@ -81,7 +81,7 @@
 
     strong {
       color: var(--gold);
-      font-size: 0.76rem;
+      font-size: 0.82rem;
     }
 
     small {

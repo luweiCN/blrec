@@ -1,11 +1,45 @@
 @use "app/public-dashboard/guide-page";
 
+:root {
+  color-scheme: dark;
+  --void: oklch(9.5% 0.025 285);
+  --canvas: oklch(12.5% 0.035 285);
+  --surface-1: oklch(16.5% 0.041 283);
+  --surface-2: oklch(20.5% 0.046 281);
+  --surface-3: oklch(25% 0.05 278);
+  --surface-raised: oklch(22.5% 0.052 280);
+  --line: oklch(37% 0.058 277 / 0.72);
+  --line-soft: oklch(32% 0.046 279 / 0.48);
+  --line-faint: oklch(28% 0.04 280 / 0.34);
+  --ink: oklch(96.5% 0.015 276);
+  --ink-soft: oklch(85% 0.027 274);
+  --ink-muted: oklch(71.5% 0.035 273);
+  --cyan: oklch(79% 0.13 204);
+  --cyan-strong: oklch(70% 0.16 214);
+  --cyan-wash: oklch(79% 0.13 204 / 0.09);
+  --gold: oklch(83% 0.145 82);
+  --gold-soft: oklch(70% 0.115 77);
+  --gold-wash: oklch(83% 0.145 82 / 0.08);
+  --rose: oklch(70% 0.17 351);
+  --focus: oklch(86% 0.13 202);
+  --content-width: 1280px;
+  --content-gutter: 64px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-control: var(--radius-md);
+  --radius-panel: var(--radius-lg);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --z-dropdown: 20;
+  --z-sticky: 30;
+}
+
 html,
 body {
   min-width: 320px;
   min-height: 100%;
   margin: 0;
-  background: #12101c;
+  background: var(--canvas);
 }
 
 body,
@@ -21,7 +55,39 @@ input {
     sans-serif;
 }
 
+body {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
 button,
 input {
   font: inherit;
+}
+
+::selection {
+  background: oklch(79% 0.13 204 / 0.28);
+  color: var(--ink);
+}
+
+@media (max-width: 980px) {
+  :root {
+    --content-gutter: 32px;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --content-gutter: 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
 }

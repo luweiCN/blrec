@@ -12,8 +12,8 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 24px;
   align-items: center;
-  min-height: 58px;
-  padding: 13px 0;
+  min-height: 62px;
+  padding: 15px 0;
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -24,9 +24,9 @@
 
   h2 {
     margin: 0;
-    color: var(--ink-soft);
-    font-size: 0.68rem;
-    font-weight: 700;
+    color: var(--ink);
+    font-size: 0.7rem;
+    font-weight: 720;
     white-space: nowrap;
   }
 }
@@ -37,7 +37,7 @@
   height: 6px;
   border-radius: 50%;
   background: var(--cyan);
-  box-shadow: 0 0 0 3px oklch(79% 0.13 204 / 0.08);
+  box-shadow: 0 0 0 4px var(--cyan-wash);
 }
 
 dl {
@@ -51,7 +51,7 @@ dl {
     display: inline-flex;
     gap: 6px;
     align-items: baseline;
-    padding: 0 17px;
+    padding: 0 18px;
     border-left: 1px solid var(--line-soft);
   }
 }
@@ -76,8 +76,8 @@ dd {
 
   strong {
     color: var(--ink);
-    font-size: 0.76rem;
-    font-weight: 730;
+    font-size: 0.8rem;
+    font-weight: 750;
   }
 }
 

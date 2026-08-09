@@ -22,15 +22,18 @@ button {
   gap: 18px;
   align-items: center;
   justify-content: space-between;
-  min-width: 154px;
-  min-height: 38px;
-  padding: 6px 11px 6px 13px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  min-width: 168px;
+  min-height: 40px;
+  padding: 6px 12px 6px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
   background: var(--surface-1);
   color: var(--ink);
   cursor: pointer;
   text-align: left;
+  transition:
+    border-color 180ms var(--ease-out),
+    background 180ms var(--ease-out);
 
   &:hover {
     border-color: var(--cyan-strong);
@@ -43,20 +46,26 @@ button {
   }
 }
 
+.open .mode-trigger {
+  border-color: var(--cyan-strong);
+  background: var(--surface-2);
+}
+
 .trigger-copy {
   display: flex;
-  gap: 8px;
+  gap: 9px;
   align-items: baseline;
 
   small {
     color: var(--ink-muted);
-    font-size: 0.57rem;
+    font-size: 0.58rem;
     white-space: nowrap;
   }
 
   strong {
     color: var(--cyan);
-    font-size: 0.7rem;
+    font-size: 0.72rem;
+    font-weight: 760;
     white-space: nowrap;
   }
 }
@@ -68,7 +77,7 @@ button {
   border-right: 1px solid var(--ink-muted);
   border-bottom: 1px solid var(--ink-muted);
   transform: rotate(45deg);
-  transition: transform 160ms ease;
+  transition: transform 180ms var(--ease-out);
 }
 
 .open .mode-chevron {
@@ -91,11 +100,11 @@ button {
   z-index: 4;
   top: calc(100% + 8px);
   right: 0;
-  width: 260px;
-  padding: 6px;
+  width: 272px;
+  padding: 7px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
 
   button {
     display: grid;
@@ -103,14 +112,15 @@ button {
     gap: 16px;
     align-items: center;
     width: 100%;
-    min-height: 50px;
-    padding: 8px 10px;
+    min-height: 54px;
+    padding: 9px 11px;
     border: 0;
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--ink);
     cursor: pointer;
     text-align: left;
+    transition: background 160ms var(--ease-out);
 
     &:hover,
     &:focus-visible {
@@ -123,7 +133,7 @@ button {
     }
 
     &.selected {
-      background: oklch(79% 0.13 204 / 0.09);
+      background: var(--cyan-wash);
 
       strong {
         color: var(--cyan);
@@ -132,6 +142,7 @@ button {
       .option-marker {
         border-color: var(--cyan);
         background: var(--cyan);
+        box-shadow: 0 0 0 3px var(--cyan-wash);
       }
     }
   }
@@ -142,12 +153,13 @@ button {
   gap: 4px;
 
   strong {
-    font-size: 0.72rem;
+    font-size: 0.73rem;
   }
 
   small {
     color: var(--ink-muted);
-    font-size: 0.56rem;
+    font-size: 0.57rem;
+    line-height: 1.45;
   }
 }
 
@@ -165,32 +177,37 @@ button {
   }
 
   .mode-trigger {
-    min-height: 44px;
+    min-height: 42px;
+    border-color: var(--line-faint);
+    background: oklch(16.5% 0.041 283 / 0.72);
   }
 
   .mode-backdrop {
-    background: oklch(8% 0.025 286 / 0.72);
+    background: oklch(7% 0.025 286 / 0.76);
   }
 
   .mode-menu {
     position: fixed;
     z-index: 4;
     top: auto;
-    right: 16px;
-    bottom: 16px;
-    left: 16px;
+    right: 14px;
+    bottom: 14px;
+    left: 14px;
     width: auto;
     padding: 8px;
+    border-radius: var(--radius-lg);
 
     button {
-      min-height: 58px;
-      padding: 9px 12px;
+      min-height: 60px;
+      padding: 10px 12px;
     }
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mode-chevron {
+  .mode-trigger,
+  .mode-chevron,
+  .mode-menu button {
     transition: none;
   }
 }
