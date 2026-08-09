@@ -252,13 +252,18 @@ class TestTrainingReviewStorage(TrainingReviewTestCase):
             result_panel_label='result_panel',
             ocr_usable='no',
             result_occlusion='occluded',
-            occluder_types=['platform_ui'],
+            occluder_types=[
+                'system_device_ui', 'game_ui', 'platform_ui', 'ad_watermark'
+            ],
             status='confirmed',
         )
 
         self.assertEqual(reviewed['ocr_usable'], 'no')
         self.assertEqual(reviewed['result_occlusion'], 'occluded')
-        self.assertEqual(reviewed['occluder_types'], ['platform_ui'])
+        self.assertEqual(
+            reviewed['occluder_types'],
+            ['system_device_ui', 'game_ui', 'platform_ui', 'ad_watermark'],
+        )
 
         reviewed = db.save_training_review(
             self.conn,
@@ -741,7 +746,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
             'result_quality': {
                 'ocr_usable': 'no',
                 'result_occlusion': 'occluded',
-                'occluder_types': ['platform_ui'],
+                'occluder_types': ['system_device_ui'],
             },
             'notes': '',
             'reviewed_at': '2026-08-09T12:00:00',
@@ -757,7 +762,7 @@ class TestUnifiedWorkerCandidate(TrainingReviewTestCase):
         self.assertIn('result_panel', item['boxes'])
         self.assertEqual(item['ocr_usable'], 'no')
         self.assertEqual(item['result_occlusion'], 'occluded')
-        self.assertEqual(item['occluder_types'], ['platform_ui'])
+        self.assertEqual(item['occluder_types'], ['system_device_ui'])
 
 
 class ResultArchiveNas:

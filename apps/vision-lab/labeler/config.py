@@ -232,7 +232,10 @@ RESULT_OCCLUSION = {'none': '无遮挡', 'occluded': '有遮挡', 'unknown': '�
 OCCLUDER_TYPES = [
     ('danmaku', '弹幕'),
     ('gift_banner', '礼物横幅'),
-    ('platform_ui', '平台UI/贴片'),
+    ('system_device_ui', '系统/设备 UI'),
+    ('game_ui', '游戏内其他 UI'),
+    ('platform_ui', '直播平台 UI'),
+    ('ad_watermark', '广告/水印贴片'),
     ('other', '其他'),
 ]
 
