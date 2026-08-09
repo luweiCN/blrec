@@ -534,6 +534,28 @@
   }
 }
 
+.profile-table-card .hero-player-comparison-table {
+  min-width: 1040px;
+}
+
+.specialist-player {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.specialist-rank {
+  min-width: 24px;
+  color: var(--ink-muted);
+  font-size: 0.62rem;
+  font-weight: 780;
+  font-variant-numeric: tabular-nums;
+
+  &.podium {
+    color: var(--gold);
+  }
+}
+
 .profile-hero-link,
 .profile-player-link {
   display: inline-flex;

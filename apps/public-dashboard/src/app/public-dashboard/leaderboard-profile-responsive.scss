@@ -180,6 +180,10 @@
     }
   }
 
+  .profile-table-card .hero-player-comparison-table {
+    min-width: 0;
+  }
+
   .season-history-table tr {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

@@ -93,16 +93,17 @@
       <header>
         <div>
           <p>PLAYER SPECIALISTS</p>
-          <h2 id="hero-players-title">常用该英雄的玩家</h2>
+          <h2 id="hero-players-title">玩家熟练度排行</h2>
         </div>
         <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
       </header>
       <div class="profile-table-wrap">
         <table class="hero-player-comparison-table">
-          <caption>{{ profile.name }}在{{ selectedSeason.label }}{{ modeLabel() }}的玩家使用记录与横向对比</caption>
+          <caption>{{ profile.name }}在{{ selectedSeason.label }}{{ modeLabel() }}的玩家熟练度排行与横向对比</caption>
           <thead>
             <tr>
               <th scope="col">玩家</th>
+              <th scope="col">熟练度</th>
               <th scope="col">使用量排名</th>
               <th scope="col">对局</th>
               <th scope="col">胜 / 负</th>
@@ -113,19 +114,26 @@
             </tr>
           </thead>
           <tbody>
-            <tr *ngFor="let record of playerRecords; trackBy: trackPlayer">
+            <tr *ngFor="let record of playerRecords; let rank = index; trackBy: trackPlayer">
               <td data-label="玩家">
-                <a class="profile-player-link" [routerLink]="['/players', record.player.id]">
-                  <app-player-avatar
-                    class="profile-player-avatar"
-                    [playerId]="record.player.id"
-                    [heroName]="record.player.modes[activeMode].topHero"
-                  ></app-player-avatar>
-                  <span>
-                    <strong>{{ record.player.name }}</strong>
-                    <small>{{ record.player.roomLabel }}</small>
-                  </span>
-                </a>
+                <div class="specialist-player">
+                  <span class="specialist-rank" [class.podium]="rank < 3">#{{ rank + 1 }}</span>
+                  <a class="profile-player-link" [routerLink]="['/players', record.player.id]">
+                    <app-player-avatar
+                      class="profile-player-avatar"
+                      [playerId]="record.player.id"
+                      [heroName]="record.player.modes[activeMode].topHero"
+                    ></app-player-avatar>
+                    <span>
+                      <strong>{{ record.player.name }}</strong>
+                      <small>{{ record.player.roomLabel }}</small>
+                    </span>
+                  </a>
+                </div>
+              </td>
+              <td class="proficiency-score" data-label="熟练度">
+                <strong>{{ record.score }}</strong>
+                <small>{{ record.level }}</small>
               </td>
               <td class="usage-rank" data-label="使用量排名">
                 #{{ record.usageRank }} / {{ record.playerCount }}
@@ -170,7 +178,7 @@
               </td>
             </tr>
             <tr *ngIf="playerRecords.length === 0">
-              <td colspan="8" class="profile-empty">当前模式暂无玩家英雄池记录。</td>
+              <td colspan="9" class="profile-empty">当前模式暂无玩家英雄池记录。</td>
             </tr>
           </tbody>
         </table>

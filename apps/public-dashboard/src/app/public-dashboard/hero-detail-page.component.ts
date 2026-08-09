@@ -10,11 +10,9 @@ import { Subscription } from 'rxjs';
 import { DashboardModeService } from './dashboard-mode.service';
 import {
   findHero,
-  getHeroPlayerComparisons,
   getHeroRankings,
   heroAverageEconomy,
   heroKda,
-  HeroPlayerComparison,
   heroForSeason,
   heroImage,
   heroPeerComparisonKind,
@@ -29,6 +27,10 @@ import {
   HeroIdentity,
   heroIdentity,
 } from './public-dashboard.hero-names';
+import {
+  getHeroProficiencies,
+  HeroProficiency,
+} from './public-dashboard.proficiency';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
   COMPETITIVE_MODE_OPTIONS,
@@ -172,11 +174,11 @@ export class HeroDetailPageComponent implements OnDestroy {
     }));
   }
 
-  get playerRecords(): readonly HeroPlayerComparison[] {
+  get playerRecords(): readonly HeroProficiency[] {
     const hero = this.hero;
     return hero === undefined
       ? []
-      : getHeroPlayerComparisons(
+      : getHeroProficiencies(
           this.data.snapshot,
           this.activeSeason,
           this.activeMode,
@@ -239,7 +241,7 @@ export class HeroDetailPageComponent implements OnDestroy {
     return record.key;
   }
 
-  trackPlayer(_index: number, record: HeroPlayerComparison): number {
+  trackPlayer(_index: number, record: HeroProficiency): number {
     return record.player.id;
   }
 

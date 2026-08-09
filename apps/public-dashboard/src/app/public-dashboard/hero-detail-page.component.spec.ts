@@ -54,12 +54,25 @@ describe('HeroDetailPageComponent', () => {
     expect(component.identity?.officialName).toBe('凯恩');
     expect(component.modeRecords.length).toBe(3);
     expect(component.playerRecords.length).toBeGreaterThan(0);
+    expect(component.playerRecords.map((record) => record.score)).toEqual(
+      [...component.playerRecords]
+        .map((record) => record.score)
+        .sort((left, right) => right - left),
+    );
     expect(component.usageRank).not.toBeNull();
     expect(component.seasonHistory.length).toBeGreaterThan(0);
     expect(page.querySelector('h1')?.textContent).toContain('凯恩');
-    expect(page.querySelector('.profile-player-link')?.textContent).toContain(
-      '星河',
+    expect(page.querySelector('#hero-players-title')?.textContent).toContain(
+      '玩家熟练度排行',
     );
+    expect(page.querySelector('.specialist-rank')?.textContent).toContain('#1');
+    expect(page.querySelector('.proficiency-score')?.textContent).toMatch(
+      /大师|精通|熟练|常用|初试/u,
+    );
+    const playerLinks = Array.from(
+      page.querySelectorAll('.profile-player-link'),
+    ).map((element) => element.textContent ?? '');
+    expect(playerLinks.some((value) => value.includes('星河'))).toBeTrue();
     expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
   });
 });
