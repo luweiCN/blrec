@@ -86,7 +86,7 @@ export function skillTierForRatingScore(
     englishName: tierName.english,
     imageUrl:
       `assets/skill-tiers/tier-${tier.toString().padStart(2, '0')}-` +
-      `${division.key}.webp`,
+      `${division.key}-hd.webp`,
     maximumScore:
       nextStart === undefined
         ? DISPLAY_SCORE_MAXIMUM

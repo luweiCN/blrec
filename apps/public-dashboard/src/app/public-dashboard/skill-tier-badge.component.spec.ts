@@ -87,7 +87,7 @@ describe('SkillTierBadgeComponent', () => {
     expect(page.textContent).not.toContain('段位分');
     expect(page.textContent).toContain('定位中');
     expect(page.querySelector('img')?.getAttribute('src')).toBe(
-      'assets/skill-tiers/tier-07-silver.webp',
+      'assets/skill-tiers/tier-07-silver-hd.webp',
     );
   });
 });

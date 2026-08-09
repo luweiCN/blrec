@@ -1,6 +1,7 @@
 Vainglory skill tier image assets
 Source: https://github.com/SuperEvilMegacorp/vainglory-assets-lfs
-The images in this directory were resized and converted to WebP for the site.
+The images in this directory were resized to 512 × 512 and converted to WebP
+for the site.
 
 Copyright (c) 2017 MadGlory Interactive, LLC
 
