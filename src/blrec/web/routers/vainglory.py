@@ -29,7 +29,10 @@ from blrec.vainglory.archive_backfill import (
     ArchiveSync,
 )
 from blrec.vainglory.catalog import hero_chinese_name
-from blrec.vainglory.publication import VaingloryPublicationService
+from blrec.vainglory.publication import (
+    PublicationTaskStatus,
+    VaingloryPublicationService,
+)
 from blrec.vainglory.repository import (
     AnchorStatsRecord,
     GameModeStatsRecord,
@@ -190,6 +193,15 @@ class MatchSessionResponse(ApiModel):
     chapter_state: Optional[str]
     publication_priority: bool
     publication_updated_at: Optional[int]
+    publication_status: Optional[str] = None
+    publication_status_label: Optional[str] = None
+    publication_status_detail: Optional[str] = None
+    publication_recommended_action: Optional[str] = None
+    publication_next_attempt_at: Optional[int] = None
+    publication_plan_state: Optional[str] = None
+    upload_job_state: Optional[str] = None
+    publication_scan_state: Optional[str] = None
+    publication_operator_paused: bool = False
 
 
 class MatchSessionListResponse(ApiModel):
@@ -546,7 +558,9 @@ def _match(value: MatchRecord) -> MatchResponse:
     )
 
 
-def _match_session(value: MatchSessionRecord) -> MatchSessionResponse:
+def _match_session(
+    value: MatchSessionRecord, task_status: Optional[PublicationTaskStatus] = None
+) -> MatchSessionResponse:
     return MatchSessionResponse(
         session_id=value.session_id,
         title=value.title,
@@ -573,6 +587,25 @@ def _match_session(value: MatchSessionRecord) -> MatchSessionResponse:
         chapter_state=value.chapter_state,
         publication_priority=value.publication_priority,
         publication_updated_at=value.publication_updated_at,
+        publication_status=None if task_status is None else task_status.code,
+        publication_status_label=None if task_status is None else task_status.label,
+        publication_status_detail=None if task_status is None else task_status.detail,
+        publication_recommended_action=(
+            None if task_status is None else task_status.recommended_action
+        ),
+        publication_next_attempt_at=(
+            None if task_status is None else task_status.next_attempt_at
+        ),
+        publication_plan_state=(
+            None if task_status is None else task_status.plan_state
+        ),
+        upload_job_state=None if task_status is None else task_status.upload_state,
+        publication_scan_state=(
+            None if task_status is None else task_status.scan_state
+        ),
+        publication_operator_paused=(
+            False if task_status is None else task_status.operator_paused
+        ),
     )
 
 
@@ -1024,6 +1057,7 @@ async def list_match_sessions(
     offset: int = Query(0, ge=0),
     _subject: str = Depends(authenticated_manager_subject),
     index: VaingloryIndexService = Depends(get_service),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
 ) -> MatchSessionListResponse:
     if len(hero_id) > 6 or any(value < 1 for value in hero_id):
         raise HTTPException(
@@ -1044,8 +1078,14 @@ async def list_match_sessions(
         limit=limit,
         offset=offset,
     )
+    statuses = await publication_service.publication_statuses(
+        [item.session_id for item in page.items]
+    )
     return MatchSessionListResponse(
-        total=page.total, items=[_match_session(item) for item in page.items]
+        total=page.total,
+        items=[
+            _match_session(item, statuses.get(item.session_id)) for item in page.items
+        ],
     )
 
 
@@ -1408,11 +1448,12 @@ async def update_session_title(
     payload: MatchTitleRequest,
     _subject: str = Depends(authenticated_manager_subject),
     index: VaingloryIndexService = Depends(get_service),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
 ) -> MatchSessionResponse:
     try:
-        return _match_session(
-            await index.update_session_title(session_id, payload.title)
-        )
+        saved = await index.update_session_title(session_id, payload.title)
+        statuses = await publication_service.publication_statuses([session_id])
+        return _match_session(saved, statuses.get(session_id))
     except (VaingloryConflict, VaingloryNotFound) as error:
         _raise_repository_error(error)
         raise AssertionError('unreachable')
@@ -1424,11 +1465,12 @@ async def update_session_anchor(
     payload: SessionAnchorRequest,
     _subject: str = Depends(authenticated_manager_subject),
     index: VaingloryIndexService = Depends(get_service),
+    publication_service: VaingloryPublicationService = Depends(get_publication),
 ) -> MatchSessionResponse:
     try:
-        return _match_session(
-            await index.update_session_anchor(session_id, payload.anchor_name)
-        )
+        saved = await index.update_session_anchor(session_id, payload.anchor_name)
+        statuses = await publication_service.publication_statuses([session_id])
+        return _match_session(saved, statuses.get(session_id))
     except (VaingloryConflict, VaingloryNotFound) as error:
         _raise_repository_error(error)
         raise AssertionError('unreachable')

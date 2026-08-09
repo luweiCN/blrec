@@ -209,6 +209,69 @@ def test_key_screen_training_candidates_are_spaced_and_keep_strongest(
     assert candidates[0].suggestion_confidence == 0.9
 
 
+def test_in_match_training_candidates_keep_each_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    candidates = []
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda _frame: b'\xff\xd8candidate\xff\xd9'
+    )
+
+    for at_ms, mode in ((10_000, '3v3'), (20_000, '5v5')):
+        assert _remember_training_candidate(
+            candidates,
+            task='screen_state',
+            suggested_label='in_match',
+            at_ms=at_ms,
+            segment_start_ms=0,
+            frame=frame,
+            model_version='multi-v2',
+            suggestion_confidence=0.9,
+            stage_class='in_match',
+            stage_confidence=0.9,
+            mode_class=mode,
+            mode_confidence=0.9,
+            selection_reason='对局画面候选',
+            minimum_gap_ms=60_000,
+            maximum_per_label=1,
+            separate_modes=True,
+        )
+
+    assert [candidate.mode_class for candidate in candidates] == ['3v3', '5v5']
+
+
+def test_borderline_training_candidates_keep_lowest_accepted_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = RgbFrame(1, 1, b'\x00\x00\x00')
+    candidates = []
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda _frame: b'\xff\xd8candidate\xff\xd9'
+    )
+
+    for confidence in (0.72, 0.61, 0.68):
+        _remember_training_candidate(
+            candidates,
+            task='result_detector',
+            suggested_label='result_panel',
+            at_ms=int(confidence * 1_000),
+            segment_start_ms=0,
+            frame=frame,
+            model_version='result-detector-v1',
+            suggestion_confidence=confidence,
+            stage_class='result_page',
+            stage_confidence=confidence,
+            selection_reason='结算模型边界样本',
+            minimum_gap_ms=15_000,
+            maximum_per_label=1,
+            prefer_lower_confidence=True,
+        )
+
+    assert len(candidates) == 1
+    assert candidates[0].suggestion_confidence == 0.61
+
+
 def test_result_hit_keeps_layout_from_the_strongest_frame() -> None:
     collapsed = collapse_result_hits(
         (hit(10_000, 0.8), hit(10_250, 1.0), hit(10_500, 0.9))

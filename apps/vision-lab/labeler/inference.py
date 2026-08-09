@@ -76,18 +76,23 @@ MODE_AMBIGUOUS_STAGES = {'gameplay', 'victory_defeat'}
 
 
 def _load_session(name: str) -> Any:
-    if name in _sessions:
-        return _sessions[name]
-    import onnxruntime as ort
     path = MODELS_DIR / f'{name}.onnx'
+    return _load_session_path(path)
+
+
+def _load_session_path(path: Path) -> Any:
+    cache_key = str(path.resolve())
+    if cache_key in _sessions:
+        return _sessions[cache_key]
+    import onnxruntime as ort
     if not path.exists():
         raise FileNotFoundError(f'模型不存在: {path}')
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     so.intra_op_num_threads = 4
-    _sessions[name] = ort.InferenceSession(str(path), so,
-                                           providers=['CPUExecutionProvider'])
-    return _sessions[name]
+    _sessions[cache_key] = ort.InferenceSession(
+        str(path), so, providers=['CPUExecutionProvider'])
+    return _sessions[cache_key]
 
 
 def clear_model_cache() -> None:
@@ -209,17 +214,30 @@ def run_detect(name: str, frame_path: Path, conf_thr: float = 0.25,
                imgsz: int = 640) -> Dict[str, Any]:
     """检测推理(单类,结算面板)。"""
     sess = _load_session(name)
-    img = Image.open(frame_path).convert('RGB')
-    x, scale, pad_x, pad_y = _letterbox(img, imgsz)
-    outputs = sess.run(None, {sess.get_inputs()[0].name: x})[0]  # (1,4+nc,8400)
     is_gate = name.startswith('mode-gate-detector')
+    return _run_detect_session(
+        sess,
+        frame_path,
+        conf_thr=conf_thr,
+        imgsz=imgsz,
+        class_name='mode_gate' if is_gate else 'result_panel',
+        class_label='黄色光栅' if is_gate else '结算面板',
+    )
+
+
+def _run_detect_session(
+        sess: Any, frame_path: Path, *, conf_thr: float, imgsz: int,
+        class_name: str, class_label: str) -> Dict[str, Any]:
+    img = Image.open(frame_path).convert('RGB')
+    x, _scale, _pad_x, _pad_y = _letterbox(img, imgsz)
+    outputs = sess.run(None, {sess.get_inputs()[0].name: x})[0]  # (1,4+nc,8400)
     dets = _parse_detect(
         outputs,
         conf_thr,
         imgsz,
         img.size,
-        class_name='mode_gate' if is_gate else 'result_panel',
-        class_label='黄色光栅' if is_gate else '结算面板',
+        class_name=class_name,
+        class_label=class_label,
     )
     confs_all = outputs[0][4]
     return {'task': 'detect', 'found': len(dets) > 0,
@@ -234,10 +252,33 @@ def run_classify(name: str, frame_path: Path,
                  imgsz: int = 224) -> Dict[str, Any]:
     """分类推理,返回 top-5 概率 + 原始 logits。"""
     sess = _load_session(name)
+    return _run_classify_session(
+        sess, frame_path, classes=classes, labels=labels, imgsz=imgsz)
+
+
+def _classification_tensor(img: Image.Image, imgsz: int) -> np.ndarray:
+    """与 Ultralytics 分类验证保持一致：短边缩放、中心裁剪、ImageNet 归一化。"""
+    width, height = img.size
+    scale = imgsz / min(width, height)
+    resized = img.resize(
+        (max(imgsz, round(width * scale)), max(imgsz, round(height * scale))),
+        Image.BILINEAR,
+    )
+    left = max(0, (resized.width - imgsz) // 2)
+    top = max(0, (resized.height - imgsz) // 2)
+    cropped = resized.crop((left, top, left + imgsz, top + imgsz))
+    arr = np.asarray(cropped, dtype=np.float32) / 255.0
+    mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32)
+    arr = (arr - mean) / std
+    return arr.transpose(2, 0, 1)[None]
+
+
+def _run_classify_session(
+        sess: Any, frame_path: Path, *, classes: List[str],
+        labels: Dict[str, str], imgsz: int) -> Dict[str, Any]:
     img = Image.open(frame_path).convert('RGB')
-    img2 = img.resize((imgsz, imgsz), Image.BILINEAR)
-    arr = np.asarray(img2, dtype=np.float32) / 255.0
-    x = arr.transpose(2, 0, 1)[None]
+    x = _classification_tensor(img, imgsz)
     logits = sess.run(None, {sess.get_inputs()[0].name: x})[0][0]
     probs = _finalize_probs(logits)
     order = probs.argsort()[::-1][:5]
@@ -253,6 +294,58 @@ def run_classify(name: str, frame_path: Path,
         'raw_logits': [round(float(v), 4) for v in logits.tolist()],
         'raw_probs': [round(float(v), 4) for v in probs.tolist()],
     }
+
+
+def run_artifact(
+        artifact_path: Path, metadata: Dict[str, Any], frame_path: Path,
+        conf_thr: float = 0.25) -> Dict[str, Any]:
+    """直接测试某次训练 run 的 ONNX，不先覆盖本机 current 模型。"""
+    artifact = Path(artifact_path)
+    session = _load_session_path(artifact)
+    kind = str(metadata.get('kind') or '')
+    task_id = str(metadata.get('task_id') or '')
+    imgsz = int(metadata.get('imgsz') or (640 if kind == 'detect' else 224))
+    if kind == 'classify':
+        raw_classes = metadata.get('classes') or {}
+        if isinstance(raw_classes, dict):
+            classes = [
+                str(value)
+                for _key, value in sorted(
+                    raw_classes.items(), key=lambda item: int(item[0]))
+            ]
+        elif isinstance(raw_classes, list):
+            classes = [str(value) for value in raw_classes]
+        else:
+            raise ValueError('训练产物缺少分类标签顺序')
+        label_maps = {
+            'screen_state': STAGE_LABELS,
+            'bp_review': BP_LABELS,
+            'key_screen_review': KEY_SCREEN_LABELS,
+        }
+        return {
+            'model': artifact.name,
+            **_run_classify_session(
+                session,
+                frame_path,
+                classes=classes,
+                labels=label_maps.get(task_id, {}),
+                imgsz=imgsz,
+            ),
+        }
+    if kind == 'detect':
+        is_gate = task_id == 'mode_gate'
+        return {
+            'model': artifact.name,
+            **_run_detect_session(
+                session,
+                frame_path,
+                conf_thr=conf_thr,
+                imgsz=imgsz,
+                class_name='mode_gate' if is_gate else 'result_panel',
+                class_label='黄色光栅' if is_gate else '结算面板',
+            ),
+        }
+    raise ValueError(f'未知训练产物类型: {kind}')
 
 
 def _load_torch_model(name: str):

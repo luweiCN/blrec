@@ -704,6 +704,60 @@ describe('VaingloryComponent remote media', () => {
     );
   });
 
+  it('shows the real step state while an automatic retry is scheduled', () => {
+    const paused: VaingloryMatchSession = {
+      sessionId: 9,
+      title: '直播标题',
+      sourceTitle: '原始直播标题',
+      anchorName: '主播',
+      startedAt: 1_000,
+      liveStartedAt: 1_000,
+      partCount: 1,
+      recordingDurationSeconds: 585,
+      matchCount: 1,
+      tealWinCount: 1,
+      orangeWinCount: 0,
+      winCount: 1,
+      lossCount: 0,
+      unknownCount: 0,
+      surrenderCount: 0,
+      durationSeconds: 585,
+      gameModes: ['3v3'],
+      publicationState: 'paused',
+      descriptionState: 'prepared',
+      pinState: 'prepared',
+      chapterState: 'prepared',
+      publicationPriority: false,
+      publicationUpdatedAt: 1_500,
+    };
+
+    expect(component.descriptionStateLabel(paused)).toBe('等待回填');
+    expect(component.pinStateLabel(paused)).toBe('等待处理');
+    expect(component.chapterStateLabel(paused)).toBe('等待设置');
+    expect(component.publicationRetryLabel(paused, 'chapter')).toBe('重试');
+
+    const failedChapter = { ...paused, publicationState: 'failed' as const };
+    expect(component.descriptionStateLabel(failedChapter)).toBe('等待回填');
+    expect(component.pinStateLabel(failedChapter)).toBe('等待处理');
+    expect(component.chapterStateLabel(failedChapter)).toBe('失败');
+
+    const invalidAnalysis = {
+      ...failedChapter,
+      publicationStatus: 'analysis_data_invalid' as const,
+    };
+    expect(
+      component.canRetryPublicationStep(invalidAnalysis, 'chapter'),
+    ).toBeFalse();
+    const legacyTiming = {
+      ...paused,
+      publicationStatus: 'legacy_chapter_timing' as const,
+    };
+    expect(component.canRetryPublicationStep(legacyTiming, 'chapter')).toBeTrue();
+    expect(
+      component.canRetryPublicationStep(legacyTiming, 'description'),
+    ).toBeFalse();
+  });
+
   it('creates a player, renames it, and manages its room binding', () => {
     const player: VaingloryPlayer = {
       id: 5,

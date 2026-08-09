@@ -156,7 +156,7 @@ class TestTrainingReadiness(unittest.TestCase):
 
         summary = next(
             item
-            for item in training.task_summaries(self.conn)
+            for item in training.task_summaries(self.conn, include_legacy=True)
             if item['id'] == 'bp_review'
         )
 

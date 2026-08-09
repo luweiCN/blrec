@@ -424,6 +424,39 @@
   color: #595959 !important;
 }
 
+.session-publication-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+
+  > span {
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+.publication-task-diagnostic {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fafafa;
+
+  span,
+  small {
+    color: #595959;
+  }
+
+  strong {
+    color: #262626;
+  }
+}
+
 .session-list,
 .match-list {
   display: grid;

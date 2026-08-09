@@ -24,6 +24,15 @@ class FakeNas:
         return self.image
 
 
+class ReviewNas(FakeNas):
+    def __init__(self, image: bytes):
+        super().__init__(image)
+        self.reviews = []
+
+    def write_training_candidate_review(self, image_path, review):
+        self.reviews.append((image_path, review))
+
+
 class TestWorkerCandidateSync(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -114,6 +123,84 @@ class TestWorkerCandidateSync(unittest.TestCase):
         self.assertEqual(db.list_bp_review_items(self.conn), [])
         pending = db.list_key_screen_review_items(self.conn, status='pending')
         self.assertEqual(pending[0]['suggested_label'], 'scoreboard')
+
+    def test_schema_v2_screen_state_candidate_uses_unified_queue(self):
+        item = self.item()
+        item.update({
+            'schema_version': 2,
+            'task': 'screen_state',
+            'suggested_label': 'in_match',
+            'stage_class': 'gameplay',
+            'selection_reason': 'worker 粗扫代表帧',
+            'suggested_boxes': [],
+        })
+
+        result = worker_candidates.sync_worker_candidates(
+            self.conn, self.nas, [item])
+
+        self.assertEqual(result['inserted'], 1)
+        candidates = db.list_worker_candidates(
+            self.conn, task='screen_state', status='pending')
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]['suggested_label'], 'in_match')
+        self.assertEqual(db.list_bp_review_items(self.conn), [])
+
+    def test_multiple_detection_boxes_are_pushed_as_review_sidecar(self):
+        nas = ReviewNas(self.image)
+        item = self.item()
+        item.update({
+            'schema_version': 2,
+            'task': 'mode_gate',
+            'suggested_label': 'no_evidence',
+            'suggested_boxes': [],
+        })
+        worker_candidates.sync_worker_candidates(self.conn, nas, [item])
+        candidate = db.list_worker_candidates(
+            self.conn, task='mode_gate', status='pending')[0]
+        boxes = [
+            {'type': 'mode_gate', 'x': 0.1, 'y': 0.2, 'w': 0.2, 'h': 0.1},
+            {'type': 'mode_gate', 'x': 0.6, 'y': 0.3, 'w': 0.2, 'h': 0.1},
+        ]
+        db.review_worker_candidate(
+            self.conn,
+            candidate_id=candidate['id'],
+            label='blocked_gate',
+            boxes=boxes,
+        )
+
+        result = worker_candidates.push_worker_candidate_reviews(self.conn, nas)
+
+        self.assertEqual(result['reviews_pushed'], 1)
+        self.assertEqual(len(nas.reviews[0][1]['boxes']), 2)
+        synced = db.get_worker_candidate(self.conn, candidate['id'])
+        self.assertEqual(synced['sync_state'], 'clean')
+
+    def test_remote_review_never_overwrites_dirty_local_review(self):
+        item = self.item()
+        worker_candidates.sync_worker_candidates(self.conn, self.nas, [item])
+        candidate = db.list_worker_candidates(
+            self.conn, task='bp_review', status='pending')[0]
+        db.review_worker_candidate(
+            self.conn, candidate_id=candidate['id'], label='bp_3v3')
+        remote = {
+            'schema_version': 1,
+            'source_id': candidate['source_id'],
+            'task': 'bp_review',
+            'image_path': candidate['image_path'],
+            'review_status': 'confirmed',
+            'confirmed_label': 'bp_5v5',
+            'visual_condition': 'clear',
+            'boxes': [],
+            'reviewed_at': '2026-08-09T12:00:00',
+        }
+
+        result = worker_candidates.pull_worker_candidate_reviews(
+            self.conn, [remote])
+
+        self.assertEqual(result['review_conflicts'], 1)
+        conflicted = db.get_worker_candidate(self.conn, candidate['id'])
+        self.assertEqual(conflicted['confirmed_label'], 'bp_3v3')
+        self.assertEqual(conflicted['sync_state'], 'conflict')
 
 
 if __name__ == '__main__':

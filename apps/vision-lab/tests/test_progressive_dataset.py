@@ -1,0 +1,316 @@
+"""目录重构后的旧数据复用与画面状态累计快照。"""
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from labeler import config, db, export, training  # noqa: E402
+
+
+class TestManagedPathMigration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.old_frame_dir = config.FRAME_DIR
+        self.old_thumb_dir = config.THUMB_DIR
+        config.FRAME_DIR = self.root / 'frames'
+        config.THUMB_DIR = self.root / 'thumbs'
+        self.conn = db.connect(self.root / 'lab.db')
+
+    def tearDown(self):
+        self.conn.close()
+        config.FRAME_DIR = self.old_frame_dir
+        config.THUMB_DIR = self.old_thumb_dir
+        self.tmp.cleanup()
+
+    def test_only_missing_old_paths_are_repaired_by_sha(self):
+        video_id = db.upsert_video(
+            self.conn,
+            remote_path='/nas/sample.flv',
+            streamer='主播',
+            room_id='1',
+            filename='sample.flv',
+            duration_seconds=10,
+            size_bytes=1,
+        )
+        sha = 'a' * 64
+        frame_id = db.add_frames(
+            self.conn,
+            video_id,
+            [
+                {
+                    'timestamp_ms': 1000,
+                    'width': 10,
+                    'height': 10,
+                    'sha256': sha,
+                    'phash': '',
+                    'frame_path': '/old/vision-lab/frames/a.jpg',
+                    'thumb_path': '/old/vision-lab/thumbs/a.jpg',
+                    'strategy': 'test',
+                    'model_source': '',
+                    'model_confidence': None,
+                }
+            ],
+        )[0]
+        config.FRAME_DIR.mkdir()
+        config.THUMB_DIR.mkdir()
+        (config.FRAME_DIR / f'{sha}.jpg').write_bytes(b'frame')
+        (config.THUMB_DIR / f'{sha}.jpg').write_bytes(b'thumb')
+        self.conn.execute(
+            "DELETE FROM workspace_migrations WHERE id = 'managed-frame-paths-v1'"
+        )
+
+        repaired = db.repair_managed_paths(self.conn)
+        frame = db.get_frame(self.conn, frame_id)
+
+        self.assertEqual(repaired, {'frames': 1, 'thumbs': 1})
+        self.assertEqual(frame['frame_path'], str(config.FRAME_DIR / f'{sha}.jpg'))
+        self.assertEqual(frame['thumb_path'], str(config.THUMB_DIR / f'{sha}.jpg'))
+
+
+class TestScreenStateSnapshot(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.conn = db.connect(self.root / 'lab.db')
+        self.old_export_dir = config.EXPORT_DIR
+        config.EXPORT_DIR = self.root / 'datasets'
+
+    def tearDown(self):
+        config.EXPORT_DIR = self.old_export_dir
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _frame(self, video_id, index):
+        path = self.root / f'{index}.jpg'
+        path.write_bytes(f'frame-{index}'.encode())
+        return db.add_frames(
+            self.conn,
+            video_id,
+            [
+                {
+                    'timestamp_ms': index * 1000,
+                    'width': 1280,
+                    'height': 720,
+                    'sha256': f'{index:064x}',
+                    'phash': '',
+                    'frame_path': str(path),
+                    'thumb_path': '',
+                    'strategy': 'test',
+                    'model_source': '',
+                    'model_confidence': None,
+                }
+            ],
+        )[0]
+
+    def test_old_general_annotations_become_seven_class_snapshot(self):
+        videos = [
+            db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/{number}.flv',
+                streamer=str(number),
+                room_id=str(number),
+                filename=f'{number}.flv',
+                duration_seconds=10,
+                size_bytes=1,
+            )
+            for number in (1, 2)
+        ]
+        labels = [
+            ('not_vainglory', None, None),
+            ('vainglory', 'out_of_match', 'main_lobby'),
+            ('vainglory', 'pre_match', 'matchmaking'),
+            ('vainglory', 'in_match', 'gameplay'),
+            ('vainglory', 'in_match', 'talent_select'),
+            ('vainglory', 'post_match', 'result_page'),
+            ('vainglory', 'transition', 'switch_app'),
+        ]
+        index = 1
+        for video_id in videos:
+            for content, context, screen_type in labels:
+                db.save_annotation(
+                    self.conn,
+                    self._frame(video_id, index),
+                    {
+                        'content_family': content,
+                        'game_context': context,
+                        'screen_type': screen_type,
+                        'game_mode': 'unknown',
+                    },
+                    status='complete',
+                )
+                index += 1
+
+        summary = next(
+            item
+            for item in training.task_summaries(self.conn, include_legacy=True)
+            if item['id'] == 'screen_state'
+        )
+        snapshot = training.export_snapshot(self.conn, 'screen_state')
+        samples = [
+            json.loads(line)
+            for line in (Path(snapshot['dir']) / 'samples.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines()
+        ]
+
+        self.assertTrue(summary['ready'])
+        self.assertEqual(snapshot['total'], 14)
+        self.assertEqual(
+            set(sample['label'] for sample in samples),
+            {
+                'not_vainglory',
+                'out_of_match',
+                'pre_match',
+                'in_match',
+                'talent_select',
+                'post_match',
+                'transition',
+            },
+        )
+        first = samples[0]
+        snapshot_image = (
+            Path(snapshot['dir'])
+            / 'images'
+            / first['split']
+            / first['label']
+            / f"{first['sample_id']}.jpg"
+        )
+        source_image = Path(
+            self.conn.execute(
+                'SELECT frame_path FROM frames WHERE id = ?',
+                (int(first['sample_id'][1:]),),
+            ).fetchone()[0]
+        )
+
+        source_image.unlink()
+
+        self.assertTrue(snapshot_image.is_file())
+        self.assertTrue(snapshot_image.read_bytes())
+
+
+class TestDetectionSplit(unittest.TestCase):
+    def test_moves_smallest_sufficient_positive_video_into_training(self):
+        samples = []
+        samples.extend({'video_id': 1, 'label': 'blocked_gate'} for _ in range(123))
+        samples.append({'video_id': 2, 'label': 'blocked_gate'})
+        samples.extend({'video_id': 2, 'label': 'open_entrance'} for _ in range(32))
+        samples.extend({'video_id': 3, 'label': 'blocked_gate'} for _ in range(44))
+
+        split = export.split_detection_by_video(
+            samples, label_field='label', positive_label='blocked_gate'
+        )
+
+        self.assertEqual(split['train'], [2, 3])
+        self.assertEqual(split['val'], [1])
+        self.assertEqual(split['test'], [])
+
+
+class TestUnifiedTrainingSnapshots(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.conn = db.connect(self.root / 'lab.db')
+        self.old_export_dir = config.EXPORT_DIR
+        config.EXPORT_DIR = self.root / 'datasets'
+
+    def tearDown(self):
+        config.EXPORT_DIR = self.old_export_dir
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _frame(self, video_id, index):
+        path = self.root / f'unified-{index}.jpg'
+        path.write_bytes(f'unified-frame-{index}'.encode())
+        return db.add_frames(
+            self.conn,
+            video_id,
+            [{
+                'timestamp_ms': index * 1000,
+                'width': 1280,
+                'height': 720,
+                'sha256': f'{index + 1000:064x}',
+                'phash': '',
+                'frame_path': str(path),
+                'thumb_path': '',
+                'strategy': 'test',
+                'model_source': '',
+                'model_confidence': None,
+            }],
+        )[0]
+
+    def _save(self, frame_id, flow, mode, select, result='no_result_panel'):
+        db.add_training_review_source(
+            self.conn,
+            frame_id=frame_id,
+            source_type='test',
+            source_id=f'frame:{frame_id}',
+        )
+        if result == 'result_panel':
+            db.save_box(self.conn, frame_id, 'result_panel', 0.1, 0.2, 0.8, 0.6)
+        db.save_training_review(
+            self.conn,
+            frame_id=frame_id,
+            match_flow_label=flow,
+            match_mode_label=mode,
+            hero_select_label=select,
+            result_panel_label=result,
+            status='confirmed',
+        )
+
+    def test_one_review_record_exports_all_four_new_model_datasets(self):
+        index = 1
+        for video_number in (1, 2):
+            video_id = db.upsert_video(
+                self.conn,
+                remote_path=f'/nas/unified-{video_number}.flv',
+                streamer=str(video_number),
+                room_id=str(video_number),
+                filename=f'unified-{video_number}.flv',
+                duration_seconds=100,
+                size_bytes=1,
+            )
+            for mode in ('3v3', 'aram', '5v5'):
+                self._save(
+                    self._frame(video_id, index),
+                    'match_flow', mode, 'not_select')
+                index += 1
+            for select in ('select_3v3', 'select_aram', 'select_5v5'):
+                self._save(
+                    self._frame(video_id, index),
+                    'not_match_flow', None, select)
+                index += 1
+            self._save(
+                self._frame(video_id, index),
+                'not_match_flow', None, 'not_select')
+            index += 1
+            self._save(
+                self._frame(video_id, index),
+                'match_flow', 'unreadable', 'not_select', 'result_panel')
+            index += 1
+
+        snapshots = {
+            task: training.export_snapshot(self.conn, task)
+            for task in ('match_flow', 'match_mode', 'hero_select', 'result_detector')
+        }
+
+        self.assertEqual(
+            snapshots['match_flow']['by_label'],
+            {'match_flow': 8, 'not_match_flow': 8},
+        )
+        self.assertEqual(
+            set(snapshots['match_mode']['by_label']), {'3v3', 'aram', '5v5'})
+        self.assertEqual(
+            set(snapshots['hero_select']['by_label']),
+            {'not_select', 'select_3v3', 'select_aram', 'select_5v5'},
+        )
+        self.assertEqual(snapshots['result_detector']['positive'], 2)
+        self.assertEqual(snapshots['result_detector']['negative'], 14)
+
+
+if __name__ == '__main__':
+    unittest.main()

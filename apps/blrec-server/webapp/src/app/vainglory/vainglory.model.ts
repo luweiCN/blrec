@@ -33,6 +33,30 @@ export type VaingloryPublicationRetryStep =
   | 'comments'
   | 'pin'
   | 'chapter';
+export type VaingloryPublicationStatus =
+  | 'operator_paused'
+  | 'analysis_failed'
+  | 'waiting_analysis'
+  | 'upload_missing'
+  | 'review_rejected'
+  | 'upload_paused'
+  | 'waiting_review'
+  | 'waiting_upload'
+  | 'legacy_chapter_timing'
+  | 'analysis_data_invalid'
+  | 'confirmed'
+  | 'running'
+  | 'failed'
+  | 'retry_scheduled'
+  | 'queued';
+export type VaingloryPublicationRecommendedAction =
+  | 'none'
+  | 'wait'
+  | 'reanalyze'
+  | 'retry_chapter'
+  | 'resume_migration'
+  | 'check_upload'
+  | 'retry';
 
 export type ScanState = 'pending' | 'analyzing' | 'ready' | 'failed';
 
@@ -160,6 +184,8 @@ export interface VaingloryAnalysisQueueCompletion {
   readonly title: string;
   readonly partDurationSeconds: number | null;
   readonly recordingDurationSeconds: number;
+  readonly partMatchDurationSeconds: number;
+  readonly sessionMatchDurationSeconds: number;
   readonly candidateCount: number | null;
   readonly matchCount: number;
   readonly elapsedSeconds: number;
@@ -400,6 +426,17 @@ export interface VaingloryMatchSession {
   readonly chapterState: VaingloryChapterState | null;
   readonly publicationPriority: boolean;
   readonly publicationUpdatedAt: number | null;
+  readonly publicationStatus?: VaingloryPublicationStatus | null;
+  readonly publicationStatusLabel?: string | null;
+  readonly publicationStatusDetail?: string | null;
+  readonly publicationRecommendedAction?:
+    | VaingloryPublicationRecommendedAction
+    | null;
+  readonly publicationNextAttemptAt?: number | null;
+  readonly publicationPlanState?: 'waiting_analysis' | 'ready' | null;
+  readonly uploadJobState?: string | null;
+  readonly publicationScanState?: ScanState | null;
+  readonly publicationOperatorPaused?: boolean;
 }
 
 export interface VaingloryMatchSessionList {

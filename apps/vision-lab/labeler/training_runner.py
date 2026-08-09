@@ -103,6 +103,22 @@ def main() -> None:
         'device': device,
         'classes': names,
         'metrics': metrics,
+        'preprocessing': (
+            {
+                'color': 'RGB',
+                'resize': 'shortest_edge_center_crop',
+                'scale': '0_to_1',
+                'normalize': 'imagenet',
+            }
+            if args.kind == 'classify'
+            else {
+                'color': 'RGB',
+                'resize': 'letterbox',
+                'pad_value': 114,
+                'scale': '0_to_1',
+                'normalize': 'none',
+            }
+        ),
     }
     args.artifact.with_suffix('.json').write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8'

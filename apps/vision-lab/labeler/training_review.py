@@ -1,0 +1,324 @@
+"""新模型共用的一图多标签复核与旧人工数据迁移。"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from typing import Any, Dict, Optional
+
+from . import db
+
+_MIGRATION_ID = 'training-review-labels-v1'
+_HERO_SELECT_TYPES = {
+    'hero_select_bp', 'hero_select_blind', 'hero_select_aram'
+}
+
+
+def _review_status(values: Dict[str, Optional[str]], *, has_result_box: bool) -> str:
+    flow = values.get('match_flow_label')
+    mode = values.get('match_mode_label')
+    select = values.get('hero_select_label')
+    result = values.get('result_panel_label')
+    if flow is None or result is None:
+        return 'partial'
+    if flow == 'match_flow' and (mode is None or select != 'not_select'):
+        return 'partial'
+    if flow == 'not_match_flow' and (select is None or mode is not None):
+        return 'partial'
+    if flow == 'unreadable' and mode is not None:
+        return 'partial'
+    if result == 'result_panel' and not has_result_box:
+        return 'partial'
+    return 'confirmed'
+
+
+def _upsert_human_labels(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    labels: Dict[str, Optional[str]],
+    source_type: str,
+    source_id: str,
+    metadata: Dict[str, Any],
+) -> None:
+    timestamp = db.now()
+    current = conn.execute(
+        'SELECT * FROM training_review_items WHERE frame_id = ?', (int(frame_id),)
+    ).fetchone()
+    values: Dict[str, Optional[str]] = {
+        'match_flow_label': None,
+        'match_mode_label': None,
+        'hero_select_label': None,
+        'result_panel_label': None,
+    }
+    if current is not None:
+        for key in values:
+            values[key] = current[key]
+    for key, value in labels.items():
+        values[key] = value
+    has_result_box = conn.execute(
+        "SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = 'result_panel'",
+        (int(frame_id),),
+    ).fetchone() is not None
+    status = _review_status(values, has_result_box=has_result_box)
+    conn.execute(
+        """
+        INSERT INTO training_review_items
+            (frame_id, match_flow_label, match_mode_label, hero_select_label,
+             result_panel_label, review_status, created_at, updated_at,
+             reviewed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(frame_id) DO UPDATE SET
+            match_flow_label=excluded.match_flow_label,
+            match_mode_label=excluded.match_mode_label,
+            hero_select_label=excluded.hero_select_label,
+            result_panel_label=excluded.result_panel_label,
+            review_status=excluded.review_status,
+            updated_at=excluded.updated_at,
+            reviewed_at=excluded.reviewed_at
+        """,
+        (
+            int(frame_id), values['match_flow_label'],
+            values['match_mode_label'], values['hero_select_label'],
+            values['result_panel_label'], status, timestamp, timestamp, timestamp,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO training_review_sources
+            (frame_id, source_type, source_id, suggestions_json, metadata_json,
+             created_at, updated_at)
+        VALUES (?, ?, ?, '{}', ?, ?, ?)
+        ON CONFLICT(source_type, source_id) DO UPDATE SET
+            frame_id=excluded.frame_id,
+            metadata_json=excluded.metadata_json,
+            updated_at=excluded.updated_at
+        """,
+        (
+            int(frame_id), source_type, source_id,
+            json.dumps(
+                metadata, ensure_ascii=False, separators=(',', ':'), sort_keys=True
+            ),
+            timestamp, timestamp,
+        ),
+    )
+
+
+def _annotation_labels(row: sqlite3.Row, has_result_box: bool) -> Dict[str, Any]:
+    content = str(row['content_family'] or '')
+    context = str(row['game_context'] or '')
+    screen_type = str(row['screen_type'] or '')
+    game_mode = str(row['game_mode'] or '')
+    if content == 'not_vainglory' or context in ('out_of_match', 'pre_match'):
+        flow: Optional[str] = 'not_match_flow'
+    elif context in ('in_match', 'post_match'):
+        flow = 'match_flow'
+    elif context in ('transition', 'unknown') or content == 'uncertain':
+        flow = 'unreadable'
+    else:
+        return {}
+
+    mode: Optional[str] = None
+    if flow == 'match_flow':
+        if context == 'in_match' and screen_type == 'gameplay':
+            mode = game_mode if game_mode in ('3v3', 'aram', '5v5') else 'unreadable'
+        elif context == 'in_match' and screen_type == 'talent_select':
+            mode = 'aram'
+        else:
+            # 商店、赛后页以及三人积分板本身不能可靠区分 3V3/大乱斗。
+            mode = 'unreadable'
+
+    if screen_type in _HERO_SELECT_TYPES:
+        if screen_type == 'hero_select_aram':
+            select = 'select_aram'
+        else:
+            select = {
+                '3v3': 'select_3v3',
+                'aram': 'select_aram',
+                '5v5': 'select_5v5',
+            }.get(game_mode, 'unreadable')
+    else:
+        select = 'not_select'
+
+    if screen_type == 'result_page':
+        result: Optional[str] = 'result_panel' if has_result_box else None
+    else:
+        result = 'no_result_panel'
+    return {
+        'match_flow_label': flow,
+        'match_mode_label': mode,
+        'hero_select_label': select,
+        'result_panel_label': result,
+    }
+
+
+def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
+    """把已有人工真值映射到新标签；原表和原框只读保留。"""
+    prior = conn.execute(
+        'SELECT detail_json FROM workspace_migrations WHERE id = ?',
+        (_MIGRATION_ID,),
+    ).fetchone()
+    if prior is not None:
+        value = json.loads(prior['detail_json'] or '{}')
+        return {str(key): int(count) for key, count in value.items()}
+
+    counts = {
+        'legacy_annotations': 0,
+        'bp_reviews': 0,
+        'key_screen_reviews': 0,
+        'mode_gate_annotations': 0,
+    }
+    with conn:
+        annotations = conn.execute(
+            """
+            SELECT annotation.*,
+                   EXISTS (
+                       SELECT 1 FROM boxes box
+                       WHERE box.frame_id = annotation.frame_id
+                         AND box.box_type = 'result_panel'
+                   ) AS has_result_box
+            FROM annotations annotation
+            WHERE annotation.annotation_status = 'complete'
+            ORDER BY annotation.frame_id
+            """
+        ).fetchall()
+        for row in annotations:
+            labels = _annotation_labels(row, bool(row['has_result_box']))
+            if not labels:
+                continue
+            _upsert_human_labels(
+                conn,
+                frame_id=int(row['frame_id']),
+                labels=labels,
+                source_type='legacy_annotation',
+                source_id='frame:{}'.format(int(row['frame_id'])),
+                metadata={
+                    'content_family': row['content_family'],
+                    'game_context': row['game_context'],
+                    'screen_type': row['screen_type'],
+                    'game_mode': row['game_mode'],
+                },
+            )
+            counts['legacy_annotations'] += 1
+
+        bp_rows = conn.execute(
+            """
+            SELECT frame_id, confirmed_label, visual_condition
+            FROM bp_review_items
+            WHERE review_status = 'confirmed' AND confirmed_label IS NOT NULL
+            ORDER BY frame_id
+            """
+        ).fetchall()
+        for row in bp_rows:
+            old_label = str(row['confirmed_label'])
+            select = {
+                'bp_3v3': 'select_3v3',
+                'bp_aram': 'select_aram',
+                'bp_5v5': 'select_5v5',
+                'not_bp': 'not_select',
+            }.get(old_label)
+            if select is None:
+                continue
+            if row['visual_condition'] == 'unreadable':
+                select = 'unreadable'
+            labels: Dict[str, Optional[str]] = {'hero_select_label': select}
+            if old_label != 'not_bp':
+                labels.update(
+                    match_flow_label='not_match_flow',
+                    match_mode_label=None,
+                    result_panel_label='no_result_panel',
+                )
+            _upsert_human_labels(
+                conn,
+                frame_id=int(row['frame_id']),
+                labels=labels,
+                source_type='legacy_bp_review',
+                source_id='frame:{}'.format(int(row['frame_id'])),
+                metadata={
+                    'confirmed_label': old_label,
+                    'visual_condition': row['visual_condition'],
+                },
+            )
+            counts['bp_reviews'] += 1
+
+        key_rows = conn.execute(
+            """
+            SELECT item.frame_id, item.confirmed_label, item.visual_condition,
+                   EXISTS (
+                       SELECT 1 FROM boxes box
+                       WHERE box.frame_id = item.frame_id
+                         AND box.box_type = 'result_panel'
+                   ) AS has_result_box
+            FROM key_screen_review_items item
+            WHERE item.review_status = 'confirmed'
+              AND item.confirmed_label IS NOT NULL
+            ORDER BY item.frame_id
+            """
+        ).fetchall()
+        for row in key_rows:
+            label = str(row['confirmed_label'])
+            if label == 'result_page':
+                labels = {
+                    'match_flow_label': 'match_flow',
+                    'match_mode_label': 'unreadable',
+                    'hero_select_label': 'not_select',
+                    'result_panel_label': (
+                        'result_panel' if row['has_result_box'] else None
+                    ),
+                }
+            elif label == 'scoreboard':
+                labels = {
+                    'match_flow_label': 'match_flow',
+                    'match_mode_label': 'unreadable',
+                    'hero_select_label': 'not_select',
+                    'result_panel_label': 'no_result_panel',
+                }
+            else:
+                labels = {'result_panel_label': 'no_result_panel'}
+            _upsert_human_labels(
+                conn,
+                frame_id=int(row['frame_id']),
+                labels=labels,
+                source_type='legacy_key_screen_review',
+                source_id='frame:{}'.format(int(row['frame_id'])),
+                metadata={
+                    'confirmed_label': label,
+                    'visual_condition': row['visual_condition'],
+                },
+            )
+            counts['key_screen_reviews'] += 1
+
+        gate_rows = conn.execute(
+            """
+            SELECT round_id, frame_id, evidence
+            FROM mode_gate_annotations
+            WHERE evidence IN ('blocked_gate', 'open_entrance')
+            ORDER BY round_id, frame_id
+            """
+        ).fetchall()
+        for row in gate_rows:
+            mode = 'aram' if row['evidence'] == 'blocked_gate' else '3v3'
+            _upsert_human_labels(
+                conn,
+                frame_id=int(row['frame_id']),
+                labels={
+                    'match_flow_label': 'match_flow',
+                    'match_mode_label': mode,
+                    'hero_select_label': 'not_select',
+                    'result_panel_label': 'no_result_panel',
+                },
+                source_type='legacy_mode_gate',
+                source_id='{}:{}'.format(row['round_id'], int(row['frame_id'])),
+                metadata={'evidence': row['evidence']},
+            )
+            counts['mode_gate_annotations'] += 1
+
+        conn.execute(
+            'INSERT INTO workspace_migrations (id, applied_at, detail_json) '
+            'VALUES (?, ?, ?)',
+            (
+                _MIGRATION_ID, db.now(),
+                json.dumps(counts, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+    return counts

@@ -9,19 +9,19 @@
 ```text
 录像
   │
-  ├─ 每约 5 秒：画面状态分类 → 状态时间线
+  ├─ 每约 5 秒：对局流程分类 → 二态时间线
   │
-  ├─ 开局候选窗口：BP 分类 → 开始锚点 + 初始模式证据
+  ├─ 开局候选窗口：英雄选择分类 → 开始锚点 + 初始模式证据
   │
   ├─ 已进入对局：保存 match_flow 区间
   │
   ├─ match_flow → 游戏外：产生结束边界
   │
-  ├─ 从结束边界向前：结算面板检测 + 关键界面分类
+  ├─ 从结束边界向前：结算面板检测
   │                         │
   │                         └─ 确认后才做 OCR、英雄和版式识别
   │
-  └─ 3V3／大乱斗仍有歧义：天赋／光栅证据补充
+  └─ 模式仍有歧义：对局模式分类 + 旧天赋／光栅证据
                             │
                             └─ 证据融合 → 3V3／ARAM／5V5／unknown
 ```
@@ -38,7 +38,8 @@
 | `src/blrec/vainglory/analyzer.py` | 粗扫、精扫、OCR、英雄识别和候选帧收集的级联流程 |
 | `src/blrec/vainglory/analysis_protocol.py` | Worker 与 Server 之间的结果／训练候选编码校验 |
 | `apps/vision-lab/labeler/export.py` | 冻结各任务的不可变数据集快照 |
-| `apps/vision-lab/labeler/training.py` | 定义四个训练任务、启动训练、记录版本和本机测试发布 |
+| `apps/vision-lab/labeler/training.py` | 定义四个当前训练任务、冻结累计快照、启动训练并记录版本 |
+| `apps/vision-lab/labeler/model_testing.py` | 按 run 的不可变快照验收 ONNX，并组装带哈希和数据锁的模型包 |
 
 当前 Analysis Worker 安装包仍直接携带：
 
@@ -49,7 +50,7 @@ apps/analysis-worker/src/blrec_analysis_worker/models/
 └── result-panel.onnx
 ```
 
-这能运行，但缺少统一清单，无法单靠文件回答标签顺序、预处理、阈值、训练数据版本和完整性。下一步应由“若干散装 ONNX”迁移为一个不可变模型包。
+这能运行，但缺少统一清单，无法单靠文件回答标签顺序、预处理、阈值、训练数据版本和完整性。Vision Lab 现在已经能生成不可变模型包候选；Analysis Worker 的模型包加载器和新时间线管线仍未接入，因此当前生产环境仍使用上述散装旧模型。
 
 ## 时间线状态机
 
@@ -124,11 +125,10 @@ apps/analysis-worker/src/blrec_analysis_worker/models/
 建议接口职责如下：
 
 ```text
-ScreenStateClassifier.classify(frame) -> ScreenStatePrediction
-BpClassifier.classify(frame) -> BpPrediction
-KeyScreenClassifier.classify(frame) -> KeyScreenPrediction
+MatchFlowClassifier.classify(frame) -> MatchFlowPrediction
+HeroSelectClassifier.classify(frame) -> HeroSelectPrediction
+MatchModeClassifier.classify(frame) -> MatchModePrediction
 ResultPanelDetector.detect(frame) -> ResultPanelDetection | None
-ModeGateDetector.detect(frame) -> sequence[ModeGateDetection]
 ```
 
 每个加载器只负责：
@@ -148,11 +148,10 @@ ModeGateDetector.detect(frame) -> sequence[ModeGateDetection]
 ```text
 apps/analysis-worker/src/blrec_analysis_worker/vainglory/
 ├── model_package.py
-├── screen_state.py
-├── bp_classifier.py
-├── key_screen.py
+├── match_flow.py
+├── hero_select.py
+├── match_mode.py
 ├── result_panel.py
-├── mode_gate.py
 ├── timeline.py
 └── pipeline.py
 ```
@@ -171,11 +170,10 @@ apps/analysis-worker/src/blrec_analysis_worker/model_packages/
         ├── dataset-lock.json
         ├── metrics.json
         └── models/
-            ├── screen-state.onnx
-            ├── bp-classifier.onnx
-            ├── key-screen.onnx
-            ├── result-panel.onnx
-            └── mode-gate.onnx
+            ├── match-flow.onnx
+            ├── hero-select.onnx
+            ├── match-mode.onnx
+            └── result-panel.onnx
 ```
 
 `vg-vision-2026.08.09.1` 只是示例。模型包 ID 一旦发布不可复用或覆盖；哪怕只替换其中一个 ONNX，也必须生成新包 ID。
@@ -192,8 +190,8 @@ Analysis Worker 的 `pyproject.toml` 目前只包含 `models/*.onnx`。迁移后
   "package_id": "vg-vision-2026.08.09.1",
   "pipeline_version": "timeline-v1",
   "models": {
-    "bp_classifier": {
-      "file": "models/bp-classifier.onnx",
+    "hero_select": {
+      "file": "models/hero-select.onnx",
       "sha256": "<64 hex characters>",
       "kind": "classification",
       "input": {
@@ -204,13 +202,13 @@ Analysis Worker 的 `pyproject.toml` 目前只包含 `models/*.onnx`。迁移后
         "pad_value": 114,
         "scale": "0_to_1"
       },
-      "classes": ["bp_3v3", "bp_aram", "bp_5v5", "not_bp"],
+      "classes": ["not_select", "select_3v3", "select_aram", "select_5v5"],
       "thresholds": {
         "minimum_confidence": 0.8,
         "minimum_consistent_frames": 2
       },
-      "dataset_version": "bp-classifier-vN",
-      "training_run_id": "bp-review-<run-id>"
+      "dataset_version": "hero-select-classifier-vN",
+      "training_run_id": "hero-select-<run-id>"
     }
   },
   "compatibility": {
@@ -234,20 +232,23 @@ Worker 启动时应先校验整个包，再一次性创建所有 session。任�
 
 ## Worker 与 Server 协议
 
-当前训练候选协议只允许：
+Worker 内部候选仍兼容五路旧任务输出：
 
+- `screen_state`
 - `bp_review`
 - `key_screen_review`
+- `result_detector`
+- `mode_gate`
 
-要让 Worker 辅助收集状态、光栅和结算漏检数据，需要同步扩展：
+Server 最终把同图输出合并为 `unified_review` v3。本轮已经同时扩展：
 
-1. `TrainingCandidateTask` 和对应标签白名单；
+1. `TrainingCandidateTask`、候选框和对应标签白名单；
 2. `analysis_protocol.py` 的编码／解码校验；
-3. BLREC Server 接收、限量和落盘逻辑；
-4. Vision Lab 的 NAS 候选同步器；
-5. 各任务的预标复核页面。
+3. BLREC Server 接收、限量和原子落盘逻辑；
+4. Vision Lab 的 NAS 双向候选／复核同步器；
+5. 一图四标签的统一复核页面；仅结算正样本保留一个完整面板框。
 
-分析完成 payload 还应新增向后兼容字段：
+生产管线真正切换模型包时，分析完成 payload 还应新增向后兼容字段：
 
 - `modelPackageId`
 - `pipelineVersion`
@@ -294,6 +295,8 @@ Server 将模型包 ID 与分析结果一起保存。以后发现某批结果有
 | 新增生产数据库字段或管理页面 | 视需求 | 视协议而定 | **需要** |
 
 Vision Lab 的“设为本机测试模型”只影响当前电脑，不会更新 NAS 或 MacBook Pro。BLREC Server 不应因为模型更新而加载 ONNX。
+
+当前模型测试页已经不再要求先覆盖本机 `current` 模型。它直接运行所选 training run 的 ONNX 和该 run 绑定的快照；验收通过后可生成 ZIP 模型包。这个 ZIP 是可追溯的部署候选，不会自动复制到 MacBook Pro，也不会重启 Worker。等模型包加载器和影子管线完成后，再增加带目标核对、备份、安装校验和回滚信息的部署动作，不能把“下载 ZIP”误写成已经上线。
 
 ### 回滚
 

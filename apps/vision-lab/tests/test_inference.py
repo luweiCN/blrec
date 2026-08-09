@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
+from PIL import Image
 
 from labeler import inference
 
@@ -45,6 +46,17 @@ class TestProbNormalization(unittest.TestCase):
         logits = np.array([0.1, 0.2, 0.3, 0.4, 0.0, 0.0])
         probs = inference._finalize_probs(logits)
         self.assertEqual(int(np.argmax(probs)), 3)
+
+
+class TestClassificationPreprocessing(unittest.TestCase):
+    def test_preserves_aspect_ratio_then_center_crops_and_normalizes(self):
+        image = Image.new('RGB', (400, 200), (255, 255, 255))
+
+        tensor = inference._classification_tensor(image, 224)
+
+        self.assertEqual(tensor.shape, (1, 3, 224, 224))
+        self.assertAlmostEqual(
+            float(tensor[0, 0, 0, 0]), (1.0 - 0.485) / 0.229, places=4)
 
 
 class TestDetectParse(unittest.TestCase):

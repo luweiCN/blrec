@@ -10,6 +10,7 @@ from blrec.vainglory.analyzer import (
     AnalyzedMatch,
     ScannedPart,
     TrainingCandidate,
+    TrainingCandidateBox,
 )
 from blrec.vainglory.hero_recognition import HeroReference
 from blrec.vainglory.ocr import OcrPlayer, PlayerStats, ResultHeader, ResultOcr
@@ -94,14 +95,20 @@ async def test_complete_part_stores_worker_training_candidate_sidecar(
             at_ms=12_000,
             segment_start_ms=10_000,
             image_jpeg=image,
-            model_version='multi-v2',
-            suggested_label='bp_3v3',
+            model_version='result-detector-v1',
+            suggested_label='result_panel',
             suggestion_confidence=0.8,
             stage_class='pre_match',
             stage_confidence=0.9,
             mode_class='3v3',
             mode_confidence=0.8,
             selection_reason='worker 测试候选',
+            task='result_detector',
+            suggested_boxes=(
+                TrainingCandidateBox(
+                    box_type='result_panel', x=0.1, y=0.2, w=0.8, h=0.5
+                ),
+            ),
         )
 
         await repository.complete_part(1, (), training_candidates=(candidate,))
@@ -111,9 +118,70 @@ async def test_complete_part_stores_worker_training_candidate_sidecar(
         assert len(images) == len(sidecars) == 1
         assert images[0].read_bytes() == image
         metadata = json.loads(sidecars[0].read_text(encoding='utf8'))
-        assert metadata['suggested_label'] == 'bp_3v3'
+        assert metadata['schema_version'] == 3
+        assert metadata['task'] == 'unified_review'
+        assert metadata['suggestions']['result_panel']['label'] == 'result_panel'
         assert metadata['streamer'] == '样本主播'
         assert metadata['image_path'].endswith(images[0].name)
+        assert metadata['suggested_boxes'][0]['type'] == 'result_panel'
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_same_worker_frame_is_stored_once_with_multiple_suggestions(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'sample.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        candidate_root = tmp_path / 'training-candidates'
+        repository = VaingloryRepository(
+            database, training_candidate_root=candidate_root, clock=lambda: 100
+        )
+        await repository.request_scan(1)
+        assert await repository.claim_next() is not None
+        image = b'\xff\xd8same-frame\xff\xd9'
+        common = {
+            'at_ms': 12_000,
+            'segment_start_ms': 10_000,
+            'image_jpeg': image,
+            'model_version': 'multi-v2',
+            'suggestion_confidence': 0.8,
+            'stage_class': 'result_page',
+            'stage_confidence': 0.9,
+            'mode_class': 'aram',
+            'mode_confidence': 0.7,
+            'selection_reason': '同一帧多模型建议',
+        }
+        candidates = (
+            TrainingCandidate(
+                **common, task='screen_state', suggested_label='post_match'
+            ),
+            TrainingCandidate(
+                **common,
+                task='result_detector',
+                suggested_label='result_panel',
+                suggested_boxes=(
+                    TrainingCandidateBox(
+                        box_type='result_panel', x=0.1, y=0.2, w=0.8, h=0.5
+                    ),
+                ),
+            ),
+        )
+
+        await repository.complete_part(1, (), training_candidates=candidates)
+
+        images = list(candidate_root.rglob('*.jpg'))
+        sidecars = list(candidate_root.rglob('*.json'))
+        assert len(images) == len(sidecars) == 1
+        metadata = json.loads(sidecars[0].read_text(encoding='utf8'))
+        assert metadata['suggestions']['match_flow']['label'] == 'match_flow'
+        assert metadata['suggestions']['result_panel']['label'] == 'result_panel'
+        assert len(metadata['model_outputs']) == 2
     finally:
         await database.close()
 
@@ -903,6 +971,8 @@ async def test_analysis_queue_exposes_live_time_durations_and_confirmed_matches(
         assert active.match_previews[0].part_id == 1
         assert status.recent_completions[0].image_count == 1
         assert status.recent_completions[0].match_previews[0].match_id > 0
+        assert status.recent_completions[0].part_match_duration_seconds == 900
+        assert status.recent_completions[0].session_match_duration_seconds == 900
     finally:
         await database.close()
 

@@ -7,6 +7,7 @@ from blrec.vainglory.analyzer import (
     AnalyzedHero,
     AnalyzedMatch,
     TrainingCandidate,
+    TrainingCandidateBox,
     TrainingCandidateLabel,
     TrainingCandidateTask,
 )
@@ -23,8 +24,19 @@ def _decode_bytes(value: object) -> bytes:
 
 
 _TRAINING_CANDIDATE_LABELS = {
+    'screen_state': {
+        'not_vainglory',
+        'out_of_match',
+        'pre_match',
+        'in_match',
+        'talent_select',
+        'post_match',
+        'transition',
+    },
     'bp_review': {'bp_3v3', 'bp_aram', 'bp_5v5', 'not_bp'},
     'key_screen_review': {'result_page', 'scoreboard', 'other'},
+    'result_detector': {'result_panel', 'no_result_panel'},
+    'mode_gate': {'blocked_gate', 'open_entrance', 'no_evidence'},
 }
 
 
@@ -42,6 +54,10 @@ def encode_training_candidate(candidate: TrainingCandidate) -> Dict[str, Any]:
         'mode_class': candidate.mode_class,
         'mode_confidence': candidate.mode_confidence,
         'selection_reason': candidate.selection_reason,
+        'suggested_boxes': [
+            {'type': box.box_type, 'x': box.x, 'y': box.y, 'w': box.w, 'h': box.h}
+            for box in candidate.suggested_boxes
+        ],
     }
 
 
@@ -68,6 +84,19 @@ def decode_training_candidate(payload: Mapping[str, Any]) -> TrainingCandidate:
     segment_start_ms = int(payload['segment_start_ms'])
     if at_ms < 0 or segment_start_ms < 0:
         raise ValueError('training candidate timestamps must not be negative')
+    boxes = []
+    for raw_box in payload.get('suggested_boxes') or ():
+        if not isinstance(raw_box, Mapping):
+            raise ValueError('training candidate box must be an object')
+        boxes.append(
+            TrainingCandidateBox(
+                box_type=str(raw_box.get('type', ''))[:80],
+                x=float(raw_box['x']),
+                y=float(raw_box['y']),
+                w=float(raw_box['w']),
+                h=float(raw_box['h']),
+            )
+        )
     return TrainingCandidate(
         at_ms=at_ms,
         segment_start_ms=segment_start_ms,
@@ -81,6 +110,7 @@ def decode_training_candidate(payload: Mapping[str, Any]) -> TrainingCandidate:
         mode_confidence=confidence('mode_confidence'),
         selection_reason=str(payload['selection_reason'])[:500],
         task=cast(TrainingCandidateTask, task),
+        suggested_boxes=tuple(boxes),
     )
 
 

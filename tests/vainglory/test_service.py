@@ -193,6 +193,8 @@ async def test_scan_task_log_includes_part_and_recording_durations(
                         title='测试直播',
                         part_duration_seconds=7_200,
                         recording_duration_seconds=10_800,
+                        part_match_duration_seconds=1_800,
+                        session_match_duration_seconds=2_700,
                         candidate_count=self.candidate_count,
                         match_count=0,
                         elapsed_seconds=0,
@@ -242,6 +244,8 @@ async def test_scan_task_log_includes_part_and_recording_durations(
     assert queue.recent_completions[0].part_id == 11
     assert queue.recent_completions[0].part_duration_seconds == 7_200
     assert queue.recent_completions[0].recording_duration_seconds == 10_800
+    assert queue.recent_completions[0].part_match_duration_seconds == 1_800
+    assert queue.recent_completions[0].session_match_duration_seconds == 2_700
     assert queue.recent_completions[0].candidate_count == 0
     assert queue.recent_completions[0].match_count == 0
     assert queue.recent_completions[0].elapsed_seconds >= 0

@@ -341,19 +341,49 @@
                   class="session-publication-status"
                   aria-label="稿件回填状态"
                 >
+                  <div
+                    *ngIf="session.publicationStatusLabel as statusLabel"
+                    class="publication-task-diagnostic"
+                  >
+                    <nz-tag
+                      [nzColor]="
+                        publicationStatusColor(session.publicationStatus)
+                      "
+                    >
+                      发布任务：{{ statusLabel }}
+                    </nz-tag>
+                    <span *ngIf="session.publicationStatusDetail">
+                      {{ session.publicationStatusDetail }}
+                    </span>
+                    <strong
+                      *ngIf="
+                        publicationActionLabel(
+                          session.publicationRecommendedAction
+                        ) as actionLabel
+                      "
+                    >
+                      建议操作：{{ actionLabel }}
+                    </strong>
+                    <small *ngIf="session.publicationNextAttemptAt">
+                      下次自动重试：{{
+                        session.publicationNextAttemptAt * 1000
+                          | date: "MM-dd HH:mm:ss"
+                      }}
+                    </small>
+                  </div>
                   <span>
                     <nz-tag
                       [nzColor]="
                         publicationStepColor(
                           session.descriptionState,
-                          session.publicationState
+                          isPublicationStepFailed(session, 'description')
                         )
                       "
                     >
                       简介：{{ descriptionStateLabel(session) }}
                     </nz-tag>
                     <button
-                      *ngIf="canRetryPublicationStep(session)"
+                      *ngIf="canRetryPublicationStep(session, 'description')"
                       nz-button
                       nzType="link"
                       nzSize="small"
@@ -374,14 +404,14 @@
                       [nzColor]="
                         publicationStepColor(
                           session.pinState,
-                          session.publicationState
+                          isPublicationStepFailed(session, 'pin')
                         )
                       "
                     >
                       置顶评论：{{ pinStateLabel(session) }}
                     </nz-tag>
                     <button
-                      *ngIf="canRetryPublicationStep(session)"
+                      *ngIf="canRetryPublicationStep(session, 'comments')"
                       nz-button
                       nzType="link"
                       nzSize="small"
@@ -406,14 +436,14 @@
                       [nzColor]="
                         publicationStepColor(
                           session.chapterState,
-                          session.publicationState
+                          isPublicationStepFailed(session, 'chapter')
                         )
                       "
                     >
                       视频分段：{{ chapterStateLabel(session) }}
                     </nz-tag>
                     <button
-                      *ngIf="canRetryPublicationStep(session)"
+                      *ngIf="canRetryPublicationStep(session, 'chapter')"
                       nz-button
                       nzType="link"
                       nzSize="small"

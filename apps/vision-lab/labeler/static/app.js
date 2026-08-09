@@ -22,6 +22,28 @@ let keyReviewIndex = 0;
 let keyVisualCondition = 'clear';
 let keyWorkerSyncTimer = null;
 let trainingPollTimer = null;
+let candidateQueue = [];
+let candidateIndex = 0;
+let candidateDraft = null;
+let candidateBoxes = [];
+let candidateDrawStart = null;
+let candidateSyncTimer = null;
+let candidateHeroCatalog = [];
+let candidateHeroCatalogPromise = null;
+let candidateHeroLineup = null;
+let candidateHeroDraft = new Map();
+let candidateHeroDirty = false;
+let candidateHeroLoading = false;
+let candidateHeroLoadToken = 0;
+let candidateHeroPickerSlot = null;
+let candidateHeroPlayerSlot = null;
+let candidateHeroTeamSizeExplicit = false;
+let candidateHeroTeamSizeOverride = null;
+let candidateHeroDrawMode = false;
+let candidateHeroEdit = null;
+let modelTestRuns = [];
+let modelTestSamples = [];
+let modelTestIndex = 0;
 const initialTask = new URLSearchParams(window.location.search).get('task');
 const state = {
   task: initialTask === 'mode_gate' ? 'mode_gate' : 'result_detector',
@@ -58,6 +80,8 @@ async function init() {
   bindShortcuts();
   bindBpReview();
   bindKeyScreenReview();
+  bindCandidateReview();
+  bindModelTesting();
   setTask(state.task, false);
   if (isGateTask()) {
     const gateNav = $('.nav-item[data-task="mode_gate"]');
@@ -76,6 +100,8 @@ function bindNav() {
       if (btn.dataset.view === 'label') loadLiveList();
       if (btn.dataset.view === 'bp-review') loadBpReview();
       if (btn.dataset.view === 'key-screen-review') loadKeyScreenReview();
+      if (btn.dataset.view === 'candidates') loadCandidateReview();
+      if (btn.dataset.view === 'model-tests') loadModelTesting();
       if (btn.dataset.view === 'records') loadTrainingDashboard();
       if (btn.dataset.view !== 'records' && trainingPollTimer) {
         clearInterval(trainingPollTimer);
@@ -104,6 +130,1658 @@ function setTask(task, reload = true) {
     ? '播放或时间按钮用来寻找地图入口。看到有效证据后，用右侧专项按钮标记。'
     : '播放=每秒取一帧前进一个间隔;时间按钮=跳到该时间点的帧。当前帧就是打标帧,右侧标注后点「完成并下一张」';
   if (reload) loadLiveList();
+}
+
+// ---------- Worker 候选数据 ----------
+const TRAINING_REVIEW_FIELDS = [
+  {
+    key: 'match_flow_label', suggestion: 'match_flow', title: '1. 是否在对局流程中',
+    help: '英雄选择属于“非对局画面”；战斗、积分板、商店、胜负动画和结算页属于“对局流程中”。',
+    labels: {
+      match_flow: '对局流程中', not_match_flow: '非对局画面', unreadable: '看不清',
+    },
+  },
+  {
+    key: 'match_mode_label', suggestion: 'match_mode', title: '2. 对局模式',
+    help: '只在对局画面中判断。商店或其他无法看出地图模式的画面选“看不出模式”。',
+    labels: { '3v3': '3V3', aram: '大乱斗', '5v5': '5V5', unreadable: '看不出模式' },
+  },
+  {
+    key: 'hero_select_label', suggestion: 'hero_select', title: '3. 是否是英雄选择界面',
+    help: '匹配接受／拒绝不是英雄选择。能看出英雄选择时，同时标出模式。',
+    labels: {
+      not_select: '不是英雄选择', select_3v3: '3V3 英雄选择',
+      select_aram: '大乱斗英雄选择', select_5v5: '5V5 英雄选择',
+      unreadable: '看不清',
+    },
+  },
+  {
+    key: 'result_panel_label', suggestion: 'result_panel', title: '4. 是否有真正结算面板',
+    help: '积分板不是结算。选择“有结算面板”后，直接在左图框完整面板；一张图只保留一个大框。',
+    labels: {
+      result_panel: '有结算面板', no_result_panel: '没有结算面板', unreadable: '看不清',
+    },
+  },
+];
+
+const TRAINING_REVIEW_LABEL_TEXT = Object.fromEntries(
+  TRAINING_REVIEW_FIELDS.map((field) => [field.suggestion, field.labels]));
+const CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY =
+  'vainglory-vision-lab.training-review-defaults.v1';
+
+const CANDIDATE_SUGGESTION_TITLES = {
+  match_flow: '对局流程',
+  match_mode: '对局模式',
+  hero_select: '英雄选择',
+  result_panel: '结算面板',
+};
+
+const CANDIDATE_HERO_LAYOUTS = {
+  gameplay_hud: '游戏中顶部 HUD',
+  scoreboard: '积分板',
+  result_page: '结算界面',
+  none: '没有可标的英雄头像',
+  unreadable: '看不清／无法判断',
+};
+
+const CANDIDATE_HERO_LAYOUT_SHORT_LABELS = {
+  gameplay_hud: 'HUD',
+  scoreboard: '积分板',
+  result_page: '结算',
+  none: '无头像',
+  unreadable: '看不清',
+};
+
+const CANDIDATE_HERO_SCREEN_TYPES = new Set([
+  'gameplay_hud', 'scoreboard', 'result_page',
+]);
+
+function currentCandidate() {
+  return candidateQueue[candidateIndex] || null;
+}
+
+function candidateSuggestion(item, task) {
+  return item.suggestions && item.suggestions[task] || null;
+}
+
+function candidateSuggestedValue(item, field) {
+  const suggestion = candidateSuggestion(item, field.suggestion);
+  return suggestion && field.labels[suggestion.label] ? suggestion.label : null;
+}
+
+function candidateCachedReviewLabels() {
+  try {
+    const stored = JSON.parse(
+      window.localStorage.getItem(CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY) || '{}');
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+    return Object.fromEntries(TRAINING_REVIEW_FIELDS.flatMap((field) => {
+      const value = stored[field.key];
+      return Object.prototype.hasOwnProperty.call(field.labels, value)
+        ? [[field.key, value]] : [];
+    }));
+  } catch (_error) {
+    return {};
+  }
+}
+
+function cacheCandidateReviewLabels(draft) {
+  const values = Object.fromEntries(TRAINING_REVIEW_FIELDS.flatMap((field) => {
+    const value = draft[field.key];
+    return Object.prototype.hasOwnProperty.call(field.labels, value)
+      ? [[field.key, value]] : [];
+  }));
+  try {
+    window.localStorage.setItem(
+      CANDIDATE_REVIEW_DEFAULTS_STORAGE_KEY, JSON.stringify(values));
+  } catch (_error) {
+    // 浏览器禁止本地存储时仍可继续打标，只是不跨图片沿用。
+  }
+}
+
+function candidateResultHeroCountMode(item) {
+  for (const source of item.sources || []) {
+    if (source.source_type !== 'result_archive') continue;
+    const count = Number((source.metadata || {}).hero_slot_count || 0);
+    if (count === 6) return '3v3';
+    if (count >= 7 && count <= 10) return '5v5';
+  }
+  return null;
+}
+
+function candidateDefaultDraft(item) {
+  const hasHumanLabels = TRAINING_REVIEW_FIELDS.some(
+    (field) => Boolean(item[field.key]));
+  const cached = hasHumanLabels ? {} : candidateCachedReviewLabels();
+  const resultHeroCountMode = hasHumanLabels
+    ? null : candidateResultHeroCountMode(item);
+  const draft = {};
+  TRAINING_REVIEW_FIELDS.forEach((field) => {
+    const resultMode = field.key === 'match_mode_label'
+      ? resultHeroCountMode : null;
+    draft[field.key] = item[field.key] || resultMode || cached[field.key] ||
+      candidateSuggestedValue(item, field);
+  });
+  draft.match_flow_label ||= 'unreadable';
+  draft.result_panel_label ||= 'no_result_panel';
+  if (draft.match_flow_label === 'match_flow') {
+    draft.match_mode_label ||= 'unreadable';
+    draft.hero_select_label = 'not_select';
+  } else if (draft.match_flow_label === 'not_match_flow') {
+    draft.match_mode_label = null;
+    draft.hero_select_label ||= 'not_select';
+  } else {
+    draft.match_mode_label = null;
+    draft.hero_select_label ||= 'unreadable';
+  }
+  if (draft.hero_select_label.startsWith('select_')) {
+    draft.result_panel_label = 'no_result_panel';
+  } else if (draft.result_panel_label === 'result_panel') {
+    draft.match_flow_label = 'match_flow';
+    draft.match_mode_label ||= 'unreadable';
+    draft.hero_select_label = 'not_select';
+  }
+  draft.hero_layout_label = item.hero_layout_label || null;
+  if (!draft.hero_layout_label) {
+    if (draft.result_panel_label === 'result_panel') {
+      draft.hero_layout_label = 'result_page';
+    } else {
+      for (const source of item.sources || []) {
+        const metadata = source.metadata || {};
+        const screen = metadata.screen_type || metadata.stage_class || '';
+        if (['scoreboard', 'death_scoreboard'].includes(screen)) {
+          draft.hero_layout_label = 'scoreboard';
+          break;
+        }
+        if (['gameplay', 'gameplay_hud', 'in_match'].includes(screen)) {
+          draft.hero_layout_label = 'gameplay_hud';
+          break;
+        }
+      }
+    }
+  }
+  draft.hero_layout_label ||= 'none';
+  return draft;
+}
+
+function candidateSuggestedResultBox(item) {
+  if (item.boxes && item.boxes.result_panel) {
+    return {...item.boxes.result_panel, type: 'result_panel'};
+  }
+  for (const source of item.sources || []) {
+    const boxes = source.metadata && source.metadata.suggested_boxes || [];
+    const box = boxes.find((value) =>
+      ['result_panel', ''].includes(value.type || value.box_type || ''));
+    if (box) return {...box, type: 'result_panel'};
+  }
+  return null;
+}
+
+function candidateHeroClamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function candidateHeroDisplayCrop(crop, layerRect) {
+  if (!crop || !layerRect.width || !layerRect.height) return crop;
+  const maximumDiameter = Math.min(layerRect.width, layerRect.height);
+  const rawWidth = Math.max(0, crop.w * layerRect.width);
+  const rawHeight = Math.max(0, crop.h * layerRect.height);
+  const rawDiameter = Math.sqrt(rawWidth * rawHeight);
+  const diameter = Math.min(maximumDiameter, Math.max(16, rawDiameter));
+  const centerX = (crop.x + crop.w / 2) * layerRect.width;
+  const centerY = (crop.y + crop.h / 2) * layerRect.height;
+  const left = candidateHeroClamp(
+    centerX - diameter / 2, 0, layerRect.width - diameter);
+  const top = candidateHeroClamp(
+    centerY - diameter / 2, 0, layerRect.height - diameter);
+  return {
+    x: left / layerRect.width,
+    y: top / layerRect.height,
+    w: diameter / layerRect.width,
+    h: diameter / layerRect.height,
+  };
+}
+
+function applyCandidateHeroCrop(node, crop) {
+  node.style.left = `${crop.x * 100}%`;
+  node.style.top = `${crop.y * 100}%`;
+  node.style.width = `${crop.w * 100}%`;
+  node.style.height = `${crop.h * 100}%`;
+}
+
+function candidateHeroSlot(slotKey) {
+  if (!candidateHeroLineup) return null;
+  return candidateHeroLineup.slots.find((slot) =>
+    candidateHeroKey(slot.side, slot.slot) === slotKey) || null;
+}
+
+function startCandidateHeroEdit(event, node, slotKey, mode) {
+  if (event.button !== 0 || candidateHeroLoading) return;
+  const layerRect = $('#candidate-box-layer').getBoundingClientRect();
+  const slot = candidateHeroSlot(slotKey);
+  if (!slot || !layerRect.width || !layerRect.height) return;
+  event.preventDefault();
+  event.stopPropagation();
+  candidateHeroPickerSlot = null;
+  $('#candidate-hero-picker').classList.add('hidden');
+  const displayCrop = candidateHeroDisplayCrop(slot.crop, layerRect);
+  candidateHeroEdit = {
+    pointerId: event.pointerId,
+    slotKey,
+    mode,
+    startX: event.clientX,
+    startY: event.clientY,
+    originalSlots: candidateHeroLineup.slots.map((value) => ({
+      ...value,
+      crop: {...value.crop},
+    })),
+    displayCrop,
+    layerWidth: layerRect.width,
+    layerHeight: layerRect.height,
+    moved: false,
+  };
+  applyCandidateHeroCrop(node, displayCrop);
+  node.classList.add('editing');
+  node.setPointerCapture(event.pointerId);
+}
+
+function moveCandidateHeroEdit(event) {
+  const edit = candidateHeroEdit;
+  if (!edit || edit.pointerId !== event.pointerId) return;
+  const slot = candidateHeroSlot(edit.slotKey);
+  if (!slot) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const dx = event.clientX - edit.startX;
+  const dy = event.clientY - edit.startY;
+  edit.moved ||= Math.hypot(dx, dy) >= 3;
+  const original = edit.displayCrop;
+  let crop;
+  if (edit.mode === 'resize') {
+    const originalDiameter = original.w * edit.layerWidth;
+    const delta = Math.abs(dx) >= Math.abs(dy) ? dx : dy;
+    const left = original.x * edit.layerWidth;
+    const top = original.y * edit.layerHeight;
+    const maximumDiameter = Math.min(
+      edit.layerWidth - left, edit.layerHeight - top);
+    const minimumDiameter = Math.min(16, maximumDiameter);
+    const diameter = candidateHeroClamp(
+      originalDiameter + delta, minimumDiameter, maximumDiameter);
+    crop = {
+      x: original.x,
+      y: original.y,
+      w: diameter / edit.layerWidth,
+      h: diameter / edit.layerHeight,
+    };
+  } else {
+    crop = {
+      x: candidateHeroClamp(
+        original.x + dx / edit.layerWidth, 0, 1 - original.w),
+      y: candidateHeroClamp(
+        original.y + dy / edit.layerHeight, 0, 1 - original.h),
+      w: original.w,
+      h: original.h,
+    };
+  }
+  candidateHeroLineup.slots = candidateHeroLinkedSlots(
+    edit.originalSlots,
+    edit.slotKey,
+    crop,
+    candidateHeroLineup.screen_type,
+    edit.mode,
+  );
+  applyCandidateHeroSlotsToCanvas();
+}
+
+async function finishCandidateHeroEdit(event, node) {
+  const edit = candidateHeroEdit;
+  if (!edit || edit.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  candidateHeroEdit = null;
+  node.classList.remove('editing');
+  if (node.hasPointerCapture(event.pointerId)) {
+    node.releasePointerCapture(event.pointerId);
+  }
+  const slot = candidateHeroSlot(edit.slotKey);
+  if (!slot) return;
+  if (!edit.moved) {
+    candidateHeroLineup.slots = edit.originalSlots;
+    if (edit.mode === 'move') openCandidateHeroPicker(node, edit.slotKey);
+    else renderCandidateBoxes();
+    return;
+  }
+  const saveTemplate = candidateHeroLayoutComplete();
+  const saved = await persistCandidateHeroLayout(candidateHeroLineup.slots, {
+    saveTemplate: saveTemplate,
+  });
+  if (!saved) {
+    candidateHeroLineup.slots = edit.originalSlots;
+    renderCandidateHeroLineup();
+    return;
+  }
+  $('#candidate-save-state').textContent = saveTemplate
+    ? '英雄圆框的位置和大小已更新，并同步到该主播的布局缓存'
+    : '英雄圆框的位置和大小已更新';
+}
+
+function cancelCandidateHeroEdit(event) {
+  const edit = candidateHeroEdit;
+  if (!edit || edit.pointerId !== event.pointerId) return;
+  candidateHeroLineup.slots = edit.originalSlots;
+  candidateHeroEdit = null;
+  renderCandidateHeroLineup();
+}
+
+function applyCandidateHeroSlotsToCanvas() {
+  const layer = $('#candidate-box-layer');
+  const layerRect = layer.getBoundingClientRect();
+  (candidateHeroLineup && candidateHeroLineup.slots || []).forEach((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    const node = [...layer.querySelectorAll('.candidate-hero-circle')]
+      .find((value) => value.dataset.heroSlot === key);
+    if (node) {
+      const displayCrop = candidateHeroDisplayCrop(slot.crop, layerRect);
+      applyCandidateHeroCrop(node, displayCrop);
+    }
+  });
+}
+
+function renderCandidateBoxes() {
+  const layer = $('#candidate-box-layer');
+  const layerRect = layer.getBoundingClientRect();
+  layer.innerHTML = '';
+  candidateBoxes.forEach((box) => {
+    const node = document.createElement('div');
+    node.className = 'candidate-box result-box';
+    node.style.left = `${box.x * 100}%`;
+    node.style.top = `${box.y * 100}%`;
+    node.style.width = `${box.w * 100}%`;
+    node.style.height = `${box.h * 100}%`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.title = '删除这个框';
+    remove.onpointerdown = (event) => event.stopPropagation();
+    remove.onclick = (event) => {
+      event.stopPropagation();
+      candidateBoxes = [];
+      renderCandidateBoxes();
+    };
+    node.appendChild(remove);
+    layer.appendChild(node);
+  });
+  if (!candidateHeroLineup) return;
+  (candidateHeroLineup.slots || []).forEach((slot) => {
+    const key = candidateHeroKey(slot.side, slot.slot);
+    const box = candidateHeroDisplayCrop(slot.crop, layerRect);
+    const node = document.createElement('button');
+    node.type = 'button';
+    node.className = 'candidate-hero-circle';
+    node.dataset.heroSlot = key;
+    node.classList.toggle('selected', candidateHeroPickerSlot === key);
+    const isPlayer = candidateHeroLineup.screen_type === 'result_page' &&
+      candidateHeroPlayerSlot === key;
+    node.classList.toggle('player', isPlayer);
+    applyCandidateHeroCrop(node, box);
+    const label = candidateHeroDraft.get(key) || '';
+    const hero = candidateHeroDisplay(label);
+    node.title = hero
+      ? `${slot.side === 'left' ? '左队' : '右队'} ${slot.slot}：${hero.name}`
+      : `${slot.side === 'left' ? '左队' : '右队'} ${slot.slot}：点击选择英雄`;
+    if (isPlayer) node.title += '（主播本人）';
+    const tag = document.createElement('span');
+    tag.className = 'candidate-hero-circle-label';
+    tag.textContent = `${slot.side === 'left' ? '左' : '右'}${slot.slot}` +
+      (isPlayer ? ' · 本人' : '');
+    node.appendChild(tag);
+    const resizeHandle = document.createElement('span');
+    resizeHandle.className = 'candidate-hero-resize-handle';
+    resizeHandle.title = '拖动调整圆框大小';
+    resizeHandle.onpointerdown = (event) =>
+      startCandidateHeroEdit(event, node, key, 'resize');
+    node.appendChild(resizeHandle);
+    node.onpointerdown = (event) =>
+      startCandidateHeroEdit(event, node, key, 'move');
+    node.onpointermove = (event) => moveCandidateHeroEdit(event);
+    node.onpointerup = (event) => finishCandidateHeroEdit(event, node);
+    node.onpointercancel = cancelCandidateHeroEdit;
+    node.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.detail === 0) openCandidateHeroPicker(node, key);
+    };
+    layer.appendChild(node);
+  });
+}
+
+function renderCandidateSuggestions(item) {
+  const suggestions = $('#candidate-suggestion');
+  suggestions.innerHTML = '';
+  TRAINING_REVIEW_FIELDS.forEach((field) => {
+    const suggestion = candidateSuggestion(item, field.suggestion);
+    if (!suggestion) return;
+    const line = document.createElement('div');
+    line.className = 'candidate-suggestion-line';
+    const label = field.labels[suggestion.label] || suggestion.label;
+    const title = CANDIDATE_SUGGESTION_TITLES[field.suggestion] ||
+      field.title.replace(/^\d+\.\s*/, '');
+    line.textContent = `${title}：${label} · ` +
+      `${(Number(suggestion.confidence || 0) * 100).toFixed(1)}%`;
+    suggestions.appendChild(line);
+  });
+  if (!suggestions.childElementCount) suggestions.textContent = '没有模型建议';
+  const reasons = new Set();
+  Object.values(item.suggestions || {}).forEach((suggestion) => {
+    if (suggestion.reason) reasons.add(suggestion.reason);
+  });
+  (item.sources || []).forEach((source) => {
+    const metadata = source.metadata || {};
+    if (metadata.selection_reason) reasons.add(metadata.selection_reason);
+    (metadata.model_outputs || []).forEach((output) => {
+      if (output.selection_reason) reasons.add(output.selection_reason);
+    });
+  });
+  const reasonText = [...reasons].join('；');
+  $('#candidate-reason').textContent = reasonText;
+  $('#candidate-reason').title = reasonText;
+}
+
+function candidateHeroKey(side, slot) {
+  return `${side}:${slot}`;
+}
+
+function candidateHeroPlayerKey(lineup) {
+  if (!lineup || !lineup.player_side || !lineup.player_slot) return null;
+  return candidateHeroKey(lineup.player_side, lineup.player_slot);
+}
+
+function candidateHeroPlayerPosition() {
+  if (!candidateHeroPlayerSlot) return null;
+  const slot = candidateHeroSlot(candidateHeroPlayerSlot);
+  return slot ? {side: slot.side, slot: slot.slot} : null;
+}
+
+function candidateHeroByLabel(label) {
+  return candidateHeroCatalog.find((hero) => hero.label === label) || null;
+}
+
+function candidateHeroContext(item) {
+  if (!item || !candidateDraft) return null;
+  const screenType = candidateDraft.hero_layout_label;
+  if (!CANDIDATE_HERO_SCREEN_TYPES.has(screenType)) return null;
+  const selectedMode = candidateDraft.match_mode_label || '';
+  const teamSize = candidateHeroTeamSizeExplicit
+    ? candidateHeroTeamSizeOverride
+    : selectedMode === '5v5' ? 5
+      : ['3v3', 'aram'].includes(selectedMode) ? 3
+        : candidateHeroLineup && candidateHeroLineup.screen_type === screenType
+          ? candidateHeroLineup.team_size : null;
+  return {screenType, teamSize};
+}
+
+async function ensureCandidateHeroCatalog() {
+  if (candidateHeroCatalog.length) return candidateHeroCatalog;
+  if (!candidateHeroCatalogPromise) {
+    candidateHeroCatalogPromise = api('/api/training-review/heroes')
+      .then((value) => {
+        candidateHeroCatalog = value.heroes || [];
+        return candidateHeroCatalog;
+      })
+      .finally(() => { candidateHeroCatalogPromise = null; });
+  }
+  return candidateHeroCatalogPromise;
+}
+
+function closeCandidateHeroPicker() {
+  candidateHeroPickerSlot = null;
+  $('#candidate-hero-picker').classList.add('hidden');
+  renderCandidateBoxes();
+}
+
+function resetCandidateHeroReview() {
+  candidateHeroLoadToken += 1;
+  candidateHeroLineup = null;
+  candidateHeroDraft = new Map();
+  candidateHeroPlayerSlot = null;
+  candidateHeroDirty = false;
+  candidateHeroLoading = false;
+  candidateHeroDrawMode = false;
+  candidateHeroEdit = null;
+  closeCandidateHeroPicker();
+  $('#candidate-hero-review').classList.add('hidden');
+  $('#candidate-hero-teams').innerHTML = '';
+  $('#candidate-hero-status').textContent = '';
+  renderCandidateBoxes();
+}
+
+function candidateHeroDisplay(label) {
+  if (label === 'unreadable') {
+    return {label, name: '看不清／无法确认', image_url: ''};
+  }
+  return candidateHeroByLabel(label);
+}
+
+function candidateHeroExpectedPositions(teamSize) {
+  const result = [];
+  for (const side of ['left', 'right']) {
+    for (let slot = 1; slot <= teamSize; slot += 1) {
+      result.push({side, slot});
+    }
+  }
+  return result;
+}
+
+function candidateNextHeroPosition() {
+  if (!candidateHeroLineup || !candidateHeroLineup.team_size) return null;
+  const occupied = new Set(
+    (candidateHeroLineup.slots || []).map((slot) =>
+      candidateHeroKey(slot.side, slot.slot))
+  );
+  return candidateHeroExpectedPositions(candidateHeroLineup.team_size)
+    .find((position) => !occupied.has(
+      candidateHeroKey(position.side, position.slot))) || null;
+}
+
+function candidateHeroLayoutComplete() {
+  return Boolean(
+    candidateHeroLineup &&
+    candidateHeroLineup.team_size &&
+    candidateHeroLineup.slots.length === candidateHeroLineup.team_size * 2
+  );
+}
+
+function candidateHeroCropCenter(crop) {
+  return {
+    x: crop.x + crop.w / 2,
+    y: crop.y + crop.h / 2,
+  };
+}
+
+function candidateHeroCropAtCenter(center, referenceCrop) {
+  return {
+    x: candidateHeroClamp(center.x - referenceCrop.w / 2, 0, 1 - referenceCrop.w),
+    y: candidateHeroClamp(center.y - referenceCrop.h / 2, 0, 1 - referenceCrop.h),
+    w: referenceCrop.w,
+    h: referenceCrop.h,
+  };
+}
+
+function candidateHeroLinkedSlots(
+  originalSlots, selectedKey, editedCrop, screenType, mode) {
+  const result = originalSlots.map((slot) => ({...slot, crop: {...slot.crop}}));
+  const selected = result.find((slot) =>
+    candidateHeroKey(slot.side, slot.slot) === selectedKey);
+  if (!selected) return result;
+
+  if (mode === 'resize') {
+    result.forEach((slot) => {
+      const center = candidateHeroCropCenter(slot.crop);
+      slot.crop = candidateHeroCropAtCenter(center, editedCrop);
+    });
+    selected.crop = {...editedCrop};
+    return result;
+  }
+
+  const originalCenter = candidateHeroCropCenter(selected.crop);
+  const editedCenter = candidateHeroCropCenter(editedCrop);
+  if (['result_page', 'scoreboard'].includes(screenType)) {
+    result.forEach((slot) => {
+      const center = candidateHeroCropCenter(slot.crop);
+      if (slot.side === selected.side) center.x = editedCenter.x;
+      if (slot.slot === selected.slot) center.y = editedCenter.y;
+      slot.crop = candidateHeroCropAtCenter(center, slot.crop);
+    });
+  } else if (screenType === 'gameplay_hud') {
+    const delta = {
+      x: editedCenter.x - originalCenter.x,
+      y: editedCenter.y - originalCenter.y,
+    };
+    result.forEach((slot) => {
+      if (slot.side !== selected.side) return;
+      const center = candidateHeroCropCenter(slot.crop);
+      slot.crop = candidateHeroCropAtCenter({
+        x: center.x + delta.x,
+        y: center.y + delta.y,
+      }, slot.crop);
+    });
+  }
+  selected.crop = {...editedCrop};
+  return result;
+}
+
+function candidateHeroAutofillSlots(slots, screenType, teamSize) {
+  const result = slots.map((slot) => ({...slot, crop: {...slot.crop}}));
+  const reference = result[0];
+  if (!reference) return result;
+  const findSlot = (side, slot) => result.find((value) =>
+    value.side === side && value.slot === slot);
+  const addSlot = (side, slot, center) => {
+    if (findSlot(side, slot)) return;
+    result.push({
+      side,
+      slot,
+      crop: candidateHeroCropAtCenter(center, reference.crop),
+    });
+  };
+
+  if (screenType === 'gameplay_hud') {
+    const left1 = findSlot('left', 1);
+    const left2 = findSlot('left', 2);
+    if (!left1 || !left2) return result;
+    const firstCenter = candidateHeroCropCenter(left1.crop);
+    const secondCenter = candidateHeroCropCenter(left2.crop);
+    const step = {
+      x: secondCenter.x - firstCenter.x,
+      y: secondCenter.y - firstCenter.y,
+    };
+    for (let slot = 3; slot <= teamSize; slot += 1) {
+      addSlot('left', slot, {
+        x: firstCenter.x + step.x * (slot - 1),
+        y: firstCenter.y + step.y * (slot - 1),
+      });
+    }
+    const right1 = findSlot('right', 1);
+    if (!right1) return result;
+    const rightCenter = candidateHeroCropCenter(right1.crop);
+    for (let slot = 2; slot <= teamSize; slot += 1) {
+      addSlot('right', slot, {
+        x: rightCenter.x + step.x * (slot - 1),
+        y: rightCenter.y + step.y * (slot - 1),
+      });
+    }
+    return result;
+  }
+
+  const right1 = findSlot('right', 1);
+  if (!right1) return result;
+  const rightCenter = candidateHeroCropCenter(right1.crop);
+  for (let slot = 2; slot <= teamSize; slot += 1) {
+    const matchingLeft = findSlot('left', slot);
+    if (!matchingLeft) return result;
+    addSlot('right', slot, {
+      x: rightCenter.x,
+      y: candidateHeroCropCenter(matchingLeft.crop).y,
+    });
+  }
+  return result;
+}
+
+function renderCandidateHeroLineup() {
+  const review = $('#candidate-hero-review');
+  const teams = $('#candidate-hero-teams');
+  const tools = $('.candidate-hero-tools');
+  teams.innerHTML = '';
+  const context = candidateHeroContext(currentCandidate());
+  if (!context) {
+    review.classList.toggle('hidden', !currentCandidate() || !candidateDraft);
+    teams.classList.add('hidden');
+    tools.classList.add('hidden');
+    $('#candidate-hero-status').textContent =
+      '先选择头像来源；没有可标头像时可选“无头像”或“看不清”。';
+    renderCandidateBoxes();
+    return;
+  }
+  review.classList.remove('hidden');
+  tools.classList.remove('hidden');
+  const drawButton = $('#btn-candidate-hero-draw');
+  const saveTemplate = $('#btn-candidate-hero-save-template');
+  const clearButton = $('#btn-candidate-hero-clear');
+  if (!candidateHeroLineup) {
+    teams.classList.add('hidden');
+    drawButton.classList.remove('hidden');
+    drawButton.disabled = true;
+    saveTemplate.disabled = true;
+    clearButton.disabled = true;
+    $('#candidate-hero-status').textContent = candidateHeroLoading
+      ? '正在读取本图或该主播缓存的英雄框…'
+      : '请先选择每队 3 人或每队 5 人。';
+    renderCandidateBoxes();
+    return;
+  }
+  teams.classList.remove('hidden');
+  const recognized = candidateHeroLineup.slots.filter(
+    (slot) => slot.suggested_label).length;
+  const screenName = CANDIDATE_HERO_LAYOUTS[candidateHeroLineup.screen_type]
+    || candidateHeroLineup.screen_type;
+  const complete = candidateHeroLayoutComplete();
+  const marksPlayer = ['scoreboard', 'result_page'].includes(
+    candidateHeroLineup.screen_type);
+  const playerPosition = candidateHeroPlayerPosition();
+  const next = candidateNextHeroPosition();
+  const status = candidateHeroLineup.review_status === 'confirmed'
+    ? '阵容已经人工确认；修改任意下拉框后会更新。'
+    : complete
+      ? `算法预填 ${recognized}/${candidateHeroLineup.slots.length} 个；` +
+        '正确的不用改，只修改错误或空白的位置。'
+      : next
+        ? `已画 ${candidateHeroLineup.slots.length}/` +
+          `${candidateHeroLineup.team_size * 2} 个；下一框是` +
+          `${next.side === 'left' ? '左队' : '右队'}第 ${next.slot} 个。`
+        : '还没有英雄圆框。';
+  const drawingHint = !complete && candidateHeroLineup.slots.length
+    ? ' 后续圆框沿用第一个大小，可直接点头像中心。' : '';
+  const playerHint = !marksPlayer ? '' : playerPosition
+    ? ` 主播本人：${playerPosition.side === 'left' ? '左' : '右'}队第 ` +
+      `${playerPosition.slot} 个。`
+    : ' 请点击“设为本人”，标出画面中高亮的主播英雄。';
+  $('#candidate-hero-status').textContent =
+    `${screenName} · ${candidateHeroLineup.team_size}V${candidateHeroLineup.team_size} · ` +
+    `${status}${drawingHint}${playerHint} 拖圆框移动，拖黄点缩放。`;
+  drawButton.disabled = candidateHeroLoading || complete;
+  drawButton.classList.toggle('hidden', complete);
+  drawButton.classList.toggle('selected', candidateHeroDrawMode);
+  drawButton.textContent = candidateHeroDrawMode && next
+      ? `正在画${next.side === 'left' ? '左' : '右'}${next.slot}`
+      : '补画头像';
+  saveTemplate.disabled = candidateHeroLoading || !complete;
+  clearButton.disabled = candidateHeroLoading || !candidateHeroLineup.slots.length;
+  for (const side of ['left', 'right']) {
+    const team = document.createElement('section');
+    team.className = 'candidate-hero-team';
+    const title = document.createElement('div');
+    title.className = 'candidate-hero-team-title';
+    title.textContent = side === 'left' ? '左队' : '右队';
+    team.appendChild(title);
+    const slots = document.createElement('div');
+    slots.className = `candidate-hero-slots team-size-${candidateHeroLineup.team_size}`;
+    candidateHeroLineup.slots.filter((slot) => slot.side === side).forEach((slot) => {
+      const key = candidateHeroKey(slot.side, slot.slot);
+      const selected = candidateHeroDraft.get(key) || '';
+      const hero = candidateHeroDisplay(selected);
+      const isPlayer = marksPlayer && candidateHeroPlayerSlot === key;
+      const card = document.createElement('article');
+      card.className = 'candidate-hero-slot';
+      card.dataset.heroSlot = key;
+      card.classList.toggle('player', isPlayer);
+      const index = document.createElement('span');
+      index.className = 'candidate-hero-slot-index';
+      index.textContent = String(slot.slot);
+      card.appendChild(index);
+      const comparison = document.createElement('div');
+      comparison.className = 'candidate-hero-comparison';
+      comparison.setAttribute('aria-label', '截图头像与当前标注头像对照');
+      const crop = document.createElement('img');
+      crop.className = 'candidate-hero-crop';
+      crop.src = `${slot.crop_url}?t=${encodeURIComponent(slot.updated_at || '')}`;
+      crop.alt = `${side === 'left' ? '左队' : '右队'}第 ${slot.slot} 个截图头像`;
+      crop.title = '截图中圈出的原始头像';
+      crop.draggable = false;
+      comparison.appendChild(crop);
+      if (hero && hero.image_url) {
+        const reference = document.createElement('img');
+        reference.className = 'candidate-hero-reference';
+        reference.src = hero.image_url;
+        reference.alt = `当前标注的标准头像：${hero.name} · ${hero.label}`;
+        reference.title = reference.alt;
+        reference.draggable = false;
+        comparison.appendChild(reference);
+      } else {
+        const reference = document.createElement('span');
+        reference.className = 'candidate-hero-reference empty';
+        reference.textContent = '?';
+        reference.title = hero ? '当前标注为看不清' : '尚未选择英雄';
+        reference.setAttribute('aria-label', reference.title);
+        comparison.appendChild(reference);
+      }
+      card.appendChild(comparison);
+      const details = document.createElement('div');
+      details.className = 'candidate-hero-slot-details';
+      details.classList.toggle('with-player-action', marksPlayer);
+      const select = document.createElement('button');
+      select.type = 'button';
+      select.className = 'candidate-hero-select';
+      select.dataset.heroSlot = key;
+      select.classList.toggle('missing', !hero);
+      const name = document.createElement('span');
+      name.className = 'candidate-hero-selected-name';
+      const confidence = hero && selected === slot.suggested_label
+        ? ` · ${(Number(slot.suggestion_confidence || 0) * 100).toFixed(1)}%`
+        : '';
+      name.textContent = hero
+        ? `${hero.name}${hero.label === 'unreadable' ? '' : ` · ${hero.label}`}`
+        : '请选择英雄';
+      name.textContent += confidence;
+      select.title = name.textContent;
+      select.appendChild(name);
+      select.onclick = () => openCandidateHeroPicker(select, key);
+      details.appendChild(select);
+      if (marksPlayer) {
+        const playerButton = document.createElement('button');
+        playerButton.type = 'button';
+        playerButton.className = 'candidate-hero-player';
+        playerButton.classList.toggle('selected', isPlayer);
+        playerButton.dataset.heroSlot = key;
+        playerButton.setAttribute('aria-pressed', String(isPlayer));
+        playerButton.textContent = isPlayer ? '✓ 本人' : '设为本人';
+        playerButton.title = isPlayer
+          ? '这个英雄是主播本人使用的英雄'
+          : '将这个英雄标记为主播本人使用的英雄';
+        playerButton.onclick = () => {
+          candidateHeroPlayerSlot = key;
+          candidateHeroDirty = true;
+          $('#candidate-save-state').classList.remove('error');
+          $('#candidate-save-state').textContent = '';
+          renderCandidateHeroLineup();
+        };
+        details.appendChild(playerButton);
+      }
+      card.appendChild(details);
+      slots.appendChild(card);
+    });
+    team.appendChild(slots);
+    teams.appendChild(team);
+  }
+  renderCandidateBoxes();
+}
+
+function renderCandidateHeroOptions() {
+  const options = $('#candidate-hero-options');
+  options.innerHTML = '';
+  if (!candidateHeroPickerSlot) return;
+  const query = $('#candidate-hero-search').value.trim().toLocaleLowerCase();
+  const current = candidateHeroDraft.get(candidateHeroPickerSlot) || '';
+  const values = [
+    {label: 'unreadable', name: '看不清／无法确认', image_url: ''},
+    ...candidateHeroCatalog,
+  ].filter((hero) => !query ||
+    `${hero.name} ${hero.label}`.toLocaleLowerCase().includes(query));
+  values.forEach((hero) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'candidate-hero-option';
+    button.classList.toggle('selected', hero.label === current);
+    if (hero.image_url) {
+      const image = document.createElement('img');
+      image.src = hero.image_url;
+      image.alt = '';
+      image.loading = 'lazy';
+      button.appendChild(image);
+    }
+    const names = document.createElement('span');
+    names.textContent = hero.name;
+    if (hero.label !== 'unreadable') {
+      const english = document.createElement('small');
+      english.textContent = hero.label;
+      names.appendChild(english);
+    }
+    button.appendChild(names);
+    button.onclick = () => {
+      candidateHeroDraft.set(candidateHeroPickerSlot, hero.label);
+      candidateHeroDirty = true;
+      $('#candidate-save-state').classList.remove('error');
+      $('#candidate-save-state').textContent = '';
+      closeCandidateHeroPicker();
+      renderCandidateHeroLineup();
+    };
+    options.appendChild(button);
+  });
+}
+
+function openCandidateHeroPicker(anchor, slotKey) {
+  candidateHeroPickerSlot = slotKey;
+  $('#btn-candidate-hero-delete').disabled = false;
+  $('#candidate-hero-search').value = '';
+  renderCandidateHeroOptions();
+  const picker = $('#candidate-hero-picker');
+  picker.classList.remove('hidden');
+  const anchorRect = anchor.getBoundingClientRect();
+  const pickerRect = picker.getBoundingClientRect();
+  const left = Math.max(
+    12, Math.min(window.innerWidth - pickerRect.width - 12, anchorRect.left));
+  const below = anchorRect.bottom + 6;
+  const top = below + pickerRect.height <= window.innerHeight - 12
+    ? below : Math.max(12, anchorRect.top - pickerRect.height - 6);
+  picker.style.left = `${left}px`;
+  picker.style.top = `${top}px`;
+  renderCandidateBoxes();
+  $('#candidate-hero-search').focus();
+}
+
+function showCandidateMissingHero(label) {
+  const key = candidateHeroKey(label.side, label.slot);
+  const sideName = label.side === 'left' ? '左队' : '右队';
+  const saveState = $('#candidate-save-state');
+  saveState.classList.add('error');
+  saveState.textContent =
+    `${sideName}第 ${label.slot} 个英雄还没选，已为你打开选择面板`;
+  const select = [...$$('.candidate-hero-select')]
+    .find((value) => value.dataset.heroSlot === key);
+  if (!select) return;
+  const card = select.closest('.candidate-hero-slot');
+  if (card) card.classList.add('needs-attention');
+  select.scrollIntoView({block: 'center', inline: 'nearest'});
+  requestAnimationFrame(() => openCandidateHeroPicker(select, key));
+}
+
+function showCandidateMissingPlayerHero() {
+  showCandidateSaveError('请在英雄阵容中标出画面高亮的主播本人英雄');
+  const buttons = $$('.candidate-hero-player');
+  buttons.forEach((button) => button.classList.add('needs-attention'));
+  if (buttons[0]) buttons[0].scrollIntoView({block: 'center', inline: 'nearest'});
+}
+
+async function loadCandidateHeroLineup(item) {
+  const context = candidateHeroContext(item);
+  if (!context) {
+    resetCandidateHeroReview();
+    renderCandidateHeroContextControls();
+    renderCandidateHeroLineup();
+    $('#btn-candidate-save').disabled = false;
+    return;
+  }
+  const token = ++candidateHeroLoadToken;
+  candidateHeroLoading = true;
+  candidateHeroLineup = null;
+  candidateHeroDraft = new Map();
+  candidateHeroPlayerSlot = null;
+  candidateHeroDirty = false;
+  candidateHeroDrawMode = false;
+  closeCandidateHeroPicker();
+  $('#candidate-hero-review').classList.remove('hidden');
+  $('#candidate-hero-teams').innerHTML = '';
+  $('#candidate-hero-status').textContent = '正在读取本图或该主播缓存的英雄框…';
+  $('#btn-candidate-save').disabled = true;
+  const query = new URLSearchParams({screen_type: context.screenType});
+  if (context.teamSize) query.set('team_size', String(context.teamSize));
+  try {
+    const [, lineup] = await Promise.all([
+      ensureCandidateHeroCatalog(),
+      api(`/api/training-review/items/${item.frame_id}/hero-lineup?${query}`),
+    ]);
+    if (token !== candidateHeroLoadToken || currentCandidate() !== item) return;
+    if (!lineup.applicable) {
+      resetCandidateHeroReview();
+      $('#btn-candidate-save').disabled = false;
+      return;
+    }
+    if (lineup.needs_team_size) {
+      candidateHeroLineup = null;
+      renderCandidateHeroLineup();
+      return;
+    }
+    lineup.slots ||= [];
+    candidateHeroLineup = lineup;
+    candidateHeroPlayerSlot = candidateHeroPlayerKey(lineup);
+    if (!context.teamSize && lineup.team_size) {
+      candidateHeroTeamSizeExplicit = true;
+      candidateHeroTeamSizeOverride = lineup.team_size;
+      renderCandidateChoices();
+    }
+    candidateHeroDraft = new Map(
+      lineup.slots.map((slot) => [
+        candidateHeroKey(slot.side, slot.slot),
+        slot.confirmed_label || slot.suggested_label || '',
+      ])
+    );
+    renderCandidateHeroLineup();
+  } catch (error) {
+    if (token !== candidateHeroLoadToken || currentCandidate() !== item) return;
+    candidateHeroLineup = null;
+    $('#candidate-hero-review').classList.remove('hidden');
+    $('#candidate-hero-status').textContent = '英雄预填失败：' + error.message;
+  } finally {
+    if (token === candidateHeroLoadToken) {
+      candidateHeroLoading = false;
+      $('#btn-candidate-save').disabled = false;
+      renderCandidateHeroLineup();
+    }
+  }
+}
+
+function refreshCandidateHeroReview() {
+  const item = currentCandidate();
+  const context = candidateHeroContext(item);
+  if (!context) {
+    resetCandidateHeroReview();
+    renderCandidateHeroContextControls();
+    renderCandidateHeroLineup();
+    $('#btn-candidate-save').disabled = !item;
+    return;
+  }
+  if (candidateHeroLineup &&
+      candidateHeroLineup.screen_type === context.screenType &&
+      (!context.teamSize || candidateHeroLineup.team_size === context.teamSize)) {
+    $('#candidate-hero-review').classList.remove('hidden');
+    renderCandidateHeroLineup();
+    return;
+  }
+  loadCandidateHeroLineup(item);
+}
+
+function candidateHeroSlotsPayload(slots = null) {
+  return (slots || (candidateHeroLineup && candidateHeroLineup.slots) || [])
+    .map((slot) => ({
+      side: slot.side,
+      slot: slot.slot,
+      crop: {...slot.crop},
+    }));
+}
+
+async function persistCandidateHeroLayout(
+  slots, {recognize = false, saveTemplate = false} = {}) {
+  const item = currentCandidate();
+  const context = candidateHeroContext(item);
+  if (!item || !context || !context.teamSize || candidateHeroLoading) return false;
+  const previousDraft = new Map(candidateHeroDraft);
+  const previousPlayerSlot = candidateHeroPlayerSlot;
+  candidateHeroLoading = true;
+  $('#btn-candidate-save').disabled = true;
+  renderCandidateHeroLineup();
+  try {
+    const lineup = await api(
+      `/api/training-review/items/${item.frame_id}/hero-layout`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          screen_type: context.screenType,
+          team_size: context.teamSize,
+          slots: candidateHeroSlotsPayload(slots),
+          recognize: recognize,
+          save_template: saveTemplate,
+        }),
+      });
+    candidateHeroLineup = lineup;
+    const persistedPlayerSlot = candidateHeroPlayerKey(lineup);
+    const previousPlayerStillExists = previousPlayerSlot && lineup.slots.some(
+      (slot) => candidateHeroKey(slot.side, slot.slot) === previousPlayerSlot
+    );
+    candidateHeroPlayerSlot = persistedPlayerSlot ||
+      (previousPlayerStillExists ? previousPlayerSlot : null);
+    candidateHeroDraft = new Map(
+      lineup.slots.map((slot) => {
+        const key = candidateHeroKey(slot.side, slot.slot);
+        return [
+          key,
+          previousDraft.get(key) || slot.confirmed_label ||
+            slot.suggested_label || '',
+        ];
+      })
+    );
+    candidateHeroDirty = true;
+    if (lineup.template_saved) {
+      $('#candidate-save-state').textContent =
+        '英雄圆框已识别，并缓存为该主播的同类画面布局';
+    }
+    return true;
+  } catch (error) {
+    $('#candidate-save-state').textContent = '英雄圆框保存失败：' + error.message;
+    return false;
+  } finally {
+    candidateHeroLoading = false;
+    $('#btn-candidate-save').disabled = false;
+    renderCandidateHeroLineup();
+    renderCandidateChoices();
+  }
+}
+
+async function addCandidateHeroCircle(crop) {
+  const next = candidateNextHeroPosition();
+  if (!next || !candidateHeroLineup) return;
+  const manuallyAdded = [
+    ...candidateHeroLineup.slots,
+    {...next, crop},
+  ];
+  const slots = candidateHeroAutofillSlots(
+    manuallyAdded,
+    candidateHeroLineup.screen_type,
+    candidateHeroLineup.team_size,
+  );
+  const complete = slots.length === candidateHeroLineup.team_size * 2;
+  const saved = await persistCandidateHeroLayout(slots, {
+    recognize: complete,
+    saveTemplate: complete,
+  });
+  if (saved && complete) {
+    candidateHeroDrawMode = false;
+    const automaticallyAdded = slots.length - manuallyAdded.length;
+    if (automaticallyAdded > 0) {
+      $('#candidate-save-state').textContent =
+        `已自动补齐 ${automaticallyAdded} 个英雄圆框，并完成识别`;
+    }
+  }
+  renderCandidateHeroLineup();
+}
+
+async function deleteCandidateHeroSlot() {
+  if (!candidateHeroPickerSlot || !candidateHeroLineup) return;
+  const key = candidateHeroPickerSlot;
+  const slots = candidateHeroLineup.slots.filter((slot) =>
+    candidateHeroKey(slot.side, slot.slot) !== key);
+  candidateHeroDraft.delete(key);
+  if (candidateHeroPlayerSlot === key) candidateHeroPlayerSlot = null;
+  closeCandidateHeroPicker();
+  const saved = await persistCandidateHeroLayout(slots);
+  if (saved) candidateHeroDrawMode = true;
+  renderCandidateHeroLineup();
+}
+
+async function clearCandidateHeroLayout() {
+  if (!candidateHeroLineup || !candidateHeroLineup.slots.length) return;
+  candidateHeroDraft = new Map();
+  candidateHeroPlayerSlot = null;
+  closeCandidateHeroPicker();
+  const saved = await persistCandidateHeroLayout([]);
+  if (saved) candidateHeroDrawMode = true;
+  renderCandidateHeroLineup();
+}
+
+async function saveCandidateHeroTemplate() {
+  if (!candidateHeroLayoutComplete()) return;
+  await persistCandidateHeroLayout(candidateHeroLineup.slots, {
+    recognize: true,
+    saveTemplate: true,
+  });
+}
+
+function renderCandidateHeroContextControls() {
+  const section = $('#candidate-hero-context');
+  const review = $('#candidate-hero-review');
+  const layoutActions = $('#candidate-hero-layout-actions');
+  const sizeGroup = $('#candidate-hero-size-group');
+  const sizeActions = $('#candidate-hero-size-actions');
+  layoutActions.innerHTML = '';
+  sizeActions.innerHTML = '';
+  const item = currentCandidate();
+  if (!item || !candidateDraft) {
+    section.classList.add('hidden');
+    review.classList.add('hidden');
+    return;
+  }
+  review.classList.remove('hidden');
+  section.classList.remove('hidden');
+  Object.entries(CANDIDATE_HERO_LAYOUTS).forEach(([value, label]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = CANDIDATE_HERO_LAYOUT_SHORT_LABELS[value] || label;
+    button.title = label;
+    button.classList.toggle(
+      'selected', candidateDraft.hero_layout_label === value);
+    button.onclick = () => selectCandidateHeroLayout(value);
+    layoutActions.appendChild(button);
+  });
+  const hasHeroLayout = CANDIDATE_HERO_SCREEN_TYPES.has(
+    candidateDraft.hero_layout_label);
+  sizeGroup.classList.toggle('hidden', !hasHeroLayout);
+  if (hasHeroLayout) {
+    const context = candidateHeroContext(item);
+    [3, 5].forEach((teamSize) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = `${teamSize} 人`;
+      button.classList.toggle(
+        'selected', context && context.teamSize === teamSize);
+      button.onclick = () => {
+        candidateHeroTeamSizeExplicit = true;
+        candidateHeroTeamSizeOverride = teamSize;
+        candidateHeroDrawMode = false;
+        renderCandidateHeroContextControls();
+        loadCandidateHeroLineup(item);
+      };
+      sizeActions.appendChild(button);
+    });
+  }
+}
+
+function renderCandidateChoices() {
+  const item = currentCandidate();
+  const actions = $('#candidate-label-actions');
+  actions.innerHTML = '';
+  renderCandidateHeroContextControls();
+  if (!item || !candidateDraft) return;
+  TRAINING_REVIEW_FIELDS.forEach((field) => {
+    const group = document.createElement('section');
+    group.className = 'candidate-review-group';
+    if (field.key === 'match_mode_label' &&
+        candidateDraft.match_flow_label !== 'match_flow') {
+      group.classList.add('hidden');
+    }
+    const heading = document.createElement('h4');
+    heading.textContent = field.title;
+    group.appendChild(heading);
+    const buttons = document.createElement('div');
+    buttons.className = 'candidate-review-buttons';
+    const suggestion = candidateSuggestedValue(item, field);
+    Object.entries(field.labels).forEach(([value, label]) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label + (value === suggestion ? ' · 模型建议' : '');
+      button.classList.toggle('selected', candidateDraft[field.key] === value);
+      button.onclick = () => selectCandidateReviewLabel(field.key, value);
+      buttons.appendChild(button);
+    });
+    group.appendChild(buttons);
+    const help = document.createElement('p');
+    help.className = 'hint small';
+    help.textContent = field.help;
+    group.appendChild(help);
+    actions.appendChild(group);
+  });
+  const needsBox = candidateDraft.result_panel_label === 'result_panel';
+  $('#candidate-draw-hint').textContent = candidateHeroDrawMode
+    ? '正在画英雄圆框；画完当前英雄后会自动切到下一个位置。'
+    : needsBox
+      ? '在左图空白处拖动可框住完整结算面板；点“画英雄圆框”后则改为画头像。'
+      : '确认右侧四项和图片下方的英雄标注后，点“确认并下一张”。';
+  $('#btn-candidate-clear-boxes').disabled = !needsBox || !candidateBoxes.length;
+}
+
+function selectCandidateHeroLayout(value) {
+  if (!candidateDraft || !CANDIDATE_HERO_LAYOUTS[value]) return;
+  candidateDraft.hero_layout_label = value;
+  candidateHeroDrawMode = false;
+  if (CANDIDATE_HERO_SCREEN_TYPES.has(value)) {
+    candidateDraft.match_flow_label = 'match_flow';
+    candidateDraft.match_mode_label ||= 'unreadable';
+    candidateDraft.hero_select_label = 'not_select';
+    if (value === 'result_page') {
+      candidateDraft.result_panel_label = 'result_panel';
+    } else {
+      candidateDraft.result_panel_label = 'no_result_panel';
+      candidateBoxes = [];
+    }
+  } else {
+    resetCandidateHeroReview();
+  }
+  renderCandidateBoxes();
+  renderCandidateChoices();
+  refreshCandidateHeroReview();
+}
+
+function selectCandidateReviewLabel(field, value) {
+  if (!candidateDraft) return;
+  candidateDraft[field] = value;
+  if (field === 'match_flow_label') {
+    candidateHeroTeamSizeExplicit = false;
+    candidateHeroTeamSizeOverride = null;
+    if (value === 'match_flow') {
+      candidateDraft.match_mode_label ||= 'unreadable';
+      candidateDraft.hero_select_label = 'not_select';
+    } else {
+      candidateDraft.match_mode_label = null;
+      if (value === 'unreadable') candidateDraft.hero_select_label = 'unreadable';
+      else candidateDraft.hero_select_label ||= 'not_select';
+      candidateDraft.result_panel_label = value === 'unreadable'
+        ? 'unreadable' : 'no_result_panel';
+      candidateDraft.hero_layout_label = value === 'unreadable'
+        ? 'unreadable' : 'none';
+      candidateBoxes = [];
+      renderCandidateBoxes();
+    }
+  } else if (field === 'match_mode_label') {
+    candidateDraft.match_flow_label = 'match_flow';
+    candidateDraft.hero_select_label = 'not_select';
+    candidateHeroTeamSizeExplicit = true;
+    candidateHeroTeamSizeOverride = value === '5v5' ? 5
+      : ['3v3', 'aram'].includes(value) ? 3 : null;
+  } else if (field === 'hero_select_label' && value.startsWith('select_')) {
+    candidateDraft.match_flow_label = 'not_match_flow';
+    candidateDraft.match_mode_label = null;
+    candidateHeroTeamSizeExplicit = false;
+    candidateHeroTeamSizeOverride = null;
+    candidateDraft.result_panel_label = 'no_result_panel';
+    candidateDraft.hero_layout_label = 'none';
+    candidateBoxes = [];
+    renderCandidateBoxes();
+  } else if (field === 'hero_select_label' && value === 'unreadable' &&
+      candidateDraft.match_flow_label === 'match_flow') {
+    candidateDraft.match_flow_label = 'unreadable';
+    candidateDraft.match_mode_label = null;
+  } else if (field === 'result_panel_label' && value === 'result_panel') {
+    candidateDraft.match_flow_label = 'match_flow';
+    candidateDraft.match_mode_label ||= 'unreadable';
+    candidateDraft.hero_select_label = 'not_select';
+    candidateDraft.hero_layout_label = 'result_page';
+  } else if (field === 'result_panel_label' && value !== 'result_panel') {
+    if (candidateDraft.hero_layout_label === 'result_page') {
+      candidateDraft.hero_layout_label = 'none';
+    }
+    candidateBoxes = [];
+    renderCandidateBoxes();
+  }
+  renderCandidateChoices();
+  refreshCandidateHeroReview();
+}
+
+function renderCandidateItem() {
+  const item = currentCandidate();
+  const image = $('#candidate-image');
+  const empty = $('#candidate-empty');
+  $('#candidate-progress').textContent = candidateQueue.length
+    ? `${candidateIndex + 1}/${candidateQueue.length}` : '0/0';
+  $('#btn-candidate-prev').disabled = !item || candidateIndex <= 0;
+  $('#btn-candidate-next').disabled = !item || candidateIndex >= candidateQueue.length - 1;
+  if (!item) {
+    image.onload = null;
+    image.removeAttribute('src');
+    $('#candidate-image-wrap').classList.add('hidden');
+    empty.classList.remove('hidden');
+    $('#candidate-meta').textContent = '';
+    $('#candidate-label-actions').innerHTML = '';
+    $('#candidate-suggestion').textContent = '--';
+    $('#candidate-reason').textContent = '';
+    $('#btn-candidate-save').disabled = true;
+    candidateDraft = null;
+    candidateHeroTeamSizeExplicit = false;
+    candidateHeroTeamSizeOverride = null;
+    candidateBoxes = [];
+    resetCandidateHeroReview();
+    renderCandidateHeroContextControls();
+    renderCandidateBoxes();
+    return;
+  }
+  empty.classList.add('hidden');
+  $('#candidate-image-wrap').classList.remove('hidden');
+  const frameId = item.frame_id;
+  image.onload = () => {
+    if (currentCandidate() && currentCandidate().frame_id === frameId) {
+      renderCandidateBoxes();
+    }
+  };
+  image.src = `/api/frames/${item.frame_id}/image?t=${encodeURIComponent(item.updated_at)}`;
+  candidateHeroTeamSizeExplicit = false;
+  candidateHeroTeamSizeOverride = null;
+  candidateHeroDrawMode = false;
+  candidateDraft = candidateDefaultDraft(item);
+  const suggestedBox = candidateSuggestedResultBox(item);
+  candidateBoxes = suggestedBox ? [suggestedBox] : [];
+  $('#candidate-notes').value = item.notes || '';
+  $('#candidate-meta').textContent =
+    `${item.streamer || '未知主播'} / ${item.filename || ''} · ` +
+    `${(item.timestamp_ms / 1000).toFixed(1)}s · frame #${item.frame_id} · ` +
+    `${item.source_count || 0} 个来源`;
+  renderCandidateSuggestions(item);
+  renderCandidateChoices();
+  $('#btn-candidate-save').disabled = false;
+  $('#candidate-save-state').classList.remove('error');
+  $('#candidate-save-state').textContent = item.needs_player_hero_review
+    ? '原标注已保留，请补齐英雄阵容并标出主播本人'
+    : item.review_status === 'confirmed'
+      ? '这张图已经人工确认' : item.review_status === 'partial'
+      ? '历史数据只覆盖了部分标签，请补齐后确认'
+      : item.review_status === 'skipped' ? '已跳过' : '';
+  $('#btn-candidate-skip').disabled = item.review_status === 'confirmed';
+  renderCandidateBoxes();
+  loadCandidateHeroLineup(item);
+}
+
+async function loadCandidateReview() {
+  const status = $('#candidate-status-filter').value;
+  try {
+    const data = await api(
+      `/api/training-review/items?status=${encodeURIComponent(status)}&limit=2000`);
+    candidateQueue = data.items || [];
+    candidateIndex = 0;
+    renderCandidateItem();
+    const stats = data.stats || {};
+    const missingPlayer = stats.missing_player_hero || 0;
+    $('#candidate-sync-state').textContent =
+      `本地 ${stats.total || 0} · 待补齐 ${((stats.statuses || {}).pending || 0) +
+        ((stats.statuses || {}).partial || 0) + missingPlayer}（待补本人 ${missingPlayer}） · ` +
+      `已确认 ${(stats.statuses || {}).confirmed || 0} · ` +
+      `待回传 ${stats.dirty || 0}`;
+  } catch (error) {
+    $('#candidate-save-state').textContent = '加载失败：' + error.message;
+  }
+}
+
+function moveCandidate(offset) {
+  if (!candidateQueue.length) return;
+  candidateIndex = Math.max(
+    0, Math.min(candidateQueue.length - 1, candidateIndex + offset));
+  renderCandidateItem();
+}
+
+function showCandidateSaveError(message) {
+  const saveState = $('#candidate-save-state');
+  saveState.classList.add('error');
+  saveState.textContent = message;
+}
+
+async function saveCandidateReview(skip = false) {
+  const item = currentCandidate();
+  if (!item || !candidateDraft) return;
+  $('#candidate-save-state').classList.remove('error');
+  if (!skip && candidateHeroLoading) {
+    showCandidateSaveError('英雄预填仍在进行，请稍等一下');
+    return;
+  }
+  if (!skip && candidateDraft.result_panel_label === 'result_panel' &&
+      !candidateBoxes.length) {
+    showCandidateSaveError('请先在左侧框出完整结算面板');
+    return;
+  }
+  const heroContext = candidateHeroContext(item);
+  if (!skip && heroContext && (
+    !heroContext.teamSize ||
+    !candidateHeroLineup ||
+    candidateHeroLineup.screen_type !== heroContext.screenType ||
+    candidateHeroLineup.team_size !== heroContext.teamSize ||
+    !candidateHeroLayoutComplete()
+  )) {
+    showCandidateSaveError('请先选择每队人数，并按顺序画满全部英雄圆框');
+    return;
+  }
+  const heroLabels = !skip && heroContext && candidateHeroLineup
+    ? candidateHeroLineup.slots.map((slot) => ({
+      side: slot.side,
+      slot: slot.slot,
+      hero_label: candidateHeroDraft.get(
+        candidateHeroKey(slot.side, slot.slot)) || '',
+    })) : null;
+  const missingHero = heroLabels && heroLabels.find(
+    (value) => !value.hero_label);
+  if (missingHero) {
+    showCandidateMissingHero(missingHero);
+    return;
+  }
+  const playerPosition = candidateHeroPlayerPosition();
+  if (!skip && heroContext &&
+      ['scoreboard', 'result_page'].includes(heroContext.screenType) &&
+      !playerPosition) {
+    showCandidateMissingPlayerHero();
+    return;
+  }
+  $('#candidate-save-state').textContent = '正在保存…';
+  try {
+    if (heroLabels && (
+      candidateHeroDirty || candidateHeroLineup.review_status !== 'confirmed'
+    )) {
+      candidateHeroLineup = await api(
+        `/api/training-review/items/${item.frame_id}/hero-lineup`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            heroes: heroLabels,
+            player_side: playerPosition && playerPosition.side,
+            player_slot: playerPosition && playerPosition.slot,
+          }),
+        });
+      candidateHeroPlayerSlot = candidateHeroPlayerKey(candidateHeroLineup);
+      candidateHeroDirty = false;
+    }
+    const labels = skip ? {
+      match_flow_label: null, match_mode_label: null,
+      hero_select_label: null, result_panel_label: null,
+      hero_layout_label: null,
+    } : candidateDraft;
+    const updated = await api(`/api/training-review/items/${item.frame_id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...labels,
+        review_status: skip ? 'skipped' : 'confirmed',
+        result_box: !skip && candidateDraft.result_panel_label === 'result_panel'
+          ? candidateBoxes[0] : null,
+        notes: $('#candidate-notes').value,
+      }),
+    });
+    if (!skip) cacheCandidateReviewLabels(candidateDraft);
+    candidateQueue[candidateIndex] = updated;
+    if (candidateIndex < candidateQueue.length - 1) {
+      moveCandidate(1);
+      return;
+    }
+    renderCandidateItem();
+  } catch (error) {
+    showCandidateSaveError('保存失败：' + error.message);
+  }
+}
+
+function candidatePoint(event) {
+  const rect = $('#candidate-box-layer').getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+  };
+}
+
+function candidatePixelPoint(event) {
+  const rect = $('#candidate-box-layer').getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+    y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function candidateHeroDrawingDiameter(width, height) {
+  const first = candidateHeroLineup && candidateHeroLineup.slots[0];
+  if (!first) return null;
+  const crop = candidateHeroDisplayCrop(first.crop, {width, height});
+  return crop.w * width;
+}
+
+async function refreshCandidateSync() {
+  try {
+    const value = await api('/api/worker-candidates/state');
+    const sync = value.sync || {};
+    const review = value.review || {};
+    $('#candidate-sync-state').textContent = sync.running
+      ? `同步中：Worker ${sync.processed || 0}/${sync.total || 0}，` +
+        `历史结算 ${sync.archive_processed || 0}/${sync.archive_total || 0}`
+      : sync.error ? `同步失败：${sync.error}`
+      : sync.archive_failed ?
+        `历史结算图失败 ${sync.archive_failed} 张：${sync.archive_last_error || '未知错误'}`
+      : `本地 ${review.total || 0} · 待补齐 ${((review.statuses || {}).pending || 0) +
+          ((review.statuses || {}).partial || 0) +
+          (review.missing_player_hero || 0)}（待补本人 ${review.missing_player_hero || 0}） · ` +
+        `待回传 ${review.dirty || 0} · ` +
+        `历史结算新增 ${sync.archive_inserted || 0}／预填框 ${sync.archive_box_suggested || 0} · ` +
+        `本次拉取 ${sync.reviews_pulled || 0}／回传 ${sync.reviews_pushed || 0}`;
+    if (!sync.running && candidateSyncTimer) {
+      clearInterval(candidateSyncTimer);
+      candidateSyncTimer = null;
+      await loadCandidateReview();
+    }
+  } catch (error) {
+    $('#candidate-sync-state').textContent = '同步状态读取失败：' + error.message;
+  }
+}
+
+async function syncCandidates() {
+  $('#candidate-sync-state').textContent = '正在启动同步…';
+  try {
+    await api('/api/worker-candidates/sync', {
+      method: 'POST', body: JSON.stringify({maximum: 20000}),
+    });
+    if (!candidateSyncTimer) {
+      candidateSyncTimer = setInterval(refreshCandidateSync, 1000);
+    }
+    await refreshCandidateSync();
+  } catch (error) {
+    $('#candidate-sync-state').textContent = '同步失败：' + error.message;
+  }
+}
+
+function bindCandidateReview() {
+  $('#candidate-status-filter').onchange = loadCandidateReview;
+  $('#btn-candidate-refresh').onclick = loadCandidateReview;
+  $('#btn-candidate-sync').onclick = syncCandidates;
+  $('#btn-candidate-prev').onclick = () => moveCandidate(-1);
+  $('#btn-candidate-next').onclick = () => moveCandidate(1);
+  $('#btn-candidate-clear-boxes').onclick = () => {
+    candidateBoxes = [];
+    renderCandidateBoxes();
+  };
+  $('#btn-candidate-skip').onclick = () => saveCandidateReview(true);
+  $('#btn-candidate-save').onclick = () => saveCandidateReview();
+  $('#candidate-hero-search').oninput = renderCandidateHeroOptions;
+  $('#btn-candidate-hero-picker-close').onclick = closeCandidateHeroPicker;
+  $('#btn-candidate-hero-delete').onclick = deleteCandidateHeroSlot;
+  $('#btn-candidate-hero-draw').onclick = () => {
+    if (!candidateHeroLineup || candidateHeroLayoutComplete()) return;
+    candidateHeroDrawMode = !candidateHeroDrawMode;
+    renderCandidateHeroLineup();
+    renderCandidateChoices();
+  };
+  $('#btn-candidate-hero-save-template').onclick = saveCandidateHeroTemplate;
+  $('#btn-candidate-hero-clear').onclick = clearCandidateHeroLayout;
+  document.addEventListener('pointerdown', (event) => {
+    const picker = $('#candidate-hero-picker');
+    if (!picker.classList.contains('hidden') &&
+        !picker.contains(event.target) &&
+        !event.target.closest('.candidate-hero-select') &&
+        !event.target.closest('.candidate-hero-circle')) {
+      closeCandidateHeroPicker();
+    }
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeCandidateHeroPicker();
+  });
+  const layer = $('#candidate-box-layer');
+  layer.onpointerdown = (event) => {
+    const item = currentCandidate();
+    if (!item || !candidateDraft ||
+        event.target.closest('.candidate-box') ||
+        event.target.closest('.candidate-hero-circle')) return;
+    const canDrawHero = candidateHeroDrawMode &&
+      candidateHeroLineup && candidateNextHeroPosition();
+    const canDrawResult = !candidateHeroDrawMode &&
+      candidateDraft.result_panel_label === 'result_panel';
+    if (!canDrawHero && !canDrawResult) return;
+    event.preventDefault();
+    layer.setPointerCapture(event.pointerId);
+    candidateDrawStart = canDrawHero
+      ? {kind: 'hero', point: candidatePixelPoint(event)}
+      : {kind: 'result', point: candidatePoint(event)};
+  };
+  layer.onpointerup = async (event) => {
+    if (!candidateDrawStart) return;
+    const start = candidateDrawStart;
+    candidateDrawStart = null;
+    if (start.kind === 'hero') {
+      const end = candidatePixelPoint(event);
+      const dx = end.x - start.point.x;
+      const dy = end.y - start.point.y;
+      const fixedSize = candidateHeroDrawingDiameter(end.width, end.height);
+      let size = fixedSize || Math.max(Math.abs(dx), Math.abs(dy));
+      size = Math.min(size, end.width, end.height);
+      if (!fixedSize && size < 14) return;
+      const rawLeft = fixedSize
+        ? (start.point.x + end.x - size) / 2
+        : dx < 0 ? start.point.x - size : start.point.x;
+      const rawTop = fixedSize
+        ? (start.point.y + end.y - size) / 2
+        : dy < 0 ? start.point.y - size : start.point.y;
+      const left = Math.max(0, Math.min(end.width - size, rawLeft));
+      const top = Math.max(0, Math.min(end.height - size, rawTop));
+      await addCandidateHeroCircle({
+        x: left / end.width,
+        y: top / end.height,
+        w: size / end.width,
+        h: size / end.height,
+      });
+      return;
+    }
+    const end = candidatePoint(event);
+    const x = Math.min(start.point.x, end.x);
+    const y = Math.min(start.point.y, end.y);
+    const w = Math.abs(end.x - start.point.x);
+    const h = Math.abs(end.y - start.point.y);
+    if (w < 0.01 || h < 0.01) return;
+    candidateBoxes = [{type: 'result_panel', x, y, w, h}];
+    renderCandidateBoxes();
+    renderCandidateChoices();
+  };
+  layer.onpointercancel = () => { candidateDrawStart = null; };
 }
 
 // ---------- BP 主动学习复核 ----------
@@ -2682,6 +4360,202 @@ $('#btn-pair-diff').onclick = () => savePair('different_match');
 $('#btn-pair-uncertain').onclick = () => savePair('uncertain');
 $('#btn-pair-refresh').onclick = loadPairs;
 
+// ---------- 模型测试与 Worker 模型包 ----------
+const MODEL_TASK_NAMES = {
+  screen_state: '画面状态',
+  bp_review: 'BP 模式',
+  key_screen_review: '结算／计分板',
+  result_detector: '结算面板',
+  mode_gate: '大乱斗光栅',
+};
+
+function currentModelTestSample() {
+  return modelTestSamples[modelTestIndex] || null;
+}
+
+function renderModelTestSample() {
+  const sample = currentModelTestSample();
+  $('#model-test-progress').textContent = modelTestSamples.length
+    ? `${modelTestIndex + 1}/${modelTestSamples.length}` : '0/0';
+  $('#btn-model-test-prev').disabled = !sample || modelTestIndex <= 0;
+  $('#btn-model-test-next').disabled =
+    !sample || modelTestIndex >= modelTestSamples.length - 1;
+  $('#model-test-output').textContent = '--';
+  if (!sample || !sample.has_snapshot_image) {
+    $('#model-test-image').removeAttribute('src');
+    $('#model-test-expected').textContent = sample
+      ? '这次训练快照中的图片文件缺失' : '--';
+    $('#btn-model-test-predict').disabled = true;
+    return;
+  }
+  $('#model-test-image').src =
+    `/api/model-tests/runs/${encodeURIComponent($('#model-test-run').value)}` +
+    `/samples/${encodeURIComponent(sample.sample_id)}/image` +
+    `?split=${encodeURIComponent(sample.split)}`;
+  $('#model-test-expected').textContent = JSON.stringify(sample.expected, null, 2);
+  $('#btn-model-test-predict').disabled = false;
+}
+
+function moveModelTestSample(offset) {
+  if (!modelTestSamples.length) return;
+  modelTestIndex = Math.max(
+    0, Math.min(modelTestSamples.length - 1, modelTestIndex + offset));
+  renderModelTestSample();
+}
+
+async function loadModelTestSamples() {
+  const runId = $('#model-test-run').value;
+  if (!runId) {
+    modelTestSamples = [];
+    renderModelTestSample();
+    return;
+  }
+  $('#model-test-state').textContent = '正在读取冻结快照…';
+  try {
+    const split = $('#model-test-split').value;
+    const data = await api(
+      `/api/model-tests/runs/${encodeURIComponent(runId)}/samples` +
+      `?split=${encodeURIComponent(split)}&limit=1000`);
+    modelTestSamples = data.items || [];
+    modelTestIndex = 0;
+    const run = modelTestRuns.find((item) => item.id === runId);
+    $('#model-test-notes').value = (run && run.validation_notes) || '';
+    $('#model-test-state').textContent =
+      `${split} 共 ${data.total || 0} 张 · 当前验收：` +
+      `${(run && run.validation_status) || 'pending'}`;
+    renderModelTestSample();
+  } catch (error) {
+    $('#model-test-state').textContent = '载入失败：' + error.message;
+  }
+}
+
+async function predictModelTestSample() {
+  const sample = currentModelTestSample();
+  const runId = $('#model-test-run').value;
+  if (!sample || !sample.has_snapshot_image || !runId) return;
+  $('#model-test-output').textContent = '推理中…';
+  try {
+    const result = await api(
+      `/api/model-tests/runs/${encodeURIComponent(runId)}/predict`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sample_id: sample.sample_id,
+          split: sample.split,
+          conf_thr: Number($('#model-test-conf').value || 0.25),
+        }),
+      });
+    $('#model-test-output').textContent = JSON.stringify(result, null, 2);
+  } catch (error) {
+    $('#model-test-output').textContent = '推理失败：' + error.message;
+  }
+}
+
+async function saveModelValidation(status) {
+  const runId = $('#model-test-run').value;
+  if (!runId) return;
+  try {
+    await api(`/api/model-tests/runs/${encodeURIComponent(runId)}/validation`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        status,
+        notes: $('#model-test-notes').value,
+      }),
+    });
+    $('#model-test-state').textContent =
+      status === 'passed' ? '已记录：验收通过' : '已记录：验收不通过';
+    await loadModelTesting(runId, false);
+  } catch (error) {
+    $('#model-test-state').textContent = '保存验收结论失败：' + error.message;
+  }
+}
+
+function renderModelPackageChoices() {
+  const root = $('#model-package-runs');
+  root.innerHTML = '';
+  Object.entries(MODEL_TASK_NAMES).forEach(([taskId, name]) => {
+    const choices = modelTestRuns.filter(
+      (run) => run.task_id === taskId && run.validation_status === 'passed');
+    const row = document.createElement('label');
+    row.className = 'model-package-choice';
+    const title = document.createElement('span');
+    title.textContent = name;
+    const select = document.createElement('select');
+    select.dataset.packageTask = taskId;
+    select.innerHTML = '<option value="">尚未选择</option>' + choices.map((run) =>
+      `<option value="${esc(run.id)}">${esc(run.id)} · ${esc(run.dataset_version_id)}</option>`
+    ).join('');
+    row.append(title, select);
+    root.appendChild(row);
+  });
+}
+
+function renderModelPackages(packages) {
+  $('#model-package-list').innerHTML = (packages || []).map((item) => {
+    const missing = ((item.manifest_json || {}).missing_roles || []).join('、');
+    return `<div class="small"><b>${esc(item.id)}</b> · ${esc(item.status)} · ` +
+      `${esc(item.path)}${missing ? ` · 缺少 ${esc(missing)}` : ''} · ` +
+      `<a href="/api/model-packages/${encodeURIComponent(item.id)}/archive">下载 ZIP</a></div>`;
+  }).join('') || '<div class="muted small">还没有模型包</div>';
+}
+
+async function buildModelPackage() {
+  const runIds = $$('[data-package-task]').map((select) => select.value).filter(Boolean);
+  if (!runIds.length) {
+    $('#model-package-state').textContent = '请至少选择一个验收通过的 run';
+    return;
+  }
+  $('#model-package-state').textContent = '正在校验哈希并组装…';
+  try {
+    const result = await api('/api/model-packages', {
+      method: 'POST', body: JSON.stringify({run_ids: runIds}),
+    });
+    $('#model-package-state').textContent = result.status === 'ready'
+      ? `已生成 ready 模型包：${result.id}`
+      : `已生成 incomplete 研究包：${result.id}；` +
+        `${result.missing_tasks.length ? `还缺任务 ${result.missing_tasks.join('、')}；` : ''}` +
+        `${Object.keys(result.evaluation_gaps || {}).length ? '固定测试集覆盖仍不足' : ''}`;
+    const packages = await api('/api/model-packages');
+    renderModelPackages(packages.packages);
+  } catch (error) {
+    $('#model-package-state').textContent = '组包失败：' + error.message;
+  }
+}
+
+async function loadModelTesting(preferredRunId = '', loadSamples = true) {
+  try {
+    const [runsData, packagesData] = await Promise.all([
+      api('/api/model-tests/runs'), api('/api/model-packages'),
+    ]);
+    modelTestRuns = runsData.runs || [];
+    const select = $('#model-test-run');
+    const previous = preferredRunId || select.value;
+    select.innerHTML = '<option value="">请选择训练结果</option>' +
+      modelTestRuns.map((run) =>
+        `<option value="${esc(run.id)}">${esc(MODEL_TASK_NAMES[run.task_id] || run.task_id)} · ` +
+        `${esc(run.id)} · ${esc(run.validation_status)}</option>`
+      ).join('');
+    if (modelTestRuns.some((run) => run.id === previous)) select.value = previous;
+    else if (modelTestRuns.length) select.value = modelTestRuns[0].id;
+    renderModelPackageChoices();
+    renderModelPackages(packagesData.packages);
+    if (loadSamples) await loadModelTestSamples();
+  } catch (error) {
+    $('#model-test-state').textContent = '模型测试页加载失败：' + error.message;
+  }
+}
+
+function bindModelTesting() {
+  $('#model-test-run').onchange = loadModelTestSamples;
+  $('#model-test-split').onchange = loadModelTestSamples;
+  $('#btn-model-test-load').onclick = loadModelTestSamples;
+  $('#btn-model-test-prev').onclick = () => moveModelTestSample(-1);
+  $('#btn-model-test-next').onclick = () => moveModelTestSample(1);
+  $('#btn-model-test-predict').onclick = predictModelTestSample;
+  $('#btn-model-test-pass').onclick = () => saveModelValidation('passed');
+  $('#btn-model-test-fail').onclick = () => saveModelValidation('failed');
+  $('#btn-build-model-package').onclick = buildModelPackage;
+}
+
 // ---------- 训练与模型 ----------
 const TRAINING_STATUS_LABELS = {
   queued: '排队中',
@@ -2694,6 +4568,13 @@ const TRAINING_STATUS_LABELS = {
 
 function trainingCountsText(task) {
   const counts = task.counts || {};
+  if (task.id === 'screen_state') {
+    const labels = counts.by_label || {};
+    return `非虚荣 ${labels.not_vainglory || 0} · 游戏外 ${labels.out_of_match || 0} · ` +
+      `对局前 ${labels.pre_match || 0} · 对局中 ${labels.in_match || 0} · ` +
+      `天赋 ${labels.talent_select || 0} · 赛后 ${labels.post_match || 0} · ` +
+      `转场 ${labels.transition || 0} · ${counts.videos || 0} 个视频`;
+  }
   if (task.id === 'bp_review') {
     const labels = counts.by_label || {};
     return `3V3 ${labels.bp_3v3 || 0} · 大乱斗 ${labels.bp_aram || 0} · ` +
@@ -2711,6 +4592,9 @@ function trainingCountsText(task) {
 }
 
 function trainingSnapshotNote(taskId) {
+  if (taskId === 'screen_state') {
+    return '训练快照会自动限制大量普通对局帧，保留稀有状态和人工确认候选。';
+  }
   if (taskId === 'key_screen_review') {
     return '训练快照会优先保留易混淆画面，并自动平衡大量普通画面。';
   }
@@ -2768,7 +4652,7 @@ function renderTrainingRuns(data) {
     const statusLabel = TRAINING_STATUS_LABELS[run.status] || run.status;
     const canCancel = ['queued', 'running'].includes(run.status) &&
       run.id === activeRunId;
-    const canPublish = run.status === 'succeeded' && run.artifact_path;
+    const canTest = run.status === 'succeeded' && run.artifact_path;
     tbody.insertAdjacentHTML('beforeend', `
       <tr>
         <td>${esc(run.task_id)}<br><span class="muted">${esc(run.id)}</span></td>
@@ -2787,8 +4671,8 @@ function renderTrainingRuns(data) {
           ${canCancel
             ? `<button class="training-cancel" data-run-id="${esc(run.id)}">取消</button>`
             : ''}
-          ${canPublish
-            ? `<button class="training-publish" data-run-id="${esc(run.id)}">设为本机测试模型</button>`
+          ${canTest
+            ? `<button class="training-test-run" data-run-id="${esc(run.id)}">进入模型验收</button>`
             : ''}
         </td>
       </tr>`);
@@ -2802,8 +4686,12 @@ function renderTrainingRuns(data) {
   $$('.training-cancel').forEach((button) => {
     button.onclick = () => cancelTraining(button.dataset.runId);
   });
-  $$('.training-publish').forEach((button) => {
-    button.onclick = () => publishTrainingModel(button.dataset.runId);
+  $$('.training-test-run').forEach((button) => {
+    button.onclick = async () => {
+      const nav = $('.nav-item[data-view="model-tests"]');
+      activateNav(nav);
+      await loadModelTesting(button.dataset.runId);
+    };
   });
   $('#training-global-state').textContent = activeRunId
     ? `正在训练：${activeRunId}` : '当前没有训练任务占用本机算力';
@@ -2877,23 +4765,6 @@ async function loadTrainingLog(runId) {
   } catch (error) {
     $('#training-log').textContent = '日志加载失败：' + error.message;
     $('#training-log-box').classList.remove('hidden');
-  }
-}
-
-async function publishTrainingModel(runId) {
-  const confirmed = window.confirm(
-    '这里只会设为当前 Mac Studio 标注工具的测试模型，不会自动改 NAS，' +
-    '也不会自动重启 MacBook Pro worker。继续吗？');
-  if (!confirmed) return;
-  try {
-    const result = await api(
-      `/api/training/runs/${encodeURIComponent(runId)}/publish-local`,
-      { method: 'POST', body: '{}' });
-    $('#training-global-state').textContent =
-      `已设为本机测试模型：${result.path}`;
-    loadTrainingDashboard();
-  } catch (error) {
-    $('#training-global-state').textContent = '发布失败：' + error.message;
   }
 }
 

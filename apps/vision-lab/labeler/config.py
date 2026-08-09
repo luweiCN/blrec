@@ -32,9 +32,12 @@ NAS_TRAINING_CANDIDATE_DIR = os.environ.get(
     'VISION_LAB_NAS_CANDIDATE_DIR',
     os.environ.get(
         'BLREC_LABELING_NAS_CANDIDATE_DIR',
-        '/volume1/docker/blrec-next/config/vainglory-training-candidates',
+        '/volume1/docker/blrec-next/vision-data/candidates',
     ),
 )
+NAS_RESULT_FRAME_DIR = os.environ.get(
+    'VISION_LAB_NAS_RESULT_FRAME_DIR', '/cfg/vainglory-result-frames'
+).rstrip('/')
 
 VIDEO_EXTS = {'.flv', '.mp4', '.ts', '.mkv', '.m4s'}
 

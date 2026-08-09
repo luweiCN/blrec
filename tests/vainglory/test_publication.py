@@ -17,6 +17,7 @@ from blrec.vainglory.publication import (
     VaingloryPublicationService,
     _automatic_chapter_cards,
     _chapter_content,
+    _match_anchor,
     build_publication_plan,
     description_contains_block,
     merge_archive_description,
@@ -202,6 +203,27 @@ def test_native_timestamp_supports_hours_and_multipart_seek() -> None:
 
     assert '3#01:02:03' not in plan.description_block
     assert '①｜胜　｜3V3｜凯恩 vs 骷髅｜3#01:02:03' in plan.comments[0].content
+
+
+def test_match_anchor_infers_same_page_start_from_result_ocr_duration() -> None:
+    current = match(1, start_ms=0, result_ms=720_000, duration_seconds=600)
+
+    assert _match_anchor(current) == (1, 120)
+
+
+def test_match_anchor_walks_previous_pages_from_nearest_to_oldest() -> None:
+    current = replace(
+        match(1, page=3, start_ms=0, result_ms=100_000, duration_seconds=500),
+        previous_archive_segments=((1, 1_200), (2, 300)),
+    )
+
+    assert _match_anchor(current) == (1, 1_100)
+
+
+def test_match_anchor_marks_recording_start_when_live_began_mid_match() -> None:
+    current = match(1, start_ms=0, result_ms=100_000, duration_seconds=500)
+
+    assert _match_anchor(current) == (1, 0)
 
 
 def test_very_long_archive_keeps_every_result_in_first_comment() -> None:
@@ -523,6 +545,181 @@ async def test_service_preserves_description_posts_picture_and_pins_once(
             await database.scalar('SELECT state FROM vainglory_publications')
             == 'confirmed'
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_chapters_use_result_ocr_duration_when_stored_start_is_missing(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute('UPDATE vainglory_matches SET started_at_ms=0')
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        assert (
+            await database.scalar('SELECT chapter_state FROM vainglory_publications')
+            == 'confirmed'
+        )
+        assert await database.scalar('SELECT error FROM vainglory_publications') is None
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_chapters_mark_missing_ocr_duration_for_reanalysis(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute(
+            'UPDATE vainglory_matches SET started_at_ms=0,duration_seconds=NULL'
+        )
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+
+        status = (await service.publication_statuses((1,)))[1]
+        assert status.code == 'analysis_data_invalid'
+        assert status.recommended_action == 'reanalyze'
+        assert (
+            await database.scalar('SELECT chapter_state FROM vainglory_publications')
+            == 'prepared'
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_publication_waits_until_bilibili_review_is_approved(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute("UPDATE upload_jobs SET state='waiting_review'")
+        protocol = FakePublicationProtocol()
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            protocol,
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+        assert await service.run_once() is False
+        assert protocol.chapter_batches == []
+        status = (await service.publication_statuses((1,)))[1]
+        assert status.code == 'waiting_review'
+        assert status.recommended_action == 'wait'
+
+        await database.execute("UPDATE upload_jobs SET state='approved'")
+        assert await service.run_once() is True
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_status_distinguishes_retry_from_bad_analysis_data(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+        assert await service.run_once() is True
+        await database.execute(
+            "UPDATE vainglory_publications SET plan_state='waiting_analysis'"
+        )
+        await database.execute(
+            "UPDATE vainglory_scan_jobs SET state='pending',progress=0,"
+            'started_at=NULL,completed_at=NULL'
+        )
+
+        waiting = (await service.publication_statuses((1,)))[1]
+        assert waiting.code == 'waiting_analysis'
+        assert waiting.recommended_action == 'wait'
+
+        await database.execute(
+            "UPDATE upload_jobs SET state='rejected',review_reason='"
+            '稿件内容未通过审核'
+            "'"
+        )
+        rejected = (await service.publication_statuses((1,)))[1]
+        assert rejected.code == 'review_rejected'
+        assert rejected.detail == '稿件内容未通过审核'
+        await database.execute("UPDATE upload_jobs SET state='approved'")
+
+        await database.execute(
+            "UPDATE vainglory_publications SET plan_state='ready',state='paused',"
+            'next_attempt_at=1600,'
+            "error='B 站章节请求未发出，将自动重试'"
+        )
+
+        retrying = (await service.publication_statuses((1,)))[1]
+        assert retrying.code == 'retry_scheduled'
+        assert retrying.recommended_action == 'wait'
+        assert retrying.next_attempt_at == 1600
+
+        await database.execute(
+            "UPDATE vainglory_publications SET error='"
+            '部分对局缺少有效时间点，视频分段不会跳过并将自动重试'
+            "'"
+        )
+        legacy = (await service.publication_statuses((1,)))[1]
+        assert legacy.code == 'legacy_chapter_timing'
+        assert legacy.recommended_action == 'retry_chapter'
+
+        assert await service._requeue_legacy_chapter_timing() == 1
+        assert (
+            await database.scalar('SELECT state FROM vainglory_publications')
+            == 'prepared'
+        )
+
+        await database.execute(
+            "UPDATE vainglory_publications SET state='failed',"
+            "error='1 局识别结果缺少结算画面时间或 OCR 对局时长，请重新分析这场直播'"
+        )
+
+        invalid = (await service.publication_statuses((1,)))[1]
+        assert invalid.code == 'analysis_data_invalid'
+        assert invalid.recommended_action == 'reanalyze'
     finally:
         await database.close()
 
@@ -1480,6 +1677,9 @@ async def test_paused_migration_also_pauses_its_publication(tmp_path: Path) -> N
             await database.scalar('SELECT plan_state FROM vainglory_publications')
             == 'waiting_analysis'
         )
+        status = (await service.publication_statuses((1,)))[1]
+        assert status.code == 'operator_paused'
+        assert status.recommended_action == 'resume_migration'
         await database.execute(
             'UPDATE archive_migration_jobs SET operator_paused=0 WHERE id=1'
         )

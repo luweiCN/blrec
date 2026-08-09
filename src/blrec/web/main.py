@@ -391,6 +391,10 @@ async def _realtime_vainglory_index_snapshot() -> Mapping[str, object]:
                     'title': value.title,
                     'partDurationSeconds': value.part_duration_seconds,
                     'recordingDurationSeconds': value.recording_duration_seconds,
+                    'partMatchDurationSeconds': value.part_match_duration_seconds,
+                    'sessionMatchDurationSeconds': (
+                        value.session_match_duration_seconds
+                    ),
                     'candidateCount': value.candidate_count,
                     'matchCount': value.match_count,
                     'elapsedSeconds': value.elapsed_seconds,

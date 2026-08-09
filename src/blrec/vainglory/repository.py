@@ -135,6 +135,106 @@ def _analysis_revision_snapshot(matches: Sequence[AnalyzedMatch]) -> Tuple[str, 
     return snapshot_json, hashlib.sha256(snapshot_json.encode('utf8')).hexdigest()
 
 
+def _unified_training_suggestions(
+    candidates: Sequence[TrainingCandidate],
+) -> Dict[str, Dict[str, Any]]:
+    """把旧模型的多路输出合成一张图的四项预标。"""
+    suggestions: Dict[str, Dict[str, Any]] = {}
+
+    def remember(
+        task: str,
+        label: str,
+        candidate: TrainingCandidate,
+        *,
+        confidence: Optional[float] = None,
+    ) -> None:
+        selected_confidence = float(
+            candidate.suggestion_confidence if confidence is None else confidence
+        )
+        previous = suggestions.get(task)
+        if (
+            previous is not None
+            and float(previous['confidence']) >= selected_confidence
+        ):
+            return
+        suggestions[task] = {
+            'label': label,
+            'confidence': selected_confidence,
+            'model_version': candidate.model_version,
+            'reason': candidate.selection_reason,
+        }
+
+    for candidate in candidates:
+        label = candidate.suggested_label
+        if candidate.task == 'screen_state':
+            flow = (
+                'match_flow'
+                if label in ('in_match', 'talent_select', 'post_match')
+                else 'unreadable' if label == 'transition' else 'not_match_flow'
+            )
+            remember('match_flow', flow, candidate)
+            if label in ('in_match', 'talent_select') and candidate.mode_class in (
+                '3v3',
+                'aram',
+                '5v5',
+            ):
+                remember(
+                    'match_mode',
+                    candidate.mode_class,
+                    candidate,
+                    confidence=candidate.mode_confidence,
+                )
+        elif candidate.task == 'bp_review':
+            select = {
+                'bp_3v3': 'select_3v3',
+                'bp_aram': 'select_aram',
+                'bp_5v5': 'select_5v5',
+                'not_bp': 'not_select',
+            }[label]
+            remember('hero_select', select, candidate)
+            if label != 'not_bp':
+                remember('match_flow', 'not_match_flow', candidate)
+                remember('result_panel', 'no_result_panel', candidate)
+        elif candidate.task == 'key_screen_review':
+            if label == 'result_page':
+                remember('match_flow', 'match_flow', candidate)
+                remember('hero_select', 'not_select', candidate)
+                remember('result_panel', 'result_panel', candidate)
+            elif label == 'scoreboard':
+                remember('match_flow', 'match_flow', candidate)
+                remember('match_mode', 'unreadable', candidate)
+                remember('hero_select', 'not_select', candidate)
+                remember('result_panel', 'no_result_panel', candidate)
+            else:
+                remember('result_panel', 'no_result_panel', candidate)
+        elif candidate.task == 'result_detector':
+            remember('result_panel', str(label), candidate)
+        elif candidate.task == 'mode_gate' and candidate.mode_class in (
+            '3v3',
+            'aram',
+            '5v5',
+        ):
+            remember('match_flow', 'match_flow', candidate)
+            remember('match_mode', candidate.mode_class, candidate)
+            remember('hero_select', 'not_select', candidate)
+            remember('result_panel', 'no_result_panel', candidate)
+    return suggestions
+
+
+def _training_candidate_groups(
+    candidates: Sequence[TrainingCandidate],
+) -> Tuple[Tuple[TrainingCandidate, ...], ...]:
+    groups: Dict[str, List[TrainingCandidate]] = {}
+    order: List[str] = []
+    for candidate in candidates[:80]:
+        digest = hashlib.sha256(candidate.image_jpeg).hexdigest()
+        if digest not in groups:
+            groups[digest] = []
+            order.append(digest)
+        groups[digest].append(candidate)
+    return tuple(tuple(groups[digest]) for digest in order)
+
+
 @dataclass(frozen=True)
 class ScanJob:
     session_id: int
@@ -200,6 +300,8 @@ class AnalysisQueueCompletion:
     title: str
     part_duration_seconds: Optional[int]
     recording_duration_seconds: int
+    part_match_duration_seconds: int
+    session_match_duration_seconds: int
     candidate_count: Optional[int]
     match_count: int
     elapsed_seconds: float
@@ -2105,7 +2207,15 @@ class VaingloryRepository:
                 '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,0)),0) '
                 'FROM recording_parts all_part '
                 'WHERE all_part.session_id=job.session_id) '
-                'AS recording_duration_seconds '
+                'AS recording_duration_seconds,'
+                '(SELECT COALESCE(SUM(COALESCE(part_match.duration_seconds,0)),0) '
+                'FROM vainglory_matches part_match '
+                'WHERE part_match.result_part_id=job.part_id) '
+                'AS part_match_duration_seconds,'
+                '(SELECT COALESCE(SUM(COALESCE(session_match.duration_seconds,0)),0) '
+                'FROM vainglory_matches session_match '
+                'WHERE session_match.session_id=job.session_id) '
+                'AS session_match_duration_seconds '
                 'FROM vainglory_part_jobs job '
                 'JOIN recording_parts part ON part.id=job.part_id '
                 'JOIN recording_sessions session ON session.id=job.session_id '
@@ -2278,6 +2388,10 @@ class VaingloryRepository:
                         else int(row['record_duration_seconds'])
                     ),
                     recording_duration_seconds=int(row['recording_duration_seconds']),
+                    part_match_duration_seconds=int(row['part_match_duration_seconds']),
+                    session_match_duration_seconds=int(
+                        row['session_match_duration_seconds']
+                    ),
                     candidate_count=(
                         None
                         if row['candidate_count'] is None
@@ -2447,53 +2561,90 @@ class VaingloryRepository:
             if str(job['state']) != 'analyzing':
                 raise VaingloryConflict('分析任务当前不能写入结果')
             session_id = int(job['session_id'])
-            for candidate in training_candidates[:60]:
+            for candidate_group in _training_candidate_groups(training_candidates):
+                primary = max(
+                    candidate_group, key=lambda item: item.suggestion_confidence
+                )
                 try:
                     relative_path = self._training_candidate_relative_path(
                         session_id=session_id,
                         part_id=part_id,
-                        at_ms=candidate.at_ms,
-                        content=candidate.image_jpeg,
-                        task=candidate.task,
+                        at_ms=primary.at_ms,
+                        content=primary.image_jpeg,
                     )
                     destination = self._resolve_training_candidate_path(relative_path)
+                    metadata_relative_path = (
+                        self._training_candidate_metadata_relative_path(
+                            session_id=session_id,
+                            part_id=part_id,
+                            at_ms=primary.at_ms,
+                            content=primary.image_jpeg,
+                        )
+                    )
+                    metadata_destination = self._resolve_training_candidate_path(
+                        metadata_relative_path
+                    )
                     source_path = str(job['source_path'] or '')
                     filename = Path(source_path).name or 'part-{}'.format(
                         int(job['part_index'])
                     )
+                    digest = hashlib.sha256(primary.image_jpeg).hexdigest()
+                    boxes = []
+                    seen_boxes: Set[Tuple[str, float, float, float, float]] = set()
+                    for candidate in candidate_group:
+                        for box in candidate.suggested_boxes:
+                            key = (box.box_type, box.x, box.y, box.w, box.h)
+                            if key in seen_boxes:
+                                continue
+                            seen_boxes.add(key)
+                            boxes.append(
+                                {
+                                    'type': box.box_type,
+                                    'x': box.x,
+                                    'y': box.y,
+                                    'w': box.w,
+                                    'h': box.h,
+                                }
+                            )
                     metadata = {
-                        'schema_version': 1,
-                        'task': candidate.task,
+                        'schema_version': 3,
+                        'task': 'unified_review',
                         'source_id': 'part-{}:{}:{}'.format(
-                            part_id,
-                            candidate.at_ms,
-                            hashlib.sha256(candidate.image_jpeg).hexdigest()[:16],
+                            part_id, primary.at_ms, digest[:16]
                         ),
                         'session_id': session_id,
                         'part_id': int(part_id),
                         'part_index': int(job['part_index']),
-                        'at_ms': int(candidate.at_ms),
-                        'segment_start_ms': int(candidate.segment_start_ms),
+                        'at_ms': int(primary.at_ms),
+                        'segment_start_ms': min(
+                            int(item.segment_start_ms) for item in candidate_group
+                        ),
                         'streamer': str(job['anchor_name'] or ''),
                         'room_id': str(job['room_id'] or ''),
                         'session_title': str(job['title'] or ''),
                         'filename': filename,
-                        'model_version': candidate.model_version,
-                        'suggested_label': candidate.suggested_label,
-                        'suggestion_confidence': candidate.suggestion_confidence,
-                        'stage_class': candidate.stage_class,
-                        'stage_confidence': candidate.stage_confidence,
-                        'mode_class': candidate.mode_class,
-                        'mode_confidence': candidate.mode_confidence,
-                        'selection_reason': candidate.selection_reason,
+                        'suggestions': _unified_training_suggestions(candidate_group),
+                        'suggested_boxes': boxes,
+                        'model_outputs': [
+                            {
+                                'task': item.task,
+                                'model_version': item.model_version,
+                                'suggested_label': item.suggested_label,
+                                'suggestion_confidence': (item.suggestion_confidence),
+                                'stage_class': item.stage_class,
+                                'stage_confidence': item.stage_confidence,
+                                'mode_class': item.mode_class,
+                                'mode_confidence': item.mode_confidence,
+                                'selection_reason': item.selection_reason,
+                            }
+                            for item in candidate_group
+                        ],
                         'image_path': relative_path,
-                        'image_sha256': hashlib.sha256(
-                            candidate.image_jpeg
-                        ).hexdigest(),
+                        'image_sha256': digest,
                         'created_at': now,
                     }
                     self._write_training_candidate(
-                        destination, candidate.image_jpeg, metadata
+                        destination, primary.image_jpeg, metadata, metadata_destination
                     )
                     written_training_candidates.append(destination)
                 except (OSError, ValueError) as error:
@@ -2501,7 +2652,7 @@ class VaingloryRepository:
                         'Vainglory training candidate storage skipped: '
                         'part_id={} at_ms={} error={!r}',
                         part_id,
-                        candidate.at_ms,
+                        primary.at_ms,
                         error,
                     )
             suppressed_times = tuple(
@@ -4524,18 +4675,19 @@ class VaingloryRepository:
 
     @staticmethod
     def _training_candidate_relative_path(
-        *,
-        session_id: int,
-        part_id: int,
-        at_ms: int,
-        content: bytes,
-        task: str = 'bp_review',
+        *, session_id: int, part_id: int, at_ms: int, content: bytes
     ) -> str:
-        if task not in ('bp_review', 'key_screen_review'):
-            raise ValueError('unknown training candidate task')
+        del session_id, part_id, at_ms
+        digest = hashlib.sha256(content).hexdigest()
+        return 'objects/{}/{}.jpg'.format(digest[:2], digest)
+
+    @staticmethod
+    def _training_candidate_metadata_relative_path(
+        *, session_id: int, part_id: int, at_ms: int, content: bytes
+    ) -> str:
         digest = hashlib.sha256(content).hexdigest()[:16]
-        return '{}/session-{}/part-{}/{:012d}-{}.jpg'.format(
-            task, session_id, part_id, at_ms, digest
+        return 'items/session-{}/part-{}/{:012d}-{}.json'.format(
+            session_id, part_id, at_ms, digest
         )
 
     def _resolve_training_candidate_path(self, relative_path: str) -> Path:
@@ -4554,7 +4706,11 @@ class VaingloryRepository:
         return resolved
 
     def _write_training_candidate(
-        self, destination: Path, content: bytes, metadata: Mapping[str, Any]
+        self,
+        destination: Path,
+        content: bytes,
+        metadata: Mapping[str, Any],
+        metadata_destination: Optional[Path] = None,
     ) -> None:
         if not content:
             raise ValueError('training candidate image must not be empty')
@@ -4565,7 +4721,13 @@ class VaingloryRepository:
             self._write_training_candidate_file(
                 destination, content, prefix='.training-image-'
             )
-        sidecar = destination.with_suffix('.json')
+        sidecar = (
+            destination.with_suffix('.json')
+            if metadata_destination is None
+            else metadata_destination
+        )
+        sidecar.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.chmod(sidecar.parent, 0o700)
         payload = json.dumps(
             metadata, ensure_ascii=False, separators=(',', ':'), sort_keys=True
         ).encode('utf8')

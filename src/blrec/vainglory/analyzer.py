@@ -201,10 +201,50 @@ class ScannedPart:
     candidate_modes: Tuple[str, ...] = ()
 
 
-TrainingCandidateTask = Literal['bp_review', 'key_screen_review']
-TrainingCandidateLabel = Literal[
-    'bp_3v3', 'bp_aram', 'bp_5v5', 'not_bp', 'result_page', 'scoreboard', 'other'
+TrainingCandidateTask = Literal[
+    'screen_state', 'bp_review', 'key_screen_review', 'result_detector', 'mode_gate'
 ]
+TrainingCandidateLabel = Literal[
+    'not_vainglory',
+    'out_of_match',
+    'pre_match',
+    'in_match',
+    'talent_select',
+    'post_match',
+    'transition',
+    'bp_3v3',
+    'bp_aram',
+    'bp_5v5',
+    'not_bp',
+    'result_page',
+    'scoreboard',
+    'other',
+    'result_panel',
+    'no_result_panel',
+    'blocked_gate',
+    'open_entrance',
+    'no_evidence',
+]
+
+
+@dataclass(frozen=True)
+class TrainingCandidateBox:
+    box_type: str
+    x: float
+    y: float
+    w: float
+    h: float
+
+    def __post_init__(self) -> None:
+        if not (
+            0 <= self.x <= 1
+            and 0 <= self.y <= 1
+            and 0 < self.w <= 1
+            and 0 < self.h <= 1
+            and self.x + self.w <= 1.001
+            and self.y + self.h <= 1.001
+        ):
+            raise ValueError('training candidate box must be normalized')
 
 
 @dataclass(frozen=True)
@@ -221,6 +261,7 @@ class TrainingCandidate:
     mode_confidence: float
     selection_reason: str
     task: TrainingCandidateTask = 'bp_review'
+    suggested_boxes: Tuple[TrainingCandidateBox, ...] = ()
 
 
 def _remember_training_candidate(
@@ -240,12 +281,17 @@ def _remember_training_candidate(
     maximum_per_label: int,
     mode_class: str = 'unknown',
     mode_confidence: float = 0,
+    suggested_boxes: Sequence[TrainingCandidateBox] = (),
+    prefer_lower_confidence: bool = False,
+    separate_modes: bool = False,
 ) -> bool:
     """保留少量间隔开的高价值帧；候选失败绝不影响主分析。"""
     same_label = [
         (index, candidate)
         for index, candidate in enumerate(candidates)
-        if candidate.task == task and candidate.suggested_label == suggested_label
+        if candidate.task == task
+        and candidate.suggested_label == suggested_label
+        and (not separate_modes or candidate.mode_class == mode_class)
     ]
     replacement_index: Optional[int] = None
     nearby = [
@@ -255,13 +301,23 @@ def _remember_training_candidate(
         replacement_index, previous = min(
             nearby, key=lambda item: abs(item[1].at_ms - at_ms)
         )
-        if suggestion_confidence <= previous.suggestion_confidence:
+        if (
+            suggestion_confidence >= previous.suggestion_confidence
+            if prefer_lower_confidence
+            else suggestion_confidence <= previous.suggestion_confidence
+        ):
             return False
     elif len(same_label) >= maximum_per_label:
-        replacement_index, weakest = min(
-            same_label, key=lambda item: item[1].suggestion_confidence
+        replacement_index, replaceable = (
+            max(same_label, key=lambda item: item[1].suggestion_confidence)
+            if prefer_lower_confidence
+            else min(same_label, key=lambda item: item[1].suggestion_confidence)
         )
-        if suggestion_confidence <= weakest.suggestion_confidence:
+        if (
+            suggestion_confidence >= replaceable.suggestion_confidence
+            if prefer_lower_confidence
+            else suggestion_confidence <= replaceable.suggestion_confidence
+        ):
             return False
     try:
         image_jpeg = jpeg_bytes(frame)
@@ -286,12 +342,87 @@ def _remember_training_candidate(
         mode_confidence=max(0, min(1, float(mode_confidence))),
         selection_reason=selection_reason,
         task=task,
+        suggested_boxes=tuple(suggested_boxes),
     )
     if replacement_index is None:
         candidates.append(candidate)
     else:
         candidates[replacement_index] = candidate
     return True
+
+
+def _result_panel_training_box(
+    frame: RgbFrame, layout: ResultLayout
+) -> TrainingCandidateBox:
+    reference = (
+        (0.01, 0.09, 0.99, 0.905) if layout.team_size == 5 else (0.09, 0.22, 0.91, 0.78)
+    )
+    rect = layout.viewport.source_rect(frame, *reference)
+    return TrainingCandidateBox(
+        box_type='result_panel',
+        x=rect.left / frame.width,
+        y=rect.top / frame.height,
+        w=(rect.right - rect.left) / frame.width,
+        h=(rect.bottom - rect.top) / frame.height,
+    )
+
+
+def _screen_state_candidate_label(
+    prediction: StagePrediction,
+) -> TrainingCandidateLabel:
+    if prediction.content == CONTENT_NOT_VAINGLORY:
+        return 'not_vainglory'
+    labels: Dict[int, TrainingCandidateLabel] = {
+        STAGE_PRE_MATCH: 'pre_match',
+        STAGE_OUT_OF_MATCH: 'out_of_match',
+        STAGE_TRANSITION: 'transition',
+        STAGE_TALENT_SELECT: 'talent_select',
+        STAGE_RESULT_PAGE: 'post_match',
+        STAGE_VICTORY_DEFEAT: 'post_match',
+        STAGE_GAMEPLAY: 'in_match',
+        STAGE_SCOREBOARD: 'in_match',
+    }
+    return labels.get(prediction.stage, 'transition')
+
+
+_SCREEN_STATE_CANDIDATE_LIMITS = {
+    'not_vainglory': 2,
+    'out_of_match': 3,
+    'pre_match': 4,
+    'in_match': 4,
+    'talent_select': 3,
+    'post_match': 3,
+    'transition': 3,
+}
+
+
+def _selected_screen_state_candidates(
+    candidates: Sequence[TrainingCandidate],
+) -> List[TrainingCandidate]:
+    selected = [
+        candidate
+        for label, maximum in _SCREEN_STATE_CANDIDATE_LIMITS.items()
+        if label != 'in_match'
+        for candidate in [item for item in candidates if item.suggested_label == label][
+            :maximum
+        ]
+    ]
+    known_modes = ('3v3', 'aram', '5v5')
+    selected.extend(
+        candidate
+        for mode in known_modes
+        for candidate in [
+            item
+            for item in candidates
+            if item.suggested_label == 'in_match' and item.mode_class == mode
+        ][: _SCREEN_STATE_CANDIDATE_LIMITS['in_match']]
+    )
+    selected.extend(
+        item
+        for item in candidates
+        if item.suggested_label == 'in_match' and item.mode_class not in known_modes
+    )
+    return selected[:32]
 
 
 @dataclass(frozen=True)
@@ -1309,6 +1440,7 @@ class VaingloryVideoAnalyzer:
         frames = iter(self._sampler.fine_frames(part.path, window, threads=6))
         hits: List[ResultHit] = []
         training_candidates: List[TrainingCandidate] = []
+        borderline_result_candidates: List[TrainingCandidate] = []
         decoded_frames = 0
         decode_seconds = 0.0
         detection_seconds = 0.0
@@ -1346,7 +1478,40 @@ class VaingloryVideoAnalyzer:
                     stage_confidence=layout.confidence,
                     selection_reason=('worker 结算检测模型命中，保留为结算页复核候选'),
                     minimum_gap_ms=15_000,
-                    maximum_per_label=24,
+                    maximum_per_label=12,
+                )
+                _remember_training_candidate(
+                    training_candidates,
+                    task='result_detector',
+                    suggested_label='result_panel',
+                    at_ms=timed.at_ms,
+                    segment_start_ms=max(0, timed.at_ms - 30_000),
+                    frame=timed.frame,
+                    model_version='result-detector-v1',
+                    suggestion_confidence=layout.confidence,
+                    stage_class='result_page',
+                    stage_confidence=layout.confidence,
+                    selection_reason='worker 结算检测命中，预填结算面板框',
+                    minimum_gap_ms=15_000,
+                    maximum_per_label=12,
+                    suggested_boxes=(_result_panel_training_box(timed.frame, layout),),
+                )
+                _remember_training_candidate(
+                    borderline_result_candidates,
+                    task='result_detector',
+                    suggested_label='result_panel',
+                    at_ms=timed.at_ms,
+                    segment_start_ms=max(0, timed.at_ms - 30_000),
+                    frame=timed.frame,
+                    model_version='result-detector-v1',
+                    suggestion_confidence=layout.confidence,
+                    stage_class='result_page',
+                    stage_confidence=layout.confidence,
+                    selection_reason='worker 结算检测低置信边界命中，供人工复核',
+                    minimum_gap_ms=15_000,
+                    maximum_per_label=6,
+                    suggested_boxes=(_result_panel_training_box(timed.frame, layout),),
+                    prefer_lower_confidence=True,
                 )
             ratio = min(1.0, timed.at_ms / max(1, profile.duration_ms))
             if ratio >= next_progress:
@@ -1395,7 +1560,9 @@ class VaingloryVideoAnalyzer:
             decode_seconds=decode_seconds,
             detection_seconds=detection_seconds,
             total_seconds=total_seconds,
-            training_candidates=tuple(training_candidates[:24]),
+            training_candidates=tuple(
+                (training_candidates + borderline_result_candidates)[:30]
+            ),
         )
 
     def scan_part_cascade(
@@ -1829,7 +1996,11 @@ class VaingloryVideoAnalyzer:
         probe_seconds = time.monotonic() - probe_started
         classify_started = time.monotonic()
         observations: List[ClassifiedObservation] = []
+        screen_state_candidates: List[TrainingCandidate] = []
         key_screen_candidates: List[TrainingCandidate] = []
+        result_detector_candidates: List[TrainingCandidate] = []
+        borderline_result_candidates: List[TrainingCandidate] = []
+        mode_gate_candidates: List[TrainingCandidate] = []
         next_progress = 0.01
         next_status_progress = 0.1
         logger.info(
@@ -1856,6 +2027,31 @@ class VaingloryVideoAnalyzer:
                     mode=prediction.mode,
                     content=prediction.content,
                 )
+            )
+            screen_state_label = _screen_state_candidate_label(prediction)
+            _remember_training_candidate(
+                screen_state_candidates,
+                task='screen_state',
+                suggested_label=screen_state_label,
+                at_ms=timed.at_ms,
+                segment_start_ms=max(0, timed.at_ms - 30_000),
+                frame=timed.frame,
+                model_version='multi-v2',
+                suggestion_confidence=(
+                    prediction.content_conf
+                    if screen_state_label == 'not_vainglory'
+                    else min(prediction.content_conf, prediction.stage_conf)
+                ),
+                stage_class=screen_state_label,
+                stage_confidence=prediction.stage_conf,
+                mode_class={MODE_3V3: '3v3', MODE_ARAM: 'aram', MODE_5V5: '5v5'}.get(
+                    prediction.mode, str(prediction.mode)
+                ),
+                mode_confidence=prediction.mode_conf,
+                selection_reason='worker 低频粗扫代表帧，供画面状态人工复核',
+                minimum_gap_ms=60_000,
+                maximum_per_label=_SCREEN_STATE_CANDIDATE_LIMITS[screen_state_label],
+                separate_modes=screen_state_label == 'in_match',
             )
             key_screen_label: Optional[TrainingCandidateLabel] = None
             key_screen_reason = ''
@@ -1907,6 +2103,57 @@ class VaingloryVideoAnalyzer:
                     selection_reason=key_screen_reason,
                     minimum_gap_ms=key_screen_gap_ms,
                     maximum_per_label=key_screen_limit,
+                )
+            if prediction.stage in (STAGE_SCOREBOARD, STAGE_VICTORY_DEFEAT):
+                _remember_training_candidate(
+                    result_detector_candidates,
+                    task='result_detector',
+                    suggested_label='no_result_panel',
+                    at_ms=timed.at_ms,
+                    segment_start_ms=max(0, timed.at_ms - 30_000),
+                    frame=timed.frame,
+                    model_version='multi-v2',
+                    suggestion_confidence=prediction.stage_conf,
+                    stage_class=(
+                        'scoreboard'
+                        if prediction.stage == STAGE_SCOREBOARD
+                        else 'victory_defeat'
+                    ),
+                    stage_confidence=prediction.stage_conf,
+                    mode_class={
+                        MODE_3V3: '3v3',
+                        MODE_ARAM: 'aram',
+                        MODE_5V5: '5v5',
+                    }.get(prediction.mode, str(prediction.mode)),
+                    mode_confidence=prediction.mode_conf,
+                    selection_reason=(
+                        '计分板／胜负动画是结算检测器的重要 hard negative'
+                    ),
+                    minimum_gap_ms=60_000,
+                    maximum_per_label=6,
+                )
+            if prediction.stage == STAGE_GAMEPLAY and prediction.mode in (
+                MODE_3V3,
+                MODE_ARAM,
+            ):
+                _remember_training_candidate(
+                    mode_gate_candidates,
+                    task='mode_gate',
+                    suggested_label='no_evidence',
+                    at_ms=timed.at_ms,
+                    segment_start_ms=max(0, timed.at_ms - 30_000),
+                    frame=timed.frame,
+                    model_version='multi-v2',
+                    suggestion_confidence=prediction.mode_conf,
+                    stage_class='gameplay',
+                    stage_confidence=prediction.stage_conf,
+                    mode_class=('aram' if prediction.mode == MODE_ARAM else '3v3'),
+                    mode_confidence=prediction.mode_conf,
+                    selection_reason=(
+                        '3V3／大乱斗游戏画面，检查是否拍到黄色光栅或开放入口'
+                    ),
+                    minimum_gap_ms=120_000,
+                    maximum_per_label=6,
                 )
             if debug_writer is not None:
                 debug_writer.write(
@@ -2070,6 +2317,45 @@ class VaingloryVideoAnalyzer:
                         minimum_gap_ms=15_000,
                         maximum_per_label=12,
                     )
+                    _remember_training_candidate(
+                        result_detector_candidates,
+                        task='result_detector',
+                        suggested_label='result_panel',
+                        at_ms=timed.at_ms,
+                        segment_start_ms=window.start_ms,
+                        frame=timed.frame,
+                        model_version='result-detector-v1',
+                        suggestion_confidence=layout.confidence,
+                        stage_class='result_page',
+                        stage_confidence=layout.confidence,
+                        selection_reason='worker 检测命中，预填结算面板框供人工修正',
+                        minimum_gap_ms=15_000,
+                        maximum_per_label=8,
+                        suggested_boxes=(
+                            _result_panel_training_box(timed.frame, layout),
+                        ),
+                    )
+                    _remember_training_candidate(
+                        borderline_result_candidates,
+                        task='result_detector',
+                        suggested_label='result_panel',
+                        at_ms=timed.at_ms,
+                        segment_start_ms=window.start_ms,
+                        frame=timed.frame,
+                        model_version='result-detector-v1',
+                        suggestion_confidence=layout.confidence,
+                        stage_class='result_page',
+                        stage_confidence=layout.confidence,
+                        selection_reason=(
+                            'worker 结算检测低置信边界命中，供人工复核'
+                        ),
+                        minimum_gap_ms=15_000,
+                        maximum_per_label=6,
+                        suggested_boxes=(
+                            _result_panel_training_box(timed.frame, layout),
+                        ),
+                        prefer_lower_confidence=True,
+                    )
             scanned_window_ms += window.end_ms - window.start_ms
             logger.info(
                 'Vainglory guided fine scan window completed: part_id={} '
@@ -2216,13 +2502,22 @@ class VaingloryVideoAnalyzer:
             detection_seconds=detection_seconds,
             total_seconds=total_seconds,
             training_candidates=tuple(
-                list(training_candidates[:36])
+                _selected_screen_state_candidates(screen_state_candidates)
+                + [
+                    candidate
+                    for label in ('bp_3v3', 'bp_aram', 'bp_5v5', 'not_bp')
+                    for candidate in [
+                        item
+                        for item in training_candidates
+                        if item.suggested_label == label
+                    ][:5]
+                ]
                 + [
                     candidate
                     for label, maximum in (
-                        ('result_page', 12),
-                        ('scoreboard', 8),
-                        ('other', 4),
+                        ('result_page', 3),
+                        ('scoreboard', 3),
+                        ('other', 2),
                     )
                     for candidate in [
                         item
@@ -2230,7 +2525,18 @@ class VaingloryVideoAnalyzer:
                         if item.suggested_label == label
                     ][:maximum]
                 ]
-            )[:60],
+                + [
+                    candidate
+                    for label, maximum in (('result_panel', 4), ('no_result_panel', 3))
+                    for candidate in [
+                        item
+                        for item in result_detector_candidates
+                        if item.suggested_label == label
+                    ][:maximum]
+                ]
+                + list(borderline_result_candidates[:3])
+                + list(mode_gate_candidates[:6])
+            )[:80],
         )
 
     def recognize_scanned_part(

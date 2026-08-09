@@ -238,13 +238,27 @@
           </div>
         </div>
         <dl>
-          <div>
-            <dt>分 P 时长</dt>
-            <dd>{{ formatDuration(completion.partDurationSeconds) }}</dd>
+          <div class="analysis-duration-group">
+            <dt>当前分批</dt>
+            <dd>
+              <span>分批时长</span>
+              {{ formatDuration(completion.partDurationSeconds) }}
+            </dd>
+            <dd>
+              <span>对局累计</span>
+              {{ formatDuration(completion.partMatchDurationSeconds) }}
+            </dd>
           </div>
-          <div>
-            <dt>整场录像</dt>
-            <dd>{{ formatDuration(completion.recordingDurationSeconds) }}</dd>
+          <div class="analysis-duration-group">
+            <dt>所在直播</dt>
+            <dd>
+              <span>视频总时长</span>
+              {{ formatDuration(completion.recordingDurationSeconds) }}
+            </dd>
+            <dd>
+              <span>对局累计</span>
+              {{ formatDuration(completion.sessionMatchDurationSeconds) }}
+            </dd>
           </div>
           <div>
             <dt>候选画面</dt>

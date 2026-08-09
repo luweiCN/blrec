@@ -11,7 +11,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import config
 
@@ -310,6 +310,184 @@ CREATE TABLE IF NOT EXISTS training_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_training_runs_created
     ON training_runs (created_at DESC, id DESC);
+
+-- Worker 候选的本地镜像与 NAS 双向复核状态。模型建议和人工结论分开；
+-- 只有 confirmed 的人工结论才允许进入训练快照。
+CREATE TABLE IF NOT EXISTS worker_candidate_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL UNIQUE,
+    frame_id INTEGER NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+    task TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    image_path TEXT NOT NULL,
+    image_sha256 TEXT NOT NULL,
+    suggested_label TEXT NOT NULL,
+    suggestion_confidence REAL NOT NULL,
+    suggested_boxes_json TEXT NOT NULL DEFAULT '[]',
+    raw_metadata_json TEXT NOT NULL DEFAULT '{}',
+    review_status TEXT NOT NULL DEFAULT 'pending', -- pending | confirmed | skipped | conflict
+    confirmed_label TEXT,
+    visual_condition TEXT NOT NULL DEFAULT 'clear',
+    boxes_json TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT '',
+    candidate_created_at INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    remote_reviewed_at TEXT,
+    sync_state TEXT NOT NULL DEFAULT 'clean', -- clean | dirty | conflict
+    remote_review_hash TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_worker_candidate_queue
+    ON worker_candidate_items (task, review_status, candidate_created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_worker_candidate_sync
+    ON worker_candidate_items (sync_state, reviewed_at, id);
+
+-- 新模型共用的一图多标签人工结论。NULL 明确表示“尚未人工判断”，不能当作
+-- 负样本；模型建议单独存在 training_review_sources，永远不冒充人工真值。
+CREATE TABLE IF NOT EXISTS training_review_items (
+    frame_id INTEGER PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+    match_flow_label TEXT CHECK (
+        match_flow_label IS NULL OR match_flow_label IN (
+            'match_flow', 'not_match_flow', 'unreadable')),
+    match_mode_label TEXT CHECK (
+        match_mode_label IS NULL OR match_mode_label IN (
+            '3v3', 'aram', '5v5', 'unreadable')),
+    hero_select_label TEXT CHECK (
+        hero_select_label IS NULL OR hero_select_label IN (
+            'not_select', 'select_3v3', 'select_aram', 'select_5v5',
+            'unreadable')),
+    result_panel_label TEXT CHECK (
+        result_panel_label IS NULL OR result_panel_label IN (
+            'result_panel', 'no_result_panel', 'unreadable')),
+    hero_layout_label TEXT CHECK (
+        hero_layout_label IS NULL OR hero_layout_label IN (
+            'gameplay_hud', 'scoreboard', 'result_page', 'none',
+            'unreadable')),
+    ocr_usable TEXT NOT NULL DEFAULT 'yes' CHECK (
+        ocr_usable IN ('yes', 'no', 'unknown')),
+    result_occlusion TEXT NOT NULL DEFAULT 'none' CHECK (
+        result_occlusion IN ('none', 'occluded', 'unknown')),
+    occluder_types TEXT NOT NULL DEFAULT '[]',
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        review_status IN ('pending', 'partial', 'confirmed', 'skipped')),
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    reviewed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_status
+    ON training_review_items (review_status, updated_at DESC, frame_id);
+
+-- 同一张图片可同时来自旧人工标注、Worker 多个模型和历史结算图。来源与预标
+-- 一对多保存，图片和人工标签都只保留一份。
+CREATE TABLE IF NOT EXISTS training_review_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    frame_id INTEGER NOT NULL REFERENCES frames(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    image_path TEXT NOT NULL DEFAULT '',
+    suggestions_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    source_created_at INTEGER NOT NULL DEFAULT 0,
+    sync_state TEXT NOT NULL DEFAULT 'clean' CHECK (
+        sync_state IN ('clean', 'dirty', 'conflict')),
+    remote_review_hash TEXT NOT NULL DEFAULT '',
+    remote_reviewed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (source_type, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_sources_frame
+    ON training_review_sources (frame_id, source_created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_training_review_sources_sync
+    ON training_review_sources (source_type, sync_state, id);
+
+-- 积分板／结算图的英雄阵容复核。算法预填与人工结论分列保存，避免未确认
+-- 的 SIFT 结果直接成为训练真值。
+CREATE TABLE IF NOT EXISTS training_review_hero_lineups (
+    frame_id INTEGER PRIMARY KEY REFERENCES frames(id) ON DELETE CASCADE,
+    screen_type TEXT NOT NULL CHECK (
+        screen_type IN ('gameplay_hud', 'scoreboard', 'result_page')),
+    team_size INTEGER NOT NULL CHECK (team_size IN (3, 5)),
+    suggestion_method TEXT NOT NULL DEFAULT '',
+    player_side TEXT CHECK (
+        player_side IS NULL OR player_side IN ('left', 'right')),
+    player_slot INTEGER CHECK (
+        player_slot IS NULL OR player_slot BETWEEN 1 AND 5),
+    review_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        review_status IN ('pending', 'confirmed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    reviewed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS training_review_hero_slots (
+    frame_id INTEGER NOT NULL REFERENCES training_review_hero_lineups(frame_id)
+        ON DELETE CASCADE,
+    side TEXT NOT NULL CHECK (side IN ('left', 'right')),
+    slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 5),
+    crop_x REAL NOT NULL,
+    crop_y REAL NOT NULL,
+    crop_w REAL NOT NULL,
+    crop_h REAL NOT NULL,
+    suggested_label TEXT NOT NULL DEFAULT '',
+    suggestion_confidence REAL NOT NULL DEFAULT 0 CHECK (
+        suggestion_confidence BETWEEN 0 AND 1),
+    confirmed_label TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (frame_id, side, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_training_review_hero_status
+    ON training_review_hero_lineups (review_status, updated_at DESC, frame_id);
+
+-- 主播在同一类画面和近似宽高比下，英雄头像位置通常保持不变。模板只保存
+-- 人工画出的圆框位置，不保存算法预填或英雄真值。
+CREATE TABLE IF NOT EXISTS training_review_hero_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    streamer TEXT NOT NULL,
+    screen_type TEXT NOT NULL CHECK (
+        screen_type IN ('gameplay_hud', 'scoreboard', 'result_page')),
+    team_size INTEGER NOT NULL CHECK (team_size IN (3, 5)),
+    layout_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (streamer, screen_type, team_size, layout_key)
+);
+
+CREATE TABLE IF NOT EXISTS training_review_hero_template_slots (
+    template_id INTEGER NOT NULL REFERENCES training_review_hero_templates(id)
+        ON DELETE CASCADE,
+    side TEXT NOT NULL CHECK (side IN ('left', 'right')),
+    slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 5),
+    crop_x REAL NOT NULL,
+    crop_y REAL NOT NULL,
+    crop_w REAL NOT NULL,
+    crop_h REAL NOT NULL,
+    PRIMARY KEY (template_id, side, slot)
+);
+
+CREATE TABLE IF NOT EXISTS model_validations (
+    run_id TEXT PRIMARY KEY REFERENCES training_runs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,                    -- pending | passed | failed
+    notes TEXT NOT NULL DEFAULT '',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    tested_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_packages (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,                    -- incomplete | ready
+    path TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- 本地工作目录迁移只执行一次，避免每次 API 打开连接都遍历数万张图片。
+CREATE TABLE IF NOT EXISTS workspace_migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 DEFAULT_TASKS = [
@@ -322,6 +500,8 @@ DEFAULT_TASKS = [
     ('bp_review', 'BP 模式主动学习复核', '模型预标选英雄画面，由人工确认或纠错'),
     ('key_screen_review', '结算页/计分板主动学习复核',
      '模型预标关键画面，由人工确认结算页、计分板或其他'),
+    ('screen_state', '画面状态分类',
+     '区分非虚荣、游戏外、对局前、对局中、天赋选择、赛后与转场'),
 ]
 
 
@@ -368,6 +548,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "WHERE annotation_status = 'draft' AND content_family IS NOT NULL "
         "AND (content_family != 'vainglory' "
         "     OR (game_context IS NOT NULL AND screen_type IS NOT NULL))")
+    # labeled 是 annotations 的派生索引。目录搬迁前有少量完整标注没有同步该
+    # 标志，不能因此从检测数据集里漏掉人工真值。
+    conn.execute(
+        "UPDATE frames SET labeled = 1 WHERE labeled = 0 AND EXISTS ("
+        "SELECT 1 FROM annotations a WHERE a.frame_id = frames.id "
+        "AND a.annotation_status = 'complete')"
+    )
     # 旧的 game_context 语义不变(in_match 等),列名沿用
     # 光栅专项旧版一帧只有一个 x/y/w/h；首次打开新版时迁到多框子表。
     conn.execute(
@@ -393,6 +580,177 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE bp_review_items ADD COLUMN visual_condition TEXT "
             "NOT NULL DEFAULT 'clear'"
         )
+    review_cols = {
+        row['name']
+        for row in conn.execute('PRAGMA table_info(training_review_items)')
+    }
+    for column, ddl in (
+        ('ocr_usable', "TEXT NOT NULL DEFAULT 'yes'"),
+        ('result_occlusion', "TEXT NOT NULL DEFAULT 'none'"),
+        ('occluder_types', "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        if column not in review_cols:
+            conn.execute(
+                f'ALTER TABLE training_review_items ADD COLUMN {column} {ddl}'
+            )
+            review_cols.add(column)
+    if 'hero_layout_label' not in review_cols:
+        conn.execute(
+            'ALTER TABLE training_review_items ADD COLUMN hero_layout_label '
+            "TEXT CHECK (hero_layout_label IS NULL OR hero_layout_label IN ("
+            "'gameplay_hud', 'scoreboard', 'result_page', 'none', "
+            "'unreadable'))"
+        )
+    _migrate_training_review_hero_lineups(conn)
+    _migrate_training_review_player_slot(conn)
+    repair_managed_paths(conn)
+
+
+def _migrate_training_review_hero_lineups(conn: sqlite3.Connection) -> None:
+    """让旧阵容表接受 HUD，同时原样保留已有阵容和人工结论。"""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ('training_review_hero_lineups',),
+    ).fetchone()
+    if row is None or 'gameplay_hud' in str(row['sql'] or ''):
+        return
+    with conn:
+        conn.execute('DROP TABLE IF EXISTS training_review_hero_slots_new')
+        conn.execute('DROP TABLE IF EXISTS training_review_hero_lineups_new')
+        conn.execute(
+            """
+            CREATE TABLE training_review_hero_lineups_new (
+                frame_id INTEGER PRIMARY KEY REFERENCES frames(id)
+                    ON DELETE CASCADE,
+                screen_type TEXT NOT NULL CHECK (
+                    screen_type IN (
+                        'gameplay_hud', 'scoreboard', 'result_page')),
+                team_size INTEGER NOT NULL CHECK (team_size IN (3, 5)),
+                suggestion_method TEXT NOT NULL DEFAULT '',
+                review_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                    review_status IN ('pending', 'confirmed')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE training_review_hero_slots_new (
+                frame_id INTEGER NOT NULL
+                    REFERENCES training_review_hero_lineups_new(frame_id)
+                    ON DELETE CASCADE,
+                side TEXT NOT NULL CHECK (side IN ('left', 'right')),
+                slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 5),
+                crop_x REAL NOT NULL,
+                crop_y REAL NOT NULL,
+                crop_w REAL NOT NULL,
+                crop_h REAL NOT NULL,
+                suggested_label TEXT NOT NULL DEFAULT '',
+                suggestion_confidence REAL NOT NULL DEFAULT 0 CHECK (
+                    suggestion_confidence BETWEEN 0 AND 1),
+                confirmed_label TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (frame_id, side, slot)
+            )
+            """
+        )
+        conn.execute(
+            'INSERT INTO training_review_hero_lineups_new '
+            'SELECT * FROM training_review_hero_lineups'
+        )
+        conn.execute(
+            'INSERT INTO training_review_hero_slots_new '
+            'SELECT * FROM training_review_hero_slots'
+        )
+        conn.execute('DROP TABLE training_review_hero_slots')
+        conn.execute('DROP TABLE training_review_hero_lineups')
+        conn.execute(
+            'ALTER TABLE training_review_hero_lineups_new '
+            'RENAME TO training_review_hero_lineups'
+        )
+        conn.execute(
+            'ALTER TABLE training_review_hero_slots_new '
+            'RENAME TO training_review_hero_slots'
+        )
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_training_review_hero_status '
+            'ON training_review_hero_lineups '
+            '(review_status, updated_at DESC, frame_id)'
+        )
+
+
+def _migrate_training_review_player_slot(conn: sqlite3.Connection) -> None:
+    """给既有英雄阵容补充唯一的主播英雄位置。"""
+    columns = {
+        row['name']
+        for row in conn.execute(
+            'PRAGMA table_info(training_review_hero_lineups)'
+        )
+    }
+    if 'player_side' not in columns:
+        conn.execute(
+            'ALTER TABLE training_review_hero_lineups ADD COLUMN '
+            "player_side TEXT CHECK (player_side IS NULL OR player_side IN ("
+            "'left', 'right'))"
+        )
+    if 'player_slot' not in columns:
+        conn.execute(
+            'ALTER TABLE training_review_hero_lineups ADD COLUMN '
+            'player_slot INTEGER CHECK ('
+            'player_slot IS NULL OR player_slot BETWEEN 1 AND 5)'
+        )
+
+
+def repair_managed_paths(conn: sqlite3.Connection) -> Dict[str, int]:
+    """修复目录重组后仍指向旧工作目录的帧路径。
+
+    只在原路径已经失效、且当前 Vision Lab 目录下能按 SHA-256 找到同名
+    文件时更新。帧 ID、哈希、标注和数据集版本均保持不变。
+    """
+    migration_id = 'managed-frame-paths-v1'
+    if conn.execute(
+            'SELECT 1 FROM workspace_migrations WHERE id = ?',
+            (migration_id,),).fetchone():
+        return {'frames': 0, 'thumbs': 0}
+    repaired = {'frames': 0, 'thumbs': 0}
+    rows = conn.execute(
+        "SELECT id, sha256, frame_path, thumb_path FROM frames "
+        "WHERE frame_path != '' OR thumb_path != ''"
+    ).fetchall()
+    for row in rows:
+        updates: Dict[str, str] = {}
+        frame_path = Path(str(row['frame_path'] or ''))
+        managed_frame = config.FRAME_DIR / f"{row['sha256']}.jpg"
+        if (
+            str(row['frame_path'] or '')
+            and not frame_path.is_file()
+            and managed_frame.is_file()
+        ):
+            updates['frame_path'] = str(managed_frame)
+            repaired['frames'] += 1
+        thumb_path = Path(str(row['thumb_path'] or ''))
+        managed_thumb = config.THUMB_DIR / f"{row['sha256']}.jpg"
+        if (
+            str(row['thumb_path'] or '')
+            and not thumb_path.is_file()
+            and managed_thumb.is_file()
+        ):
+            updates['thumb_path'] = str(managed_thumb)
+            repaired['thumbs'] += 1
+        if updates:
+            assignments = ', '.join(f'{field} = ?' for field in updates)
+            conn.execute(
+                f'UPDATE frames SET {assignments} WHERE id = ?',
+                [*updates.values(), int(row['id'])],
+            )
+    conn.execute(
+        'INSERT INTO workspace_migrations (id, applied_at, detail_json) '
+        'VALUES (?, ?, ?)',
+        (migration_id, now(), json.dumps(repaired, ensure_ascii=False)),
+    )
+    return repaired
 
 
 def now() -> str:
@@ -444,7 +802,10 @@ def list_videos(conn: sqlite3.Connection, *, status: Optional[str] = None,
            '(SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id) AS frame_count, '
            '(SELECT COUNT(*) FROM frames f WHERE f.video_id = v.id AND f.labeled = 1) AS labeled_count '
            'FROM videos v')
-    where: List[str] = ["v.remote_path NOT LIKE 'worker-candidate://%'"]
+    where: List[str] = [
+        "v.remote_path NOT LIKE 'worker-candidate://%'",
+        "v.remote_path NOT LIKE 'result-archive://%'",
+    ]
     args: List[Any] = []
     if status:
         where.append('v.status = ?')
@@ -900,6 +1261,81 @@ def list_training_runs(
         (max(1, min(1_000, int(limit))),),
     ).fetchall()
     return [_training_run_dict(row) for row in rows]
+
+
+def set_model_validation(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    status: str,
+    notes: str = '',
+    metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if status not in {'pending', 'passed', 'failed'}:
+        raise ValueError(f'未知模型验收状态: {status}')
+    run = get_training_run(conn, run_id)
+    if run is None:
+        raise KeyError(f'训练记录不存在: {run_id}')
+    if run['status'] != 'succeeded':
+        raise ValueError('只有训练成功的模型才能验收')
+    conn.execute(
+        """
+        INSERT INTO model_validations
+            (run_id, status, notes, metrics_json, tested_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            status=excluded.status,
+            notes=excluded.notes,
+            metrics_json=excluded.metrics_json,
+            tested_at=excluded.tested_at
+        """,
+        (
+            run_id, status, notes[:2000],
+            json.dumps(metrics or {}, ensure_ascii=False), now(),
+        ),
+    )
+    conn.commit()
+    return get_model_validation(conn, run_id) or {}
+
+
+def get_model_validation(
+        conn: sqlite3.Connection, run_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        'SELECT * FROM model_validations WHERE run_id = ?', (run_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result['metrics_json'] = json.loads(result['metrics_json'] or '{}')
+    return result
+
+
+def create_model_package(
+        conn: sqlite3.Connection, *, package_id: str, status: str,
+        path: str, manifest: Dict[str, Any]) -> None:
+    if status not in {'incomplete', 'ready'}:
+        raise ValueError(f'未知模型包状态: {status}')
+    conn.execute(
+        'INSERT INTO model_packages '
+        '(id, status, path, manifest_json, created_at) VALUES (?, ?, ?, ?, ?)',
+        (
+            package_id, status, path,
+            json.dumps(manifest, ensure_ascii=False), now(),
+        ),
+    )
+    conn.commit()
+
+
+def list_model_packages(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        'SELECT * FROM model_packages ORDER BY created_at DESC, id DESC'
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item['manifest_json'] = json.loads(item['manifest_json'] or '{}')
+        result.append(item)
+    return result
 
 
 def audit_recent(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]]:
@@ -1578,4 +2014,1269 @@ def key_screen_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         'statuses': statuses,
         'confirmed_labels': confirmed,
         'existing_human_labels': existing,
+    }
+
+
+# ---------- Worker 训练候选与 NAS 双向复核 ----------
+
+WORKER_CANDIDATE_LABELS = {
+    'screen_state': {
+        'not_vainglory', 'out_of_match', 'pre_match', 'in_match',
+        'talent_select', 'post_match', 'transition',
+    },
+    'bp_review': BP_REVIEW_LABELS,
+    'key_screen_review': KEY_SCREEN_REVIEW_LABELS,
+    'result_detector': {'result_panel', 'no_result_panel'},
+    'mode_gate': {'blocked_gate', 'open_entrance', 'no_evidence'},
+}
+WORKER_CANDIDATE_STATUSES = {'pending', 'confirmed', 'skipped', 'conflict'}
+WORKER_CANDIDATE_SYNC_STATES = {'clean', 'dirty', 'conflict'}
+WORKER_VISUAL_CONDITIONS = {
+    'clear', 'occluded', 'windowed', 'occluded_windowed', 'unreadable',
+}
+
+
+def normalize_candidate_boxes(boxes: Any) -> List[Dict[str, Any]]:
+    if boxes is None:
+        return []
+    if not isinstance(boxes, list):
+        raise ValueError('boxes 必须是边界框数组')
+    normalized = []
+    for raw in boxes:
+        if not isinstance(raw, dict):
+            raise ValueError('每个边界框必须是对象')
+        try:
+            values = {name: float(raw[name]) for name in ('x', 'y', 'w', 'h')}
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('每个边界框都必须包含数字 x/y/w/h')
+        if not (
+            0 <= values['x'] <= 1
+            and 0 <= values['y'] <= 1
+            and 0 < values['w'] <= 1
+            and 0 < values['h'] <= 1
+            and values['x'] + values['w'] <= 1.001
+            and values['y'] + values['h'] <= 1.001
+        ):
+            raise ValueError('框坐标必须归一化到 [0,1]')
+        box_type = str(raw.get('type') or raw.get('box_type') or '')[:80]
+        normalized.append({**values, 'type': box_type})
+    return normalized
+
+
+def upsert_worker_candidate(
+        conn: sqlite3.Connection, *, source_id: str, frame_id: int,
+        task: str, schema_version: int, image_path: str, image_sha256: str,
+        suggested_label: str, suggestion_confidence: float,
+        suggested_boxes: List[Dict[str, Any]], raw_metadata: Dict[str, Any],
+        candidate_created_at: int) -> bool:
+    if task not in WORKER_CANDIDATE_LABELS:
+        raise ValueError(f'未知 worker 候选任务: {task}')
+    if suggested_label not in WORKER_CANDIDATE_LABELS[task]:
+        raise ValueError(f'未知 worker 建议标签: {suggested_label}')
+    if not conn.execute(
+            'SELECT 1 FROM frames WHERE id = ?', (frame_id,)).fetchone():
+        raise KeyError(f'帧不存在: {frame_id}')
+    existing = conn.execute(
+        'SELECT id FROM worker_candidate_items WHERE source_id = ?',
+        (source_id,),
+    ).fetchone()
+    conn.execute(
+        """
+        INSERT INTO worker_candidate_items
+            (source_id, frame_id, task, schema_version, image_path,
+             image_sha256, suggested_label, suggestion_confidence,
+             suggested_boxes_json, raw_metadata_json, candidate_created_at,
+             created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET
+            frame_id=excluded.frame_id,
+            task=excluded.task,
+            schema_version=excluded.schema_version,
+            image_path=excluded.image_path,
+            image_sha256=excluded.image_sha256,
+            suggested_label=excluded.suggested_label,
+            suggestion_confidence=excluded.suggestion_confidence,
+            suggested_boxes_json=excluded.suggested_boxes_json,
+            raw_metadata_json=excluded.raw_metadata_json,
+            candidate_created_at=excluded.candidate_created_at
+        """,
+        (
+            source_id, frame_id, task, int(schema_version), image_path,
+            image_sha256, suggested_label,
+            max(0.0, min(1.0, float(suggestion_confidence))),
+            json.dumps(normalize_candidate_boxes(suggested_boxes), ensure_ascii=False),
+            json.dumps(raw_metadata, ensure_ascii=False),
+            max(0, int(candidate_created_at)), now(),
+        ),
+    )
+    conn.commit()
+    return existing is None
+
+
+def _worker_candidate_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    item = dict(row)
+    item['suggested_boxes'] = json.loads(
+        item.pop('suggested_boxes_json') or '[]')
+    item['boxes'] = json.loads(item.pop('boxes_json') or '[]')
+    item['raw_metadata'] = json.loads(
+        item.pop('raw_metadata_json') or '{}')
+    return item
+
+
+def get_worker_candidate(
+        conn: sqlite3.Connection, candidate_id: int) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT c.*, f.video_id, f.timestamp_ms, f.width, f.height,
+               f.frame_path, f.thumb_path, v.streamer, v.filename
+        FROM worker_candidate_items c
+        JOIN frames f ON f.id = c.frame_id
+        JOIN videos v ON v.id = f.video_id
+        WHERE c.id = ?
+        """,
+        (int(candidate_id),),
+    ).fetchone()
+    return _worker_candidate_dict(row) if row else None
+
+
+def get_worker_candidate_by_source(
+        conn: sqlite3.Connection, source_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        'SELECT id FROM worker_candidate_items WHERE source_id = ?',
+        (source_id,),
+    ).fetchone()
+    return get_worker_candidate(conn, int(row['id'])) if row else None
+
+
+def list_worker_candidates(
+        conn: sqlite3.Connection, *, task: str = '', status: str = 'pending',
+        limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
+    if task and task not in WORKER_CANDIDATE_LABELS:
+        raise ValueError(f'未知 worker 候选任务: {task}')
+    if status != 'all' and status not in WORKER_CANDIDATE_STATUSES:
+        raise ValueError(f'未知 worker 候选状态: {status}')
+    where = []
+    args: List[Any] = []
+    if task:
+        where.append('c.task = ?')
+        args.append(task)
+    if status == 'conflict':
+        where.append("c.sync_state = 'conflict'")
+    elif status != 'all':
+        where.append('c.review_status = ?')
+        args.append(status)
+    clause = 'WHERE ' + ' AND '.join(where) if where else ''
+    args.extend((max(1, min(2_000, int(limit))), max(0, int(offset))))
+    rows = conn.execute(
+        f"""
+        SELECT c.*, f.video_id, f.timestamp_ms, f.width, f.height,
+               f.frame_path, f.thumb_path, v.streamer, v.filename
+        FROM worker_candidate_items c
+        JOIN frames f ON f.id = c.frame_id
+        JOIN videos v ON v.id = f.video_id
+        {clause}
+        ORDER BY
+            CASE c.review_status WHEN 'conflict' THEN 0 WHEN 'pending' THEN 1
+                 ELSE 2 END,
+            c.candidate_created_at DESC, c.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        args,
+    ).fetchall()
+    return [_worker_candidate_dict(row) for row in rows]
+
+
+def review_worker_candidate(
+        conn: sqlite3.Connection, *, candidate_id: int,
+        label: Optional[str], visual_condition: str = 'clear',
+        boxes: Optional[List[Dict[str, Any]]] = None, notes: str = '',
+        reviewed_at: Optional[str] = None, sync_state: str = 'dirty',
+        remote_review_hash: str = '') -> Dict[str, Any]:
+    item = get_worker_candidate(conn, candidate_id)
+    if item is None:
+        raise KeyError(f'worker 候选不存在: {candidate_id}')
+    task = str(item['task'])
+    if label is not None and label not in WORKER_CANDIDATE_LABELS[task]:
+        raise ValueError(f'未知 {task} 确认标签: {label}')
+    if visual_condition not in WORKER_VISUAL_CONDITIONS:
+        raise ValueError(f'未知画面情况: {visual_condition}')
+    if sync_state not in WORKER_CANDIDATE_SYNC_STATES:
+        raise ValueError(f'未知同步状态: {sync_state}')
+    normalized_boxes = normalize_candidate_boxes(boxes)
+    if label in {'result_panel', 'blocked_gate', 'open_entrance'}:
+        if not normalized_boxes:
+            raise ValueError('这个标签必须至少画一个框')
+    elif normalized_boxes:
+        raise ValueError('当前标签不能带边界框')
+    if label is None:
+        visual_condition = 'clear'
+        status = 'skipped'
+    else:
+        status = 'confirmed'
+    timestamp = reviewed_at or now()
+    conn.execute(
+        'UPDATE worker_candidate_items SET review_status = ?, '
+        'confirmed_label = ?, visual_condition = ?, boxes_json = ?, notes = ?, '
+        'reviewed_at = ?, remote_reviewed_at = CASE WHEN ? = \'clean\' '
+        'THEN ? ELSE remote_reviewed_at END, sync_state = ?, '
+        'remote_review_hash = ? WHERE id = ?',
+        (
+            status, label, visual_condition,
+            json.dumps(normalized_boxes, ensure_ascii=False), notes[:1000],
+            timestamp, sync_state, timestamp, sync_state,
+            remote_review_hash, int(candidate_id),
+        ),
+    )
+    audit(
+        conn,
+        'worker_candidate_review',
+        frame_id=int(item['frame_id']),
+        detail=json.dumps(
+            {
+                'source_id': item['source_id'], 'task': task, 'label': label,
+                'status': status, 'visual_condition': visual_condition,
+                'boxes': normalized_boxes, 'sync_state': sync_state,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    updated = get_worker_candidate(conn, candidate_id)
+    assert updated is not None
+    return updated
+
+
+def mark_worker_candidate_review_for_frame(
+        conn: sqlite3.Connection, *, frame_id: int, task: str,
+        label: Optional[str], visual_condition: str = 'clear') -> int:
+    """兼容旧 BP/关键界面复核页：把人工结果同时标成待回传 NAS。"""
+    rows = conn.execute(
+        'SELECT id FROM worker_candidate_items WHERE frame_id = ? AND task = ?',
+        (int(frame_id), task),
+    ).fetchall()
+    for row in rows:
+        review_worker_candidate(
+            conn,
+            candidate_id=int(row['id']),
+            label=label,
+            visual_condition=visual_condition,
+        )
+    return len(rows)
+
+
+def worker_candidate_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
+    by_status = {
+        row['review_status']: int(row['count'])
+        for row in conn.execute(
+            'SELECT review_status, COUNT(*) AS count '
+            'FROM worker_candidate_items GROUP BY review_status'
+        ).fetchall()
+    }
+    by_task = {
+        row['task']: {
+            'total': int(row['total']),
+            'pending': int(row['pending']),
+            'confirmed': int(row['confirmed']),
+        }
+        for row in conn.execute(
+            """
+            SELECT task, COUNT(*) AS total,
+                   SUM(review_status = 'pending') AS pending,
+                   SUM(review_status = 'confirmed') AS confirmed
+            FROM worker_candidate_items GROUP BY task
+            """
+        ).fetchall()
+    }
+    dirty = int(conn.execute(
+        "SELECT COUNT(*) FROM worker_candidate_items WHERE sync_state = 'dirty'"
+    ).fetchone()[0])
+    conflicts = int(conn.execute(
+        "SELECT COUNT(*) FROM worker_candidate_items "
+        "WHERE sync_state = 'conflict' OR review_status = 'conflict'"
+    ).fetchone()[0])
+    return {
+        'total': sum(by_status.values()),
+        'statuses': by_status,
+        'by_task': by_task,
+        'dirty': dirty,
+        'conflicts': conflicts,
+    }
+
+
+# ---------- 新模型共用复核 ----------
+
+_TRAINING_REVIEW_LABELS = {
+    'match_flow': {'match_flow', 'not_match_flow', 'unreadable'},
+    'match_mode': {'3v3', 'aram', '5v5', 'unreadable'},
+    'hero_select': {
+        'not_select', 'select_3v3', 'select_aram', 'select_5v5', 'unreadable'
+    },
+    'result_panel': {'result_panel', 'no_result_panel', 'unreadable'},
+}
+_TRAINING_REVIEW_STATUSES = {'pending', 'partial', 'confirmed', 'skipped'}
+_HERO_SCREEN_TYPES = {'gameplay_hud', 'scoreboard', 'result_page'}
+_HERO_LAYOUT_LABELS = _HERO_SCREEN_TYPES | {'none', 'unreadable'}
+_MISSING_PLAYER_HERO_REVIEW = """
+item.review_status = 'confirmed'
+AND (
+    (
+        item.result_panel_label = 'result_panel'
+        AND (
+            COALESCE(item.hero_layout_label, '') != 'result_page'
+            OR NOT EXISTS (
+                SELECT 1
+                FROM training_review_hero_lineups lineup
+                WHERE lineup.frame_id = item.frame_id
+                  AND lineup.screen_type = 'result_page'
+                  AND lineup.review_status = 'confirmed'
+                  AND lineup.player_side IN ('left', 'right')
+                  AND lineup.player_slot BETWEEN 1 AND lineup.team_size
+            )
+        )
+    )
+    OR (
+        item.hero_layout_label = 'scoreboard'
+        AND NOT EXISTS (
+            SELECT 1
+            FROM training_review_hero_lineups lineup
+            WHERE lineup.frame_id = item.frame_id
+              AND lineup.screen_type = 'scoreboard'
+              AND lineup.review_status = 'confirmed'
+              AND lineup.player_side IN ('left', 'right')
+              AND lineup.player_slot BETWEEN 1 AND lineup.team_size
+        )
+    )
+)
+"""
+
+
+def validate_training_suggestions(value: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise ValueError('模型建议必须是对象')
+    result: Dict[str, Dict[str, Any]] = {}
+    for task, raw in value.items():
+        if task not in _TRAINING_REVIEW_LABELS or not isinstance(raw, dict):
+            raise ValueError('模型建议任务无效')
+        label = str(raw.get('label') or '')
+        if label not in _TRAINING_REVIEW_LABELS[task]:
+            raise ValueError('模型建议标签无效')
+        confidence = float(raw.get('confidence', 0))
+        if not 0 <= confidence <= 1:
+            raise ValueError('模型建议置信度必须在 0 到 1 之间')
+        result[task] = {**raw, 'label': label, 'confidence': confidence}
+    return result
+
+
+def add_training_review_source(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    source_type: str,
+    source_id: str,
+    suggestions: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    image_path: str = '',
+    source_created_at: int = 0,
+) -> bool:
+    """增加一条来源/预标；不会改写任何人工标签。"""
+    if not conn.execute(
+            'SELECT 1 FROM frames WHERE id = ?', (int(frame_id),)).fetchone():
+        raise KeyError(frame_id)
+    normalized_type = source_type.strip()[:80]
+    normalized_id = source_id.strip()[:300]
+    if not normalized_type or not normalized_id:
+        raise ValueError('训练复核来源无效')
+    normalized_suggestions = validate_training_suggestions(suggestions or {})
+    timestamp = now()
+    existing = conn.execute(
+        'SELECT id FROM training_review_sources '
+        'WHERE source_type = ? AND source_id = ?',
+        (normalized_type, normalized_id),
+    ).fetchone()
+    conn.execute(
+        """
+        INSERT INTO training_review_items
+            (frame_id, review_status, created_at, updated_at)
+        VALUES (?, 'pending', ?, ?)
+        ON CONFLICT(frame_id) DO NOTHING
+        """,
+        (int(frame_id), timestamp, timestamp),
+    )
+    conn.execute(
+        """
+        INSERT INTO training_review_sources
+            (frame_id, source_type, source_id, image_path, suggestions_json,
+             metadata_json, source_created_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_id) DO UPDATE SET
+            frame_id=excluded.frame_id,
+            image_path=excluded.image_path,
+            suggestions_json=excluded.suggestions_json,
+            metadata_json=excluded.metadata_json,
+            source_created_at=excluded.source_created_at,
+            updated_at=excluded.updated_at
+        """,
+        (
+            int(frame_id), normalized_type, normalized_id, image_path[:500],
+            json.dumps(
+                normalized_suggestions, ensure_ascii=False,
+                separators=(',', ':'), sort_keys=True),
+            json.dumps(
+                metadata or {}, ensure_ascii=False,
+                separators=(',', ':'), sort_keys=True),
+            max(0, int(source_created_at)), timestamp, timestamp,
+        ),
+    )
+    conn.commit()
+    return existing is None
+
+
+def _training_review_item_dict(
+    conn: sqlite3.Connection, row: sqlite3.Row
+) -> Dict[str, Any]:
+    item = dict(row)
+    try:
+        occluder_types = json.loads(str(item.get('occluder_types') or '[]'))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        occluder_types = []
+    item['occluder_types'] = (
+        [str(value) for value in occluder_types]
+        if isinstance(occluder_types, list)
+        else []
+    )
+    source_rows = conn.execute(
+        'SELECT id, source_type, source_id, image_path, suggestions_json, '
+        'metadata_json, source_created_at, sync_state, remote_reviewed_at '
+        'FROM training_review_sources WHERE frame_id = ? '
+        'ORDER BY source_created_at DESC, id DESC',
+        (int(row['frame_id']),),
+    ).fetchall()
+    suggestions: Dict[str, Dict[str, Any]] = {}
+    sources = []
+    for source_row in source_rows:
+        source = dict(source_row)
+        source_suggestions = json.loads(source.pop('suggestions_json') or '{}')
+        source['metadata'] = json.loads(source.pop('metadata_json') or '{}')
+        source['suggestions'] = source_suggestions
+        sources.append(source)
+        for task, suggestion in source_suggestions.items():
+            previous = suggestions.get(task)
+            if previous is None or float(suggestion.get('confidence', 0)) > float(
+                    previous.get('confidence', 0)):
+                suggestions[task] = dict(suggestion)
+    item['suggestions'] = suggestions
+    item['sources'] = sources
+    item['source_count'] = len(sources)
+    item['boxes'] = get_boxes(conn, int(row['frame_id']))
+    item['needs_player_hero_review'] = bool(
+        item['needs_player_hero_review']
+    )
+    return item
+
+
+def get_training_review_item(
+    conn: sqlite3.Connection, frame_id: int
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        f"""
+        SELECT item.*, frame.video_id, frame.timestamp_ms, frame.width,
+               frame.height, frame.frame_path, frame.thumb_path, frame.sha256,
+               video.streamer, video.filename, video.remote_path,
+               CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW})
+                    THEN 1 ELSE 0 END AS needs_player_hero_review
+        FROM training_review_items item
+        JOIN frames frame ON frame.id = item.frame_id
+        JOIN videos video ON video.id = frame.video_id
+        WHERE item.frame_id = ?
+        """,
+        (int(frame_id),),
+    ).fetchone()
+    return None if row is None else _training_review_item_dict(conn, row)
+
+
+def list_training_review_items(
+    conn: sqlite3.Connection,
+    *,
+    status: str = 'pending',
+    limit: int = 1000,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    if status not in _TRAINING_REVIEW_STATUSES | {
+        'all', 'needs_review', 'missing_player'
+    }:
+        raise ValueError('训练复核状态无效')
+    if limit < 1 or limit > 10_000 or offset < 0:
+        raise ValueError('训练复核分页参数无效')
+    base = (
+        'SELECT frame_id FROM training_review_items '
+        "ORDER BY CASE review_status WHEN 'pending' THEN 0 WHEN 'partial' THEN 1 "
+        "WHEN 'confirmed' THEN 2 ELSE 3 END, updated_at DESC, frame_id DESC "
+        'LIMIT ? OFFSET ?'
+    )
+    parameters: tuple[Any, ...] = (int(limit), int(offset))
+    if status == 'needs_review':
+        base = (
+            'SELECT item.frame_id FROM training_review_items item '
+            "WHERE item.review_status IN ('pending', 'partial') "
+            f'OR ({_MISSING_PLAYER_HERO_REVIEW}) '
+            f'ORDER BY CASE WHEN ({_MISSING_PLAYER_HERO_REVIEW}) THEN 0 '
+            "WHEN item.review_status = 'pending' THEN 1 ELSE 2 END, "
+            'item.updated_at DESC, item.frame_id DESC LIMIT ? OFFSET ?'
+        )
+    elif status == 'missing_player':
+        base = (
+            'SELECT item.frame_id FROM training_review_items item '
+            f'WHERE {_MISSING_PLAYER_HERO_REVIEW} '
+            'ORDER BY item.updated_at DESC, item.frame_id DESC '
+            'LIMIT ? OFFSET ?'
+        )
+    elif status != 'all':
+        base = (
+            'SELECT frame_id FROM training_review_items WHERE review_status = ? '
+            'ORDER BY updated_at DESC, frame_id DESC LIMIT ? OFFSET ?'
+        )
+        parameters = (status, int(limit), int(offset))
+    rows = conn.execute(base, parameters).fetchall()
+    result = []
+    for row in rows:
+        item = get_training_review_item(conn, int(row['frame_id']))
+        if item is not None:
+            result.append(item)
+    return result
+
+
+def save_training_review(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    match_flow_label: Optional[str],
+    match_mode_label: Optional[str],
+    hero_select_label: Optional[str],
+    result_panel_label: Optional[str],
+    hero_layout_label: Optional[str] = None,
+    ocr_usable: str = 'yes',
+    result_occlusion: str = 'none',
+    occluder_types: Sequence[str] = (),
+    status: str = 'confirmed',
+    notes: str = '',
+) -> Dict[str, Any]:
+    labels = {
+        'match_flow': match_flow_label,
+        'match_mode': match_mode_label,
+        'hero_select': hero_select_label,
+        'result_panel': result_panel_label,
+    }
+    for task, label in labels.items():
+        if label is not None and label not in _TRAINING_REVIEW_LABELS[task]:
+            raise ValueError(f'{task} 标签无效')
+    if (
+        hero_layout_label is not None
+        and hero_layout_label not in _HERO_LAYOUT_LABELS
+    ):
+        raise ValueError('英雄头像画面类型无效')
+    if status not in _TRAINING_REVIEW_STATUSES:
+        raise ValueError('训练复核状态无效')
+    normalized_ocr = str(ocr_usable or 'yes')
+    normalized_occlusion = str(result_occlusion or 'none')
+    allowed_occluders = {value for value, _label in config.OCCLUDER_TYPES}
+    normalized_occluders: List[str] = []
+    for value in occluder_types or ():
+        normalized = str(value)
+        if normalized not in allowed_occluders:
+            raise ValueError('结算遮挡物类型无效')
+        if normalized not in normalized_occluders:
+            normalized_occluders.append(normalized)
+    if normalized_ocr not in config.OCR_USABLE:
+        raise ValueError('结算 OCR 可用性无效')
+    if normalized_occlusion not in config.RESULT_OCCLUSION:
+        raise ValueError('结算遮挡状态无效')
+    if result_panel_label != 'result_panel':
+        normalized_ocr = 'yes'
+        normalized_occlusion = 'none'
+        normalized_occluders = []
+    elif normalized_occlusion != 'occluded':
+        normalized_occluders = []
+    if status == 'confirmed':
+        if match_flow_label is None or result_panel_label is None:
+            raise ValueError('确认前必须判断对局流程和结算面板')
+        if (
+            hero_select_label is not None
+            and hero_select_label.startswith('select_')
+            and result_panel_label != 'no_result_panel'
+        ):
+            raise ValueError('英雄选择界面的结算标签必须是“没有结算面板”')
+        if (
+            result_panel_label == 'result_panel'
+            and match_flow_label != 'match_flow'
+        ):
+            raise ValueError('结算面板必须属于对局流程画面')
+        if match_flow_label == 'match_flow':
+            if match_mode_label is None:
+                raise ValueError('对局画面必须判断本帧能否看出模式')
+            if hero_select_label != 'not_select':
+                raise ValueError('对局画面不能同时标成英雄选择界面')
+        elif match_flow_label == 'not_match_flow':
+            if hero_select_label is None:
+                raise ValueError('非对局画面必须判断英雄选择类型')
+            if match_mode_label is not None:
+                raise ValueError('非对局画面不能填写对局模式')
+        elif match_mode_label is not None:
+            raise ValueError('看不清对局状态时不能填写对局模式')
+        if result_panel_label == 'result_panel' and 'result_panel' not in get_boxes(
+                conn, int(frame_id)):
+            raise ValueError('结算正样本必须画一个完整结算面板框')
+        if hero_layout_label in _HERO_SCREEN_TYPES:
+            if match_flow_label != 'match_flow':
+                raise ValueError('HUD、积分板或结算图必须属于对局流程画面')
+            if hero_select_label != 'not_select':
+                raise ValueError('英雄头像画面不能同时是英雄选择界面')
+            if (
+                hero_layout_label == 'result_page'
+                and result_panel_label != 'result_panel'
+            ):
+                raise ValueError('结算图必须同时标记真正结算面板')
+            if (
+                hero_layout_label != 'result_page'
+                and result_panel_label != 'no_result_panel'
+            ):
+                raise ValueError('HUD 或积分板不能同时标记真正结算面板')
+            lineup = get_training_review_hero_lineup(conn, int(frame_id))
+            if (
+                lineup is None
+                or lineup['screen_type'] != hero_layout_label
+                or lineup['review_status'] != 'confirmed'
+                or len(lineup['slots']) != int(lineup['team_size']) * 2
+            ):
+                raise ValueError('请先画满并确认全部英雄头像')
+    if status != 'skipped' and result_panel_label != 'result_panel':
+        delete_box(conn, int(frame_id), 'result_panel')
+    timestamp = now()
+    conn.execute(
+        """
+        INSERT INTO training_review_items
+            (frame_id, match_flow_label, match_mode_label, hero_select_label,
+             result_panel_label, hero_layout_label, ocr_usable,
+             result_occlusion, occluder_types, review_status, notes,
+             created_at, updated_at, reviewed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(frame_id) DO UPDATE SET
+            match_flow_label=excluded.match_flow_label,
+            match_mode_label=excluded.match_mode_label,
+            hero_select_label=excluded.hero_select_label,
+            result_panel_label=excluded.result_panel_label,
+            hero_layout_label=excluded.hero_layout_label,
+            ocr_usable=excluded.ocr_usable,
+            result_occlusion=excluded.result_occlusion,
+            occluder_types=excluded.occluder_types,
+            review_status=excluded.review_status,
+            notes=excluded.notes,
+            updated_at=excluded.updated_at,
+            reviewed_at=excluded.reviewed_at
+        """,
+        (
+            int(frame_id), match_flow_label, match_mode_label, hero_select_label,
+            result_panel_label, hero_layout_label, normalized_ocr,
+            normalized_occlusion,
+            json.dumps(normalized_occluders, ensure_ascii=False),
+            status, notes[:1000], timestamp, timestamp,
+            timestamp if status in ('confirmed', 'skipped') else None,
+        ),
+    )
+    if status in ('confirmed', 'skipped'):
+        conn.execute(
+            "UPDATE training_review_sources SET sync_state = 'dirty', "
+            'updated_at = ? WHERE frame_id = ? AND source_type = ?',
+            (timestamp, int(frame_id), 'worker'),
+        )
+    if status == 'confirmed':
+        conn.execute('UPDATE frames SET labeled = 1 WHERE id = ?', (int(frame_id),))
+    conn.commit()
+    audit(
+        conn,
+        'training_review',
+        frame_id=int(frame_id),
+        detail=json.dumps(
+            {
+                **labels,
+                'hero_layout_label': hero_layout_label,
+                'ocr_usable': normalized_ocr,
+                'result_occlusion': normalized_occlusion,
+                'occluder_types': normalized_occluders,
+                'review_status': status,
+            }, ensure_ascii=False,
+            separators=(',', ':'), sort_keys=True),
+    )
+    item = get_training_review_item(conn, int(frame_id))
+    if item is None:
+        raise KeyError(frame_id)
+    return item
+
+
+def hero_layout_key(width: int, height: int) -> str:
+    if width <= 0 or height <= 0:
+        raise ValueError('图片尺寸必须为正数')
+    return f'{width / height:.3f}'
+
+
+def get_training_review_hero_lineup(
+    conn: sqlite3.Connection, frame_id: int
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        'SELECT * FROM training_review_hero_lineups WHERE frame_id = ?',
+        (int(frame_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    slots = conn.execute(
+        'SELECT side, slot, crop_x, crop_y, crop_w, crop_h, '
+        'suggested_label, suggestion_confidence, confirmed_label, updated_at '
+        'FROM training_review_hero_slots WHERE frame_id = ? '
+        "ORDER BY CASE side WHEN 'left' THEN 0 ELSE 1 END, slot",
+        (int(frame_id),),
+    ).fetchall()
+    result['slots'] = [
+        {
+            'side': str(slot['side']),
+            'slot': int(slot['slot']),
+            'crop': {
+                'x': float(slot['crop_x']),
+                'y': float(slot['crop_y']),
+                'w': float(slot['crop_w']),
+                'h': float(slot['crop_h']),
+            },
+            'suggested_label': str(slot['suggested_label'] or ''),
+            'suggestion_confidence': float(slot['suggestion_confidence']),
+            'confirmed_label': slot['confirmed_label'],
+            'updated_at': slot['updated_at'],
+        }
+        for slot in slots
+    ]
+    return result
+
+
+def _validated_hero_slots(
+    slots: List[Dict[str, Any]],
+    team_size: int,
+    *,
+    require_complete: bool = True,
+) -> List[Dict[str, Any]]:
+    if team_size not in (3, 5):
+        raise ValueError('英雄阵容人数必须是 3 或 5')
+    expected = {
+        (side, slot)
+        for side in ('left', 'right')
+        for slot in range(1, team_size + 1)
+    }
+    normalized = []
+    positions = set()
+    for value in slots:
+        side = str(value.get('side') or '')
+        try:
+            slot = int(value.get('slot'))
+            crop = value.get('crop') or {}
+            x, y, w, h = (
+                float(crop[name]) for name in ('x', 'y', 'w', 'h')
+            )
+            confidence = float(value.get('suggestion_confidence', 0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError('英雄位置或裁剪框无效') from exc
+        position = (side, slot)
+        if position not in expected or position in positions:
+            raise ValueError('英雄位置与队伍人数不匹配')
+        if not (
+            0 <= x <= 1
+            and 0 <= y <= 1
+            and 0 < w <= 1
+            and 0 < h <= 1
+            and x + w <= 1.001
+            and y + h <= 1.001
+        ):
+            raise ValueError('英雄头像裁剪框必须归一化到 [0,1]')
+        if not 0 <= confidence <= 1:
+            raise ValueError('英雄建议置信度必须在 [0,1]')
+        suggested_label = str(value.get('suggested_label') or '').strip()
+        if len(suggested_label) > 80:
+            raise ValueError('英雄名称过长')
+        positions.add(position)
+        normalized.append(
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {'x': x, 'y': y, 'w': w, 'h': h},
+                'suggested_label': suggested_label,
+                'suggestion_confidence': confidence,
+            }
+        )
+    if require_complete and positions != expected:
+        raise ValueError(f'必须提供完整的 {team_size * 2} 个英雄位置')
+    return normalized
+
+
+def _clear_invalid_training_review_player_slot(
+    conn: sqlite3.Connection, frame_id: int
+) -> None:
+    conn.execute(
+        """
+        UPDATE training_review_hero_lineups
+        SET player_side = NULL, player_slot = NULL
+        WHERE frame_id = ?
+          AND player_side IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM training_review_hero_slots slot
+              WHERE slot.frame_id = training_review_hero_lineups.frame_id
+                AND slot.side = training_review_hero_lineups.player_side
+                AND slot.slot = training_review_hero_lineups.player_slot
+          )
+        """,
+        (int(frame_id),),
+    )
+
+
+def replace_training_review_hero_suggestions(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    screen_type: str,
+    team_size: int,
+    method: str,
+    slots: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if screen_type not in _HERO_SCREEN_TYPES:
+        raise ValueError('英雄阵容画面类型无效')
+    normalized_method = method.strip()[:80]
+    if not normalized_method:
+        raise ValueError('英雄预填算法不能为空')
+    normalized = _validated_hero_slots(slots, team_size)
+    if not conn.execute(
+        'SELECT 1 FROM training_review_items WHERE frame_id = ?',
+        (int(frame_id),),
+    ).fetchone():
+        raise KeyError(frame_id)
+    timestamp = now()
+    with conn:
+        existing = conn.execute(
+            'SELECT team_size, review_status '
+            'FROM training_review_hero_lineups WHERE frame_id = ?',
+            (int(frame_id),),
+        ).fetchone()
+        if (
+            existing is not None
+            and existing['review_status'] == 'confirmed'
+            and int(existing['team_size']) != team_size
+        ):
+            raise ValueError('已确认阵容不能自动更换队伍人数')
+        conn.execute(
+            """
+            INSERT INTO training_review_hero_lineups
+                (frame_id, screen_type, team_size, suggestion_method,
+                 review_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+            ON CONFLICT(frame_id) DO UPDATE SET
+                player_side=CASE
+                    WHEN training_review_hero_lineups.screen_type =
+                         excluded.screen_type
+                     AND training_review_hero_lineups.team_size =
+                         excluded.team_size
+                    THEN training_review_hero_lineups.player_side
+                    ELSE NULL
+                END,
+                player_slot=CASE
+                    WHEN training_review_hero_lineups.screen_type =
+                         excluded.screen_type
+                     AND training_review_hero_lineups.team_size =
+                         excluded.team_size
+                    THEN training_review_hero_lineups.player_slot
+                    ELSE NULL
+                END,
+                screen_type=excluded.screen_type,
+                team_size=excluded.team_size,
+                suggestion_method=excluded.suggestion_method,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(frame_id), screen_type, team_size, normalized_method,
+                timestamp, timestamp,
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO training_review_hero_slots
+                (frame_id, side, slot, crop_x, crop_y, crop_w, crop_h,
+                 suggested_label, suggestion_confidence, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(frame_id, side, slot) DO UPDATE SET
+                crop_x=excluded.crop_x,
+                crop_y=excluded.crop_y,
+                crop_w=excluded.crop_w,
+                crop_h=excluded.crop_h,
+                suggested_label=excluded.suggested_label,
+                suggestion_confidence=excluded.suggestion_confidence,
+                updated_at=excluded.updated_at
+            """,
+            [
+                (
+                    int(frame_id), value['side'], value['slot'],
+                    value['crop']['x'], value['crop']['y'],
+                    value['crop']['w'], value['crop']['h'],
+                    value['suggested_label'], value['suggestion_confidence'],
+                    timestamp,
+                )
+                for value in normalized
+            ],
+        )
+        conn.execute(
+            'DELETE FROM training_review_hero_slots '
+            'WHERE frame_id = ? AND slot > ?',
+            (int(frame_id), team_size),
+        )
+        _clear_invalid_training_review_player_slot(conn, int(frame_id))
+    result = get_training_review_hero_lineup(conn, int(frame_id))
+    if result is None:
+        raise KeyError(frame_id)
+    return result
+
+
+def replace_training_review_hero_layout(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    screen_type: str,
+    team_size: int,
+    method: str,
+    slots: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """保存本帧人工圆框草稿；允许尚未画满，且不会冒充人工英雄真值。"""
+    if screen_type not in _HERO_SCREEN_TYPES:
+        raise ValueError('英雄阵容画面类型无效')
+    normalized_method = method.strip()[:80]
+    if not normalized_method:
+        raise ValueError('英雄预填算法不能为空')
+    normalized = _validated_hero_slots(
+        slots, team_size, require_complete=False
+    )
+    if not conn.execute(
+        'SELECT 1 FROM training_review_items WHERE frame_id = ?',
+        (int(frame_id),),
+    ).fetchone():
+        raise KeyError(frame_id)
+    timestamp = now()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO training_review_hero_lineups
+                (frame_id, screen_type, team_size, suggestion_method,
+                 review_status, created_at, updated_at, reviewed_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL)
+            ON CONFLICT(frame_id) DO UPDATE SET
+                player_side=CASE
+                    WHEN training_review_hero_lineups.screen_type =
+                         excluded.screen_type
+                     AND training_review_hero_lineups.team_size =
+                         excluded.team_size
+                    THEN training_review_hero_lineups.player_side
+                    ELSE NULL
+                END,
+                player_slot=CASE
+                    WHEN training_review_hero_lineups.screen_type =
+                         excluded.screen_type
+                     AND training_review_hero_lineups.team_size =
+                         excluded.team_size
+                    THEN training_review_hero_lineups.player_slot
+                    ELSE NULL
+                END,
+                screen_type=excluded.screen_type,
+                team_size=excluded.team_size,
+                suggestion_method=excluded.suggestion_method,
+                review_status='pending',
+                updated_at=excluded.updated_at,
+                reviewed_at=NULL
+            """,
+            (
+                int(frame_id), screen_type, team_size, normalized_method,
+                timestamp, timestamp,
+            ),
+        )
+        conn.execute(
+            'DELETE FROM training_review_hero_slots WHERE frame_id = ?',
+            (int(frame_id),),
+        )
+        conn.executemany(
+            """
+            INSERT INTO training_review_hero_slots
+                (frame_id, side, slot, crop_x, crop_y, crop_w, crop_h,
+                 suggested_label, suggestion_confidence, confirmed_label,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            [
+                (
+                    int(frame_id), value['side'], value['slot'],
+                    value['crop']['x'], value['crop']['y'],
+                    value['crop']['w'], value['crop']['h'],
+                    value['suggested_label'],
+                    value['suggestion_confidence'], timestamp,
+                )
+                for value in normalized
+            ],
+        )
+        _clear_invalid_training_review_player_slot(conn, int(frame_id))
+    result = get_training_review_hero_lineup(conn, int(frame_id))
+    if result is None:
+        raise KeyError(frame_id)
+    return result
+
+
+def _hero_template_dict(
+    conn: sqlite3.Connection, row: sqlite3.Row
+) -> Dict[str, Any]:
+    result = dict(row)
+    slots = conn.execute(
+        'SELECT side, slot, crop_x, crop_y, crop_w, crop_h '
+        'FROM training_review_hero_template_slots WHERE template_id = ? '
+        "ORDER BY CASE side WHEN 'left' THEN 0 ELSE 1 END, slot",
+        (int(row['id']),),
+    ).fetchall()
+    result['slots'] = [
+        {
+            'side': str(slot['side']),
+            'slot': int(slot['slot']),
+            'crop': {
+                'x': float(slot['crop_x']),
+                'y': float(slot['crop_y']),
+                'w': float(slot['crop_w']),
+                'h': float(slot['crop_h']),
+            },
+        }
+        for slot in slots
+    ]
+    return result
+
+
+def get_training_review_hero_template(
+    conn: sqlite3.Connection,
+    *,
+    streamer: str,
+    screen_type: str,
+    team_size: int,
+    layout_key: str,
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        'SELECT * FROM training_review_hero_templates '
+        'WHERE streamer = ? AND screen_type = ? AND team_size = ? '
+        'AND layout_key = ?',
+        (streamer, screen_type, int(team_size), layout_key),
+    ).fetchone()
+    return None if row is None else _hero_template_dict(conn, row)
+
+
+def save_training_review_hero_template(
+    conn: sqlite3.Connection,
+    *,
+    streamer: str,
+    screen_type: str,
+    team_size: int,
+    layout_key: str,
+    slots: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    normalized_streamer = streamer.strip()[:200]
+    normalized_key = layout_key.strip()[:40]
+    if not normalized_streamer:
+        raise ValueError('主播名称为空，不能缓存英雄布局')
+    if screen_type not in _HERO_SCREEN_TYPES:
+        raise ValueError('英雄阵容画面类型无效')
+    if not normalized_key:
+        raise ValueError('英雄布局比例无效')
+    normalized = _validated_hero_slots(slots, team_size)
+    timestamp = now()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO training_review_hero_templates
+                (streamer, screen_type, team_size, layout_key,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(streamer, screen_type, team_size, layout_key)
+            DO UPDATE SET updated_at=excluded.updated_at
+            """,
+            (
+                normalized_streamer, screen_type, team_size, normalized_key,
+                timestamp, timestamp,
+            ),
+        )
+        row = conn.execute(
+            'SELECT id FROM training_review_hero_templates '
+            'WHERE streamer = ? AND screen_type = ? AND team_size = ? '
+            'AND layout_key = ?',
+            (
+                normalized_streamer, screen_type, team_size, normalized_key,
+            ),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError('英雄布局模板保存失败')
+        template_id = int(row['id'])
+        conn.execute(
+            'DELETE FROM training_review_hero_template_slots '
+            'WHERE template_id = ?',
+            (template_id,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO training_review_hero_template_slots
+                (template_id, side, slot, crop_x, crop_y, crop_w, crop_h)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    template_id, value['side'], value['slot'],
+                    value['crop']['x'], value['crop']['y'],
+                    value['crop']['w'], value['crop']['h'],
+                )
+                for value in normalized
+            ],
+        )
+    result = get_training_review_hero_template(
+        conn,
+        streamer=normalized_streamer,
+        screen_type=screen_type,
+        team_size=team_size,
+        layout_key=normalized_key,
+    )
+    if result is None:
+        raise RuntimeError('英雄布局模板保存失败')
+    return result
+
+
+def save_training_review_hero_lineup(
+    conn: sqlite3.Connection,
+    *,
+    frame_id: int,
+    labels: List[Dict[str, Any]],
+    allowed_labels: set[str],
+    player_side: Optional[str] = None,
+    player_slot: Optional[int] = None,
+) -> Dict[str, Any]:
+    lineup = get_training_review_hero_lineup(conn, int(frame_id))
+    if lineup is None:
+        raise KeyError(frame_id)
+    team_size = int(lineup['team_size'])
+    expected = {
+        (side, slot)
+        for side in ('left', 'right')
+        for slot in range(1, team_size + 1)
+    }
+    normalized = []
+    positions = set()
+    accepted = set(allowed_labels) | {'unreadable'}
+    for value in labels:
+        side = str(value.get('side') or '')
+        try:
+            slot = int(value.get('slot'))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('英雄位置无效') from exc
+        hero_label = str(value.get('hero_label') or '').strip()
+        position = (side, slot)
+        if position not in expected or position in positions:
+            raise ValueError('英雄位置与队伍人数不匹配')
+        if hero_label not in accepted:
+            raise ValueError('英雄名称无效')
+        positions.add(position)
+        normalized.append((hero_label, side, slot))
+    if positions != expected:
+        raise ValueError(f'必须确认完整的 {team_size * 2} 个英雄位置')
+    normalized_player_side: Optional[str] = None
+    normalized_player_slot: Optional[int] = None
+    if player_side is not None or player_slot is not None:
+        try:
+            normalized_player_side = str(player_side or '')
+            normalized_player_slot = int(player_slot)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('主播英雄位置无效') from exc
+        if (normalized_player_side, normalized_player_slot) not in expected:
+            raise ValueError('主播英雄位置无效')
+    timestamp = now()
+    with conn:
+        conn.executemany(
+            'UPDATE training_review_hero_slots SET confirmed_label = ?, '
+            'updated_at = ? WHERE frame_id = ? AND side = ? AND slot = ?',
+            [
+                (label, timestamp, int(frame_id), side, slot)
+                for label, side, slot in normalized
+            ],
+        )
+        conn.execute(
+            "UPDATE training_review_hero_lineups SET review_status='confirmed', "
+            'player_side=?, player_slot=?, updated_at=?, reviewed_at=? '
+            'WHERE frame_id=?',
+            (
+                normalized_player_side, normalized_player_slot,
+                timestamp, timestamp, int(frame_id),
+            ),
+        )
+    audit(
+        conn,
+        'training_review_hero_lineup',
+        frame_id=int(frame_id),
+        detail=json.dumps(
+            {
+                'team_size': team_size,
+                'heroes': [
+                    {'side': side, 'slot': slot, 'hero_label': label}
+                    for label, side, slot in normalized
+                ],
+                'player_side': normalized_player_side,
+                'player_slot': normalized_player_slot,
+            },
+            ensure_ascii=False,
+            separators=(',', ':'),
+            sort_keys=True,
+        ),
+    )
+    result = get_training_review_hero_lineup(conn, int(frame_id))
+    if result is None:
+        raise KeyError(frame_id)
+    return result
+
+
+def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
+    statuses = {
+        str(row['review_status']): int(row['count'])
+        for row in conn.execute(
+            'SELECT review_status, COUNT(*) AS count FROM training_review_items '
+            'GROUP BY review_status'
+        ).fetchall()
+    }
+    labels: Dict[str, Dict[str, int]] = {}
+    for task, column in (
+        ('match_flow', 'match_flow_label'),
+        ('match_mode', 'match_mode_label'),
+        ('hero_select', 'hero_select_label'),
+        ('result_panel', 'result_panel_label'),
+    ):
+        labels[task] = {
+            str(row['label']): int(row['count'])
+            for row in conn.execute(
+                f'SELECT {column} AS label, COUNT(*) AS count '
+                f'FROM training_review_items WHERE {column} IS NOT NULL '
+                f'GROUP BY {column}'
+            ).fetchall()
+        }
+    dirty = int(conn.execute(
+        "SELECT COUNT(*) FROM training_review_sources WHERE source_type = 'worker' "
+        "AND sync_state = 'dirty'"
+    ).fetchone()[0])
+    conflicts = int(conn.execute(
+        "SELECT COUNT(*) FROM training_review_sources WHERE source_type = 'worker' "
+        "AND sync_state = 'conflict'"
+    ).fetchone()[0])
+    missing_player_hero = int(conn.execute(
+        'SELECT COUNT(*) FROM training_review_items item '
+        f'WHERE {_MISSING_PLAYER_HERO_REVIEW}'
+    ).fetchone()[0])
+    return {
+        'total': sum(statuses.values()),
+        'statuses': statuses,
+        'labels': labels,
+        'dirty': dirty,
+        'conflicts': conflicts,
+        'missing_player_hero': missing_player_hero,
     }

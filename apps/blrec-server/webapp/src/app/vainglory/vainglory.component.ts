@@ -55,7 +55,9 @@ import {
   VaingloryMatchSessionSort,
   VaingloryPlayer,
   VaingloryPlayerStats,
+  VaingloryPublicationRecommendedAction,
   VaingloryPublicationRetryStep,
+  VaingloryPublicationStatus,
   VaingloryScanJob,
   VaingloryZeroMatchSession,
   ViewContext,
@@ -944,24 +946,55 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (session.publicationState !== 'failed') {
       return false;
     }
-    return step === 'pin' || step === 'comments'
-      ? session.pinState !== 'confirmed'
-      : step === 'description'
-        ? session.descriptionState !== 'confirmed'
-        : session.chapterState !== 'confirmed';
+    if (session.chapterState !== 'confirmed') {
+      return step === 'chapter';
+    }
+    if (session.descriptionState !== 'confirmed') {
+      return step === 'description';
+    }
+    return (
+      session.pinState !== 'confirmed' &&
+      (step === 'pin' || step === 'comments')
+    );
   }
 
-  canRetryPublicationStep(session: VaingloryMatchSession): boolean {
-    return (
-      session.publicationState !== null && session.publicationState !== 'running'
-    );
+  canRetryPublicationStep(
+    session: VaingloryMatchSession,
+    step: VaingloryPublicationRetryStep,
+  ): boolean {
+    if (
+      session.publicationState === null ||
+      session.publicationState === 'running'
+    ) {
+      return false;
+    }
+    if (session.publicationStatus === 'legacy_chapter_timing') {
+      return step === 'chapter';
+    }
+    return ![
+      'operator_paused',
+      'analysis_failed',
+      'waiting_analysis',
+      'upload_missing',
+      'review_rejected',
+      'upload_paused',
+      'waiting_review',
+      'waiting_upload',
+      'analysis_data_invalid',
+    ].includes(session.publicationStatus ?? '');
   }
 
   publicationRetryLabel(
     session: VaingloryMatchSession,
     step: VaingloryPublicationRetryStep,
   ): string {
-    return this.isPublicationStepFailed(session, step) ? '重试' : '重发';
+    const confirmed =
+      step === 'pin' || step === 'comments'
+        ? session.pinState === 'confirmed'
+        : step === 'description'
+          ? session.descriptionState === 'confirmed'
+          : session.chapterState === 'confirmed';
+    return confirmed ? '重发' : '重试';
   }
 
   isPublicationStepRetrying(
@@ -977,7 +1010,7 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     session: VaingloryMatchSession,
     step: VaingloryPublicationRetryStep,
   ): void {
-    if (!this.canRetryPublicationStep(session)) {
+    if (!this.canRetryPublicationStep(session, step)) {
       return;
     }
     const key = this.publicationRetryKey(session.sessionId, step);
@@ -1042,6 +1075,11 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         return {
           ...session,
           publicationState: 'prepared',
+          publicationStatus: 'queued',
+          publicationStatusLabel: '发布队列中',
+          publicationStatusDetail: '已手动加入发布队列。',
+          publicationRecommendedAction: 'wait',
+          publicationNextAttemptAt: null,
           descriptionState:
             step === 'description' ? 'prepared' : session.descriptionState,
           pinState:
@@ -1057,13 +1095,10 @@ export class VaingloryComponent implements OnInit, OnDestroy {
 
   publicationStepColor(
     state: string | null,
-    publicationState: string | null,
+    failed: boolean,
   ): string {
-    if (publicationState === 'failed' && state !== 'confirmed') {
+    if (failed) {
       return 'red';
-    }
-    if (publicationState === 'paused' && state !== 'confirmed') {
-      return 'orange';
     }
     if (state === 'confirmed') {
       return 'green';
@@ -1078,17 +1113,8 @@ export class VaingloryComponent implements OnInit, OnDestroy {
   }
 
   descriptionStateLabel(session: VaingloryMatchSession): string {
-    if (
-      session.publicationState === 'failed' &&
-      session.descriptionState !== 'confirmed'
-    ) {
+    if (this.isPublicationStepFailed(session, 'description')) {
       return '失败';
-    }
-    if (
-      session.publicationState === 'paused' &&
-      session.descriptionState !== 'confirmed'
-    ) {
-      return '已暂停';
     }
     switch (session.descriptionState) {
       case 'prepared':
@@ -1108,12 +1134,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (this.isPublicationStepFailed(session, 'pin')) {
       return '失败';
     }
-    if (
-      session.publicationState === 'paused' &&
-      session.pinState !== 'confirmed'
-    ) {
-      return '已暂停';
-    }
     switch (session.pinState) {
       case 'prepared':
         return '等待处理';
@@ -1130,12 +1150,6 @@ export class VaingloryComponent implements OnInit, OnDestroy {
     if (this.isPublicationStepFailed(session, 'chapter')) {
       return '失败';
     }
-    if (
-      session.publicationState === 'paused' &&
-      session.chapterState !== 'confirmed'
-    ) {
-      return '已暂停';
-    }
     switch (session.chapterState) {
       case 'prepared':
         return '等待设置';
@@ -1145,6 +1159,60 @@ export class VaingloryComponent implements OnInit, OnDestroy {
         return '已跳过';
       case null:
         return '未开始';
+    }
+  }
+
+  publicationStatusColor(
+    status: VaingloryPublicationStatus | null | undefined,
+  ): string {
+    switch (status) {
+      case 'confirmed':
+        return 'green';
+      case 'running':
+        return 'blue';
+      case 'waiting_analysis':
+      case 'waiting_review':
+      case 'waiting_upload':
+        return 'cyan';
+      case 'queued':
+        return 'gold';
+      case 'operator_paused':
+      case 'upload_paused':
+      case 'legacy_chapter_timing':
+      case 'retry_scheduled':
+        return 'orange';
+      case 'analysis_failed':
+      case 'analysis_data_invalid':
+      case 'review_rejected':
+      case 'upload_missing':
+      case 'failed':
+        return 'red';
+      case null:
+      case undefined:
+        return 'default';
+    }
+  }
+
+  publicationActionLabel(
+    action: VaingloryPublicationRecommendedAction | null | undefined,
+  ): string | null {
+    switch (action) {
+      case 'wait':
+        return '无需操作，系统会自动继续';
+      case 'reanalyze':
+        return '使用新算法重新分析整场直播';
+      case 'retry_chapter':
+        return '重试视频分段，无需重新识别';
+      case 'resume_migration':
+        return '到历史稿件迁移任务中恢复运行';
+      case 'check_upload':
+        return '检查投稿任务或 B 站审核结果';
+      case 'retry':
+        return '根据下方失败步骤重试';
+      case 'none':
+      case null:
+      case undefined:
+        return null;
     }
   }
 

@@ -11,6 +11,7 @@ from blrec.vainglory.analyzer import (
     DenseScanResult,
     ScannedPart,
     TrainingCandidate,
+    TrainingCandidateBox,
     VideoPart,
 )
 
@@ -196,14 +197,24 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
                         at_ms=12_000,
                         segment_start_ms=10_000,
                         image_jpeg=b'\xff\xd8candidate\xff\xd9',
-                        model_version='multi-v2',
-                        suggested_label='bp_aram',
+                        model_version='result-detector-v1',
+                        suggested_label='result_panel',
                         suggestion_confidence=0.8,
                         stage_class='pre_match',
                         stage_confidence=0.9,
                         mode_class='aram',
                         mode_confidence=0.8,
                         selection_reason='worker 测试候选',
+                        task='result_detector',
+                        suggested_boxes=(
+                            TrainingCandidateBox(
+                                box_type='result_panel',
+                                x=0.1,
+                                y=0.2,
+                                w=0.8,
+                                h=0.5,
+                            ),
+                        ),
                     ),
                 ),
             )
@@ -220,7 +231,9 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
 
     candidate = clients[0].completed_payloads[0]['trainingCandidates'][0]
     assert candidate['at_ms'] == 12_000
-    assert candidate['suggested_label'] == 'bp_aram'
+    assert candidate['task'] == 'result_detector'
+    assert candidate['suggested_label'] == 'result_panel'
+    assert candidate['suggested_boxes'][0]['type'] == 'result_panel'
     assert candidate['image_jpeg']
 
 

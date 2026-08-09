@@ -34,6 +34,10 @@ def next_version_id(conn: Any, task_id: str) -> str:
     prefix = {'result_detector': 'result-detector',
               'game_state': 'game-state',
               'game_mode': 'game-mode',
+              'match_flow': 'match-flow-classifier',
+              'match_mode': 'match-mode-classifier',
+              'hero_select': 'hero-select-classifier',
+              'screen_state': 'screen-state',
               'bp_review': 'bp-classifier',
               'key_screen_review': 'key-screen-classifier',
               'mode_gate': 'mode-gate-detector',
@@ -133,8 +137,8 @@ def split_by_video(video_ids: List[int], ratio: Tuple[float, float, float] = (0.
 
 
 def split_classification_by_video(
-        samples: List[Dict[str, Any]], labels: Tuple[str, ...]
-        ) -> Dict[str, List[int]]:
+    samples: List[Dict[str, Any]], labels: Tuple[str, ...]
+) -> Dict[str, List[int]]:
     """按视频切分，并尽量让每个类别都出现在 train/val。
 
     仍以整段视频为最小单位，只会把整个视频从 train 移到
@@ -207,6 +211,88 @@ def split_classification_by_video(
     return {name: sorted(video_ids) for name, video_ids in split.items()}
 
 
+def split_detection_by_video(
+        samples: List[Dict[str, Any]], *, label_field: str,
+        positive_label: str) -> Dict[str, List[int]]:
+    """按视频切分，并优先保证训练集同时有带框正样本和无框负样本。"""
+    video_labels: Dict[int, set] = {}
+    video_counts: Dict[int, Dict[str, int]] = {}
+    for sample in samples:
+        video_id = int(sample['video_id'])
+        label = str(sample[label_field])
+        video_labels.setdefault(video_id, set()).add(label)
+        kind = positive_label if label == positive_label else '__negative__'
+        counts = video_counts.setdefault(
+            video_id, {positive_label: 0, '__negative__': 0})
+        counts[kind] += 1
+    split = split_by_video(sorted(video_labels))
+    required = {positive_label, '__negative__'}
+
+    def evidence(video_id: int) -> set:
+        labels = video_labels[video_id]
+        values = {positive_label} if positive_label in labels else set()
+        if any(label != positive_label for label in labels):
+            values.add('__negative__')
+        return values
+
+    while True:
+        present = set().union(*(evidence(video_id) for video_id in split['train']))
+        missing = required - present
+        if not missing:
+            break
+        choice = next((
+            (source, video_id)
+            for source in ('val', 'test')
+            for video_id in split[source]
+            if evidence(video_id) & missing
+        ), None)
+        if choice is None:
+            break
+        source, video_id = choice
+        split[source].remove(video_id)
+        split['train'].append(video_id)
+    totals = {
+        kind: sum(counts[kind] for counts in video_counts.values())
+        for kind in required
+    }
+    minimums = {
+        kind: min(100, max(2, round(total * 0.2)))
+        for kind, total in totals.items()
+    }
+    for kind in (positive_label, '__negative__'):
+        while sum(video_counts[video_id][kind] for video_id in split['train']) \
+                < minimums[kind]:
+            current = sum(
+                video_counts[video_id][kind]
+                for video_id in split['train']
+            )
+            deficit = minimums[kind] - current
+            choices = [
+                (video_counts[video_id][kind], source, video_id)
+                for source in ('val', 'test')
+                for video_id in split[source]
+                if video_counts[video_id][kind] > 0
+            ]
+            if not choices:
+                break
+            enough = [choice for choice in choices if choice[0] >= deficit]
+            if enough:
+                _count, source, video_id = min(
+                    enough,
+                    key=lambda choice: (
+                        choice[0], choice[1] != 'test', choice[2]),
+                )
+            else:
+                _count, source, video_id = max(
+                    choices,
+                    key=lambda choice: (
+                        choice[0], choice[1] == 'test', -choice[2]),
+                )
+            split[source].remove(video_id)
+            split['train'].append(video_id)
+    return {name: sorted(video_ids) for name, video_ids in split.items()}
+
+
 # ---------- 结算检测导出 ----------
 
 def export_result_detector(conn: Any, *, include_negatives: bool = True,
@@ -214,39 +300,122 @@ def export_result_detector(conn: Any, *, include_negatives: bool = True,
                            version: Optional[str] = None) -> Dict[str, Any]:
     """导出 result_detector 数据集(JSONL + YOLO + COCO),创建不可变版本。"""
     frames = _labeled_frames(conn)
-    result_frames = [
-        f for f in frames
-        if (db.get_annotation(conn, f['id']) or {}).get('screen_type')
-        == 'result_page'
-    ]
+    samples_by_frame: Dict[int, Dict[str, Any]] = {}
+    result_without_bbox = 0
+    for frame in frames:
+        annotation = db.get_annotation(conn, frame['id']) or {}
+        sample = _frame_sample(conn, frame)
+        if sample is None:
+            continue
+        if annotation.get('screen_type') == 'result_page':
+            if not sample['boxes'].get('result_panel'):
+                result_without_bbox += 1
+                continue
+            sample['detector_label'] = 'result_panel'
+        elif include_negatives:
+            sample['detector_label'] = 'no_result_panel'
+        else:
+            continue
+        sample['label_source'] = 'existing_human_annotation'
+        samples_by_frame[int(frame['id'])] = sample
+
+    reviewed = conn.execute(
+        'SELECT c.*, f.*, v.streamer, v.remote_path '
+        'FROM worker_candidate_items c '
+        'JOIN frames f ON f.id = c.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE c.task = 'result_detector' AND c.review_status = 'confirmed' "
+        'AND c.confirmed_label IS NOT NULL '
+        "AND c.visual_condition != 'unreadable'"
+    ).fetchall()
+    for row in reviewed:
+        frame = dict(row)
+        frame['id'] = int(row['frame_id'])
+        sample = _frame_sample(conn, frame)
+        label = str(frame['confirmed_label'])
+        if sample is None or (label == 'no_result_panel' and not include_negatives):
+            continue
+        candidate_boxes = json.loads(frame['boxes_json'] or '[]')
+        if label == 'result_panel':
+            result_boxes = [
+                box for box in candidate_boxes
+                if not box.get('type') or box.get('type') == 'result_panel'
+            ]
+            if not result_boxes:
+                continue
+            sample['boxes']['result_panel'] = result_boxes[0]
+        else:
+            sample['boxes'].pop('result_panel', None)
+        sample['detector_label'] = label
+        sample['label_source'] = 'worker_candidate_confirmed'
+        sample['visual_condition'] = str(frame['visual_condition'])
+        samples_by_frame[int(frame['frame_id'])] = sample
+
+    unified_rows = conn.execute(
+        'SELECT f.*, v.streamer, v.remote_path, r.result_panel_label '
+        'FROM training_review_items r '
+        'JOIN frames f ON f.id = r.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE r.review_status = 'confirmed' "
+        'AND r.result_panel_label IS NOT NULL '
+        'ORDER BY f.video_id, f.timestamp_ms, f.id'
+    ).fetchall()
+    for row in unified_rows:
+        frame = dict(row)
+        frame_id = int(frame['id'])
+        label = str(frame['result_panel_label'])
+        if label == 'unreadable':
+            samples_by_frame.pop(frame_id, None)
+            continue
+        if label == 'no_result_panel' and not include_negatives:
+            samples_by_frame.pop(frame_id, None)
+            continue
+        sample = _frame_sample(conn, frame)
+        if sample is None:
+            samples_by_frame.pop(frame_id, None)
+            continue
+        if label == 'result_panel' and not sample['boxes'].get('result_panel'):
+            result_without_bbox += 1
+            samples_by_frame.pop(frame_id, None)
+            continue
+        if label == 'no_result_panel':
+            sample['boxes'].pop('result_panel', None)
+        sample['detector_label'] = label
+        sample['label_source'] = 'training_review_confirmed'
+        samples_by_frame[frame_id] = sample
+
     positives = [
-        f for f in result_frames if db.get_boxes(conn, f['id']).get('result_panel')
+        sample for sample in samples_by_frame.values()
+        if sample['detector_label'] == 'result_panel'
     ]
-    result_frame_ids = {f['id'] for f in result_frames}
-    # 负样本:非 result_page 的已标帧(含积分板 hard negative、随机负样本、其他)
-    negatives = [f for f in frames if f['id'] not in result_frame_ids] \
-        if include_negatives else []
+    negatives = [
+        sample for sample in samples_by_frame.values()
+        if sample['detector_label'] == 'no_result_panel'
+    ]
     if max_negatives and len(negatives) > max_negatives:
-        # 积分板(硬负样本)优先保留,其余按帧 id 截断(可复现)
-        def _is_hard(f: Dict[str, Any]) -> bool:
-            st = (db.get_annotation(conn, f['id']) or {}).get('screen_type')
-            return st in ('scoreboard', 'death_scoreboard')
-        hard = [f for f in negatives if _is_hard(f)]
-        rest = sorted((f for f in negatives if not _is_hard(f)),
-                      key=lambda f: f['id'])
-        negatives = hard + rest[:max(0, max_negatives - len(hard))]
-    samples: List[Dict[str, Any]] = []
-    for f in positives + negatives:
-        s = _frame_sample(conn, f)
-        if s is not None:
-            samples.append(s)
+        def _negative_rank(sample: Dict[str, Any]) -> Tuple[int, str]:
+            if sample.get('label_source') in (
+                    'training_review_confirmed', 'worker_candidate_confirmed'):
+                priority = 0
+            elif sample.get('annotation', {}).get('screen_type') in (
+                    'scoreboard', 'death_scoreboard'):
+                priority = 1
+            else:
+                priority = 2
+            return priority, str(sample.get('sha256') or sample['sample_id'])
+        negatives = sorted(negatives, key=_negative_rank)[:max_negatives]
+    samples = positives + negatives
 
     if not samples:
         raise RuntimeError('没有可导出的已标注样本')
 
     # 切分:按视频
     video_ids = sorted({s['video_id'] for s in samples})
-    split = split_by_video(video_ids)
+    split = split_detection_by_video(
+        samples,
+        label_field='detector_label',
+        positive_label='result_panel',
+    )
     v2split = {vid: k for k, vids in split.items() for vid in vids}
     for s in samples:
         s['split'] = v2split[s['video_id']]
@@ -320,7 +489,7 @@ def export_result_detector(conn: Any, *, include_negatives: bool = True,
         'total': len(samples), 'positive': len(positives),
         'negative': len(negatives),
         'result_with_bbox': sum(1 for s in samples if s['boxes'].get('result_panel')),
-        'excluded_result_without_bbox': len(result_frames) - len(positives),
+        'excluded_result_without_bbox': result_without_bbox,
         'by_split': {k: sum(1 for s in samples if s['split'] == k)
                      for k in ('train', 'val', 'test')},
         'videos': len(video_ids),
@@ -366,6 +535,105 @@ def _write_classification_images(
         )
         if not destination.exists():
             shutil.copy2(source, destination)
+
+
+UNIFIED_CLASSIFICATION_LABELS = {
+    'match_flow': ('match_flow', 'not_match_flow'),
+    'match_mode': ('3v3', 'aram', '5v5'),
+    'hero_select': (
+        'not_select', 'select_3v3', 'select_aram', 'select_5v5'
+    ),
+}
+
+
+def export_training_review_classifier(
+    conn: Any, task_id: str
+) -> Dict[str, Any]:
+    """从一图多标签人工复核中冻结一个分类任务的数据快照。"""
+    labels = UNIFIED_CLASSIFICATION_LABELS.get(task_id)
+    if labels is None:
+        raise ValueError(f'未知统一分类任务: {task_id}')
+    column = {
+        'match_flow': 'match_flow_label',
+        'match_mode': 'match_mode_label',
+        'hero_select': 'hero_select_label',
+    }[task_id]
+    rows = conn.execute(
+        f'SELECT f.*, v.streamer, v.remote_path, r.{column} AS label '
+        'FROM training_review_items r '
+        'JOIN frames f ON f.id = r.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE r.review_status = 'confirmed' "
+        f'AND r.{column} IS NOT NULL '
+        'ORDER BY f.video_id, f.timestamp_ms, f.id'
+    ).fetchall()
+    samples = []
+    for row in rows:
+        frame = dict(row)
+        label = str(frame['label'])
+        if label not in labels:
+            continue
+        sample = _frame_sample(conn, frame)
+        if sample is None:
+            continue
+        sample['label'] = label
+        sample['label_source'] = 'training_review_confirmed'
+        samples.append(sample)
+    if not samples:
+        raise RuntimeError(f'没有可导出的 {task_id} 人工确认样本')
+    split = split_classification_by_video(samples, labels)
+    video_split = {
+        video_id: name for name, video_ids in split.items()
+        for video_id in video_ids
+    }
+    for sample in samples:
+        sample['split'] = video_split[int(sample['video_id'])]
+
+    version_id = next_version_id(conn, task_id)
+    out_dir = config.EXPORT_DIR / version_id
+    if out_dir.exists():
+        raise RuntimeError(f'数据集版本已存在: {version_id}')
+    out_dir.mkdir(parents=True, exist_ok=False)
+    jsonl_path = out_dir / 'samples.jsonl'
+    with jsonl_path.open('w', encoding='utf-8') as handle:
+        for sample in samples:
+            handle.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    _write_classification_images(conn, out_dir, samples, labels)
+    excluded_unreadable = int(conn.execute(
+        f'SELECT COUNT(*) FROM training_review_items '
+        "WHERE review_status = 'confirmed' "
+        f"AND {column} = 'unreadable'"
+    ).fetchone()[0])
+    counts = {
+        'total': len(samples),
+        'videos': len({int(sample['video_id']) for sample in samples}),
+        'excluded_unreadable': excluded_unreadable,
+        'by_label': {
+            label: sum(1 for sample in samples if sample['label'] == label)
+            for label in labels
+        },
+        'by_split': {
+            name: sum(1 for sample in samples if sample['split'] == name)
+            for name in ('train', 'val', 'test')
+        },
+    }
+    db.create_dataset_version(
+        conn,
+        version_id=version_id,
+        task_id=task_id,
+        filter_json={
+            'source': 'training_review_items',
+            'label_column': column,
+            'labels': list(labels),
+            'confirmed_only': True,
+            'excluded_labels': ['unreadable'],
+            'split_unit': 'video',
+        },
+        counts=counts,
+        manifest_path=str(jsonl_path),
+        git_commit=_git_commit(),
+    )
+    return {'version': version_id, 'dir': str(out_dir), **counts}
 
 
 # ---------- 通用导出(游戏状态/模式/窗口,JSONL) ----------
@@ -660,6 +928,148 @@ def export_key_screen_classifier(conn: Any) -> Dict[str, Any]:
     return {'version': version_id, 'dir': str(out_dir), **counts}
 
 
+# ---------- 七类画面状态分类导出 ----------
+
+SCREEN_STATE_LABELS = (
+    'not_vainglory',
+    'out_of_match',
+    'pre_match',
+    'in_match',
+    'talent_select',
+    'post_match',
+    'transition',
+)
+
+
+def _screen_state_label(annotation: Dict[str, Any]) -> Optional[str]:
+    if annotation.get('content_family') == 'not_vainglory':
+        return 'not_vainglory'
+    if annotation.get('content_family') != 'vainglory':
+        return None
+    context = annotation.get('game_context')
+    if context == 'in_match' and annotation.get('screen_type') == 'talent_select':
+        return 'talent_select'
+    if context in {'out_of_match', 'pre_match', 'in_match', 'post_match',
+                   'transition'}:
+        return str(context)
+    return None
+
+
+def export_screen_state_classifier(conn: Any) -> Dict[str, Any]:
+    """把旧通用标注和新 worker 人工复核合并为七分类不可变快照。"""
+    samples_by_frame: Dict[int, Dict[str, Any]] = {}
+    rows = conn.execute(
+        'SELECT f.*, v.streamer, v.remote_path '
+        'FROM annotations a JOIN frames f ON f.id = a.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE a.annotation_status = 'complete' "
+        'ORDER BY f.video_id, f.timestamp_ms'
+    ).fetchall()
+    for row in rows:
+        frame = dict(row)
+        sample = _frame_sample(conn, frame)
+        if sample is None:
+            continue
+        label = _screen_state_label(sample['annotation'])
+        if label is None:
+            continue
+        sample['label'] = label
+        sample['label_source'] = 'existing_human_annotation'
+        sample['visual_condition'] = 'clear'
+        samples_by_frame[int(frame['id'])] = sample
+
+    reviewed = conn.execute(
+        'SELECT f.*, v.streamer, v.remote_path, c.confirmed_label, '
+        'c.visual_condition FROM worker_candidate_items c '
+        'JOIN frames f ON f.id = c.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE c.task = 'screen_state' AND c.review_status = 'confirmed' "
+        'AND c.confirmed_label IS NOT NULL '
+        "AND c.visual_condition != 'unreadable' "
+        'ORDER BY f.video_id, f.timestamp_ms'
+    ).fetchall()
+    for row in reviewed:
+        frame = dict(row)
+        sample = _frame_sample(conn, frame)
+        if sample is None:
+            continue
+        sample['label'] = str(frame['confirmed_label'])
+        sample['label_source'] = 'worker_candidate_confirmed'
+        sample['visual_condition'] = str(frame['visual_condition'])
+        samples_by_frame[int(frame['id'])] = sample
+
+    available = list(samples_by_frame.values())
+    if not available:
+        raise RuntimeError('没有可导出的画面状态人工确认样本')
+    non_in_match = [sample for sample in available if sample['label'] != 'in_match']
+    in_match = sorted(
+        (sample for sample in available if sample['label'] == 'in_match'),
+        key=lambda sample: (
+            sample['label_source'] != 'worker_candidate_confirmed',
+            str(sample.get('sha256') or sample['sample_id']),
+        ),
+    )
+    largest_other = max(
+        (
+            sum(1 for sample in non_in_match if sample['label'] == label)
+            for label in SCREEN_STATE_LABELS if label != 'in_match'
+        ),
+        default=0,
+    )
+    maximum_in_match = max(500, largest_other * 3)
+    samples = non_in_match + in_match[:maximum_in_match]
+    samples.sort(key=lambda sample: (
+        int(sample['video_id']), int(sample['timestamp_ms']), sample['sample_id']))
+    split = split_classification_by_video(samples, SCREEN_STATE_LABELS)
+    video_split = {
+        video_id: name for name, video_ids in split.items()
+        for video_id in video_ids
+    }
+    for sample in samples:
+        sample['split'] = video_split[sample['video_id']]
+
+    version_id = next_version_id(conn, 'screen_state')
+    out_dir = config.EXPORT_DIR / version_id
+    if out_dir.exists():
+        raise RuntimeError(f'数据集版本已存在: {version_id}')
+    out_dir.mkdir(parents=True, exist_ok=False)
+    jsonl_path = out_dir / 'samples.jsonl'
+    with jsonl_path.open('w', encoding='utf-8') as handle:
+        for sample in samples:
+            handle.write(json.dumps(sample, ensure_ascii=False) + '\n')
+    _write_classification_images(conn, out_dir, samples, SCREEN_STATE_LABELS)
+    counts = {
+        'total': len(samples),
+        'videos': len({sample['video_id'] for sample in samples}),
+        'available_in_match': len(in_match),
+        'excluded_in_match_balance': max(0, len(in_match) - maximum_in_match),
+        'by_label': {
+            label: sum(1 for sample in samples if sample['label'] == label)
+            for label in SCREEN_STATE_LABELS
+        },
+        'by_split': {
+            name: sum(1 for sample in samples if sample['split'] == name)
+            for name in ('train', 'val', 'test')
+        },
+    }
+    db.create_dataset_version(
+        conn,
+        version_id=version_id,
+        task_id='screen_state',
+        filter_json={
+            'labels': list(SCREEN_STATE_LABELS),
+            'confirmed_only': True,
+            'excluded_visual_conditions': ['unreadable'],
+            'in_match_maximum': maximum_in_match,
+            'split_unit': 'video',
+        },
+        counts=counts,
+        manifest_path=str(jsonl_path),
+        git_commit=_git_commit(),
+    )
+    return {'version': version_id, 'dir': str(out_dir), **counts}
+
+
 # ---------- 3V3 / 大乱斗光栅检测导出 ----------
 
 def export_mode_gate_detector(conn: Any) -> Dict[str, Any]:
@@ -696,12 +1106,43 @@ def export_mode_gate_detector(conn: Any) -> Dict[str, Any]:
             annotation['boxes'] if frame['evidence'] == 'open_entrance' else []
         )
         samples_by_frame[int(frame['frame_id'])] = sample
+    worker_rows = conn.execute(
+        'SELECT c.*, f.*, v.streamer, v.remote_path '
+        'FROM worker_candidate_items c '
+        'JOIN frames f ON f.id = c.frame_id '
+        'JOIN videos v ON v.id = f.video_id '
+        "WHERE c.task = 'mode_gate' AND c.review_status = 'confirmed' "
+        "AND c.confirmed_label IN ('blocked_gate', 'open_entrance') "
+        "AND c.visual_condition != 'unreadable'"
+    ).fetchall()
+    for row in worker_rows:
+        frame = dict(row)
+        frame['id'] = int(row['frame_id'])
+        sample = _frame_sample(conn, frame)
+        if sample is None:
+            continue
+        label = str(frame['confirmed_label'])
+        candidate_boxes = json.loads(frame['boxes_json'] or '[]')
+        sample['label'] = label
+        sample['label_source'] = 'worker_candidate_confirmed'
+        sample['round_id'] = 'worker_candidates'
+        sample['mode_gate_boxes'] = (
+            candidate_boxes if label == 'blocked_gate' else []
+        )
+        sample['open_entrance_boxes'] = (
+            candidate_boxes if label == 'open_entrance' else []
+        )
+        samples_by_frame[int(frame['frame_id'])] = sample
     samples = list(samples_by_frame.values())
     if not samples:
         raise RuntimeError('没有可导出的光栅或开放入口人工标注')
 
     video_ids = sorted({sample['video_id'] for sample in samples})
-    split = split_by_video(video_ids)
+    split = split_detection_by_video(
+        samples,
+        label_field='label',
+        positive_label='blocked_gate',
+    )
     video_split = {
         video_id: name for name, ids in split.items() for video_id in ids
     }

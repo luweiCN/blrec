@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterator, List, Tuple
+from typing import Dict, Iterator, List, Tuple
 
 import pytest
 from fastapi import FastAPI
@@ -11,6 +11,7 @@ from blrec.vainglory.archive_backfill import (
     ArchiveContentReviewPage,
     ArchiveSync,
 )
+from blrec.vainglory.publication import PublicationTaskStatus
 from blrec.vainglory.repository import (
     AnchorStatsRecord,
     GameModeStatsRecord,
@@ -248,6 +249,25 @@ class FakeService:
     async def retry_failed_step(self, session_id: int, step: str) -> None:
         self.publication_retries.append((session_id, step))
 
+    async def publication_statuses(
+        self, session_ids: List[int]
+    ) -> Dict[int, PublicationTaskStatus]:
+        assert tuple(session_ids) == (9,)
+        return {
+            9: PublicationTaskStatus(
+                session_id=9,
+                code='analysis_data_invalid',
+                label='识别数据需重新分析',
+                detail='缺少 OCR 对局时长',
+                recommended_action='reanalyze',
+                next_attempt_at=None,
+                plan_state='ready',
+                upload_state='approved',
+                scan_state='ready',
+                operator_paused=False,
+            )
+        }
+
 
 class FakeArchiveBackfill:
     def __init__(self) -> None:
@@ -474,6 +494,14 @@ def test_lists_recording_session_summaries_instead_of_flat_matches(
     assert payload['items'][0]['winCount'] == 2
     assert payload['items'][0]['lossCount'] == 1
     assert payload['items'][0]['anchorName'] == '主播名'
+    assert payload['items'][0]['publicationStatus'] == 'analysis_data_invalid'
+    assert payload['items'][0]['publicationStatusLabel'] == '识别数据需重新分析'
+    assert payload['items'][0]['publicationStatusDetail'] == '缺少 OCR 对局时长'
+    assert payload['items'][0]['publicationRecommendedAction'] == 'reanalyze'
+    assert payload['items'][0]['publicationPlanState'] == 'ready'
+    assert payload['items'][0]['uploadJobState'] == 'approved'
+    assert payload['items'][0]['publicationScanState'] == 'ready'
+    assert payload['items'][0]['publicationOperatorPaused'] is False
 
 
 def test_lists_completed_zero_match_sessions_for_review(

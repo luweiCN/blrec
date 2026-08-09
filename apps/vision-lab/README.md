@@ -2,8 +2,8 @@
 
 《虚荣》(Vainglory)所有视觉模型共用的数据工作台:从 NAS 录制视频抽帧 → 事件分组 →
 分层人工标注 → 导出不可变数据集版本 → 本机训练与模型验证。
-当前支持 BP 分类、3V3/大乱斗光栅检测、结算面板检测，以及结算页/
-计分板/其他画面三分类。
+当前统一训练四个目标：是否处于对局流程、英雄选择及其模式、对局画面模式、
+结算面板检测。旧 BP、光栅、关键界面和通用分层标注完整保留并迁移复用。
 
 ## 核心原则
 
@@ -66,6 +66,27 @@ export SYNO_ADMIN_PASSWORD=你的群晖密码
   (只读,绝不修改/删除 NAS 文件),支持按主播/房间号过滤。
 - 凭据只从环境变量读取;ssh 认证走 `SSH_ASKPASS`,sudo 密码走 ssh stdin 管道,
   不出现在命令行、不落盘、不写入库/日志/前端。
+
+## 新模型统一打标与 Worker 候选闭环
+
+MacBook Pro 上的 Analysis Worker 只复用正常分析已经解码的帧，不为收集数据
+另扫一遍录像。旧 5 秒一帧模型、开局候选和结算检测结果会合并成“一图多预标”
+候选；同一图片按 SHA-256 只保存一份。结算检测同时保留高置信代表帧和低置信
+边界帧。候选图片与模型建议由 BLREC Server 写入 NAS 的
+`/volume1/docker/blrec-next/vision-data/candidates`；Server 只存文件，
+不运行 ONNX。
+
+打开“新模型统一打标”页点“同步 NAS（Worker＋历史结算图）”会：
+
+1. 下载本机没有的候选图片和预标；
+2. 导入 BLREC 已识别对局保存的历史结算截图；
+3. 拉取 NAS 上已有的人工复核结果，便于换电脑审查；
+4. 回传本机已确认或已跳过的结果。
+
+每张图一次确认对局流程、对局模式、英雄选择和结算面板四项。只有真正结算正样本
+需要画一个完整大框；积分板、商店和黄色光栅旧框会保留，但不要求继续绘制。
+图片已禁止浏览器拖动。模型建议不能直接进入训练集；`unreadable` 会按任务分别
+排除。本地未回传结果遇到远端修改时只标冲突，不会被静默覆盖。
 
 ## 抽帧策略(6 种配方)
 
@@ -154,20 +175,26 @@ export SYNO_ADMIN_PASSWORD=你的群晖密码
 - 切分以整段视频为单位(≈8:1:1),同视频/同事件的帧只属于一个集合。
 - 版本不可变,禁止覆盖;记录筛选条件、数量、分布、路径与 git commit。
 
-专项复核和“训练与模型”页还会生成:
+“训练与模型”页当前生成：
 
-- `bp-classifier-vN`:3V3 BP / 大乱斗 BP / 5V5 BP / 非 BP 四分类。
-- `key-screen-classifier-vN`:结算页 / 计分板 / 其他画面三分类。
-- `mode-gate-detector-vN`:有光栅帧是带多框正样本;开放入口是无框 hard negative。
+- `match-flow-classifier-vN`:对局流程中 / 非对局画面二分类。
+- `hero-select-classifier-vN`:非英雄选择 / 3V3 / 大乱斗 / 5V5 英雄选择。
+- `match-mode-classifier-vN`:3V3 / 大乱斗 / 5V5 对局画面分类。
 - `result-detector-vN`:结算面板框检测;没有框的 `result_page` 不会被误当成负样本。
+
+旧 `bp-classifier-*`、`key-screen-classifier-*`、`mode-gate-detector-*` 和
+`screen-state-*` 快照与训练记录仍可追溯，但不再显示为新一轮主动训练任务。
 
 ## 数据位置与备份
 
 - 工作库:`data/lab.db`(交互式);权威导出:`data/datasets/*/samples.jsonl`。
 - 基础权重:`data/models/base/`;已训练模型:`data/models/`。
-- 原始帧:`data/frames/<sha256>.jpg`;缩略图:`data/thumbs/`。
+- 标注工作帧:`data/frames/<sha256>.jpg`;缩略图:`data/thumbs/`。这里同时包含临时候选和已确认但尚未冻结的数据，不能直接按目录批量删除。
+- 永久训练资产:`data/datasets/<version>/`。每个版本都自包含 train／val／test 图片、标签和 `samples.jsonl`，不依赖 `data/frames`、NAS 候选目录或原视频。
 - 备份:直接复制 `data/` 目录即可(帧与库一体);NAS 文件为只读源,不需要备份。
 - 重装/迁移:保留 `data/` 即保留全部标注。
+
+只有旧模型建议、未经人工确认的图片属于可清理候选；人工确认但尚未冻结的图片必须继续保留。`dataset_versions` 表示已经冻结，`training_runs.dataset_version_id` 表示该快照已经被某次训练使用。验证集和测试集也属于永久资产。当前没有自动清理入口，后续实现时必须同时检查人工确认状态和所有快照 SHA-256，不能只看候选创建时间。
 
 ## 训练与模型版本
 
@@ -184,9 +211,15 @@ export SYNO_ADMIN_PASSWORD=你的群晖密码
 计分板，三分类快照会优先保留人工确认和赛后易混淆负样本，再按固定规则抽取
 其他画面;结算检测试训最多取 1500 张负样本并优先保留计分板 hard negative。
 
-训练优先使用 Apple MPS，不可用时退回 CPU。“设为本机测试模型”只更新
-当前标注工作台，并会备份它原来的测试模型;不会自动修改 NAS 或
-MacBook Pro worker。生产部署要等本机验证通过后，再通过明确的部署流程进行。
+训练优先使用 Apple MPS，不可用时退回 CPU。训练成功后在“模型测试”页选择该
+run；页面直接读取 run 绑定的不可变快照和 ONNX，不需要先覆盖本机测试模型。
+人工记录通过／不通过后，只有通过的 run 才能组装模型包。四个角色不齐，或固定
+测试集缺少必要类别时，只能生成 `incomplete` 研究包；不能作为生产部署包。
+
+模型包 ZIP 不会自动修改 NAS 或 MacBook Pro Worker。当前 Worker 的新模型包
+加载器和影子管线尚未上线；完成后部署也只需要更新 MacBook Pro Worker，NAS
+Server 仍不加载视觉模型。旧的 `publish-local` API 暂时保留兼容，但不是新的验收
+与生产发布流程。
 
 ## 独立打包与发布
 

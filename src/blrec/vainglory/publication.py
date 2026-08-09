@@ -66,6 +66,7 @@ _GENERATED_LINK_LINE = re.compile(
 )
 _GENERATED_TRUNCATION = '…其余对局请见置顶评论'
 _WAITING_DESCRIPTION = '等待对局分析完成后生成发布内容'
+_LEGACY_CHAPTER_TIMING_ERROR = '部分对局缺少有效时间点，视频分段不会跳过并将自动重试'
 
 _PUBLICATION_ANALYSIS_READY_PREDICATE = (
     'EXISTS(SELECT 1 FROM vainglory_scan_jobs source_scan '
@@ -108,6 +109,12 @@ _PUBLICATION_READY_PREDICATE = (
     + _PUBLICATION_TERMINAL_EMPTY_PREDICATE
     + '))'
 )
+_PUBLICATION_UPLOAD_APPROVED_PREDICATE = (
+    "(publication.source_kind!='upload' OR EXISTS("
+    'SELECT 1 FROM upload_jobs approved_upload '
+    'WHERE approved_upload.id=publication.upload_job_id '
+    "AND approved_upload.state IN ('approved','completed')))"
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +134,20 @@ class PublicationPlan:
 
 
 @dataclass(frozen=True)
+class PublicationTaskStatus:
+    session_id: int
+    code: str
+    label: str
+    detail: Optional[str]
+    recommended_action: str
+    next_attempt_at: Optional[int]
+    plan_state: str
+    upload_state: Optional[str]
+    scan_state: Optional[str]
+    operator_paused: bool
+
+
+@dataclass(frozen=True)
 class _Candidate:
     account_id: int
     session_id: int
@@ -142,6 +163,121 @@ class _ChapterPage:
     page: int
     cid: int
     duration_seconds: Optional[int]
+
+
+def _publication_task_status(row: Mapping[str, Any]) -> PublicationTaskStatus:
+    session_id = int(row['session_id'])
+    publication_state = str(row['publication_state'])
+    plan_state = str(row['plan_state'])
+    source_kind = str(row['source_kind'])
+    error = None if row.get('error') is None else str(row['error'])
+    upload_state = None if row.get('upload_state') is None else str(row['upload_state'])
+    scan_state = None if row.get('scan_state') is None else str(row['scan_state'])
+    operator_paused = bool(row.get('operator_paused'))
+    next_attempt = int(row.get('next_attempt_at') or 0)
+
+    code = 'queued'
+    label = '发布队列中'
+    detail = error
+    action = 'wait'
+    if operator_paused:
+        code = 'operator_paused'
+        label = '历史稿件迁移已人工暂停'
+        detail = '恢复历史稿件迁移后，对局分析和发布会自动继续。'
+        action = 'resume_migration'
+    elif plan_state == 'waiting_analysis' and not (
+        source_kind == 'upload' and upload_state in (None, 'rejected', 'paused')
+    ):
+        if scan_state == 'failed':
+            code = 'analysis_failed'
+            label = '对局分析失败'
+            detail = (
+                str(row['scan_error'])
+                if row.get('scan_error') is not None
+                else '请使用新算法重新分析这场直播。'
+            )
+            action = 'reanalyze'
+        else:
+            code = 'waiting_analysis'
+            label = '等待对局分析'
+            detail = error or '分析完成后会自动生成简介、评论和视频分段。'
+            action = 'wait'
+    elif source_kind == 'upload' and upload_state is None:
+        code = 'upload_missing'
+        label = '投稿任务记录缺失'
+        detail = '无法确认稿件是否已通过审核，发布 worker 不会冒险写入。'
+        action = 'check_upload'
+    elif source_kind == 'upload' and upload_state == 'rejected':
+        code = 'review_rejected'
+        label = '稿件审核未通过'
+        detail = (
+            str(row['review_reason'])
+            if row.get('review_reason') is not None
+            else '请先处理 B 站稿件审核问题。'
+        )
+        action = 'check_upload'
+    elif source_kind == 'upload' and upload_state == 'paused':
+        code = 'upload_paused'
+        label = '投稿任务已暂停'
+        detail = '这是投稿任务本身的暂停，不是简介、评论或分段的状态。'
+        action = 'check_upload'
+    elif source_kind == 'upload' and upload_state == 'waiting_review':
+        code = 'waiting_review'
+        label = '等待稿件审核'
+        detail = '审核通过后，发布 worker 会自动处理简介、评论和视频分段。'
+        action = 'wait'
+    elif source_kind == 'upload' and upload_state not in ('approved', 'completed'):
+        code = 'waiting_upload'
+        label = '等待稿件发布'
+        detail = '稿件还在上传或提交阶段，尚不能回填发布内容。'
+        action = 'wait'
+    elif error == _LEGACY_CHAPTER_TIMING_ERROR:
+        code = 'legacy_chapter_timing'
+        label = '旧版分段时间待重算'
+        detail = '旧算法没有正确使用结算图 OCR 时长；新版可以直接重算。'
+        action = 'retry_chapter'
+    elif error is not None and '识别结果缺少' in error:
+        code = 'analysis_data_invalid'
+        label = '识别数据需重新分析'
+        detail = error
+        action = 'reanalyze'
+    elif publication_state == 'confirmed':
+        code = 'confirmed'
+        label = '发布内容已全部完成'
+        detail = None
+        action = 'none'
+    elif publication_state == 'running':
+        code = 'running'
+        label = '正在发布'
+        detail = error
+        action = 'wait'
+    elif publication_state == 'failed':
+        code = 'failed'
+        label = '发布任务失败'
+        detail = error
+        action = 'retry'
+    elif publication_state == 'paused':
+        code = 'retry_scheduled'
+        label = '等待自动重试'
+        detail = error or '发布 worker 已安排下一次重试。'
+        action = 'wait'
+
+    return PublicationTaskStatus(
+        session_id=session_id,
+        code=code,
+        label=label,
+        detail=detail,
+        recommended_action=action,
+        next_attempt_at=(
+            next_attempt
+            if code in ('retry_scheduled', 'legacy_chapter_timing') and next_attempt > 0
+            else None
+        ),
+        plan_state=plan_state,
+        upload_state=upload_state,
+        scan_state=scan_state,
+        operator_paused=operator_paused,
+    )
 
 
 def build_publication_plan(
@@ -391,6 +527,7 @@ class VaingloryPublicationService:
         if self._discovery_task is not None or self._delivery_task is not None:
             return
         await self.recover_interrupted()
+        await self._requeue_legacy_chapter_timing()
         await self.ensure_publication_tasks()
         self._discovery_wake.set()
         self._delivery_wake.set()
@@ -414,6 +551,55 @@ class VaingloryPublicationService:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def publication_statuses(
+        self, session_ids: Sequence[int]
+    ) -> Dict[int, PublicationTaskStatus]:
+        selected = tuple(
+            dict.fromkeys(int(value) for value in session_ids if value > 0)
+        )
+        if not selected:
+            return {}
+        placeholders = ','.join('?' for _value in selected)
+        rows = await self._database.fetchall(
+            'SELECT publication.session_id,publication.source_kind,'
+            'publication.state AS publication_state,publication.plan_state,'
+            'publication.next_attempt_at,publication.error,'
+            'upload.state AS upload_state,upload.review_reason,'
+            'scan.state AS scan_state,scan.error AS scan_error,'
+            'EXISTS(SELECT 1 FROM archive_migration_items paused_item '
+            'JOIN archive_migration_jobs paused_job '
+            'ON paused_job.id=paused_item.migration_id '
+            'WHERE paused_item.session_id=publication.session_id '
+            'AND paused_job.operator_paused=1) AS operator_paused '
+            'FROM vainglory_publications publication '
+            'LEFT JOIN upload_jobs upload ON upload.id=publication.upload_job_id '
+            'LEFT JOIN vainglory_scan_jobs scan '
+            'ON scan.session_id=publication.session_id '
+            'WHERE publication.session_id IN ({}) '
+            'ORDER BY publication.session_id,publication.id DESC'.format(placeholders),
+            selected,
+        )
+        statuses: Dict[int, PublicationTaskStatus] = {}
+        for row in rows:
+            session_id = int(row['session_id'])
+            if session_id not in statuses:
+                statuses[session_id] = _publication_task_status(dict(row))
+        return statuses
+
+    async def _requeue_legacy_chapter_timing(self) -> int:
+        changed = await self._database.execute(
+            "UPDATE vainglory_publications SET state='prepared',"
+            'next_attempt_at=0,error=NULL,updated_at=? '
+            "WHERE state='paused' AND error=?",
+            (self._now(), _LEGACY_CHAPTER_TIMING_ERROR),
+        )
+        if changed:
+            logger.info(
+                'Requeued publications affected by legacy chapter timing: count={}',
+                changed,
+            )
+        return changed
 
     async def retry_failed_step(self, session_id: int, step: str) -> None:
         if session_id <= 0:
@@ -751,6 +937,7 @@ class VaingloryPublicationService:
             "WHERE publication.state IN ('prepared','running','paused') "
             'AND publication.needs_refresh=0 '
             "AND publication.plan_state='ready' "
+            'AND ' + _PUBLICATION_UPLOAD_APPROVED_PREDICATE + ' '
             'AND instr(COALESCE(session.title,\'\'),?)=0 '
             'AND NOT EXISTS(SELECT 1 FROM archive_migration_items paused_item '
             'JOIN archive_migration_jobs paused_job '
@@ -1341,6 +1528,8 @@ class VaingloryPublicationService:
                 "WHERE publication.id=? AND publication.needs_refresh=0 "
                 "AND publication.plan_state='ready' AND "
                 + _PUBLICATION_READY_PREDICATE
+                + ' AND '
+                + _PUBLICATION_UPLOAD_APPROVED_PREDICATE
                 + ')',
                 (int(publication_id),),
             )
@@ -1365,11 +1554,11 @@ class VaingloryPublicationService:
                     bundle, bvid=str(publication['bvid'])
                 )
                 pages = _merge_chapter_pages(pages, _chapter_pages(public))
-            if not pages:
+            if not pages or any(page.duration_seconds is None for page in pages):
                 await self._retry_publication(
                     publication_id,
                     int(publication['attempt_count']),
-                    '暂时无法取得稿件分 P，视频分段将自动重试',
+                    '暂时无法取得稿件分 P 及时长，视频分段将自动重试',
                     minimum_delay=3600,
                 )
                 return
@@ -1383,21 +1572,27 @@ class VaingloryPublicationService:
                     for match in session_matches
                     if match.bvid == str(publication['bvid'])
                 )
-            targets = _chapter_targets(matches, pages)
-            target_by_page = {page.page: cards for page, cards in targets}
-            chapter_count = sum(
-                str(card.get('content') or '') != '直播开始'
-                for _page, cards in targets
-                for card in cards
+            page_durations = {
+                page.page: int(page.duration_seconds or 0) for page in pages
+            }
+            missing_anchors = tuple(
+                match
+                for match in matches
+                if (
+                    (anchor := _match_anchor(match)) is None
+                    or anchor[0] not in page_durations
+                    or anchor[1] >= page_durations[anchor[0]]
+                )
             )
-            if matches and chapter_count < len(matches):
-                await self._retry_publication(
+            if missing_anchors:
+                await self._fail_analysis_data(
                     publication_id,
-                    int(publication['attempt_count']),
-                    '部分对局缺少有效时间点，视频分段不会跳过并将自动重试',
-                    minimum_delay=3600,
+                    '{} 局识别结果缺少稿件分 P、结算画面时间或 '
+                    'OCR 对局时长，请重新分析这场直播'.format(len(missing_anchors)),
                 )
                 return
+            targets = _chapter_targets(matches, pages)
+            target_by_page = {page.page: cards for page, cards in targets}
             for target_index, page in enumerate(pages):
                 cards = target_by_page.get(page.page, ())
                 current = await self._protocol.archive_cards(
@@ -2151,6 +2346,13 @@ class VaingloryPublicationService:
             (self._now() + delay, message[:500], self._now(), publication_id),
         )
 
+    async def _fail_analysis_data(self, publication_id: int, message: str) -> None:
+        await self._database.execute(
+            "UPDATE vainglory_publications SET state='failed',"
+            'next_attempt_at=0,error=?,updated_at=? WHERE id=?',
+            (message[:500], self._now(), publication_id),
+        )
+
     async def _handle_api_error(
         self, publication_id: int, publication: Mapping[str, Any], error: BiliApiError
     ) -> None:
@@ -2610,7 +2812,6 @@ def _match_anchor(match: MatchRecord) -> Optional[Tuple[int, int]]:
         measured = (match.result_at_ms - match.started_at_ms) / 1000
         if abs(measured - match.duration_seconds) <= 30:
             return match.archive_page, match.started_at_ms // 1000
-        return None
     segments = match.previous_archive_segments
     if not segments and (
         match.previous_archive_page is not None
@@ -2621,15 +2822,30 @@ def _match_anchor(match: MatchRecord) -> Optional[Tuple[int, int]]:
         segments = (
             (match.previous_archive_page, match.previous_archive_duration_seconds),
         )
-    remaining_ms = match.duration_seconds * 1_000 - match.result_at_ms
-    if remaining_ms <= 0:
-        return None
-    for page, duration_seconds in segments:
+    inferred_start_ms = match.result_at_ms - match.duration_seconds * 1_000
+    if inferred_start_ms >= 0:
+        return match.archive_page, inferred_start_ms // 1_000
+    remaining_ms = -inferred_start_ms
+    valid_segments = tuple(
+        sorted(
+            (
+                (int(page), int(duration_seconds))
+                for page, duration_seconds in segments
+                if page > 0 and duration_seconds > 0
+            ),
+            key=lambda value: value[0],
+            reverse=True,
+        )
+    )
+    for page, duration_seconds in valid_segments:
         duration_ms = duration_seconds * 1_000
         if remaining_ms <= duration_ms + 30_000:
             return page, max(0, duration_ms - remaining_ms) // 1_000
         remaining_ms -= duration_ms
-    return None
+    earliest_page = min(
+        (match.archive_page, *(page for page, _duration in valid_segments))
+    )
+    return earliest_page, 0
 
 
 def _comment_plans(

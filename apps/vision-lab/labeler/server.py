@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -33,10 +33,14 @@ from . import (
     db,
     events,
     export as export_mod,
+    hero_review,
     inference as inference_mod,
     local,
+    model_testing,
+    result_archive,
     stats as stats_mod,
     training,
+    training_review,
     worker_candidates,
 )
 from .extract import (
@@ -51,6 +55,7 @@ async def lifespan(_app: FastAPI):
     # 启动时恢复遗留状态:上次进程被中断的任务标记为可重试
     try:
         conn = db.connect(config.DB_PATH)
+        training_review.migrate_legacy_training_reviews(conn)
         conn.execute(
             "UPDATE extraction_jobs SET status='failed', "
             "error=COALESCE(error,'') || '; server restart' "
@@ -100,6 +105,16 @@ _worker_candidate_sync_state: Dict[str, Any] = {
     'downloaded': 0,
     'failed': 0,
     'last_error': '',
+    'reviews_pulled': 0,
+    'reviews_pushed': 0,
+    'review_conflicts': 0,
+    'push_failed': 0,
+    'archive_total': 0,
+    'archive_processed': 0,
+    'archive_inserted': 0,
+    'archive_updated': 0,
+    'archive_downloaded': 0,
+    'archive_failed': 0,
     'error': None,
 }
 _training_manager = training.TrainingManager(config.DB_PATH)
@@ -865,13 +880,22 @@ def _set_worker_candidate_sync_state(**values: Any) -> None:
 def _sync_worker_candidate_queue(*, maximum: int) -> None:
     _set_worker_candidate_sync_state(
         running=True, total=0, processed=0, inserted=0, updated=0,
-        downloaded=0, failed=0, last_error='', error=None,
+        downloaded=0, failed=0, last_error='', reviews_pulled=0,
+        reviews_pushed=0, review_conflicts=0, push_failed=0, error=None,
+        archive_total=0, archive_processed=0, archive_inserted=0,
+        archive_updated=0, archive_downloaded=0, archive_failed=0,
+        archive_last_error='', archive_box_suggested=0,
     )
     conn = None
     try:
         nas = _nas()
         items = nas.list_training_candidates()
-        _set_worker_candidate_sync_state(total=min(len(items), maximum))
+        reviews = nas.list_training_candidate_reviews()
+        archive_items = nas.list_result_frame_candidates()
+        _set_worker_candidate_sync_state(
+            total=min(len(items), maximum),
+            archive_total=min(len(archive_items), maximum),
+        )
         conn = _conn()
         result = worker_candidates.sync_worker_candidates(
             conn,
@@ -880,6 +904,53 @@ def _sync_worker_candidate_queue(*, maximum: int) -> None:
             maximum=maximum,
             progress=lambda values: _set_worker_candidate_sync_state(**values),
         )
+        legacy_pull = worker_candidates.pull_worker_candidate_reviews(conn, reviews)
+        unified_pull = worker_candidates.pull_training_review_reviews(conn, reviews)
+        legacy_push = worker_candidates.push_worker_candidate_reviews(conn, nas)
+        unified_push = worker_candidates.push_training_review_reviews(conn, nas)
+        result.update({
+            'reviews_pulled': (
+                legacy_pull['reviews_pulled'] + unified_pull['reviews_pulled']
+            ),
+            'review_conflicts': (
+                legacy_pull['review_conflicts']
+                + unified_pull['review_conflicts']
+            ),
+            'reviews_ignored': (
+                legacy_pull['reviews_ignored'] + unified_pull['reviews_ignored']
+            ),
+            'reviews_pushed': (
+                legacy_push['reviews_pushed'] + unified_push['reviews_pushed']
+            ),
+            'push_failed': legacy_push['push_failed'] + unified_push['push_failed'],
+        })
+        archive = result_archive.sync_result_archive(
+            conn,
+            nas,
+            archive_items,
+            maximum=maximum,
+            box_suggester=result_archive.detect_result_box,
+            progress=lambda values: _set_worker_candidate_sync_state(
+                archive_total=values['total'],
+                archive_processed=values['processed'],
+                archive_inserted=values['inserted'],
+                archive_updated=values['updated'],
+                archive_downloaded=values['downloaded'],
+                archive_failed=values['failed'],
+                archive_last_error=values['last_error'],
+                archive_box_suggested=values['box_suggested'],
+            ),
+        )
+        result.update({
+            'archive_total': archive['total'],
+            'archive_processed': archive['processed'],
+            'archive_inserted': archive['inserted'],
+            'archive_updated': archive['updated'],
+            'archive_downloaded': archive['downloaded'],
+            'archive_failed': archive['failed'],
+            'archive_last_error': archive['last_error'],
+            'archive_box_suggested': archive['box_suggested'],
+        })
         _set_worker_candidate_sync_state(**result, running=False)
     except Exception as exc:  # noqa: BLE001
         _set_worker_candidate_sync_state(running=False, error=str(exc))
@@ -910,6 +981,489 @@ def api_sync_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
 def api_sync_all_worker_candidates(body: Dict[str, Any]) -> Dict[str, Any]:
     """同步 NAS 上全部专项候选；保留旧 BP 路由兼容已有页面。"""
     return api_sync_worker_candidates(body)
+
+
+@app.get('/api/worker-candidates/state')
+def api_worker_candidate_state() -> Dict[str, Any]:
+    with _worker_candidate_sync_lock:
+        sync = dict(_worker_candidate_sync_state)
+    with _db_lock:
+        conn = _conn()
+        try:
+            review = db.training_review_stats(conn)
+        finally:
+            conn.close()
+    return {'sync': sync, 'review': review}
+
+
+@app.get('/api/training-review/items')
+def api_training_review_items(
+        status: str = 'needs_review',
+        limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                items = db.list_training_review_items(
+                    conn, status=status, limit=limit, offset=offset)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return {'items': items, 'stats': db.training_review_stats(conn)}
+        finally:
+            conn.close()
+
+
+def _hero_lineup_payload(lineup: Dict[str, Any]) -> Dict[str, Any]:
+    frame_id = int(lineup['frame_id'])
+    slots = []
+    for slot in lineup.get('slots') or []:
+        value = dict(slot)
+        value['crop_url'] = (
+            f'/api/training-review/items/{frame_id}/heroes/'
+            f"{value['side']}/{value['slot']}/crop"
+        )
+        slots.append(value)
+    return {'applicable': True, **lineup, 'slots': slots}
+
+
+@app.get('/api/training-review/heroes')
+def api_training_review_heroes() -> Dict[str, Any]:
+    try:
+        heroes = hero_review.hero_catalog()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {
+        'heroes': [
+            {
+                **hero,
+                'image_url': '/api/training-review/heroes/{}/image'.format(
+                    hero['label']
+                ),
+            }
+            for hero in heroes
+        ]
+    }
+
+
+@app.get('/api/training-review/heroes/{label}/image')
+def api_training_review_hero_image(label: str) -> Response:
+    try:
+        content = hero_review.hero_image_bytes(label)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    if content is None:
+        raise HTTPException(404, '英雄头像不存在')
+    return Response(
+        content=content,
+        media_type='image/jpeg',
+        headers={'Cache-Control': 'private, max-age=86400'},
+    )
+
+
+@app.get('/api/training-review/items/{frame_id}/hero-lineup')
+def api_training_review_hero_lineup(
+        frame_id: int,
+        screen_type: Optional[str] = None,
+        team_size: Optional[int] = Query(None),
+        refresh: bool = False) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            item = db.get_training_review_item(conn, frame_id)
+            if item is None:
+                raise HTTPException(404, '训练复核图片不存在')
+            existing = db.get_training_review_hero_lineup(conn, frame_id)
+        finally:
+            conn.close()
+    try:
+        context = hero_review.infer_lineup_context(
+            item,
+            screen_type_hint=screen_type,
+            team_size_hint=team_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if context is None:
+        if existing is not None and screen_type is None:
+            return _hero_lineup_payload(existing)
+        return {'applicable': False, 'reason': '尚未选择英雄头像所在画面'}
+    inferred_screen, inferred_size = context
+    same_context_existing = False
+    if existing is not None:
+        same_screen = existing['screen_type'] == inferred_screen
+        same_size = inferred_size is None or int(existing['team_size']) == inferred_size
+        same_context_existing = same_screen and same_size
+        refreshes_automatic_layout = (
+            inferred_size is not None
+            and existing['review_status'] == 'pending'
+            and str(existing['suggestion_method']).startswith(
+                'layout-template+'
+            )
+        )
+        if (
+            same_context_existing
+            and not refresh
+            and not refreshes_automatic_layout
+        ):
+            return _hero_lineup_payload(existing)
+    if inferred_size is None:
+        return {
+            'applicable': True,
+            'screen_type': inferred_screen,
+            'needs_team_size': True,
+            'slots': [],
+        }
+    with _db_lock:
+        conn = _conn()
+        try:
+            template = db.get_training_review_hero_template(
+                conn,
+                streamer=str(item['streamer'] or ''),
+                screen_type=inferred_screen,
+                team_size=inferred_size,
+                layout_key=db.hero_layout_key(
+                    int(item['width']), int(item['height'])
+                ),
+            )
+        finally:
+            conn.close()
+    if template is None:
+        if same_context_existing and existing is not None:
+            return _hero_lineup_payload(existing)
+        return {
+            'applicable': True,
+            'screen_type': inferred_screen,
+            'team_size': inferred_size,
+            'review_status': 'pending',
+            'suggestion_method': 'manual-circle-v1',
+            'template_found': False,
+            'slots': [],
+        }
+    if (
+        same_context_existing
+        and existing is not None
+        and not refresh
+        and str(template['updated_at']) <= str(existing['updated_at'])
+    ):
+        return _hero_lineup_payload(existing)
+    try:
+        slots = hero_review.recognize_slots(
+            Path(str(item['frame_path'])), template['slots']
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(422, f'英雄预填失败：{exc}') from exc
+    with _db_lock:
+        conn = _conn()
+        try:
+            lineup = db.replace_training_review_hero_layout(
+                conn,
+                frame_id=frame_id,
+                screen_type=inferred_screen,
+                team_size=inferred_size,
+                method='layout-template+sift-v1',
+                slots=slots,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        finally:
+            conn.close()
+    lineup['template_found'] = True
+    return _hero_lineup_payload(lineup)
+
+
+def _same_hero_crop(
+    left: Dict[str, Any], right: Dict[str, Any]
+) -> bool:
+    return all(
+        abs(float(left[name]) - float(right[name])) < 0.000001
+        for name in ('x', 'y', 'w', 'h')
+    )
+
+
+@app.put('/api/training-review/items/{frame_id}/hero-layout')
+def api_save_training_review_hero_layout(
+        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    screen_type = str(body.get('screen_type') or '')
+    try:
+        team_size = int(body.get('team_size'))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, '英雄阵容人数必须是 3 或 5') from exc
+    raw_slots = body.get('slots')
+    if not isinstance(raw_slots, list):
+        raise HTTPException(400, '英雄头像框必须是列表')
+    recognize = bool(body.get('recognize'))
+    save_template = bool(body.get('save_template'))
+    with _db_lock:
+        conn = _conn()
+        try:
+            item = db.get_training_review_item(conn, frame_id)
+            existing = db.get_training_review_hero_lineup(conn, frame_id)
+        finally:
+            conn.close()
+    if item is None:
+        raise HTTPException(404, '训练复核图片不存在')
+    slots = [
+        {
+            'side': value.get('side'),
+            'slot': value.get('slot'),
+            'crop': value.get('crop'),
+        }
+        for value in raw_slots
+        if isinstance(value, dict)
+    ]
+    try:
+        if recognize:
+            slots = hero_review.recognize_slots(
+                Path(str(item['frame_path'])), slots
+            )
+        else:
+            existing_slots = {
+                (slot['side'], int(slot['slot'])): slot
+                for slot in (existing or {}).get('slots', [])
+            }
+            for slot in slots:
+                previous = existing_slots.get(
+                    (str(slot['side']), int(slot['slot']))
+                )
+                if previous and _same_hero_crop(
+                    previous['crop'], slot['crop'] or {}
+                ):
+                    slot['suggested_label'] = previous['suggested_label']
+                    slot['suggestion_confidence'] = previous[
+                        'suggestion_confidence'
+                    ]
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(422, f'英雄头像识别失败：{exc}') from exc
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                lineup = db.replace_training_review_hero_layout(
+                    conn,
+                    frame_id=frame_id,
+                    screen_type=screen_type,
+                    team_size=team_size,
+                    method=(
+                        'manual-circle+sift-v1'
+                        if recognize else 'manual-circle-v1'
+                    ),
+                    slots=slots,
+                )
+                if save_template:
+                    db.save_training_review_hero_template(
+                        conn,
+                        streamer=str(item['streamer'] or ''),
+                        screen_type=screen_type,
+                        team_size=team_size,
+                        layout_key=db.hero_layout_key(
+                            int(item['width']), int(item['height'])
+                        ),
+                        slots=slots,
+                    )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        finally:
+            conn.close()
+    lineup['template_saved'] = save_template
+    return _hero_lineup_payload(lineup)
+
+
+@app.get('/api/training-review/items/{frame_id}/heroes/{side}/{slot}/crop')
+def api_training_review_hero_crop(
+        frame_id: int, side: str, slot: int) -> Response:
+    with _db_lock:
+        conn = _conn()
+        try:
+            item = db.get_training_review_item(conn, frame_id)
+            lineup = db.get_training_review_hero_lineup(conn, frame_id)
+        finally:
+            conn.close()
+    if item is None or lineup is None:
+        raise HTTPException(404, '英雄阵容不存在')
+    selected = next(
+        (
+            value
+            for value in lineup['slots']
+            if value['side'] == side and int(value['slot']) == slot
+        ),
+        None,
+    )
+    if selected is None:
+        raise HTTPException(404, '英雄位置不存在')
+    try:
+        content = hero_review.crop_image_bytes(
+            Path(str(item['frame_path'])), selected['crop']
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(422, f'英雄头像裁剪失败：{exc}') from exc
+    return Response(
+        content=content,
+        media_type='image/jpeg',
+        headers={'Cache-Control': 'private, max-age=3600'},
+    )
+
+
+@app.put('/api/training-review/items/{frame_id}/hero-lineup')
+def api_save_training_review_hero_lineup(
+        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    labels = body.get('heroes')
+    if not isinstance(labels, list):
+        raise HTTPException(400, '英雄阵容必须是列表')
+    try:
+        allowed = hero_review.allowed_hero_labels()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                lineup = db.save_training_review_hero_lineup(
+                    conn,
+                    frame_id=frame_id,
+                    labels=labels,
+                    allowed_labels=allowed,
+                    player_side=body.get('player_side'),
+                    player_slot=body.get('player_slot'),
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        finally:
+            conn.close()
+    return _hero_lineup_payload(lineup)
+
+
+def _training_review_box(value: Any) -> Optional[Dict[str, float]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HTTPException(400, '结算框必须是对象')
+    try:
+        box = {name: float(value[name]) for name in ('x', 'y', 'w', 'h')}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, '结算框需要 x/y/w/h 数字') from exc
+    if not (
+        0 <= box['x'] <= 1 and 0 <= box['y'] <= 1
+        and 0 < box['w'] <= 1 and 0 < box['h'] <= 1
+        and box['x'] + box['w'] <= 1.001
+        and box['y'] + box['h'] <= 1.001
+    ):
+        raise HTTPException(400, '结算框坐标必须归一化到 [0,1]')
+    return box
+
+
+@app.put('/api/training-review/items/{frame_id}')
+def api_save_training_review_item(
+        frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(body.get('review_status') or 'confirmed')
+    result_label = body.get('result_panel_label')
+    result_box = _training_review_box(body.get('result_box'))
+    with _db_lock:
+        conn = _conn()
+        try:
+            if db.get_training_review_item(conn, frame_id) is None:
+                raise HTTPException(404, '训练复核图片不存在')
+            if result_label == 'result_panel':
+                if result_box is None and 'result_panel' not in db.get_boxes(
+                        conn, frame_id):
+                    raise HTTPException(400, '结算正样本必须框出完整结算面板')
+                if result_box is not None:
+                    db.save_box(
+                        conn, frame_id, 'result_panel',
+                        result_box['x'], result_box['y'],
+                        result_box['w'], result_box['h'])
+            try:
+                return db.save_training_review(
+                    conn,
+                    frame_id=frame_id,
+                    match_flow_label=body.get('match_flow_label'),
+                    match_mode_label=body.get('match_mode_label'),
+                    hero_select_label=body.get('hero_select_label'),
+                    result_panel_label=result_label,
+                    hero_layout_label=body.get('hero_layout_label'),
+                    ocr_usable=str(body.get('ocr_usable') or 'yes'),
+                    result_occlusion=str(
+                        body.get('result_occlusion') or 'none'
+                    ),
+                    occluder_types=body.get('occluder_types') or [],
+                    status=status,
+                    notes=str(body.get('notes') or ''),
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.get('/api/worker-candidates/items')
+def api_worker_candidate_items(
+        task: str = '', status: str = 'pending',
+        limit: int = Query(500, ge=1, le=2000),
+        offset: int = Query(0, ge=0)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                items = db.list_worker_candidates(
+                    conn, task=task, status=status, limit=limit, offset=offset)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return {'items': items, 'stats': db.worker_candidate_stats(conn)}
+        finally:
+            conn.close()
+
+
+@app.put('/api/worker-candidates/items/{candidate_id}')
+def api_review_worker_candidate(
+        candidate_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    raw_label = body.get('label')
+    label = None if raw_label in (None, '', 'skip') else str(raw_label)
+    visual_condition = str(body.get('visual_condition') or 'clear')
+    boxes = body.get('boxes') or []
+    notes = str(body.get('notes') or '')
+    with _db_lock:
+        conn = _conn()
+        try:
+            item = db.get_worker_candidate(conn, candidate_id)
+            if item is None:
+                raise HTTPException(404, 'worker 候选不存在')
+            try:
+                if item['task'] == 'bp_review':
+                    db.review_bp_item(
+                        conn,
+                        frame_id=int(item['frame_id']),
+                        label=label,
+                        visual_condition=visual_condition,
+                    )
+                elif item['task'] == 'key_screen_review':
+                    db.review_key_screen_item(
+                        conn,
+                        frame_id=int(item['frame_id']),
+                        label=label,
+                        visual_condition=visual_condition,
+                    )
+                return db.review_worker_candidate(
+                    conn,
+                    candidate_id=candidate_id,
+                    label=label,
+                    visual_condition=visual_condition,
+                    boxes=boxes,
+                    notes=notes,
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
 
 
 def _set_bp_collect_state(**values: Any) -> None:
@@ -1073,12 +1627,20 @@ def api_review_bp_item(frame_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
         conn = _conn()
         try:
             try:
-                return db.review_bp_item(
+                result = db.review_bp_item(
                     conn,
                     frame_id=frame_id,
                     label=label,
                     visual_condition=visual_condition,
                 )
+                db.mark_worker_candidate_review_for_frame(
+                    conn,
+                    frame_id=frame_id,
+                    task='bp_review',
+                    label=label,
+                    visual_condition=visual_condition,
+                )
+                return result
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except ValueError as exc:
@@ -1132,12 +1694,20 @@ def api_review_key_screen_item(
         conn = _conn()
         try:
             try:
-                return db.review_key_screen_item(
+                result = db.review_key_screen_item(
                     conn,
                     frame_id=frame_id,
                     label=label,
                     visual_condition=visual_condition,
                 )
+                db.mark_worker_candidate_review_for_frame(
+                    conn,
+                    frame_id=frame_id,
+                    task='key_screen_review',
+                    label=label,
+                    visual_condition=visual_condition,
+                )
+                return result
             except KeyError as exc:
                 raise HTTPException(404, str(exc))
             except ValueError as exc:
@@ -1178,6 +1748,150 @@ def api_model_test(model_name: str, body: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(500, f'推理失败: {e}')
     result['frame_id'] = int(frame_id)
     return result
+
+
+@app.get('/api/model-tests/runs')
+def api_model_test_runs() -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return {'runs': model_testing.list_testable_runs(conn)}
+        finally:
+            conn.close()
+
+
+@app.get('/api/model-tests/runs/{run_id}/samples')
+def api_model_test_samples(
+        run_id: str, split: str = 'test',
+        limit: int = Query(500, ge=1, le=2000)) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return model_testing.list_run_samples(
+                    conn, run_id, split=split, limit=limit)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.post('/api/model-tests/runs/{run_id}/predict')
+def api_model_test_run_predict(
+        run_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    sample_id = str(body.get('sample_id') or '')
+    split = str(body.get('split') or '')
+    if not sample_id or split not in {'train', 'val', 'test'}:
+        raise HTTPException(400, '需要有效的 sample_id 和 split')
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return model_testing.predict_run_sample(
+                    conn,
+                    run_id,
+                    sample_id=sample_id,
+                    split=split,
+                    conf_thr=float(body.get('conf_thr', 0.25)),
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f'推理失败: {exc}')
+        finally:
+            conn.close()
+
+
+@app.get('/api/model-tests/runs/{run_id}/samples/{sample_id}/image')
+def api_model_test_sample_image(
+        run_id: str, sample_id: str, split: str) -> FileResponse:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                path = model_testing.run_sample_image_path(
+                    conn, run_id, sample_id=sample_id, split=split)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+    return FileResponse(path, media_type='image/jpeg')
+
+
+@app.put('/api/model-tests/runs/{run_id}/validation')
+def api_validate_model_run(run_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return model_testing.validate_run(
+                    conn,
+                    run_id,
+                    status=str(body.get('status') or ''),
+                    notes=str(body.get('notes') or ''),
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.get('/api/model-packages')
+def api_model_packages() -> Dict[str, Any]:
+    with _db_lock:
+        conn = _conn()
+        try:
+            return {'packages': db.list_model_packages(conn)}
+        finally:
+            conn.close()
+
+
+@app.post('/api/model-packages')
+def api_build_model_package(body: Dict[str, Any]) -> Dict[str, Any]:
+    run_ids = [str(value) for value in body.get('run_ids') or []]
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                return model_testing.build_model_package(
+                    conn,
+                    run_ids,
+                    package_id=str(body.get('package_id') or ''),
+                )
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+
+
+@app.get('/api/model-packages/{package_id}/archive')
+def api_model_package_archive(package_id: str) -> FileResponse:
+    with _db_lock:
+        conn = _conn()
+        try:
+            try:
+                archive = model_testing.model_package_archive(conn, package_id)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(400, str(exc))
+        finally:
+            conn.close()
+    return FileResponse(
+        archive,
+        media_type='application/zip',
+        filename=archive.name,
+    )
 
 
 @app.get('/api/events')
@@ -1637,7 +2351,7 @@ def api_training_runs(
 def api_start_training(body: Dict[str, Any]) -> Dict[str, Any]:
     task_id = str(body.get('task_id') or '')
     definition = training.TRAINING_TASKS.get(task_id)
-    if definition is None:
+    if definition is None or not definition.get('active', True):
         raise HTTPException(400, f'未知训练任务: {task_id}')
     epochs = int(body.get('epochs') or definition['epochs'])
     if not 1 <= epochs <= 500:

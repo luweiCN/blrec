@@ -15,6 +15,8 @@ dependencies = [
   "pillow>=10.0",
   "numpy>=1.26",
   "onnxruntime>=1.20",
+  "opencv-python>=4.8",
+  "loguru>=0.7,<0.8",
 ]
 
 [project.optional-dependencies]

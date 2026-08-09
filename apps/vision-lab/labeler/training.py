@@ -19,6 +19,50 @@ PROGRESS_PREFIX = '@@BLREC_TRAIN_PROGRESS@@'
 RESULT_PREFIX = '@@BLREC_TRAIN_RESULT@@'
 
 TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
+    'match_flow': {
+        'name': '是否在虚荣对局流程中',
+        'kind': 'classify',
+        'description': '低频判断当前画面是否属于一局比赛流程；看不清的样本不训练。',
+        'epochs': 60,
+        'imgsz': 224,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'match-flow-classifier-current.onnx',
+        'recommended': '对局与非对局各至少 300 张，并覆盖多位主播和不同设备。',
+        'active': True,
+    },
+    'hero_select': {
+        'name': '英雄选择与模式分类',
+        'kind': 'classify',
+        'description': '识别非英雄选择、3V3、大乱斗和 5V5 英雄选择界面。',
+        'epochs': 60,
+        'imgsz': 224,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'hero-select-classifier-current.onnx',
+        'recommended': '三种英雄选择各至少 100 张，非英雄选择至少 300 张。',
+        'active': True,
+    },
+    'match_mode': {
+        'name': '对局画面模式分类',
+        'kind': 'classify',
+        'description': '只对能看出地图的对局画面判断 3V3、大乱斗或 5V5。',
+        'epochs': 60,
+        'imgsz': 224,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'match-mode-classifier-current.onnx',
+        'recommended': '每种模式至少 200 张，并覆盖地图区域、设备和遮挡差异。',
+        'active': True,
+    },
+    'screen_state': {
+        'name': '画面状态分类',
+        'kind': 'classify',
+        'description': '构建非虚荣、游戏外、对局前、对局中、天赋、赛后和转场时间线。',
+        'epochs': 60,
+        'imgsz': 224,
+        'base_model': 'yolov8n-cls.pt',
+        'publish_name': 'screen-state-classifier-current.onnx',
+        'recommended': '每类至少 100 张并覆盖多个视频；对局中样本会自动限量。',
+        'active': False,
+    },
     'bp_review': {
         'name': 'BP 模式分类',
         'kind': 'classify',
@@ -28,6 +72,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'bp-classifier-current.onnx',
         'recommended': '每种 BP 至少 100 张，非 BP 至少 200 张，并覆盖多个主播。',
+        'active': False,
     },
     'key_screen_review': {
         'name': '结算页／计分板分类',
@@ -38,6 +83,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'base_model': 'yolov8n-cls.pt',
         'publish_name': 'key-screen-classifier-current.onnx',
         'recommended': '结算页和计分板各 100 张以上，其他 hard negative 300 张以上。',
+        'active': False,
     },
     'mode_gate': {
         'name': '大乱斗光栅检测',
@@ -48,6 +94,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'base_model': 'yolov8n.pt',
         'publish_name': 'mode-gate-detector-current.onnx',
         'recommended': '至少 100 张有光栅、100 张同位置开放入口，覆盖不同设备。',
+        'active': False,
     },
     'result_detector': {
         'name': '结算面板检测',
@@ -58,6 +105,7 @@ TRAINING_TASKS: Dict[str, Dict[str, Any]] = {
         'base_model': 'yolov8n.pt',
         'publish_name': 'result-detector-current.onnx',
         'recommended': '120～250 张有框结算页，800～1500 张负样本，重点覆盖计分板。',
+        'active': True,
     },
 }
 
@@ -136,6 +184,37 @@ def _existing_key_screen_labels(conn: Any) -> Dict[int, str]:
     return labels
 
 
+def _existing_screen_state_labels(conn: Any) -> Dict[int, str]:
+    labels: Dict[int, str] = {}
+    rows = conn.execute(
+        'SELECT a.*, f.frame_path FROM annotations a '
+        'JOIN frames f ON f.id = a.frame_id '
+        "WHERE a.annotation_status = 'complete'"
+    ).fetchall()
+    for row in rows:
+        if not Path(row['frame_path']).is_file():
+            continue
+        label = export._screen_state_label(dict(row))
+        if label is not None:
+            labels[int(row['frame_id'])] = label
+    reviewed = conn.execute(
+        'SELECT c.frame_id, c.confirmed_label, c.visual_condition, f.frame_path '
+        'FROM worker_candidate_items c JOIN frames f ON f.id = c.frame_id '
+        "WHERE c.task = 'screen_state' AND c.review_status = 'confirmed' "
+        'AND c.confirmed_label IS NOT NULL'
+    ).fetchall()
+    for row in reviewed:
+        frame_id = int(row['frame_id'])
+        if (
+            row['visual_condition'] == 'unreadable'
+            or not Path(row['frame_path']).is_file()
+        ):
+            labels.pop(frame_id, None)
+        else:
+            labels[frame_id] = str(row['confirmed_label'])
+    return labels
+
+
 def _classification_summary(
     labels: Dict[int, str], required: List[str]
 ) -> Dict[str, Any]:
@@ -180,8 +259,49 @@ def _videos_by_label(
     }
 
 
+def _training_review_labels(
+    conn: Any, *, column: str, allowed: List[str]
+) -> Dict[int, str]:
+    if column not in {
+        'match_flow_label', 'match_mode_label', 'hero_select_label'
+    }:
+        raise ValueError('未知统一复核标签列')
+    labels: Dict[int, str] = {}
+    rows = conn.execute(
+        f'SELECT r.frame_id, r.{column} AS label, f.frame_path '
+        'FROM training_review_items r '
+        'JOIN frames f ON f.id = r.frame_id '
+        "WHERE r.review_status = 'confirmed' "
+        f'AND r.{column} IS NOT NULL'
+    ).fetchall()
+    accepted = set(allowed)
+    for row in rows:
+        label = str(row['label'])
+        if label in accepted and Path(row['frame_path']).is_file():
+            labels[int(row['frame_id'])] = label
+    return labels
+
+
 def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
-    if task_id == 'bp_review':
+    if task_id in export.UNIFIED_CLASSIFICATION_LABELS:
+        required = list(export.UNIFIED_CLASSIFICATION_LABELS[task_id])
+        column = {
+            'match_flow': 'match_flow_label',
+            'match_mode': 'match_mode_label',
+            'hero_select': 'hero_select_label',
+        }[task_id]
+        labels = _training_review_labels(
+            conn, column=column, allowed=required)
+        counts = _classification_summary(labels, required)
+        counts['videos_by_label'] = _videos_by_label(conn, labels, required)
+        video_count = _video_count_for_frames(conn, list(labels))
+    elif task_id == 'screen_state':
+        labels = _existing_screen_state_labels(conn)
+        required = list(export.SCREEN_STATE_LABELS)
+        counts = _classification_summary(labels, required)
+        counts['videos_by_label'] = _videos_by_label(conn, labels, required)
+        video_count = _video_count_for_frames(conn, list(labels))
+    elif task_id == 'bp_review':
         labels = _existing_bp_labels(conn)
         required = ['bp_3v3', 'bp_aram', 'bp_5v5', 'not_bp']
         counts = _classification_summary(labels, required)
@@ -194,47 +314,89 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
         counts['videos_by_label'] = _videos_by_label(conn, labels, required)
         video_count = _video_count_for_frames(conn, list(labels))
     elif task_id == 'mode_gate':
-        rows = conn.execute(
-            'SELECT mga.evidence, COUNT(DISTINCT mga.frame_id) AS count '
-            'FROM mode_gate_annotations mga JOIN frames f ON f.id = mga.frame_id '
-            "WHERE mga.evidence IN ('blocked_gate', 'open_entrance') "
-            "AND f.frame_path != '' GROUP BY mga.evidence"
-        ).fetchall()
-        by_evidence = {row['evidence']: row['count'] for row in rows}
+        evidence_by_frame = {
+            int(row['frame_id']): str(row['evidence'])
+            for row in conn.execute(
+                'SELECT mga.frame_id, mga.evidence, f.frame_path '
+                'FROM mode_gate_annotations mga JOIN frames f ON f.id = mga.frame_id '
+                "WHERE mga.evidence IN ('blocked_gate', 'open_entrance') "
+                "AND f.frame_path != ''"
+            ).fetchall()
+            if Path(row['frame_path']).is_file()
+        }
+        for row in conn.execute(
+            'SELECT c.frame_id, c.confirmed_label, f.frame_path '
+            'FROM worker_candidate_items c JOIN frames f ON f.id = c.frame_id '
+            "WHERE c.task = 'mode_gate' AND c.review_status = 'confirmed' "
+            "AND c.confirmed_label IN ('blocked_gate', 'open_entrance') "
+            "AND c.visual_condition != 'unreadable'"
+        ).fetchall():
+            if Path(row['frame_path']).is_file():
+                evidence_by_frame[int(row['frame_id'])] = str(row['confirmed_label'])
+        by_evidence = {
+            label: sum(1 for value in evidence_by_frame.values() if value == label)
+            for label in ('blocked_gate', 'open_entrance')
+        }
         counts = {
             'total': sum(by_evidence.values()),
             'positive': int(by_evidence.get('blocked_gate', 0)),
             'negative': int(by_evidence.get('open_entrance', 0)),
         }
-        video_count = int(
-            conn.execute(
-                'SELECT COUNT(DISTINCT f.video_id) '
-                'FROM mode_gate_annotations mga '
-                'JOIN frames f ON f.id = mga.frame_id '
-                "WHERE mga.evidence IN ('blocked_gate', 'open_entrance') "
-                "AND f.frame_path != ''"
-            ).fetchone()[0]
-        )
+        video_count = _video_count_for_frames(conn, list(evidence_by_frame))
     elif task_id == 'result_detector':
-        positive = int(
-            conn.execute(
-                'SELECT COUNT(DISTINCT a.frame_id) FROM annotations a '
-                'JOIN boxes b ON b.frame_id = a.frame_id '
-                'JOIN frames f ON f.id = a.frame_id '
-                "WHERE a.annotation_status = 'complete' "
-                "AND a.screen_type = 'result_page' "
-                "AND b.box_type = 'result_panel' AND f.frame_path != ''"
-            ).fetchone()[0]
-        )
-        negative = int(
-            conn.execute(
-                'SELECT COUNT(*) FROM annotations a '
-                'JOIN frames f ON f.id = a.frame_id '
-                "WHERE a.annotation_status = 'complete' "
-                "AND COALESCE(a.screen_type, '') != 'result_page' "
-                "AND f.frame_path != ''"
-            ).fetchone()[0]
-        )
+        detector_labels = {
+            int(row['frame_id']): str(row['label'])
+            for row in conn.execute(
+                """
+                SELECT a.frame_id,
+                       CASE WHEN a.screen_type = 'result_page'
+                                  AND EXISTS (
+                                      SELECT 1 FROM boxes b
+                                      WHERE b.frame_id = a.frame_id
+                                        AND b.box_type = 'result_panel')
+                            THEN 'result_panel'
+                            WHEN COALESCE(a.screen_type, '') != 'result_page'
+                            THEN 'no_result_panel' END AS label,
+                       f.frame_path
+                FROM annotations a JOIN frames f ON f.id = a.frame_id
+                WHERE a.annotation_status = 'complete'
+                """
+            ).fetchall()
+            if row['label'] and Path(row['frame_path']).is_file()
+        }
+        for row in conn.execute(
+            'SELECT c.frame_id, c.confirmed_label, f.frame_path '
+            'FROM worker_candidate_items c JOIN frames f ON f.id = c.frame_id '
+            "WHERE c.task = 'result_detector' "
+            "AND c.review_status = 'confirmed' "
+            'AND c.confirmed_label IS NOT NULL '
+            "AND c.visual_condition != 'unreadable'"
+        ).fetchall():
+            if Path(row['frame_path']).is_file():
+                detector_labels[int(row['frame_id'])] = str(row['confirmed_label'])
+        for row in conn.execute(
+            'SELECT r.frame_id, r.result_panel_label, f.frame_path '
+            'FROM training_review_items r '
+            'JOIN frames f ON f.id = r.frame_id '
+            "WHERE r.review_status = 'confirmed' "
+            'AND r.result_panel_label IS NOT NULL'
+        ).fetchall():
+            frame_id = int(row['frame_id'])
+            label = str(row['result_panel_label'])
+            if label == 'unreadable' or not Path(row['frame_path']).is_file():
+                detector_labels.pop(frame_id, None)
+            elif label == 'result_panel' and not conn.execute(
+                "SELECT 1 FROM boxes WHERE frame_id = ? AND box_type = 'result_panel'",
+                (frame_id,),
+            ).fetchone():
+                detector_labels.pop(frame_id, None)
+            else:
+                detector_labels[frame_id] = label
+        positive = sum(
+            1 for value in detector_labels.values() if value == 'result_panel')
+        negative = sum(
+            1 for value in detector_labels.values()
+            if value == 'no_result_panel')
         hard_negative = int(
             conn.execute(
                 'SELECT COUNT(*) FROM annotations a '
@@ -250,13 +412,7 @@ def _task_counts(conn: Any, task_id: str) -> Dict[str, Any]:
             'negative': negative,
             'hard_negative': hard_negative,
         }
-        video_count = int(
-            conn.execute(
-                'SELECT COUNT(DISTINCT f.video_id) FROM annotations a '
-                'JOIN frames f ON f.id = a.frame_id '
-                "WHERE a.annotation_status = 'complete' AND f.frame_path != ''"
-            ).fetchone()[0]
-        )
+        video_count = _video_count_for_frames(conn, list(detector_labels))
     else:
         raise ValueError(f'未知训练任务: {task_id}')
     counts['videos'] = video_count
@@ -267,7 +423,42 @@ def _blocking_reasons(task_id: str, counts: Dict[str, Any]) -> List[str]:
     reasons = []
     if int(counts.get('videos', 0)) < 2:
         reasons.append('至少需要 2 个视频，才能把训练集和验证集按视频分开')
-    if task_id == 'bp_review':
+    if task_id in export.UNIFIED_CLASSIFICATION_LABELS:
+        labels = counts.get('by_label', {})
+        display_names = {
+            'match_flow': '对局流程中',
+            'not_match_flow': '非对局画面',
+            '3v3': '3V3',
+            'aram': '大乱斗',
+            '5v5': '5V5',
+            'not_select': '非英雄选择',
+            'select_3v3': '3V3 英雄选择',
+            'select_aram': '大乱斗英雄选择',
+            'select_5v5': '5V5 英雄选择',
+        }
+        for label in export.UNIFIED_CLASSIFICATION_LABELS[task_id]:
+            name = display_names[label]
+            if int(labels.get(label, 0)) < 2:
+                reasons.append(f'{name}至少需要 2 张有效图片')
+            elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
+                reasons.append(f'{name}至少需要来自 2 个不同视频')
+    elif task_id == 'screen_state':
+        labels = counts.get('by_label', {})
+        names = {
+            'not_vainglory': '非虚荣',
+            'out_of_match': '游戏外',
+            'pre_match': '对局前',
+            'in_match': '对局中',
+            'talent_select': '天赋选择',
+            'post_match': '赛后',
+            'transition': '转场',
+        }
+        for label, name in names.items():
+            if int(labels.get(label, 0)) < 2:
+                reasons.append(f'{name}至少需要 2 张有效图片')
+            elif int(counts.get('videos_by_label', {}).get(label, 0)) < 2:
+                reasons.append(f'{name}至少需要来自 2 个不同视频')
+    elif task_id == 'bp_review':
         labels = counts.get('by_label', {})
         names = {
             'bp_3v3': '3V3 BP',
@@ -298,7 +489,39 @@ def _blocking_reasons(task_id: str, counts: Dict[str, Any]) -> List[str]:
 
 def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
     """已经能跑训练，但还没达到第一轮正式模型的建议量。"""
-    if task_id == 'bp_review':
+    if task_id == 'match_flow':
+        values = counts.get('by_label', {})
+        targets = {
+            'match_flow': ('对局流程中', 300),
+            'not_match_flow': ('非对局画面', 300),
+        }
+    elif task_id == 'match_mode':
+        values = counts.get('by_label', {})
+        targets = {
+            '3v3': ('3V3', 200),
+            'aram': ('大乱斗', 200),
+            '5v5': ('5V5', 200),
+        }
+    elif task_id == 'hero_select':
+        values = counts.get('by_label', {})
+        targets = {
+            'not_select': ('非英雄选择', 300),
+            'select_3v3': ('3V3 英雄选择', 100),
+            'select_aram': ('大乱斗英雄选择', 100),
+            'select_5v5': ('5V5 英雄选择', 100),
+        }
+    elif task_id == 'screen_state':
+        values = counts.get('by_label', {})
+        targets = {
+            'not_vainglory': ('非虚荣', 100),
+            'out_of_match': ('游戏外', 100),
+            'pre_match': ('对局前', 100),
+            'in_match': ('对局中', 300),
+            'talent_select': ('天赋选择', 100),
+            'post_match': ('赛后', 100),
+            'transition': ('转场', 100),
+        }
+    elif task_id == 'bp_review':
         values = counts.get('by_label', {})
         targets = {
             'bp_3v3': ('3V3 BP', 100),
@@ -330,9 +553,13 @@ def _quality_warnings(task_id: str, counts: Dict[str, Any]) -> List[str]:
     ]
 
 
-def task_summaries(conn: Any) -> List[Dict[str, Any]]:
+def task_summaries(
+    conn: Any, *, include_legacy: bool = False
+) -> List[Dict[str, Any]]:
     summaries = []
     for task_id, definition in TRAINING_TASKS.items():
+        if not include_legacy and not definition.get('active', True):
+            continue
         counts = _task_counts(conn, task_id)
         reasons = _blocking_reasons(task_id, counts)
         warnings = _quality_warnings(task_id, counts)
@@ -350,6 +577,10 @@ def task_summaries(conn: Any) -> List[Dict[str, Any]]:
 
 
 def export_snapshot(conn: Any, task_id: str) -> Dict[str, Any]:
+    if task_id in export.UNIFIED_CLASSIFICATION_LABELS:
+        return export.export_training_review_classifier(conn, task_id)
+    if task_id == 'screen_state':
+        return export.export_screen_state_classifier(conn)
     if task_id == 'bp_review':
         return export.export_bp_classifier(conn)
     if task_id == 'key_screen_review':

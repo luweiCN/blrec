@@ -147,6 +147,7 @@ _*/
 
 # local Reasonix runtime state
 .reasonix/
+reasonix.toml
 
 # vscode
 .vscode/

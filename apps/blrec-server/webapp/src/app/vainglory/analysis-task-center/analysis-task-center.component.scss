@@ -389,6 +389,31 @@
     margin: 0;
     color: #595959;
   }
+
+  > .analysis-duration-group {
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 2px 8px;
+    padding-right: 18px;
+    border-right: 1px solid #f0f0f0;
+
+    dt {
+      grid-row: 1 / span 2;
+      align-self: center;
+      color: #595959;
+      font-weight: 600;
+    }
+
+    dd {
+      display: flex;
+      gap: 5px;
+      white-space: nowrap;
+
+      span {
+        color: #8c8c8c;
+      }
+    }
+  }
 }
 
 .analysis-queue-counts {
