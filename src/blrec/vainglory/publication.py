@@ -67,6 +67,7 @@ _GENERATED_LINK_LINE = re.compile(
 _GENERATED_TRUNCATION = '…其余对局请见置顶评论'
 _WAITING_DESCRIPTION = '等待对局分析完成后生成发布内容'
 _LEGACY_CHAPTER_TIMING_ERROR = '部分对局缺少有效时间点，视频分段不会跳过并将自动重试'
+_WAITING_PUBLICATION_ERROR = '稿件尚未公开，公开可访问后自动处理简介、评论和视频分段'
 
 _PUBLICATION_ANALYSIS_READY_PREDICATE = (
     'EXISTS(SELECT 1 FROM vainglory_scan_jobs source_scan '
@@ -230,6 +231,11 @@ def _publication_task_status(row: Mapping[str, Any]) -> PublicationTaskStatus:
         code = 'waiting_upload'
         label = '等待稿件发布'
         detail = '稿件还在上传或提交阶段，尚不能回填发布内容。'
+        action = 'wait'
+    elif error == _WAITING_PUBLICATION_ERROR:
+        code = 'waiting_publication'
+        label = '等待稿件公开'
+        detail = _WAITING_PUBLICATION_ERROR
         action = 'wait'
     elif error == _LEGACY_CHAPTER_TIMING_ERROR:
         code = 'legacy_chapter_timing'
@@ -1330,6 +1336,8 @@ class VaingloryPublicationService:
             gate = self._account_gates.for_account(int(publication['account_id']))
             async with gate.hold(int(publication['credential_version'])):
                 bundle = await self._bundle_loader(int(publication['account_id']))
+                if not await self._confirm_public_visibility(publication, bundle):
+                    return
                 await self._database.execute(
                     "UPDATE vainglory_publications SET state='running',"
                     'attempt_count=attempt_count+1,error=NULL,updated_at=? WHERE id=?',
@@ -1410,6 +1418,91 @@ class VaingloryPublicationService:
                 int(publication['attempt_count']),
                 '投稿账号或凭据在发布期间发生变化',
             )
+
+    async def _confirm_public_visibility(
+        self, publication: Mapping[str, Any], bundle: CredentialBundle
+    ) -> bool:
+        if publication['public_visible_at'] is not None:
+            return True
+        publication_id = int(publication['id'])
+        try:
+            response = await self._protocol.public_archive_view(
+                bundle, bvid=str(publication['bvid'])
+            )
+        except BiliApiError as error:
+            if error.code in (-404, 404):
+                await self._retry_publication(
+                    publication_id,
+                    int(publication['attempt_count']),
+                    _WAITING_PUBLICATION_ERROR,
+                    minimum_delay=300,
+                )
+            elif error.code in self._RETRYABLE_CODES:
+                await self._handle_api_error(publication_id, publication, error)
+            else:
+                await self._retry_publication(
+                    publication_id,
+                    int(publication['attempt_count']),
+                    '确认稿件公开状态失败（{}），将自动重试'.format(error.code),
+                    minimum_delay=3600,
+                )
+            return False
+        except (DefinitelyNotSent, RemoteOutcomeUnknown):
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                '暂时无法确认稿件是否公开，将自动重试',
+                minimum_delay=60,
+            )
+            return False
+        except ProtocolContractError:
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                '公开稿件数据异常，将自动重试',
+                minimum_delay=300,
+            )
+            return False
+        data = response.get('data')
+        now = self._now()
+        if not isinstance(data, Mapping):
+            visible = False
+        else:
+            pages = data.get('pages')
+            published_at = _positive_int(data.get('pubdate'))
+            visible = (
+                _positive_int(data.get('aid')) == int(publication['aid'])
+                and data.get('bvid') == str(publication['bvid'])
+                and published_at is not None
+                and published_at <= now
+                and isinstance(pages, list)
+                and any(
+                    isinstance(page, Mapping)
+                    and _positive_int(page.get('cid')) is not None
+                    for page in pages
+                )
+            )
+        if not visible:
+            await self._retry_publication(
+                publication_id,
+                int(publication['attempt_count']),
+                _WAITING_PUBLICATION_ERROR,
+                minimum_delay=300,
+            )
+            return False
+        await self._database.execute(
+            "UPDATE vainglory_publications SET state='prepared',"
+            'public_visible_at=?,next_attempt_at=0,error=NULL,updated_at=? '
+            'WHERE id=?',
+            (now, now, publication_id),
+        )
+        logger.info(
+            'Vainglory publication confirmed publicly visible: '
+            'publication_id={} bvid={}',
+            publication_id,
+            str(publication['bvid']),
+        )
+        return True
 
     async def _prepare_comment_cleanup(
         self, publication: Mapping[str, Any], bundle: CredentialBundle
