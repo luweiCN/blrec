@@ -114,5 +114,6 @@ jobs:
 
       - name: Verify Publisher image boundary
         run: |
+          docker run --rm blrec-dashboard-publisher:test --help >/dev/null
           docker run --rm --entrypoint python blrec-dashboard-publisher:test -c \
             "import importlib.util; import blrec_dashboard_publisher.publisher; names=('cv2','onnxruntime','rapidocr','fastapi'); assert all(importlib.util.find_spec(name) is None for name in names)"
