@@ -90,6 +90,16 @@
 }
 
 @media (max-width: 620px) {
+  .rating-trend-card > header {
+    display: block;
+
+    & > span {
+      display: block;
+      margin-top: 7px;
+      text-align: left;
+    }
+  }
+
   .profile-table-wrap {
     overflow: visible;
   }
