@@ -67,66 +67,46 @@ _GENERATED_LINK_LINE = re.compile(
 _GENERATED_TRUNCATION = '…其余对局请见置顶评论'
 _WAITING_DESCRIPTION = '等待对局分析完成后生成发布内容'
 
-_SESSION_ARCHIVES_COMPLETE = (
-    'NOT EXISTS(SELECT 1 FROM vainglory_archive_imports source_import '
-    'WHERE source_import.session_id=session.id AND ('
-    "source_import.state NOT IN ('ready','skipped') OR ("
-    "source_import.state='ready' AND (source_import.page_count<=0 OR "
-    'source_import.completed_page_count!=source_import.page_count OR ('
-    'SELECT COUNT(*) FROM vainglory_archive_parts source_part '
-    'WHERE source_part.import_id=source_import.id '
-    "AND source_part.state='ready')!=source_import.page_count))))"
-)
 _PUBLICATION_ANALYSIS_READY_PREDICATE = (
     'EXISTS(SELECT 1 FROM vainglory_scan_jobs source_scan '
     'WHERE source_scan.session_id=session.id '
     "AND source_scan.state='ready')"
 )
-_PUBLICATION_TERMINAL_EMPTY_PREDICATE = (
+_PUBLICATION_SKIPPED_ARCHIVE_PREDICATE = (
     'EXISTS(SELECT 1 FROM vainglory_archive_imports empty_import '
     'WHERE empty_import.session_id=session.id '
     'AND empty_import.account_id=publication.account_id '
     'AND empty_import.bvid=publication.bvid '
-    "AND empty_import.state='skipped') AND NOT EXISTS("
+    "AND empty_import.state='skipped')"
+)
+_PUBLICATION_ARCHIVE_READY_PREDICATE = (
+    'EXISTS(SELECT 1 FROM vainglory_archive_imports ready_import '
+    'WHERE ready_import.session_id=session.id '
+    'AND ready_import.account_id=publication.account_id '
+    'AND ready_import.bvid=publication.bvid '
+    "AND ready_import.state='ready' AND ready_import.page_count>0 "
+    'AND ready_import.completed_page_count=ready_import.page_count '
+    'AND (SELECT COUNT(*) FROM vainglory_archive_parts ready_part '
+    'WHERE ready_part.import_id=ready_import.id '
+    "AND ready_part.state='ready')=ready_import.page_count)"
+)
+_PUBLICATION_TERMINAL_EMPTY_PREDICATE = (
+    '(' + _PUBLICATION_SKIPPED_ARCHIVE_PREDICATE + ') AND NOT EXISTS('
     'SELECT 1 FROM recording_parts local_part '
     'WHERE local_part.session_id=session.id '
     "AND local_part.artifact_state='ready' "
     'AND local_part.video_deleted_at IS NULL)'
 )
 _PUBLICATION_READY_PREDICATE = (
-    '('
+    "((publication.source_kind='upload' AND "
     + _PUBLICATION_ANALYSIS_READY_PREDICATE
-    + ' OR ('
-    + _PUBLICATION_TERMINAL_EMPTY_PREDICATE
-    + ')) AND '
-    + _SESSION_ARCHIVES_COMPLETE
-    + " AND (publication.source_kind!='archive' OR EXISTS("
-    'SELECT 1 FROM vainglory_archive_imports source_import '
-    'WHERE source_import.session_id=session.id '
-    'AND source_import.account_id=publication.account_id '
-    'AND source_import.bvid=publication.bvid '
-    "AND (source_import.state='skipped' OR ("
-    "source_import.state='ready' AND source_import.page_count>0 "
-    'AND source_import.completed_page_count=source_import.page_count '
-    'AND (SELECT COUNT(*) FROM vainglory_archive_parts source_part '
-    'WHERE source_part.import_id=source_import.id '
-    "AND source_part.state='ready')=source_import.page_count)))) "
-    "AND (publication.source_kind!='upload' OR ("
-    + _PUBLICATION_TERMINAL_EMPTY_PREDICATE
+    + ") OR (publication.source_kind='archive' AND "
+    + _PUBLICATION_ANALYSIS_READY_PREDICATE
+    + ' AND '
+    + _PUBLICATION_ARCHIVE_READY_PREDICATE
     + ') OR ('
-    'publication.upload_job_id IS NOT NULL AND EXISTS('
-    'SELECT 1 FROM upload_parts expected_upload '
-    'WHERE expected_upload.job_id=publication.upload_job_id '
-    'AND expected_upload.cid IS NOT NULL) AND NOT EXISTS('
-    'SELECT 1 FROM upload_parts expected_upload '
-    'WHERE expected_upload.job_id=publication.upload_job_id '
-    'AND expected_upload.cid IS NOT NULL AND NOT EXISTS('
-    'SELECT 1 FROM recording_parts expected_recording '
-    'JOIN vainglory_part_jobs expected_analysis '
-    'ON expected_analysis.part_id=expected_recording.id '
-    'WHERE expected_recording.session_id=session.id '
-    'AND expected_recording.part_index=expected_upload.part_index '
-    "AND expected_analysis.state='ready'))))"
+    + _PUBLICATION_TERMINAL_EMPTY_PREDICATE
+    + '))'
 )
 
 

@@ -1016,6 +1016,40 @@ async def test_skipped_archive_without_video_becomes_zero_match_publication(
 
 
 @pytest.mark.asyncio
+async def test_ready_scan_replaces_missing_legacy_upload_part_mapping(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        repository = await seed_publication_match(database, tmp_path)
+        await database.execute('DELETE FROM upload_parts WHERE job_id=1')
+        service = VaingloryPublicationService(
+            database,
+            repository,
+            FakePublicationProtocol(),
+            bundle_loader=async_bundle,
+            account_gates=AccountWriteGate(database),
+            clock=lambda: 1000,
+        )
+
+        assert await service.run_once() is True
+
+        publication = await database.fetchone(
+            'SELECT source_kind,plan_state,match_count,needs_refresh '
+            'FROM vainglory_publications'
+        )
+        assert dict(publication) == {
+            'source_kind': 'upload',
+            'plan_state': 'ready',
+            'match_count': 1,
+            'needs_refresh': 0,
+        }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_published_upload_gets_task_before_analysis_is_ready(
     tmp_path: Path,
 ) -> None:
@@ -1375,7 +1409,10 @@ async def test_failed_publication_does_not_block_already_discovered_sibling(
         assert await service.run_once() is True
         await insert_failed_publication(database)
 
-        assert await service.run_once() is True
+        for _ in range(2):
+            assert await service.run_once() is True
+            if protocol.chapter_calls:
+                break
         assert protocol.chapter_calls
     finally:
         await database.close()
