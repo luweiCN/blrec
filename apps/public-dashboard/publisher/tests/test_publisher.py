@@ -4,9 +4,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from blrec_dashboard_publisher import publisher
 from blrec_dashboard_publisher.publisher import (
     DashboardPublishError,
-    next_publication_at,
     publish_dashboard_once,
 )
 from blrec_dashboard_publisher.snapshot import SHANGHAI, DashboardExportResult
@@ -24,7 +24,9 @@ def manifest_bytes(
     publication_date: str,
     source_last_match_id: int,
     snapshot_content: bytes,
+    content_revision: str = '',
 ) -> bytes:
+    revision = content_revision or hashlib.sha256(snapshot_content).hexdigest()
     return json_bytes(
         {
             'schemaVersion': 1,
@@ -33,6 +35,7 @@ def manifest_bytes(
             'publicationDate': publication_date,
             'generatedAt': '{}T00:05:00Z'.format(publication_date),
             'sourceLastMatchId': source_last_match_id,
+            'contentRevision': revision,
             'sha256': hashlib.sha256(snapshot_content).hexdigest(),
             'bytes': len(snapshot_content),
         }
@@ -79,11 +82,23 @@ class FakeStore:
 
 class Exporter:
     def __init__(
-        self, snapshot_id='snapshot-new', source_last_match_id=20, players=None
+        self,
+        snapshot_id='snapshot-new',
+        source_last_match_id=20,
+        players=None,
+        content_revision=None,
     ) -> None:
         self.snapshot_id = snapshot_id
         self.source_last_match_id = source_last_match_id
         self.players = players or []
+        self.content_revision = (
+            content_revision
+            or hashlib.sha256(
+                json_bytes(
+                    {'sourceLastMatchId': source_last_match_id, 'players': self.players}
+                )
+            ).hexdigest()
+        )
         self.calls = 0
 
     def __call__(self, database, output, *, now):
@@ -97,11 +112,16 @@ class Exporter:
                 'generatedAt': now.isoformat(),
                 'sourceLastMatchId': self.source_last_match_id,
                 'sourceMatchCount': 42,
+                'contentRevision': self.content_revision,
                 'standings': {'2026-summer': {'players': self.players, 'heroes': []}},
             }
         )
         manifest = manifest_bytes(
-            self.snapshot_id, publication_date, self.source_last_match_id, snapshot
+            self.snapshot_id,
+            publication_date,
+            self.source_last_match_id,
+            snapshot,
+            self.content_revision,
         )
         snapshot_path = output / 'snapshots' / '{}.json'.format(self.snapshot_id)
         snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,11 +136,12 @@ class Exporter:
         )
 
 
-def test_current_remote_manifest_skips_export_and_upload(tmp_path: Path) -> None:
+def test_unchanged_content_is_checked_then_skips_upload(tmp_path: Path) -> None:
     snapshot = json_bytes({'snapshotId': 'snapshot-current'})
-    remote = manifest_bytes('snapshot-current', '2026-08-08', 30, snapshot)
+    revision = 'a' * 64
+    remote = manifest_bytes('snapshot-current', '2026-08-08', 30, snapshot, revision)
     store = FakeStore(remote)
-    exporter = Exporter()
+    exporter = Exporter(source_last_match_id=30, content_revision=revision)
 
     result = publish_dashboard_once(
         tmp_path / 'database.sqlite3',
@@ -132,15 +153,44 @@ def test_current_remote_manifest_skips_export_and_upload(tmp_path: Path) -> None
 
     assert result.published is False
     assert result.snapshot_id == 'snapshot-current'
-    assert exporter.calls == 0
+    assert result.source_match_count == 42
+    assert exporter.calls == 1
     assert store.events == ['load-manifest']
+
+
+def test_changed_content_is_published_again_on_the_same_day(tmp_path: Path) -> None:
+    snapshot = json_bytes({'snapshotId': 'snapshot-current'})
+    remote = manifest_bytes('snapshot-current', '2026-08-08', 30, snapshot, 'a' * 64)
+    store = FakeStore(remote)
+    exporter = Exporter(
+        snapshot_id='snapshot-updated',
+        source_last_match_id=31,
+        content_revision='b' * 64,
+    )
+
+    result = publish_dashboard_once(
+        tmp_path / 'database.sqlite3',
+        tmp_path / 'state',
+        store,
+        now=datetime(2026, 8, 8, 10, 15, tzinfo=SHANGHAI),
+        exporter=exporter,
+    )
+
+    assert result.published is True
+    assert result.snapshot_id == 'snapshot-updated'
+    assert exporter.calls == 1
 
 
 def test_force_republishes_a_current_remote_manifest(tmp_path: Path) -> None:
     snapshot = json_bytes({'snapshotId': 'snapshot-current'})
-    remote = manifest_bytes('snapshot-current', '2026-08-08', 30, snapshot)
+    revision = 'a' * 64
+    remote = manifest_bytes('snapshot-current', '2026-08-08', 30, snapshot, revision)
     store = FakeStore(remote)
-    exporter = Exporter(snapshot_id='snapshot-recalculated', source_last_match_id=30)
+    exporter = Exporter(
+        snapshot_id='snapshot-recalculated',
+        source_last_match_id=30,
+        content_revision=revision,
+    )
 
     result = publish_dashboard_once(
         tmp_path / 'database.sqlite3',
@@ -335,7 +385,29 @@ def test_trends_are_committed_before_the_manifest(tmp_path: Path) -> None:
     assert 'put-manifest' not in store.events
 
 
-def test_next_publication_rolls_forward_after_schedule() -> None:
-    assert next_publication_at(
-        datetime(2026, 8, 8, 0, 6, tzinfo=SHANGHAI), 0, 5
-    ) == datetime(2026, 8, 9, 0, 5, tzinfo=SHANGHAI)
+def test_worker_checks_again_after_fifteen_minutes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = publisher._WorkerConfiguration(
+        database=tmp_path / 'database.sqlite3',
+        settings=tmp_path / 'settings.toml',
+        state=tmp_path / 'state',
+        endpoint='https://example.invalid',
+        bucket='bucket',
+        prefix='data',
+        poll_seconds=15 * 60,
+        retry_seconds=15 * 60,
+    )
+    delays = []
+    monkeypatch.setattr(publisher, '_publish', lambda configuration, now: None)
+
+    def stop_after_first_delay(seconds: int) -> None:
+        delays.append(seconds)
+        raise RuntimeError('stop worker loop')
+
+    monkeypatch.setattr(publisher.time, 'sleep', stop_after_first_delay)
+
+    with pytest.raises(RuntimeError, match='stop worker loop'):
+        publisher._worker_loop(configuration)
+
+    assert delays == [15 * 60]

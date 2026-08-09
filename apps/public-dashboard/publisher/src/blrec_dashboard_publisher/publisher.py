@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -37,7 +38,6 @@ __all__ = (
     'DashboardPublishError',
     'OssDashboardStore',
     'build_dashboard_trends',
-    'next_publication_at',
     'publish_dashboard_once',
 )
 
@@ -45,6 +45,7 @@ __all__ = (
 LOGGER = logging.getLogger('dashboard-publisher')
 SNAPSHOT_PATH = re.compile(r'snapshots/[a-zA-Z0-9-]+\.json\Z')
 DEFAULT_RETRY_SECONDS = 15 * 60
+DEFAULT_POLL_SECONDS = 15 * 60
 TREND_MODES = ('all', '3v3', 'brawl', '5v5')
 MAX_TREND_PUBLICATIONS = 30
 
@@ -98,6 +99,7 @@ def _manifest(content: bytes, label: str) -> Mapping[str, Any]:
     snapshot_path = value.get('snapshotPath')
     publication_date = value.get('publicationDate')
     source_last_match_id = value.get('sourceLastMatchId')
+    content_revision = value.get('contentRevision')
     sha256 = value.get('sha256')
     byte_count = value.get('bytes')
     if (
@@ -109,6 +111,13 @@ def _manifest(content: bytes, label: str) -> Mapping[str, Any]:
         or not isinstance(publication_date, str)
         or type(source_last_match_id) is not int
         or source_last_match_id < 0
+        or (
+            content_revision is not None
+            and (
+                not isinstance(content_revision, str)
+                or re.fullmatch(r'[0-9a-f]{64}', content_revision) is None
+            )
+        )
         or not isinstance(sha256, str)
         or re.fullmatch(r'[0-9a-f]{64}', sha256) is None
         or type(byte_count) is not int
@@ -342,7 +351,10 @@ def _pending_export(
     if reuse_existing and manifest_path.is_file():
         content = manifest_path.read_bytes()
         manifest = _manifest(content, '本地待发布 manifest')
-        if manifest['publicationDate'] == now.astimezone(SHANGHAI).date().isoformat():
+        if (
+            manifest['publicationDate'] == now.astimezone(SHANGHAI).date().isoformat()
+            and manifest.get('contentRevision') is not None
+        ):
             snapshot_path = pending / str(manifest['snapshotPath'])
             _validate_snapshot(snapshot_path, manifest)
             return DashboardExportResult(
@@ -352,6 +364,10 @@ def _pending_export(
                 sha256=str(manifest['sha256']),
             )
     return exporter(database_path, pending, now=now)
+
+
+def _discard_pending(exported: DashboardExportResult) -> None:
+    shutil.rmtree(exported.manifest_path.parent)
 
 
 def publish_dashboard_once(
@@ -377,15 +393,6 @@ def publish_dashboard_once(
         remote_date = date.fromisoformat(str(remote_manifest['publicationDate']))
         if remote_date > today:
             raise DashboardPublishError('远端 manifest 的发布日期来自未来')
-        if remote_date == today and not force:
-            return DashboardPublicationResult(
-                published=False,
-                publication_date=today,
-                snapshot_id=str(remote_manifest['snapshotId']),
-                source_last_match_id=int(remote_manifest['sourceLastMatchId']),
-                source_match_count=None,
-                uploaded_bytes=0,
-            )
 
     exported = _pending_export(
         database_path, state_directory, generated_at, exporter, reuse_existing=not force
@@ -393,12 +400,34 @@ def publish_dashboard_once(
     local_manifest_content = exported.manifest_path.read_bytes()
     local_manifest = _manifest(local_manifest_content, '本地待发布 manifest')
     snapshot = _validate_snapshot(exported.snapshot_path, local_manifest)
+    local_content_revision = local_manifest.get('contentRevision')
+    if not isinstance(local_content_revision, str):
+        raise DashboardPublishError('本地待发布 manifest 缺少内容版本')
     if local_manifest['publicationDate'] != today.isoformat():
         raise DashboardPublishError('本地待发布快照不是今天生成的')
     if remote_manifest is not None and int(local_manifest['sourceLastMatchId']) < int(
         remote_manifest['sourceLastMatchId']
     ):
         raise DashboardPublishError('数据源进度发生回退，已停止覆盖远端榜单')
+    if (
+        remote_manifest is not None
+        and not force
+        and remote_manifest.get('contentRevision') == local_content_revision
+    ):
+        _discard_pending(exported)
+        source_match_count = snapshot.get('sourceMatchCount')
+        return DashboardPublicationResult(
+            published=False,
+            publication_date=today,
+            snapshot_id=str(remote_manifest['snapshotId']),
+            source_last_match_id=int(remote_manifest['sourceLastMatchId']),
+            source_match_count=(
+                source_match_count
+                if type(source_match_count) is int and source_match_count >= 0
+                else None
+            ),
+            uploaded_bytes=0,
+        )
 
     trends_content = build_dashboard_trends(snapshot, store.load_trends())
     uploaded_bytes = store.put_snapshot(
@@ -411,6 +440,7 @@ def publish_dashboard_once(
     committed = store.load_manifest()
     if committed != local_manifest_content:
         raise DashboardPublishError('远端 manifest 提交后校验失败')
+    _discard_pending(exported)
 
     source_match_count = snapshot.get('sourceMatchCount')
     if type(source_match_count) is not int or source_match_count < 0:
@@ -591,18 +621,6 @@ class OssDashboardStore:
         self._session.close()
 
 
-def next_publication_at(now: datetime, hour: int, minute: int) -> datetime:
-    if now.tzinfo is None:
-        raise DashboardPublishError('当前时间必须包含时区')
-    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-        raise DashboardPublishError('每日发布时间无效')
-    local = now.astimezone(SHANGHAI)
-    candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if candidate <= local:
-        candidate += timedelta(days=1)
-    return candidate
-
-
 @contextmanager
 def _exclusive_worker_lock(state_directory: Path) -> Iterator[None]:
     try:
@@ -628,8 +646,7 @@ class _WorkerConfiguration:
     endpoint: str
     bucket: str
     prefix: str
-    schedule_hour: int
-    schedule_minute: int
+    poll_seconds: int
     retry_seconds: int
 
 
@@ -686,12 +703,11 @@ def _worker_loop(configuration: _WorkerConfiguration) -> None:
             LOGGER.exception('排行榜发布失败，%s 秒后重试', configuration.retry_seconds)
             time.sleep(configuration.retry_seconds)
             continue
-        next_run = next_publication_at(
-            now, configuration.schedule_hour, configuration.schedule_minute
+        next_run = datetime.now(tz=SHANGHAI) + timedelta(
+            seconds=configuration.poll_seconds
         )
-        delay = max(1.0, (next_run - now).total_seconds())
         LOGGER.info('下次检查时间：%s', next_run.isoformat())
-        time.sleep(delay)
+        time.sleep(configuration.poll_seconds)
 
 
 def _environment_int(name: str, default: int) -> int:
@@ -705,7 +721,7 @@ def _environment_int(name: str, default: int) -> int:
 
 
 def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='每日生成并发布虚荣排行榜 JSON')
+    parser = argparse.ArgumentParser(description='定时检查并发布虚荣排行榜 JSON')
     parser.add_argument('--once', action='store_true', help='只检查并发布一次')
     parser.add_argument(
         '--force',
@@ -734,14 +750,9 @@ def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument('--prefix', default=os.environ.get('OSS_PREFIX', 'data'))
     parser.add_argument(
-        '--schedule-hour',
+        '--poll-seconds',
         type=int,
-        default=_environment_int('DASHBOARD_SCHEDULE_HOUR', 0),
-    )
-    parser.add_argument(
-        '--schedule-minute',
-        type=int,
-        default=_environment_int('DASHBOARD_SCHEDULE_MINUTE', 5),
+        default=_environment_int('DASHBOARD_POLL_SECONDS', DEFAULT_POLL_SECONDS),
     )
     parser.add_argument(
         '--retry-seconds',
@@ -758,6 +769,8 @@ def main() -> None:
     )
     logging.getLogger('oss2').setLevel(logging.WARNING)
     arguments = _parse_args()
+    if arguments.poll_seconds <= 0:
+        raise DashboardPublishError('检查间隔必须大于 0')
     if arguments.retry_seconds <= 0:
         raise DashboardPublishError('重试间隔必须大于 0')
     if arguments.force and not arguments.once:
@@ -769,8 +782,7 @@ def main() -> None:
         endpoint=arguments.endpoint,
         bucket=arguments.bucket,
         prefix=arguments.prefix,
-        schedule_hour=arguments.schedule_hour,
-        schedule_minute=arguments.schedule_minute,
+        poll_seconds=arguments.poll_seconds,
         retry_seconds=arguments.retry_seconds,
     )
     with _exclusive_worker_lock(configuration.state):

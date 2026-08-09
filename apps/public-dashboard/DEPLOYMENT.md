@@ -5,7 +5,7 @@
 | 链路 | 运行位置 | 写入范围 | 触发方式 |
 | --- | --- | --- | --- |
 | 页面发布 | GitHub Actions | OSS 根目录页面与静态资源，不含 `data/**` | `master` 上页面代码变更或手动触发 |
-| 数据发布 | 群晖 NAS worker | `data/manifest.json`、`data/trends.json` 与 `data/snapshots/**` | 每天 00:05、启动补跑、失败重试 |
+| 数据发布 | 群晖 NAS worker | `data/manifest.json`、`data/trends.json` 与 `data/snapshots/**` | 每 15 分钟检查、内容变化时发布、失败重试 |
 
 访问统计仍由阿里云服务器单独维护 `data/site-stats.json` 和
 `data/site-stats-history.json`，两条新链路都无权覆盖它们。CDN 继续使用
@@ -44,14 +44,15 @@ ghcr.io/luweicn/blrec-dashboard-publisher:master
 `deploy/aliyun/data-publish-ram-policy.json`，其权限被限定到排行榜 manifest、
 紧凑趋势数据和不可变快照。
 
-worker 每次发布会：
+worker 每次检查会：
 
-1. 读取远端 manifest；当天已经发布则跳过。
-2. 在 SQLite 只读事务中生成快照，并校验长度与 SHA-256。
-3. 生成最多保留最近 30 次发布的排名与榜单分趋势；同日重发只替换当天记录。
+1. 在 SQLite 只读事务中按对局时间从旧到新重算快照，并生成稳定的内容版本。
+2. 读取远端 manifest；内容版本没有变化时不上传任何文件。
+3. 内容变化时生成最多保留最近 30 个发布日的排名与排位分趋势；同日更新只替换当天记录。
 4. 先上传、复核不可变快照，再更新趋势数据。
 5. 最后替换 manifest，并再次下载核对提交结果。
 
-容器在零点后恢复时会立即检查漏发；失败后每 15 分钟重试。manifest 提交失败
-时，本地 `/state/pending` 会保留同一份快照供下次复用。远端数据源进度高于
-本地时会停止覆盖，防止旧数据库回退线上榜单。
+容器启动后会立即检查，成功后每 15 分钟再次检查，失败后也每 15 分钟重试。
+manifest 提交失败时，本地 `/state/pending` 会保留同一份快照供下次复用；发布
+成功或确认内容未变化后会清理待发布文件。远端数据源进度高于本地时会停止覆盖，
+防止旧数据库回退线上榜单。

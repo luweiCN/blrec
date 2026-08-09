@@ -60,6 +60,10 @@ curl -fsS https://vg.luwei.host/data/trends.json
 `purpose=dashboard_publish`、所选网卡、源地址、数据源进度和上传字节数。首次
 发布后再次以 `--once` 运行应显示当天已发布且上传字节为 0。
 
+常驻 worker 每 15 分钟按时间顺序重新计算一次内容版本；数据库内容没有变化时
+不会上传快照、趋势或 manifest。历史对局补录后会插回原始时间位置，并从最早受
+影响的赛季重新计算到当前赛季。
+
 worker 从现有 `settings.toml` 读取网络分工。旧配置尚无
 `network.dashboard_publish` 时会继承 `network.upload` 的固定线路；后续可在
 BLREC 网络管理页单独修改“排行榜数据发布”。固定线路会同时绑定源地址和该
@@ -84,7 +88,7 @@ docker compose --project-name blrec-dashboard \
 
 `--force` 只允许与 `--once` 同用。它会忽略本地当天待发布快照并重新读取
 SQLite，并替换当天趋势点，但仍执行源数据水位防回退、不可变快照优先、趋势
-数据优先和 manifest 最后提交校验；常驻每日任务不会自动强制覆盖当天数据。
+数据优先和 manifest 最后提交校验；常驻任务检测到内容变化后也会自动更新当天数据。
 
 ## 停止与回滚
 

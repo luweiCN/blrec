@@ -55,8 +55,7 @@ ENV PYTHONPATH=/app \
     OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com \
     OSS_BUCKET=luwei-vainglory \
     OSS_PREFIX=data \
-    DASHBOARD_SCHEDULE_HOUR=0 \
-    DASHBOARD_SCHEDULE_MINUTE=5 \
+    DASHBOARD_POLL_SECONDS=900 \
     DASHBOARD_RETRY_SECONDS=900
 VOLUME ["/cfg", "/state"]
 STOPSIGNAL SIGTERM

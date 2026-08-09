@@ -450,3 +450,12 @@ async def test_export_writes_an_immutable_snapshot_then_manifest(
         manifest['snapshotId']
     )
     assert manifest['sha256'] == result.sha256
+    assert len(manifest['contentRevision']) == 64
+
+    later = export_dashboard_files(
+        tmp_path / 'blrec.sqlite3',
+        tmp_path / 'later-public-data',
+        now=datetime(2026, 8, 3, 10, 45, tzinfo=SHANGHAI),
+    )
+    assert later.manifest['snapshotId'] != manifest['snapshotId']
+    assert later.manifest['contentRevision'] == manifest['contentRevision']

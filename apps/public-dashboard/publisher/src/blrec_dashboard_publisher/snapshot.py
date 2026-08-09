@@ -546,6 +546,22 @@ def build_dashboard_snapshot(
         ],
         'standings': standings,
     }
+    content_revision = hashlib.sha256(
+        _json_bytes(
+            {
+                key: body[key]
+                for key in (
+                    'sourceLastMatchId',
+                    'sourceMatchCount',
+                    'ratingModel',
+                    'currentSeasonKey',
+                    'seasons',
+                    'standings',
+                )
+            }
+        )
+    ).hexdigest()
+    body['contentRevision'] = content_revision
     digest = hashlib.sha256(_json_bytes(body)).hexdigest()
     body['snapshotId'] = '{}-{}'.format(
         generated_at.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ'), digest[:8]
@@ -622,6 +638,7 @@ def export_dashboard_files(
         'publicationDate': snapshot['publicationDate'],
         'generatedAt': snapshot['generatedAt'],
         'sourceLastMatchId': snapshot['sourceLastMatchId'],
+        'contentRevision': snapshot['contentRevision'],
         'sha256': sha256,
         'bytes': len(snapshot_content),
     }
