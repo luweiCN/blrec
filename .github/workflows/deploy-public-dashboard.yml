@@ -98,7 +98,8 @@ jobs:
         run: |
           response_headers="$(mktemp)"
           curl --fail --silent --show-error --location \
-            --retry 4 --retry-all-errors --retry-delay 3 \
+            --connect-timeout 10 --max-time 30 \
+            --retry 4 --retry-all-errors --retry-delay 3 --retry-max-time 150 \
             --dump-header "$response_headers" \
             --output /dev/null \
             "https://vg.luwei.host/?deployment=${GITHUB_SHA}"
