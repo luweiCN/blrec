@@ -11,14 +11,12 @@ import { DashboardModeService } from './dashboard-mode.service';
 import {
   findPlayer,
   getModeBreakdown,
-  getPlayerHeroComparisons,
   getPlayerRankings,
   getPlayerTrend,
   getRankMovement,
   heroAverageEconomy,
   heroImage,
   heroKda,
-  HeroPlayerComparison,
   heroPeerComparisonKind,
   heroPeerComparisonText,
   heroPeerMetricKind,
@@ -32,6 +30,10 @@ import {
   winRate,
 } from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
+import {
+  getPlayerHeroProficiencies,
+  HeroProficiency,
+} from './public-dashboard.proficiency';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
   MatchResult,
@@ -260,8 +262,8 @@ export class PlayerDetailPageComponent implements OnDestroy {
       : getModeBreakdown(this.seasonPlayer);
   }
 
-  get heroPool(): readonly HeroPlayerComparison[] {
-    return getPlayerHeroComparisons(
+  get heroPool(): readonly HeroProficiency[] {
+    return getPlayerHeroProficiencies(
       this.data.snapshot,
       this.activeSeason,
       this.activeMode,
@@ -330,8 +332,8 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return mode.key;
   }
 
-  trackHero(_index: number, comparison: HeroPlayerComparison): string {
-    return comparison.usage.name;
+  trackHero(_index: number, proficiency: HeroProficiency): string {
+    return proficiency.usage.name;
   }
 
   trackSeason(_index: number, record: PlayerSeasonRecord): SeasonKey {

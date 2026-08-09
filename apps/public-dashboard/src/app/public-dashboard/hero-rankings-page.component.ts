@@ -18,6 +18,10 @@ import {
   winRate,
 } from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
+import {
+  getHeroProficiencyLeader,
+  HeroProficiency,
+} from './public-dashboard.proficiency';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
   HeroPerformance,
@@ -157,6 +161,15 @@ export class HeroRankingsPageComponent implements OnDestroy {
 
   heroDisplayName(heroName: string): string {
     return heroDisplayName(heroName);
+  }
+
+  proficiencyLeader(hero: HeroStanding): HeroProficiency | null {
+    return getHeroProficiencyLeader(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+      hero.name,
+    );
   }
 
   winRate(value: { readonly matches: number; readonly wins: number }): number {

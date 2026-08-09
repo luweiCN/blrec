@@ -219,7 +219,7 @@ a {
   }
 
   &.hero-directory-table {
-    min-width: 640px;
+    min-width: 820px;
   }
 
   caption {
@@ -340,6 +340,15 @@ a {
 
   &:hover strong {
     color: var(--cyan);
+  }
+}
+
+.proficiency-leader {
+  min-width: 130px;
+
+  small span {
+    color: var(--gold);
+    font-weight: 750;
   }
 }
 

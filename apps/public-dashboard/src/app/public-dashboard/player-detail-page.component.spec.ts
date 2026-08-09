@@ -66,9 +66,10 @@ describe('PlayerDetailPageComponent', () => {
     expect(component.heroPool.length).toBe(7);
     expect(component.seasonHistory.length).toBeGreaterThan(1);
     expect(page.querySelector('h1')?.textContent).toContain('星河');
-    expect(page.querySelector('.profile-hero-link')?.textContent).toContain(
-      '凯恩',
-    );
+    const heroLinks = Array.from(
+      page.querySelectorAll('.profile-hero-link'),
+    ).map((element) => element.textContent ?? '');
+    expect(heroLinks.some((value) => value.includes('凯恩'))).toBeTrue();
     expect(page.querySelectorAll('.trend-point').length).toBe(3);
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
       '+6',
@@ -81,6 +82,11 @@ describe('PlayerDetailPageComponent', () => {
       page.querySelectorAll('.peer-comparison'),
     ).map((element) => element.textContent ?? '');
     expect(comparisons.some((value) => value.includes('KDA'))).toBeTrue();
+    const scores = component.heroPool.map((record) => record.score);
+    expect(scores).toEqual([...scores].sort((left, right) => right - left));
+    expect(page.querySelector('.proficiency-score')?.textContent).toMatch(
+      /大师|精通|熟练|常用|初试/u,
+    );
   });
 
   it('follows the persisted global mode', () => {

@@ -6,6 +6,7 @@ import { DASHBOARD_MODE_STORAGE } from './dashboard-mode.service';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
+import { PlayerAvatarComponent } from './player-avatar.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
@@ -19,6 +20,7 @@ describe('HeroRankingsPageComponent', () => {
         HeroRankingsPageComponent,
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
+        PlayerAvatarComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
@@ -79,6 +81,19 @@ describe('HeroRankingsPageComponent', () => {
 
     expect(links.length).toBe(component.visibleRows.length);
     expect(links[0].href).toContain('/heroes/');
+  });
+
+  it('shows the highest proficiency player for every visible hero', () => {
+    const page = fixture.nativeElement as HTMLElement;
+    const leaders = page.querySelectorAll('.proficiency-leader');
+    const headers = Array.from(page.querySelectorAll('th')).map((header) =>
+      header.textContent?.trim(),
+    );
+
+    expect(headers).toContain('最熟练玩家');
+    expect(leaders.length).toBe(component.visibleRows.length);
+    expect((leaders[0] as HTMLAnchorElement).href).toContain('/players/');
+    expect(leaders[0].textContent).toMatch(/大师|精通|熟练|常用|初试/u);
   });
 
   it('switches to usage ranking and returns to the first page', () => {
