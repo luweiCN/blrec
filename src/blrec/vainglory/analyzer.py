@@ -2346,9 +2346,7 @@ class VaingloryVideoAnalyzer:
                         suggestion_confidence=layout.confidence,
                         stage_class='result_page',
                         stage_confidence=layout.confidence,
-                        selection_reason=(
-                            'worker 结算检测低置信边界命中，供人工复核'
-                        ),
+                        selection_reason=('worker 结算检测低置信边界命中，供人工复核'),
                         minimum_gap_ms=15_000,
                         maximum_per_label=6,
                         suggested_boxes=(
