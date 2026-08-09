@@ -71,13 +71,68 @@ class _PreviousAbility:
 
 
 @dataclass
+class _HeroUsageTotals:
+    matches: int = 0
+    wins: int = 0
+    kda_matches: int = 0
+    kills: int = 0
+    deaths: int = 0
+    assists: int = 0
+    economy_matches: int = 0
+    economy: int = 0
+
+    def add(
+        self,
+        result: str,
+        kills: Optional[int],
+        deaths: Optional[int],
+        assists: Optional[int],
+        economy: Optional[int],
+    ) -> None:
+        self.matches += 1
+        if result == 'W':
+            self.wins += 1
+        if kills is not None and deaths is not None and assists is not None:
+            self.kda_matches += 1
+            self.kills += kills
+            self.deaths += deaths
+            self.assists += assists
+        if economy is not None:
+            self.economy_matches += 1
+            self.economy += economy
+
+    def public_value(self, name: str) -> Mapping[str, Any]:
+        return {
+            'name': name,
+            'matches': self.matches,
+            'wins': self.wins,
+            'stats': {
+                'kdaMatches': self.kda_matches,
+                'kills': self.kills,
+                'deaths': self.deaths,
+                'assists': self.assists,
+                'economyMatches': self.economy_matches,
+                'economy': self.economy,
+            },
+        }
+
+
+@dataclass
 class _Performance:
     matches: int = 0
     wins: int = 0
     results: Optional[List[str]] = None
-    heroes: Optional[MutableMapping[str, List[int]]] = None
+    heroes: Optional[MutableMapping[str, _HeroUsageTotals]] = None
 
-    def add(self, result: str, hero_name: str) -> None:
+    def add(
+        self,
+        result: str,
+        hero_name: str,
+        kills: Optional[int],
+        deaths: Optional[int],
+        assists: Optional[int],
+        economy: Optional[int],
+    ) -> None:
         self.matches += 1
         if result == 'W':
             self.wins += 1
@@ -88,20 +143,18 @@ class _Performance:
             return
         if self.heroes is None:
             self.heroes = {}
-        hero = self.heroes.setdefault(hero_name, [0, 0])
-        hero[0] += 1
-        if result == 'W':
-            hero[1] += 1
+        hero = self.heroes.setdefault(hero_name, _HeroUsageTotals())
+        hero.add(result, kills, deaths, assists, economy)
 
     def top_hero(self) -> str:
-        heroes: Mapping[str, List[int]] = self.heroes or {}
+        heroes: Mapping[str, _HeroUsageTotals] = self.heroes or {}
         if not heroes:
             return ''
         return min(
             heroes,
             key=lambda name: (
-                -heroes[name][0],
-                -heroes[name][1],
+                -heroes[name].matches,
+                -heroes[name].wins,
                 name.casefold(),
                 name,
             ),
@@ -277,7 +330,8 @@ def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
         'match.started_at_ms,match.game_mode,'
         "CASE match.winner_side WHEN 'left' THEN match.left_color "
         "WHEN 'right' THEN match.right_color ELSE 'unknown' END AS winner_color,"
-        "COALESCE(hero.label,'') AS hero_name "
+        "COALESCE(hero.label,'') AS hero_name,recorded.kills,"
+        'recorded.deaths,recorded.assists,recorded.economy '
         'FROM recording_sessions session '
         'LEFT JOIN vainglory_player_rooms room '
         'ON room.room_id=session.room_id AND session.room_id>0 '
@@ -310,6 +364,22 @@ def _empty_player_modes() -> Dict[str, _Performance]:
 
 def _empty_hero_modes() -> Dict[str, _HeroPerformance]:
     return {mode: _HeroPerformance() for mode in PUBLIC_MODES}
+
+
+def _hero_pool(performance: _Performance) -> List[Mapping[str, Any]]:
+    heroes = performance.heroes or {}
+    return [
+        values.public_value(hero_name)
+        for hero_name, values in sorted(
+            heroes.items(),
+            key=lambda item: (
+                -item[1].matches,
+                -item[1].wins,
+                item[0].casefold(),
+                item[0],
+            ),
+        )
+    ]
 
 
 def _room_label(rooms: List[int]) -> str:
@@ -360,9 +430,13 @@ def _standings_for_rows(
         public_mode = RAW_MODE_TO_PUBLIC[str(row['game_mode'])]
         result = 'W' if str(row['winner_color']) == 'teal' else 'L'
         hero_name = str(row['hero_name'])
+        kills = None if row['kills'] is None else int(row['kills'])
+        deaths = None if row['deaths'] is None else int(row['deaths'])
+        assists = None if row['assists'] is None else int(row['assists'])
+        economy = None if row['economy'] is None else int(row['economy'])
         modes = player_modes.setdefault(player_id, _empty_player_modes())
-        modes[public_mode].add(result, hero_name)
-        modes['all'].add(result, hero_name)
+        modes[public_mode].add(result, hero_name, kills, deaths, assists, economy)
+        modes['all'].add(result, hero_name, kills, deaths, assists, economy)
         if not hero_name:
             continue
         hero = hero_modes.setdefault(hero_name, _empty_hero_modes())
@@ -391,19 +465,6 @@ def _standings_for_rows(
                     ability=rating.ability, season_index=season_index
                 )
         name = str(metadata['name'])
-        all_heroes = modes['all'].heroes or {}
-        hero_pool = [
-            {'name': hero_name, 'matches': values[0], 'wins': values[1]}
-            for hero_name, values in sorted(
-                all_heroes.items(),
-                key=lambda item: (
-                    -item[1][0],
-                    -item[1][1],
-                    item[0].casefold(),
-                    item[0],
-                ),
-            )
-        ]
         public_players.append(
             {
                 'id': player_id,
@@ -417,7 +478,8 @@ def _standings_for_rows(
                     mode: modes[mode].public_value(ratings[mode])
                     for mode in PUBLIC_MODES
                 },
-                'heroPool': hero_pool,
+                'heroPool': _hero_pool(modes['all']),
+                'heroPools': {mode: _hero_pool(modes[mode]) for mode in PUBLIC_MODES},
             }
         )
 

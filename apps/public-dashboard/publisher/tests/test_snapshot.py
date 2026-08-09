@@ -170,6 +170,9 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             hero_id=2,
             anchor_name='直播名称',
         )
+        await database.execute(
+            'UPDATE vainglory_match_players SET economy=NULL WHERE match_id=3'
+        )
         await seed_match(
             database,
             tmp_path,
@@ -253,10 +256,22 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         assert first['modes']['5v5']['ratingScore'] is None
         assert first['modes']['brawl']['matches'] == 1
         assert first['modes']['5v5']['matches'] == 0
-        assert first['heroPool'] == [
-            {'name': 'Caine', 'matches': 1, 'wins': 1},
-            {'name': 'Vox', 'matches': 1, 'wins': 0},
-        ]
+        assert [
+            (usage['name'], usage['matches'], usage['wins'])
+            for usage in first['heroPool']
+        ] == [('Caine', 1, 1), ('Vox', 1, 0)]
+        assert first['heroPool'][0]['stats'] == {
+            'kdaMatches': 1,
+            'kills': 1,
+            'deaths': 1,
+            'assists': 1,
+            'economyMatches': 1,
+            'economy': 10000,
+        }
+        assert first['heroPool'][1]['stats']['economyMatches'] == 0
+        assert [usage['name'] for usage in first['heroPools']['3v3']] == ['Caine']
+        assert [usage['name'] for usage in first['heroPools']['brawl']] == ['Vox']
+        assert first['heroPools']['5v5'] == []
         assert [(hero['name'], hero['modes']['all']) for hero in summer['heroes']] == [
             ('Caine', {'matches': 2, 'wins': 2, 'players': 2}),
             ('Vox', {'matches': 1, 'wins': 0, 'players': 1}),
