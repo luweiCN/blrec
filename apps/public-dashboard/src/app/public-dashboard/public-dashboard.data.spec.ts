@@ -6,6 +6,7 @@ import {
   getRankMovement,
   heroKda,
   heroPeerComparisonText,
+  playerKdaForMode,
 } from './public-dashboard.data';
 import {
   DashboardSnapshot,
@@ -155,6 +156,25 @@ describe('public dashboard player rankings', () => {
       expect(heroKda(record.usage)).not.toBeNull();
       expect(heroPeerComparisonText(record.peers)).toMatch(/高|低|持平/u);
     }
+  });
+
+  it('aggregates player KDA from complete hero samples in the selected mode', () => {
+    const player =
+      TEST_DASHBOARD_SNAPSHOT.standings['2026-summer'].players[0];
+    const summary = playerKdaForMode(player, '3v3');
+    const playerWithoutKda: PlayerStanding = {
+      ...player,
+      heroPools: {
+        all: [],
+        '3v3': [{ name: 'Caine', matches: 1, wins: 1 }],
+        brawl: [],
+        '5v5': [],
+      },
+    };
+
+    expect(summary?.matches).toBe(145);
+    expect(summary?.value).toBeCloseTo(3.68, 2);
+    expect(playerKdaForMode(playerWithoutKda, '3v3')).toBeNull();
   });
 });
 

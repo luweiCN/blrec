@@ -24,8 +24,10 @@ import {
   modeLabel,
   PlayerTrend,
   PlayerTrendPoint,
+  PlayerKdaSummary,
   RankMovement,
   playerForSeason,
+  playerKdaForMode,
   seasonOption,
   winRate,
 } from './public-dashboard.data';
@@ -138,6 +140,13 @@ export class PlayerDetailPageComponent implements OnDestroy {
 
   get performance(): Performance {
     return this.seasonPlayer?.modes[this.activeMode] ?? EMPTY_PERFORMANCE;
+  }
+
+  get kdaSummary(): PlayerKdaSummary | null {
+    const player = this.seasonPlayer;
+    return player === undefined
+      ? null
+      : playerKdaForMode(player, this.activeMode);
   }
 
   get rank(): number | null {

@@ -43,7 +43,7 @@
       (activeSeasonChange)="selectSeason($event)"
     ></app-leaderboard-filters>
 
-    <section class="profile-summary" aria-label="玩家当前数据">
+    <section class="profile-summary player-profile-summary" aria-label="玩家当前数据">
       <div class="profile-context">
         <span>{{ selectedSeason.shortLabel }}</span>
         <strong>{{ modeLabel() }}</strong>
@@ -78,6 +78,16 @@
         <div>
           <dt>胜率</dt>
           <dd class="accent">{{ winRate(performance) | percent: "1.0-1" }}</dd>
+        </div>
+        <div>
+          <dt title="仅统计 K / D / A 均识别完整的场次">KDA</dt>
+          <dd class="profile-kda-value">
+            <ng-container *ngIf="kdaSummary as kda; else noPlayerKda">
+              <span class="accent">{{ kda.value | number: "1.2-2" }}</span>
+              <small>{{ kda.matches }} 局有效</small>
+            </ng-container>
+            <ng-template #noPlayerKda><span>—</span></ng-template>
+          </dd>
         </div>
       </dl>
     </section>

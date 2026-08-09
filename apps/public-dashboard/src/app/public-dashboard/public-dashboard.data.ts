@@ -57,6 +57,11 @@ export interface HeroPlayerComparison {
   readonly peers: HeroPeerComparison;
 }
 
+export interface PlayerKdaSummary {
+  readonly value: number;
+  readonly matches: number;
+}
+
 export type HeroPeerComparisonKind = 'up' | 'down' | 'same' | 'unavailable';
 
 export function heroPeerComparisonText(comparison: HeroPeerComparison): string {
@@ -339,6 +344,32 @@ export function heroPoolForMode(
   mode: ModeFilter,
 ): readonly HeroUsage[] {
   return player.heroPools?.[mode] ?? (mode === 'all' ? player.heroPool : []);
+}
+
+export function playerKdaForMode(
+  player: PlayerStanding,
+  mode: ModeFilter,
+): PlayerKdaSummary | null {
+  const totals = heroPoolForMode(player, mode).reduce(
+    (result, usage) => {
+      const stats = usage.stats;
+      return stats === undefined || stats.kdaMatches === 0
+        ? result
+        : {
+            matches: result.matches + stats.kdaMatches,
+            kills: result.kills + stats.kills,
+            deaths: result.deaths + stats.deaths,
+            assists: result.assists + stats.assists,
+          };
+    },
+    { matches: 0, kills: 0, deaths: 0, assists: 0 },
+  );
+  return totals.matches === 0
+    ? null
+    : {
+        value: (totals.kills + totals.assists) / Math.max(1, totals.deaths),
+        matches: totals.matches,
+      };
 }
 
 export function getHeroPlayerComparisons(

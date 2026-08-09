@@ -145,6 +145,23 @@
   }
 }
 
+.player-profile-summary dl {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.profile-kda-value {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.5rem;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+}
+
 .profile-context {
   display: grid;
   align-content: center;
