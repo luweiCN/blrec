@@ -45,6 +45,7 @@ from .repository import (
     VaingloryRepository,
     ZeroMatchSessionPage,
 )
+from .sampling import UnusableVideoError
 from .vision import RecordedPlayer
 
 
@@ -125,6 +126,7 @@ class VaingloryIndexService:
         await self._repository.recover_interrupted()
         await self._repository.apply_builtin_hero_labels()
         await self._repository.consolidate_hero_catalog()
+        await self._repository.discover_ready_parts()
         references = load_hero_references()
         if len(references) != 57:
             logger.warning(
@@ -277,12 +279,21 @@ class VaingloryIndexService:
         self._require_remote_worker()
         await self._repository.complete_recorded_player_backfill(match_id, player)
 
-    async def fail_remote_work(self, kind: str, item_id: int, error: str) -> None:
+    async def fail_remote_work(
+        self,
+        kind: str,
+        item_id: int,
+        error: str,
+        failure_kind: Literal['task_error', 'unusable_media'] = 'task_error',
+    ) -> None:
         self._require_remote_worker()
         if kind == 'match_rerun':
             await self._repository.fail_match_rerun(item_id, error)
         elif kind == 'part':
-            await self._repository.fail(item_id, error)
+            if failure_kind == 'unusable_media':
+                await self._repository.ignore_unusable_part(item_id, error)
+            else:
+                await self._repository.fail(item_id, error)
             self._clear_runtime_status(item_id)
         elif kind == 'hero_rematch':
             await self._repository.complete_hero_rematch(item_id, ())
@@ -592,6 +603,16 @@ class VaingloryIndexService:
                 await self._repository.requeue(part.id)
             else:
                 await self._repository.fail(part.id, '对局分析意外停止')
+        except UnusableVideoError as error:
+            logger.warning(
+                'Ignored unusable Vainglory media for session {} part {}: {!r}',
+                session_id,
+                part.id,
+                error,
+            )
+            await self._repository.ignore_unusable_part(
+                part.id, '{}: {}'.format(type(error).__name__, error)
+            )
         except Exception as error:
             logger.exception(
                 'Vainglory match analysis failed for session {} part {}',
@@ -782,6 +803,17 @@ class VaingloryIndexService:
                 session_id,
                 part.id,
                 time.monotonic() - task_started,
+            )
+            self._clear_runtime_status(part.id)
+        except UnusableVideoError as error:
+            logger.warning(
+                'Ignored unusable Vainglory media for session {} part {}: {!r}',
+                session_id,
+                part.id,
+                error,
+            )
+            await self._repository.ignore_unusable_part(
+                part.id, '{}: {}'.format(type(error).__name__, error)
             )
             self._clear_runtime_status(part.id)
         except Exception as error:

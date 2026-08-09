@@ -50,7 +50,11 @@
               主播 {{ active.anchorName }} ·
             </ng-container>
             当前 P{{ active.partIndex }} · 已完成
-            {{ active.completedPartCount }}/{{ active.partCount }} 个分 P
+            {{ active.completedPartCount }}/{{ active.partCount }} 个有效分 P
+            <ng-container *ngIf="active.ignoredPartCount > 0">
+              · 原始 {{ active.originalPartCount }} 个，已忽略
+              {{ active.ignoredPartCount }} 个损坏分 P
+            </ng-container>
           </span>
         </div>
         <div class="analysis-active-tools">
@@ -268,6 +272,16 @@
           </div>
           <div><dt>确认对局</dt><dd>{{ completion.matchCount }} 局</dd></div>
           <div>
+            <dt>直播分 P</dt>
+            <dd>
+              {{ completion.partCount }} 个有效
+              <ng-container *ngIf="completion.ignoredPartCount > 0">
+                · 原始 {{ completion.originalPartCount }} 个 · 忽略
+                {{ completion.ignoredPartCount }} 个
+              </ng-container>
+            </dd>
+          </div>
+          <div>
             <dt>处理总耗时</dt>
             <dd>{{ formatDuration(completion.elapsedSeconds) }}</dd>
           </div>
@@ -391,6 +405,10 @@
                 {{ queued.completedPartCount }}/{{ queued.partCount }} · 下一个 P{{
                   queued.partIndex
                 }}
+                <ng-container *ngIf="queued.ignoredPartCount > 0">
+                  · 原始 {{ queued.originalPartCount }} 个 · 忽略
+                  {{ queued.ignoredPartCount }} 个损坏分 P
+                </ng-container>
               </dd>
             </div>
             <div>

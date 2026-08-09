@@ -189,6 +189,9 @@ export interface VaingloryAnalysisQueueCompletion {
   readonly candidateCount: number | null;
   readonly matchCount: number;
   readonly elapsedSeconds: number;
+  readonly partCount: number;
+  readonly originalPartCount: number;
+  readonly ignoredPartCount: number;
   readonly bvid?: string | null;
   readonly archivePage?: number | null;
   readonly localVideoAvailable?: boolean;
@@ -215,6 +218,8 @@ export interface VaingloryAnalysisQueueItem {
   readonly matchCount: number;
   readonly partCount: number;
   readonly completedPartCount: number;
+  readonly originalPartCount: number;
+  readonly ignoredPartCount: number;
   readonly runtimeStage: VaingloryAnalysisRuntimeStage;
   readonly runtimeDetail: string;
   readonly runtimeElapsedSeconds: number;
@@ -299,6 +304,10 @@ export interface VaingloryScanJob {
   readonly startedAt: number | null;
   readonly completedAt: number | null;
   readonly updatedAt: number;
+  readonly partCount: number;
+  readonly originalPartCount: number;
+  readonly ignoredPartCount: number;
+  readonly ignoredPartReasons: readonly string[];
 }
 
 export interface VaingloryHero {
@@ -408,6 +417,8 @@ export interface VaingloryMatchSession {
   readonly startedAt: number;
   readonly liveStartedAt: number;
   readonly partCount: number;
+  readonly originalPartCount: number;
+  readonly ignoredPartCount: number;
   readonly recordingDurationSeconds: number;
   readonly matchCount: number;
   readonly tealWinCount: number;

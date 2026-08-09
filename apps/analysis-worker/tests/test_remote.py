@@ -14,6 +14,7 @@ from blrec.vainglory.analyzer import (
     TrainingCandidateBox,
     VideoPart,
 )
+from blrec.vainglory.sampling import UnusableVideoError
 
 
 class Analyzer:
@@ -73,6 +74,7 @@ class Client:
         self._lock = lock
         self.closed = False
         self.completed_payloads: List[Mapping[str, Any]] = []
+        self.failures: List[Mapping[str, Any]] = []
 
     def claim(self) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -91,8 +93,17 @@ class Client:
     def complete(self, payload: Mapping[str, Any]) -> None:
         self.completed_payloads.append(dict(payload))
 
-    def fail(self, *, kind: str, item_id: int, error: str) -> None:
-        pass
+    def fail(
+        self, *, kind: str, item_id: int, error: str, failure_kind: str = 'task_error'
+    ) -> None:
+        self.failures.append(
+            {
+                'kind': kind,
+                'item_id': item_id,
+                'error': error,
+                'failure_kind': failure_kind,
+            }
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -100,7 +111,7 @@ class Client:
 
 def _claim(item_id: int) -> Dict[str, Any]:
     return {
-        'kind': 'full_scan',
+        'kind': 'part',
         'itemId': item_id,
         'part': {
             'id': item_id,
@@ -208,11 +219,7 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
                         task='result_detector',
                         suggested_boxes=(
                             TrainingCandidateBox(
-                                box_type='result_panel',
-                                x=0.1,
-                                y=0.2,
-                                w=0.8,
-                                h=0.5,
+                                box_type='result_panel', x=0.1, y=0.2, w=0.8, h=0.5
                             ),
                         ),
                     ),
@@ -235,6 +242,31 @@ def test_worker_uploads_candidates_already_seen_during_scan(tmp_path: Path) -> N
     assert candidate['suggested_label'] == 'result_panel'
     assert candidate['suggested_boxes'][0]['type'] == 'result_panel'
     assert candidate['image_jpeg']
+
+
+def test_worker_reports_unusable_video_as_structured_failure(tmp_path: Path) -> None:
+    class UnusableAnalyzer(Analyzer):
+        def scan_part_cascade(self, part: VideoPart, **kwargs: Any) -> DenseScanResult:
+            raise UnusableVideoError('FFprobe 无法解析视频')
+
+    queue, lock = _shared_queue([_claim(1)])
+    clients: List[Client] = []
+    worker = RemoteAnalysisWorker(
+        lambda: _tracked_client(clients, queue, lock),
+        UnusableAnalyzer(),
+        cache_dir=tmp_path,
+    )
+
+    worker.run(once=True)
+
+    assert clients[0].failures == [
+        {
+            'kind': 'part',
+            'item_id': 1,
+            'error': 'UnusableVideoError: FFprobe 无法解析视频',
+            'failure_kind': 'unusable_media',
+        }
+    ]
 
 
 def _shared_queue(claims: List[Mapping[str, Any]]) -> tuple:

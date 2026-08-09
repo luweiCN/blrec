@@ -75,6 +75,173 @@ async def seed_part(
 
 
 @pytest.mark.asyncio
+async def test_empty_part_is_ignored_without_failing_successful_session(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        valid = tmp_path / 'valid.flv'
+        empty = tmp_path / 'empty.flv'
+        valid.write_bytes(b'video')
+        empty.write_bytes(b'')
+        await seed_session(database, valid)
+        await seed_part(database, empty, session_id=1, part_id=2, part_index=2)
+        await database.execute(
+            'UPDATE recording_parts SET file_size_bytes=?,record_duration_seconds=? '
+            'WHERE id=?',
+            (5, 3_600, 1),
+        )
+        await database.execute(
+            'UPDATE recording_parts SET file_size_bytes=0,record_duration_seconds=7 '
+            'WHERE id=2'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        await repository.request_scan(1)
+        claim = await repository.claim_next()
+        assert claim is not None and claim.part.id == 1
+        await repository.complete_part(1, (analyzed_match(),))
+
+        assert await repository.claim_next() is None
+        job = await repository.get_job(1)
+        assert job is not None
+        assert job.state == 'ready'
+        assert job.match_count == 1
+        assert job.part_count == 1
+        assert job.original_part_count == 2
+        assert job.ignored_part_count == 1
+        assert len(job.ignored_part_reasons) == 1
+        assert '0 B' in job.ignored_part_reasons[0]
+        ignored = await database.fetchone(
+            'SELECT state,progress,match_count,error,ignored_reason '
+            'FROM vainglory_part_jobs WHERE part_id=2'
+        )
+        assert ignored is not None
+        assert str(ignored['state']) == 'ready'
+        assert float(ignored['progress']) == 1
+        assert int(ignored['match_count']) == 0
+        assert ignored['error'] is None
+        assert '0 B' in str(ignored['ignored_reason'])
+
+        sessions = await repository.list_match_sessions(session_id=1)
+        assert sessions.total == 1
+        session = sessions.items[0]
+        assert session.part_count == 1
+        assert session.original_part_count == 2
+        assert session.ignored_part_count == 1
+        assert session.recording_duration_seconds == 3_600
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_discovery_reconciles_historical_empty_part_failure(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        valid = tmp_path / 'valid.flv'
+        empty = tmp_path / 'empty.flv'
+        valid.write_bytes(b'video')
+        empty.write_bytes(b'')
+        await seed_session(database, valid)
+        await seed_part(database, empty, session_id=1, part_id=2, part_index=2)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        await repository.request_scan(1)
+        claim = await repository.claim_next()
+        assert claim is not None and claim.part.id == 1
+        await repository.complete_part(1, (analyzed_match(),))
+        await database.execute(
+            "UPDATE vainglory_part_jobs SET state='failed',progress=0,"
+            "error='HTTP 409',ignored_reason=NULL WHERE part_id=2"
+        )
+        await database.execute(
+            "UPDATE vainglory_scan_jobs SET state='failed',progress=0,"
+            "error='HTTP 409' WHERE session_id=1"
+        )
+
+        discovered = await repository.discover_ready_parts()
+
+        assert discovered == 0
+        job = await repository.get_job(1)
+        assert job is not None
+        assert job.state == 'ready'
+        assert job.match_count == 1
+        assert job.part_count == 1
+        assert job.original_part_count == 2
+        assert job.ignored_part_count == 1
+        valid_job = await database.fetchone(
+            'SELECT state,match_count FROM vainglory_part_jobs WHERE part_id=1'
+        )
+        assert valid_job is not None
+        assert dict(valid_job) == {'state': 'ready', 'match_count': 1}
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_can_ignore_unreadable_nonempty_part(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        first = tmp_path / 'first.flv'
+        corrupt = tmp_path / 'corrupt.flv'
+        first.write_bytes(b'first video')
+        corrupt.write_bytes(b'not a real video')
+        await seed_session(database, first)
+        await seed_part(database, corrupt, session_id=1, part_id=2, part_index=2)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        await repository.request_scan(1)
+        first_claim = await repository.claim_next()
+        assert first_claim is not None and first_claim.part.id == 1
+        await repository.complete_part(1, (analyzed_match(),))
+        corrupt_claim = await repository.claim_next()
+        assert corrupt_claim is not None and corrupt_claim.part.id == 2
+
+        await repository.ignore_unusable_part(2, 'FFprobe 无法解析视频')
+
+        job = await repository.get_job(1)
+        assert job is not None
+        assert job.state == 'ready'
+        assert job.part_count == 1
+        assert job.original_part_count == 2
+        assert job.ignored_part_count == 1
+        assert job.ignored_part_reasons == ('FFprobe 无法解析视频',)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_session_fails_when_every_part_is_unusable(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'corrupt.flv'
+        video.write_bytes(b'not a real video')
+        await seed_session(database, video)
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        await repository.request_scan(1)
+        claim = await repository.claim_next()
+        assert claim is not None
+        await repository.ignore_unusable_part(1, 'FFprobe 无法解析视频')
+
+        job = await repository.get_job(1)
+        assert job is not None
+        assert job.state == 'failed'
+        assert job.part_count == 0
+        assert job.original_part_count == 1
+        assert job.ignored_part_count == 1
+        assert job.error is not None and '没有可分析的视频分 P' in job.error
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_complete_part_stores_worker_training_candidate_sidecar(
     tmp_path: Path,
 ) -> None:

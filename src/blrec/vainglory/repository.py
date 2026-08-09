@@ -247,6 +247,10 @@ class ScanJob:
     started_at: Optional[int]
     completed_at: Optional[int]
     updated_at: int
+    part_count: int = 0
+    original_part_count: int = 0
+    ignored_part_count: int = 0
+    ignored_part_reasons: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -305,6 +309,9 @@ class AnalysisQueueCompletion:
     candidate_count: Optional[int]
     match_count: int
     elapsed_seconds: float
+    part_count: int = 0
+    original_part_count: int = 0
+    ignored_part_count: int = 0
     bvid: Optional[str] = None
     archive_page: Optional[int] = None
     local_video_available: bool = False
@@ -332,6 +339,8 @@ class AnalysisQueueItem:
     match_count: int
     part_count: int
     completed_part_count: int
+    original_part_count: int = 0
+    ignored_part_count: int = 0
     runtime_stage: str = ''
     runtime_detail: str = ''
     runtime_elapsed_seconds: float = 0
@@ -492,6 +501,8 @@ class MatchSessionRecord:
     anchor_name: str = ''
     live_started_at: int = 0
     part_count: int = 0
+    original_part_count: int = 0
+    ignored_part_count: int = 0
     recording_duration_seconds: int = 0
     win_count: int = 0
     loss_count: int = 0
@@ -655,6 +666,8 @@ def refresh_session_scan_job(
         "SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending_count,"
         "SUM(CASE WHEN state='analyzing' THEN 1 ELSE 0 END) AS analyzing_count,"
         "SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_count,"
+        'SUM(CASE WHEN ignored_reason IS NOT NULL THEN 1 ELSE 0 END) '
+        'AS ignored_count,'
         'AVG(progress) AS progress,SUM(match_count) AS match_count,'
         'MIN(requested_at) AS requested_at,MIN(started_at) AS started_at,'
         'MAX(algorithm_version) AS algorithm_version '
@@ -666,6 +679,9 @@ def refresh_session_scan_job(
     pending_count = int(summary['pending_count'])
     analyzing_count = int(summary['analyzing_count'])
     failed_count = int(summary['failed_count'])
+    part_count = int(summary['part_count'])
+    ignored_count = int(summary['ignored_count'] or 0)
+    analyzable_count = part_count - ignored_count
     archive = connection.execute(
         'SELECT COALESCE(MAX(imported.page_count),0) AS expected_count,'
         'COUNT(part.id) AS materialized_count,'
@@ -692,7 +708,12 @@ def refresh_session_scan_job(
     )
     error: Optional[str] = None
     completed_at: Optional[int] = None
-    if archive_incomplete:
+    if analyzable_count == 0:
+        state = 'failed'
+        progress = 1.0
+        error = '没有可分析的视频分 P（已忽略 {} 个损坏分 P）'.format(ignored_count)
+        completed_at = now
+    elif archive_incomplete:
         has_progress = (
             archive_terminal_count > 0
             or float(archive['progress_sum'] or 0) > 0
@@ -769,6 +790,21 @@ def _preferred_part_path(source_path: object, final_path: object) -> str:
         if path is not None and os.path.isfile(str(path)):
             return str(path)
     return str(final_path if final_path is not None else source_path)
+
+
+def _definitely_unusable_part_reason(
+    source_path: object, final_path: object, media_index_state: object
+) -> Optional[str]:
+    path = _preferred_part_path(source_path, final_path)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    if size == 0:
+        return '视频文件为空（0 B），没有可分析的音视频内容'
+    if size < 1_024 and str(media_index_state or '') == 'failed':
+        return '视频文件损坏（仅 {} B 且索引失败），没有可分析的音视频内容'.format(size)
+    return None
 
 
 class VaingloryRepository:
@@ -1211,7 +1247,8 @@ class VaingloryRepository:
             )
             connection.execute(
                 "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
-                'algorithm_version=?,match_count=0,error=NULL,started_at=NULL,'
+                'algorithm_version=?,match_count=0,error=NULL,ignored_reason=NULL,'
+                'started_at=NULL,'
                 'completed_at=NULL,updated_at=? WHERE algorithm_version<? '
                 'AND NOT EXISTS(SELECT 1 FROM vainglory_scan_suppressions '
                 'suppression WHERE suppression.session_id='
@@ -1348,6 +1385,7 @@ class VaingloryRepository:
 
     async def request_scan(self, session_id: int) -> ScanJob:
         now = self._now()
+        obsolete_frame_paths: List[str] = []
 
         def request(connection: sqlite3.Connection) -> None:
             session = connection.execute(
@@ -1381,7 +1419,8 @@ class VaingloryRepository:
             ):
                 raise VaingloryConflict('只能分析可用且未删除的录播')
             part_rows = connection.execute(
-                'SELECT id FROM recording_parts '
+                'SELECT id,source_path,final_path,media_index_state '
+                'FROM recording_parts '
                 "WHERE session_id=? AND artifact_state='ready' "
                 'AND video_deleted_at IS NULL ORDER BY part_index,id',
                 (int(session_id),),
@@ -1409,16 +1448,28 @@ class VaingloryRepository:
                 'ON CONFLICT(part_id) DO UPDATE SET '
                 "state='pending',request_kind='manual',progress=0,"
                 'algorithm_version=excluded.algorithm_version,match_count=0,'
-                'error=NULL,requested_at=excluded.requested_at,started_at=NULL,'
+                'error=NULL,ignored_reason=NULL,'
+                'requested_at=excluded.requested_at,started_at=NULL,'
                 'completed_at=NULL,updated_at=excluded.updated_at',
                 (
                     (int(part['id']), int(session_id), self.ALGORITHM_VERSION, now, now)
                     for part in part_rows
                 ),
             )
+            for part in part_rows:
+                reason = _definitely_unusable_part_reason(
+                    part['source_path'], part['final_path'], part['media_index_state']
+                )
+                if reason is not None:
+                    obsolete_frame_paths.extend(
+                        self._mark_part_ignored(
+                            connection, int(part['id']), reason, now
+                        )
+                    )
             self._refresh_session_job(connection, int(session_id), now)
 
         await self._database.write(request)
+        self._remove_result_frame_files(obsolete_frame_paths)
         job = await self.get_job(session_id)
         assert job is not None
         return job
@@ -1574,7 +1625,8 @@ class VaingloryRepository:
                     'ON CONFLICT(part_id) DO UPDATE SET '
                     "state='pending',request_kind='manual',progress=0,"
                     'algorithm_version=excluded.algorithm_version,match_count=0,'
-                    'error=NULL,requested_at=excluded.requested_at,started_at=NULL,'
+                    'error=NULL,ignored_reason=NULL,'
+                    'requested_at=excluded.requested_at,started_at=NULL,'
                     'completed_at=NULL,updated_at=excluded.updated_at',
                     (part_id, int(session_id), self.ALGORITHM_VERSION, now, now),
                 )
@@ -1595,9 +1647,34 @@ class VaingloryRepository:
     async def discover_ready_parts(self) -> int:
         now = self._now()
 
-        def discover(connection: sqlite3.Connection) -> int:
+        def discover(connection: sqlite3.Connection) -> Tuple[int, List[str]]:
+            obsolete_frame_paths: List[str] = []
+            touched: Dict[int, bool] = {}
+            existing_rows = connection.execute(
+                'SELECT job.part_id,job.session_id,part.source_path,'
+                'part.final_path,part.media_index_state '
+                'FROM vainglory_part_jobs job '
+                'JOIN recording_parts part ON part.id=job.part_id '
+                "WHERE job.state IN ('pending','failed') "
+                'AND job.ignored_reason IS NULL '
+                "AND part.artifact_state='ready' "
+                'AND part.video_deleted_at IS NULL'
+            ).fetchall()
+            for row in existing_rows:
+                reason = _definitely_unusable_part_reason(
+                    row['source_path'], row['final_path'], row['media_index_state']
+                )
+                if reason is None:
+                    continue
+                obsolete_frame_paths.extend(
+                    self._mark_part_ignored(
+                        connection, int(row['part_id']), reason, now
+                    )
+                )
+                touched[int(row['session_id'])] = True
             rows = connection.execute(
                 'SELECT part.id AS part_id,part.session_id,session.title,'
+                'part.source_path,part.final_path,part.media_index_state,'
                 'upload.policy_snapshot_json,'
                 'migration.title AS migration_title,'
                 'imported.title AS import_title '
@@ -1620,7 +1697,6 @@ class VaingloryRepository:
                 'ORDER BY part.created_at,part.id',
                 (self.ALGORITHM_VERSION,),
             ).fetchall()
-            touched: Dict[int, bool] = {}
             for row in rows:
                 if is_excluded_title(
                     row['title'],
@@ -1640,16 +1716,28 @@ class VaingloryRepository:
                     'ON CONFLICT(part_id) DO UPDATE SET '
                     "state='pending',request_kind='automatic',progress=0,"
                     'algorithm_version=excluded.algorithm_version,match_count=0,'
-                    'error=NULL,requested_at=excluded.requested_at,started_at=NULL,'
+                    'error=NULL,ignored_reason=NULL,'
+                    'requested_at=excluded.requested_at,started_at=NULL,'
                     'completed_at=NULL,updated_at=excluded.updated_at',
                     (int(row['part_id']), session_id, self.ALGORITHM_VERSION, now, now),
                 )
+                reason = _definitely_unusable_part_reason(
+                    row['source_path'], row['final_path'], row['media_index_state']
+                )
+                if reason is not None:
+                    obsolete_frame_paths.extend(
+                        self._mark_part_ignored(
+                            connection, int(row['part_id']), reason, now
+                        )
+                    )
                 touched[session_id] = True
             for session_id in touched:
                 self._refresh_session_job(connection, session_id, now)
-            return len(rows)
+            return len(rows), obsolete_frame_paths
 
-        return await self._database.write(discover)
+        discovered, obsolete_frame_paths = await self._database.write(discover)
+        self._remove_result_frame_files(obsolete_frame_paths)
+        return discovered
 
     async def claim_next(self) -> Optional[ScanClaim]:
         await self.discover_ready_parts()
@@ -2095,12 +2183,23 @@ class VaingloryRepository:
         task_progress = 'COALESCE(MAX(session_job.progress),AVG(job.progress))'
         part_count = (
             '(SELECT COUNT(*) FROM vainglory_part_jobs all_job '
+            'WHERE all_job.session_id=job.session_id '
+            'AND all_job.ignored_reason IS NULL)'
+        )
+        original_part_count = (
+            '(SELECT COUNT(*) FROM vainglory_part_jobs all_job '
             'WHERE all_job.session_id=job.session_id)'
+        )
+        ignored_part_count = (
+            '(SELECT COUNT(*) FROM vainglory_part_jobs ignored_job '
+            'WHERE ignored_job.session_id=job.session_id '
+            'AND ignored_job.ignored_reason IS NOT NULL)'
         )
         completed_part_count = (
             '(SELECT COUNT(*) FROM vainglory_part_jobs completed_job '
             'WHERE completed_job.session_id=job.session_id '
-            "AND completed_job.state='ready')"
+            "AND completed_job.state='ready' "
+            'AND completed_job.ignored_reason IS NULL)'
         )
         live_started_at = (
             'MAX(CASE WHEN COALESCE(session.live_start_time,0)>0 '
@@ -2109,7 +2208,10 @@ class VaingloryRepository:
         recording_duration = (
             '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,0)),0) '
             'FROM recording_parts all_part '
-            'WHERE all_part.session_id=job.session_id)'
+            'WHERE all_part.session_id=job.session_id '
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs ignored_job '
+            'WHERE ignored_job.part_id=all_part.id '
+            'AND ignored_job.ignored_reason IS NOT NULL))'
         )
         active_select = (
             'SELECT COALESCE(MIN(CASE WHEN ocr.state=\'running\' '
@@ -2135,6 +2237,10 @@ class VaingloryRepository:
             'MAX(COALESCE(session_job.match_count,0)) AS match_count,'
             + part_count
             + ' AS part_count,'
+            + original_part_count
+            + ' AS original_part_count,'
+            + ignored_part_count
+            + ' AS ignored_part_count,'
             + completed_part_count
             + ' AS completed_part_count'
             + joins
@@ -2168,6 +2274,10 @@ class VaingloryRepository:
             'MAX(COALESCE(session_job.match_count,0)) AS match_count,'
             + part_count
             + ' AS part_count,'
+            + original_part_count
+            + ' AS original_part_count,'
+            + ignored_part_count
+            + ' AS ignored_part_count,'
             + completed_part_count
             + ' AS completed_part_count,'
             'MAX(COALESCE(archive_import.recording_started_at,'
@@ -2204,9 +2314,22 @@ class VaingloryRepository:
                 'SELECT job.completed_at,job.started_at,job.session_id,job.part_id,'
                 'part.part_index,session.title,part.record_duration_seconds,'
                 'job.candidate_count,job.match_count,'
+                '(SELECT COUNT(*) FROM vainglory_part_jobs effective_job '
+                'WHERE effective_job.session_id=job.session_id '
+                'AND effective_job.ignored_reason IS NULL) AS part_count,'
+                '(SELECT COUNT(*) FROM vainglory_part_jobs original_job '
+                'WHERE original_job.session_id=job.session_id) '
+                'AS original_part_count,'
+                '(SELECT COUNT(*) FROM vainglory_part_jobs ignored_job '
+                'WHERE ignored_job.session_id=job.session_id '
+                'AND ignored_job.ignored_reason IS NOT NULL) '
+                'AS ignored_part_count,'
                 '(SELECT COALESCE(SUM(COALESCE(all_part.record_duration_seconds,0)),0) '
                 'FROM recording_parts all_part '
-                'WHERE all_part.session_id=job.session_id) '
+                'WHERE all_part.session_id=job.session_id '
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs ignored_job '
+                'WHERE ignored_job.part_id=all_part.id '
+                'AND ignored_job.ignored_reason IS NOT NULL)) '
                 'AS recording_duration_seconds,'
                 '(SELECT COALESCE(SUM(COALESCE(part_match.duration_seconds,0)),0) '
                 'FROM vainglory_matches part_match '
@@ -2220,6 +2343,7 @@ class VaingloryRepository:
                 'JOIN recording_parts part ON part.id=job.part_id '
                 'JOIN recording_sessions session ON session.id=job.session_id '
                 "WHERE job.state='ready' AND job.completed_at IS NOT NULL "
+                'AND job.ignored_reason IS NULL '
                 'ORDER BY job.completed_at DESC,job.part_id DESC LIMIT ?',
                 (limit,),
             ).fetchall()
@@ -2357,6 +2481,8 @@ class VaingloryRepository:
                     match_count=int(row['match_count']),
                     part_count=int(row['part_count']),
                     completed_part_count=int(row['completed_part_count']),
+                    original_part_count=int(row['original_part_count']),
+                    ignored_part_count=int(row['ignored_part_count']),
                     bvid=bvid,
                     archive_page=archive_page,
                     local_video_available=local_available,
@@ -2399,6 +2525,9 @@ class VaingloryRepository:
                     ),
                     match_count=int(row['match_count']),
                     elapsed_seconds=max(0, completed_at - started_at),
+                    part_count=int(row['part_count']),
+                    original_part_count=int(row['original_part_count']),
+                    ignored_part_count=int(row['ignored_part_count']),
                     bvid=bvid,
                     archive_page=archive_page,
                     local_video_available=local_available,
@@ -2523,13 +2652,25 @@ class VaingloryRepository:
             )
             connection.execute(
                 "UPDATE vainglory_part_jobs SET state='failed',progress=0,error=?,"
-                'completed_at=?,updated_at=? '
+                'ignored_reason=NULL,completed_at=?,updated_at=? '
                 "WHERE part_id=? AND state='analyzing'",
                 (message, now, now, int(part_id)),
             )
             self._refresh_session_job(connection, int(row['session_id']), now)
 
         await self._database.write(fail)
+
+    async def ignore_unusable_part(self, part_id: int, reason: str) -> None:
+        message = reason.strip()[:500] or '视频文件无法解析'
+        now = self._now()
+
+        def ignore(connection: sqlite3.Connection) -> List[str]:
+            return self._mark_part_ignored(
+                connection, int(part_id), message, now, require_analyzing=True
+            )
+
+        obsolete_frame_paths = await self._database.write(ignore)
+        self._remove_result_frame_files(obsolete_frame_paths)
 
     async def complete_part(
         self,
@@ -2906,7 +3047,7 @@ class VaingloryRepository:
                 connection.execute(
                     "UPDATE vainglory_part_jobs SET state='pending',progress=0,"
                     'algorithm_version=?,match_count=?,candidate_count=COALESCE(?,'
-                    'candidate_count),error=NULL,requested_at=?,'
+                    'candidate_count),error=NULL,ignored_reason=NULL,requested_at=?,'
                     'started_at=NULL,completed_at=NULL,updated_at=? WHERE part_id=?',
                     (
                         self.ALGORITHM_VERSION,
@@ -2921,7 +3062,7 @@ class VaingloryRepository:
                 connection.execute(
                     "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
                     'match_count=?,candidate_count=COALESCE(?,candidate_count),'
-                    'error=NULL,completed_at=?,updated_at=? '
+                    'error=NULL,ignored_reason=NULL,completed_at=?,updated_at=? '
                     'WHERE part_id=?',
                     (len(stored_matches), candidate_count, now, now, int(part_id)),
                 )
@@ -2956,7 +3097,20 @@ class VaingloryRepository:
 
     async def get_job(self, session_id: int) -> Optional[ScanJob]:
         row = await self._database.fetchone(
-            'SELECT * FROM vainglory_scan_jobs WHERE session_id=?', (int(session_id),)
+            'SELECT scan.*,'
+            '(SELECT COUNT(*) FROM vainglory_part_jobs job '
+            'WHERE job.session_id=scan.session_id '
+            'AND job.ignored_reason IS NULL) AS part_count,'
+            '(SELECT COUNT(*) FROM vainglory_part_jobs job '
+            'WHERE job.session_id=scan.session_id) AS original_part_count,'
+            '(SELECT COUNT(*) FROM vainglory_part_jobs job '
+            'WHERE job.session_id=scan.session_id '
+            'AND job.ignored_reason IS NOT NULL) AS ignored_part_count,'
+            "COALESCE((SELECT GROUP_CONCAT(job.ignored_reason, '\n') "
+            'FROM vainglory_part_jobs job WHERE job.session_id=scan.session_id '
+            "AND job.ignored_reason IS NOT NULL),'') AS ignored_part_reasons "
+            'FROM vainglory_scan_jobs scan WHERE scan.session_id=?',
+            (int(session_id),),
         )
         return None if row is None else self._scan_job(row)
 
@@ -3108,10 +3262,23 @@ class VaingloryRepository:
             'COALESCE(session.live_start_time,session.started_at) '
             'AS live_started_at,'
             '(SELECT COUNT(*) FROM recording_parts source_part '
-            'WHERE source_part.session_id=session.id) AS part_count,'
+            'WHERE source_part.session_id=session.id '
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs ignored_job '
+            'WHERE ignored_job.part_id=source_part.id '
+            'AND ignored_job.ignored_reason IS NOT NULL)) AS part_count,'
+            '(SELECT COUNT(*) FROM recording_parts source_part '
+            'WHERE source_part.session_id=session.id) AS original_part_count,'
+            '(SELECT COUNT(*) FROM recording_parts source_part '
+            'WHERE source_part.session_id=session.id '
+            'AND EXISTS(SELECT 1 FROM vainglory_part_jobs ignored_job '
+            'WHERE ignored_job.part_id=source_part.id '
+            'AND ignored_job.ignored_reason IS NOT NULL)) AS ignored_part_count,'
             '(SELECT COALESCE(SUM(COALESCE(source_part.record_duration_seconds,'
             '0)),0) FROM recording_parts source_part '
-            'WHERE source_part.session_id=session.id) '
+            'WHERE source_part.session_id=session.id '
+            'AND NOT EXISTS(SELECT 1 FROM vainglory_part_jobs ignored_job '
+            'WHERE ignored_job.part_id=source_part.id '
+            'AND ignored_job.ignored_reason IS NOT NULL)) '
             'AS recording_duration_seconds,'
             'COALESCE(scan.stats_included,1) AS stats_included,'
             'COALESCE('
@@ -4863,6 +5030,57 @@ class VaingloryRepository:
             (session_id, self.ALGORITHM_VERSION, now, now),
         )
 
+    def _mark_part_ignored(
+        self,
+        connection: sqlite3.Connection,
+        part_id: int,
+        reason: str,
+        now: int,
+        *,
+        require_analyzing: bool = False,
+    ) -> List[str]:
+        job = connection.execute(
+            'SELECT session_id,state FROM vainglory_part_jobs WHERE part_id=?',
+            (int(part_id),),
+        ).fetchone()
+        if job is None:
+            return []
+        if require_analyzing and str(job['state']) != 'analyzing':
+            raise VaingloryConflict('分析任务当前不能标记为损坏分 P')
+        obsolete_frame_paths = [
+            str(row['result_frame_path'])
+            for row in connection.execute(
+                'SELECT result_frame_path FROM vainglory_matches '
+                'WHERE result_part_id=? AND result_frame_path IS NOT NULL',
+                (int(part_id),),
+            ).fetchall()
+        ]
+        connection.execute(
+            'DELETE FROM vainglory_matches WHERE result_part_id=?', (int(part_id),)
+        )
+        connection.execute(
+            'DELETE FROM vainglory_ocr_jobs WHERE part_id=?', (int(part_id),)
+        )
+        connection.execute(
+            "UPDATE vainglory_part_jobs SET state='ready',progress=1,"
+            'match_count=0,candidate_count=0,error=NULL,ignored_reason=?,'
+            'completed_at=?,updated_at=? WHERE part_id=?',
+            (reason, now, now, int(part_id)),
+        )
+        connection.execute(
+            "UPDATE vainglory_archive_parts SET state='ready',progress=1,"
+            'error=NULL,updated_at=? WHERE recording_part_id=?',
+            (now, int(part_id)),
+        )
+        session_id = int(job['session_id'])
+        connection.execute(
+            'UPDATE vainglory_publications SET needs_refresh=1,updated_at=? '
+            'WHERE session_id=?',
+            (now, session_id),
+        )
+        self._refresh_session_job(connection, session_id, now)
+        return obsolete_frame_paths
+
     def _refresh_session_job(
         self, connection: sqlite3.Connection, session_id: int, now: int
     ) -> None:
@@ -4879,6 +5097,7 @@ class VaingloryRepository:
 
     @staticmethod
     def _scan_job(row: sqlite3.Row) -> ScanJob:
+        ignored_reasons = str(row['ignored_part_reasons'] or '')
         return ScanJob(
             session_id=int(row['session_id']),
             state=str(row['state']),
@@ -4892,6 +5111,12 @@ class VaingloryRepository:
                 None if row['completed_at'] is None else int(row['completed_at'])
             ),
             updated_at=int(row['updated_at']),
+            part_count=int(row['part_count'] or 0),
+            original_part_count=int(row['original_part_count'] or 0),
+            ignored_part_count=int(row['ignored_part_count'] or 0),
+            ignored_part_reasons=tuple(
+                reason for reason in ignored_reasons.split('\n') if reason
+            ),
         )
 
     async def _player_match_stats_rows(
@@ -5377,6 +5602,8 @@ class VaingloryRepository:
             started_at=int(row['started_at']),
             live_started_at=int(row['live_started_at']),
             part_count=int(row['part_count'] or 0),
+            original_part_count=int(row['original_part_count'] or 0),
+            ignored_part_count=int(row['ignored_part_count'] or 0),
             recording_duration_seconds=int(row['recording_duration_seconds'] or 0),
             match_count=int(row['match_count']),
             teal_win_count=int(row['teal_win_count'] or 0),

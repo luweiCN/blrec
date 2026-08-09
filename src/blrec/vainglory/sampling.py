@@ -18,6 +18,10 @@ class InvalidImage(ValueError):
     pass
 
 
+class UnusableVideoError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class VideoProfile:
     width: int
@@ -429,7 +433,7 @@ class FfmpegSampler:
         except subprocess.TimeoutExpired as error:
             raise RuntimeError('FFprobe 读取视频超时') from error
         if result.returncode != 0:
-            raise RuntimeError(_process_error('FFprobe', result))
+            raise UnusableVideoError(_process_error('FFprobe', result))
         try:
             payload = json.loads(result.stdout.decode('utf8'))
             stream = payload['streams'][0]
@@ -437,9 +441,9 @@ class FfmpegSampler:
             width = int(stream['width'])
             height = int(stream['height'])
         except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise RuntimeError('FFprobe 没有返回有效的视频信息') from error
+            raise UnusableVideoError('FFprobe 没有返回有效的视频信息') from error
         if duration_ms <= 0 or width <= 0 or height <= 0:
-            raise RuntimeError('视频尺寸或时长无效')
+            raise UnusableVideoError('视频尺寸或时长无效')
         profile = VideoProfile(width=width, height=height, duration_ms=duration_ms)
         self._profile_cache[resolved] = (stat.st_mtime_ns, stat.st_size, profile)
         return profile

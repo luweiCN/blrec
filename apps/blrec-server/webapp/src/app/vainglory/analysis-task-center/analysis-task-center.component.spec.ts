@@ -23,6 +23,8 @@ describe('AnalysisTaskCenterComponent', () => {
       matchCount: 2,
       partCount: 2,
       completedPartCount: 1,
+      originalPartCount: 3,
+      ignoredPartCount: 1,
       runtimeStage: 'fine_scan',
       runtimeDetail: '正在精扫第 2/4 个疑似结算区间',
       runtimeElapsedSeconds: 120,
