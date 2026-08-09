@@ -54,10 +54,12 @@ describe('HeroDetailPageComponent', () => {
     expect(component.identity?.officialName).toBe('凯恩');
     expect(component.modeRecords.length).toBe(3);
     expect(component.playerRecords.length).toBeGreaterThan(0);
+    expect(component.usageRank).not.toBeNull();
     expect(component.seasonHistory.length).toBeGreaterThan(0);
     expect(page.querySelector('h1')?.textContent).toContain('凯恩');
     expect(page.querySelector('.profile-player-link')?.textContent).toContain(
       '星河',
     );
+    expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
   });
 });

@@ -43,6 +43,17 @@ function heroPerformance(
 }
 
 function player(seed: PlayerSeed): PlayerStanding {
+  const heroPool = seed.heroPool.map((usage) => ({
+    ...usage,
+    stats: {
+      kdaMatches: usage.matches,
+      kills: usage.wins * 5 + (usage.matches - usage.wins) * 2,
+      deaths: usage.wins * 2 + (usage.matches - usage.wins) * 4,
+      assists: usage.matches * 6,
+      economyMatches: usage.matches,
+      economy: usage.matches * 12_000 + usage.wins * 300,
+    },
+  }));
   return {
     id: seed.id,
     name: seed.name,
@@ -52,7 +63,13 @@ function player(seed: PlayerSeed): PlayerStanding {
     trend: seed.trend,
     form: seed.form,
     modes: seed.modes,
-    heroPool: seed.heroPool,
+    heroPool,
+    heroPools: {
+      all: heroPool,
+      '3v3': heroPool,
+      brawl: heroPool,
+      '5v5': heroPool,
+    },
   };
 }
 
@@ -559,6 +576,33 @@ function scaledPlayer(
   const five = scaledPerformance(value.modes['5v5'], season, value.id + 3);
   const allMatches = three.matches + brawl.matches + five.matches;
   const allWins = three.wins + brawl.wins + five.wins;
+  const heroPool = value.heroPool.map((hero, index) => {
+    const matches = Math.max(
+      1,
+      Math.round(hero.matches * seasonScale(season)),
+    );
+    const rate = Math.min(
+      0.8,
+      Math.max(
+        0.3,
+        hero.wins / hero.matches + seasonVariance(value.id + index, season),
+      ),
+    );
+    const wins = Math.round(matches * rate);
+    return {
+      ...hero,
+      matches,
+      wins,
+      stats: {
+        kdaMatches: matches,
+        kills: wins * 5 + (matches - wins) * 2,
+        deaths: wins * 2 + (matches - wins) * 4,
+        assists: matches * 6,
+        economyMatches: matches,
+        economy: matches * 12_000 + wins * 300,
+      },
+    };
+  });
   return {
     ...value,
     modes: {
@@ -567,20 +611,13 @@ function scaledPlayer(
       brawl,
       '5v5': five,
     },
-    heroPool: value.heroPool.map((hero, index) => {
-      const matches = Math.max(
-        1,
-        Math.round(hero.matches * seasonScale(season)),
-      );
-      const rate = Math.min(
-        0.8,
-        Math.max(
-          0.3,
-          hero.wins / hero.matches + seasonVariance(value.id + index, season),
-        ),
-      );
-      return { ...hero, matches, wins: Math.round(matches * rate) };
-    }),
+    heroPool,
+    heroPools: {
+      all: heroPool,
+      '3v3': heroPool,
+      brawl: heroPool,
+      '5v5': heroPool,
+    },
   };
 }
 

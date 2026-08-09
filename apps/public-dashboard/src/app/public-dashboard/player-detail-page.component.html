@@ -2,7 +2,7 @@
   <nav class="breadcrumbs" aria-label="面包屑">
     <a routerLink="/">总览</a>
     <span aria-hidden="true">/</span>
-    <a routerLink="/players">玩家排行</a>
+    <a routerLink="/players">玩家榜</a>
     <span aria-hidden="true">/</span>
     <span aria-current="page">玩家详情</span>
   </nav>
@@ -223,33 +223,77 @@
           <p>HERO POOL</p>
           <h2 id="hero-pool-detail-title">常用英雄</h2>
         </div>
-        <span>{{ selectedSeason.label }} · 全部模式</span>
+        <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
       </header>
       <div class="profile-table-wrap">
-        <table>
-          <caption>{{ profile.name }}在{{ selectedSeason.label }}使用过的英雄</caption>
+        <table class="player-hero-comparison-table">
+          <caption>{{ profile.name }}在{{ selectedSeason.label }}{{ modeLabel() }}使用过的英雄及同英雄玩家对比</caption>
           <thead>
             <tr>
               <th scope="col">英雄</th>
               <th scope="col">对局</th>
               <th scope="col">胜 / 负</th>
               <th scope="col">胜率</th>
+              <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
+              <th scope="col" title="仅统计经济识别完整的场次">场均经济</th>
+              <th scope="col">使用量排名</th>
+              <th scope="col">对比其他玩家</th>
             </tr>
           </thead>
           <tbody>
-            <tr *ngFor="let hero of heroPool; trackBy: trackHero">
+            <tr *ngFor="let comparison of heroPool; trackBy: trackHero">
               <td data-label="英雄">
-                <a class="profile-hero-link" [routerLink]="['/heroes', hero.name]">
-                  <img [src]="heroImage(hero.name)" alt="" />
-                  <strong>{{ heroDisplayName(hero.name) }}</strong>
+                <a class="profile-hero-link" [routerLink]="['/heroes', comparison.usage.name]">
+                  <img [src]="heroImage(comparison.usage.name)" alt="" />
+                  <strong>{{ heroDisplayName(comparison.usage.name) }}</strong>
                 </a>
               </td>
-              <td data-label="对局">{{ hero.matches }}</td>
-              <td data-label="胜 / 负">{{ hero.wins }} / {{ hero.matches - hero.wins }}</td>
-              <td class="table-rate" data-label="胜率">{{ winRate(hero) | percent: "1.0-1" }}</td>
+              <td data-label="对局">{{ comparison.usage.matches }}</td>
+              <td data-label="胜 / 负">
+                {{ comparison.usage.wins }} / {{ comparison.usage.matches - comparison.usage.wins }}
+              </td>
+              <td class="table-rate" data-label="胜率">{{ winRate(comparison.usage) | percent: "1.0-1" }}</td>
+              <td data-label="KDA">
+                {{ heroKda(comparison.usage) === null ? "—" : (heroKda(comparison.usage) | number: "1.2-2") }}
+              </td>
+              <td data-label="场均经济">
+                {{ averageHeroEconomy(comparison.usage) === null ? "—" : (averageHeroEconomy(comparison.usage) | number: "1.0-0") }}
+              </td>
+              <td class="usage-rank" data-label="使用量排名">
+                #{{ comparison.usageRank }} / {{ comparison.playerCount }}
+              </td>
+              <td data-label="对比其他玩家">
+                <span class="peer-comparison">
+                  <strong
+                    [class.up]="peerComparisonKind(comparison.peers) === 'up'"
+                    [class.down]="peerComparisonKind(comparison.peers) === 'down'"
+                  >
+                    胜率{{ peerComparisonText(comparison.peers) }}
+                  </strong>
+                  <small
+                    *ngIf="comparison.peers.kind === 'available' && comparison.peers.kda.kind === 'available'"
+                    class="peer-metric"
+                    [class.up]="peerMetricKind(comparison.peers.kda) === 'up'"
+                    [class.down]="peerMetricKind(comparison.peers.kda) === 'down'"
+                  >
+                    KDA {{ peerMetricText(comparison.peers.kda, 2) }}
+                  </small>
+                  <small
+                    *ngIf="comparison.peers.kind === 'available' && comparison.peers.economy.kind === 'available'"
+                    class="peer-metric"
+                    [class.up]="peerMetricKind(comparison.peers.economy) === 'up'"
+                    [class.down]="peerMetricKind(comparison.peers.economy) === 'down'"
+                  >
+                    经济 {{ peerMetricText(comparison.peers.economy, 0) }}
+                  </small>
+                  <small *ngIf="comparison.peers.kind === 'available'">
+                    其他 {{ comparison.peers.players }} 名玩家 · {{ comparison.peers.matches }} 局
+                  </small>
+                </span>
+              </td>
             </tr>
             <tr *ngIf="heroPool.length === 0">
-              <td colspan="4" class="profile-empty">该赛季暂无已识别英雄数据。</td>
+              <td colspan="8" class="profile-empty">当前模式暂无已识别英雄数据。</td>
             </tr>
           </tbody>
         </table>
@@ -304,7 +348,7 @@
     <section class="profile-not-found" role="alert">
       <p>PLAYER NOT FOUND</p>
       <h1>没有找到这个玩家档案</h1>
-      <a routerLink="/players">返回玩家排行</a>
+      <a routerLink="/players">返回玩家榜</a>
     </section>
   </ng-template>
 </article>

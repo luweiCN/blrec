@@ -80,4 +80,22 @@ describe('HeroRankingsPageComponent', () => {
     expect(links.length).toBe(component.visibleRows.length);
     expect(links[0].href).toContain('/heroes/');
   });
+
+  it('switches to usage ranking and returns to the first page', () => {
+    component.goToPage(2);
+    const usageButton = fixture.nativeElement.querySelectorAll(
+      '.ranking-sort-control button',
+    )[1] as HTMLButtonElement;
+    usageButton.click();
+    fixture.detectChanges();
+    const matches = component.rankingRows.map(
+      (row) => row.hero.modes['3v3'].matches,
+    );
+
+    expect(component.currentPage).toBe(1);
+    expect(matches).toEqual([...matches].sort((left, right) => right - left));
+    expect(fixture.nativeElement.textContent).toContain(
+      '按对局次数展示当前模式最常被使用的英雄',
+    );
+  });
 });

@@ -25,7 +25,7 @@ const routes: Routes = [
       {
         path: 'players',
         component: PlayerRankingsPageComponent,
-        title: '玩家综合榜 · 虚荣对局榜',
+        title: '玩家榜 · 虚荣对局榜',
       },
       {
         path: 'players/:playerId',
@@ -35,7 +35,7 @@ const routes: Routes = [
       {
         path: 'heroes',
         component: HeroRankingsPageComponent,
-        title: '英雄胜率榜 · 虚荣对局榜',
+        title: '英雄榜 · 虚荣对局榜',
       },
       {
         path: 'heroes/:heroId',

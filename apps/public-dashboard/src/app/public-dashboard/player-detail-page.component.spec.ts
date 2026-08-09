@@ -73,6 +73,14 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
       '+6',
     );
+    expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
+    expect(page.querySelector('.peer-comparison')?.textContent).toMatch(
+      /其他玩家|暂无其他玩家/u,
+    );
+    const comparisons = Array.from(
+      page.querySelectorAll('.peer-comparison'),
+    ).map((element) => element.textContent ?? '');
+    expect(comparisons.some((value) => value.includes('KDA'))).toBeTrue();
   });
 
   it('follows the persisted global mode', () => {

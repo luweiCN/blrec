@@ -2,7 +2,7 @@
   <nav class="breadcrumbs" aria-label="面包屑">
     <a routerLink="/">总览</a>
     <span aria-hidden="true">/</span>
-    <a routerLink="/heroes">英雄排行</a>
+    <a routerLink="/heroes">英雄榜</a>
     <span aria-hidden="true">/</span>
     <span aria-current="page">英雄详情</span>
   </nav>
@@ -44,8 +44,12 @@
       </div>
       <dl>
         <div>
-          <dt>当前排名</dt>
+          <dt>胜率排名</dt>
           <dd>{{ rank === null ? "未入榜" : "#" + rank }}</dd>
+        </div>
+        <div>
+          <dt>使用量排名</dt>
+          <dd>{{ usageRank === null ? "暂无" : "#" + usageRank }}</dd>
         </div>
         <div>
           <dt>对局</dt>
@@ -91,17 +95,21 @@
           <p>PLAYER SPECIALISTS</p>
           <h2 id="hero-players-title">常用该英雄的玩家</h2>
         </div>
-        <span>{{ selectedSeason.label }} · 玩家英雄池为全部模式</span>
+        <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
       </header>
       <div class="profile-table-wrap">
-        <table>
-          <caption>{{ profile.name }}在{{ selectedSeason.label }}的玩家使用记录</caption>
+        <table class="hero-player-comparison-table">
+          <caption>{{ profile.name }}在{{ selectedSeason.label }}{{ modeLabel() }}的玩家使用记录与横向对比</caption>
           <thead>
             <tr>
               <th scope="col">玩家</th>
+              <th scope="col">使用量排名</th>
               <th scope="col">对局</th>
               <th scope="col">胜 / 负</th>
               <th scope="col">胜率</th>
+              <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
+              <th scope="col" title="仅统计经济识别完整的场次">场均经济</th>
+              <th scope="col">对比其他玩家</th>
             </tr>
           </thead>
           <tbody>
@@ -119,12 +127,50 @@
                   </span>
                 </a>
               </td>
+              <td class="usage-rank" data-label="使用量排名">
+                #{{ record.usageRank }} / {{ record.playerCount }}
+              </td>
               <td data-label="对局">{{ record.usage.matches }}</td>
               <td data-label="胜 / 负">{{ record.usage.wins }} / {{ record.usage.matches - record.usage.wins }}</td>
               <td class="table-rate" data-label="胜率">{{ winRate(record.usage) | percent: "1.0-1" }}</td>
+              <td data-label="KDA">
+                {{ heroKda(record.usage) === null ? "—" : (heroKda(record.usage) | number: "1.2-2") }}
+              </td>
+              <td data-label="场均经济">
+                {{ averageHeroEconomy(record.usage) === null ? "—" : (averageHeroEconomy(record.usage) | number: "1.0-0") }}
+              </td>
+              <td data-label="对比其他玩家">
+                <span class="peer-comparison">
+                  <strong
+                    [class.up]="peerComparisonKind(record.peers) === 'up'"
+                    [class.down]="peerComparisonKind(record.peers) === 'down'"
+                  >
+                    胜率{{ peerComparisonText(record.peers) }}
+                  </strong>
+                  <small
+                    *ngIf="record.peers.kind === 'available' && record.peers.kda.kind === 'available'"
+                    class="peer-metric"
+                    [class.up]="peerMetricKind(record.peers.kda) === 'up'"
+                    [class.down]="peerMetricKind(record.peers.kda) === 'down'"
+                  >
+                    KDA {{ peerMetricText(record.peers.kda, 2) }}
+                  </small>
+                  <small
+                    *ngIf="record.peers.kind === 'available' && record.peers.economy.kind === 'available'"
+                    class="peer-metric"
+                    [class.up]="peerMetricKind(record.peers.economy) === 'up'"
+                    [class.down]="peerMetricKind(record.peers.economy) === 'down'"
+                  >
+                    经济 {{ peerMetricText(record.peers.economy, 0) }}
+                  </small>
+                  <small *ngIf="record.peers.kind === 'available'">
+                    其他 {{ record.peers.players }} 名玩家 · {{ record.peers.matches }} 局
+                  </small>
+                </span>
+              </td>
             </tr>
             <tr *ngIf="playerRecords.length === 0">
-              <td colspan="4" class="profile-empty">该赛季暂无玩家英雄池记录。</td>
+              <td colspan="8" class="profile-empty">当前模式暂无玩家英雄池记录。</td>
             </tr>
           </tbody>
         </table>
@@ -145,7 +191,7 @@
           <thead>
             <tr>
               <th scope="col">榜单周期</th>
-              <th scope="col">排名</th>
+              <th scope="col">胜率排名</th>
               <th scope="col">对局</th>
               <th scope="col">使用玩家</th>
               <th scope="col">胜率</th>
@@ -172,7 +218,7 @@
     <section class="profile-not-found" role="alert">
       <p>HERO NOT FOUND</p>
       <h1>没有找到这个英雄档案</h1>
-      <a routerLink="/heroes">返回英雄排行</a>
+      <a routerLink="/heroes">返回英雄榜</a>
     </section>
   </ng-template>
 </article>

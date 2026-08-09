@@ -10,11 +10,18 @@ import { Subscription } from 'rxjs';
 import { DashboardModeService } from './dashboard-mode.service';
 import {
   findHero,
+  getHeroPlayerComparisons,
   getHeroRankings,
+  heroAverageEconomy,
+  heroKda,
+  HeroPlayerComparison,
   heroForSeason,
   heroImage,
+  heroPeerComparisonKind,
+  heroPeerComparisonText,
+  heroPeerMetricKind,
+  heroPeerMetricText,
   modeLabel,
-  playersForSeason,
   seasonOption,
   winRate,
 } from './public-dashboard.data';
@@ -28,9 +35,7 @@ import {
   CompetitiveMode,
   HeroPerformance,
   HeroStanding,
-  HeroUsage,
   ModeFilter,
-  PlayerStanding,
   SeasonKey,
   SeasonOption,
 } from './public-dashboard.models';
@@ -39,11 +44,6 @@ interface HeroModeRecord {
   readonly key: CompetitiveMode;
   readonly label: string;
   readonly performance: HeroPerformance;
-}
-
-interface HeroPlayerRecord {
-  readonly player: PlayerStanding;
-  readonly usage: HeroUsage;
 }
 
 interface HeroSeasonRecord {
@@ -71,6 +71,12 @@ const EMPTY_PERFORMANCE: HeroPerformance = {
 export class HeroDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
+  readonly averageHeroEconomy = heroAverageEconomy;
+  readonly heroKda = heroKda;
+  readonly peerComparisonKind = heroPeerComparisonKind;
+  readonly peerComparisonText = heroPeerComparisonText;
+  readonly peerMetricKind = heroPeerMetricKind;
+  readonly peerMetricText = heroPeerMetricText;
   private readonly modeSubscription: Subscription;
 
   constructor(
@@ -138,6 +144,23 @@ export class HeroDetailPageComponent implements OnDestroy {
     return index < 0 ? null : index + 1;
   }
 
+  get usageRank(): number | null {
+    const hero = this.hero;
+    if (hero === undefined) {
+      return null;
+    }
+    const index = getHeroRankings(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+      'usage',
+    ).findIndex(
+      (standing) =>
+        standing.name.toLocaleLowerCase() === hero.name.toLocaleLowerCase(),
+    );
+    return index < 0 ? null : index + 1;
+  }
+
   get modeRecords(): readonly HeroModeRecord[] {
     const hero = this.seasonHero;
     if (hero === undefined) {
@@ -149,31 +172,16 @@ export class HeroDetailPageComponent implements OnDestroy {
     }));
   }
 
-  get playerRecords(): readonly HeroPlayerRecord[] {
+  get playerRecords(): readonly HeroPlayerComparison[] {
     const hero = this.hero;
-    if (hero === undefined) {
-      return [];
-    }
-    const normalizedName = hero.name.toLocaleLowerCase();
-    const records: HeroPlayerRecord[] = [];
-    for (const player of playersForSeason(
-      this.data.snapshot,
-      this.activeSeason,
-    )) {
-      const usage = player.heroPool.find(
-        (candidate) =>
-          candidate.name.toLocaleLowerCase() === normalizedName,
-      );
-      if (usage !== undefined) {
-        records.push({ player, usage });
-      }
-    }
-    return records.sort(
-      (left, right) =>
-        right.usage.matches - left.usage.matches ||
-        right.usage.wins - left.usage.wins ||
-        left.player.id - right.player.id,
-    );
+    return hero === undefined
+      ? []
+      : getHeroPlayerComparisons(
+          this.data.snapshot,
+          this.activeSeason,
+          this.activeMode,
+          hero.name,
+        );
   }
 
   get seasonHistory(): readonly HeroSeasonRecord[] {
@@ -231,7 +239,7 @@ export class HeroDetailPageComponent implements OnDestroy {
     return record.key;
   }
 
-  trackPlayer(_index: number, record: HeroPlayerRecord): number {
+  trackPlayer(_index: number, record: HeroPlayerComparison): number {
     return record.player.id;
   }
 

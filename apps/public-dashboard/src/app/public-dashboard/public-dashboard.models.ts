@@ -86,7 +86,21 @@ export interface HeroUsage {
   readonly name: string;
   readonly matches: number;
   readonly wins: number;
+  readonly stats?: HeroUsageStats;
 }
+
+export interface HeroUsageStats {
+  readonly kdaMatches: number;
+  readonly kills: number;
+  readonly deaths: number;
+  readonly assists: number;
+  readonly economyMatches: number;
+  readonly economy: number;
+}
+
+export type HeroPools = Readonly<
+  Record<ModeFilter, readonly HeroUsage[]>
+>;
 
 export interface PlayerStanding {
   readonly id: number;
@@ -98,6 +112,7 @@ export interface PlayerStanding {
   readonly form: readonly MatchResult[];
   readonly modes: Readonly<Record<ModeFilter, Performance>>;
   readonly heroPool: readonly HeroUsage[];
+  readonly heroPools?: HeroPools;
 }
 
 export interface HeroPerformance {

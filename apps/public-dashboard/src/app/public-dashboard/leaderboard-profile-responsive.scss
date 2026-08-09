@@ -171,6 +171,13 @@
         display: none;
       }
     }
+
+    &.player-hero-comparison-table,
+    &.hero-player-comparison-table {
+      td:last-child {
+        grid-column: 1 / -1;
+      }
+    }
   }
 
   .season-history-table tr {

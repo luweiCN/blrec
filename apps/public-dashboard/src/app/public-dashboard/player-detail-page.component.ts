@@ -11,10 +11,18 @@ import { DashboardModeService } from './dashboard-mode.service';
 import {
   findPlayer,
   getModeBreakdown,
+  getPlayerHeroComparisons,
   getPlayerRankings,
   getPlayerTrend,
   getRankMovement,
+  heroAverageEconomy,
   heroImage,
+  heroKda,
+  HeroPlayerComparison,
+  heroPeerComparisonKind,
+  heroPeerComparisonText,
+  heroPeerMetricKind,
+  heroPeerMetricText,
   modeLabel,
   PlayerTrend,
   PlayerTrendPoint,
@@ -26,7 +34,6 @@ import {
 import { heroDisplayName } from './public-dashboard.hero-names';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
-  HeroUsage,
   MatchResult,
   ModeBreakdown,
   ModeFilter,
@@ -73,6 +80,12 @@ const TREND_CHART_PADDING_Y = 18;
 export class PlayerDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
+  readonly averageHeroEconomy = heroAverageEconomy;
+  readonly heroKda = heroKda;
+  readonly peerComparisonKind = heroPeerComparisonKind;
+  readonly peerComparisonText = heroPeerComparisonText;
+  readonly peerMetricKind = heroPeerMetricKind;
+  readonly peerMetricText = heroPeerMetricText;
   private readonly modeSubscription: Subscription;
 
   constructor(
@@ -247,8 +260,13 @@ export class PlayerDetailPageComponent implements OnDestroy {
       : getModeBreakdown(this.seasonPlayer);
   }
 
-  get heroPool(): readonly HeroUsage[] {
-    return this.seasonPlayer?.heroPool ?? [];
+  get heroPool(): readonly HeroPlayerComparison[] {
+    return getPlayerHeroComparisons(
+      this.data.snapshot,
+      this.activeSeason,
+      this.activeMode,
+      this.playerId ?? 0,
+    );
   }
 
   get seasonHistory(): readonly PlayerSeasonRecord[] {
@@ -312,8 +330,8 @@ export class PlayerDetailPageComponent implements OnDestroy {
     return mode.key;
   }
 
-  trackHero(_index: number, hero: HeroUsage): string {
-    return hero.name;
+  trackHero(_index: number, comparison: HeroPlayerComparison): string {
+    return comparison.usage.name;
   }
 
   trackSeason(_index: number, record: PlayerSeasonRecord): SeasonKey {

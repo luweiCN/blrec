@@ -1,7 +1,11 @@
 import {
+  getHeroPlayerComparisons,
+  getHeroRankings,
   getPlayerRankings,
   getPlayerTrend,
   getRankMovement,
+  heroKda,
+  heroPeerComparisonText,
 } from './public-dashboard.data';
 import {
   DashboardSnapshot,
@@ -115,6 +119,42 @@ describe('public dashboard player rankings', () => {
 
     expect(trend.points).toEqual([]);
     expect(getRankMovement(trend).kind).toBe('pending');
+  });
+
+  it('sorts hero popularity by usage without the win-rate sample threshold', () => {
+    const ranking = getHeroRankings(
+      TEST_DASHBOARD_SNAPSHOT,
+      '2026-summer',
+      '3v3',
+      'usage',
+    );
+    const matches = ranking.map((hero) => hero.modes['3v3'].matches);
+
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches).toEqual([...matches].sort((left, right) => right - left));
+    expect(matches.every((value) => value > 0)).toBeTrue();
+  });
+
+  it('compares a player hero record with other players using the same hero', () => {
+    const records = getHeroPlayerComparisons(
+      TEST_DASHBOARD_SNAPSHOT,
+      '2026-summer',
+      '3v3',
+      'Vox',
+    );
+    const record = records.find((candidate) => candidate.player.id === 1);
+
+    expect(record).toBeDefined();
+    expect(record?.playerCount).toBeGreaterThan(1);
+    expect(record?.usageRank).toBeGreaterThan(1);
+    expect(record?.peers.kind).toBe('available');
+    if (record?.peers.kind === 'available') {
+      expect(record.peers.players).toBe(record.playerCount - 1);
+      expect(record.peers.kda.kind).toBe('available');
+      expect(record.peers.economy.kind).toBe('available');
+      expect(heroKda(record.usage)).not.toBeNull();
+      expect(heroPeerComparisonText(record.peers)).toMatch(/高|低|持平/u);
+    }
   });
 });
 

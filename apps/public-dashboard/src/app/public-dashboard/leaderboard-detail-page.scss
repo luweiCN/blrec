@@ -119,6 +119,60 @@ a {
   }
 }
 
+.hero-directory-toolbar {
+  grid-template-columns: minmax(180px, 1fr) minmax(430px, 560px) auto;
+}
+
+.directory-actions {
+  display: grid;
+  grid-template-columns: auto minmax(240px, 1fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.ranking-sort-control {
+  display: grid;
+  gap: 7px;
+
+  & > span {
+    color: var(--ink-muted);
+    font-size: 0.61rem;
+    font-weight: 700;
+  }
+
+  & > div {
+    display: flex;
+    min-height: 42px;
+    padding: 3px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--surface-2);
+  }
+
+  button {
+    padding: 0 12px;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--ink-muted);
+    cursor: pointer;
+    font-size: 0.67rem;
+    font-weight: 700;
+    transition:
+      background 150ms ease,
+      color 150ms ease;
+
+    &:hover {
+      color: var(--ink);
+    }
+
+    &.active {
+      background: var(--void);
+      color: var(--cyan);
+    }
+  }
+}
+
 .search-control {
   display: grid;
   gap: 7px;

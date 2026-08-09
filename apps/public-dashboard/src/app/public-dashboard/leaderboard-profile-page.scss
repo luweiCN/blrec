@@ -579,6 +579,48 @@
   font-weight: 720;
 }
 
+.usage-rank {
+  color: var(--ink-soft) !important;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.peer-comparison {
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+
+  strong {
+    color: var(--ink-soft);
+    font-size: 0.65rem;
+
+    &.up {
+      color: var(--cyan);
+    }
+
+    &.down {
+      color: var(--rose);
+    }
+  }
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.52rem;
+  }
+
+  .peer-metric {
+    color: var(--ink-soft);
+
+    &.up {
+      color: var(--cyan);
+    }
+
+    &.down {
+      color: var(--rose);
+    }
+  }
+}
+
 .profile-empty {
   margin: 22px 0 0;
   color: var(--ink-muted) !important;

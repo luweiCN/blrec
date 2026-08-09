@@ -9,6 +9,7 @@ import {
   HeroPerformance,
   HeroStanding,
   HeroUsage,
+  HeroUsageStats,
   isSeasonKey,
   MODE_FILTERS,
   Performance,
@@ -180,8 +181,33 @@ function isHeroUsage(value: unknown): value is HeroUsage {
     typeof value['name'] === 'string' &&
     isNonNegativeInteger(value['matches']) &&
     isNonNegativeInteger(value['wins']) &&
-    value['wins'] <= value['matches']
+    value['wins'] <= value['matches'] &&
+    (value['stats'] === undefined ||
+      isHeroUsageStats(value['stats'], Number(value['matches'])))
   );
+}
+
+function isHeroUsageStats(
+  value: unknown,
+  maximumMatches: number,
+): value is HeroUsageStats {
+  if (!isObject(value)) {
+    return false;
+  }
+  return (
+    isNonNegativeInteger(value['kdaMatches']) &&
+    isNonNegativeInteger(value['kills']) &&
+    isNonNegativeInteger(value['deaths']) &&
+    isNonNegativeInteger(value['assists']) &&
+    isNonNegativeInteger(value['economyMatches']) &&
+    isNonNegativeInteger(value['economy']) &&
+    value['kdaMatches'] <= maximumMatches &&
+    value['economyMatches'] <= maximumMatches
+  );
+}
+
+function isHeroUsageList(value: unknown): value is readonly HeroUsage[] {
+  return Array.isArray(value) && value.every(isHeroUsage);
 }
 
 function isPlayerStanding(value: unknown): value is PlayerStanding {
@@ -199,8 +225,9 @@ function isPlayerStanding(value: unknown): value is PlayerStanding {
     Array.isArray(value['form']) &&
     value['form'].every((result) => result === 'W' || result === 'L') &&
     hasModes(value['modes'], isPerformance) &&
-    Array.isArray(value['heroPool']) &&
-    value['heroPool'].every(isHeroUsage)
+    isHeroUsageList(value['heroPool']) &&
+    (value['heroPools'] === undefined ||
+      hasModes(value['heroPools'], isHeroUsageList))
   );
 }
 

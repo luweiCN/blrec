@@ -24,7 +24,7 @@ describe('public guide pages', () => {
     const page = fixture.nativeElement as HTMLElement;
 
     expect(page.textContent).toContain('直播样本榜');
-    expect(page.textContent).toContain('不会因此自动进入玩家排行榜');
+    expect(page.textContent).toContain('不会因此自动进入玩家榜');
     expect(page.textContent).toContain('90% 可信下界');
     expect(page.textContent).toContain('胜利至少 +1，失败至少 -1');
     expect(page.textContent).toContain('RANKING / 02');

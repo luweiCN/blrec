@@ -10,6 +10,7 @@ import { DashboardModeService } from './dashboard-mode.service';
 import {
   DETAIL_PAGE_SIZE,
   getHeroRankingRows,
+  HeroRankingSort,
   heroImage,
   heroMatchesQuery,
   modeLabel,
@@ -40,6 +41,7 @@ export class HeroRankingsPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   searchQuery = '';
+  activeSort: HeroRankingSort = 'win-rate';
   currentPage = 1;
   private readonly modeSubscription: Subscription;
 
@@ -73,7 +75,18 @@ export class HeroRankingsPageComponent implements OnDestroy {
       this.data.snapshot,
       this.activeSeason,
       this.activeMode,
+      this.activeSort,
     );
+  }
+
+  get rankingHint(): string {
+    return this.activeSort === 'win-rate'
+      ? '当前模式至少 20 局后进入胜率排名。'
+      : '按对局次数展示当前模式最常被使用的英雄。';
+  }
+
+  get rankingCaption(): string {
+    return this.activeSort === 'win-rate' ? '英雄胜率排名' : '英雄使用次数排名';
   }
 
   get filteredRows(): readonly HeroRankingRow[] {
@@ -117,6 +130,11 @@ export class HeroRankingsPageComponent implements OnDestroy {
 
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
+    this.currentPage = 1;
+  }
+
+  selectSort(sort: HeroRankingSort): void {
+    this.activeSort = sort;
     this.currentPage = 1;
   }
 

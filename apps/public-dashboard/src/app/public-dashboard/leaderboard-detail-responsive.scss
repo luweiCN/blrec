@@ -29,6 +29,18 @@
     }
   }
 
+  .hero-directory-toolbar {
+    .directory-actions {
+      grid-row: 2;
+      grid-column: 1 / -1;
+    }
+
+    .result-status {
+      grid-row: 1;
+      grid-column: 2;
+    }
+  }
+
   .result-status {
     margin-bottom: 3px;
   }
@@ -220,6 +232,19 @@
     .search-control {
       grid-column: auto;
       grid-row: auto;
+    }
+  }
+
+  .hero-directory-toolbar {
+    .directory-actions {
+      grid-row: auto;
+      grid-column: auto;
+      grid-template-columns: 1fr;
+    }
+
+    .result-status {
+      grid-row: auto;
+      grid-column: auto;
     }
   }
 

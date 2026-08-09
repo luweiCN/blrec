@@ -2,14 +2,14 @@
   <nav class="breadcrumbs" aria-label="面包屑">
     <a routerLink="/">总览</a>
     <span aria-hidden="true">/</span>
-    <span aria-current="page">英雄排行</span>
+    <span aria-current="page">英雄榜</span>
   </nav>
 
   <header class="page-heading">
     <div>
-      <h1>英雄胜率榜</h1>
+      <h1>英雄榜</h1>
       <p>
-        查看全部达到样本门槛的英雄，按当前赛季与模式聚合所有已确认主人公对局。
+        按胜率或使用次数查看当前赛季与模式下所有已确认主人公英雄。
       </p>
     </div>
     <p class="page-context">
@@ -25,21 +25,45 @@
   ></app-leaderboard-filters>
 
   <section class="directory-panel" aria-labelledby="hero-directory-title">
-    <header class="directory-toolbar">
+    <header class="directory-toolbar hero-directory-toolbar">
       <div>
         <h2 id="hero-directory-title">全部英雄</h2>
-        <p>当前模式至少 20 局后进入胜率排名。</p>
+        <p>{{ rankingHint }}</p>
       </div>
 
-      <label class="search-control">
-        <span>检索英雄</span>
-        <input
-          type="search"
-          [value]="searchQuery"
-          placeholder="中文名、别名、拼音或英文名"
-          (input)="updateSearch($event)"
-        />
-      </label>
+      <div class="directory-actions">
+        <div class="ranking-sort-control">
+          <span id="hero-ranking-sort-label">排序方式</span>
+          <div role="group" aria-labelledby="hero-ranking-sort-label">
+            <button
+              type="button"
+              [class.active]="activeSort === 'win-rate'"
+              [attr.aria-pressed]="activeSort === 'win-rate'"
+              (click)="selectSort('win-rate')"
+            >
+              胜率
+            </button>
+            <button
+              type="button"
+              [class.active]="activeSort === 'usage'"
+              [attr.aria-pressed]="activeSort === 'usage'"
+              (click)="selectSort('usage')"
+            >
+              使用次数
+            </button>
+          </div>
+        </div>
+
+        <label class="search-control">
+          <span>检索英雄</span>
+          <input
+            type="search"
+            [value]="searchQuery"
+            placeholder="中文名、别名、拼音或英文名"
+            (input)="updateSearch($event)"
+          />
+        </label>
+      </div>
 
       <p class="result-status" role="status" aria-live="polite">
         {{ resultStart }}–{{ resultEnd }} / {{ filteredRows.length }} 名
@@ -49,12 +73,7 @@
     <div class="directory-table-wrap">
       <table class="directory-table hero-directory-table">
         <caption>
-          {{
-            selectedSeason.label
-          }}
-          {{
-            modeLabel()
-          }}全部英雄胜率排名
+          {{ selectedSeason.label }} {{ modeLabel() }}全部{{ rankingCaption }}
         </caption>
         <thead>
           <tr>
