@@ -80,7 +80,7 @@ jobs:
 
       - name: Install shared core and Publisher
         run: |
-          python -m pip install -e '.[dev]'
+          python -m pip install '.[dev]'
           python -m pip install -e 'apps/public-dashboard/publisher[test,avatars]' build
 
       - name: Test Publisher
