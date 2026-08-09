@@ -416,21 +416,7 @@ a {
 }
 
 .directory-score {
-  strong,
-  small {
-    display: block;
-  }
-
-  strong {
-    color: var(--cyan);
-    font-size: 0.8rem;
-  }
-
-  small {
-    margin-top: 3px;
-    color: var(--gold);
-    font-size: 0.5rem;
-  }
+  min-width: 166px;
 }
 
 .empty-state {

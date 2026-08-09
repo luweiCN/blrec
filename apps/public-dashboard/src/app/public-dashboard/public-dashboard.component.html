@@ -37,17 +37,12 @@
             [heroName]="playerPerformance(player).topHero"
           ></app-player-avatar>
           <strong class="podium-name">{{ player.name }}</strong>
-          <span class="podium-hero">
-            <img
-              [src]="heroImage(playerPerformance(player).topHero)"
-              [alt]="heroDisplayName(playerPerformance(player).topHero)"
-              [title]="
-                '代表英雄：' +
-                heroDisplayName(playerPerformance(player).topHero)
-              "
-            />
-            <span>{{ ratingScore(playerPerformance(player)) }} 分</span>
-          </span>
+          <app-skill-tier-badge
+            class="podium-tier"
+            variant="podium"
+            [ratingScore]="playerPerformance(player).ratingScore"
+            [provisional]="playerPerformance(player).provisional"
+          ></app-skill-tier-badge>
         </a>
         <p *ngIf="podiumPlayers.length === 0" class="ranking-empty">
           当前模式还没有已收录玩家。
@@ -109,7 +104,9 @@
               <th scope="col" class="optional-column">代表英雄</th>
               <th scope="col">近五局</th>
               <th scope="col">对局</th>
-              <th scope="col">榜单分</th>
+              <th scope="col" title="由榜单分映射，不是游戏官方段位">
+                段位
+              </th>
               <th scope="col">胜率</th>
             </tr>
           </thead>
@@ -179,8 +176,11 @@
               </td>
               <td>{{ playerPerformance(player).matches }}</td>
               <td class="rating-score-cell">
-                <strong>{{ ratingScore(playerPerformance(player)) }}</strong>
-                <small *ngIf="playerPerformance(player).provisional">定位中</small>
+                <app-skill-tier-badge
+                  variant="icon"
+                  [ratingScore]="playerPerformance(player).ratingScore"
+                  [provisional]="playerPerformance(player).provisional"
+                ></app-skill-tier-badge>
               </td>
               <td class="win-rate">
                 {{ winRate(playerPerformance(player)) | percent: "1.0-1" }}
@@ -229,10 +229,12 @@
           </div>
         </div>
 
-        <div class="rating-score" [attr.aria-label]="'榜单分 ' + ratingScore(selectedPerformance())">
-          <span>{{ ratingScore(selectedPerformance()) }}</span>
-          <small>榜单分</small>
-        </div>
+        <app-skill-tier-badge
+          class="featured-tier"
+          variant="featured"
+          [ratingScore]="selectedPerformance().ratingScore"
+          [provisional]="selectedPerformance().provisional"
+        ></app-skill-tier-badge>
       </div>
 
       <dl class="detail-record">

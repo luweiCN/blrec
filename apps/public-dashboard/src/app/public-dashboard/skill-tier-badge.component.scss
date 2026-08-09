@@ -1,0 +1,111 @@
+:host {
+  display: inline-block;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.skill-tier-badge {
+  display: inline-grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  max-width: 100%;
+  color: var(--ink);
+  line-height: 1.2;
+
+  img {
+    display: block;
+    width: 38px;
+    height: 38px;
+    object-fit: contain;
+    filter: drop-shadow(0 4px 8px oklch(6% 0.02 280 / 0.55));
+  }
+}
+
+.skill-tier-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+
+  strong,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: var(--ink-soft);
+    font-size: 0.65rem;
+    font-weight: 730;
+  }
+
+  small {
+    color: var(--ink-muted);
+    font-size: 0.5rem;
+  }
+
+  em {
+    margin-left: 5px;
+    color: var(--gold);
+    font-style: normal;
+    font-weight: 750;
+  }
+}
+
+.skill-tier-badge--featured {
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 10px;
+
+  img {
+    width: 70px;
+    height: 70px;
+  }
+
+  .skill-tier-copy {
+    strong {
+      color: var(--gold);
+      font-size: 0.73rem;
+    }
+
+    small {
+      font-size: 0.52rem;
+    }
+  }
+}
+
+.skill-tier-badge--icon {
+  display: inline-block;
+
+  img {
+    width: 42px;
+    height: 42px;
+  }
+}
+
+.skill-tier-badge--podium {
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 4px;
+
+  img {
+    width: 30px;
+    height: 30px;
+  }
+
+  .skill-tier-copy {
+    gap: 1px;
+
+    strong {
+      font-size: 0.52rem;
+    }
+
+    small {
+      font-size: 0.45rem;
+    }
+  }
+}
+
+.skill-tier-unavailable {
+  color: var(--ink-muted);
+}

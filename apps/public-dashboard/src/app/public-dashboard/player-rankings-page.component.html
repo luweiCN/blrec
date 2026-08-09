@@ -64,7 +64,9 @@
             <th scope="col">近五局</th>
             <th scope="col">对局</th>
             <th scope="col">胜 / 负</th>
-            <th scope="col">榜单分</th>
+            <th scope="col" title="由榜单分映射，不是游戏官方段位">
+              站内段位
+            </th>
             <th scope="col">胜率</th>
           </tr>
         </thead>
@@ -139,9 +141,11 @@
                   playerPerformance(row.player).wins
               }}
             </td>
-            <td class="directory-score" data-label="榜单分">
-              <strong>{{ playerPerformance(row.player).ratingScore }}</strong>
-              <small *ngIf="playerPerformance(row.player).provisional">定位中</small>
+            <td class="directory-score" data-label="站内段位">
+              <app-skill-tier-badge
+                [ratingScore]="playerPerformance(row.player).ratingScore"
+                [provisional]="playerPerformance(row.player).provisional"
+              ></app-skill-tier-badge>
             </td>
             <td class="directory-rate" data-label="胜率">
               {{ winRate(playerPerformance(row.player)) | percent: "1.0-1" }}

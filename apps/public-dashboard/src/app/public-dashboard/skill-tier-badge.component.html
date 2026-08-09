@@ -1,0 +1,32 @@
+<ng-container *ngIf="skillTier as tier; else unavailable">
+  <span
+    class="skill-tier-badge"
+    [class.skill-tier-badge--featured]="variant === 'featured'"
+    [class.skill-tier-badge--icon]="variant === 'icon'"
+    [class.skill-tier-badge--podium]="variant === 'podium'"
+    [attr.aria-label]="description(tier)"
+    [title]="description(tier)"
+  >
+    <img
+      [src]="tier.imageUrl"
+      alt=""
+      width="256"
+      height="256"
+      decoding="async"
+    />
+    <span *ngIf="variant !== 'icon'" class="skill-tier-copy">
+      <strong>{{ tier.name }} · {{ tier.divisionLabel }}</strong>
+      <small>
+        {{ tier.tier }} 段
+        <ng-container *ngIf="variant !== 'podium'">
+          · 榜单分 {{ tier.ratingScore }}
+        </ng-container>
+        <em *ngIf="provisional">定位中</em>
+      </small>
+    </span>
+  </span>
+</ng-container>
+
+<ng-template #unavailable>
+  <span class="skill-tier-unavailable" aria-label="暂无站内段位">—</span>
+</ng-template>

@@ -63,9 +63,14 @@
             >{{ rankMovementText }}</small>
           </dd>
         </div>
-        <div>
-          <dt>榜单分</dt>
-          <dd class="accent">{{ performance.ratingScore === null ? "—" : performance.ratingScore }}</dd>
+        <div class="profile-tier-metric">
+          <dt>站内段位</dt>
+          <dd>
+            <app-skill-tier-badge
+              [ratingScore]="performance.ratingScore"
+              [provisional]="performance.provisional"
+            ></app-skill-tier-badge>
+          </dd>
         </div>
         <div>
           <dt>对局</dt>
@@ -109,8 +114,12 @@
       <div *ngIf="playerTrend.current as current; else noRatingTrend" class="rating-trend-layout">
         <dl class="rating-trend-summary">
           <div>
-            <dt>当前榜单分</dt>
-            <dd>{{ current.ratingScore }}</dd>
+            <dt>当前站内段位</dt>
+            <dd class="trend-tier-value">
+              <app-skill-tier-badge
+                [ratingScore]="current.ratingScore"
+              ></app-skill-tier-badge>
+            </dd>
           </div>
           <div>
             <dt>较上次发布</dt>
@@ -330,7 +339,9 @@
             <tr>
               <th scope="col">榜单周期</th>
               <th scope="col">排名</th>
-              <th scope="col">榜单分</th>
+              <th scope="col" title="由榜单分映射，不是游戏官方段位">
+                站内段位
+              </th>
               <th scope="col">对局</th>
               <th scope="col">胜 / 负</th>
               <th scope="col">胜率</th>
@@ -340,8 +351,11 @@
             <tr *ngFor="let record of seasonHistory; trackBy: trackSeason">
               <td data-label="榜单周期"><strong>{{ record.season.label }}</strong></td>
               <td data-label="排名">{{ record.rank === null ? "未入榜" : "#" + record.rank }}</td>
-              <td class="table-rate" data-label="榜单分">
-                {{ record.performance.ratingScore }}
+              <td class="season-tier" data-label="站内段位">
+                <app-skill-tier-badge
+                  [ratingScore]="record.performance.ratingScore"
+                  [provisional]="record.performance.provisional"
+                ></app-skill-tier-badge>
               </td>
               <td data-label="对局">{{ record.performance.matches }}</td>
               <td data-label="胜 / 负">

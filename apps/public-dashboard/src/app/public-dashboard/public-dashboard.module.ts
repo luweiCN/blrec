@@ -16,6 +16,7 @@ import { PublicDashboardComponent } from './public-dashboard.component';
 import { PublicDashboardShellComponent } from './public-dashboard-shell.component';
 import { RankingGuidePageComponent } from './ranking-guide-page.component';
 import { SiteStatsComponent } from './site-stats.component';
+import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 
 @NgModule({
   declarations: [
@@ -33,6 +34,7 @@ import { SiteStatsComponent } from './site-stats.component';
     PlayGuidePageComponent,
     DownloadGuidePageComponent,
     SiteStatsComponent,
+    SkillTierBadgeComponent,
   ],
   imports: [CommonModule, PublicDashboardRoutingModule],
 })

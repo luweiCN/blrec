@@ -189,10 +189,6 @@ export class PublicDashboardComponent implements OnDestroy {
     return winRate(value);
   }
 
-  ratingScore(value: Performance): number {
-    return value.ratingScore ?? 0;
-  }
-
   rankMovement(player: PlayerStanding): RankMovement {
     return getRankMovement(
       getPlayerTrend(

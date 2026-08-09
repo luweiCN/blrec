@@ -40,6 +40,11 @@
               },
               {
                 "glob": "**/*",
+                "input": "src/assets/skill-tiers",
+                "output": "/assets/skill-tiers/"
+              },
+              {
+                "glob": "**/*",
                 "input": "public-data",
                 "output": "/data/"
               }
@@ -111,6 +116,11 @@
                 "glob": "*.jpg",
                 "input": "src/assets/vainglory/heroes",
                 "output": "/assets/vainglory/heroes/"
+              },
+              {
+                "glob": "**/*",
+                "input": "src/assets/skill-tiers",
+                "output": "/assets/skill-tiers/"
               },
               {
                 "glob": "**/*",

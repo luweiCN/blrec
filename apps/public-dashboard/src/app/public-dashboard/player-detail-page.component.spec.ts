@@ -12,6 +12,7 @@ import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.co
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { DashboardDataService } from './public-dashboard-data.service';
+import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
   TEST_DASHBOARD_SNAPSHOT,
   TEST_DASHBOARD_TRENDS,
@@ -29,6 +30,7 @@ describe('PlayerDetailPageComponent', () => {
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
         PlayerAvatarComponent,
+        SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
@@ -70,6 +72,9 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('h1')?.textContent).toContain('星河');
     expect(page.querySelector('.profile-kda-value')?.textContent).toContain(
       '145 局有效',
+    );
+    expect(page.querySelector('.profile-tier-metric')?.textContent).toContain(
+      '登峰造极 · 铜',
     );
     const heroLinks = Array.from(
       page.querySelectorAll('.profile-hero-link'),

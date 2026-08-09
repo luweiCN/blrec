@@ -210,6 +210,10 @@
   }
 }
 
+.profile-summary .profile-tier-metric dd {
+  margin-top: 3px;
+}
+
 .rating-trend-card {
   overflow: hidden;
 }
@@ -258,6 +262,14 @@
       color: var(--rose);
     }
   }
+}
+
+.rating-trend-summary .trend-tier-value {
+  margin-top: 3px;
+}
+
+.season-tier {
+  min-width: 166px;
 }
 
 .rating-trend-visual {

@@ -11,6 +11,7 @@ import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.co
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
 import { DashboardDataService } from './public-dashboard-data.service';
+import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
   TEST_DASHBOARD_SNAPSHOT,
   TEST_DASHBOARD_TRENDS,
@@ -28,6 +29,7 @@ describe('PlayerRankingsPageComponent', () => {
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
         PlayerAvatarComponent,
+        SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
@@ -57,6 +59,7 @@ describe('PlayerRankingsPageComponent', () => {
     expect(component.filteredRows.length).toBe(16);
     expect(component.totalPages).toBe(2);
     expect(page.querySelectorAll('tbody tr').length).toBe(10);
+    expect(page.querySelectorAll('.directory-score img').length).toBe(10);
 
     const secondPage = Array.from(
       page.querySelectorAll<HTMLButtonElement>('.pagination button'),

@@ -221,21 +221,10 @@ a {
   white-space: nowrap;
 }
 
-.podium-hero {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
+.podium-tier {
+  display: block;
+  width: min(100%, 108px);
   margin-top: 4px;
-  color: var(--ink-muted);
-  font-size: 0.62rem;
-
-  img {
-    width: 18px;
-    height: 18px;
-    border: 1px solid var(--line-soft);
-    border-radius: 3px;
-    object-fit: cover;
-  }
 }
 
 .summary-strip {

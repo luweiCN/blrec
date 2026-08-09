@@ -9,8 +9,8 @@
     </div>
     <div class="guide-meta" aria-label="说明版本">
       <span>规则版本</span>
-      <strong>RANKING / 02</strong>
-      <small>更新于 2026-08-09</small>
+      <strong>RANKING / 03</strong>
+      <small>更新于 2026-08-10</small>
     </div>
   </header>
 
@@ -22,6 +22,7 @@
         <a [routerLink]="[]" fragment="scope">谁会进入榜单</a>
         <a [routerLink]="[]" fragment="period">赛季与模式</a>
         <a [routerLink]="[]" fragment="rating">榜单分算法</a>
+        <a [routerLink]="[]" fragment="tier">段位图如何换算</a>
         <a [routerLink]="[]" fragment="limits">误差与变化</a>
         <a [routerLink]="[]" fragment="faq">常见问题</a>
       </nav>
@@ -226,8 +227,61 @@
         </div>
       </section>
 
+      <section id="tier" class="content-section">
+        <p class="section-index">05 / SKILL TIER</p>
+        <h2>段位图是榜单分的怀旧映射</h2>
+        <p>
+          本站仍使用 0–1000 的榜单分进行排序，再把它线性换算到《虚荣》旧版
+          0–3000 段位分：一分榜单分对应三分旧分。换算后按旧版 30
+          个铜、银、金分界选择原版段位徽章。
+        </p>
+
+        <div class="tier-examples" aria-label="榜单分换算段位示例">
+          <div>
+            <app-skill-tier-badge [ratingScore]="400"></app-skill-tier-badge>
+          </div>
+          <div>
+            <app-skill-tier-badge [ratingScore]="572"></app-skill-tier-badge>
+          </div>
+          <div>
+            <app-skill-tier-badge [ratingScore]="800"></app-skill-tier-badge>
+          </div>
+        </div>
+
+        <div class="key-statement">
+          <strong>这是站内段位，不是玩家当年的官方游戏段位。</strong>
+          <p>
+            段位图只改变榜单分的呈现方式，不参与评分、赛季继承或排序。数字榜单分仍用于趋势曲线和同分时的细微比较。
+          </p>
+        </div>
+
+        <div class="formula-panel">
+          <div>
+            <span>换算公式</span>
+            <strong>榜单分 × 3 = 怀旧段位分</strong>
+          </div>
+          <div>
+            <span>十段 · 铜</span>
+            <strong>旧分 2400 起，对应榜单分 800 起</strong>
+          </div>
+          <div>
+            <span>十段 · 银</span>
+            <strong>旧分 2600 起，对应榜单分约 867 起</strong>
+          </div>
+          <div>
+            <span>十段 · 金</span>
+            <strong>旧分 2800 起，对应榜单分约 934 起</strong>
+          </div>
+        </div>
+
+        <p class="fine-print">
+          旧版各段所占分数并不完全相等，本站使用的是 1.22
+          时期公开的完整分界，而不是把 30 个小段简单平均切分。
+        </p>
+      </section>
+
       <section id="limits" class="content-section">
-        <p class="section-index">05 / LIMITATIONS</p>
+        <p class="section-index">06 / LIMITATIONS</p>
         <h2>为什么排名会变，也可能不准</h2>
         <div class="limitation-list">
           <div>
@@ -257,7 +311,7 @@
       </section>
 
       <section id="faq" class="content-section last-section">
-        <p class="section-index">06 / FAQ</p>
+        <p class="section-index">07 / FAQ</p>
         <h2>常见问题</h2>
         <div class="faq-list">
           <details>
@@ -280,6 +334,27 @@
 
         <div class="source-block">
           <p>相关背景</p>
+          <a
+            href="https://www.vainglorygame.com/vainglorylive/spring-update-1-16-notes-halcyon-days/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            官方：最终版 Skill Tier 名称（1.16）
+          </a>
+          <a
+            href="https://github.com/SuperEvilMegacorp/vainglory-assets-lfs/tree/master/assets/skill_tiers"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            开发者资源：原版段位徽章
+          </a>
+          <a
+            href="https://web.archive.org/web/20191112142026/https://brokenmyth.net/skill-tier-point-far-next-tier/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            历史资料：1.22 段位分界
+          </a>
           <a
             href="https://www.vainglorygame.com/news/a-word-on-the-api-and-vainglory-esports/"
             target="_blank"

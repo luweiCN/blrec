@@ -410,6 +410,27 @@ app-download-guide-page {
   }
 }
 
+.tier-examples {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 28px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+
+  & > div {
+    display: grid;
+    min-width: 0;
+    min-height: 86px;
+    align-items: center;
+    padding: 14px 18px;
+    border-left: 1px solid var(--line-soft);
+
+    &:first-child {
+      border-left: 0;
+    }
+  }
+}
+
 .numbered-notes,
 .network-steps,
 .install-steps {
@@ -1191,6 +1212,20 @@ app-download-guide-page {
     div {
       grid-template-columns: 1fr;
       gap: 4px;
+    }
+  }
+
+  .tier-examples {
+    grid-template-columns: 1fr;
+
+    & > div {
+      min-height: 76px;
+      border-top: 1px solid var(--line-soft);
+      border-left: 0;
+
+      &:first-child {
+        border-top: 0;
+      }
     }
   }
 

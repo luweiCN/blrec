@@ -1,9 +1,11 @@
+import { CommonModule } from '@angular/common';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { DownloadGuidePageComponent } from './download-guide-page.component';
 import { PlayGuidePageComponent } from './play-guide-page.component';
 import { RankingGuidePageComponent } from './ranking-guide-page.component';
+import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 
 describe('public guide pages', () => {
   beforeEach(async () => {
@@ -12,8 +14,9 @@ describe('public guide pages', () => {
         RankingGuidePageComponent,
         PlayGuidePageComponent,
         DownloadGuidePageComponent,
+        SkillTierBadgeComponent,
       ],
-      imports: [RouterTestingModule],
+      imports: [CommonModule, RouterTestingModule],
     }).compileComponents();
   });
 
@@ -30,8 +33,10 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('经验量 · 35%');
     expect(page.textContent).toContain('稳定胜率 · 40%');
     expect(page.textContent).toContain('75 分起为“大师”');
-    expect(page.textContent).toContain('RANKING / 02');
-    expect(page.textContent).toContain('更新于 2026-08-09');
+    expect(page.textContent).toContain('RANKING / 03');
+    expect(page.textContent).toContain('更新于 2026-08-10');
+    expect(page.textContent).toContain('榜单分 × 3 = 怀旧段位分');
+    expect(page.textContent).toContain('不是玩家当年的官方游戏段位');
     expect(page.textContent).toContain('历史数据正在持续同步中');
     expect(page.textContent).toContain('当前公开数据的主体');
     expect(page.textContent).toContain('5V5 战绩匹配尚未完成');

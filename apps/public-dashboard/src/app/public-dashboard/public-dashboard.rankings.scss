@@ -289,21 +289,8 @@ table {
 }
 
 .rating-score-cell {
-  strong,
-  small {
-    display: block;
-  }
-
-  strong {
-    color: var(--cyan);
-    font-size: 0.8rem;
-  }
-
-  small {
-    margin-top: 2px;
-    color: var(--gold);
-    font-size: 0.5rem;
-  }
+  width: 64px;
+  text-align: center;
 }
 
 .player-detail {
@@ -337,7 +324,7 @@ table {
 
 .detail-primary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: center;
   margin-top: 22px;
@@ -399,27 +386,11 @@ table {
   }
 }
 
-.rating-score {
-  display: grid;
-  width: 70px;
-  height: 64px;
-  place-content: center;
-  border: 1px solid var(--cyan);
-  border-radius: 6px;
-  background: var(--surface-3);
-  text-align: center;
-
-  span {
-    color: var(--cyan);
-    font-size: 1rem;
-    font-weight: 760;
-  }
-
-  small {
-    margin-top: 1px;
-    color: var(--ink-muted);
-    font-size: 0.5rem;
-  }
+.featured-tier {
+  display: block;
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
 }
 
 .detail-record {

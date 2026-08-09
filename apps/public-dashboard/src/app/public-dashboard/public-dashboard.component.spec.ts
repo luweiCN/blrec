@@ -9,6 +9,7 @@ import {
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
+import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
   TEST_DASHBOARD_SNAPSHOT,
   TEST_DASHBOARD_TRENDS,
@@ -24,6 +25,7 @@ describe('PublicDashboardComponent', () => {
       declarations: [
         PublicDashboardComponent,
         PlayerAvatarComponent,
+        SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
@@ -71,6 +73,7 @@ describe('PublicDashboardComponent', () => {
     expect(page.querySelector('.hero-intro')?.textContent).not.toContain(
       '重复建档',
     );
+    expect(page.querySelectorAll('.rating-score-cell img').length).toBe(10);
   });
 
   it('updates the ranking when the global game mode changes', () => {
