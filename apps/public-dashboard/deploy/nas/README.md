@@ -53,6 +53,7 @@ docker inspect blrec-next
 docker inspect blrec-dashboard-publisher
 docker logs --tail 100 blrec-dashboard-publisher
 curl -fsS https://vg.luwei.host/data/manifest.json
+curl -fsS https://vg.luwei.host/data/trends.json
 ```
 
 日志应出现 `publication=published` 或 `publication=current`，并包含
@@ -82,8 +83,8 @@ docker compose --project-name blrec-dashboard \
 ```
 
 `--force` 只允许与 `--once` 同用。它会忽略本地当天待发布快照并重新读取
-SQLite，但仍执行源数据水位防回退、不可变快照优先和 manifest 最后提交校验；
-常驻每日任务不会自动强制覆盖当天数据。
+SQLite，并替换当天趋势点，但仍执行源数据水位防回退、不可变快照优先、趋势
+数据优先和 manifest 最后提交校验；常驻每日任务不会自动强制覆盖当天数据。
 
 ## 停止与回滚
 

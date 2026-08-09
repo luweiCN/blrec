@@ -5,12 +5,12 @@
 | 链路 | 运行位置 | 写入范围 | 触发方式 |
 | --- | --- | --- | --- |
 | 页面发布 | GitHub Actions | OSS 根目录页面与静态资源，不含 `data/**` | `master` 上页面代码变更或手动触发 |
-| 数据发布 | 群晖 NAS worker | `data/manifest.json` 与 `data/snapshots/**` | 每天 00:05、启动补跑、失败重试 |
+| 数据发布 | 群晖 NAS worker | `data/manifest.json`、`data/trends.json` 与 `data/snapshots/**` | 每天 00:05、启动补跑、失败重试 |
 
 访问统计仍由阿里云服务器单独维护 `data/site-stats.json` 和
 `data/site-stats-history.json`，两条新链路都无权覆盖它们。CDN 继续使用
-`vg.luwei.host`；页面入口和 manifest 使用 `no-store`，因此正常发布不需要刷新
-CDN 缓存。
+`vg.luwei.host`；页面入口、manifest 和趋势数据使用 `no-store`，因此正常发布不
+需要刷新 CDN 缓存。
 
 ## GitHub 页面发布
 
@@ -41,15 +41,16 @@ ghcr.io/luweicn/blrec-dashboard-publisher:master
 
 具体安装、备份、验证和回滚步骤见
 [`deploy/nas/README.md`](deploy/nas/README.md)。NAS AccessKey 只需附加
-`deploy/aliyun/data-publish-ram-policy.json`，其权限被限定到排行榜 manifest 和
-不可变快照。
+`deploy/aliyun/data-publish-ram-policy.json`，其权限被限定到排行榜 manifest、
+紧凑趋势数据和不可变快照。
 
 worker 每次发布会：
 
 1. 读取远端 manifest；当天已经发布则跳过。
 2. 在 SQLite 只读事务中生成快照，并校验长度与 SHA-256。
-3. 先上传、复核不可变快照。
-4. 最后替换 manifest，并再次下载核对提交结果。
+3. 生成最多保留最近 30 次发布的排名与榜单分趋势；同日重发只替换当天记录。
+4. 先上传、复核不可变快照，再更新趋势数据。
+5. 最后替换 manifest，并再次下载核对提交结果。
 
 容器在零点后恢复时会立即检查漏发；失败后每 15 分钟重试。manifest 提交失败
 时，本地 `/state/pending` 会保留同一份快照供下次复用。远端数据源进度高于
