@@ -1,14 +1,60 @@
+from typing import Optional
+
 import pytest
-from blrec_dashboard_publisher import rating
-from blrec_dashboard_publisher.rating import calculate_bayesian_rating
+from blrec_dashboard_publisher.rating import (
+    CARRYOVER_MATCH_CAP,
+    VirtualMatchRating,
+    calculate_virtual_match_rating,
+    expected_win_probability,
+)
 
 
-def test_rating_rewards_a_larger_sample_at_the_same_raw_win_rate() -> None:
-    short = calculate_bayesian_rating(
-        results=['W', 'W', 'W', 'W', 'L'], baseline=0.5, previous_ability=None
+def display_score(rating: Optional[VirtualMatchRating]) -> int:
+    assert rating is not None
+    return rating.score * 3
+
+
+def test_virtual_average_curve_maps_2160_to_about_77_percent() -> None:
+    assert expected_win_probability(1200) == pytest.approx(0.5)
+    assert expected_win_probability(2160) == pytest.approx(0.773476, abs=0.000001)
+
+
+def test_established_2160_rating_gains_six_or_loses_eighteen() -> None:
+    ability = expected_win_probability(2160)
+    win = calculate_virtual_match_rating(
+        results=['W'],
+        previous_ability=ability,
+        previous_evidence=CARRYOVER_MATCH_CAP,
+        reset_visible_score=False,
     )
-    long = calculate_bayesian_rating(
-        results=['W', 'W', 'W', 'W', 'L'] * 10, baseline=0.5, previous_ability=None
+    loss = calculate_virtual_match_rating(
+        results=['L'],
+        previous_ability=ability,
+        previous_evidence=CARRYOVER_MATCH_CAP,
+        reset_visible_score=False,
+    )
+
+    assert display_score(win) == 2166
+    assert display_score(loss) == 2142
+
+
+def test_thirteen_wins_and_two_losses_from_2160_gain_thirty_points() -> None:
+    rating = calculate_virtual_match_rating(
+        results=(['W'] * 13) + (['L'] * 2),
+        previous_ability=expected_win_probability(2160),
+        previous_evidence=CARRYOVER_MATCH_CAP,
+        reset_visible_score=False,
+    )
+
+    assert display_score(rating) == 2190
+
+
+def test_more_evidence_beats_a_small_sample_at_the_same_win_rate() -> None:
+    short = calculate_virtual_match_rating(
+        results=['W', 'W', 'W', 'W', 'L'], reset_visible_score=False
+    )
+    long = calculate_virtual_match_rating(
+        results=['W', 'W', 'W', 'W', 'L'] * 10, reset_visible_score=False
     )
 
     assert short is not None
@@ -17,78 +63,71 @@ def test_rating_rewards_a_larger_sample_at_the_same_raw_win_rate() -> None:
     assert long.score > short.score
 
 
-def test_rating_uses_a_quarter_of_the_previous_season_ability() -> None:
-    without_history = calculate_bayesian_rating(
-        results=['W', 'L'] * 5, baseline=0.5, previous_ability=None
+def test_previous_hidden_strength_accelerates_the_visible_season_reset() -> None:
+    strong = calculate_virtual_match_rating(
+        results=['W'],
+        previous_ability=expected_win_probability(2160),
+        previous_evidence=CARRYOVER_MATCH_CAP,
     )
-    with_history = calculate_bayesian_rating(
-        results=['W', 'L'] * 5, baseline=0.5, previous_ability=0.8
+    neutral = calculate_virtual_match_rating(
+        results=['W'], previous_ability=0.5, previous_evidence=CARRYOVER_MATCH_CAP
     )
 
-    assert without_history is not None
-    assert with_history is not None
-    assert without_history.ability == pytest.approx(0.5)
-    assert with_history.ability == pytest.approx(0.55)
-    assert with_history.score > without_history.score
+    assert strong is not None
+    assert neutral is not None
+    assert display_score(strong) > display_score(neutral)
+    assert display_score(strong) >= 1047
+
+
+@pytest.mark.parametrize(
+    'history', (['W'], ['W', 'L'] * 10, (['W'] * 30) + (['L'] * 8))
+)
+def test_next_season_result_always_moves_the_visible_score(history: list[str]) -> None:
+    before = calculate_virtual_match_rating(results=history)
+    after_win = calculate_virtual_match_rating(results=history + ['W'])
+    after_loss = calculate_virtual_match_rating(results=history + ['L'])
+
+    assert before is not None
+    assert after_win is not None
+    assert after_loss is not None
+    assert after_win.score >= before.score + 1
+    assert after_loss.score <= before.score - 1
+
+
+def test_carryover_evidence_is_capped() -> None:
+    capped = calculate_virtual_match_rating(
+        results=['W'],
+        previous_ability=0.75,
+        previous_evidence=CARRYOVER_MATCH_CAP,
+        reset_visible_score=False,
+    )
+    oversized = calculate_virtual_match_rating(
+        results=['W'],
+        previous_ability=0.75,
+        previous_evidence=CARRYOVER_MATCH_CAP * 10,
+        reset_visible_score=False,
+    )
+
+    assert oversized == capped
+    assert oversized is not None
+    assert oversized.evidence == CARRYOVER_MATCH_CAP
 
 
 def test_rating_marks_fewer_than_five_matches_as_provisional() -> None:
-    rating = calculate_bayesian_rating(
-        results=['W', 'W', 'W', 'L'], baseline=0.5, previous_ability=None
-    )
+    rating = calculate_virtual_match_rating(results=['W', 'W', 'W', 'L'])
 
     assert rating is not None
     assert rating.provisional is True
-    assert (
-        calculate_bayesian_rating(results=[], baseline=0.5, previous_ability=None)
-        is None
-    )
-
-
-def test_each_result_changes_the_visible_score_in_the_expected_direction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(rating, '_beta_quantile', lambda probability, alpha, beta: 0.5)
-
-    first_win = calculate_bayesian_rating(
-        results=['W'], baseline=0.5, previous_ability=None
-    )
-    second_win = calculate_bayesian_rating(
-        results=['W', 'W'], baseline=0.5, previous_ability=None
-    )
-    following_loss = calculate_bayesian_rating(
-        results=['W', 'W', 'L'], baseline=0.5, previous_ability=None
-    )
-
-    assert first_win is not None
-    assert second_win is not None
-    assert following_loss is not None
-    assert first_win.score == 501
-    assert second_win.score == 502
-    assert following_loss.score <= second_win.score - 1
+    assert calculate_virtual_match_rating(results=[]) is None
 
 
 def test_rating_rejects_unknown_results() -> None:
     with pytest.raises(ValueError, match='result'):
-        calculate_bayesian_rating(
-            results=['W', 'unknown'], baseline=0.5, previous_ability=None
+        calculate_virtual_match_rating(results=['W', 'unknown'])
+
+
+def test_previous_evidence_requires_a_previous_ability() -> None:
+    with pytest.raises(ValueError, match='evidence'):
+        calculate_virtual_match_rating(
+            results=['W'], previous_evidence=CARRYOVER_MATCH_CAP
         )
-
-
-@pytest.mark.parametrize(
-    ('history', 'result', 'expected_delta'),
-    (((['W'] * 155) + (['L'] * 17), 'W', 1), ((['W'] * 11) + (['L'] * 98), 'L', -1)),
-)
-def test_real_rounding_plateaus_receive_minimum_outcome_feedback(
-    history: list, result: str, expected_delta: int
-) -> None:
-    before = calculate_bayesian_rating(
-        results=history, baseline=0.5, previous_ability=None
-    )
-    after = calculate_bayesian_rating(
-        results=history + [result], baseline=0.5, previous_ability=None
-    )
-
-    assert before is not None
-    assert after is not None
-    assert after.score - before.score == expected_delta

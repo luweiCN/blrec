@@ -64,23 +64,38 @@ export interface Performance {
   readonly provisional: boolean;
 }
 
-interface RatingModelBase {
+interface LegacyRatingModelBase {
   readonly priorMatches: 20;
   readonly carryoverRate: 0.25;
   readonly credibleLevel: 0.9;
   readonly provisionalMatches: 5;
 }
 
-export interface RatingModelV1 extends RatingModelBase {
+export interface RatingModelV1 extends LegacyRatingModelBase {
   readonly version: 1;
 }
 
-export interface RatingModelV2 extends RatingModelBase {
+export interface RatingModelV2 extends LegacyRatingModelBase {
   readonly version: 2;
   readonly minimumOutcomeDelta: 1;
 }
 
-export type RatingModel = RatingModelV1 | RatingModelV2;
+export interface RatingModelV3 {
+  readonly version: 3;
+  readonly priorMatches: 20;
+  readonly carryoverMatchCap: 200;
+  readonly provisionalMatches: 5;
+  readonly neutralDisplayScore: 1200;
+  readonly seasonResetDisplayScore: 1000;
+  readonly probabilityScale: 1800;
+  readonly minimumOutcomeDelta: 1;
+  readonly catchupRate: 0.08;
+  readonly catchupLimit: 45;
+  readonly catchupProtectionGap: 150;
+  readonly catchupLossMultiplier: 0.5;
+}
+
+export type RatingModel = RatingModelV1 | RatingModelV2 | RatingModelV3;
 
 export interface HeroUsage {
   readonly name: string;

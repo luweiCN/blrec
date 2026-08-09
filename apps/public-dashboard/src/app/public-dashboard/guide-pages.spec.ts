@@ -28,8 +28,9 @@ describe('public guide pages', () => {
 
     expect(page.textContent).toContain('直播样本榜');
     expect(page.textContent).toContain('不会因此自动进入玩家榜');
-    expect(page.textContent).toContain('90% 可信下界');
-    expect(page.textContent).toContain('胜利至少 +1，失败至少 -1');
+    expect(page.textContent).toContain('虚拟平均对局');
+    expect(page.textContent).toContain('胜利一定上涨，失败一定下降');
+    expect(page.textContent).toContain('下一局胜率约为 77.3%');
     expect(page.textContent).toContain('经验量 · 35%');
     expect(page.textContent).toContain('稳定胜率 · 40%');
     expect(page.textContent).toContain('75 分起为“大师”');

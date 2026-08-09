@@ -377,8 +377,9 @@ async def test_historical_backfill_recalculates_every_later_season(
         )
         spring_strong = rating(with_spring, '2026-summer', 10)
         spring_control = rating(with_spring, '2026-summer', 20)
-        assert spring_strong > initial_strong
-        assert spring_control < initial_control
+        assert spring_strong > spring_control
+        assert spring_strong != initial_strong
+        assert spring_control != initial_control
 
         await add_results(100, timestamp(2025, 10, 1), [True] * 5)
         await add_results(200, timestamp(2025, 10, 1), [False] * 5)
@@ -386,16 +387,25 @@ async def test_historical_backfill_recalculates_every_later_season(
             lambda connection: build_dashboard_snapshot(connection, now=now)
         )
         assert rating(with_autumn, '2026-spring', 10) > rating(
-            with_spring, '2026-spring', 10
+            with_autumn, '2026-spring', 20
         )
-        assert rating(with_autumn, '2026-summer', 10) > spring_strong
+        assert rating(with_autumn, '2026-summer', 10) > rating(
+            with_autumn, '2026-summer', 20
+        )
+        assert rating(with_autumn, '2026-summer', 10) != spring_strong
         assert with_autumn['ratingModel'] == {
-            'carryoverRate': 0.25,
-            'credibleLevel': 0.9,
+            'carryoverMatchCap': 200,
+            'catchupLimit': 45,
+            'catchupLossMultiplier': 0.5,
+            'catchupProtectionGap': 150,
+            'catchupRate': 0.08,
             'minimumOutcomeDelta': 1,
+            'neutralDisplayScore': 1200,
             'priorMatches': 20,
+            'probabilityScale': 1800,
             'provisionalMatches': 5,
-            'version': 2,
+            'seasonResetDisplayScore': 1000,
+            'version': 3,
         }
     finally:
         await database.close()

@@ -27,7 +27,7 @@ function withPerformance(
 }
 
 describe('public dashboard player rankings', () => {
-  it('includes low samples and sorts by Bayesian rating instead of raw win rate', () => {
+  it('includes low samples and sorts by rating instead of raw win rate', () => {
     const sourcePlayers =
       TEST_DASHBOARD_SNAPSHOT.standings['2026-summer'].players;
     const lowSample = withPerformance(sourcePlayers[0], {

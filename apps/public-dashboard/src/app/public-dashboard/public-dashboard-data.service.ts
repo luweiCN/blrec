@@ -139,13 +139,28 @@ function isRatingModel(value: unknown): value is RatingModel {
   if (!isObject(value)) {
     return false;
   }
-  const commonModel =
+  if (value['version'] === 3) {
+    return (
+      value['priorMatches'] === 20 &&
+      value['carryoverMatchCap'] === 200 &&
+      value['provisionalMatches'] === 5 &&
+      value['neutralDisplayScore'] === 1200 &&
+      value['seasonResetDisplayScore'] === 1000 &&
+      value['probabilityScale'] === 1800 &&
+      value['minimumOutcomeDelta'] === 1 &&
+      value['catchupRate'] === 0.08 &&
+      value['catchupLimit'] === 45 &&
+      value['catchupProtectionGap'] === 150 &&
+      value['catchupLossMultiplier'] === 0.5
+    );
+  }
+  const legacyModel =
     value['priorMatches'] === 20 &&
     value['carryoverRate'] === 0.25 &&
     value['credibleLevel'] === 0.9 &&
     value['provisionalMatches'] === 5;
   return (
-    commonModel &&
+    legacyModel &&
     (value['version'] === 1 ||
       (value['version'] === 2 && value['minimumOutcomeDelta'] === 1))
   );

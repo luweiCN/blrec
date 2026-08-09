@@ -5,154 +5,158 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 __all__ = (
-    'CARRYOVER_RATE',
-    'CREDIBLE_LEVEL',
+    'CARRYOVER_MATCH_CAP',
+    'CATCHUP_LIMIT',
+    'CATCHUP_LOSS_MULTIPLIER',
+    'CATCHUP_PROTECTION_GAP',
+    'CATCHUP_RATE',
     'MINIMUM_OUTCOME_DELTA',
+    'NEUTRAL_DISPLAY_SCORE',
     'PRIOR_MATCHES',
+    'PROBABILITY_SCALE',
     'PROVISIONAL_MATCHES',
     'RATING_MODEL_VERSION',
-    'BayesianRating',
-    'calculate_bayesian_rating',
+    'SEASON_RESET_DISPLAY_SCORE',
+    'VirtualMatchRating',
+    'calculate_virtual_match_rating',
+    'expected_win_probability',
 )
 
 
 PRIOR_MATCHES = 20
-CARRYOVER_RATE = 0.25
-CREDIBLE_LEVEL = 0.9
+CARRYOVER_MATCH_CAP = 200
 PROVISIONAL_MATCHES = 5
+NEUTRAL_DISPLAY_SCORE = 1200
+SEASON_RESET_DISPLAY_SCORE = 1000
+PROBABILITY_SCALE = 1800
 MINIMUM_OUTCOME_DELTA = 1
-RATING_MODEL_VERSION = 2
-_LOWER_QUANTILE = 1.0 - CREDIBLE_LEVEL
-_SCORE_SCALE = 1000
+CATCHUP_RATE = 0.08
+CATCHUP_LIMIT = 45
+CATCHUP_PROTECTION_GAP = 150
+CATCHUP_LOSS_MULTIPLIER = 0.5
+RATING_MODEL_VERSION = 3
+
+_NEUTRAL_ABILITY = 0.5
+_DISPLAY_SCORE_MULTIPLIER = 3
+_DISPLAY_SCORE_MAXIMUM = 3000
+_INTERNAL_SCORE_MAXIMUM = _DISPLAY_SCORE_MAXIMUM // _DISPLAY_SCORE_MULTIPLIER
 
 
 @dataclass(frozen=True)
-class BayesianRating:
+class VirtualMatchRating:
     ability: float
+    evidence: float
     score: int
     provisional: bool
 
 
-def _beta_continued_fraction(alpha: float, beta: float, value: float) -> float:
-    maximum_iterations = 240
-    epsilon = 3e-14
-    minimum = 1e-300
-    combined = alpha + beta
-    alpha_plus_one = alpha + 1.0
-    alpha_minus_one = alpha - 1.0
-    denominator = 1.0 - combined * value / alpha_plus_one
-    if abs(denominator) < minimum:
-        denominator = minimum
-    denominator = 1.0 / denominator
-    numerator = 1.0
-    result = denominator
-    for iteration in range(1, maximum_iterations + 1):
-        doubled = 2 * iteration
-        coefficient = (
-            iteration
-            * (beta - iteration)
-            * value
-            / ((alpha_minus_one + doubled) * (alpha + doubled))
-        )
-        denominator = 1.0 + coefficient * denominator
-        if abs(denominator) < minimum:
-            denominator = minimum
-        numerator = 1.0 + coefficient / numerator
-        if abs(numerator) < minimum:
-            numerator = minimum
-        denominator = 1.0 / denominator
-        result *= denominator * numerator
-
-        coefficient = -(
-            (alpha + iteration)
-            * (combined + iteration)
-            * value
-            / ((alpha + doubled) * (alpha_plus_one + doubled))
-        )
-        denominator = 1.0 + coefficient * denominator
-        if abs(denominator) < minimum:
-            denominator = minimum
-        numerator = 1.0 + coefficient / numerator
-        if abs(numerator) < minimum:
-            numerator = minimum
-        denominator = 1.0 / denominator
-        change = denominator * numerator
-        result *= change
-        if abs(change - 1.0) <= epsilon:
-            return result
-    raise ArithmeticError('Bayesian rating beta fraction did not converge')
-
-
-def _regularized_incomplete_beta(value: float, alpha: float, beta: float) -> float:
-    if value <= 0.0:
-        return 0.0
-    if value >= 1.0:
-        return 1.0
-    scale = math.exp(
-        math.lgamma(alpha + beta)
-        - math.lgamma(alpha)
-        - math.lgamma(beta)
-        + alpha * math.log(value)
-        + beta * math.log1p(-value)
+def expected_win_probability(display_score: float) -> float:
+    if not math.isfinite(display_score):
+        raise ValueError('virtual match display score must be finite')
+    return 1.0 / (
+        1.0
+        + math.pow(10.0, (NEUTRAL_DISPLAY_SCORE - display_score) / PROBABILITY_SCALE)
     )
-    if value < (alpha + 1.0) / (alpha + beta + 2.0):
-        return scale * _beta_continued_fraction(alpha, beta, value) / alpha
-    return 1.0 - (scale * _beta_continued_fraction(beta, alpha, 1.0 - value) / beta)
 
 
-def _beta_quantile(probability: float, alpha: float, beta: float) -> float:
-    lower = 0.0
-    upper = 1.0
-    for _iteration in range(64):
-        midpoint = (lower + upper) / 2.0
-        if _regularized_incomplete_beta(midpoint, alpha, beta) < probability:
-            lower = midpoint
-        else:
-            upper = midpoint
-    return (lower + upper) / 2.0
+def _display_score_for_ability(ability: float) -> float:
+    score = NEUTRAL_DISPLAY_SCORE + PROBABILITY_SCALE * math.log10(
+        ability / (1.0 - ability)
+    )
+    return max(0.0, min(float(_DISPLAY_SCORE_MAXIMUM), score))
 
 
-def calculate_bayesian_rating(
+def _initial_evidence(
+    previous_ability: Optional[float], previous_evidence: Optional[float]
+) -> tuple[float, float]:
+    if previous_ability is None:
+        if previous_evidence is not None:
+            raise ValueError(
+                'virtual match previous evidence requires a previous ability'
+            )
+        return _NEUTRAL_ABILITY, float(PRIOR_MATCHES)
+    if not 0.0 < previous_ability < 1.0:
+        raise ValueError('virtual match previous ability must be between zero and one')
+    if previous_evidence is None or previous_evidence <= 0.0:
+        raise ValueError('virtual match previous evidence must be positive')
+    return previous_ability, min(previous_evidence, float(CARRYOVER_MATCH_CAP))
+
+
+def _internal_outcome_delta(
+    *,
+    result: str,
+    hidden_score_before: float,
+    hidden_score_after: float,
+    visible_score: int,
+) -> int:
+    display_delta = hidden_score_after - hidden_score_before
+    placement_gap = hidden_score_after - (visible_score * _DISPLAY_SCORE_MULTIPLIER)
+    if result == 'W' and placement_gap > 0.0:
+        display_delta += min(CATCHUP_LIMIT, placement_gap * CATCHUP_RATE)
+    elif result == 'L' and placement_gap >= CATCHUP_PROTECTION_GAP:
+        display_delta *= CATCHUP_LOSS_MULTIPLIER
+
+    internal_delta = round(display_delta / _DISPLAY_SCORE_MULTIPLIER)
+    if result == 'W':
+        return max(MINIMUM_OUTCOME_DELTA, internal_delta)
+    return min(-MINIMUM_OUTCOME_DELTA, internal_delta)
+
+
+def calculate_virtual_match_rating(
     *,
     results: Sequence[str],
-    baseline: float,
-    previous_ability: Optional[float],
-    carryover_rate: float = CARRYOVER_RATE,
-) -> Optional[BayesianRating]:
-    if not 0.0 < baseline < 1.0:
-        raise ValueError('Bayesian rating baseline must be between zero and one')
-    if previous_ability is not None and not 0.0 <= previous_ability <= 1.0:
-        raise ValueError('Bayesian previous ability must be between zero and one')
-    if not 0.0 <= carryover_rate <= 1.0:
-        raise ValueError('Bayesian carryover rate must be between zero and one')
+    previous_ability: Optional[float] = None,
+    previous_evidence: Optional[float] = None,
+    reset_visible_score: bool = True,
+) -> Optional[VirtualMatchRating]:
     if any(result not in ('W', 'L') for result in results):
-        raise ValueError('Bayesian rating result must be W or L')
-    matches = len(results)
-    if matches == 0:
+        raise ValueError('virtual match rating result must be W or L')
+    if not results:
         return None
 
-    prior_mean = baseline
-    if previous_ability is not None:
-        prior_mean = (
-            baseline * (1.0 - carryover_rate) + previous_ability * carryover_rate
+    prior_ability, prior_evidence = _initial_evidence(
+        previous_ability, previous_evidence
+    )
+    alpha = prior_ability * prior_evidence
+    beta = (1.0 - prior_ability) * prior_evidence
+    visible_score = round(
+        (
+            SEASON_RESET_DISPLAY_SCORE
+            if reset_visible_score
+            else _display_score_for_ability(prior_ability)
         )
-    alpha = prior_mean * PRIOR_MATCHES
-    beta = (1.0 - prior_mean) * PRIOR_MATCHES
-    score = round(_beta_quantile(_LOWER_QUANTILE, alpha, beta) * _SCORE_SCALE)
+        / _DISPLAY_SCORE_MULTIPLIER
+    )
+
     for result in results:
+        hidden_score_before = _display_score_for_ability(alpha / (alpha + beta))
         if result == 'W':
             alpha += 1.0
         else:
             beta += 1.0
-        target_score = round(
-            _beta_quantile(_LOWER_QUANTILE, alpha, beta) * _SCORE_SCALE
-        )
-        if result == 'W':
-            score = max(target_score, score + MINIMUM_OUTCOME_DELTA)
-        else:
-            score = min(target_score, score - MINIMUM_OUTCOME_DELTA)
-        score = max(0, min(_SCORE_SCALE, score))
+        evidence = alpha + beta
+        if evidence > CARRYOVER_MATCH_CAP:
+            evidence_scale = CARRYOVER_MATCH_CAP / evidence
+            alpha *= evidence_scale
+            beta *= evidence_scale
+        hidden_score_after = _display_score_for_ability(alpha / (alpha + beta))
+        if reset_visible_score:
+            visible_score += _internal_outcome_delta(
+                result=result,
+                hidden_score_before=hidden_score_before,
+                hidden_score_after=hidden_score_after,
+                visible_score=visible_score,
+            )
+            visible_score = max(0, min(_INTERNAL_SCORE_MAXIMUM, visible_score))
+
     ability = alpha / (alpha + beta)
-    return BayesianRating(
-        ability=ability, score=score, provisional=matches < PROVISIONAL_MATCHES
+    if not reset_visible_score:
+        visible_score = round(
+            _display_score_for_ability(ability) / _DISPLAY_SCORE_MULTIPLIER
+        )
+    return VirtualMatchRating(
+        ability=ability,
+        evidence=alpha + beta,
+        score=visible_score,
+        provisional=len(results) < PROVISIONAL_MATCHES,
     )
