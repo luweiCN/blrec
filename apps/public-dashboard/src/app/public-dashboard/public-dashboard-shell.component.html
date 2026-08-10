@@ -1,75 +1,71 @@
 <main class="dashboard">
   <header class="site-header">
-    <div class="header-primary">
-      <a class="brand" routerLink="/" aria-label="虚荣对局榜首页">
-        <span class="brand-mark" aria-hidden="true"><span>V</span></span>
-        <span class="brand-copy">
-          <strong>虚荣对局榜</strong>
-          <small>COMMUNITY ARCHIVE</small>
-        </span>
+    <a class="brand" routerLink="/" aria-label="虚荣对局榜首页">
+      <span class="brand-mark" aria-hidden="true"><span>V</span></span>
+      <span class="brand-copy">
+        <strong>虚荣对局榜</strong>
+        <small>COMMUNITY ARCHIVE</small>
+      </span>
+    </a>
+
+    <nav class="primary-nav" aria-label="榜单页面">
+      <a
+        routerLink="/"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+        [routerLinkActiveOptions]="{ exact: true }"
+      >
+        总览
       </a>
+      <a
+        routerLink="/players"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        <span class="nav-label-long">玩家榜</span>
+        <span class="nav-label-short">玩家</span>
+      </a>
+      <a
+        routerLink="/heroes"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        <span class="nav-label-long">英雄榜</span>
+        <span class="nav-label-short">英雄</span>
+      </a>
+      <a
+        routerLink="/guide/rankings"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+      >
+        <span class="nav-label-long">榜单说明</span>
+        <span class="nav-label-short">榜单</span>
+      </a>
+      <a
+        class="game-guide-link"
+        routerLink="/guide/download"
+        [class.active]="isGameGuideActive"
+        [attr.aria-current]="isGameGuideActive ? 'page' : null"
+      >
+        <span class="nav-label-long">下载与游玩</span>
+        <span class="nav-label-short">下载游玩</span>
+      </a>
+    </nav>
 
-      <p *ngIf="data.state.kind === 'ready'" class="data-status">
-        <span aria-hidden="true"></span>
-        <span class="status-season">{{ currentSeasonLabel }}</span>
-        <span aria-hidden="true">·</span>
-        <span class="status-time">
-          <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
-        </span>
-      </p>
-    </div>
+    <app-dashboard-mode-switcher
+      class="header-mode"
+      [value]="dashboardMode.mode"
+      (valueChange)="dashboardMode.selectMode($event)"
+    ></app-dashboard-mode-switcher>
 
-    <div class="header-controls">
-      <nav aria-label="榜单页面">
-        <a
-          routerLink="/"
-          routerLinkActive="active"
-          ariaCurrentWhenActive="page"
-          [routerLinkActiveOptions]="{ exact: true }"
-        >
-          总览
-        </a>
-        <a
-          routerLink="/players"
-          routerLinkActive="active"
-          ariaCurrentWhenActive="page"
-        >
-          <span class="nav-label-long">玩家榜</span>
-          <span class="nav-label-short">玩家</span>
-        </a>
-        <a
-          routerLink="/heroes"
-          routerLinkActive="active"
-          ariaCurrentWhenActive="page"
-        >
-          <span class="nav-label-long">英雄榜</span>
-          <span class="nav-label-short">英雄</span>
-        </a>
-        <a
-          routerLink="/guide/rankings"
-          routerLinkActive="active"
-          ariaCurrentWhenActive="page"
-        >
-          <span class="nav-label-long">榜单说明</span>
-          <span class="nav-label-short">榜单</span>
-        </a>
-        <a
-          class="game-guide-link"
-          routerLink="/guide/download"
-          [class.active]="isGameGuideActive"
-          [attr.aria-current]="isGameGuideActive ? 'page' : null"
-        >
-          <span class="nav-label-long">下载与游玩</span>
-          <span class="nav-label-short">下载游玩</span>
-        </a>
-      </nav>
-
-      <app-dashboard-mode-switcher
-        class="header-mode"
-        [value]="dashboardMode.mode"
-        (valueChange)="dashboardMode.selectMode($event)"
-      ></app-dashboard-mode-switcher>
-    </div>
+    <p *ngIf="data.state.kind === 'ready'" class="data-status">
+      <span aria-hidden="true"></span>
+      <span class="status-season">{{ currentSeasonLabel }}</span>
+      <span aria-hidden="true">·</span>
+      <span class="status-time">
+        <span class="status-prefix">最后同步 </span>{{ lastUpdatedLabel }}
+      </span>
+    </p>
   </header>
 
   <router-outlet *ngIf="data.state.kind === 'ready'"></router-outlet>

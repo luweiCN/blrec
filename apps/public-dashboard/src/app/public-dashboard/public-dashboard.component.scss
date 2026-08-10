@@ -24,12 +24,33 @@ a {
 .arena-hero {
   position: relative;
   display: grid;
+  grid-template-areas:
+    "copy podium"
+    "summary summary";
   grid-template-columns: minmax(0, 0.82fr) minmax(540px, 1.18fr);
-  gap: 72px;
+  gap: 26px 64px;
   align-items: center;
   width: min(calc(100% - var(--content-gutter)), var(--content-width));
-  margin: 0 auto;
-  padding: 78px 0 64px;
+  margin: 34px auto 0;
+  padding: 46px 46px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 78% 28%, oklch(42% 0.17 294 / 0.22), transparent 24rem),
+    radial-gradient(circle at 8% 8%, oklch(35% 0.1 214 / 0.12), transparent 22rem),
+    linear-gradient(145deg, oklch(16% 0.047 286), oklch(12% 0.035 285));
+
+  &::after {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--cyan), transparent 36%, var(--gold) 82%, transparent);
+    content: "";
+    opacity: 0.78;
+  }
 }
 
 .season {
@@ -49,11 +70,16 @@ a {
 }
 
 .hero-copy {
+  position: relative;
+  z-index: 1;
+  grid-area: copy;
+  padding: 10px 0 14px;
+
   h1 {
     max-width: 8.5ch;
     margin: 0;
     color: var(--ink);
-    font-size: 4.15rem;
+    font-size: 4.55rem;
     font-weight: 780;
     letter-spacing: -0.035em;
     line-height: 1.04;
@@ -65,20 +91,18 @@ a {
   max-width: 35rem;
   margin: 26px 0 0;
   color: var(--ink-soft);
-  font-size: 0.92rem;
+  font-size: 0.94rem;
   line-height: 1.82;
   text-wrap: pretty;
 }
 
 .podium-panel {
   position: relative;
+  grid-area: podium;
   min-height: 404px;
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background:
-    radial-gradient(circle at 50% 28%, oklch(40% 0.15 294 / 0.18), transparent 15rem),
-    linear-gradient(180deg, var(--surface-1), oklch(13.5% 0.035 285));
+  border-left: 1px solid var(--line-soft);
+  background: radial-gradient(circle at 50% 32%, oklch(46% 0.17 294 / 0.2), transparent 16rem);
 
   &::before {
     position: absolute;
@@ -87,7 +111,7 @@ a {
     width: 380px;
     height: 300px;
     border-radius: 50%;
-    background: oklch(50% 0.16 294 / 0.12);
+    background: oklch(50% 0.16 294 / 0.1);
     content: "";
     filter: blur(18px);
     transform: translateX(-50%);
@@ -116,7 +140,7 @@ a {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-      padding: 26px 28px 0;
+    padding: 12px 22px 0 34px;
 
     div {
       display: grid;
@@ -145,8 +169,8 @@ a {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end;
-  min-height: 326px;
-  padding: 34px 26px 50px;
+  min-height: 352px;
+  padding: 42px 18px 50px 30px;
 }
 
 .podium-slot {
@@ -179,8 +203,8 @@ a {
     }
 
     .podium-emblem {
-      width: 154px;
-      height: 154px;
+      width: 176px;
+      height: 176px;
     }
 
     .podium-avatar {
@@ -208,8 +232,8 @@ a {
 
 .podium-emblem {
   display: block;
-  width: 116px;
-  height: 116px;
+  width: 126px;
+  height: 126px;
   object-fit: contain;
   filter: drop-shadow(0 7px 12px oklch(6% 0.02 280 / 0.62));
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -260,15 +284,16 @@ a {
 
 .summary-strip {
   display: grid;
+  position: relative;
+  z-index: 1;
+  grid-area: summary;
   grid-template-columns: 170px minmax(0, 1fr) auto;
   gap: 28px;
   align-items: center;
-  width: min(calc(100% - var(--content-gutter)), var(--content-width));
-  margin: 0 auto;
-  padding: 22px 26px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  background: oklch(16.5% 0.041 283 / 0.78);
+  margin: 8px -46px 0;
+  padding: 23px 42px;
+  border-top: 1px solid var(--line-soft);
+  background: oklch(10.5% 0.029 285 / 0.72);
 
   dl {
     display: grid;

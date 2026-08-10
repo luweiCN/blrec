@@ -20,7 +20,7 @@ a {
 .leaderboard-page {
   width: min(calc(100% - var(--content-gutter)), var(--content-width));
   margin: 0 auto;
-  padding: 34px 0 52px;
+  padding: 38px 0 64px;
   color: var(--ink);
 }
 
@@ -46,12 +46,19 @@ a {
   gap: 40px;
   align-items: flex-end;
   justify-content: space-between;
-  margin: 34px 0 30px;
+  margin: 28px 0 30px;
+  padding: 34px 36px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 86% 8%, oklch(41% 0.15 294 / 0.18), transparent 20rem),
+    linear-gradient(135deg, oklch(17% 0.05 286), oklch(13% 0.035 285));
 
   h1 {
     margin: 0;
     color: var(--ink);
-    font-size: 2.4rem;
+    font-size: 3.05rem;
     font-weight: 770;
     letter-spacing: -0.03em;
     line-height: 1.08;
@@ -74,10 +81,8 @@ a {
   gap: 5px;
   min-width: 220px;
   margin: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  background: oklch(16.5% 0.041 283 / 0.74);
+  padding: 4px 0 4px 22px;
+  border-left: 1px solid var(--gold-soft);
 
   strong {
     color: var(--gold);
@@ -91,11 +96,7 @@ a {
 }
 
 .directory-panel {
-  margin-top: 24px;
-  overflow: hidden;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  background: oklch(16.5% 0.041 283 / 0.92);
+  margin-top: 28px;
 }
 
 .directory-toolbar {
@@ -104,6 +105,9 @@ a {
   gap: 22px;
   align-items: end;
   padding: 26px 28px 22px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: oklch(16.5% 0.041 283 / 0.88);
 
   h2 {
     margin: 0;
@@ -211,7 +215,11 @@ a {
 }
 
 .directory-table-wrap {
+  margin-top: 14px;
   overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: oklch(15% 0.038 284 / 0.9);
 }
 
 .directory-table {
@@ -434,8 +442,7 @@ a {
   gap: 6px;
   align-items: center;
   justify-content: flex-end;
-  padding: 20px 26px;
-  border-top: 1px solid var(--line-soft);
+  padding: 18px 2px 0;
 
   button {
     min-width: 42px;

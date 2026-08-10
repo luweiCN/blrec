@@ -61,47 +61,47 @@
         </p>
       </div>
     </aside>
-  </section>
 
-  <section class="summary-strip" aria-label="数据概览">
-    <div class="summary-label">
-      <span>本期概览</span>
-      <p>{{ seasonPeriod }}</p>
-    </div>
-    <dl>
-      <div>
-        <dt>收录玩家</dt>
-        <dd>{{ summary.playerCount }}</dd>
+    <section class="summary-strip" aria-label="数据概览">
+      <div class="summary-label">
+        <span>本期概览</span>
+        <p>{{ seasonPeriod }}</p>
       </div>
-      <div>
-        <dt>{{ modeLabel() }}对局</dt>
-        <dd>{{ summary.matchCount | number }}</dd>
-      </div>
-      <div>
-        <dt>样本胜率</dt>
-        <dd>{{ summary.winRate | percent: "1.0-1" }}</dd>
-      </div>
-      <div>
-        <dt>已识别英雄</dt>
-        <dd>{{ summary.heroCount }}</dd>
-      </div>
-    </dl>
-    <p class="snapshot-note">真实数据 · 持续更新</p>
+      <dl>
+        <div>
+          <dt>收录玩家</dt>
+          <dd>{{ summary.playerCount }}</dd>
+        </div>
+        <div>
+          <dt>{{ modeLabel() }}对局</dt>
+          <dd>{{ summary.matchCount | number }}</dd>
+        </div>
+        <div>
+          <dt>样本胜率</dt>
+          <dd>{{ summary.winRate | percent: "1.0-1" }}</dd>
+        </div>
+        <div>
+          <dt>已识别英雄</dt>
+          <dd>{{ summary.heroCount }}</dd>
+        </div>
+      </dl>
+      <p class="snapshot-note">真实数据 · 持续更新</p>
+    </section>
   </section>
 
   <section id="players" class="players-section" aria-labelledby="players-title">
-    <div class="ranking-panel">
-      <header class="section-heading">
-        <div>
-          <p class="section-kicker">本期排名</p>
-          <h2 id="players-title">玩家榜</h2>
-          <p>按排位分展示当前模式下的玩家表现。</p>
-        </div>
-        <a class="full-ranking-link" routerLink="/players">
-          Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位
-        </a>
-      </header>
+    <header class="section-heading players-heading">
+      <div>
+        <p class="section-kicker">本期排名</p>
+        <h2 id="players-title">玩家榜</h2>
+        <p>按排位分展示当前模式下的玩家表现。</p>
+      </div>
+      <a class="full-ranking-link" routerLink="/players">
+        Top {{ overviewRankings.length }} / 共 {{ rankings.length }} 位
+      </a>
+    </header>
 
+    <div class="ranking-panel">
       <div class="ranking-table-wrap">
         <table>
           <caption>
