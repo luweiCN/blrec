@@ -112,6 +112,15 @@ def create_app(settings: Optional[ApiSettings] = None) -> FastAPI:
             regex=r'^(all-time|\d{4}-(spring|summer|autumn))$',
         ),
     ) -> dict:
+        with database_session(active_settings.database_path) as connection:
+            initialized = connection.execute(
+                'SELECT 1 FROM ingestion_batches LIMIT 1'
+            ).fetchone()
+        if initialized is None:
+            raise HTTPException(
+                status_code=503,
+                detail='match archive is waiting for its first publication',
+            )
         return list_matches(
             active_settings.database_path,
             page=page,

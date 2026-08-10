@@ -120,6 +120,22 @@ def ingest(client: TestClient, payload: Dict[str, Any], key: str = 'batch-1') ->
     )
 
 
+def test_match_list_waits_for_first_publication(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    response = client.get('/v1/matches')
+
+    assert response.status_code == 503
+    assert response.json() == {
+        'detail': 'match archive is waiting for its first publication'
+    }
+
+    assert ingest(client, batch([])).status_code == 200
+    published = client.get('/v1/matches')
+    assert published.status_code == 200
+    assert published.json()['total'] == 0
+
+
 def test_ingest_requires_authentication_and_is_idempotent(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     payload = batch([match(2, played_at='2026-06-02T12:00:00Z', result='W')])
