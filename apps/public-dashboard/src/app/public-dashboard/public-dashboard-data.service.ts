@@ -3,17 +3,11 @@ import { Injectable } from '@angular/core';
 import { environment } from '../../environments/environment';
 import {
   DashboardManifest,
-  DashboardMatch,
-  DashboardMatchPlayer,
-  DashboardMatchReplay,
-  DashboardMatchTeam,
   DashboardSnapshot,
   DashboardTrendPublication,
   DashboardTrends,
   HeroPerformance,
   HeroStanding,
-  HeroSynergy,
-  HeroSynergyRanking,
   HeroUsage,
   HeroUsageStats,
   isSeasonKey,
@@ -110,14 +104,6 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
-}
-
-function isPositiveIntegerArray(value: unknown): value is readonly number[] {
-  return (
-    Array.isArray(value) &&
-    value.every((item) => isNonNegativeInteger(item) && item > 0) &&
-    new Set(value).size === value.length
-  );
 }
 
 function isSeasonOption(value: unknown): value is SeasonOption {
@@ -290,7 +276,6 @@ function isPlayerStanding(value: unknown): value is PlayerStanding {
     value['name'].length > 0 &&
     typeof value['initial'] === 'string' &&
     typeof value['roomLabel'] === 'string' &&
-    isPositiveIntegerArray(value['roomIds']) &&
     isStringArray(value['aliases']) &&
     Number.isInteger(value['trend']) &&
     Array.isArray(value['form']) &&
@@ -302,27 +287,6 @@ function isPlayerStanding(value: unknown): value is PlayerStanding {
   );
 }
 
-function isHeroSynergy(value: unknown): value is HeroSynergy {
-  return (
-    isObject(value) &&
-    typeof value['name'] === 'string' &&
-    value['name'].length > 0 &&
-    isNonNegativeInteger(value['matches']) &&
-    isNonNegativeInteger(value['wins']) &&
-    value['wins'] <= value['matches']
-  );
-}
-
-function isHeroSynergyRanking(value: unknown): value is HeroSynergyRanking {
-  return (
-    isObject(value) &&
-    Array.isArray(value['best']) &&
-    value['best'].every(isHeroSynergy) &&
-    Array.isArray(value['worst']) &&
-    value['worst'].every(isHeroSynergy)
-  );
-}
-
 function isHeroStanding(value: unknown): value is HeroStanding {
   if (!isObject(value)) {
     return false;
@@ -330,76 +294,7 @@ function isHeroStanding(value: unknown): value is HeroStanding {
   return (
     typeof value['id'] === 'string' &&
     typeof value['name'] === 'string' &&
-    hasModes(value['modes'], isHeroPerformance) &&
-    (value['synergies'] === undefined ||
-      hasModes(value['synergies'], isHeroSynergyRanking))
-  );
-}
-
-function isNullableNonNegativeInteger(value: unknown): boolean {
-  return value === null || isNonNegativeInteger(value);
-}
-
-function isMatchPlayer(value: unknown): value is DashboardMatchPlayer {
-  return (
-    isObject(value) &&
-    typeof value['name'] === 'string' &&
-    value['name'].length > 0 &&
-    typeof value['heroName'] === 'string' &&
-    isNullableNonNegativeInteger(value['kills']) &&
-    isNullableNonNegativeInteger(value['deaths']) &&
-    isNullableNonNegativeInteger(value['assists']) &&
-    isNullableNonNegativeInteger(value['economy']) &&
-    isNullableNonNegativeInteger(value['lastHits']) &&
-    typeof value['isRecordedPlayer'] === 'boolean'
-  );
-}
-
-function isMatchTeam(value: unknown): value is DashboardMatchTeam {
-  return (
-    isObject(value) &&
-    (value['side'] === 'left' || value['side'] === 'right') &&
-    (value['color'] === 'teal' || value['color'] === 'orange') &&
-    isNullableNonNegativeInteger(value['kills']) &&
-    isNullableNonNegativeInteger(value['economy']) &&
-    Array.isArray(value['players']) &&
-    value['players'].length <= 5 &&
-    value['players'].every(isMatchPlayer)
-  );
-}
-
-function isMatchReplay(value: unknown): value is DashboardMatchReplay {
-  return (
-    isObject(value) &&
-    (value['kind'] === 'match' || value['kind'] === 'full') &&
-    typeof value['url'] === 'string' &&
-    /^https:\/\/www\.bilibili\.com\/video\/[0-9A-Za-z]{10,20}(?:\?p=\d+&t=\d+)?$/u.test(
-      value['url'],
-    )
-  );
-}
-
-function isDashboardMatch(value: unknown): value is DashboardMatch {
-  return (
-    isObject(value) &&
-    isNonNegativeInteger(value['id']) &&
-    value['id'] > 0 &&
-    isNonNegativeInteger(value['playerId']) &&
-    value['playerId'] > 0 &&
-    typeof value['seasonKey'] === 'string' &&
-    value['seasonKey'] !== 'all-time' &&
-    isSeasonKey(value['seasonKey']) &&
-    (value['mode'] === '3v3' ||
-      value['mode'] === 'brawl' ||
-      value['mode'] === '5v5') &&
-    typeof value['playedAt'] === 'string' &&
-    !Number.isNaN(Date.parse(value['playedAt'])) &&
-    isNonNegativeInteger(value['durationSeconds']) &&
-    (value['result'] === 'W' || value['result'] === 'L') &&
-    isMatchTeam(value['ally']) &&
-    isMatchTeam(value['enemy']) &&
-    value['ally'].side !== value['enemy'].side &&
-    (value['replay'] === undefined || isMatchReplay(value['replay']))
+    hasModes(value['modes'], isHeroPerformance)
   );
 }
 
@@ -503,14 +398,9 @@ function parseManifest(value: unknown): DashboardManifest {
 }
 
 function parseSnapshot(value: unknown): DashboardSnapshot {
-  if (!isObject(value)) {
-    throw new Error('dashboard snapshot has an unsupported format');
-  }
-  const supportedSchema =
-    (value['schemaVersion'] === 2 || value['schemaVersion'] === 3);
-  const matches = value['schemaVersion'] === 2 ? [] : value['matches'];
   if (
-    !supportedSchema ||
+    !isObject(value) ||
+    value['schemaVersion'] !== 2 ||
     typeof value['snapshotId'] !== 'string' ||
     typeof value['publicationDate'] !== 'string' ||
     typeof value['generatedAt'] !== 'string' ||
@@ -522,9 +412,7 @@ function parseSnapshot(value: unknown): DashboardSnapshot {
     !Array.isArray(value['seasons']) ||
     value['seasons'].length === 0 ||
     !value['seasons'].every(isSeasonOption) ||
-    !isObject(value['standings']) ||
-    !Array.isArray(matches) ||
-    !matches.every(isDashboardMatch)
+    !isObject(value['standings'])
   ) {
     throw new Error('dashboard snapshot has an unsupported format');
   }
@@ -544,30 +432,5 @@ function parseSnapshot(value: unknown): DashboardSnapshot {
   if (standings[value['currentSeasonKey']] === undefined) {
     throw new Error('dashboard snapshot is missing its current season');
   }
-  const allTimeStandings = standings['all-time'];
-  const playerIds = new Set(
-    isObject(allTimeStandings) && Array.isArray(allTimeStandings['players'])
-      ? allTimeStandings['players']
-          .filter(isPlayerStanding)
-          .map((player) => player.id)
-      : [],
-  );
-  const matchIds = new Set<number>();
-  for (const [index, match] of matches.entries()) {
-    if (matchIds.has(match.id) || !playerIds.has(match.playerId)) {
-      throw new Error('dashboard matches contain an invalid player or match ID');
-    }
-    if (
-      index > 0 &&
-      Date.parse(match.playedAt) > Date.parse(matches[index - 1].playedAt)
-    ) {
-      throw new Error('dashboard matches are not sorted by live time');
-    }
-    matchIds.add(match.id);
-  }
-  return {
-    ...value,
-    schemaVersion: 3,
-    matches,
-  } as unknown as DashboardSnapshot;
+  return value as unknown as DashboardSnapshot;
 }

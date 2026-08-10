@@ -121,7 +121,6 @@ function player(seed: PlayerSeed): PlayerStanding {
     name: seed.name,
     initial: seed.name.slice(-1),
     roomLabel: '直播间 ' + seed.roomId,
-    roomIds: [Number(seed.roomId)],
     aliases: seed.aliases,
     trend: seed.trend,
     form: seed.form,

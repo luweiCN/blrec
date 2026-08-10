@@ -39,7 +39,6 @@ import {
 } from './public-dashboard.proficiency';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
-  DashboardMatch,
   MatchResult,
   ModeBreakdown,
   ModeFilter,
@@ -110,7 +109,6 @@ const TREND_CHART_PADDING_Y = 18;
     './leaderboard-profile-page.scss',
     './player-rank-showcase.scss',
     './player-rating-forecast.scss',
-    './player-hero-table.scss',
     './leaderboard-profile-responsive.scss',
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -400,14 +398,6 @@ export class PlayerDetailPageComponent implements OnDestroy {
       this.playerId ?? 0,
       this.activeHeroSort,
     );
-  }
-
-  get matchArchive(): readonly DashboardMatch[] {
-    return this.data.snapshot.matches;
-  }
-
-  get allPlayers(): readonly PlayerStanding[] {
-    return this.data.snapshot.standings['all-time'].players;
   }
 
   get seasonHistory(): readonly PlayerSeasonRecord[] {

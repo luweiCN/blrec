@@ -9,11 +9,8 @@ import {
 } from './dashboard-mode.service';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
-import { MatchDetailModalComponent } from './match-detail-modal.component';
-import { MatchExplorerComponent } from './match-explorer.component';
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
-import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
@@ -32,10 +29,7 @@ describe('PlayerDetailPageComponent', () => {
         PlayerDetailPageComponent,
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
-        MatchDetailModalComponent,
-        MatchExplorerComponent,
         PlayerAvatarComponent,
-        PlayerRoomLinksComponent,
         SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],

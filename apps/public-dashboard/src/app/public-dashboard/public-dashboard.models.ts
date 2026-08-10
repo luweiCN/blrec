@@ -138,7 +138,6 @@ export interface PlayerStanding {
   readonly name: string;
   readonly initial: string;
   readonly roomLabel: string;
-  readonly roomIds: readonly number[];
   readonly aliases: readonly string[];
   readonly trend: number;
   readonly form: readonly MatchResult[];
@@ -153,59 +152,10 @@ export interface HeroPerformance {
   readonly players: number;
 }
 
-export interface HeroSynergy {
-  readonly name: string;
-  readonly matches: number;
-  readonly wins: number;
-}
-
-export interface HeroSynergyRanking {
-  readonly best: readonly HeroSynergy[];
-  readonly worst: readonly HeroSynergy[];
-}
-
 export interface HeroStanding {
   readonly id: string;
   readonly name: string;
   readonly modes: Readonly<Record<ModeFilter, HeroPerformance>>;
-  readonly synergies?: Readonly<Record<ModeFilter, HeroSynergyRanking>>;
-}
-
-export interface DashboardMatchPlayer {
-  readonly name: string;
-  readonly heroName: string;
-  readonly kills: number | null;
-  readonly deaths: number | null;
-  readonly assists: number | null;
-  readonly economy: number | null;
-  readonly lastHits: number | null;
-  readonly isRecordedPlayer: boolean;
-}
-
-export interface DashboardMatchTeam {
-  readonly side: 'left' | 'right';
-  readonly color: 'teal' | 'orange';
-  readonly kills: number | null;
-  readonly economy: number | null;
-  readonly players: readonly DashboardMatchPlayer[];
-}
-
-export interface DashboardMatchReplay {
-  readonly kind: 'match' | 'full';
-  readonly url: string;
-}
-
-export interface DashboardMatch {
-  readonly id: number;
-  readonly playerId: number;
-  readonly seasonKey: Exclude<SeasonKey, 'all-time'>;
-  readonly mode: CompetitiveMode;
-  readonly playedAt: string;
-  readonly durationSeconds: number;
-  readonly result: MatchResult;
-  readonly ally: DashboardMatchTeam;
-  readonly enemy: DashboardMatchTeam;
-  readonly replay?: DashboardMatchReplay;
 }
 
 export interface SeasonStandings {
@@ -214,7 +164,7 @@ export interface SeasonStandings {
 }
 
 export interface DashboardSnapshot {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 2;
   readonly snapshotId: string;
   readonly publicationDate: string;
   readonly generatedAt: string;
@@ -224,7 +174,6 @@ export interface DashboardSnapshot {
   readonly currentSeasonKey: SeasonKey;
   readonly seasons: readonly SeasonOption[];
   readonly standings: Readonly<Record<string, SeasonStandings>>;
-  readonly matches: readonly DashboardMatch[];
 }
 
 export interface DashboardSummary {

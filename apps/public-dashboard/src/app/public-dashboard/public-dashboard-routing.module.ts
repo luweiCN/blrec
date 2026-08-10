@@ -4,7 +4,6 @@ import { RouterModule, Routes } from '@angular/router';
 import { DownloadGuidePageComponent } from './download-guide-page.component';
 import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { HeroRankingsPageComponent } from './hero-rankings-page.component';
-import { MatchesPageComponent } from './matches-page.component';
 import { PlayGuidePageComponent } from './play-guide-page.component';
 import { PlayerDetailPageComponent } from './player-detail-page.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
@@ -22,11 +21,6 @@ const routes: Routes = [
         pathMatch: 'full',
         component: PublicDashboardComponent,
         title: '虚荣对局榜',
-      },
-      {
-        path: 'matches',
-        component: MatchesPageComponent,
-        title: '对局档案 · 虚荣对局榜',
       },
       {
         path: 'players',

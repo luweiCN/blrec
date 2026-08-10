@@ -25,7 +25,6 @@ import {
 } from './public-dashboard.data';
 import {
   HeroIdentity,
-  heroDisplayName,
   heroIdentity,
 } from './public-dashboard.hero-names';
 import {
@@ -38,7 +37,6 @@ import {
   CompetitiveMode,
   HeroPerformance,
   HeroStanding,
-  HeroSynergy,
   ModeFilter,
   SeasonKey,
   SeasonOption,
@@ -68,7 +66,6 @@ const EMPTY_PERFORMANCE: HeroPerformance = {
   styleUrls: [
     './leaderboard-detail-page.scss',
     './leaderboard-profile-page.scss',
-    './hero-synergy.scss',
     './leaderboard-profile-responsive.scss',
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -177,14 +174,6 @@ export class HeroDetailPageComponent implements OnDestroy {
     }));
   }
 
-  get bestSynergies(): readonly HeroSynergy[] {
-    return this.seasonHero?.synergies?.[this.activeMode].best ?? [];
-  }
-
-  get worstSynergies(): readonly HeroSynergy[] {
-    return this.seasonHero?.synergies?.[this.activeMode].worst ?? [];
-  }
-
   get playerRecords(): readonly HeroProficiency[] {
     const hero = this.hero;
     return hero === undefined
@@ -240,10 +229,6 @@ export class HeroDetailPageComponent implements OnDestroy {
     return heroImage(heroName);
   }
 
-  heroName(heroName: string): string {
-    return heroDisplayName(heroName);
-  }
-
   winRate(value: { readonly matches: number; readonly wins: number }): number {
     return winRate(value);
   }
@@ -262,9 +247,5 @@ export class HeroDetailPageComponent implements OnDestroy {
 
   trackSeason(_index: number, record: HeroSeasonRecord): SeasonKey {
     return record.season.key;
-  }
-
-  trackSynergy(_index: number, synergy: HeroSynergy): string {
-    return synergy.name;
   }
 }

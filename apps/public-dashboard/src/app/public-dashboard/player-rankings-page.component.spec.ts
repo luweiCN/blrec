@@ -10,7 +10,6 @@ import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
 import { PlayerAvatarComponent } from './player-avatar.component';
 import { PlayerRankingsPageComponent } from './player-rankings-page.component';
-import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
 import {
@@ -30,7 +29,6 @@ describe('PlayerRankingsPageComponent', () => {
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
         PlayerAvatarComponent,
-        PlayerRoomLinksComponent,
         SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
@@ -157,7 +155,7 @@ describe('PlayerRankingsPageComponent', () => {
 
   it('links every visible player to a stable detail route', () => {
     const links = fixture.nativeElement.querySelectorAll(
-      '.directory-player-main[href]',
+      '.directory-player[href]',
     ) as NodeListOf<HTMLAnchorElement>;
 
     expect(links.length).toBe(component.visibleRows.length);

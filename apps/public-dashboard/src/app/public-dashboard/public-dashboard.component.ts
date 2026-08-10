@@ -7,7 +7,6 @@ import {
 import { Subscription } from 'rxjs';
 
 import { DashboardModeService } from './dashboard-mode.service';
-import { filterDashboardMatches } from './public-dashboard.matches';
 import {
   getDashboardSummary,
   getHeroRankings,
@@ -27,8 +26,6 @@ import { heroDisplayName } from './public-dashboard.hero-names';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
   DashboardSummary,
-  DashboardMatch,
-  DashboardMatchPlayer,
   HeroPerformance,
   HeroStanding,
   HeroUsage,
@@ -131,24 +128,6 @@ export class PublicDashboardComponent implements OnDestroy {
       : getModeBreakdown(this.selectedPlayer);
   }
 
-  get selectedRecentMatches(): readonly DashboardMatch[] {
-    const player = this.selectedPlayer;
-    if (player === undefined) {
-      return [];
-    }
-    return filterDashboardMatches(
-      this.data.snapshot.matches,
-      this.data.snapshot.standings['all-time'].players,
-      {
-        seasonKey: this.activeSeason,
-        mode: this.activeMode,
-        fixedPlayerId: player.id,
-        playerQuery: '',
-        selectedHeroes: [],
-      },
-    ).slice(0, 3);
-  }
-
   get heroRankings(): readonly HeroStanding[] {
     return getHeroRankings(
       this.data.snapshot,
@@ -207,21 +186,6 @@ export class PublicDashboardComponent implements OnDestroy {
     return heroDisplayName(heroName);
   }
 
-  recordedMatchPlayer(match: DashboardMatch): DashboardMatchPlayer | undefined {
-    return match.ally.players.find((player) => player.isRecordedPlayer);
-  }
-
-  formatMatchDate(value: string): string {
-    return new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(new Date(value));
-  }
-
   winRate(value: { readonly matches: number; readonly wins: number }): number {
     return winRate(value);
   }
@@ -264,10 +228,6 @@ export class PublicDashboardComponent implements OnDestroy {
 
   trackHeroUsage(_index: number, hero: HeroUsage): string {
     return hero.name;
-  }
-
-  trackMatch(_index: number, match: DashboardMatch): number {
-    return match.id;
   }
 
   trackResult(index: number, _result: MatchResult): number {

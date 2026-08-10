@@ -145,24 +145,21 @@
                 </ng-container>
               </td>
               <td>
-                <div class="player-select">
-                  <a
-                    class="player-select-main"
-                    [routerLink]="['/players', player.id]"
-                    [attr.aria-label]="'查看玩家 ' + player.name + ' 的详情'"
-                  >
-                    <app-player-avatar
-                      class="row-player-avatar"
-                      [playerId]="player.id"
-                      [heroName]="playerPerformance(player).topHero"
-                    ></app-player-avatar>
+                <a
+                  class="player-select"
+                  [routerLink]="['/players', player.id]"
+                  [attr.aria-label]="'查看玩家 ' + player.name + ' 的详情'"
+                >
+                  <app-player-avatar
+                    class="row-player-avatar"
+                    [playerId]="player.id"
+                    [heroName]="playerPerformance(player).topHero"
+                  ></app-player-avatar>
+                  <span>
                     <strong>{{ player.name }}</strong>
-                  </a>
-                  <app-player-room-links
-                    [roomIds]="player.roomIds"
-                    [fallbackLabel]="player.roomLabel"
-                  ></app-player-room-links>
-                </div>
+                    <small>{{ player.roomLabel }}</small>
+                  </span>
+                </a>
               </td>
               <td class="optional-column">
                 <a
@@ -230,10 +227,7 @@
           ></app-player-avatar>
           <div>
             <h2 id="player-detail-title">{{ selected.name }}</h2>
-            <app-player-room-links
-              [roomIds]="selected.roomIds"
-              [fallbackLabel]="selected.roomLabel"
-            ></app-player-room-links>
+            <p>{{ selected.roomLabel }}</p>
             <small class="detail-top-hero">
               <img
                 [src]="heroImage(selectedPerformance().topHero)"
@@ -276,35 +270,6 @@
       <a class="profile-detail-link" [routerLink]="['/players', selected.id]">
         查看完整玩家档案
       </a>
-
-      <section class="detail-recent-matches" aria-labelledby="detail-recent-title">
-        <div class="detail-section-heading">
-          <h3 id="detail-recent-title">最近对局</h3>
-          <span>按直播时间</span>
-        </div>
-        <ol>
-          <li *ngFor="let match of selectedRecentMatches; trackBy: trackMatch">
-            <a [routerLink]="['/players', selected.id]">
-              <span class="detail-match-result" [class.loss]="match.result === 'L'">
-                {{ match.result === "W" ? "胜" : "负" }}
-              </span>
-              <img
-                *ngIf="recordedMatchPlayer(match) as recorded"
-                [src]="heroImage(recorded.heroName)"
-                [alt]="heroDisplayName(recorded.heroName)"
-              />
-              <span class="detail-match-time">
-                <strong>{{ formatMatchDate(match.playedAt) }}</strong>
-                <small>
-                  {{ match.ally.kills === null ? "—" : match.ally.kills }} :
-                  {{ match.enemy.kills === null ? "—" : match.enemy.kills }}
-                </small>
-              </span>
-            </a>
-          </li>
-        </ol>
-        <p *ngIf="selectedRecentMatches.length === 0">当前模式暂无最近对局。</p>
-      </section>
 
       <section class="mode-breakdown" aria-labelledby="mode-breakdown-title">
         <div class="detail-section-heading">

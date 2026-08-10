@@ -39,7 +39,7 @@ button {
   position: relative;
   z-index: var(--z-sticky);
   display: grid;
-  grid-template-columns: auto minmax(470px, 1fr) auto auto;
+  grid-template-columns: auto minmax(360px, 1fr) auto auto;
   gap: 24px;
   align-items: center;
   width: min(calc(100% - var(--content-gutter)), var(--content-width));
@@ -354,7 +354,7 @@ footer {
 
   .primary-nav {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 2px;
     width: 100%;
     min-height: 48px;
@@ -413,10 +413,6 @@ footer {
     overflow: hidden;
     font-size: var(--type-caption);
     text-overflow: ellipsis;
-  }
-
-  .primary-nav a {
-    font-size: var(--type-label);
   }
 
   .status-season,
