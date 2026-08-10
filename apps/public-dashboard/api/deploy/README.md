@@ -17,6 +17,7 @@ release 中创建虚拟环境，切换软链接后执行本机健康检查；失
 需要在 GitHub Environment `vainglory-dashboard-production` 中配置：
 
 - `DASHBOARD_API_SSH_HOST`
+- `DASHBOARD_API_SSH_PORT`
 - `DASHBOARD_API_SSH_USER`
 - `DASHBOARD_API_SSH_PRIVATE_KEY`
 - `DASHBOARD_API_SSH_KNOWN_HOSTS`
