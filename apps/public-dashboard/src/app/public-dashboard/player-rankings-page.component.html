@@ -130,20 +130,23 @@
               </ng-container>
             </td>
             <td data-label="玩家">
-              <a
-                class="directory-player"
-                [routerLink]="['/players', row.player.id]"
-              >
-                <app-player-avatar
-                  class="directory-player-avatar"
-                  [playerId]="row.player.id"
-                  [heroName]="playerPerformance(row.player).topHero"
-                ></app-player-avatar>
-                <span>
+              <div class="directory-player">
+                <a
+                  class="directory-player-main"
+                  [routerLink]="['/players', row.player.id]"
+                >
+                  <app-player-avatar
+                    class="directory-player-avatar"
+                    [playerId]="row.player.id"
+                    [heroName]="playerPerformance(row.player).topHero"
+                  ></app-player-avatar>
                   <strong>{{ row.player.name }}</strong>
-                  <small>{{ row.player.roomLabel }}</small>
-                </span>
-              </a>
+                </a>
+                <app-player-room-links
+                  [roomIds]="row.player.roomIds"
+                  [fallbackLabel]="row.player.roomLabel"
+                ></app-player-room-links>
+              </div>
             </td>
             <td data-label="代表英雄">
               <a

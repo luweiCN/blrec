@@ -1,0 +1,166 @@
+<section class="match-explorer" aria-labelledby="match-explorer-title">
+  <header class="match-explorer-heading">
+    <div>
+      <h2 id="match-explorer-title">{{ title }}</h2>
+      <p>{{ summaryText }}</p>
+    </div>
+    <span *ngIf="contextLabel">{{ contextLabel }}</span>
+  </header>
+
+  <div class="match-filter-bar">
+    <label class="match-player-search">
+      <span>{{ playerSearchLabel }}</span>
+      <input
+        type="search"
+        [value]="playerQuery"
+        [placeholder]="playerSearchPlaceholder"
+        (input)="setPlayerQuery($event)"
+      />
+    </label>
+
+    <details class="lineup-filter">
+      <summary>
+        <span>阵容筛选</span>
+        <strong>
+          {{ selectedHeroes.length === 0 ? "选择英雄" : "已选 " + selectedHeroes.length }}
+        </strong>
+      </summary>
+      <div class="lineup-filter-panel">
+        <header>
+          <div>
+            <strong>任意选择 1—{{ heroSelectionLimit }} 个英雄</strong>
+            <span>所选英雄必须同时出现在本局任意一方阵容</span>
+          </div>
+          <button
+            type="button"
+            [disabled]="selectedHeroes.length === 0"
+            (click)="selectedHeroes = []; page = 1"
+          >清空</button>
+        </header>
+        <div class="lineup-hero-grid" role="group" aria-label="选择阵容英雄">
+          <button
+            *ngFor="let hero of heroOptions; trackBy: trackHero"
+            type="button"
+            [class.active]="selectedHeroes.includes(hero)"
+            [attr.aria-pressed]="selectedHeroes.includes(hero)"
+            [disabled]="
+              !selectedHeroes.includes(hero) &&
+              selectedHeroes.length >= heroSelectionLimit
+            "
+            (click)="toggleHero(hero)"
+          >
+            <img [src]="heroImage(hero)" alt="" />
+            <span>{{ heroName(hero) }}</span>
+          </button>
+        </div>
+      </div>
+    </details>
+
+    <button
+      *ngIf="hasLocalFilters"
+      type="button"
+      class="match-filter-reset"
+      (click)="clearFilters()"
+    >重置筛选</button>
+  </div>
+
+  <div *ngIf="selectedHeroes.length > 0" class="selected-lineup" aria-label="已选阵容英雄">
+    <span>阵容包含</span>
+    <button
+      *ngFor="let hero of selectedHeroes; trackBy: trackHero"
+      type="button"
+      [attr.aria-label]="'移除英雄 ' + heroName(hero)"
+      (click)="toggleHero(hero)"
+    >
+      <img [src]="heroImage(hero)" alt="" />
+      {{ heroName(hero) }}
+      <span aria-hidden="true">×</span>
+    </button>
+  </div>
+
+  <ol *ngIf="pageMatches.length > 0; else noMatches" class="match-list">
+    <li *ngFor="let match of pageMatches; trackBy: trackMatch">
+      <button
+        type="button"
+        class="match-row"
+        [attr.aria-label]="matchAriaLabel(match)"
+        (click)="openMatch(match)"
+      >
+        <span class="match-outcome" [class.loss]="match.result === 'L'">
+          <strong>{{ match.result === "W" ? "胜" : "负" }}</strong>
+          <small>{{ modeName(match.mode) }}</small>
+        </span>
+
+        <span class="match-time">
+          <strong>{{ formatDate(match.playedAt) }}</strong>
+          <small>{{ playerName(match.playerId) }} · {{ formatDuration(match.durationSeconds) }}</small>
+        </span>
+
+        <span class="match-lineup match-lineup--ally" aria-label="主播方阵容">
+          <span *ngFor="let player of match.ally.players; trackBy: trackPlayer">
+            <img
+              [src]="heroImage(player.heroName)"
+              [alt]="heroName(player.heroName)"
+              [title]="player.name + ' · ' + heroName(player.heroName)"
+            />
+          </span>
+        </span>
+
+        <span class="match-versus" aria-hidden="true">VS</span>
+
+        <span class="match-lineup match-lineup--enemy" aria-label="对手方阵容">
+          <span *ngFor="let player of match.enemy.players; trackBy: trackPlayer">
+            <img
+              [src]="heroImage(player.heroName)"
+              [alt]="heroName(player.heroName)"
+              [title]="player.name + ' · ' + heroName(player.heroName)"
+            />
+          </span>
+        </span>
+
+        <span class="match-score">
+          <strong>
+            {{ match.ally.kills === null ? "—" : match.ally.kills }} :
+            {{ match.enemy.kills === null ? "—" : match.enemy.kills }}
+          </strong>
+          <small>
+            经济 {{ match.ally.economy === null ? "—" : (match.ally.economy | number: "1.0-0") }} /
+            {{ match.enemy.economy === null ? "—" : (match.enemy.economy | number: "1.0-0") }}
+          </small>
+        </span>
+
+        <span class="match-row-meta">
+          <span *ngIf="match.replay" class="replay-available">有回放</span>
+          <span>查看详情</span>
+        </span>
+      </button>
+    </li>
+  </ol>
+
+  <ng-template #noMatches>
+    <div class="match-empty">
+      <strong>没有找到符合条件的对局</strong>
+      <p>可以减少阵容英雄，或尝试其他玩家名称与拼音。</p>
+      <button *ngIf="hasLocalFilters" type="button" (click)="clearFilters()">
+        清空筛选
+      </button>
+    </div>
+  </ng-template>
+
+  <nav *ngIf="filteredMatches.length > 0" class="match-pagination" aria-label="对局列表分页">
+    <button type="button" [disabled]="page === 1" (click)="previousPage()">
+      上一页
+    </button>
+    <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ filteredMatches.length }} 场</span>
+    <button type="button" [disabled]="page === pageCount" (click)="nextPage()">
+      下一页
+    </button>
+  </nav>
+</section>
+
+<app-match-detail-modal
+  *ngIf="selectedMatch as match"
+  [match]="match"
+  [streamerName]="playerName(match.playerId)"
+  (closeModal)="closeMatch()"
+></app-match-detail-modal>

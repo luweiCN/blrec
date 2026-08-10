@@ -7,6 +7,7 @@ import {
   DashboardModeService,
 } from './dashboard-mode.service';
 import { PlayerAvatarComponent } from './player-avatar.component';
+import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { PublicDashboardComponent } from './public-dashboard.component';
 import { SkillTierBadgeComponent } from './skill-tier-badge.component';
@@ -25,6 +26,7 @@ describe('PublicDashboardComponent', () => {
       declarations: [
         PublicDashboardComponent,
         PlayerAvatarComponent,
+        PlayerRoomLinksComponent,
         SkillTierBadgeComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
@@ -92,9 +94,9 @@ describe('PublicDashboardComponent', () => {
   it('links player names and hero names without separate arrow controls', () => {
     const page = fixture.nativeElement as HTMLElement;
 
-    expect(page.querySelector<HTMLAnchorElement>('.player-select')?.href).toContain(
-      '/players/',
-    );
+    expect(
+      page.querySelector<HTMLAnchorElement>('.player-select-main')?.href,
+    ).toContain('/players/');
     expect(page.querySelector<HTMLAnchorElement>('.hero-name a')?.href).toContain(
       '/heroes/',
     );
