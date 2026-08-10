@@ -4,6 +4,7 @@ from typing import Optional
 
 import pytest
 from blrec_dashboard_publisher.snapshot import (
+    build_dashboard_api_source,
     build_dashboard_snapshot,
     export_dashboard_files,
 )
@@ -502,6 +503,10 @@ async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
         }
         assert matches[1]['playerId'] == 10
         assert matches[1]['result'] == 'W'
+        assert matches[1]['streamTitle'] == '样本录播'
+        assert matches[1]['ally']['role'] == 'ally'
+        assert matches[1]['enemy']['role'] == 'enemy'
+        assert matches[1]['ally']['players'][0]['slot'] == 1
         assert [player['heroName'] for player in matches[1]['ally']['players']] == [
             'Caine',
             'Ardan',
@@ -515,6 +520,19 @@ async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
         assert matches[1]['ally']['economy'] == 40900
         assert matches[1]['enemy']['economy'] == 33000
         assert matches[1]['ally']['players'][0]['lastHits'] == 900
+
+        await database.execute(
+            "UPDATE vainglory_matches SET result_frame_path='session/result.png' "
+            'WHERE id=1'
+        )
+        api_source = await database.read(
+            lambda connection: build_dashboard_api_source(
+                connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
+            )
+        )
+        api_match = next(value for value in api_source['matches'] if value['id'] == 1)
+        assert api_match['resultFramePath'] == 'session/result.png'
+        assert api_source['players'][0]['name'] == '卢伟'
     finally:
         await database.close()
 

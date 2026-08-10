@@ -19,6 +19,13 @@
 `/volume1/docker/blrec-next/dashboard-publisher/`，并将后者改名为
 `publisher.env`。
 
+同一文件还要写入 `DASHBOARD_API_TOKEN`。它只用于 NAS 向
+`https://vg-api.luwei.host` 增量写入对局；服务端只保存该密钥的 SHA-256，日志
+不会记录原文。结算图目录以只读方式挂载到 `/result-frames`，worker 会压缩为最长
+边 1600 像素的 WebP，再写入同一 OSS 桶的 `data/match-images/` 前缀。现有
+`acs:oss:*:*:luwei-vainglory/*` 资源范围已经覆盖该前缀，无需创建“目录”或新增
+资源授权。
+
 ## 首次部署与升级
 
 即使 worker 只读数据库，首次启动或更新镜像前也必须执行 BLREC 数据库备份。
@@ -59,6 +66,10 @@ curl -fsS https://vg.luwei.host/data/trends.json
 日志应出现 `publication=published` 或 `publication=current`，并包含
 `purpose=dashboard_publish`、所选网卡、源地址、数据源进度和上传字节数。首次
 发布后再次以 `--once` 运行应显示当天已发布且上传字节为 0。
+
+启用 API 后还应出现 `api_sync=synced` 或 `api_sync=current`。失败批次会留在
+`/state/api-outbox/`，容器重启后会使用相同幂等键重试；API 确认后才更新本地
+水位，因此不会因超时而重复创建对局。
 
 常驻 worker 每 15 分钟按时间顺序重新计算一次内容版本；数据库内容没有变化时
 不会上传快照、趋势或 manifest。历史对局补录后会插回原始时间位置，并从最早受

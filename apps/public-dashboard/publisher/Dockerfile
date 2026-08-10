@@ -52,12 +52,14 @@ ENV PYTHONPATH=/app \
     BLREC_CONFIG=/cfg/settings.toml \
     DASHBOARD_DATABASE=/cfg/blrec.sqlite3 \
     DASHBOARD_STATE=/state \
+    DASHBOARD_RESULT_FRAMES=/result-frames \
+    DASHBOARD_PUBLIC_DATA_BASE_URL=https://vg.luwei.host/data \
     OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com \
     OSS_BUCKET=luwei-vainglory \
     OSS_PREFIX=data \
     DASHBOARD_POLL_SECONDS=900 \
     DASHBOARD_RETRY_SECONDS=900
-VOLUME ["/cfg", "/state"]
+VOLUME ["/cfg", "/state", "/result-frames"]
 STOPSIGNAL SIGTERM
 HEALTHCHECK NONE
 ENTRYPOINT ["blrec-dashboard-publisher"]

@@ -31,6 +31,7 @@ from blrec.networking.config import load_network_settings
 from blrec.networking.manager import NetworkRouteManager, RouteSelection
 from blrec.networking.requests_session import RoutedRequestsSession
 
+from .api_sync import DashboardApiClient, sync_dashboard_api_once
 from .snapshot import SHANGHAI, DashboardExportResult, export_dashboard_files
 
 __all__ = (
@@ -44,6 +45,9 @@ __all__ = (
 
 LOGGER = logging.getLogger('dashboard-publisher')
 SNAPSHOT_PATH = re.compile(r'snapshots/[a-zA-Z0-9-]+\.json\Z')
+MATCH_IMAGE_PATH = re.compile(
+    r'match-images/[0-9]{3,}/[1-9][0-9]*-[0-9a-f]{16}\.webp\Z'
+)
 DEFAULT_RETRY_SECONDS = 15 * 60
 DEFAULT_POLL_SECONDS = 15 * 60
 TREND_MODES = ('all', '3v3', 'brawl', '5v5')
@@ -68,6 +72,9 @@ class DashboardStore(Protocol):
         pass
 
     def put_manifest(self, content: bytes) -> int:
+        pass
+
+    def put_match_image(self, path: str, content: bytes, sha256: str) -> int:
         pass
 
 
@@ -585,6 +592,31 @@ class OssDashboardStore:
             )
         return len(content)
 
+    def put_match_image(self, path: str, content: bytes, sha256: str) -> int:
+        if MATCH_IMAGE_PATH.fullmatch(path) is None:
+            raise DashboardPublishError('结算图对象路径无效：{}'.format(path))
+        key = self._key(path)
+        existing = self._optional_object(key)
+        if existing is not None:
+            if hashlib.sha256(existing).hexdigest() != sha256:
+                raise DashboardPublishError('远端不可变结算图内容冲突：{}'.format(path))
+            return 0
+        result = self._bucket.put_object(
+            key,
+            content,
+            headers={
+                'Cache-Control': 'public, max-age=31536000, immutable',
+                'Content-Type': 'image/webp',
+                'x-oss-meta-sha256': sha256,
+            },
+            progress_callback=self._progress(),
+        )
+        if not 200 <= int(result.status) < 300:
+            raise DashboardPublishError(
+                'OSS 结算图上传失败：HTTP {}'.format(result.status)
+            )
+        return len(content)
+
     def put_manifest(self, content: bytes) -> int:
         result = self._bucket.put_object(
             self._key('manifest.json'),
@@ -648,6 +680,9 @@ class _WorkerConfiguration:
     prefix: str
     poll_seconds: int
     retry_seconds: int
+    api_url: Optional[str] = None
+    result_frames: Path = Path('/result-frames')
+    public_data_base_url: str = 'https://vg.luwei.host/data'
 
 
 def _required_environment(name: str) -> str:
@@ -671,11 +706,29 @@ def _publish(
         security_token=os.environ.get('ALIBABA_CLOUD_SECURITY_TOKEN') or None,
         route_manager=route_manager,
     )
+    api_client: Optional[DashboardApiClient] = None
+    api_result = None
     try:
         result = publish_dashboard_once(
             configuration.database, configuration.state, store, now=now, force=force
         )
+        if configuration.api_url:
+            api_client = DashboardApiClient(
+                base_url=configuration.api_url,
+                token=_required_environment('DASHBOARD_API_TOKEN'),
+                route_manager=route_manager,
+            )
+            api_result = sync_dashboard_api_once(
+                database_path=configuration.database,
+                state_directory=configuration.state,
+                result_frame_directory=configuration.result_frames,
+                public_data_base_url=configuration.public_data_base_url,
+                image_store=store,
+                post_batch=api_client.post_batch,
+            )
     finally:
+        if api_client is not None:
+            api_client.close()
         store.close()
     LOGGER.info(
         'publication=%s date=%s snapshot=%s source_last_match_id=%s '
@@ -691,6 +744,26 @@ def _publish(
         store.selection.source_address or 'system-default',
         store.selection.role,
     )
+    if api_result is not None:
+        LOGGER.info(
+            'api_sync=%s batch=%s matches=%s removed=%s image_bytes=%s '
+            'purpose=dashboard_publish interface=%s source_address=%s',
+            'synced' if api_result.synced else 'current',
+            api_result.batch_id or '-',
+            api_result.match_count,
+            api_result.removed_match_count,
+            api_result.uploaded_image_bytes,
+            (
+                api_client.selection.interface_name
+                if api_client is not None and api_client.selection.interface_name
+                else 'system-default'
+            ),
+            (
+                api_client.selection.source_address
+                if api_client is not None and api_client.selection.source_address
+                else 'system-default'
+            ),
+        )
     return result
 
 
@@ -750,6 +823,20 @@ def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument('--prefix', default=os.environ.get('OSS_PREFIX', 'data'))
     parser.add_argument(
+        '--api-url', default=os.environ.get('DASHBOARD_API_URL') or None
+    )
+    parser.add_argument(
+        '--result-frames',
+        type=Path,
+        default=Path(os.environ.get('DASHBOARD_RESULT_FRAMES', '/result-frames')),
+    )
+    parser.add_argument(
+        '--public-data-base-url',
+        default=os.environ.get(
+            'DASHBOARD_PUBLIC_DATA_BASE_URL', 'https://vg.luwei.host/data'
+        ),
+    )
+    parser.add_argument(
         '--poll-seconds',
         type=int,
         default=_environment_int('DASHBOARD_POLL_SECONDS', DEFAULT_POLL_SECONDS),
@@ -784,6 +871,9 @@ def main() -> None:
         prefix=arguments.prefix,
         poll_seconds=arguments.poll_seconds,
         retry_seconds=arguments.retry_seconds,
+        api_url=arguments.api_url,
+        result_frames=arguments.result_frames,
+        public_data_base_url=arguments.public_data_base_url,
     )
     with _exclusive_worker_lock(configuration.state):
         if arguments.once:

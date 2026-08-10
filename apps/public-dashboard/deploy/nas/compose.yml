@@ -13,6 +13,9 @@ services:
       BLREC_CONFIG: /cfg/settings.toml
       DASHBOARD_DATABASE: /cfg/blrec.sqlite3
       DASHBOARD_STATE: /state
+      DASHBOARD_RESULT_FRAMES: /result-frames
+      DASHBOARD_API_URL: ${DASHBOARD_API_URL:-https://vg-api.luwei.host}
+      DASHBOARD_PUBLIC_DATA_BASE_URL: ${DASHBOARD_PUBLIC_DATA_BASE_URL:-https://vg.luwei.host/data}
       OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
       OSS_BUCKET: luwei-vainglory
       OSS_PREFIX: data
@@ -21,3 +24,4 @@ services:
     volumes:
       - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg:ro
       - ${DASHBOARD_PUBLISHER_STATE_DIR:-/volume1/docker/blrec-next/dashboard-publisher/state}:/state
+      - ${VAINGLORY_RESULT_FRAMES_DIR:-/volume1/docker/blrec-next/vainglory-result-frames}:/result-frames:ro

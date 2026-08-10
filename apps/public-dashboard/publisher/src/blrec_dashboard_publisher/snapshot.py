@@ -44,6 +44,7 @@ from .rating import (
 
 __all__ = (
     'DashboardExportResult',
+    'build_dashboard_api_source',
     'build_dashboard_snapshot',
     'export_dashboard_files',
 )
@@ -406,7 +407,8 @@ def _match_played_at(row: Mapping[str, Any]) -> int:
 def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
     rows = connection.execute(
         'SELECT player.id AS player_id,player.name AS player_name,'
-        'session.id AS session_id,session.started_at,match.id AS match_id,'
+        'session.id AS session_id,session.started_at,session.title AS stream_title,'
+        'match.id AS match_id,match.result_frame_path,'
         'match.result_part_id,part.part_index,part.record_start_time,'
         'match.result_at_ms,match.started_at_ms,match.duration_seconds,'
         'match.game_mode,match.winner_side,match.recorded_player_side,'
@@ -654,6 +656,7 @@ def _public_matches(
                 if str(participant['side']) != side:
                     continue
                 player_value: Dict[str, Any] = {
+                    'slot': int(participant['slot']),
                     'name': str(participant['player_name'] or '未知玩家'),
                     'heroName': str(participant['hero_name']),
                     'isRecordedPlayer': (
@@ -675,6 +678,7 @@ def _public_matches(
                     )
                 players.append(player_value)
             return {
+                'role': 'ally' if side == recorded_side else 'enemy',
                 'side': side,
                 'color': str(row['{}_color'.format(prefix)]),
                 'kills': (
@@ -709,6 +713,7 @@ def _public_matches(
             'playedAt': _utc_iso(played_at),
             'durationSeconds': int(row['duration_seconds']),
             'result': ('W' if str(row['winner_side']) == recorded_side else 'L'),
+            'streamTitle': str(row['stream_title'] or ''),
             'ally': team_value(recorded_side),
             'enemy': team_value(enemy_side),
         }
@@ -720,6 +725,54 @@ def _public_matches(
         key=lambda value: (str(value['playedAt']), int(value['id'])),
         reverse=True,
     )
+
+
+def build_dashboard_api_source(
+    connection: sqlite3.Connection, *, now: Optional[datetime] = None
+) -> Mapping[str, Any]:
+    connection.row_factory = sqlite3.Row
+    _validate_schema(connection)
+    generated_at = now or datetime.now(timezone.utc)
+    if generated_at.tzinfo is None:
+        raise ValueError('dashboard API source time must include a timezone')
+    players, aliases = _player_metadata(connection)
+    rows = _match_rows(connection)
+    lineups = _lineups_by_match(connection, rows)
+    publications = _publications_by_session(connection, rows)
+    publication_parts = _publication_parts(connection, publications)
+    public_matches = _public_matches(rows, lineups, publications, publication_parts)
+    rows_by_id = {int(row['match_id']): row for row in rows}
+    matches = []
+    for public_match in public_matches:
+        value = dict(public_match)
+        source_row = rows_by_id[int(value['id'])]
+        value['resultFramePath'] = (
+            None
+            if source_row['result_frame_path'] is None
+            else str(source_row['result_frame_path'])
+        )
+        matches.append(value)
+    public_players = []
+    for player_id, metadata in sorted(players.items()):
+        name = str(metadata['name'])
+        public_players.append(
+            {
+                'id': player_id,
+                'name': name,
+                'initial': name[:1],
+                'roomLabel': _room_label(list(metadata['rooms'])),
+                'roomIds': list(metadata['rooms']),
+                'aliases': list(aliases.get(player_id, ())),
+                'avatarUrl': None,
+            }
+        )
+    return {
+        'schemaVersion': 1,
+        'generatedAt': _utc_iso(generated_at),
+        'sourceLastMatchId': max((int(row['match_id']) for row in rows), default=0),
+        'players': public_players,
+        'matches': matches,
+    }
 
 
 def _empty_player_modes() -> Dict[str, _Performance]:
