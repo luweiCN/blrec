@@ -228,22 +228,20 @@
                   class="trend-line"
                   [attr.points]="trendPolyline"
                 ></polyline>
-                <g
-                  *ngFor="let point of trendChartPoints; let pointIndex = index; trackBy: trackTrendPoint"
-                >
-                  <circle
-                    class="trend-point"
-                    [class.current]="pointIndex === trendChartPoints.length - 1"
-                    [attr.cx]="point.x"
-                    [attr.cy]="point.y"
-                    [attr.r]="pointIndex === trendChartPoints.length - 1 ? 5 : 3.5"
-                  >
-                    <title>
-                      {{ formatTrendDate(point.publicationDate) }}：{{ displayScore(point.ratingScore) | number: "1.0-0" }}，第 {{ point.rank }} 名
-                    </title>
-                  </circle>
-                </g>
               </svg>
+              <div class="trend-point-layer">
+                <span
+                  *ngFor="let point of trendChartPoints; let pointIndex = index; trackBy: trackTrendPoint"
+                  class="trend-point"
+                  [class.current]="pointIndex === trendChartPoints.length - 1"
+                  [style.left.%]="point.xPercent"
+                  [style.top.%]="point.yPercent"
+                  role="img"
+                  [attr.aria-label]="trendPointLabel(point)"
+                  [title]="trendPointLabel(point)"
+                >
+                </span>
+              </div>
               <div
                 class="rating-trend-axis"
                 [class.single]="trendFirstDate === trendLastDate"
@@ -321,6 +319,45 @@
         </div>
         <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
       </header>
+      <div class="profile-table-controls">
+        <div class="ranking-sort-control profile-hero-sort">
+          <span id="player-hero-sort-label">排序方式</span>
+          <div role="group" aria-labelledby="player-hero-sort-label">
+            <button
+              type="button"
+              [class.active]="activeHeroSort === 'proficiency'"
+              [attr.aria-pressed]="activeHeroSort === 'proficiency'"
+              (click)="selectHeroSort('proficiency')"
+            >
+              熟练度
+            </button>
+            <button
+              type="button"
+              [class.active]="activeHeroSort === 'usage'"
+              [attr.aria-pressed]="activeHeroSort === 'usage'"
+              (click)="selectHeroSort('usage')"
+            >
+              使用次数
+            </button>
+            <button
+              type="button"
+              [class.active]="activeHeroSort === 'win-rate'"
+              [attr.aria-pressed]="activeHeroSort === 'win-rate'"
+              (click)="selectHeroSort('win-rate')"
+            >
+              胜率
+            </button>
+            <button
+              type="button"
+              [class.active]="activeHeroSort === 'kda'"
+              [attr.aria-pressed]="activeHeroSort === 'kda'"
+              (click)="selectHeroSort('kda')"
+            >
+              KDA
+            </button>
+          </div>
+        </div>
+      </div>
       <div class="profile-table-wrap">
         <table class="player-hero-comparison-table">
           <caption>{{ profile.name }}在{{ selectedSeason.label }}{{ modeLabel() }}使用过的英雄熟练度及同英雄玩家对比</caption>

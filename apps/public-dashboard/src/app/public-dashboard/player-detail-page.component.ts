@@ -35,6 +35,7 @@ import { heroDisplayName } from './public-dashboard.hero-names';
 import {
   getPlayerHeroProficiencies,
   HeroProficiency,
+  PlayerHeroSort,
 } from './public-dashboard.proficiency';
 import { DashboardDataService } from './public-dashboard-data.service';
 import {
@@ -62,6 +63,8 @@ interface PlayerSeasonRecord {
 interface TrendChartPoint extends PlayerTrendPoint {
   readonly x: number;
   readonly y: number;
+  readonly xPercent: number;
+  readonly yPercent: number;
 }
 
 const EMPTY_PERFORMANCE: Performance = {
@@ -91,6 +94,7 @@ const TREND_CHART_PADDING_Y = 18;
 export class PlayerDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
+  activeHeroSort: PlayerHeroSort = 'proficiency';
   readonly averageHeroEconomy = heroAverageEconomy;
   readonly displayScore = displayScoreForRatingScore;
   readonly heroKda = heroKda;
@@ -234,19 +238,25 @@ export class PlayerDetailPageComponent implements OnDestroy {
     const domainMinimum = minimum - padding;
     const domainMaximum = maximum + padding;
     const domainRange = domainMaximum - domainMinimum;
-    return points.map((point, index) => ({
-      ...point,
-      x:
+    return points.map((point, index) => {
+      const x =
         points.length === 1
           ? TREND_CHART_WIDTH / 2
           : TREND_CHART_PADDING_X +
             (index / (points.length - 1)) *
-              (TREND_CHART_WIDTH - TREND_CHART_PADDING_X * 2),
-      y:
+              (TREND_CHART_WIDTH - TREND_CHART_PADDING_X * 2);
+      const y =
         TREND_CHART_PADDING_Y +
         ((domainMaximum - point.ratingScore) / domainRange) *
-          (TREND_CHART_HEIGHT - TREND_CHART_PADDING_Y * 2),
-    }));
+          (TREND_CHART_HEIGHT - TREND_CHART_PADDING_Y * 2);
+      return {
+        ...point,
+        x,
+        y,
+        xPercent: (x / TREND_CHART_WIDTH) * 100,
+        yPercent: (y / TREND_CHART_HEIGHT) * 100,
+      };
+    });
   }
 
   get trendPolyline(): string {
@@ -295,6 +305,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
       this.activeSeason,
       this.activeMode,
       this.playerId ?? 0,
+      this.activeHeroSort,
     );
   }
 
@@ -331,6 +342,10 @@ export class PlayerDetailPageComponent implements OnDestroy {
     this.activeSeason = season;
   }
 
+  selectHeroSort(sort: PlayerHeroSort): void {
+    this.activeHeroSort = sort;
+  }
+
   heroImage(heroName: string): string {
     return heroImage(heroName);
   }
@@ -353,6 +368,12 @@ export class PlayerDetailPageComponent implements OnDestroy {
     }
     const [, month, day] = value.split('-');
     return `${Number(month)}月${Number(day)}日`;
+  }
+
+  trendPointLabel(point: PlayerTrendPoint): string {
+    const score = displayScoreForRatingScore(point.ratingScore);
+    const scoreLabel = score?.toLocaleString('zh-CN') ?? '暂无排位分';
+    return `${this.formatTrendDate(point.publicationDate)}：${scoreLabel}，第 ${point.rank} 名`;
   }
 
   trackMode(_index: number, mode: ModeBreakdown): ModeFilter {

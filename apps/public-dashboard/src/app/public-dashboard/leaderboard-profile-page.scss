@@ -311,6 +311,7 @@
 }
 
 .rating-trend-plot {
+  position: relative;
   min-width: 0;
 
   svg {
@@ -337,15 +338,31 @@
 }
 
 .trend-point {
-  fill: var(--surface-1);
-  stroke: var(--cyan);
-  stroke-width: 2;
-  vector-effect: non-scaling-stroke;
+  position: absolute;
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--cyan);
+  border-radius: 50%;
+  background: var(--surface-1);
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
 
   &.current {
-    fill: var(--gold);
-    stroke: var(--gold);
+    width: 11px;
+    height: 11px;
+    border-color: var(--gold);
+    background: var(--gold);
   }
+}
+
+.trend-point-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 168px;
+  pointer-events: none;
 }
 
 .rating-trend-axis {
@@ -531,6 +548,16 @@
   & > header {
     padding: 22px 26px 20px;
   }
+}
+
+.profile-table-controls {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 26px 18px;
+}
+
+.profile-hero-sort > div {
+  min-height: 40px;
 }
 
 .profile-table-wrap {

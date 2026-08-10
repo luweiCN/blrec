@@ -90,6 +90,10 @@ describe('PlayerDetailPageComponent', () => {
     ).map((element) => element.textContent ?? '');
     expect(heroLinks.some((value) => value.includes('凯恩'))).toBeTrue();
     expect(page.querySelectorAll('.trend-point').length).toBe(3);
+    expect(page.querySelector('.trend-point')?.tagName).toBe('SPAN');
+    expect(
+      (page.querySelector('.trend-point') as HTMLElement).style.left,
+    ).toContain('%');
     expect(page.querySelector('.rating-trend-summary')?.textContent).toContain(
       '+18',
     );
@@ -114,5 +118,39 @@ describe('PlayerDetailPageComponent', () => {
 
     expect(component.activeMode).toBe('brawl');
     expect(component.performance.matches).toBe(46);
+  });
+
+  it('sorts the hero pool by usage, win rate or KDA', () => {
+    component.selectHeroSort('usage');
+    const matches = component.heroPool.map((record) => record.usage.matches);
+    expect(matches).toEqual([...matches].sort((left, right) => right - left));
+
+    component.selectHeroSort('win-rate');
+    const winRates = component.heroPool.map((record) =>
+      component.winRate(record.usage),
+    );
+    expect(winRates).toEqual(
+      [...winRates].sort((left, right) => right - left),
+    );
+
+    component.selectHeroSort('kda');
+    const kdas = component.heroPool.map(
+      (record) => component.heroKda(record.usage) ?? Number.NEGATIVE_INFINITY,
+    );
+    expect(kdas).toEqual([...kdas].sort((left, right) => right - left));
+  });
+
+  it('renders four hero-pool sort options', () => {
+    const buttons = fixture.nativeElement.querySelectorAll(
+      '.profile-hero-sort button',
+    ) as NodeListOf<HTMLButtonElement>;
+
+    expect(buttons.length).toBe(4);
+    expect(Array.from(buttons).map((button) => button.textContent?.trim())).toEqual([
+      '熟练度',
+      '使用次数',
+      '胜率',
+      'KDA',
+    ]);
   });
 });

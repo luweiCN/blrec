@@ -1,3 +1,20 @@
+@media (max-width: 960px) {
+  .directory-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+
+    .directory-actions {
+      grid-row: 2;
+      grid-column: 1 / -1;
+      justify-self: stretch;
+    }
+  }
+
+  .result-status {
+    grid-row: 1;
+    grid-column: 2;
+  }
+}
+
 @media (max-width: 760px) {
   .leaderboard-page {
     width: min(calc(100% - var(--content-gutter)), var(--content-width));
@@ -22,23 +39,6 @@
     grid-template-columns: 1fr auto;
     gap: 18px 14px;
     padding: 22px;
-
-    .search-control {
-      grid-column: 1 / -1;
-      grid-row: 2;
-    }
-  }
-
-  .hero-directory-toolbar {
-    .directory-actions {
-      grid-row: 2;
-      grid-column: 1 / -1;
-    }
-
-    .result-status {
-      grid-row: 1;
-      grid-column: 2;
-    }
   }
 
   .result-status {
@@ -61,6 +61,18 @@
 }
 
 @media (max-width: 620px) {
+  .directory-toolbar .directory-actions {
+    grid-template-columns: 1fr;
+
+    .search-control {
+      width: 100%;
+    }
+
+    .ranking-sort-control button {
+      flex: 1;
+    }
+  }
+
   .directory-table-wrap {
     margin-top: 10px;
     overflow: visible;
@@ -266,17 +278,19 @@
     }
   }
 
-  .hero-directory-toolbar {
-    .directory-actions {
-      grid-row: auto;
-      grid-column: auto;
-      grid-template-columns: 1fr;
-    }
+  .directory-toolbar .directory-actions {
+    grid-row: auto;
+    grid-column: auto;
+    grid-template-columns: 1fr;
 
-    .result-status {
-      grid-row: auto;
-      grid-column: auto;
+    .search-control {
+      width: 100%;
     }
+  }
+
+  .directory-toolbar .result-status {
+    grid-row: auto;
+    grid-column: auto;
   }
 
   .pagination {

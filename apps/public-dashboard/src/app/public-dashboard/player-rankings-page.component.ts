@@ -14,6 +14,7 @@ import {
   getRankMovement,
   heroImage,
   modeLabel,
+  PlayerRankingSort,
   playerMatchesQuery,
   RankMovement,
   seasonOption,
@@ -44,6 +45,7 @@ export class PlayerRankingsPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   searchQuery = '';
+  activeSort: PlayerRankingSort = 'rating';
   currentPage = 1;
   private readonly modeSubscription: Subscription;
 
@@ -77,7 +79,34 @@ export class PlayerRankingsPageComponent implements OnDestroy {
       this.data.snapshot,
       this.activeSeason,
       this.activeMode,
+      this.activeSort,
     );
+  }
+
+  get rankingHint(): string {
+    switch (this.activeSort) {
+      case 'rating':
+        return '按排位分从高到低排列。';
+      case 'matches':
+        return '按当前模式累计对局数排列。';
+      case 'wins':
+        return '按当前模式累计胜场数排列。';
+      case 'win-rate':
+        return '当前模式至少 20 局后进入胜率排序。';
+    }
+  }
+
+  get rankingCaption(): string {
+    switch (this.activeSort) {
+      case 'rating':
+        return '排位分排名';
+      case 'matches':
+        return '对局数排名';
+      case 'wins':
+        return '胜场数排名';
+      case 'win-rate':
+        return '胜率排名';
+    }
   }
 
   get filteredRows(): readonly PlayerRankingRow[] {
@@ -121,6 +150,11 @@ export class PlayerRankingsPageComponent implements OnDestroy {
 
   selectSeason(season: SeasonKey): void {
     this.activeSeason = season;
+    this.currentPage = 1;
+  }
+
+  selectSort(sort: PlayerRankingSort): void {
+    this.activeSort = sort;
     this.currentPage = 1;
   }
 

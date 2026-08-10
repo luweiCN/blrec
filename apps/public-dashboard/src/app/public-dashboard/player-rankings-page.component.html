@@ -9,7 +9,7 @@
     <div>
       <h1>玩家榜</h1>
       <p>
-        查看全部已收录的稳定玩家身份，可按展示名、游戏别名、拼音或直播间检索。
+        查看全部已收录玩家，可切换排位分、对局、胜场或胜率排序，并按名称、拼音或直播间检索。
       </p>
     </div>
     <p class="page-context">
@@ -25,21 +25,61 @@
   ></app-leaderboard-filters>
 
   <section class="directory-panel" aria-labelledby="player-directory-title">
-    <header class="directory-toolbar">
+    <header class="directory-toolbar player-directory-toolbar">
       <div>
         <h2 id="player-directory-title">全部玩家</h2>
-        <p>按排位分从高到低排列。</p>
+        <p>{{ rankingHint }}</p>
       </div>
 
-      <label class="search-control">
-        <span>检索玩家</span>
-        <input
-          type="search"
-          [value]="searchQuery"
-          placeholder="玩家名、别名、拼音或直播间"
-          (input)="updateSearch($event)"
-        />
-      </label>
+      <div class="directory-actions">
+        <div class="ranking-sort-control">
+          <span id="player-ranking-sort-label">排序方式</span>
+          <div role="group" aria-labelledby="player-ranking-sort-label">
+            <button
+              type="button"
+              [class.active]="activeSort === 'rating'"
+              [attr.aria-pressed]="activeSort === 'rating'"
+              (click)="selectSort('rating')"
+            >
+              排位分
+            </button>
+            <button
+              type="button"
+              [class.active]="activeSort === 'matches'"
+              [attr.aria-pressed]="activeSort === 'matches'"
+              (click)="selectSort('matches')"
+            >
+              对局
+            </button>
+            <button
+              type="button"
+              [class.active]="activeSort === 'wins'"
+              [attr.aria-pressed]="activeSort === 'wins'"
+              (click)="selectSort('wins')"
+            >
+              胜场
+            </button>
+            <button
+              type="button"
+              [class.active]="activeSort === 'win-rate'"
+              [attr.aria-pressed]="activeSort === 'win-rate'"
+              (click)="selectSort('win-rate')"
+            >
+              胜率
+            </button>
+          </div>
+        </div>
+
+        <label class="search-control">
+          <span>检索玩家</span>
+          <input
+            type="search"
+            [value]="searchQuery"
+            placeholder="玩家名、别名、拼音或直播间"
+            (input)="updateSearch($event)"
+          />
+        </label>
+      </div>
 
       <p class="result-status" role="status" aria-live="polite">
         {{ resultStart }}–{{ resultEnd }} / {{ filteredRows.length }} 位
@@ -52,9 +92,7 @@
           {{
             selectedSeason.label
           }}
-          {{
-            modeLabel()
-          }}全部玩家排名
+          {{ modeLabel() }}全部玩家{{ rankingCaption }}
         </caption>
         <thead>
           <tr>
@@ -77,16 +115,18 @@
           >
             <td class="directory-rank" data-label="排名">
               <strong>{{ row.rank.toString().padStart(2, "0") }}</strong>
-              <ng-container *ngIf="rankMovement(row.player) as movement">
-                <small
-                  *ngIf="movement.kind !== 'pending'"
-                  class="rank-movement"
-                  [class.up]="movement.kind === 'up'"
-                  [class.down]="movement.kind === 'down'"
-                  [class.new]="movement.kind === 'new'"
-                  [attr.aria-label]="movement.label"
-                  [title]="movement.label"
-                >{{ movement.text }}</small>
+              <ng-container *ngIf="activeSort === 'rating'">
+                <ng-container *ngIf="rankMovement(row.player) as movement">
+                  <small
+                    *ngIf="movement.kind !== 'pending'"
+                    class="rank-movement"
+                    [class.up]="movement.kind === 'up'"
+                    [class.down]="movement.kind === 'down'"
+                    [class.new]="movement.kind === 'new'"
+                    [attr.aria-label]="movement.label"
+                    [title]="movement.label"
+                  >{{ movement.text }}</small>
+                </ng-container>
               </ng-container>
             </td>
             <td data-label="玩家">

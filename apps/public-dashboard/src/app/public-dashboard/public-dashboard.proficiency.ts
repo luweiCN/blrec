@@ -30,6 +30,8 @@ export type HeroProficiencyLevel =
   | '常用'
   | '初试';
 
+export type PlayerHeroSort = 'proficiency' | 'usage' | 'win-rate' | 'kda';
+
 export interface HeroProficiency extends HeroPlayerComparison {
   readonly score: number;
   readonly level: HeroProficiencyLevel;
@@ -113,6 +115,7 @@ export function getPlayerHeroProficiencies(
   season: SeasonKey,
   mode: ModeFilter,
   playerId: number,
+  sort: PlayerHeroSort = 'proficiency',
 ): readonly HeroProficiency[] {
   const player = playerForSeason(snapshot, season, playerId);
   if (player === undefined) {
@@ -130,7 +133,9 @@ export function getPlayerHeroProficiencies(
       proficiencies.push(proficiency);
     }
   }
-  return proficiencies.sort(compareProficiency);
+  return proficiencies.sort((left, right) =>
+    comparePlayerHeroProficiency(left, right, sort),
+  );
 }
 
 function stablePercentile(
@@ -164,6 +169,43 @@ function compareProficiency(
     winRate(right.usage) - winRate(left.usage) ||
     left.player.id - right.player.id
   );
+}
+
+function comparePlayerHeroProficiency(
+  left: HeroProficiency,
+  right: HeroProficiency,
+  sort: PlayerHeroSort,
+): number {
+  switch (sort) {
+    case 'proficiency':
+      return (
+        compareProficiency(left, right) ||
+        left.usage.name.localeCompare(right.usage.name)
+      );
+    case 'usage':
+      return (
+        right.usage.matches - left.usage.matches ||
+        right.score - left.score ||
+        winRate(right.usage) - winRate(left.usage) ||
+        left.usage.name.localeCompare(right.usage.name)
+      );
+    case 'win-rate':
+      return (
+        winRate(right.usage) - winRate(left.usage) ||
+        right.usage.matches - left.usage.matches ||
+        right.score - left.score ||
+        left.usage.name.localeCompare(right.usage.name)
+      );
+    case 'kda':
+      return (
+        (heroKda(right.usage) ?? Number.NEGATIVE_INFINITY) -
+          (heroKda(left.usage) ?? Number.NEGATIVE_INFINITY) ||
+        (right.usage.stats?.kdaMatches ?? 0) -
+          (left.usage.stats?.kdaMatches ?? 0) ||
+        right.usage.matches - left.usage.matches ||
+        left.usage.name.localeCompare(right.usage.name)
+      );
+  }
 }
 
 function isNumber(value: number | null): value is number {

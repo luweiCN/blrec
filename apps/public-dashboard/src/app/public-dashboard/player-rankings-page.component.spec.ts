@@ -108,6 +108,51 @@ describe('PlayerRankingsPageComponent', () => {
     expect(component.currentPage).toBe(1);
   });
 
+  it('sorts players by matches, wins or established win rate', () => {
+    component.goToPage(2);
+    component.selectSort('matches');
+    fixture.detectChanges();
+    const matches = component.rankingRows.map(
+      (row) => row.player.modes['3v3'].matches,
+    );
+    expect(component.currentPage).toBe(1);
+    expect(matches).toEqual([...matches].sort((left, right) => right - left));
+
+    component.selectSort('wins');
+    const wins = component.rankingRows.map(
+      (row) => row.player.modes['3v3'].wins,
+    );
+    expect(wins).toEqual([...wins].sort((left, right) => right - left));
+
+    const winRateButton = fixture.nativeElement.querySelectorAll(
+      '.ranking-sort-control button',
+    )[3] as HTMLButtonElement;
+    winRateButton.click();
+    fixture.detectChanges();
+    const winRates = component.rankingRows.map((row) =>
+      component.winRate(row.player.modes['3v3']),
+    );
+    expect(
+      component.rankingRows.every(
+        (row) => row.player.modes['3v3'].matches >= 20,
+      ),
+    ).toBeTrue();
+    expect(winRates).toEqual(
+      [...winRates].sort((left, right) => right - left),
+    );
+    expect(fixture.nativeElement.textContent).toContain('至少 20 局');
+    expect(fixture.nativeElement.querySelector('.rank-movement')).toBeNull();
+  });
+
+  it('uses the same combined sort and search toolbar as the hero ranking', () => {
+    const toolbar = fixture.nativeElement.querySelector(
+      '.player-directory-toolbar .directory-actions',
+    ) as HTMLElement;
+
+    expect(toolbar.querySelectorAll('.ranking-sort-control button').length).toBe(4);
+    expect(toolbar.querySelector('input[type="search"]')).not.toBeNull();
+  });
+
   it('links every visible player to a stable detail route', () => {
     const links = fixture.nativeElement.querySelectorAll(
       '.directory-player[href]',

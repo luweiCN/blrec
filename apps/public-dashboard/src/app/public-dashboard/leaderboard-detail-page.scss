@@ -101,7 +101,7 @@ a {
 
 .directory-toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(260px, 340px) auto;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
   gap: 22px;
   align-items: end;
   padding: 26px 28px 22px;
@@ -123,15 +123,12 @@ a {
   }
 }
 
-.hero-directory-toolbar {
-  grid-template-columns: minmax(180px, 1fr) minmax(430px, 560px) auto;
-}
-
 .directory-actions {
   display: grid;
-  grid-template-columns: auto minmax(240px, 1fr);
+  grid-template-columns: auto 320px;
   gap: 14px;
   align-items: end;
+  justify-self: end;
 }
 
 .ranking-sort-control {
@@ -162,6 +159,7 @@ a {
     cursor: pointer;
     font-size: 0.67rem;
     font-weight: 700;
+    white-space: nowrap;
     transition:
       background 150ms ease,
       color 150ms ease;
@@ -180,6 +178,9 @@ a {
 .search-control {
   display: grid;
   gap: 7px;
+  width: 320px;
+  max-width: 100%;
+  min-width: 0;
 
   span {
     color: var(--ink-muted);
@@ -188,6 +189,7 @@ a {
   }
 
   input {
+    width: 100%;
     min-height: 44px;
     padding: 0 12px;
     border: 1px solid var(--line);

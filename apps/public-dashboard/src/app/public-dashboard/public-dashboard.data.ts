@@ -21,10 +21,12 @@ import {
 import { matchesSearchSegments } from './public-dashboard.search';
 
 export const HERO_MIN_MATCHES = 20;
+export const PLAYER_WIN_RATE_MIN_MATCHES = 20;
 export const OVERVIEW_LIMIT = 10;
 export const DETAIL_PAGE_SIZE = 10;
 
 export type HeroRankingSort = 'win-rate' | 'usage';
+export type PlayerRankingSort = 'rating' | 'matches' | 'wins' | 'win-rate';
 
 export type HeroPeerComparison =
   | { readonly kind: 'unavailable' }
@@ -185,8 +187,46 @@ export function getPlayerRankingRows(
   snapshot: DashboardSnapshot,
   season: SeasonKey,
   mode: ModeFilter,
+  sort: PlayerRankingSort = 'rating',
 ): readonly PlayerRankingRow[] {
-  return getPlayerRankings(snapshot, season, mode).map((player, index) => ({
+  const players = getPlayerRankings(snapshot, season, mode).filter(
+    (player) =>
+      sort !== 'win-rate' ||
+      player.modes[mode].matches >= PLAYER_WIN_RATE_MIN_MATCHES,
+  );
+  if (sort !== 'rating') {
+    players.sort((left, right) => {
+      const leftPerformance = left.modes[mode];
+      const rightPerformance = right.modes[mode];
+      switch (sort) {
+        case 'matches':
+          return (
+            rightPerformance.matches - leftPerformance.matches ||
+            rightPerformance.wins - leftPerformance.wins ||
+            (rightPerformance.ratingScore ?? 0) -
+              (leftPerformance.ratingScore ?? 0) ||
+            left.id - right.id
+          );
+        case 'wins':
+          return (
+            rightPerformance.wins - leftPerformance.wins ||
+            rightPerformance.matches - leftPerformance.matches ||
+            (rightPerformance.ratingScore ?? 0) -
+              (leftPerformance.ratingScore ?? 0) ||
+            left.id - right.id
+          );
+        case 'win-rate':
+          return (
+            winRate(rightPerformance) - winRate(leftPerformance) ||
+            rightPerformance.matches - leftPerformance.matches ||
+            (rightPerformance.ratingScore ?? 0) -
+              (leftPerformance.ratingScore ?? 0) ||
+            left.id - right.id
+          );
+      }
+    });
+  }
+  return players.map((player, index) => ({
     rank: index + 1,
     player,
   }));
