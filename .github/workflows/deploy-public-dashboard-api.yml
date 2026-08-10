@@ -40,9 +40,13 @@ jobs:
 
       - name: Install test and build dependencies
         run: |
-          python -m pip install build
+          python -m pip install \
+            -r apps/public-dashboard/api/deploy/runtime-requirements.txt \
+            'httpx>=0.23.0,<0.24.0' \
+            'pytest>=7.4.4,<9.0.0' \
+            build
           python -m pip install --no-deps -e apps/public-dashboard/publisher
-          python -m pip install -e 'apps/public-dashboard/api[test]'
+          python -m pip install --no-deps -e apps/public-dashboard/api
 
       - name: Test API and rating contract
         run: >-
