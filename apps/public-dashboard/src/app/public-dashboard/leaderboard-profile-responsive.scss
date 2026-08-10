@@ -184,19 +184,6 @@
     padding: 0 20px 18px;
   }
 
-  .profile-hero-sort {
-    width: 100%;
-
-    & > div {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-
-      button {
-        padding: 0 5px;
-      }
-    }
-  }
-
   .profile-table-card table {
     display: block;
     min-width: 0;

@@ -8,6 +8,7 @@ import { HeroDetailPageComponent } from './hero-detail-page.component';
 import { LeaderboardFiltersComponent } from './leaderboard-filters.component';
 import { LeaderboardSeasonSelectComponent } from './leaderboard-season-select.component';
 import { PlayerAvatarComponent } from './player-avatar.component';
+import { PlayerRoomLinksComponent } from './player-room-links.component';
 import { DashboardDataService } from './public-dashboard-data.service';
 import { TEST_DASHBOARD_SNAPSHOT } from './public-dashboard.test-data';
 
@@ -22,6 +23,7 @@ describe('HeroDetailPageComponent', () => {
         LeaderboardFiltersComponent,
         LeaderboardSeasonSelectComponent,
         PlayerAvatarComponent,
+        PlayerRoomLinksComponent,
       ],
       imports: [CommonModule, RouterTestingModule],
       providers: [
@@ -74,5 +76,11 @@ describe('HeroDetailPageComponent', () => {
     ).map((element) => element.textContent ?? '');
     expect(playerLinks.some((value) => value.includes('星河'))).toBeTrue();
     expect(page.querySelector('.usage-rank')?.textContent).toContain('/');
+    expect(page.querySelector('.hero-synergy-columns')?.textContent).toContain(
+      '二蛋',
+    );
+    expect(page.querySelector('.hero-synergy-columns')?.textContent).toContain(
+      '舞司',
+    );
   });
 });

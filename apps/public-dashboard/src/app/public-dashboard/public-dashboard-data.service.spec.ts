@@ -88,6 +88,27 @@ describe('DashboardDataService', () => {
     expect(service.state.kind).toBe('ready');
   });
 
+  it('keeps accepting version 2 snapshots without match details', async () => {
+    const legacySnapshot = { ...TEST_DASHBOARD_SNAPSHOT } as Record<
+      string,
+      unknown
+    >;
+    legacySnapshot['schemaVersion'] = 2;
+    delete legacySnapshot['matches'];
+    spyOn(window, 'fetch').and.returnValues(
+      Promise.resolve(jsonResponse(MANIFEST)),
+      Promise.resolve(jsonResponse(legacySnapshot)),
+      Promise.resolve(jsonResponse(TRENDS)),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('ready');
+    expect(service.snapshot.schemaVersion).toBe(3);
+    expect(service.snapshot.matches).toEqual([]);
+  });
+
   it('keeps the ranking available when trend data is missing or invalid', async () => {
     spyOn(console, 'warn');
     spyOn(window, 'fetch').and.returnValues(
@@ -132,6 +153,31 @@ describe('DashboardDataService', () => {
       Promise.resolve(
         jsonResponse({ ...MANIFEST, snapshotPath: '../private.json' }),
       ),
+    );
+    const service = new DashboardDataService();
+
+    await service.load();
+
+    expect(service.state.kind).toBe('error');
+    expect(service.snapshotOrNull).toBeNull();
+  });
+
+  it('rejects replay links outside a public Bilibili video', async () => {
+    spyOn(console, 'error');
+    const invalidSnapshot = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      matches: TEST_DASHBOARD_SNAPSHOT.matches.map((match, index) =>
+        index === 0
+          ? {
+              ...match,
+              replay: { kind: 'match', url: 'javascript:alert(1)' },
+            }
+          : match,
+      ),
+    };
+    spyOn(window, 'fetch').and.returnValues(
+      Promise.resolve(jsonResponse(MANIFEST)),
+      Promise.resolve(jsonResponse(invalidSnapshot)),
     );
     const service = new DashboardDataService();
 

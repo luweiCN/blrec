@@ -1,0 +1,10 @@
+<span *ngIf="roomIds.length === 0" class="room-fallback">{{ fallbackLabel }}</span>
+<ng-container *ngFor="let roomId of roomIds; let last = last; trackBy: trackRoom">
+  <a
+    [href]="roomUrl(roomId)"
+    target="_blank"
+    rel="noopener noreferrer"
+    [attr.aria-label]="'打开 B 站直播间 ' + roomId"
+  >直播间 {{ roomId }}</a>
+  <span *ngIf="!last" class="room-separator" aria-hidden="true">/</span>
+</ng-container>

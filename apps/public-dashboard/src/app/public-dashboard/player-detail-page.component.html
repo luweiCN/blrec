@@ -22,7 +22,10 @@
           <div>
             <p>玩家档案</p>
             <h1>{{ profile.name }}</h1>
-            <span>{{ profile.roomLabel }}</span>
+            <app-player-room-links
+              [roomIds]="profile.roomIds"
+              [fallbackLabel]="profile.roomLabel"
+            ></app-player-room-links>
           </div>
         </div>
         <dl class="identity-meta">
@@ -385,10 +388,10 @@
       <section class="profile-card" aria-labelledby="player-mode-title">
         <header>
           <div>
-            <p>对局构成</p>
-            <h2 id="player-mode-title">模式构成</h2>
+            <h2 id="player-mode-title">对局模式</h2>
+            <p>所选赛季的模式构成</p>
           </div>
-          <span>所选赛季 · 全部模式</span>
+          <span>全部模式</span>
         </header>
         <ol class="metric-list">
           <li *ngFor="let mode of modeBreakdown; trackBy: trackMode">
@@ -407,10 +410,9 @@
       <section class="profile-card" aria-labelledby="player-form-title">
         <header>
           <div>
-            <p>最近表现</p>
             <h2 id="player-form-title">近期状态</h2>
+            <p>最近五局已识别结果</p>
           </div>
-          <span>最近五局已识别结果</span>
         </header>
         <div *ngIf="seasonPlayer as current; else noRecentForm" class="large-form">
           <span
@@ -427,18 +429,25 @@
       </section>
     </div>
 
+    <app-match-explorer
+      [matches]="matchArchive"
+      [players]="allPlayers"
+      [seasonKey]="activeSeason"
+      [mode]="activeMode"
+      [fixedPlayerId]="profile.id"
+      title="最近对局"
+      [contextLabel]="selectedSeason.label + ' · ' + modeLabel()"
+    ></app-match-explorer>
+
     <section class="profile-card profile-table-card" aria-labelledby="hero-pool-detail-title">
-      <header>
+      <header class="profile-table-heading">
         <div>
-          <p>英雄池</p>
-          <h2 id="hero-pool-detail-title">英雄熟练度</h2>
+          <h2 id="hero-pool-detail-title">英雄池</h2>
+          <p>{{ selectedSeason.label }} · {{ modeLabel() }}</p>
         </div>
-        <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
-      </header>
-      <div class="profile-table-controls">
-        <div class="ranking-sort-control profile-hero-sort">
+        <div class="profile-table-heading-actions">
           <span id="player-hero-sort-label">排序方式</span>
-          <div role="group" aria-labelledby="player-hero-sort-label">
+          <div class="profile-hero-sort" role="group" aria-labelledby="player-hero-sort-label">
             <button
               type="button"
               [class.active]="activeHeroSort === 'proficiency'"
@@ -473,7 +482,7 @@
             </button>
           </div>
         </div>
-      </div>
+      </header>
       <div class="profile-table-wrap">
         <table class="player-hero-comparison-table">
           <caption>{{ profile.name }}在{{ selectedSeason.label }}{{ modeLabel() }}使用过的英雄熟练度及同英雄玩家对比</caption>

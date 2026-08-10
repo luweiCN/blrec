@@ -1,0 +1,26 @@
+:host {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  align-items: center;
+  min-width: 0;
+  color: inherit;
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: color 160ms var(--ease-out), text-decoration-color 160ms var(--ease-out);
+
+  &:hover {
+    color: var(--cyan);
+    text-decoration-color: currentColor;
+  }
+}
+
+.room-separator,
+.room-fallback {
+  color: inherit;
+}

@@ -69,8 +69,8 @@
     <section class="profile-card" aria-labelledby="hero-mode-title">
       <header>
         <div>
-          <p>模式表现</p>
           <h2 id="hero-mode-title">各模式表现</h2>
+          <p>所选赛季的胜率与使用规模</p>
         </div>
         <span>{{ selectedSeason.label }}</span>
       </header>
@@ -87,6 +87,50 @@
       <p *ngIf="modeRecords.length === 0" class="profile-empty">
         该赛季还没有这个英雄的对局记录。
       </p>
+    </section>
+
+    <section class="profile-card hero-synergy-card" aria-labelledby="hero-synergy-title">
+      <header>
+        <div>
+          <h2 id="hero-synergy-title">阵容搭配</h2>
+          <p>与该英雄同队至少 5 场的搭档表现</p>
+        </div>
+        <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
+      </header>
+      <div class="hero-synergy-columns">
+        <section>
+          <h3>最佳搭配</h3>
+          <ol>
+            <li *ngFor="let synergy of bestSynergies; trackBy: trackSynergy">
+              <a [routerLink]="['/heroes', synergy.name]">
+                <img [src]="heroImage(synergy.name)" alt="" />
+                <strong>{{ heroName(synergy.name) }}</strong>
+              </a>
+              <span>{{ winRate(synergy) | percent: "1.0-1" }}</span>
+              <small>{{ synergy.wins }} 胜 / {{ synergy.matches }} 局</small>
+            </li>
+          </ol>
+          <p *ngIf="bestSynergies.length === 0" class="profile-empty">
+            当前模式还没有达到样本门槛的搭配。
+          </p>
+        </section>
+        <section class="worst">
+          <h3>仍待磨合</h3>
+          <ol>
+            <li *ngFor="let synergy of worstSynergies; trackBy: trackSynergy">
+              <a [routerLink]="['/heroes', synergy.name]">
+                <img [src]="heroImage(synergy.name)" alt="" />
+                <strong>{{ heroName(synergy.name) }}</strong>
+              </a>
+              <span>{{ winRate(synergy) | percent: "1.0-1" }}</span>
+              <small>{{ synergy.wins }} 胜 / {{ synergy.matches }} 局</small>
+            </li>
+          </ol>
+          <p *ngIf="worstSynergies.length === 0" class="profile-empty">
+            当前模式还没有达到样本门槛的搭配。
+          </p>
+        </section>
+      </div>
     </section>
 
     <section class="profile-card profile-table-card" aria-labelledby="hero-players-title">
@@ -118,17 +162,20 @@
               <td data-label="玩家">
                 <div class="specialist-player">
                   <span class="specialist-rank" [class.podium]="rank < 3">#{{ rank + 1 }}</span>
-                  <a class="profile-player-link" [routerLink]="['/players', record.player.id]">
-                    <app-player-avatar
-                      class="profile-player-avatar"
-                      [playerId]="record.player.id"
-                      [heroName]="record.player.modes[activeMode].topHero"
-                    ></app-player-avatar>
-                    <span>
+                  <div class="profile-player-link">
+                    <a [routerLink]="['/players', record.player.id]">
+                      <app-player-avatar
+                        class="profile-player-avatar"
+                        [playerId]="record.player.id"
+                        [heroName]="record.player.modes[activeMode].topHero"
+                      ></app-player-avatar>
                       <strong>{{ record.player.name }}</strong>
-                      <small>{{ record.player.roomLabel }}</small>
-                    </span>
-                  </a>
+                    </a>
+                    <app-player-room-links
+                      [roomIds]="record.player.roomIds"
+                      [fallbackLabel]="record.player.roomLabel"
+                    ></app-player-room-links>
+                  </div>
                 </div>
               </td>
               <td class="proficiency-score" data-label="熟练度">
