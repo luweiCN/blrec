@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -16,8 +17,11 @@ __all__ = (
     'PROBABILITY_SCALE',
     'PROVISIONAL_MATCHES',
     'RATING_MODEL_VERSION',
+    'RatingForecast',
+    'RatingGoalForecast',
     'SEASON_RESET_DISPLAY_SCORE',
     'VirtualMatchRating',
+    'calculate_rating_forecast',
     'calculate_virtual_match_rating',
     'expected_win_probability',
 )
@@ -40,6 +44,38 @@ _NEUTRAL_ABILITY = 0.5
 _DISPLAY_SCORE_MULTIPLIER = 3
 _DISPLAY_SCORE_MAXIMUM = 3000
 _INTERNAL_SCORE_MAXIMUM = _DISPLAY_SCORE_MAXIMUM // _DISPLAY_SCORE_MULTIPLIER
+_SKILL_TIER_START_POINTS = (
+    0,
+    109,
+    218,
+    327,
+    436,
+    545,
+    654,
+    763,
+    872,
+    981,
+    1090,
+    1200,
+    1250,
+    1300,
+    1350,
+    1400,
+    1467,
+    1533,
+    1600,
+    1667,
+    1733,
+    1800,
+    1867,
+    1933,
+    2000,
+    2134,
+    2267,
+    2400,
+    2600,
+    2800,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +84,22 @@ class VirtualMatchRating:
     evidence: float
     score: int
     provisional: bool
+
+
+@dataclass(frozen=True)
+class RatingGoalForecast:
+    target_display_score: int
+    all_win_matches: int
+    current_win_rate_matches: Optional[int]
+
+
+@dataclass(frozen=True)
+class RatingForecast:
+    next_win_score: int
+    next_loss_score: int
+    next_division: Optional[RatingGoalForecast]
+    next_tier: Optional[RatingGoalForecast]
+    ultimate: RatingGoalForecast
 
 
 def expected_win_probability(display_score: float) -> float:
@@ -87,7 +139,7 @@ def _internal_outcome_delta(
     result: str,
     hidden_score_before: float,
     hidden_score_after: float,
-    visible_score: int,
+    visible_score: float,
 ) -> int:
     display_delta = hidden_score_after - hidden_score_before
     placement_gap = hidden_score_after - (visible_score * _DISPLAY_SCORE_MULTIPLIER)
@@ -100,6 +152,166 @@ def _internal_outcome_delta(
     if result == 'W':
         return max(MINIMUM_OUTCOME_DELTA, internal_delta)
     return min(-MINIMUM_OUTCOME_DELTA, internal_delta)
+
+
+def _advance_evidence(
+    alpha: float, beta: float, win_weight: float
+) -> tuple[float, float]:
+    alpha += win_weight
+    beta += 1.0 - win_weight
+    evidence = alpha + beta
+    if evidence > CARRYOVER_MATCH_CAP:
+        evidence_scale = CARRYOVER_MATCH_CAP / evidence
+        alpha *= evidence_scale
+        beta *= evidence_scale
+    return alpha, beta
+
+
+def _advance_rating(
+    rating: VirtualMatchRating, result: str, *, reset_visible_score: bool
+) -> VirtualMatchRating:
+    if result not in ('W', 'L'):
+        raise ValueError('virtual match rating result must be W or L')
+    alpha = rating.ability * rating.evidence
+    beta = (1.0 - rating.ability) * rating.evidence
+    hidden_score_before = _display_score_for_ability(rating.ability)
+    alpha, beta = _advance_evidence(alpha, beta, 1.0 if result == 'W' else 0.0)
+    evidence = alpha + beta
+    ability = alpha / evidence
+    hidden_score_after = _display_score_for_ability(ability)
+    if reset_visible_score:
+        score = rating.score + _internal_outcome_delta(
+            result=result,
+            hidden_score_before=hidden_score_before,
+            hidden_score_after=hidden_score_after,
+            visible_score=rating.score,
+        )
+        score = max(0, min(_INTERNAL_SCORE_MAXIMUM, score))
+    else:
+        score = round(hidden_score_after / _DISPLAY_SCORE_MULTIPLIER)
+    return VirtualMatchRating(
+        ability=ability, evidence=evidence, score=score, provisional=rating.provisional
+    )
+
+
+def _goal_target_scores(display_score: int) -> tuple[Optional[int], Optional[int], int]:
+    division_index = bisect_right(_SKILL_TIER_START_POINTS, display_score) - 1
+    tier = division_index // 3 + 1
+    next_division = (
+        _SKILL_TIER_START_POINTS[division_index + 1]
+        if division_index + 1 < len(_SKILL_TIER_START_POINTS)
+        else None
+    )
+    next_tier = _SKILL_TIER_START_POINTS[tier * 3] if tier < 10 else None
+    ultimate = 2400 if tier <= 8 else 2800
+    return next_division, next_tier, ultimate
+
+
+def _all_win_matches_for_targets(
+    rating: VirtualMatchRating, targets: Sequence[int], *, reset_visible_score: bool
+) -> dict[int, int]:
+    matches_by_target = {target: 0 for target in targets if rating.score * 3 >= target}
+    pending = sorted(set(targets) - matches_by_target.keys())
+    projected = rating
+    for matches in range(1, _DISPLAY_SCORE_MAXIMUM + 1):
+        if not pending:
+            break
+        projected = _advance_rating(
+            projected, 'W', reset_visible_score=reset_visible_score
+        )
+        reached = [target for target in pending if projected.score * 3 >= target]
+        for target in reached:
+            matches_by_target[target] = matches
+            pending.remove(target)
+    if pending:
+        raise RuntimeError('all-win virtual match forecast did not reach its target')
+    return matches_by_target
+
+
+def _current_win_rate_matches_for_targets(
+    rating: VirtualMatchRating,
+    win_rate: float,
+    targets: Sequence[int],
+    all_win_matches: dict[int, int],
+    *,
+    reset_visible_score: bool,
+) -> dict[int, Optional[int]]:
+    current_display_score = rating.score * _DISPLAY_SCORE_MULTIPLIER
+    matches_by_target: dict[int, Optional[int]] = {}
+    if win_rate >= 1.0:
+        return {target: all_win_matches[target] for target in targets}
+
+    next_win_score = _advance_rating(
+        rating, 'W', reset_visible_score=reset_visible_score
+    ).score
+    next_loss_score = _advance_rating(
+        rating, 'L', reset_visible_score=reset_visible_score
+    ).score
+    expected_display_delta = _DISPLAY_SCORE_MULTIPLIER * (
+        win_rate * (next_win_score - rating.score)
+        + (1.0 - win_rate) * (next_loss_score - rating.score)
+    )
+    for target in targets:
+        remaining_score = max(0, target - current_display_score)
+        matches_by_target[target] = (
+            0
+            if remaining_score == 0
+            else (
+                math.ceil(remaining_score / expected_display_delta)
+                if expected_display_delta > 0.0
+                else None
+            )
+        )
+    return matches_by_target
+
+
+def calculate_rating_forecast(
+    *, rating: VirtualMatchRating, win_rate: float, reset_visible_score: bool
+) -> RatingForecast:
+    if not math.isfinite(win_rate) or not 0.0 <= win_rate <= 1.0:
+        raise ValueError('virtual match forecast win rate must be between zero and one')
+    next_division_target, next_tier_target, ultimate_target = _goal_target_scores(
+        rating.score * _DISPLAY_SCORE_MULTIPLIER
+    )
+    targets = tuple(
+        target
+        for target in (next_division_target, next_tier_target, ultimate_target)
+        if target is not None
+    )
+    all_win_matches = _all_win_matches_for_targets(
+        rating, targets, reset_visible_score=reset_visible_score
+    )
+    current_win_rate_matches = _current_win_rate_matches_for_targets(
+        rating,
+        win_rate,
+        targets,
+        all_win_matches,
+        reset_visible_score=reset_visible_score,
+    )
+
+    def goal(target: Optional[int]) -> Optional[RatingGoalForecast]:
+        if target is None:
+            return None
+        return RatingGoalForecast(
+            target_display_score=target,
+            all_win_matches=all_win_matches[target],
+            current_win_rate_matches=current_win_rate_matches[target],
+        )
+
+    ultimate = goal(ultimate_target)
+    if ultimate is None:
+        raise AssertionError('virtual match forecast ultimate goal is required')
+    return RatingForecast(
+        next_win_score=_advance_rating(
+            rating, 'W', reset_visible_score=reset_visible_score
+        ).score,
+        next_loss_score=_advance_rating(
+            rating, 'L', reset_visible_score=reset_visible_score
+        ).score,
+        next_division=goal(next_division_target),
+        next_tier=goal(next_tier_target),
+        ultimate=ultimate,
+    )
 
 
 def calculate_virtual_match_rating(
@@ -130,15 +342,7 @@ def calculate_virtual_match_rating(
 
     for result in results:
         hidden_score_before = _display_score_for_ability(alpha / (alpha + beta))
-        if result == 'W':
-            alpha += 1.0
-        else:
-            beta += 1.0
-        evidence = alpha + beta
-        if evidence > CARRYOVER_MATCH_CAP:
-            evidence_scale = CARRYOVER_MATCH_CAP / evidence
-            alpha *= evidence_scale
-            beta *= evidence_scale
+        alpha, beta = _advance_evidence(alpha, beta, 1.0 if result == 'W' else 0.0)
         hidden_score_after = _display_score_for_ability(alpha / (alpha + beta))
         if reset_visible_score:
             visible_score += _internal_outcome_delta(

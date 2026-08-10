@@ -4,6 +4,7 @@ import pytest
 from blrec_dashboard_publisher.rating import (
     CARRYOVER_MATCH_CAP,
     VirtualMatchRating,
+    calculate_rating_forecast,
     calculate_virtual_match_rating,
     expected_win_probability,
 )
@@ -47,6 +48,123 @@ def test_thirteen_wins_and_two_losses_from_2160_gain_thirty_points() -> None:
     )
 
     assert display_score(rating) == 2190
+
+
+def test_forecast_projects_the_exact_next_result() -> None:
+    history = ['W', 'W', 'L', 'W', 'L', 'W']
+    rating = calculate_virtual_match_rating(results=history)
+    after_win = calculate_virtual_match_rating(results=history + ['W'])
+    after_loss = calculate_virtual_match_rating(results=history + ['L'])
+
+    assert rating is not None
+    forecast = calculate_rating_forecast(
+        rating=rating,
+        win_rate=history.count('W') / len(history),
+        reset_visible_score=True,
+    )
+
+    assert after_win is not None
+    assert after_loss is not None
+    assert forecast.next_win_score == after_win.score
+    assert forecast.next_loss_score == after_loss.score
+
+
+def test_forecast_reports_promotion_targets_and_two_match_estimates() -> None:
+    rating = VirtualMatchRating(
+        ability=expected_win_probability(2160),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=720,
+        provisional=False,
+    )
+
+    forecast = calculate_rating_forecast(
+        rating=rating, win_rate=0.774, reset_visible_score=True
+    )
+
+    assert forecast.next_win_score * 3 == 2166
+    assert forecast.next_loss_score * 3 == 2142
+    assert forecast.next_division is not None
+    assert forecast.next_division.target_display_score == 2267
+    assert forecast.next_division.all_win_matches == 18
+    assert forecast.next_division.current_win_rate_matches == 186
+    assert forecast.next_tier is not None
+    assert forecast.next_tier.target_display_score == 2400
+    assert forecast.next_tier.all_win_matches == 40
+    assert forecast.next_tier.current_win_rate_matches == 417
+    assert forecast.ultimate.target_display_score == 2800
+    assert forecast.ultimate.all_win_matches == 108
+    assert forecast.ultimate.current_win_rate_matches == 1112
+
+
+def test_forecast_marks_a_non_positive_current_rate_as_unreachable() -> None:
+    rating = VirtualMatchRating(
+        ability=expected_win_probability(2160),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=720,
+        provisional=False,
+    )
+
+    forecast = calculate_rating_forecast(
+        rating=rating, win_rate=0.75, reset_visible_score=True
+    )
+
+    assert forecast.next_division is not None
+    assert forecast.next_division.current_win_rate_matches is None
+    assert forecast.next_tier is not None
+    assert forecast.next_tier.current_win_rate_matches is None
+    assert forecast.ultimate.current_win_rate_matches is None
+
+
+def test_forecast_marks_completed_vainglorious_gold_goals() -> None:
+    rating = VirtualMatchRating(
+        ability=expected_win_probability(2820),
+        evidence=CARRYOVER_MATCH_CAP,
+        score=940,
+        provisional=False,
+    )
+
+    forecast = calculate_rating_forecast(
+        rating=rating, win_rate=0.8, reset_visible_score=True
+    )
+
+    assert forecast.next_division is None
+    assert forecast.next_tier is None
+    assert forecast.ultimate.target_display_score == 2800
+    assert forecast.ultimate.all_win_matches == 0
+    assert forecast.ultimate.current_win_rate_matches == 0
+
+
+def test_forecast_switches_the_ultimate_goal_after_entering_tier_nine() -> None:
+    tier_eight = calculate_rating_forecast(
+        rating=VirtualMatchRating(
+            ability=expected_win_probability(1890),
+            evidence=CARRYOVER_MATCH_CAP,
+            score=630,
+            provisional=False,
+        ),
+        win_rate=0.8,
+        reset_visible_score=True,
+    )
+    tier_ten = calculate_rating_forecast(
+        rating=VirtualMatchRating(
+            ability=expected_win_probability(2400),
+            evidence=CARRYOVER_MATCH_CAP,
+            score=800,
+            provisional=False,
+        ),
+        win_rate=0.8,
+        reset_visible_score=True,
+    )
+
+    assert tier_eight.next_division is not None
+    assert tier_eight.next_division.target_display_score == 1933
+    assert tier_eight.next_tier is not None
+    assert tier_eight.next_tier.target_display_score == 2000
+    assert tier_eight.ultimate.target_display_score == 2400
+    assert tier_ten.next_division is not None
+    assert tier_ten.next_division.target_display_score == 2600
+    assert tier_ten.next_tier is None
+    assert tier_ten.ultimate.target_display_score == 2800
 
 
 def test_more_evidence_beats_a_small_sample_at_the_same_win_rate() -> None:

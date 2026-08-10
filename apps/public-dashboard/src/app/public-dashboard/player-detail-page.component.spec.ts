@@ -79,6 +79,33 @@ describe('PlayerDetailPageComponent', () => {
     expect(page.querySelector('.profile-rank-showcase')?.textContent).toContain(
       '2,058',
     );
+    expect(page.querySelector('.next-match-context')?.textContent).toContain(
+      '68.6%',
+    );
+    expect(page.querySelector('.next-match-outcomes')?.textContent).toContain(
+      '+6',
+    );
+    expect(page.querySelector('.next-match-outcomes')?.textContent).toContain(
+      '−18',
+    );
+    expect(page.querySelector('.next-match-outcomes')?.textContent).toContain(
+      '2,064',
+    );
+    const promotionCards = page.querySelectorAll('.promotion-goal-card');
+    expect(promotionCards.length).toBe(3);
+    expect(Array.from(promotionCards).map((card) => card.textContent)).toEqual([
+      jasmine.stringMatching(/下一小段.*9\s*段.*银.*还差.*76.*最快.*13\s*局/u),
+      jasmine.stringMatching(/下一大段.*10\s*段.*铜.*还差.*342.*最快.*57\s*局/u),
+      jasmine.stringMatching(/最终目标.*10\s*段.*金.*还差.*742.*最快.*124\s*局/u),
+    ]);
+    expect(
+      Array.from(promotionCards).every((card) =>
+        card.textContent?.includes('保持当前胜率'),
+      ),
+    ).toBeTrue();
+    expect(page.querySelector('.rating-forecast-note')?.textContent).toContain(
+      '实际局数会随后续胜负变化',
+    );
     const rankProgress = page.querySelector('.profile-rank-progress');
     expect(rankProgress?.getAttribute('role')).toBe('progressbar');
     expect(rankProgress?.getAttribute('aria-valuemin')).toBe('2000');

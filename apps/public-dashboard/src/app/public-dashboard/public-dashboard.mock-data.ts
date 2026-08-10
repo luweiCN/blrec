@@ -6,8 +6,16 @@ import {
   ModeFilter,
   Performance,
   PlayerStanding,
+  RatingForecast,
+  RatingGoalForecast,
   SeasonKey,
 } from './public-dashboard.models';
+
+const SKILL_TIER_START_POINTS = [
+  0, 109, 218, 327, 436, 545, 654, 763, 872, 981, 1090, 1200, 1250,
+  1300, 1350, 1400, 1467, 1533, 1600, 1667, 1733, 1800, 1867, 1933,
+  2000, 2134, 2267, 2400, 2600, 2800,
+] as const;
 
 interface PlayerSeed {
   readonly id: number;
@@ -25,12 +33,65 @@ function performance(
   wins: number,
   topHero: string,
 ): Performance {
+  const ratingScore =
+    matches === 0 ? null : Math.round((wins / matches) * 1000);
   return {
     matches,
     wins,
     topHero,
-    ratingScore: matches === 0 ? null : Math.round((wins / matches) * 1000),
+    ratingScore,
     provisional: matches > 0 && matches < 5,
+    ratingForecast:
+      ratingScore === null
+        ? null
+        : mockRatingForecast(ratingScore, wins / matches),
+  };
+}
+
+function mockRatingForecast(
+  ratingScore: number,
+  currentWinRate: number,
+): RatingForecast {
+  const displayScore = ratingScore * 3;
+  const divisionIndex = SKILL_TIER_START_POINTS.reduce<number>(
+    (current, start, index) => (displayScore >= start ? index : current),
+    0,
+  );
+  const tier = Math.floor(divisionIndex / 3) + 1;
+  const nextWinScore = Math.min(1000, ratingScore + 2);
+  const nextLossScore = Math.max(0, ratingScore - 6);
+  const expectedDisplayDelta =
+    3 *
+    (currentWinRate * (nextWinScore - ratingScore) +
+      (1 - currentWinRate) * (nextLossScore - ratingScore));
+
+  const goal = (targetDisplayScore: number): RatingGoalForecast => {
+    const remainingScore = Math.max(0, targetDisplayScore - displayScore);
+    return {
+      targetDisplayScore,
+      allWinMatches:
+        remainingScore === 0
+          ? 0
+          : Math.ceil(remainingScore / ((nextWinScore - ratingScore) * 3)),
+      currentWinRateMatches:
+        remainingScore === 0
+          ? 0
+          : expectedDisplayDelta > 0
+            ? Math.ceil(remainingScore / expectedDisplayDelta)
+            : null,
+    };
+  };
+
+  return {
+    nextWinScore,
+    nextLossScore,
+    nextDivision:
+      divisionIndex + 1 < SKILL_TIER_START_POINTS.length
+        ? goal(SKILL_TIER_START_POINTS[divisionIndex + 1])
+        : null,
+    nextTier:
+      tier < 10 ? goal(SKILL_TIER_START_POINTS[tier * 3]) : null,
+    ultimate: goal(tier <= 8 ? 2400 : 2800),
   };
 }
 

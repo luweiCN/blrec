@@ -253,6 +253,14 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         assert first['modes']['3v3']['matches'] == 1
         assert isinstance(first['modes']['3v3']['ratingScore'], int)
         assert first['modes']['3v3']['provisional'] is True
+        forecast = first['modes']['3v3']['ratingForecast']
+        assert forecast['nextWinScore'] > first['modes']['3v3']['ratingScore']
+        assert forecast['nextLossScore'] < first['modes']['3v3']['ratingScore']
+        assert forecast['nextDivision']['targetDisplayScore'] > (
+            first['modes']['3v3']['ratingScore'] * 3
+        )
+        assert forecast['nextDivision']['allWinMatches'] > 0
+        assert first['modes']['5v5']['ratingForecast'] is None
         assert first['modes']['5v5']['ratingScore'] is None
         assert first['modes']['brawl']['matches'] == 1
         assert first['modes']['5v5']['matches'] == 0

@@ -175,6 +175,122 @@
     </div>
 
     <section
+      *ngIf="ratingForecast"
+      class="rating-forecast-section"
+      aria-labelledby="player-rating-forecast-title"
+    >
+      <header class="rating-forecast-heading">
+        <div>
+          <p>晋级参考</p>
+          <h2 id="player-rating-forecast-title">下一局与段位目标</h2>
+        </div>
+        <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
+      </header>
+
+      <div class="next-match-forecast">
+        <div class="next-match-context">
+          <span>下一局排位分变化</span>
+          <p>
+            在当前
+            <strong>{{ currentDisplayScore | number: "1.0-0" }}</strong>
+            排位分和
+            <strong>{{ winRate(performance) | percent: "1.0-1" }}</strong>
+            胜率下，根据{{ forecastRecordLabel }}计算：
+          </p>
+        </div>
+        <dl class="next-match-outcomes">
+          <div class="win">
+            <dt>下一局胜利</dt>
+            <dd>
+              <strong>+{{ nextWinDisplayDelta | number: "1.0-0" }}</strong>
+              <span>
+                增加 {{ nextWinDisplayDelta | number: "1.0-0" }} 分，赛后
+                {{ nextWinDisplayScore | number: "1.0-0" }}
+              </span>
+            </dd>
+          </div>
+          <div class="loss">
+            <dt>下一局失败</dt>
+            <dd>
+              <strong>−{{ nextLossDisplayDelta | number: "1.0-0" }}</strong>
+              <span>
+                减少 {{ nextLossDisplayDelta | number: "1.0-0" }} 分，赛后
+                {{ nextLossDisplayScore | number: "1.0-0" }}
+              </span>
+            </dd>
+          </div>
+        </dl>
+      </div>
+
+      <div class="promotion-goal-grid">
+        <article
+          *ngFor="let goal of promotionGoals; trackBy: trackPromotionGoal"
+          class="promotion-goal-card"
+          [class.complete]="goal.kind === 'goal' && goal.remainingScore === 0"
+        >
+          <header>
+            <span>{{ goal.title }}</span>
+            <small *ngIf="goal.kind === 'goal'">
+              目标线 {{ goal.forecast.targetDisplayScore | number: "1.0-0" }}
+            </small>
+          </header>
+
+          <ng-container *ngIf="goal.kind === 'goal'; else maximumGoal">
+            <div class="promotion-goal-tier">
+              <strong>
+                {{ goal.skillTier.tier }} 段 · {{ goal.skillTier.divisionLabel }}
+              </strong>
+              <span>{{ goal.skillTier.name }}</span>
+            </div>
+
+            <p *ngIf="goal.remainingScore > 0; else completedGoal" class="promotion-goal-gap">
+              还差
+              <strong>{{ goal.remainingScore | number: "1.0-0" }}</strong>
+              分
+            </p>
+            <ng-template #completedGoal>
+              <p class="promotion-goal-complete">已达成</p>
+            </ng-template>
+
+            <dl *ngIf="goal.remainingScore > 0" class="promotion-match-estimates">
+              <div>
+                <dt>保持全胜</dt>
+                <dd>
+                  最快
+                  <strong>{{ goal.forecast.allWinMatches | number: "1.0-0" }}</strong>
+                  局
+                </dd>
+              </div>
+              <div>
+                <dt>保持当前胜率</dt>
+                <dd *ngIf="goal.forecast.currentWinRateMatches !== null; else difficultGoal">
+                  约
+                  <strong>
+                    {{ goal.forecast.currentWinRateMatches | number: "1.0-0" }}
+                  </strong>
+                  局
+                </dd>
+                <ng-template #difficultGoal>
+                  <dd class="difficult">暂难达到</dd>
+                </ng-template>
+              </div>
+            </dl>
+          </ng-container>
+
+          <ng-template #maximumGoal>
+            <p class="promotion-goal-maximum">
+              {{ maximumGoalMessage(goal) }}
+            </p>
+          </ng-template>
+        </article>
+      </div>
+
+      <p class="rating-forecast-note">
+        “保持全胜”会在每次胜利后重新计算；“保持当前胜率”为按当前胜率和下一局涨跌幅得出的约数，实际局数会随后续胜负变化。
+      </p>
+    </section>
+
+    <section
       class="profile-card rating-trend-card"
       aria-labelledby="player-rating-trend-title"
     >

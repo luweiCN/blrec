@@ -24,7 +24,10 @@ from .rating import (
     PROVISIONAL_MATCHES,
     RATING_MODEL_VERSION,
     SEASON_RESET_DISPLAY_SCORE,
+    RatingForecast,
+    RatingGoalForecast,
     VirtualMatchRating,
+    calculate_rating_forecast,
     calculate_virtual_match_rating,
 )
 
@@ -167,8 +170,20 @@ class _Performance:
         )
 
     def public_value(
-        self, rating: Optional[VirtualMatchRating] = None
+        self,
+        rating: Optional[VirtualMatchRating] = None,
+        *,
+        reset_visible_score: bool = True,
     ) -> Mapping[str, Any]:
+        forecast = (
+            calculate_rating_forecast(
+                rating=rating,
+                win_rate=self.wins / self.matches,
+                reset_visible_score=reset_visible_score,
+            )
+            if rating is not None and self.matches > 0
+            else None
+        )
         return {
             'matches': self.matches,
             'wins': self.wins,
@@ -176,6 +191,7 @@ class _Performance:
             'form': list((self.results or [])[-5:]),
             'ratingScore': rating.score if rating is not None else None,
             'provisional': rating.provisional if rating is not None else False,
+            'ratingForecast': _rating_forecast_value(forecast),
         }
 
 
@@ -199,6 +215,32 @@ class _HeroPerformance:
             'wins': self.wins,
             'players': len(self.players or ()),
         }
+
+
+def _rating_goal_forecast_value(
+    forecast: Optional[RatingGoalForecast],
+) -> Optional[Mapping[str, Any]]:
+    if forecast is None:
+        return None
+    return {
+        'targetDisplayScore': forecast.target_display_score,
+        'allWinMatches': forecast.all_win_matches,
+        'currentWinRateMatches': forecast.current_win_rate_matches,
+    }
+
+
+def _rating_forecast_value(
+    forecast: Optional[RatingForecast],
+) -> Optional[Mapping[str, Any]]:
+    if forecast is None:
+        return None
+    return {
+        'nextWinScore': forecast.next_win_score,
+        'nextLossScore': forecast.next_loss_score,
+        'nextDivision': _rating_goal_forecast_value(forecast.next_division),
+        'nextTier': _rating_goal_forecast_value(forecast.next_tier),
+        'ultimate': _rating_goal_forecast_value(forecast.ultimate),
+    }
 
 
 def _season_for(moment: datetime) -> _Season:
@@ -447,7 +489,9 @@ def _standings_for_rows(
                 'trend': 0,
                 'form': list((modes['all'].results or [])[-5:]),
                 'modes': {
-                    mode: modes[mode].public_value(ratings[mode])
+                    mode: modes[mode].public_value(
+                        ratings[mode], reset_visible_score=reset_visible_score
+                    )
                     for mode in PUBLIC_MODES
                 },
                 'heroPool': _hero_pool(modes['all']),

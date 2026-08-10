@@ -62,6 +62,21 @@ export interface Performance {
   readonly topHero: string;
   readonly ratingScore: number | null;
   readonly provisional: boolean;
+  readonly ratingForecast?: RatingForecast | null;
+}
+
+export interface RatingGoalForecast {
+  readonly targetDisplayScore: number;
+  readonly allWinMatches: number;
+  readonly currentWinRateMatches: number | null;
+}
+
+export interface RatingForecast {
+  readonly nextWinScore: number;
+  readonly nextLossScore: number;
+  readonly nextDivision: RatingGoalForecast | null;
+  readonly nextTier: RatingGoalForecast | null;
+  readonly ultimate: RatingGoalForecast;
 }
 
 interface LegacyRatingModelBase {

@@ -14,6 +14,8 @@ import {
   MODE_FILTERS,
   Performance,
   PlayerStanding,
+  RatingForecast,
+  RatingGoalForecast,
   RatingModel,
   SeasonOption,
 } from './public-dashboard.models';
@@ -131,7 +133,44 @@ function isPerformance(value: unknown): value is Performance {
       (isNonNegativeInteger(value['ratingScore']) &&
         value['ratingScore'] <= 1000)) &&
     typeof value['provisional'] === 'boolean' &&
-    (value['matches'] === 0) === (value['ratingScore'] === null)
+    (value['matches'] === 0) === (value['ratingScore'] === null) &&
+    (value['ratingForecast'] === undefined ||
+      (value['ratingScore'] === null
+        ? value['ratingForecast'] === null
+        : isRatingForecast(value['ratingForecast'], value['ratingScore'])))
+  );
+}
+
+function isRatingGoalForecast(value: unknown): value is RatingGoalForecast {
+  if (!isObject(value)) {
+    return false;
+  }
+  return (
+    isNonNegativeInteger(value['targetDisplayScore']) &&
+    value['targetDisplayScore'] <= 3000 &&
+    isNonNegativeInteger(value['allWinMatches']) &&
+    (value['currentWinRateMatches'] === null ||
+      isNonNegativeInteger(value['currentWinRateMatches']))
+  );
+}
+
+function isRatingForecast(
+  value: unknown,
+  currentScore: number,
+): value is RatingForecast {
+  if (!isObject(value)) {
+    return false;
+  }
+  return (
+    isNonNegativeInteger(value['nextWinScore']) &&
+    value['nextWinScore'] <= 1000 &&
+    value['nextWinScore'] >= currentScore &&
+    isNonNegativeInteger(value['nextLossScore']) &&
+    value['nextLossScore'] <= currentScore &&
+    (value['nextDivision'] === null ||
+      isRatingGoalForecast(value['nextDivision'])) &&
+    (value['nextTier'] === null || isRatingGoalForecast(value['nextTier'])) &&
+    isRatingGoalForecast(value['ultimate'])
   );
 }
 
