@@ -113,6 +113,7 @@ function player(seed: PlayerSeed): PlayerStanding {
       assists: usage.matches * 6,
       economyMatches: usage.matches,
       economy: usage.matches * 12_000 + usage.wins * 300,
+      economyDurationSeconds: usage.matches * 900,
     },
   }));
   return {
@@ -661,6 +662,7 @@ function scaledPlayer(
         assists: matches * 6,
         economyMatches: matches,
         economy: matches * 12_000 + wins * 300,
+        economyDurationSeconds: matches * 900,
       },
     };
   });

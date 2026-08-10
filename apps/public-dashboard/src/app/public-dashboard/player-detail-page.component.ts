@@ -14,7 +14,7 @@ import {
   getPlayerRankings,
   getPlayerTrend,
   getRankMovement,
-  heroAverageEconomy,
+  heroGoldPerMinute,
   heroImage,
   heroKda,
   heroPeerComparisonKind,
@@ -117,7 +117,7 @@ export class PlayerDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
   activeHeroSort: PlayerHeroSort = 'proficiency';
-  readonly averageHeroEconomy = heroAverageEconomy;
+  readonly heroGoldPerMinute = heroGoldPerMinute;
   readonly displayScore = displayScoreForRatingScore;
   readonly heroKda = heroKda;
   readonly peerComparisonKind = heroPeerComparisonKind;

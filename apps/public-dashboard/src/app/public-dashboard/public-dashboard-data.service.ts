@@ -255,6 +255,8 @@ function isHeroUsageStats(
     isNonNegativeInteger(value['assists']) &&
     isNonNegativeInteger(value['economyMatches']) &&
     isNonNegativeInteger(value['economy']) &&
+    (value['economyDurationSeconds'] === undefined ||
+      isNonNegativeInteger(value['economyDurationSeconds'])) &&
     value['kdaMatches'] <= maximumMatches &&
     value['economyMatches'] <= maximumMatches
   );

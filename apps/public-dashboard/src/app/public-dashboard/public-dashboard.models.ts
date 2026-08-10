@@ -126,6 +126,7 @@ export interface HeroUsageStats {
   readonly assists: number;
   readonly economyMatches: number;
   readonly economy: number;
+  readonly economyDurationSeconds?: number;
 }
 
 export type HeroPools = Readonly<

@@ -4,6 +4,7 @@ import {
   getPlayerRankings,
   getPlayerTrend,
   getRankMovement,
+  heroGoldPerMinute,
   heroKda,
   heroPeerComparisonText,
   playerKdaForMode,
@@ -156,6 +157,33 @@ describe('public dashboard player rankings', () => {
       expect(heroKda(record.usage)).not.toBeNull();
       expect(heroPeerComparisonText(record.peers)).toMatch(/高|低|持平/u);
     }
+  });
+
+  it('calculates economy comparison from total gold per total minute', () => {
+    const usage = {
+      name: 'Vox',
+      matches: 2,
+      wins: 1,
+      stats: {
+        kdaMatches: 0,
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        economyMatches: 2,
+        economy: 30_000,
+        economyDurationSeconds: 1_800,
+      },
+    };
+    const legacyUsage = {
+      ...usage,
+      stats: {
+        ...usage.stats,
+        economyDurationSeconds: undefined,
+      },
+    };
+
+    expect(heroGoldPerMinute(usage)).toBe(1_000);
+    expect(heroGoldPerMinute(legacyUsage)).toBeNull();
   });
 
   it('aggregates player KDA from complete hero samples in the selected mode', () => {

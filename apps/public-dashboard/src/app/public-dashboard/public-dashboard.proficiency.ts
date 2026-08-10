@@ -1,6 +1,6 @@
 import {
   getHeroPlayerComparisons,
-  heroAverageEconomy,
+  heroGoldPerMinute,
   heroKda,
   heroPoolForMode,
   playerForSeason,
@@ -64,7 +64,7 @@ export function getHeroProficiencies(
     .map((record) => heroKda(record.usage))
     .filter(isNumber);
   const economyValues = records
-    .map((record) => heroAverageEconomy(record.usage))
+    .map((record) => heroGoldPerMinute(record.usage))
     .filter(isNumber);
 
   return records
@@ -81,7 +81,7 @@ export function getHeroProficiencies(
         kdaValues,
       );
       const economyPercentile = stablePercentile(
-        heroAverageEconomy(record.usage),
+        heroGoldPerMinute(record.usage),
         stats?.economyMatches ?? 0,
         economyValues,
       );

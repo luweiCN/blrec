@@ -109,7 +109,7 @@
               <th scope="col">胜 / 负</th>
               <th scope="col">胜率</th>
               <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
-              <th scope="col" title="仅统计经济识别完整的场次">场均经济</th>
+              <th scope="col" title="仅统计经济与对局时长均识别完整的场次">分均经济</th>
               <th scope="col">对比其他玩家</th>
             </tr>
           </thead>
@@ -144,8 +144,8 @@
               <td data-label="KDA">
                 {{ heroKda(record.usage) === null ? "—" : (heroKda(record.usage) | number: "1.2-2") }}
               </td>
-              <td data-label="场均经济">
-                {{ averageHeroEconomy(record.usage) === null ? "—" : (averageHeroEconomy(record.usage) | number: "1.0-0") }}
+              <td data-label="分均经济">
+                {{ heroGoldPerMinute(record.usage) === null ? "—" : (heroGoldPerMinute(record.usage) | number: "1.0-0") }}
               </td>
               <td data-label="对比其他玩家">
                 <span class="peer-comparison">
@@ -169,7 +169,7 @@
                     [class.up]="peerMetricKind(record.peers.economy) === 'up'"
                     [class.down]="peerMetricKind(record.peers.economy) === 'down'"
                   >
-                    经济 {{ peerMetricText(record.peers.economy, 0) }}
+                    分均经济 {{ peerMetricText(record.peers.economy, 0) }}
                   </small>
                   <small *ngIf="record.peers.kind === 'available'">
                     其他 {{ record.peers.players }} 名玩家 · {{ record.peers.matches }} 局

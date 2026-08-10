@@ -11,7 +11,7 @@ import { DashboardModeService } from './dashboard-mode.service';
 import {
   findHero,
   getHeroRankings,
-  heroAverageEconomy,
+  heroGoldPerMinute,
   heroKda,
   heroForSeason,
   heroImage,
@@ -73,7 +73,7 @@ const EMPTY_PERFORMANCE: HeroPerformance = {
 export class HeroDetailPageComponent implements OnDestroy {
   activeSeason: SeasonKey;
   activeMode: ModeFilter;
-  readonly averageHeroEconomy = heroAverageEconomy;
+  readonly heroGoldPerMinute = heroGoldPerMinute;
   readonly heroKda = heroKda;
   readonly peerComparisonKind = heroPeerComparisonKind;
   readonly peerComparisonText = heroPeerComparisonText;

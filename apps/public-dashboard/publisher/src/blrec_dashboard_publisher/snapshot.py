@@ -89,6 +89,7 @@ class _HeroUsageTotals:
     assists: int = 0
     economy_matches: int = 0
     economy: int = 0
+    economy_duration_seconds: int = 0
 
     def add(
         self,
@@ -97,6 +98,7 @@ class _HeroUsageTotals:
         deaths: Optional[int],
         assists: Optional[int],
         economy: Optional[int],
+        duration_seconds: Optional[int],
     ) -> None:
         self.matches += 1
         if result == 'W':
@@ -106,9 +108,14 @@ class _HeroUsageTotals:
             self.kills += kills
             self.deaths += deaths
             self.assists += assists
-        if economy is not None:
+        if (
+            economy is not None
+            and duration_seconds is not None
+            and duration_seconds > 0
+        ):
             self.economy_matches += 1
             self.economy += economy
+            self.economy_duration_seconds += duration_seconds
 
     def public_value(self, name: str) -> Mapping[str, Any]:
         return {
@@ -122,6 +129,7 @@ class _HeroUsageTotals:
                 'assists': self.assists,
                 'economyMatches': self.economy_matches,
                 'economy': self.economy,
+                'economyDurationSeconds': self.economy_duration_seconds,
             },
         }
 
@@ -141,6 +149,7 @@ class _Performance:
         deaths: Optional[int],
         assists: Optional[int],
         economy: Optional[int],
+        duration_seconds: Optional[int],
     ) -> None:
         self.matches += 1
         if result == 'W':
@@ -153,7 +162,7 @@ class _Performance:
         if self.heroes is None:
             self.heroes = {}
         hero = self.heroes.setdefault(hero_name, _HeroUsageTotals())
-        hero.add(result, kills, deaths, assists, economy)
+        hero.add(result, kills, deaths, assists, economy, duration_seconds)
 
     def top_hero(self) -> str:
         heroes: Mapping[str, _HeroUsageTotals] = self.heroes or {}
@@ -370,7 +379,7 @@ def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
     return connection.execute(
         'SELECT player.id AS player_id,player.name AS player_name,'
         'session.id AS session_id,session.started_at,match.id AS match_id,'
-        'match.started_at_ms,match.game_mode,'
+        'match.started_at_ms,match.duration_seconds,match.game_mode,'
         "CASE match.winner_side WHEN 'left' THEN match.left_color "
         "WHEN 'right' THEN match.right_color ELSE 'unknown' END AS winner_color,"
         "COALESCE(hero.label,'') AS hero_name,recorded.kills,"
@@ -450,9 +459,16 @@ def _standings_for_rows(
         deaths = None if row['deaths'] is None else int(row['deaths'])
         assists = None if row['assists'] is None else int(row['assists'])
         economy = None if row['economy'] is None else int(row['economy'])
+        duration_seconds = (
+            None if row['duration_seconds'] is None else int(row['duration_seconds'])
+        )
         modes = player_modes.setdefault(player_id, _empty_player_modes())
-        modes[public_mode].add(result, hero_name, kills, deaths, assists, economy)
-        modes['all'].add(result, hero_name, kills, deaths, assists, economy)
+        modes[public_mode].add(
+            result, hero_name, kills, deaths, assists, economy, duration_seconds
+        )
+        modes['all'].add(
+            result, hero_name, kills, deaths, assists, economy, duration_seconds
+        )
         if not hero_name:
             continue
         hero = hero_modes.setdefault(hero_name, _empty_hero_modes())

@@ -69,6 +69,7 @@ describe('hero proficiency', () => {
         assists: 20,
         economyMatches: 1,
         economy: 30_000,
+        economyDurationSeconds: 900,
       },
     });
     const established = withHeroUsage(players[1], {
@@ -82,6 +83,7 @@ describe('hero proficiency', () => {
         assists: 120,
         economyMatches: 20,
         economy: 250_000,
+        economyDurationSeconds: 18_000,
       },
     });
     const snapshot: DashboardSnapshot = {

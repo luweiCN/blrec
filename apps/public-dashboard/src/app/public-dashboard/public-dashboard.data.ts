@@ -96,11 +96,14 @@ export function heroKda(usage: HeroUsage): number | null {
     : (stats.kills + stats.assists) / Math.max(1, stats.deaths);
 }
 
-export function heroAverageEconomy(usage: HeroUsage): number | null {
+export function heroGoldPerMinute(usage: HeroUsage): number | null {
   const stats = usage.stats;
-  return stats === undefined || stats.economyMatches === 0
+  return stats === undefined ||
+    stats.economyMatches === 0 ||
+    stats.economyDurationSeconds === undefined ||
+    stats.economyDurationSeconds === 0
     ? null
-    : stats.economy / stats.economyMatches;
+    : (stats.economy * 60) / stats.economyDurationSeconds;
 }
 
 export function heroPeerMetricText(
@@ -454,6 +457,9 @@ export function getHeroPlayerComparisons(
       economyMatches:
         total.economyMatches + (record.usage.stats?.economyMatches ?? 0),
       economy: total.economy + (record.usage.stats?.economy ?? 0),
+      economyDurationSeconds:
+        total.economyDurationSeconds +
+        (record.usage.stats?.economyDurationSeconds ?? 0),
     }),
     {
       kdaMatches: 0,
@@ -462,6 +468,7 @@ export function getHeroPlayerComparisons(
       assists: 0,
       economyMatches: 0,
       economy: 0,
+      economyDurationSeconds: 0,
     },
   );
   return usages.map((record, index) => {
@@ -475,14 +482,19 @@ export function getHeroPlayerComparisons(
     const peerEconomyMatches =
       totalStats.economyMatches - (stats?.economyMatches ?? 0);
     const peerEconomy = totalStats.economy - (stats?.economy ?? 0);
+    const peerEconomyDurationSeconds =
+      totalStats.economyDurationSeconds -
+      (stats?.economyDurationSeconds ?? 0);
     const kda = heroKda(record.usage);
-    const averageEconomy = heroAverageEconomy(record.usage);
+    const goldPerMinute = heroGoldPerMinute(record.usage);
     const peerKda =
       peerKdaMatches === 0
         ? null
         : (peerKills + peerAssists) / Math.max(1, peerDeaths);
-    const peerAverageEconomy =
-      peerEconomyMatches === 0 ? null : peerEconomy / peerEconomyMatches;
+    const peerGoldPerMinute =
+      peerEconomyMatches === 0 || peerEconomyDurationSeconds === 0
+        ? null
+        : (peerEconomy * 60) / peerEconomyDurationSeconds;
     return {
       ...record,
       usageRank: index + 1,
@@ -508,15 +520,15 @@ export function getHeroPlayerComparisons(
                       delta: kda - peerKda,
                     },
               economy:
-                averageEconomy === null || peerAverageEconomy === null
+                goldPerMinute === null || peerGoldPerMinute === null
                   ? { kind: 'unavailable' }
                   : {
                       kind: 'available',
                       matches: stats?.economyMatches ?? 0,
                       peerMatches: peerEconomyMatches,
-                      value: averageEconomy,
-                      peerValue: peerAverageEconomy,
-                      delta: averageEconomy - peerAverageEconomy,
+                      value: goldPerMinute,
+                      peerValue: peerGoldPerMinute,
+                      delta: goldPerMinute - peerGoldPerMinute,
                     },
             },
     };

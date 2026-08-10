@@ -485,7 +485,7 @@
               <th scope="col">胜 / 负</th>
               <th scope="col">胜率</th>
               <th scope="col" title="仅统计 K / D / A 均识别完整的场次">KDA</th>
-              <th scope="col" title="仅统计经济识别完整的场次">场均经济</th>
+              <th scope="col" title="仅统计经济与对局时长均识别完整的场次">分均经济</th>
               <th scope="col">使用量排名</th>
               <th scope="col">对比其他玩家</th>
             </tr>
@@ -510,8 +510,8 @@
               <td data-label="KDA">
                 {{ heroKda(proficiency.usage) === null ? "—" : (heroKda(proficiency.usage) | number: "1.2-2") }}
               </td>
-              <td data-label="场均经济">
-                {{ averageHeroEconomy(proficiency.usage) === null ? "—" : (averageHeroEconomy(proficiency.usage) | number: "1.0-0") }}
+              <td data-label="分均经济">
+                {{ heroGoldPerMinute(proficiency.usage) === null ? "—" : (heroGoldPerMinute(proficiency.usage) | number: "1.0-0") }}
               </td>
               <td class="usage-rank" data-label="使用量排名">
                 #{{ proficiency.usageRank }} / {{ proficiency.playerCount }}
@@ -538,7 +538,7 @@
                     [class.up]="peerMetricKind(proficiency.peers.economy) === 'up'"
                     [class.down]="peerMetricKind(proficiency.peers.economy) === 'down'"
                   >
-                    经济 {{ peerMetricText(proficiency.peers.economy, 0) }}
+                    分均经济 {{ peerMetricText(proficiency.peers.economy, 0) }}
                   </small>
                   <small *ngIf="proficiency.peers.kind === 'available'">
                     其他 {{ proficiency.peers.players }} 名玩家 · {{ proficiency.peers.matches }} 局

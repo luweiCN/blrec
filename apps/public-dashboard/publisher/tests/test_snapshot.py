@@ -275,6 +275,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             'assists': 1,
             'economyMatches': 1,
             'economy': 10000,
+            'economyDurationSeconds': 900,
         }
         assert first['heroPool'][1]['stats']['economyMatches'] == 0
         assert [usage['name'] for usage in first['heroPools']['3v3']] == ['Caine']
