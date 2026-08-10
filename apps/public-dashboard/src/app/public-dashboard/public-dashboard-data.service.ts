@@ -502,34 +502,77 @@ function parseManifest(value: unknown): DashboardManifest {
   return value as unknown as DashboardManifest;
 }
 
+function roomIdsFromLegacyLabel(value: unknown): readonly number[] {
+  if (typeof value !== 'string') {
+    return [];
+  }
+  return (value.match(/\d+/gu) ?? [])
+    .map((match) => Number(match))
+    .filter((roomId, index, roomIds) =>
+      roomId > 0 && roomIds.indexOf(roomId) === index,
+    );
+}
+
+function normalizeLegacySnapshot(value: unknown): unknown {
+  if (!isObject(value) || value['schemaVersion'] !== 2) {
+    return value;
+  }
+  const standings = value['standings'];
+  if (!isObject(standings)) {
+    return value;
+  }
+  const normalizedStandings: Record<string, unknown> = {};
+  for (const [seasonKey, seasonStandings] of Object.entries(standings)) {
+    normalizedStandings[seasonKey] =
+      isObject(seasonStandings) && Array.isArray(seasonStandings['players'])
+        ? {
+            ...seasonStandings,
+            players: seasonStandings['players'].map((player) =>
+              isObject(player)
+                ? {
+                    ...player,
+                    roomIds: roomIdsFromLegacyLabel(player['roomLabel']),
+                  }
+                : player,
+            ),
+          }
+        : seasonStandings;
+  }
+  return {
+    ...value,
+    schemaVersion: 3,
+    standings: normalizedStandings,
+    matches: [],
+  };
+}
+
 function parseSnapshot(value: unknown): DashboardSnapshot {
-  if (!isObject(value)) {
+  const snapshot = normalizeLegacySnapshot(value);
+  if (!isObject(snapshot)) {
     throw new Error('dashboard snapshot has an unsupported format');
   }
-  const supportedSchema =
-    (value['schemaVersion'] === 2 || value['schemaVersion'] === 3);
-  const matches = value['schemaVersion'] === 2 ? [] : value['matches'];
+  const matches = snapshot['matches'];
   if (
-    !supportedSchema ||
-    typeof value['snapshotId'] !== 'string' ||
-    typeof value['publicationDate'] !== 'string' ||
-    typeof value['generatedAt'] !== 'string' ||
-    !isNonNegativeInteger(value['sourceLastMatchId']) ||
-    !isNonNegativeInteger(value['sourceMatchCount']) ||
-    !isRatingModel(value['ratingModel']) ||
-    typeof value['currentSeasonKey'] !== 'string' ||
-    !isSeasonKey(value['currentSeasonKey']) ||
-    !Array.isArray(value['seasons']) ||
-    value['seasons'].length === 0 ||
-    !value['seasons'].every(isSeasonOption) ||
-    !isObject(value['standings']) ||
+    snapshot['schemaVersion'] !== 3 ||
+    typeof snapshot['snapshotId'] !== 'string' ||
+    typeof snapshot['publicationDate'] !== 'string' ||
+    typeof snapshot['generatedAt'] !== 'string' ||
+    !isNonNegativeInteger(snapshot['sourceLastMatchId']) ||
+    !isNonNegativeInteger(snapshot['sourceMatchCount']) ||
+    !isRatingModel(snapshot['ratingModel']) ||
+    typeof snapshot['currentSeasonKey'] !== 'string' ||
+    !isSeasonKey(snapshot['currentSeasonKey']) ||
+    !Array.isArray(snapshot['seasons']) ||
+    snapshot['seasons'].length === 0 ||
+    !snapshot['seasons'].every(isSeasonOption) ||
+    !isObject(snapshot['standings']) ||
     !Array.isArray(matches) ||
     !matches.every(isDashboardMatch)
   ) {
     throw new Error('dashboard snapshot has an unsupported format');
   }
-  const standings = value['standings'];
-  for (const season of value['seasons']) {
+  const standings = snapshot['standings'];
+  for (const season of snapshot['seasons']) {
     const seasonStandings = standings[season.key];
     if (
       !isObject(seasonStandings) ||
@@ -541,7 +584,7 @@ function parseSnapshot(value: unknown): DashboardSnapshot {
       throw new Error(`dashboard standings are invalid for ${season.key}`);
     }
   }
-  if (standings[value['currentSeasonKey']] === undefined) {
+  if (standings[snapshot['currentSeasonKey']] === undefined) {
     throw new Error('dashboard snapshot is missing its current season');
   }
   const allTimeStandings = standings['all-time'];
@@ -565,9 +608,5 @@ function parseSnapshot(value: unknown): DashboardSnapshot {
     }
     matchIds.add(match.id);
   }
-  return {
-    ...value,
-    schemaVersion: 3,
-    matches,
-  } as unknown as DashboardSnapshot;
+  return snapshot as unknown as DashboardSnapshot;
 }

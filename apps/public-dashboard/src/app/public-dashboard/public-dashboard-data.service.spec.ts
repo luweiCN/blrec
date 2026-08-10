@@ -89,7 +89,29 @@ describe('DashboardDataService', () => {
   });
 
   it('keeps accepting version 2 snapshots without match details', async () => {
-    const legacySnapshot = { ...TEST_DASHBOARD_SNAPSHOT } as Record<
+    const legacyStandings: Record<string, unknown> = {};
+    for (const [seasonKey, standings] of Object.entries(
+      TEST_DASHBOARD_SNAPSHOT.standings,
+    )) {
+      legacyStandings[seasonKey] = {
+        ...standings,
+        players: standings.players.map((player, index) => {
+          const legacyPlayer = {
+            ...player,
+            roomLabel:
+              index === 0
+                ? '直播间 26024031 / 27721563'
+                : player.roomLabel,
+          } as Record<string, unknown>;
+          delete legacyPlayer['roomIds'];
+          return legacyPlayer;
+        }),
+      };
+    }
+    const legacySnapshot = {
+      ...TEST_DASHBOARD_SNAPSHOT,
+      standings: legacyStandings,
+    } as Record<
       string,
       unknown
     >;
@@ -107,6 +129,9 @@ describe('DashboardDataService', () => {
     expect(service.state.kind).toBe('ready');
     expect(service.snapshot.schemaVersion).toBe(3);
     expect(service.snapshot.matches).toEqual([]);
+    expect(
+      service.snapshot.standings['all-time'].players[0].roomIds,
+    ).toEqual([26024031, 27721563]);
   });
 
   it('keeps the ranking available when trend data is missing or invalid', async () => {
