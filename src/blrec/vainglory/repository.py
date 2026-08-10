@@ -4234,7 +4234,9 @@ class VaingloryRepository:
             ).fetchone()
             if session is None:
                 raise VaingloryNotFound('直播场次不存在')
-            self._set_session_anchor(connection, int(session_id), normalized)
+            self._set_session_anchor(
+                connection, int(session_id), normalized, self._now()
+            )
 
         await self._database.write(update)
         page = await self.list_match_sessions(
@@ -4275,7 +4277,9 @@ class VaingloryRepository:
                 raise VaingloryNotFound('部分直播场次不存在')
             if normalized_anchor is not None:
                 for selected_id in unique_ids:
-                    self._set_session_anchor(connection, selected_id, normalized_anchor)
+                    self._set_session_anchor(
+                        connection, selected_id, normalized_anchor, self._now()
+                    )
             if stats_included is not None:
                 changed = connection.execute(
                     'UPDATE vainglory_scan_jobs SET stats_included=? '
@@ -5184,6 +5188,8 @@ class VaingloryRepository:
             ).fetchone()
             if existing is not None:
                 return
+        if room_id <= 0 and anchor_uid is None and not anchor_name:
+            return
 
         player_id: Optional[int] = None
         if anchor_uid is not None:
@@ -5567,7 +5573,7 @@ class VaingloryRepository:
 
     @staticmethod
     def _set_session_anchor(
-        connection: sqlite3.Connection, session_id: int, anchor_name: str
+        connection: sqlite3.Connection, session_id: int, anchor_name: str, now: int
     ) -> None:
         room_id = 0
         anchor_uid: Optional[int] = None
@@ -5584,11 +5590,40 @@ class VaingloryRepository:
             if known is not None:
                 room_id = int(known['room_id'])
                 anchor_uid = int(known['anchor_uid'])
+        previous = connection.execute(
+            'SELECT player.id,player.name '
+            'FROM vainglory_player_sessions direct '
+            'JOIN vainglory_players player ON player.id=direct.player_id '
+            'WHERE direct.session_id=?',
+            (int(session_id),),
+        ).fetchone()
         connection.execute(
             'UPDATE recording_sessions SET room_id=?,anchor_uid=?,anchor_name=? '
             'WHERE id=?',
             (room_id, anchor_uid, anchor_name, int(session_id)),
         )
+        preserved = (
+            previous is not None
+            and room_id <= 0
+            and bool(anchor_name)
+            and str(previous['name']).casefold() == anchor_name.casefold()
+        )
+        if previous is not None and not preserved:
+            previous_player_id = int(previous['id'])
+            connection.execute(
+                'DELETE FROM vainglory_player_sessions WHERE session_id=?',
+                (int(session_id),),
+            )
+            connection.execute(
+                "DELETE FROM vainglory_players WHERE id=? AND origin='automatic' "
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_player_rooms room '
+                'WHERE room.player_id=vainglory_players.id) '
+                'AND NOT EXISTS(SELECT 1 FROM vainglory_player_sessions direct '
+                'WHERE direct.player_id=vainglory_players.id)',
+                (previous_player_id,),
+            )
+        if not preserved:
+            VaingloryRepository._ensure_session_player(connection, session_id, now)
 
     @staticmethod
     def _match_session_record(row: sqlite3.Row) -> MatchSessionRecord:

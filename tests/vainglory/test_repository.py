@@ -1704,6 +1704,58 @@ async def test_match_level_exclusion_keeps_match_but_filters_all_statistics(
 
 
 @pytest.mark.asyncio
+async def test_analyzed_session_without_anchor_stays_unassigned(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'unassigned.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        await database.execute(
+            "UPDATE recording_sessions SET room_id=0,anchor_uid=NULL,anchor_name='' "
+            'WHERE id=1'
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        assert await repository.list_players() == ()
+        assert await repository.list_player_stats() == ()
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_player_sessions') == 0
+        )
+        summary = await repository.index_summary()
+        assert summary.match_count == 1
+        assert summary.unassigned_session_count == 1
+
+        assigned = await repository.update_session_anchor(1, '历史主播')
+
+        assert assigned.anchor_name == '历史主播'
+        players = await repository.list_players()
+        assert len(players) == 1
+        assert players[0].name == '历史主播'
+        assert players[0].rooms == ()
+        player_id = players[0].id
+        player_stats = await repository.list_player_stats()
+        assert len(player_stats) == 1
+        assert player_stats[0].match_count == 1
+
+        await repository.update_session_anchor(1, '历史主播')
+
+        assert (await repository.list_players())[0].id == player_id
+
+        await repository.update_session_anchor(1, '')
+
+        assert await repository.list_players() == ()
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_player_sessions') == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_manages_players_and_aggregates_player_rankings(
     tmp_path: Path,
 ) -> None:

@@ -623,7 +623,73 @@ async def test_sixty_second_migration_retries_failed_analysis_except_ignored(
             'force_republish': 1,
             'error': '等待失败分析任务重新处理',
         }
-        assert await database.scalar('SELECT MAX(version) FROM schema_migrations') == 64
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_sixty_fifth_migration_removes_only_unassigned_fallback_players(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 65):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,anchor_name) '
+            "VALUES(242,0,'archive:242','closed',1,''),"
+            "(243,0,'archive:243','closed',1,'')"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_players('
+            'id,name,origin,created_at,updated_at) '
+            "VALUES(10,'玩家 242','automatic',100,100),"
+            "(11,'已确认玩家','automatic',100,101)"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_player_sessions('
+            'session_id,player_id,created_at,updated_at) '
+            'VALUES(242,10,100,100),(243,11,100,101)'
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        players = await database.fetchall(
+            'SELECT id,name FROM vainglory_players ORDER BY id'
+        )
+        direct = await database.fetchall(
+            'SELECT session_id,player_id FROM vainglory_player_sessions '
+            'ORDER BY session_id'
+        )
+
+        assert [dict(row) for row in players] == [{'id': 11, 'name': '已确认玩家'}]
+        assert [dict(row) for row in direct] == [{'session_id': 243, 'player_id': 11}]
+        assert await database.scalar('SELECT COUNT(*) FROM recording_sessions') == 2
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
     finally:
         await database.close()
 
