@@ -1773,7 +1773,9 @@ async def test_publication_uses_separate_discovery_and_delivery_workers(
 
 
 @pytest.mark.asyncio
-async def test_paused_migration_also_pauses_its_publication(tmp_path: Path) -> None:
+async def test_paused_migration_only_pauses_unfinished_publication(
+    tmp_path: Path,
+) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
     try:
@@ -1789,7 +1791,7 @@ async def test_paused_migration_also_pauses_its_publication(tmp_path: Path) -> N
             'INSERT INTO archive_migration_items('
             'id,migration_id,aid,bvid,title,state,progress,page_count,'
             'downloaded_page_count,session_id,upload_job_id,created_at,updated_at) '
-            "VALUES(1,1,303,'BV1abcdefgh','历史稿件','task_created',1,1,1,1,1,1,1)"
+            "VALUES(1,1,303,'BV1abcdefgh','历史稿件','creating_task',1,1,1,1,1,1,1)"
         )
         service = VaingloryPublicationService(
             database,
@@ -1805,12 +1807,21 @@ async def test_paused_migration_also_pauses_its_publication(tmp_path: Path) -> N
             await database.scalar('SELECT plan_state FROM vainglory_publications')
             == 'waiting_analysis'
         )
-        status = (await service.publication_statuses((1,)))[1]
-        assert status.code == 'operator_paused'
-        assert status.recommended_action == 'resume_migration'
+        paused = (await service.publication_statuses((1,)))[1]
+        assert paused.code == 'operator_paused'
+        assert paused.operator_paused is True
+
         await database.execute(
-            'UPDATE archive_migration_jobs SET operator_paused=0 WHERE id=1'
+            "UPDATE archive_migration_items SET state='task_created' WHERE id=1"
         )
+        assert await service.run_once() is True
+        assert (
+            await database.scalar('SELECT plan_state FROM vainglory_publications')
+            == 'ready'
+        )
+        status = (await service.publication_statuses((1,)))[1]
+        assert status.code == 'queued'
+        assert status.operator_paused is False
         assert await service.run_once() is True
     finally:
         await database.close()

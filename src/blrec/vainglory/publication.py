@@ -577,6 +577,7 @@ class VaingloryPublicationService:
             'JOIN archive_migration_jobs paused_job '
             'ON paused_job.id=paused_item.migration_id '
             'WHERE paused_item.session_id=publication.session_id '
+            "AND paused_item.state!='task_created' "
             'AND paused_job.operator_paused=1) AS operator_paused '
             'FROM vainglory_publications publication '
             'LEFT JOIN upload_jobs upload ON upload.id=publication.upload_job_id '
@@ -949,6 +950,7 @@ class VaingloryPublicationService:
             'JOIN archive_migration_jobs paused_job '
             'ON paused_job.id=paused_item.migration_id '
             'WHERE paused_item.session_id=publication.session_id '
+            "AND paused_item.state!='task_created' "
             'AND paused_job.operator_paused=1) '
             'AND NOT EXISTS(SELECT 1 FROM vainglory_archive_imports imported '
             'WHERE imported.session_id=publication.session_id '
@@ -1292,6 +1294,7 @@ class VaingloryPublicationService:
             'JOIN archive_migration_jobs paused_job '
             'ON paused_job.id=paused_item.migration_id '
             'WHERE paused_item.session_id=session.id '
+            "AND paused_item.state!='task_created' "
             'AND paused_job.operator_paused=1) '
             'ORDER BY publication.priority DESC,CASE '
             "WHEN publication.source_kind='upload' THEN 0 ELSE 1 END,"

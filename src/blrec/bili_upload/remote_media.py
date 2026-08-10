@@ -120,7 +120,11 @@ class RemoteMediaCache:
         )
 
     async def request(
-        self, part_id: int, *, retain_for_playback: bool = False
+        self,
+        part_id: int,
+        *,
+        retain_for_playback: bool = False,
+        force_remote: bool = False,
     ) -> RemoteMediaStatus:
         status = await self._load_status(part_id, create_source=True)
         if retain_for_playback and status.remote_available:
@@ -130,7 +134,9 @@ class RemoteMediaCache:
                 (self._now(), int(part_id)),
             )
             status = await self.status(part_id)
-        if status.state in ('local', 'ready', 'pending', 'downloading'):
+        if status.state == 'local' and not force_remote:
+            return status
+        if status.state in ('ready', 'pending', 'downloading'):
             if status.state == 'pending':
                 self._wake.set()
             return status

@@ -79,6 +79,24 @@ class FakeRemoteMediaCache:
         )
 
 
+def test_missing_remote_source_requeues_pending_analysis() -> None:
+    state = ArchiveBackfillService._derived_part_state(
+        {
+            'state': 'analyzing',
+            'progress': 0.5,
+            'error': None,
+            'source_state': 'missing',
+            'source_progress': 0,
+            'source_error': None,
+            'analysis_state': 'pending',
+            'analysis_progress': 0,
+            'analysis_error': None,
+        }  # type: ignore[arg-type]
+    )
+
+    assert state == ('queued', 0, None)
+
+
 async def seed_account(database: BiliUploadDatabase) -> None:
     await database.execute(
         "INSERT INTO bili_accounts("

@@ -6,6 +6,8 @@ from threading import Event
 import pytest
 from loguru import logger
 
+from blrec.bili_upload.database import BiliUploadDatabase
+from blrec.bili_upload.remote_media import RemoteMediaCache
 from blrec.vainglory.analyzer import (
     AnalysisCancelled,
     AnalysisStatus,
@@ -16,6 +18,7 @@ from blrec.vainglory.repository import (
     AnalysisQueueCompletion,
     AnalysisQueueStatus,
     ScanClaim,
+    VaingloryRepository,
 )
 from blrec.vainglory.service import VaingloryIndexService
 
@@ -70,6 +73,15 @@ class Analyzer:
         raise AnalysisCancelled('preempted')
 
 
+class UnusedRemoteDownloader:
+    async def download(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError('the test only queues the remote download')
+
+
+async def async_bundle(_account_id: int) -> object:
+    return object()
+
+
 def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
     service = VaingloryIndexService(
         Repository(),  # type: ignore[arg-type]
@@ -97,6 +109,154 @@ def test_runtime_log_deduplicates_repeated_stage_messages() -> None:
 
     assert len(service._runtime_events[1]) == 1
     assert service._runtime_status[1].coarse_frames == 3
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_recovers_deleted_video_from_published_upload(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        deleted_video = tmp_path / 'deleted.mp4'
+        local_video = tmp_path / 'local.mp4'
+        empty_video = tmp_path / 'empty.mp4'
+        local_video.write_bytes(b'video')
+        empty_video.write_bytes(b'')
+        await database.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'投稿账号',X'00',1,'key','active',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO recording_sessions('
+            'id,room_id,broadcast_session_key,state,started_at,title,anchor_name) '
+            "VALUES(1,100,'session:1','closed',1,'历史稿件','主播')"
+        )
+        await database.execute(
+            'INSERT INTO recording_runs(id,session_id,state,started_at,ended_at) '
+            "VALUES('run:1',1,'finished',1,2)"
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,video_deleted_at,created_at,updated_at) '
+            "VALUES(1,1,'run:1',1,?,1,'missing',50,1,50)",
+            (str(deleted_video),),
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,created_at,updated_at) '
+            "VALUES(2,1,'run:1',2,?,1,'ready',1,1)",
+            (str(local_video),),
+        )
+        await database.execute(
+            'INSERT INTO recording_parts('
+            'id,session_id,run_id,part_index,source_path,record_start_time,'
+            'artifact_state,created_at,updated_at) '
+            "VALUES(3,1,'run:1',3,?,1,'ready',1,1)",
+            (str(empty_video),),
+        )
+        await database.execute(
+            'INSERT INTO upload_jobs('
+            'id,session_id,account_id,policy_snapshot_json,state,submit_state,'
+            'aid,bvid,created_at,updated_at) '
+            "VALUES(1,1,1,'{}','approved','confirmed',303,'BV1abcdefgh',1,1)"
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'job_id,part_index,source_path,artifact_state,upload_state,'
+            'remote_filename,cid) '
+            "VALUES(1,1,?,'ready','confirmed','remote-p1',401)",
+            (str(deleted_video),),
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'job_id,part_index,source_path,artifact_state,upload_state,'
+            'remote_filename,cid) '
+            "VALUES(1,2,?,'ready','confirmed','remote-p2',402)",
+            (str(local_video),),
+        )
+        await database.execute(
+            'INSERT INTO upload_parts('
+            'job_id,part_index,source_path,artifact_state,upload_state,'
+            'remote_filename,cid) '
+            "VALUES(1,3,?,'ready','confirmed','remote-p3',403)",
+            (str(empty_video),),
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+        remote_media = RemoteMediaCache(
+            database,
+            tmp_path / 'recordings',
+            bundle_loader=async_bundle,
+            downloader=UnusedRemoteDownloader(),
+            clock=lambda: 100,
+        )
+        service = VaingloryIndexService(repository, remote_media_cache=remote_media)
+
+        job = await service.request_scan(1)
+
+        assert job.state == 'pending'
+        source = await database.fetchone(
+            'SELECT state,bvid,cid,page FROM vainglory_video_sources ' 'WHERE part_id=1'
+        )
+        assert source is not None
+        assert (
+            str(source['state']),
+            str(source['bvid']),
+            int(source['cid']),
+            int(source['page']),
+        ) == ('pending', 'BV1abcdefgh', 401, 1)
+        assert (
+            await database.scalar(
+                'SELECT COUNT(*) FROM vainglory_video_sources WHERE part_id=2'
+            )
+            == 0
+        )
+        empty_source = await database.fetchone(
+            'SELECT state,bvid,cid,page FROM vainglory_video_sources WHERE part_id=3'
+        )
+        assert empty_source is not None
+        assert (
+            str(empty_source['state']),
+            str(empty_source['bvid']),
+            int(empty_source['cid']),
+            int(empty_source['page']),
+        ) == ('pending', 'BV1abcdefgh', 403, 3)
+        part_job = await database.fetchone(
+            'SELECT state,request_kind,algorithm_version FROM vainglory_part_jobs '
+            'WHERE part_id=1'
+        )
+        assert part_job is not None
+        assert (
+            str(part_job['state']),
+            str(part_job['request_kind']),
+            int(part_job['algorithm_version']),
+        ) == ('pending', 'manual', repository.ALGORITHM_VERSION)
+        assert (
+            await database.scalar(
+                "SELECT COUNT(*) FROM vainglory_part_jobs WHERE session_id=1 "
+                "AND state='pending' AND request_kind='manual' "
+                'AND algorithm_version=?',
+                (repository.ALGORITHM_VERSION,),
+            )
+            == 3
+        )
+        part_states = await database.fetchall(
+            'SELECT id,artifact_state FROM recording_parts ORDER BY id'
+        )
+        assert [
+            (int(row['id']), str(row['artifact_state'])) for row in part_states
+        ] == [(1, 'missing'), (2, 'ready'), (3, 'missing')]
+        claim = await repository.claim_next()
+        assert claim is not None
+        assert claim.part.id == 2
+        await repository.complete_part(2, ())
+        assert await repository.claim_next() is None
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

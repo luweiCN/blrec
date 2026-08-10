@@ -1387,10 +1387,23 @@ class VaingloryRepository:
         return await self._database.write(sync)
 
     async def request_scan(self, session_id: int) -> ScanJob:
+        job, _remote_part_ids = await self._request_scan(
+            session_id, allow_remote_media=False
+        )
+        return job
+
+    async def request_scan_with_remote_media(
+        self, session_id: int
+    ) -> Tuple[ScanJob, Tuple[int, ...]]:
+        return await self._request_scan(session_id, allow_remote_media=True)
+
+    async def _request_scan(
+        self, session_id: int, *, allow_remote_media: bool
+    ) -> Tuple[ScanJob, Tuple[int, ...]]:
         now = self._now()
         obsolete_frame_paths: List[str] = []
 
-        def request(connection: sqlite3.Connection) -> None:
+        def request(connection: sqlite3.Connection) -> Tuple[int, ...]:
             session = connection.execute(
                 'SELECT session.state,session.deletion_state,session.title,'
                 'job.policy_snapshot_json,migration.title AS migration_title,'
@@ -1421,13 +1434,58 @@ class VaingloryRepository:
                 or str(session['deletion_state']) != 'none'
             ):
                 raise VaingloryConflict('只能分析可用且未删除的录播')
-            part_rows = connection.execute(
-                'SELECT id,source_path,final_path,media_index_state '
-                'FROM recording_parts '
-                "WHERE session_id=? AND artifact_state='ready' "
-                'AND video_deleted_at IS NULL ORDER BY part_index,id',
+            candidate_rows = connection.execute(
+                'SELECT part.id,part.source_path,part.final_path,'
+                'part.media_index_state,part.artifact_state,'
+                'part.video_deleted_at,'
+                'EXISTS(SELECT 1 FROM vainglory_video_sources source '
+                'WHERE source.part_id=part.id) OR EXISTS('
+                'SELECT 1 FROM upload_jobs remote_job '
+                'JOIN upload_parts remote_part '
+                'ON remote_part.job_id=remote_job.id '
+                'AND remote_part.part_index=part.part_index '
+                'WHERE remote_job.session_id=part.session_id '
+                "AND remote_job.state IN ('approved','completed') "
+                "AND remote_job.bvid IS NOT NULL AND remote_job.bvid!='' "
+                'AND remote_part.cid IS NOT NULL) AS remote_available '
+                'FROM recording_parts part WHERE part.session_id=? '
+                'ORDER BY part.part_index,part.id',
                 (int(session_id),),
             ).fetchall()
+            part_rows = []
+            remote_part_ids: List[int] = []
+            for part in candidate_rows:
+                local_available = (
+                    str(part['artifact_state']) == 'ready'
+                    and part['video_deleted_at'] is None
+                    and os.path.isfile(
+                        _preferred_part_path(part['source_path'], part['final_path'])
+                    )
+                )
+                unusable_reason = (
+                    _definitely_unusable_part_reason(
+                        part['source_path'],
+                        part['final_path'],
+                        part['media_index_state'],
+                    )
+                    if local_available
+                    else None
+                )
+                if (
+                    allow_remote_media
+                    and bool(part['remote_available'])
+                    and (not local_available or unusable_reason is not None)
+                ):
+                    connection.execute(
+                        "UPDATE recording_parts SET artifact_state='missing',"
+                        'updated_at=? WHERE id=?',
+                        (now, int(part['id'])),
+                    )
+                    part_rows.append(part)
+                    remote_part_ids.append(int(part['id']))
+                    continue
+                if local_available:
+                    part_rows.append(part)
             if not part_rows:
                 raise VaingloryConflict('该录播没有可分析的视频文件')
             analyzing = connection.execute(
@@ -1460,6 +1518,8 @@ class VaingloryRepository:
                 ),
             )
             for part in part_rows:
+                if int(part['id']) in remote_part_ids:
+                    continue
                 reason = _definitely_unusable_part_reason(
                     part['source_path'], part['final_path'], part['media_index_state']
                 )
@@ -1470,12 +1530,13 @@ class VaingloryRepository:
                         )
                     )
             self._refresh_session_job(connection, int(session_id), now)
+            return tuple(remote_part_ids)
 
-        await self._database.write(request)
+        remote_part_ids = await self._database.write(request)
         self._remove_result_frame_files(obsolete_frame_paths)
         job = await self.get_job(session_id)
         assert job is not None
-        return job
+        return job, remote_part_ids
 
     async def find_video_part(
         self, bvid: str, page: int

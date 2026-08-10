@@ -301,7 +301,19 @@ class VaingloryIndexService:
             await self._repository.complete_recorded_player_backfill(item_id, None)
 
     async def request_scan(self, session_id: int) -> ScanJob:
-        job = await self._repository.request_scan(session_id)
+        if self._remote_media_cache is None:
+            job = await self._repository.request_scan(session_id)
+        else:
+            job, remote_part_ids = (
+                await self._repository.request_scan_with_remote_media(session_id)
+            )
+            try:
+                for part_id in remote_part_ids:
+                    await self._remote_media_cache.request(part_id, force_remote=True)
+            except (RemoteMediaNotFound, RemoteMediaUnavailable) as error:
+                raise VaingloryConflict(
+                    '无法重新下载稿件视频：{}'.format(error)
+                ) from error
         self._scan_wake.set()
         return job
 

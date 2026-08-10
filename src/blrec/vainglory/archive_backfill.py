@@ -1293,6 +1293,8 @@ class ArchiveBackfillService:
                 max(0.0, min(0.49, float(row['source_progress']) * 0.5)),
                 None,
             )
+        if source_state == 'missing' and analysis_state in ('pending', 'analyzing'):
+            return 'queued', 0, None
         if source_state == 'ready' or analysis_state in ('pending', 'analyzing'):
             analysis_progress = float(row['analysis_progress'] or 0)
             return (
