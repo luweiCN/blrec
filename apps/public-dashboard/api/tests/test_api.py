@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict, List
+
+from blrec_dashboard_api.app import create_app
+from blrec_dashboard_api.settings import ApiSettings
+from fastapi.testclient import TestClient
+
+TOKEN = 'test-ingest-token'
+
+
+def team(
+    *,
+    role: str,
+    color: str,
+    hero_names: List[str],
+    player_names: List[str],
+    recorded_slot: int = -1,
+) -> Dict[str, Any]:
+    return {
+        'role': role,
+        'side': 'left' if role == 'ally' else 'right',
+        'color': color,
+        'kills': 10 if role == 'ally' else 8,
+        'economy': 40500 if role == 'ally' else 33000,
+        'players': [
+            {
+                'slot': index + 1,
+                'name': player_name,
+                'heroName': hero_name,
+                'kills': 5 if index == 0 else 2,
+                'deaths': 2,
+                'assists': 7,
+                'economy': 13500,
+                'lastHits': 100,
+                'isRecordedPlayer': index == recorded_slot,
+            }
+            for index, (hero_name, player_name) in enumerate(
+                zip(hero_names, player_names)
+            )
+        ],
+    }
+
+
+def match(
+    match_id: int, *, played_at: str, result: str, title: str = '茉莉深夜排位'
+) -> Dict[str, Any]:
+    return {
+        'id': match_id,
+        'playerId': 7,
+        'seasonKey': '2026-summer',
+        'mode': '3v3',
+        'playedAt': played_at,
+        'durationSeconds': 907,
+        'result': result,
+        'streamTitle': title,
+        'ally': team(
+            role='ally',
+            color='teal',
+            hero_names=['剑圣', '鱼人', '鸟人'],
+            player_names=['-Akitsuki-', 'Guest', '队友甲'],
+            recorded_slot=0,
+        ),
+        'enemy': team(
+            role='enemy',
+            color='orange',
+            hero_names=['猫女', '火龙', '女警'],
+            player_names=['对手甲', '对手乙', '对手丙'],
+        ),
+        'replay': {
+            'kind': 'match',
+            'url': 'https://www.bilibili.com/video/BV1test?p=1&t=120',
+        },
+        'resultImage': {
+            'url': 'https://vg.luwei.host/data/match-images/7.webp',
+            'width': 1600,
+            'height': 900,
+        },
+    }
+
+
+def batch(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        'schemaVersion': 1,
+        'generatedAt': '2026-08-11T00:00:00Z',
+        'sourceLastMatchId': max((item['id'] for item in matches), default=0),
+        'players': [
+            {
+                'id': 7,
+                'name': '茉莉',
+                'initial': '茉',
+                'roomLabel': '直播间 123456',
+                'roomIds': [123456],
+                'aliases': ['-Akitsuki-'],
+                'avatarUrl': 'https://example.com/avatar.jpg',
+            }
+        ],
+        'matches': matches,
+        'removedMatchIds': [],
+    }
+
+
+def make_client(tmp_path: Path) -> TestClient:
+    settings = ApiSettings(
+        database_path=tmp_path / 'dashboard.sqlite3',
+        ingest_token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
+        cors_origins=('https://vg.luwei.host',),
+    )
+    return TestClient(create_app(settings))
+
+
+def ingest(client: TestClient, payload: Dict[str, Any], key: str = 'batch-1') -> Any:
+    return client.post(
+        '/v1/ingest/batches',
+        headers={'Authorization': f'Bearer {TOKEN}', 'X-Idempotency-Key': key},
+        json=payload,
+    )
+
+
+def test_ingest_requires_authentication_and_is_idempotent(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    payload = batch([match(2, played_at='2026-06-02T12:00:00Z', result='W')])
+
+    unauthorized = client.post(
+        '/v1/ingest/batches', headers={'X-Idempotency-Key': 'batch-1'}, json=payload
+    )
+    first = ingest(client, payload)
+    duplicate = ingest(client, payload)
+    conflicting_payload = {**payload, 'sourceLastMatchId': 999}
+    conflict = ingest(client, conflicting_payload)
+
+    assert unauthorized.status_code == 401
+    assert first.status_code == 200
+    assert first.json()['status'] == 'applied'
+    assert duplicate.status_code == 200
+    assert duplicate.json()['status'] == 'duplicate'
+    assert conflict.status_code == 409
+
+
+def test_historical_backfill_replays_exact_rating_ledger(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    recent = match(2, played_at='2026-06-02T12:00:00Z', result='W')
+    historical = match(1, played_at='2026-06-01T12:00:00Z', result='L')
+
+    assert ingest(client, batch([recent]), 'recent').status_code == 200
+    before_backfill = client.get('/v1/matches/2?ratingScope=3v3').json()
+    assert ingest(client, batch([historical]), 'historical').status_code == 200
+    after_backfill = client.get('/v1/matches/2?ratingScope=3v3').json()
+    first_match = client.get('/v1/matches/1?ratingScope=3v3').json()
+
+    assert before_backfill['rating']['scoreBefore'] == 999
+    assert (
+        after_backfill['rating']['scoreBefore'] == first_match['rating']['scoreAfter']
+    )
+    assert after_backfill['rating']['scoreDelta'] > 0
+    assert first_match['rating']['scoreDelta'] < 0
+    assert (
+        after_backfill['rating']['scoreAfter']
+        != before_backfill['rating']['scoreAfter']
+    )
+
+
+def test_match_search_is_segmented_and_supports_pinyin_title_and_players(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    payload = batch(
+        [
+            match(1, played_at='2026-06-01T12:00:00Z', result='W'),
+            match(2, played_at='2026-06-02T12:00:00Z', result='L', title='午后练习'),
+        ]
+    )
+    assert ingest(client, payload).status_code == 200
+
+    assert client.get('/v1/matches?q=molishenye').json()['total'] == 1
+    assert client.get('/v1/matches?q=mlsyp').json()['total'] == 1
+    assert client.get('/v1/matches?q=akitsuki').json()['total'] == 2
+    assert client.get('/v1/matches?q=茉莉akitsuki').json()['total'] == 0
+    assert client.get('/v1/matches?heroes=剑圣,猫女').json()['total'] == 2
+    assert client.get('/v1/matches?heroes=剑圣,黑羽').json()['total'] == 0
+
+
+def test_match_response_separates_teams_replay_and_result_image(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    assert (
+        ingest(
+            client, batch([match(1, played_at='2026-06-01T12:00:00Z', result='W')])
+        ).status_code
+        == 200
+    )
+
+    response = client.get('/v1/matches?page=1&pageSize=10&mode=3v3').json()
+    item = response['items'][0]
+
+    assert response['total'] == 1
+    assert item['ally']['color'] == 'teal'
+    assert item['ally']['kills'] == 10
+    assert item['enemy']['color'] == 'orange'
+    assert item['enemy']['economy'] == 33000
+    assert item['ally']['players'][0]['isRecordedPlayer'] is True
+    assert item['streamTitle'] == '茉莉深夜排位'
+    assert item['replay']['kind'] == 'match'
+    assert item['resultImage']['width'] == 1600
+
+
+def test_ingest_keeps_partially_recognized_lineups(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    partial = match(1, played_at='2026-06-01T12:00:00Z', result='W')
+    partial['ally']['players'][1]['heroName'] = ''
+    partial['enemy']['players'] = partial['enemy']['players'][:2]
+
+    response = ingest(client, batch([partial]))
+
+    assert response.status_code == 200
+    detail = client.get('/v1/matches/1').json()
+    assert detail['ally']['players'][1]['heroName'] == ''
+    assert len(detail['enemy']['players']) == 2
+
+
+def test_schema_uses_foreign_keys_and_player_match_index(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    client.get('/v1/health')
+    connection = sqlite3.connect(tmp_path / 'dashboard.sqlite3')
+    try:
+        indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list('matches')").fetchall()
+        }
+        plan = connection.execute(
+            'EXPLAIN QUERY PLAN SELECT source_match_id FROM matches '
+            'WHERE player_id=? ORDER BY played_at_epoch DESC,source_match_id DESC '
+            'LIMIT ?',
+            (7, 10),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert 'matches_player_played_idx' in indexes
+    assert any('matches_player_played_idx' in str(row) for row in plan)

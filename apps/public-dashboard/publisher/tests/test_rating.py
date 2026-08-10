@@ -6,6 +6,7 @@ from blrec_dashboard_publisher.rating import (
     VirtualMatchRating,
     calculate_rating_forecast,
     calculate_virtual_match_rating,
+    calculate_virtual_match_rating_timeline,
     expected_win_probability,
 )
 
@@ -48,6 +49,33 @@ def test_thirteen_wins_and_two_losses_from_2160_gain_thirty_points() -> None:
     )
 
     assert display_score(rating) == 2190
+
+
+def test_rating_timeline_exposes_each_exact_score_change() -> None:
+    timeline = calculate_virtual_match_rating_timeline(results=['W', 'L', 'W'])
+    final = calculate_virtual_match_rating(results=['W', 'L', 'W'])
+
+    assert final is not None
+    assert len(timeline) == 3
+    assert timeline[0].result == 'W'
+    assert timeline[0].score_before == 999
+    assert timeline[0].score_after > timeline[0].score_before
+    assert timeline[0].score_delta == (
+        timeline[0].score_after - timeline[0].score_before
+    )
+    assert timeline[1].score_before == timeline[0].score_after
+    assert timeline[1].score_delta < 0
+    assert timeline[2].score_before == timeline[1].score_after
+    assert timeline[-1].score_after == display_score(final)
+
+
+def test_rating_timeline_replays_an_inserted_historical_result() -> None:
+    original = calculate_virtual_match_rating_timeline(results=['W', 'W'])
+    backfilled = calculate_virtual_match_rating_timeline(results=['W', 'L', 'W'])
+
+    assert backfilled[0] == original[0]
+    assert backfilled[2].score_before == backfilled[1].score_after
+    assert backfilled[2].score_after != original[1].score_after
 
 
 def test_forecast_projects_the_exact_next_result() -> None:

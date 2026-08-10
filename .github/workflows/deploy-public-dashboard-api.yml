@@ -1,0 +1,102 @@
+name: Deploy public dashboard API
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - apps/public-dashboard/api/**
+      - apps/public-dashboard/publisher/src/blrec_dashboard_publisher/rating.py
+      - .github/workflows/deploy-public-dashboard-api.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-dashboard-api-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test, build and deploy API
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment:
+      name: vainglory-dashboard-production
+      url: https://vg-api.luwei.host/v1/health
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            apps/public-dashboard/api/pyproject.toml
+            apps/public-dashboard/api/deploy/runtime-requirements.txt
+
+      - name: Install test and build dependencies
+        run: |
+          python -m pip install build
+          python -m pip install --no-deps -e apps/public-dashboard/publisher
+          python -m pip install -e 'apps/public-dashboard/api[test]'
+
+      - name: Test API and rating contract
+        run: >-
+          python -m pytest
+          apps/public-dashboard/api/tests
+          apps/public-dashboard/publisher/tests/test_rating.py
+
+      - name: Build offline release
+        shell: bash
+        run: |
+          python -m build apps/public-dashboard/publisher
+          python -m build apps/public-dashboard/api
+          release_root="$(mktemp -d)"
+          mkdir -p "$release_root/wheels" "$release_root/wheelhouse" "$release_root/deploy"
+          cp apps/public-dashboard/publisher/dist/*.whl "$release_root/wheels/"
+          cp apps/public-dashboard/api/dist/*.whl "$release_root/wheels/"
+          cp apps/public-dashboard/api/deploy/runtime-requirements.txt "$release_root/"
+          cp apps/public-dashboard/api/deploy/blrec-dashboard-api.service "$release_root/deploy/"
+          cp apps/public-dashboard/api/deploy/vg-api.luwei.host.nginx.conf "$release_root/deploy/"
+          python -m pip download \
+            --only-binary=:all: \
+            --dest "$release_root/wheelhouse" \
+            --requirement apps/public-dashboard/api/deploy/runtime-requirements.txt
+          tar --create --gzip --file dashboard-api-release.tgz -C "$release_root" .
+
+      - name: Configure deployment SSH
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DASHBOARD_API_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DASHBOARD_API_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dashboard-api
+          chmod 0600 ~/.ssh/dashboard-api
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0644 ~/.ssh/known_hosts
+
+      - name: Deploy release
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.DASHBOARD_API_SSH_HOST }}
+          SSH_USER: ${{ secrets.DASHBOARD_API_SSH_USER }}
+        run: |
+          destination="${SSH_USER}@${SSH_HOST}"
+          remote_archive="/tmp/blrec-dashboard-api-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tgz"
+          scp -i ~/.ssh/dashboard-api dashboard-api-release.tgz "${destination}:${remote_archive}"
+          ssh -i ~/.ssh/dashboard-api "$destination" \
+            "bash -s -- '${remote_archive}' '${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'" \
+            < apps/public-dashboard/api/deploy/install-release.sh
+          ssh -i ~/.ssh/dashboard-api "$destination" "rm -f '${remote_archive}'"
+
+      - name: Verify public endpoint
+        run: |
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 \
+            --retry 5 --retry-all-errors --retry-delay 3 \
+            https://vg-api.luwei.host/v1/health

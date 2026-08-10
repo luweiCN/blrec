@@ -19,10 +19,12 @@ __all__ = (
     'RATING_MODEL_VERSION',
     'RatingForecast',
     'RatingGoalForecast',
+    'RatingTransition',
     'SEASON_RESET_DISPLAY_SCORE',
     'VirtualMatchRating',
     'calculate_rating_forecast',
     'calculate_virtual_match_rating',
+    'calculate_virtual_match_rating_timeline',
     'expected_win_probability',
 )
 
@@ -84,6 +86,25 @@ class VirtualMatchRating:
     evidence: float
     score: int
     provisional: bool
+
+
+@dataclass(frozen=True)
+class RatingTransition:
+    result: str
+    rating_before: VirtualMatchRating
+    rating_after: VirtualMatchRating
+
+    @property
+    def score_before(self) -> int:
+        return self.rating_before.score * _DISPLAY_SCORE_MULTIPLIER
+
+    @property
+    def score_after(self) -> int:
+        return self.rating_after.score * _DISPLAY_SCORE_MULTIPLIER
+
+    @property
+    def score_delta(self) -> int:
+        return self.score_after - self.score_before
 
 
 @dataclass(frozen=True)
@@ -321,46 +342,54 @@ def calculate_virtual_match_rating(
     previous_evidence: Optional[float] = None,
     reset_visible_score: bool = True,
 ) -> Optional[VirtualMatchRating]:
+    timeline = calculate_virtual_match_rating_timeline(
+        results=results,
+        previous_ability=previous_ability,
+        previous_evidence=previous_evidence,
+        reset_visible_score=reset_visible_score,
+    )
+    return None if not timeline else timeline[-1].rating_after
+
+
+def calculate_virtual_match_rating_timeline(
+    *,
+    results: Sequence[str],
+    previous_ability: Optional[float] = None,
+    previous_evidence: Optional[float] = None,
+    reset_visible_score: bool = True,
+) -> tuple[RatingTransition, ...]:
     if any(result not in ('W', 'L') for result in results):
         raise ValueError('virtual match rating result must be W or L')
     if not results:
-        return None
+        return ()
 
     prior_ability, prior_evidence = _initial_evidence(
         previous_ability, previous_evidence
     )
-    alpha = prior_ability * prior_evidence
-    beta = (1.0 - prior_ability) * prior_evidence
-    visible_score = round(
-        (
-            SEASON_RESET_DISPLAY_SCORE
-            if reset_visible_score
-            else _display_score_for_ability(prior_ability)
-        )
-        / _DISPLAY_SCORE_MULTIPLIER
-    )
-
-    for result in results:
-        hidden_score_before = _display_score_for_ability(alpha / (alpha + beta))
-        alpha, beta = _advance_evidence(alpha, beta, 1.0 if result == 'W' else 0.0)
-        hidden_score_after = _display_score_for_ability(alpha / (alpha + beta))
-        if reset_visible_score:
-            visible_score += _internal_outcome_delta(
-                result=result,
-                hidden_score_before=hidden_score_before,
-                hidden_score_after=hidden_score_after,
-                visible_score=visible_score,
+    rating = VirtualMatchRating(
+        ability=prior_ability,
+        evidence=prior_evidence,
+        score=round(
+            (
+                SEASON_RESET_DISPLAY_SCORE
+                if reset_visible_score
+                else _display_score_for_ability(prior_ability)
             )
-            visible_score = max(0, min(_INTERNAL_SCORE_MAXIMUM, visible_score))
-
-    ability = alpha / (alpha + beta)
-    if not reset_visible_score:
-        visible_score = round(
-            _display_score_for_ability(ability) / _DISPLAY_SCORE_MULTIPLIER
-        )
-    return VirtualMatchRating(
-        ability=ability,
-        evidence=alpha + beta,
-        score=visible_score,
-        provisional=len(results) < PROVISIONAL_MATCHES,
+            / _DISPLAY_SCORE_MULTIPLIER
+        ),
+        provisional=True,
     )
+    transitions = []
+    for match_number, result in enumerate(results, start=1):
+        after = _advance_rating(rating, result, reset_visible_score=reset_visible_score)
+        after = VirtualMatchRating(
+            ability=after.ability,
+            evidence=after.evidence,
+            score=after.score,
+            provisional=match_number < PROVISIONAL_MATCHES,
+        )
+        transitions.append(
+            RatingTransition(result=result, rating_before=rating, rating_after=after)
+        )
+        rating = after
+    return tuple(transitions)

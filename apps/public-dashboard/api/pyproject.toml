@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blrec-dashboard-api"
+version = "0.1.0"
+description = "Public match API and rating ledger for the BLREC dashboard"
+requires-python = ">=3.10"
+dependencies = [
+  "blrec-dashboard-publisher==0.1.0",
+  "fastapi>=0.95.0,<0.100.0",
+  "pydantic>=1.10.0,<2.0.0",
+  "pypinyin>=0.49.0,<1.0.0",
+  "uvicorn[standard]>=0.22.0,<0.24.0",
+]
+
+[project.optional-dependencies]
+test = ["httpx>=0.23.0,<0.24.0", "pytest>=7.4.4,<9.0.0"]
+
+[project.scripts]
+blrec-dashboard-api = "blrec_dashboard_api.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+blrec_dashboard_api = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
