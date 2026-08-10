@@ -47,6 +47,30 @@ describe('public dashboard match filters', () => {
     expect(missing).toEqual([]);
   });
 
+  it('searches each live title as its own pinyin segment', () => {
+    const titledMatch = {
+      ...TEST_DASHBOARD_MATCHES[0],
+      streamTitle: '茉莉深夜排位',
+    };
+
+    expect(
+      filterDashboardMatches([titledMatch], players, {
+        seasonKey: '2026-summer',
+        mode: 'all',
+        playerQuery: 'molishenye',
+        selectedHeroes: [],
+      }),
+    ).toEqual([titledMatch]);
+    expect(
+      filterDashboardMatches([titledMatch], players, {
+        seasonKey: '2026-summer',
+        mode: 'all',
+        playerQuery: 'moliLC',
+        selectedHeroes: [],
+      }),
+    ).toEqual([]);
+  });
+
   it('keeps the profile player fixed while searching other participants', () => {
     const fixedPlayerMatches = TEST_DASHBOARD_MATCHES.filter(
       (match) => match.playerId === 1,

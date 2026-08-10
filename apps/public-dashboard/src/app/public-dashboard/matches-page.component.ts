@@ -22,6 +22,7 @@ import {
   templateUrl: './matches-page.component.html',
   styleUrls: [
     './leaderboard-detail-page.scss',
+    './leaderboard-detail-responsive.scss',
     './matches-page.component.scss',
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,

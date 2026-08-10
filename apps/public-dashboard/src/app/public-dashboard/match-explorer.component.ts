@@ -1,10 +1,16 @@
 import {
   ChangeDetectionStrategy,
+  ChangeDetectorRef,
   Component,
   Input,
   OnChanges,
+  OnDestroy,
 } from '@angular/core';
 
+import {
+  DashboardMatchApiService,
+  DashboardMatchPage,
+} from './dashboard-match-api.service';
 import { heroImage, modeLabel } from './public-dashboard.data';
 import { heroDisplayName } from './public-dashboard.hero-names';
 import {
@@ -30,7 +36,7 @@ const PAGE_SIZE = 10;
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class MatchExplorerComponent implements OnChanges {
+export class MatchExplorerComponent implements OnChanges, OnDestroy {
   @Input() matches: readonly DashboardMatch[] = [];
   @Input() players: readonly PlayerStanding[] = [];
   @Input() seasonKey: SeasonKey = 'all-time';
@@ -43,14 +49,33 @@ export class MatchExplorerComponent implements OnChanges {
   selectedHeroes: readonly string[] = [];
   page = 1;
   selectedMatch: DashboardMatch | null = null;
+  private apiPage: DashboardMatchPage | null = null;
+  private requestSequence = 0;
+  private searchTimer?: ReturnType<typeof setTimeout>;
+
+  constructor(
+    private readonly matchApi: DashboardMatchApiService,
+    private readonly changeDetector: ChangeDetectorRef,
+  ) {}
 
   ngOnChanges(): void {
     this.page = 1;
     this.selectedMatch = null;
     this.trimHeroSelection();
+    void this.loadApiPage();
+  }
+
+  ngOnDestroy(): void {
+    this.requestSequence += 1;
+    if (this.searchTimer !== undefined) {
+      clearTimeout(this.searchTimer);
+    }
   }
 
   get filteredMatches(): readonly DashboardMatch[] {
+    if (this.apiPage !== null) {
+      return this.apiPage.items;
+    }
     return filterDashboardMatches(this.matches, this.players, {
       seasonKey: this.seasonKey,
       mode: this.mode,
@@ -61,12 +86,20 @@ export class MatchExplorerComponent implements OnChanges {
   }
 
   get pageMatches(): readonly DashboardMatch[] {
+    if (this.apiPage !== null) {
+      return this.apiPage.items;
+    }
     const start = (this.page - 1) * PAGE_SIZE;
     return this.filteredMatches.slice(start, start + PAGE_SIZE);
   }
 
   get pageCount(): number {
-    return Math.max(1, Math.ceil(this.filteredMatches.length / PAGE_SIZE));
+    const total = this.apiPage?.total ?? this.filteredMatches.length;
+    return Math.max(1, Math.ceil(total / PAGE_SIZE));
+  }
+
+  get totalMatches(): number {
+    return this.apiPage?.total ?? this.filteredMatches.length;
   }
 
   get heroOptions(): readonly string[] {
@@ -85,6 +118,13 @@ export class MatchExplorerComponent implements OnChanges {
         }
       }
     }
+    for (const player of this.players) {
+      for (const usage of player.heroPool) {
+        if (usage.name !== '') {
+          names.add(usage.name);
+        }
+      }
+    }
     return Array.from(names).sort((left, right) =>
       this.heroName(left).localeCompare(this.heroName(right), 'zh-CN'),
     );
@@ -100,7 +140,7 @@ export class MatchExplorerComponent implements OnChanges {
 
   get summaryText(): string {
     if (this.hasLocalFilters) {
-      return `按直播时间倒序 · 筛选结果 ${this.filteredMatches.length} 场`;
+      return `按直播时间倒序 · 筛选结果 ${this.totalMatches} 场`;
     }
     const recent = this.filteredMatches.slice(0, PAGE_SIZE);
     if (recent.length === 0) {
@@ -111,7 +151,7 @@ export class MatchExplorerComponent implements OnChanges {
     const streakText =
       streak === null
         ? ''
-        : ` · 当前 ${streak.matches} 连${streak.result === 'W' ? '胜' : '败'}`;
+        : ` · 连${streak.result === 'W' ? '胜' : '败'} ${streak.matches} 场`;
     return `按直播时间倒序 · 最近 ${recent.length} 场 ${wins} 胜 ${recent.length - wins} 负${streakText}`;
   }
 
@@ -121,13 +161,14 @@ export class MatchExplorerComponent implements OnChanges {
 
   get playerSearchPlaceholder(): string {
     return this.fixedPlayerId === undefined
-      ? '主播名、游戏名、拼音或别名'
-      : '玩家名、拼音或首字母';
+      ? '主播名、玩家名、直播标题或拼音'
+      : '玩家名、直播标题、拼音或首字母';
   }
 
   setPlayerQuery(event: Event): void {
     this.playerQuery = (event.target as HTMLInputElement).value;
     this.page = 1;
+    this.scheduleApiSearch();
   }
 
   toggleHero(heroName: string): void {
@@ -139,20 +180,30 @@ export class MatchExplorerComponent implements OnChanges {
       this.selectedHeroes = [...this.selectedHeroes, heroName];
     }
     this.page = 1;
+    void this.loadApiPage();
   }
 
   clearFilters(): void {
     this.playerQuery = '';
     this.selectedHeroes = [];
     this.page = 1;
+    void this.loadApiPage();
+  }
+
+  clearHeroFilters(): void {
+    this.selectedHeroes = [];
+    this.page = 1;
+    void this.loadApiPage();
   }
 
   previousPage(): void {
     this.page = Math.max(1, this.page - 1);
+    void this.loadApiPage();
   }
 
   nextPage(): void {
     this.page = Math.min(this.pageCount, this.page + 1);
+    void this.loadApiPage();
   }
 
   openMatch(match: DashboardMatch): void {
@@ -217,5 +268,41 @@ export class MatchExplorerComponent implements OnChanges {
     this.selectedHeroes = this.selectedHeroes
       .filter((heroName) => options.has(heroName))
       .slice(0, this.heroSelectionLimit);
+  }
+
+  private scheduleApiSearch(): void {
+    if (this.searchTimer !== undefined) {
+      clearTimeout(this.searchTimer);
+    }
+    this.searchTimer = setTimeout(() => {
+      this.searchTimer = undefined;
+      void this.loadApiPage();
+    }, 250);
+  }
+
+  private async loadApiPage(): Promise<void> {
+    if (!this.matchApi.enabled) {
+      return;
+    }
+    const sequence = ++this.requestSequence;
+    const response = await this.matchApi.list({
+      page: this.page,
+      pageSize: PAGE_SIZE,
+      seasonKey: this.seasonKey,
+      mode: this.mode,
+      playerId: this.fixedPlayerId,
+      query: this.playerQuery,
+      heroes: this.selectedHeroes,
+    });
+    if (sequence !== this.requestSequence) {
+      return;
+    }
+    this.apiPage = response;
+    if (response !== null && this.page > this.pageCount) {
+      this.page = this.pageCount;
+      void this.loadApiPage();
+      return;
+    }
+    this.changeDetector.markForCheck();
   }
 }

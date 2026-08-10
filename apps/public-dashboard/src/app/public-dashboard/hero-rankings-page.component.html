@@ -127,9 +127,13 @@
                     [playerId]="leader.player.id"
                     [heroName]="row.hero.name"
                   ></app-player-avatar>
-                  <span>
+                  <span class="proficiency-leader-name">
                     <strong>{{ leader.player.name }}</strong>
-                    <small><span>{{ leader.score }}</span> · {{ leader.level }}</small>
+                    <small>{{ leader.level }}</small>
+                  </span>
+                  <span class="proficiency-leader-score">
+                    <strong>{{ leader.score }}</strong>
+                    <small>熟练度</small>
                   </span>
                 </a>
               </ng-container>

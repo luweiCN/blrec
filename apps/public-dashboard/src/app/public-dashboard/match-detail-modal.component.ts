@@ -107,6 +107,10 @@ export class MatchDetailModalComponent implements AfterViewInit, OnDestroy {
         : '胜利';
   }
 
+  teamLabel(team: DashboardMatchTeam): string {
+    return team.color === 'teal' ? '蓝方' : '红方';
+  }
+
   formatDate(value: string): string {
     return new Intl.DateTimeFormat('zh-CN', {
       timeZone: 'Asia/Shanghai',

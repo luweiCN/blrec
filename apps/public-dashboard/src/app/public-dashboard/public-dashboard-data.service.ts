@@ -16,6 +16,7 @@ import {
   HeroSynergyRanking,
   HeroUsage,
   HeroUsageStats,
+  isModeFilter,
   isSeasonKey,
   MODE_FILTERS,
   Performance,
@@ -343,6 +344,8 @@ function isNullableNonNegativeInteger(value: unknown): boolean {
 function isMatchPlayer(value: unknown): value is DashboardMatchPlayer {
   return (
     isObject(value) &&
+    (value['slot'] === undefined ||
+      (isNonNegativeInteger(value['slot']) && value['slot'] > 0)) &&
     typeof value['name'] === 'string' &&
     value['name'].length > 0 &&
     typeof value['heroName'] === 'string' &&
@@ -358,6 +361,9 @@ function isMatchPlayer(value: unknown): value is DashboardMatchPlayer {
 function isMatchTeam(value: unknown): value is DashboardMatchTeam {
   return (
     isObject(value) &&
+    (value['role'] === undefined ||
+      value['role'] === 'ally' ||
+      value['role'] === 'enemy') &&
     (value['side'] === 'left' || value['side'] === 'right') &&
     (value['color'] === 'teal' || value['color'] === 'orange') &&
     isNullableNonNegativeInteger(value['kills']) &&
@@ -365,6 +371,40 @@ function isMatchTeam(value: unknown): value is DashboardMatchTeam {
     Array.isArray(value['players']) &&
     value['players'].length <= 5 &&
     value['players'].every(isMatchPlayer)
+  );
+}
+
+function isMatchResultImage(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    typeof value['url'] === 'string' &&
+    /^https:\/\/vg\.luwei\.host\/data\/match-images\/[0-9]{3,}\/[1-9][0-9]*-[0-9a-f]{16}\.webp$/u.test(
+      value['url'],
+    ) &&
+    isNonNegativeInteger(value['width']) &&
+    value['width'] > 0 &&
+    isNonNegativeInteger(value['height']) &&
+    value['height'] > 0
+  );
+}
+
+function isMatchRating(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    typeof value['scope'] === 'string' &&
+    isModeFilter(value['scope']) &&
+    typeof value['seasonKey'] === 'string' &&
+    isSeasonKey(value['seasonKey']) &&
+    isNonNegativeInteger(value['matchNumber']) &&
+    value['matchNumber'] > 0 &&
+    isNonNegativeInteger(value['scoreBefore']) &&
+    isNonNegativeInteger(value['scoreAfter']) &&
+    Number.isInteger(value['scoreDelta']) &&
+    Number(value['scoreAfter']) ===
+      Number(value['scoreBefore']) + Number(value['scoreDelta']) &&
+    typeof value['provisional'] === 'boolean' &&
+    isNonNegativeInteger(value['modelVersion']) &&
+    value['modelVersion'] > 0
   );
 }
 
@@ -379,7 +419,7 @@ function isMatchReplay(value: unknown): value is DashboardMatchReplay {
   );
 }
 
-function isDashboardMatch(value: unknown): value is DashboardMatch {
+export function isDashboardMatch(value: unknown): value is DashboardMatch {
   return (
     isObject(value) &&
     isNonNegativeInteger(value['id']) &&
@@ -396,10 +436,20 @@ function isDashboardMatch(value: unknown): value is DashboardMatch {
     !Number.isNaN(Date.parse(value['playedAt'])) &&
     isNonNegativeInteger(value['durationSeconds']) &&
     (value['result'] === 'W' || value['result'] === 'L') &&
+    (value['streamTitle'] === undefined ||
+      typeof value['streamTitle'] === 'string') &&
     isMatchTeam(value['ally']) &&
     isMatchTeam(value['enemy']) &&
     value['ally'].side !== value['enemy'].side &&
-    (value['replay'] === undefined || isMatchReplay(value['replay']))
+    (value['replay'] === undefined ||
+      value['replay'] === null ||
+      isMatchReplay(value['replay'])) &&
+    (value['resultImage'] === undefined ||
+      value['resultImage'] === null ||
+      isMatchResultImage(value['resultImage'])) &&
+    (value['rating'] === undefined ||
+      value['rating'] === null ||
+      isMatchRating(value['rating']))
   );
 }
 

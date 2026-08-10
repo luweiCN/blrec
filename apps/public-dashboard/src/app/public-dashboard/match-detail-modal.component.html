@@ -10,6 +10,9 @@
       <div>
         <p>{{ modeName() }} · {{ formatDate(match.playedAt) }}</p>
         <h2 id="match-detail-title">{{ streamerName }}的对局详情</h2>
+        <span *ngIf="match.streamTitle" class="match-modal-stream-title">
+          {{ match.streamTitle }}
+        </span>
       </div>
       <button
         #closeButton
@@ -22,7 +25,7 @@
 
     <div class="match-result-stage">
       <div class="match-result-team ally">
-        <span>主播方</span>
+        <span>{{ teamLabel(match.ally) }} · 主播方</span>
         <strong>{{ match.ally.kills === null ? "—" : match.ally.kills }}</strong>
       </div>
       <div class="match-result-center">
@@ -32,10 +35,25 @@
         <span>{{ formatDuration(match.durationSeconds) }}</span>
       </div>
       <div class="match-result-team enemy">
-        <span>对手方</span>
+        <span>{{ teamLabel(match.enemy) }} · 对手方</span>
         <strong>{{ match.enemy.kills === null ? "—" : match.enemy.kills }}</strong>
       </div>
     </div>
+
+    <section *ngIf="match.rating as rating" class="match-rating-ledger" aria-label="本局排位分变化">
+      <div>
+        <span>赛前</span>
+        <strong>{{ rating.scoreBefore | number: "1.0-0" }}</strong>
+      </div>
+      <div class="match-rating-delta" [class.loss]="rating.scoreDelta < 0">
+        <span>本局{{ match.result === "W" ? "胜利" : "失败" }}</span>
+        <strong>{{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}</strong>
+      </div>
+      <div>
+        <span>赛后</span>
+        <strong>{{ rating.scoreAfter | number: "1.0-0" }}</strong>
+      </div>
+    </section>
 
     <div class="match-team-columns">
       <section
@@ -45,16 +63,22 @@
         [attr.aria-label]="team === match.ally ? '主播方阵容' : '对手方阵容'"
       >
         <header>
-          <strong>{{ teamResult(team) }}</strong>
+          <strong>{{ teamLabel(team) }} · {{ teamResult(team) }}</strong>
           <span>
             经济 {{ team.economy === null ? "—" : (team.economy | number: "1.0-0") }}
           </span>
         </header>
         <ol>
-          <li *ngFor="let player of team.players; trackBy: trackPlayer">
+          <li
+            *ngFor="let player of team.players; trackBy: trackPlayer"
+            [class.recorded-player]="player.isRecordedPlayer"
+          >
             <img [src]="heroImage(player.heroName)" alt="" />
             <div class="match-player-name">
-              <strong>{{ player.name }}</strong>
+              <strong>
+                {{ player.name }}
+                <small *ngIf="player.isRecordedPlayer">主播</small>
+              </strong>
               <span>{{ heroName(player.heroName) }}</span>
             </div>
             <div class="match-player-kda">
@@ -78,6 +102,21 @@
       </section>
     </div>
 
+    <figure *ngIf="match.resultImage as resultImage" class="match-result-image">
+      <figcaption>
+        <strong>战绩结算图</strong>
+        <span>点击图片可查看原尺寸</span>
+      </figcaption>
+      <a [href]="resultImage.url" target="_blank" rel="noopener noreferrer">
+        <img
+          [src]="resultImage.url"
+          [width]="resultImage.width"
+          [height]="resultImage.height"
+          [alt]="streamerName + '本局战绩结算图'"
+        />
+      </a>
+    </figure>
+
     <footer class="match-modal-footer">
       <p>阵容、KDA 与经济来自结算画面识别，空缺项显示为“—”。</p>
       <a
@@ -85,7 +124,7 @@
         [href]="replay.url"
         target="_blank"
         rel="noopener noreferrer"
-      >{{ replay.kind === "match" ? "观看本局回放" : "观看整场录播" }}</a>
+      >{{ replay.kind === "match" ? "本局回放" : "整场录播" }}</a>
     </footer>
   </section>
 </div>

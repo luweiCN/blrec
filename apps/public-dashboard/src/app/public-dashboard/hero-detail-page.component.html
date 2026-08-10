@@ -70,8 +70,8 @@
       <header>
         <div>
           <h2 id="hero-mode-title">各模式表现</h2>
-          <p>所选赛季的胜率与使用规模</p>
         </div>
+        <span>{{ selectedSeason.label }}</span>
         <span>{{ selectedSeason.label }}</span>
       </header>
       <ol class="mode-stat-grid">
@@ -93,9 +93,8 @@
       <header>
         <div>
           <h2 id="hero-synergy-title">阵容搭配</h2>
-          <p>与该英雄同队至少 5 场的搭档表现</p>
         </div>
-        <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>
+        <span>同队至少 5 场 · {{ modeLabel() }}</span>
       </header>
       <div class="hero-synergy-columns">
         <section>
@@ -136,7 +135,6 @@
     <section class="profile-card profile-table-card" aria-labelledby="hero-players-title">
       <header>
         <div>
-          <p>玩家专精</p>
           <h2 id="hero-players-title">玩家熟练度排行</h2>
         </div>
         <span>{{ selectedSeason.label }} · {{ modeLabel() }}</span>

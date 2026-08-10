@@ -18,43 +18,43 @@
       />
     </label>
 
-    <details class="lineup-filter">
-      <summary>
-        <span>阵容筛选</span>
-        <strong>
-          {{ selectedHeroes.length === 0 ? "选择英雄" : "已选 " + selectedHeroes.length }}
-        </strong>
-      </summary>
-      <div class="lineup-filter-panel">
-        <header>
-          <div>
-            <strong>任意选择 1—{{ heroSelectionLimit }} 个英雄</strong>
-            <span>所选英雄必须同时出现在本局任意一方阵容</span>
+    <div class="lineup-filter-field">
+      <span>阵容筛选</span>
+      <details class="lineup-filter">
+        <summary>
+          {{ selectedHeroes.length === 0 ? "选择英雄" : "已选 " + selectedHeroes.length + " 个" }}
+        </summary>
+        <div class="lineup-filter-panel">
+          <header>
+            <div>
+              <strong>任意选择 1—{{ heroSelectionLimit }} 个英雄</strong>
+              <span>所选英雄必须同时出现在本局任意一方阵容</span>
+            </div>
+            <button
+              type="button"
+              [disabled]="selectedHeroes.length === 0"
+              (click)="clearHeroFilters()"
+            >清空</button>
+          </header>
+          <div class="lineup-hero-grid" role="group" aria-label="选择阵容英雄">
+            <button
+              *ngFor="let hero of heroOptions; trackBy: trackHero"
+              type="button"
+              [class.active]="selectedHeroes.includes(hero)"
+              [attr.aria-pressed]="selectedHeroes.includes(hero)"
+              [disabled]="
+                !selectedHeroes.includes(hero) &&
+                selectedHeroes.length >= heroSelectionLimit
+              "
+              (click)="toggleHero(hero)"
+            >
+              <img [src]="heroImage(hero)" alt="" />
+              <span>{{ heroName(hero) }}</span>
+            </button>
           </div>
-          <button
-            type="button"
-            [disabled]="selectedHeroes.length === 0"
-            (click)="selectedHeroes = []; page = 1"
-          >清空</button>
-        </header>
-        <div class="lineup-hero-grid" role="group" aria-label="选择阵容英雄">
-          <button
-            *ngFor="let hero of heroOptions; trackBy: trackHero"
-            type="button"
-            [class.active]="selectedHeroes.includes(hero)"
-            [attr.aria-pressed]="selectedHeroes.includes(hero)"
-            [disabled]="
-              !selectedHeroes.includes(hero) &&
-              selectedHeroes.length >= heroSelectionLimit
-            "
-            (click)="toggleHero(hero)"
-          >
-            <img [src]="heroImage(hero)" alt="" />
-            <span>{{ heroName(hero) }}</span>
-          </button>
         </div>
-      </div>
-    </details>
+      </details>
+    </div>
 
     <button
       *ngIf="hasLocalFilters"
@@ -80,60 +80,84 @@
 
   <ol *ngIf="pageMatches.length > 0; else noMatches" class="match-list">
     <li *ngFor="let match of pageMatches; trackBy: trackMatch">
-      <button
-        type="button"
-        class="match-row"
-        [attr.aria-label]="matchAriaLabel(match)"
-        (click)="openMatch(match)"
-      >
-        <span class="match-outcome" [class.loss]="match.result === 'L'">
-          <strong>{{ match.result === "W" ? "胜" : "负" }}</strong>
-          <small>{{ modeName(match.mode) }}</small>
-        </span>
-
-        <span class="match-time">
-          <strong>{{ formatDate(match.playedAt) }}</strong>
-          <small>{{ playerName(match.playerId) }} · {{ formatDuration(match.durationSeconds) }}</small>
-        </span>
-
-        <span class="match-lineup match-lineup--ally" aria-label="主播方阵容">
-          <span *ngFor="let player of match.ally.players; trackBy: trackPlayer">
-            <img
-              [src]="heroImage(player.heroName)"
-              [alt]="heroName(player.heroName)"
-              [title]="player.name + ' · ' + heroName(player.heroName)"
-            />
+      <div class="match-row-shell">
+        <button
+          type="button"
+          class="match-row"
+          [attr.aria-label]="matchAriaLabel(match)"
+          (click)="openMatch(match)"
+        >
+          <span class="match-outcome" [class.loss]="match.result === 'L'">
+            <strong>{{ match.result === "W" ? "胜" : "负" }}</strong>
+            <small>{{ modeName(match.mode) }}</small>
           </span>
-        </span>
 
-        <span class="match-versus" aria-hidden="true">VS</span>
-
-        <span class="match-lineup match-lineup--enemy" aria-label="对手方阵容">
-          <span *ngFor="let player of match.enemy.players; trackBy: trackPlayer">
-            <img
-              [src]="heroImage(player.heroName)"
-              [alt]="heroName(player.heroName)"
-              [title]="player.name + ' · ' + heroName(player.heroName)"
-            />
+          <span class="match-time">
+            <strong>{{ formatDate(match.playedAt) }}</strong>
+            <small>{{ playerName(match.playerId) }} · {{ formatDuration(match.durationSeconds) }}</small>
+            <small *ngIf="match.streamTitle" class="match-stream-title" [title]="match.streamTitle">
+              {{ match.streamTitle }}
+            </small>
           </span>
-        </span>
 
-        <span class="match-score">
-          <strong>
-            {{ match.ally.kills === null ? "—" : match.ally.kills }} :
-            {{ match.enemy.kills === null ? "—" : match.enemy.kills }}
-          </strong>
-          <small>
-            经济 {{ match.ally.economy === null ? "—" : (match.ally.economy | number: "1.0-0") }} /
-            {{ match.enemy.economy === null ? "—" : (match.enemy.economy | number: "1.0-0") }}
-          </small>
-        </span>
+          <span class="match-battle" aria-label="双方英雄阵容">
+            <span class="match-lineup match-lineup--ally" aria-label="蓝方阵容">
+              <span *ngFor="let player of match.ally.players; trackBy: trackPlayer">
+                <img
+                  [class.recorded]="player.isRecordedPlayer"
+                  [src]="heroImage(player.heroName)"
+                  [alt]="heroName(player.heroName)"
+                  [title]="player.name + ' · ' + heroName(player.heroName)"
+                />
+              </span>
+            </span>
 
-        <span class="match-row-meta">
-          <span *ngIf="match.replay" class="replay-available">有回放</span>
-          <span>查看详情</span>
-        </span>
-      </button>
+            <span class="match-versus" aria-hidden="true">VS</span>
+
+            <span class="match-lineup match-lineup--enemy" aria-label="红方阵容">
+              <span *ngFor="let player of match.enemy.players; trackBy: trackPlayer">
+                <img
+                  [src]="heroImage(player.heroName)"
+                  [alt]="heroName(player.heroName)"
+                  [title]="player.name + ' · ' + heroName(player.heroName)"
+                />
+              </span>
+            </span>
+          </span>
+
+          <span class="match-score">
+            <strong>
+              <span class="teal">{{ match.ally.kills === null ? "—" : match.ally.kills }}</span>
+              <span class="score-divider">:</span>
+              <span class="orange">{{ match.enemy.kills === null ? "—" : match.enemy.kills }}</span>
+            </strong>
+            <small>
+              <span class="teal">蓝 {{ match.ally.economy === null ? "—" : (match.ally.economy | number: "1.0-0") }}</span>
+              <span> · </span>
+              <span class="orange">红 {{ match.enemy.economy === null ? "—" : (match.enemy.economy | number: "1.0-0") }}</span>
+            </small>
+          </span>
+
+          <span class="match-row-meta">
+            <span *ngIf="match.rating as rating" [class.positive]="rating.scoreDelta > 0" [class.negative]="rating.scoreDelta < 0">
+              {{ rating.scoreDelta > 0 ? "+" : "" }}{{ rating.scoreDelta }}
+            </span>
+            <span>{{ match.resultImage ? "含战绩图" : "详情" }}</span>
+          </span>
+        </button>
+
+        <a
+          *ngIf="match.replay as replay; else replayUnavailable"
+          class="match-replay-link available"
+          [href]="replay.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          (click)="$event.stopPropagation()"
+        >回放</a>
+        <ng-template #replayUnavailable>
+          <span class="match-replay-link disabled" aria-label="暂无公开回放">回放</span>
+        </ng-template>
+      </div>
     </li>
   </ol>
 
@@ -147,11 +171,11 @@
     </div>
   </ng-template>
 
-  <nav *ngIf="filteredMatches.length > 0" class="match-pagination" aria-label="对局列表分页">
+  <nav *ngIf="totalMatches > 0" class="match-pagination" aria-label="对局列表分页">
     <button type="button" [disabled]="page === 1" (click)="previousPage()">
       上一页
     </button>
-    <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ filteredMatches.length }} 场</span>
+    <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ totalMatches }} 场</span>
     <button type="button" [disabled]="page === pageCount" (click)="nextPage()">
       下一页
     </button>

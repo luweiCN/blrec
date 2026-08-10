@@ -54,6 +54,17 @@
   }
 }
 
+.match-modal-stream-title {
+  display: block;
+  max-width: 680px;
+  margin-top: 8px;
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: var(--type-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .match-modal-close {
   display: grid;
   width: 40px;
@@ -126,6 +137,52 @@
   }
 }
 
+.match-rating-ledger {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: min(620px, calc(100% - 48px));
+  margin: -10px auto 24px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+
+  div {
+    display: grid;
+    gap: 4px;
+    min-height: 72px;
+    place-content: center;
+    text-align: center;
+
+    & + div {
+      border-left: 1px solid var(--line-soft);
+    }
+  }
+
+  span {
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  strong {
+    color: var(--ink-soft);
+    font-size: var(--type-body);
+  }
+
+  .match-rating-delta strong {
+    color: var(--cyan);
+
+    &::after {
+      content: " 分";
+      font-size: var(--type-caption);
+      font-weight: 600;
+    }
+  }
+
+  .match-rating-delta.loss strong {
+    color: var(--rose);
+  }
+}
+
 .match-team-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -170,6 +227,18 @@
     min-height: 72px;
     padding: 9px 0;
     border-top: 1px solid var(--line-soft);
+
+    &.recorded-player {
+      margin-inline: -8px;
+      padding-inline: 8px;
+      border-radius: 8px;
+      background: var(--cyan-wash);
+
+      img {
+        border-color: var(--gold);
+        box-shadow: 0 0 0 1px oklch(78% 0.16 83 / 0.28);
+      }
+    }
   }
 
   img {
@@ -203,6 +272,18 @@
   }
 }
 
+.match-player-name strong small {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 5px;
+  border: 1px solid var(--cyan-strong);
+  border-radius: 999px;
+  color: var(--cyan);
+  font-size: 0.62rem;
+  line-height: 1.35;
+  vertical-align: 1px;
+}
+
 .match-player-kda,
 .match-player-economy,
 .match-player-last-hits {
@@ -224,8 +305,11 @@
   }
 
   a {
-    min-height: 42px;
-    padding: 10px 18px;
+    display: inline-grid;
+    min-width: 108px;
+    min-height: 38px;
+    padding: 7px 15px;
+    place-items: center;
     border: 1px solid var(--cyan-strong);
     border-radius: var(--radius-control);
     background: var(--cyan-wash);
@@ -234,6 +318,44 @@
     font-weight: 750;
     text-decoration: none;
     white-space: nowrap;
+  }
+}
+
+.match-result-image {
+  margin: 0;
+  padding: 20px 28px 26px;
+  border-top: 1px solid var(--line-soft);
+
+  figcaption {
+    display: flex;
+    gap: 16px;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 12px;
+
+    strong {
+      color: var(--ink-soft);
+      font-size: var(--type-secondary);
+    }
+
+    span {
+      color: var(--ink-muted);
+      font-size: var(--type-caption);
+    }
+  }
+
+  a {
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
+    background: var(--surface-0);
+  }
+
+  img {
+    display: block;
+    width: 100%;
+    height: auto;
   }
 }
 
@@ -252,6 +374,10 @@
   .match-result-stage {
     min-height: 112px;
     padding: 18px 24px;
+  }
+
+  .match-rating-ledger {
+    margin-top: 12px;
   }
 
   .match-team-columns {
@@ -309,6 +435,10 @@
     a {
       text-align: center;
     }
+  }
+
+  .match-result-image {
+    padding-inline: 16px;
   }
 }
 

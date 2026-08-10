@@ -361,11 +361,59 @@ a {
 }
 
 .proficiency-leader {
-  min-width: 130px;
+  grid-template-columns: 34px minmax(72px, 1fr) auto;
+  gap: 9px;
+  min-width: 190px;
+  padding: 7px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--surface-2) 74%, transparent);
+  text-decoration: none;
 
-  small span {
-    color: var(--gold);
-    font-weight: 750;
+  .directory-player-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+  }
+
+  .proficiency-leader-name,
+  .proficiency-leader-score {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .proficiency-leader-name strong {
+    grid-column: auto;
+    overflow: hidden;
+    font-size: var(--type-label);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small {
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  .proficiency-leader-score {
+    justify-items: end;
+    padding-left: 10px;
+    border-left: 1px solid var(--line-soft);
+
+    strong {
+      grid-column: auto;
+      color: var(--gold);
+      font-size: var(--type-secondary);
+    }
+  }
+
+  &:hover {
+    border-color: var(--cyan-strong);
+
+    .proficiency-leader-name strong {
+      color: var(--cyan);
+    }
   }
 }
 

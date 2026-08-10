@@ -1,13 +1,13 @@
 .profile-table-heading-actions {
-  display: grid;
-  gap: 7px;
-  justify-items: end;
+  display: flex;
+  align-items: center;
+}
 
-  & > span {
-    color: var(--ink-muted);
-    font-size: var(--type-caption);
-    font-weight: 700;
-  }
+.profile-heading-context {
+  display: block;
+  margin-top: 5px;
+  color: var(--ink-muted);
+  font-size: var(--type-caption);
 }
 
 .profile-hero-sort {

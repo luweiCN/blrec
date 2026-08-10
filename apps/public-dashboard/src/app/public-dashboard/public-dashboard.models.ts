@@ -172,6 +172,7 @@ export interface HeroStanding {
 }
 
 export interface DashboardMatchPlayer {
+  readonly slot?: number;
   readonly name: string;
   readonly heroName: string;
   readonly kills: number | null;
@@ -183,6 +184,7 @@ export interface DashboardMatchPlayer {
 }
 
 export interface DashboardMatchTeam {
+  readonly role?: 'ally' | 'enemy';
   readonly side: 'left' | 'right';
   readonly color: 'teal' | 'orange';
   readonly kills: number | null;
@@ -195,6 +197,23 @@ export interface DashboardMatchReplay {
   readonly url: string;
 }
 
+export interface DashboardMatchResultImage {
+  readonly url: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface DashboardMatchRating {
+  readonly scope: ModeFilter;
+  readonly seasonKey: SeasonKey;
+  readonly matchNumber: number;
+  readonly scoreBefore: number;
+  readonly scoreDelta: number;
+  readonly scoreAfter: number;
+  readonly provisional: boolean;
+  readonly modelVersion: number;
+}
+
 export interface DashboardMatch {
   readonly id: number;
   readonly playerId: number;
@@ -203,9 +222,12 @@ export interface DashboardMatch {
   readonly playedAt: string;
   readonly durationSeconds: number;
   readonly result: MatchResult;
+  readonly streamTitle?: string;
   readonly ally: DashboardMatchTeam;
   readonly enemy: DashboardMatchTeam;
-  readonly replay?: DashboardMatchReplay;
+  readonly replay?: DashboardMatchReplay | null;
+  readonly resultImage?: DashboardMatchResultImage | null;
+  readonly rating?: DashboardMatchRating | null;
 }
 
 export interface SeasonStandings {

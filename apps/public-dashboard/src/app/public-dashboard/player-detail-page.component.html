@@ -389,7 +389,6 @@
         <header>
           <div>
             <h2 id="player-mode-title">对局模式</h2>
-            <p>所选赛季的模式构成</p>
           </div>
           <span>全部模式</span>
         </header>
@@ -411,8 +410,8 @@
         <header>
           <div>
             <h2 id="player-form-title">近期状态</h2>
-            <p>最近五局已识别结果</p>
           </div>
+          <span>最近五局</span>
         </header>
         <div *ngIf="seasonPlayer as current; else noRecentForm" class="large-form">
           <span
@@ -443,11 +442,10 @@
       <header class="profile-table-heading">
         <div>
           <h2 id="hero-pool-detail-title">英雄池</h2>
-          <p>{{ selectedSeason.label }} · {{ modeLabel() }}</p>
+          <span class="profile-heading-context">{{ selectedSeason.label }} · {{ modeLabel() }}</span>
         </div>
         <div class="profile-table-heading-actions">
-          <span id="player-hero-sort-label">排序方式</span>
-          <div class="profile-hero-sort" role="group" aria-labelledby="player-hero-sort-label">
+          <div class="profile-hero-sort" role="group" aria-label="英雄池排序方式">
             <button
               type="button"
               [class.active]="activeHeroSort === 'proficiency'"

@@ -59,7 +59,11 @@ export function filterDashboardMatches(
           : [];
       if (
         !matchesSearchSegments(
-          [...stablePlayerSegments, ...participantNames],
+          [
+            ...(match.streamTitle === undefined ? [] : [match.streamTitle]),
+            ...stablePlayerSegments,
+            ...participantNames,
+          ],
           filters.playerQuery,
         )
       ) {
