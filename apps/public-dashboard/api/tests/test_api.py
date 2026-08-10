@@ -136,6 +136,44 @@ def test_match_list_waits_for_first_publication(tmp_path: Path) -> None:
     assert published.json()['total'] == 0
 
 
+def test_ingest_removes_unreferenced_players_missing_from_source(
+    tmp_path: Path,
+) -> None:
+    client = make_client(tmp_path)
+    first_match = match(1, played_at='2026-06-01T12:00:00Z', result='W')
+    assert ingest(client, batch([first_match])).status_code == 200
+
+    merged_match = {**first_match, 'playerId': 8}
+    merged = batch([merged_match])
+    merged['players'] = [
+        {
+            'id': 8,
+            'name': '合并后的玩家',
+            'initial': '合',
+            'roomLabel': '直播间 123456',
+            'roomIds': [123456],
+            'aliases': ['茉莉', '-Akitsuki-'],
+            'avatarUrl': None,
+        }
+    ]
+
+    assert ingest(client, merged, key='batch-2').status_code == 200
+    connection = sqlite3.connect(tmp_path / 'dashboard.sqlite3')
+    try:
+        player_ids = [
+            int(row[0])
+            for row in connection.execute(
+                'SELECT player_id FROM players ORDER BY player_id'
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+
+    assert player_ids == [8]
+    listed = client.get('/v1/matches').json()
+    assert listed['items'][0]['player']['id'] == 8
+
+
 def test_ingest_requires_authentication_and_is_idempotent(tmp_path: Path) -> None:
     client = make_client(tmp_path)
     payload = batch([match(2, played_at='2026-06-02T12:00:00Z', result='W')])

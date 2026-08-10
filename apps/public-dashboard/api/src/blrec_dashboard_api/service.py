@@ -78,6 +78,21 @@ def _upsert_player(
     )
 
 
+def _delete_unreferenced_players(
+    connection: sqlite3.Connection, current_player_ids: Sequence[int]
+) -> None:
+    parameters = tuple(sorted(current_player_ids))
+    current_filter = ''
+    if parameters:
+        placeholders = ','.join('?' for _ in parameters)
+        current_filter = 'player_id NOT IN ({}) AND '.format(placeholders)
+    connection.execute(
+        'DELETE FROM players WHERE ' + current_filter + 'NOT EXISTS('
+        'SELECT 1 FROM matches WHERE matches.player_id=players.player_id)',
+        parameters,
+    )
+
+
 def _insert_team(
     connection: sqlite3.Connection, match_id: int, team: IngestMatchTeam
 ) -> None:
@@ -392,6 +407,7 @@ def apply_ingest_batch(
             if changed_match_ids or batch.removed_match_ids
             else 0
         )
+        _delete_unreferenced_players(connection, tuple(changed_player_ids))
         connection.execute(
             'INSERT INTO ingestion_batches('
             'idempotency_key,payload_sha256,source_last_match_id,match_count,'
