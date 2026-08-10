@@ -124,6 +124,77 @@ async def seed_match(
     )
 
 
+async def seed_lineup(
+    database: BiliUploadDatabase,
+    match_id: int,
+    players: list[tuple[str, int, str, int, int, int, int, int, int]],
+) -> None:
+    for (
+        side,
+        slot,
+        name,
+        hero_id,
+        kills,
+        deaths,
+        assists,
+        economy,
+        last_hits,
+    ) in players:
+        await database.execute(
+            'INSERT OR REPLACE INTO vainglory_match_players('
+            'match_id,side,slot,player_name,normalized_name,hero_id,'
+            'kills,deaths,assists,economy,confidence,last_hits) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,1,?)',
+            (
+                match_id,
+                side,
+                slot,
+                name,
+                name.casefold(),
+                hero_id,
+                kills,
+                deaths,
+                assists,
+                economy,
+                last_hits,
+            ),
+        )
+
+
+async def seed_publication(
+    database: BiliUploadDatabase, *, match_id: int, bvid: str, page: int, public: bool
+) -> None:
+    await database.execute(
+        'INSERT OR IGNORE INTO bili_accounts('
+        'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+        "state,created_at,updated_at) VALUES(1,1,'测试账号',X'01',1,'test','active',1,1)"
+    )
+    await database.execute(
+        'INSERT INTO vainglory_archive_imports('
+        'id,account_id,aid,bvid,title,published_at,session_id,state,progress,'
+        'page_count,completed_page_count,error,created_at,updated_at) '
+        "VALUES(?,1,?,?,?,1,?,'ready',1,1,1,NULL,1,1)",
+        (match_id, 1000 + match_id, bvid, '测试稿件', match_id),
+    )
+    await database.execute(
+        'INSERT INTO vainglory_archive_parts('
+        'id,import_id,page,cid,title,duration_seconds,recording_part_id,'
+        'state,progress,error,created_at,updated_at) '
+        "VALUES(?,?,?,?,?,1800,?,'ready',1,NULL,1,1)",
+        (1000 + match_id, match_id, page, 2000 + match_id, '测试分段', match_id),
+    )
+    await database.execute(
+        'INSERT INTO vainglory_publications('
+        'id,account_id,session_id,aid,bvid,source_kind,payload_hash,'
+        'description_block,state,description_state,pin_state,attempt_count,'
+        'next_attempt_at,created_at,updated_at,needs_refresh,chapter_state,'
+        'public_visible_at) '
+        "VALUES(?,1,?,?,?,'archive',?,'测试','confirmed','confirmed','confirmed',"
+        "0,0,1,1,0,'confirmed',?)",
+        (match_id, match_id, 1000 + match_id, bvid, 'a' * 64, 1 if public else None),
+    )
+
+
 @pytest.mark.asyncio
 async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
@@ -230,7 +301,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
             )
         )
 
-        assert snapshot['schemaVersion'] == 2
+        assert snapshot['schemaVersion'] == 3
         assert snapshot['currentSeasonKey'] == '2026-summer'
         assert [season['key'] for season in snapshot['seasons']] == [
             '2026-summer',
@@ -244,6 +315,7 @@ async def test_snapshot_uses_stable_players_and_beijing_seasons(tmp_path: Path) 
         ]
         first = summer['players'][0]
         assert first['roomLabel'] == '直播间 100'
+        assert first['roomIds'] == [100]
         assert first['aliases'] == ['旧直播名', '直播名称']
         assert 'OCR 游戏名' not in first['aliases']
         assert first['modes']['all']['matches'] == 2
@@ -332,6 +404,186 @@ async def test_snapshot_excludes_mode_and_team_size_conflicts(tmp_path: Path) ->
         assert player['modes']['3v3']['matches'] == 1
         assert player['modes']['5v5']['matches'] == 1
         assert player['modes']['brawl']['matches'] == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_exports_matches_by_live_time_and_hides_private_replays(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO vainglory_heroes('
+            'id,fingerprint,thumbnail_png,label,created_at,updated_at) VALUES'
+            "(1,'0000000000000001',X'01','Caine',1,1),"
+            "(2,'0000000000000002',X'02','Ardan',1,1),"
+            "(3,'0000000000000003',X'03','Gwen',1,1),"
+            "(4,'0000000000000004',X'04','Koshka',1,1),"
+            "(5,'0000000000000005',X'05','Vox',1,1),"
+            "(6,'0000000000000006',X'06','Lance',1,1)"
+        )
+        await seed_player(database, 10, '卢伟', 100)
+
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=1,
+            room_id=100,
+            started_at=timestamp(2026, 8, 10, 20),
+            game_mode='3v3',
+            won=True,
+            hero_id=1,
+            anchor_name='直播名称',
+        )
+        await database.execute(
+            'UPDATE vainglory_matches SET started_at_ms=120000,'
+            'duration_seconds=780,left_kills=14,right_kills=3,'
+            'left_economy=40900,right_economy=33000 WHERE id=1'
+        )
+        await seed_lineup(
+            database,
+            1,
+            [
+                ('left', 1, '毒奶的钢门', 1, 8, 0, 4, 16500, 900),
+                ('left', 2, '不是小白', 2, 5, 2, 9, 13600, 175),
+                ('left', 3, '缸一', 3, 1, 1, 10, 10700, 634),
+                ('right', 1, '猪国栋', 4, 1, 7, 2, 11100, 25),
+                ('right', 2, 'dove', 5, 0, 3, 3, 7700, 62),
+                ('right', 3, '不要输给小白', 6, 2, 4, 0, 14100, 301),
+            ],
+        )
+        await seed_publication(
+            database, match_id=1, bvid='BV1public001', page=2, public=True
+        )
+
+        await seed_match(
+            database,
+            tmp_path,
+            match_id=2,
+            room_id=100,
+            started_at=timestamp(2026, 8, 11, 20),
+            game_mode='3v3',
+            won=False,
+            hero_id=1,
+            anchor_name='直播名称',
+        )
+        await seed_lineup(
+            database,
+            2,
+            [
+                ('left', 1, '毒奶的钢门', 1, 1, 4, 2, 9000, 100),
+                ('left', 2, '不是小白', 2, 2, 4, 1, 8500, 80),
+                ('left', 3, '缸一', 3, 0, 5, 3, 8000, 70),
+                ('right', 1, '猪国栋', 4, 6, 1, 5, 15000, 500),
+                ('right', 2, 'dove', 5, 4, 1, 6, 14500, 400),
+                ('right', 3, '不要输给小白', 6, 3, 1, 7, 14000, 300),
+            ],
+        )
+        await seed_publication(
+            database, match_id=2, bvid='BV1private01', page=1, public=False
+        )
+
+        snapshot = await database.read(
+            lambda connection: build_dashboard_snapshot(
+                connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
+            )
+        )
+
+        matches = snapshot['matches']
+        assert [match['id'] for match in matches] == [2, 1]
+        assert matches[0]['playedAt'] > matches[1]['playedAt']
+        assert 'replay' not in matches[0]
+        assert matches[1]['replay'] == {
+            'kind': 'match',
+            'url': 'https://www.bilibili.com/video/BV1public001?p=2&t=120',
+        }
+        assert matches[1]['playerId'] == 10
+        assert matches[1]['result'] == 'W'
+        assert [player['heroName'] for player in matches[1]['ally']['players']] == [
+            'Caine',
+            'Ardan',
+            'Gwen',
+        ]
+        assert [player['heroName'] for player in matches[1]['enemy']['players']] == [
+            'Koshka',
+            'Vox',
+            'Lance',
+        ]
+        assert matches[1]['ally']['economy'] == 40900
+        assert matches[1]['enemy']['economy'] == 33000
+        assert matches[1]['ally']['players'][0]['lastHits'] == 900
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_calculates_best_and_worst_hero_synergies(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await database.execute(
+            'INSERT INTO vainglory_heroes('
+            'id,fingerprint,thumbnail_png,label,created_at,updated_at) VALUES'
+            "(1,'0000000000000001',X'01','Caine',1,1),"
+            "(2,'0000000000000002',X'02','Ardan',1,1),"
+            "(3,'0000000000000003',X'03','Vox',1,1),"
+            "(4,'0000000000000004',X'04','Gwen',1,1),"
+            "(5,'0000000000000005',X'05','Koshka',1,1),"
+            "(6,'0000000000000006',X'06','Lance',1,1)"
+        )
+        await seed_player(database, 10, '主播', 100)
+        for match_id in range(1, 11):
+            won = match_id <= 5
+            await seed_match(
+                database,
+                tmp_path,
+                match_id=match_id,
+                room_id=100,
+                started_at=timestamp(2026, 8, match_id),
+                game_mode='3v3',
+                won=won,
+                hero_id=1,
+                anchor_name='主播',
+            )
+            await seed_lineup(
+                database,
+                match_id,
+                [
+                    ('left', 1, '主播', 1, 1, 1, 1, 10000, 100),
+                    ('left', 2, '搭档', 2 if won else 3, 1, 1, 1, 10000, 100),
+                    ('left', 3, '固定搭档', 4, 1, 1, 1, 10000, 100),
+                    ('right', 1, '对手甲', 5, 1, 1, 1, 10000, 100),
+                    ('right', 2, '对手乙', 6, 1, 1, 1, 10000, 100),
+                    ('right', 3, '对手丙', 2 if not won else 3, 1, 1, 1, 10000, 100),
+                ],
+            )
+
+        snapshot = await database.read(
+            lambda connection: build_dashboard_snapshot(
+                connection, now=datetime(2026, 8, 11, 22, tzinfo=SHANGHAI)
+            )
+        )
+
+        heroes = snapshot['standings']['2026-summer']['heroes']
+        caine = next(hero for hero in heroes if hero['name'] == 'Caine')
+        assert caine['synergies']['3v3']['best'][0] == {
+            'name': 'Ardan',
+            'matches': 5,
+            'wins': 5,
+        }
+        assert caine['synergies']['3v3']['worst'][0] == {
+            'name': 'Vox',
+            'matches': 5,
+            'wins': 0,
+        }
+        assert {item['name'] for item in caine['synergies']['3v3']['best']}.isdisjoint(
+            item['name'] for item in caine['synergies']['3v3']['worst']
+        )
     finally:
         await database.close()
 

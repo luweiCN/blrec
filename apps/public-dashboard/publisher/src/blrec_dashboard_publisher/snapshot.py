@@ -9,7 +9,18 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Set, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from .rating import (
     CARRYOVER_MATCH_CAP,
@@ -42,6 +53,10 @@ SHANGHAI = timezone(timedelta(hours=8))
 PUBLIC_MODES = ('all', '3v3', 'brawl', '5v5')
 RAW_MODE_TO_PUBLIC = {'3v3': '3v3', '5v5': '5v5', 'aram': 'brawl', 'other': 'brawl'}
 SEASON_NAMES = {'spring': '春季赛', 'summer': '夏季赛', 'autumn': '秋季赛'}
+HERO_SYNERGY_MIN_MATCHES = 5
+HERO_SYNERGY_PRIOR_MATCHES = 5
+HERO_SYNERGY_LIMIT = 3
+QUERY_BATCH_SIZE = 500
 REQUIRED_TABLES = frozenset(
     (
         'recording_sessions',
@@ -51,6 +66,7 @@ REQUIRED_TABLES = frozenset(
         'vainglory_players',
         'vainglory_player_rooms',
         'vainglory_player_sessions',
+        'vainglory_publications',
         'vainglory_scan_jobs',
     )
 )
@@ -328,8 +344,8 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
     version_row = connection.execute(
         'SELECT COALESCE(MAX(version),0) FROM schema_migrations'
     ).fetchone()
-    if version_row is None or int(version_row[0]) < 54:
-        raise sqlite3.DatabaseError('dashboard source database requires schema 54+')
+    if version_row is None or int(version_row[0]) < 64:
+        raise sqlite3.DatabaseError('dashboard source database requires schema 64+')
 
 
 def _player_metadata(
@@ -375,11 +391,28 @@ def _player_metadata(
     return players, aliases
 
 
-def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
-    return connection.execute(
+def _match_played_at(row: Mapping[str, Any]) -> int:
+    part_started_at = int(row['record_start_time'])
+    result_at_ms = int(row['result_at_ms'])
+    started_at_ms = int(row['started_at_ms'])
+    duration_seconds = int(row['duration_seconds'])
+    if started_at_ms > 0:
+        measured_duration = (result_at_ms - started_at_ms) / 1000
+        if abs(measured_duration - duration_seconds) <= 30:
+            return part_started_at + started_at_ms // 1000
+    return part_started_at + (result_at_ms - duration_seconds * 1000) // 1000
+
+
+def _match_rows(connection: sqlite3.Connection) -> List[Mapping[str, Any]]:
+    rows = connection.execute(
         'SELECT player.id AS player_id,player.name AS player_name,'
         'session.id AS session_id,session.started_at,match.id AS match_id,'
-        'match.started_at_ms,match.duration_seconds,match.game_mode,'
+        'match.result_part_id,part.part_index,part.record_start_time,'
+        'match.result_at_ms,match.started_at_ms,match.duration_seconds,'
+        'match.game_mode,match.winner_side,match.recorded_player_side,'
+        'match.recorded_player_slot,match.left_color,match.right_color,'
+        'match.left_kills,match.right_kills,match.left_economy,'
+        'match.right_economy,'
         "CASE match.winner_side WHEN 'left' THEN match.left_color "
         "WHEN 'right' THEN match.right_color ELSE 'unknown' END AS winner_color,"
         "COALESCE(hero.label,'') AS hero_name,recorded.kills,"
@@ -392,6 +425,7 @@ def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
         'JOIN vainglory_players player '
         'ON player.id=COALESCE(room.player_id,direct.player_id) '
         'JOIN vainglory_matches match ON match.session_id=session.id '
+        'JOIN recording_parts part ON part.id=match.result_part_id '
         'JOIN vainglory_scan_jobs scan ON scan.session_id=session.id '
         'LEFT JOIN vainglory_match_players recorded '
         'ON recorded.match_id=match.id '
@@ -406,8 +440,286 @@ def _match_rows(connection: sqlite3.Connection) -> List[sqlite3.Row]:
         "OR match.game_mode IN ('aram','other')) "
         "AND CASE match.winner_side WHEN 'left' THEN match.left_color "
         "WHEN 'right' THEN match.right_color END IN ('teal','orange') "
-        'ORDER BY session.started_at,session.id,match.started_at_ms,match.id'
+        'ORDER BY part.record_start_time,match.result_at_ms,match.id'
     ).fetchall()
+    values: List[Mapping[str, Any]] = []
+    for row in rows:
+        value = dict(row)
+        value['played_at'] = _match_played_at(value)
+        values.append(value)
+    return sorted(values, key=lambda row: (int(row['played_at']), int(row['match_id'])))
+
+
+def _id_batches(values: Sequence[int]) -> Iterator[Tuple[int, ...]]:
+    for start in range(0, len(values), QUERY_BATCH_SIZE):
+        yield tuple(values[start : start + QUERY_BATCH_SIZE])
+
+
+def _lineups_by_match(
+    connection: sqlite3.Connection, rows: Sequence[Mapping[str, Any]]
+) -> Mapping[int, List[Mapping[str, Any]]]:
+    match_ids = tuple(sorted(int(row['match_id']) for row in rows))
+    lineups: Dict[int, List[Mapping[str, Any]]] = {}
+    for batch in _id_batches(match_ids):
+        placeholders = ','.join('?' for _ in batch)
+        lineup_rows = connection.execute(
+            'SELECT participant.match_id,participant.side,participant.slot,'
+            "COALESCE(participant.player_name,'') AS player_name,"
+            "COALESCE(hero.label,'') AS hero_name,participant.kills,"
+            'participant.deaths,participant.assists,participant.economy,'
+            'participant.last_hits FROM vainglory_match_players participant '
+            'LEFT JOIN vainglory_heroes hero ON hero.id=participant.hero_id '
+            'WHERE participant.match_id IN ('
+            + placeholders
+            + ") AND participant.side IN ('left','right') "
+            "ORDER BY participant.match_id,CASE participant.side "
+            "WHEN 'left' THEN 0 ELSE 1 END,participant.slot",
+            batch,
+        ).fetchall()
+        for lineup_row in lineup_rows:
+            lineups.setdefault(int(lineup_row['match_id']), []).append(dict(lineup_row))
+    return lineups
+
+
+def _publications_by_session(
+    connection: sqlite3.Connection, rows: Sequence[Mapping[str, Any]]
+) -> Mapping[int, Mapping[str, Any]]:
+    session_ids = tuple(sorted({int(row['session_id']) for row in rows}))
+    publications: Dict[int, Mapping[str, Any]] = {}
+    for batch in _id_batches(session_ids):
+        placeholders = ','.join('?' for _ in batch)
+        publication_rows = connection.execute(
+            'SELECT publication.id,publication.session_id,publication.bvid,'
+            'publication.source_kind,publication.upload_job_id '
+            'FROM vainglory_publications publication '
+            'WHERE publication.session_id IN ('
+            + placeholders
+            + ') AND publication.public_visible_at IS NOT NULL '
+            'AND publication.id=(SELECT latest.id '
+            'FROM vainglory_publications latest '
+            'WHERE latest.session_id=publication.session_id '
+            'AND latest.public_visible_at IS NOT NULL '
+            'ORDER BY latest.public_visible_at DESC,latest.id DESC LIMIT 1)',
+            batch,
+        ).fetchall()
+        publications.update(
+            (int(row['session_id']), dict(row)) for row in publication_rows
+        )
+    return publications
+
+
+def _publication_parts(
+    connection: sqlite3.Connection, publications: Mapping[int, Mapping[str, Any]]
+) -> Mapping[int, List[Tuple[int, int, int]]]:
+    publication_ids = tuple(
+        sorted(int(publication['id']) for publication in publications.values())
+    )
+    parts: Dict[int, List[Tuple[int, int, int]]] = {}
+    upload_page_by_publication: Dict[int, int] = {}
+    for batch in _id_batches(publication_ids):
+        placeholders = ','.join('?' for _ in batch)
+        archive_rows = connection.execute(
+            'SELECT publication.id AS publication_id,'
+            'archive_part.recording_part_id,archive_part.page,'
+            'archive_part.duration_seconds '
+            'FROM vainglory_publications publication '
+            'JOIN vainglory_archive_imports imported '
+            'ON imported.account_id=publication.account_id '
+            'AND imported.bvid=publication.bvid '
+            'JOIN vainglory_archive_parts archive_part '
+            'ON archive_part.import_id=imported.id '
+            'WHERE publication.id IN ('
+            + placeholders
+            + ") AND publication.source_kind='archive' "
+            'AND archive_part.recording_part_id IS NOT NULL '
+            'ORDER BY publication.id,archive_part.page',
+            batch,
+        ).fetchall()
+        for row in archive_rows:
+            parts.setdefault(int(row['publication_id']), []).append(
+                (
+                    int(row['recording_part_id']),
+                    int(row['page']),
+                    (
+                        0
+                        if row['duration_seconds'] is None
+                        else int(row['duration_seconds'])
+                    ),
+                )
+            )
+
+        upload_rows = connection.execute(
+            'SELECT publication.id AS publication_id,'
+            'recording.id AS recording_part_id,'
+            'recording.record_duration_seconds '
+            'FROM vainglory_publications publication '
+            'JOIN upload_parts remote ON remote.job_id=publication.upload_job_id '
+            'AND remote.cid IS NOT NULL '
+            'JOIN recording_parts recording '
+            'ON recording.session_id=publication.session_id '
+            'AND recording.part_index=remote.part_index '
+            'WHERE publication.id IN ('
+            + placeholders
+            + ") AND publication.source_kind='upload' "
+            'ORDER BY publication.id,remote.part_index',
+            batch,
+        ).fetchall()
+        for row in upload_rows:
+            publication_id = int(row['publication_id'])
+            page = upload_page_by_publication.get(publication_id, 0) + 1
+            upload_page_by_publication[publication_id] = page
+            parts.setdefault(publication_id, []).append(
+                (
+                    int(row['recording_part_id']),
+                    page,
+                    (
+                        0
+                        if row['record_duration_seconds'] is None
+                        else int(row['record_duration_seconds'])
+                    ),
+                )
+            )
+    return parts
+
+
+def _match_replay(
+    row: Mapping[str, Any],
+    publication: Optional[Mapping[str, Any]],
+    parts: Sequence[Tuple[int, int, int]],
+) -> Optional[Mapping[str, str]]:
+    if publication is None:
+        return None
+    bvid = str(publication['bvid'])
+    full_url = 'https://www.bilibili.com/video/{}'.format(bvid)
+    current = next(
+        (part for part in parts if part[0] == int(row['result_part_id'])), None
+    )
+    if current is None:
+        return {'kind': 'full', 'url': full_url}
+    _part_id, page, _part_duration = current
+    result_at_ms = int(row['result_at_ms'])
+    duration_seconds = int(row['duration_seconds'])
+    started_at_ms = int(row['started_at_ms'])
+    if started_at_ms > 0:
+        measured_duration = (result_at_ms - started_at_ms) / 1000
+        if abs(measured_duration - duration_seconds) <= 30:
+            seconds = started_at_ms // 1000
+            return {
+                'kind': 'match',
+                'url': '{}?p={}&t={}'.format(full_url, page, seconds),
+            }
+    inferred_start_ms = result_at_ms - duration_seconds * 1000
+    if inferred_start_ms >= 0:
+        return {
+            'kind': 'match',
+            'url': '{}?p={}&t={}'.format(full_url, page, inferred_start_ms // 1000),
+        }
+    remaining_ms = -inferred_start_ms
+    previous_parts = sorted(
+        (
+            (previous_page, previous_duration)
+            for _previous_id, previous_page, previous_duration in parts
+            if previous_page < page and previous_duration > 0
+        ),
+        reverse=True,
+    )
+    for previous_page, previous_duration in previous_parts:
+        duration_ms = previous_duration * 1000
+        if remaining_ms <= duration_ms + 30000:
+            seconds = max(0, duration_ms - remaining_ms) // 1000
+            return {
+                'kind': 'match',
+                'url': '{}?p={}&t={}'.format(full_url, previous_page, seconds),
+            }
+        remaining_ms -= duration_ms
+    return {'kind': 'match', 'url': '{}?p={}&t=0'.format(full_url, page)}
+
+
+def _public_matches(
+    rows: Sequence[Mapping[str, Any]],
+    lineups: Mapping[int, List[Mapping[str, Any]]],
+    publications: Mapping[int, Mapping[str, Any]],
+    publication_parts: Mapping[int, List[Tuple[int, int, int]]],
+) -> List[Mapping[str, Any]]:
+    values: List[Mapping[str, Any]] = []
+    for row in rows:
+        match_id = int(row['match_id'])
+        recorded_side = str(row['recorded_player_side'])
+        enemy_side = 'right' if recorded_side == 'left' else 'left'
+
+        def team_value(side: str) -> Mapping[str, Any]:
+            prefix = side
+            players = []
+            for participant in lineups.get(match_id, ()):
+                if str(participant['side']) != side:
+                    continue
+                player_value: Dict[str, Any] = {
+                    'name': str(participant['player_name'] or '未知玩家'),
+                    'heroName': str(participant['hero_name']),
+                    'isRecordedPlayer': (
+                        side == recorded_side
+                        and int(participant['slot']) == int(row['recorded_player_slot'])
+                    ),
+                }
+                for source, target in (
+                    ('kills', 'kills'),
+                    ('deaths', 'deaths'),
+                    ('assists', 'assists'),
+                    ('economy', 'economy'),
+                    ('last_hits', 'lastHits'),
+                ):
+                    player_value[target] = (
+                        None
+                        if participant[source] is None
+                        else int(participant[source])
+                    )
+                players.append(player_value)
+            return {
+                'side': side,
+                'color': str(row['{}_color'.format(prefix)]),
+                'kills': (
+                    None
+                    if row['{}_kills'.format(prefix)] is None
+                    else int(row['{}_kills'.format(prefix)])
+                ),
+                'economy': (
+                    None
+                    if row['{}_economy'.format(prefix)] is None
+                    else int(row['{}_economy'.format(prefix)])
+                ),
+                'players': players,
+            }
+
+        publication = publications.get(int(row['session_id']))
+        replay = _match_replay(
+            row,
+            publication,
+            (
+                ()
+                if publication is None
+                else publication_parts.get(int(publication['id']), ())
+            ),
+        )
+        played_at = datetime.fromtimestamp(int(row['played_at']), tz=timezone.utc)
+        value: Dict[str, Any] = {
+            'id': match_id,
+            'playerId': int(row['player_id']),
+            'seasonKey': _season_for(played_at).key,
+            'mode': RAW_MODE_TO_PUBLIC[str(row['game_mode'])],
+            'playedAt': _utc_iso(played_at),
+            'durationSeconds': int(row['duration_seconds']),
+            'result': ('W' if str(row['winner_side']) == recorded_side else 'L'),
+            'ally': team_value(recorded_side),
+            'enemy': team_value(enemy_side),
+        }
+        if replay is not None:
+            value['replay'] = replay
+        values.append(value)
+    return sorted(
+        values,
+        key=lambda value: (str(value['playedAt']), int(value['id'])),
+        reverse=True,
+    )
 
 
 def _empty_player_modes() -> Dict[str, _Performance]:
@@ -416,6 +728,100 @@ def _empty_player_modes() -> Dict[str, _Performance]:
 
 def _empty_hero_modes() -> Dict[str, _HeroPerformance]:
     return {mode: _HeroPerformance() for mode in PUBLIC_MODES}
+
+
+def _empty_synergy_modes() -> Dict[str, Mapping[str, List[Mapping[str, Any]]]]:
+    return {mode: {'best': [], 'worst': []} for mode in PUBLIC_MODES}
+
+
+def _hero_synergies(
+    rows: Sequence[Mapping[str, Any]], lineups: Mapping[int, List[Mapping[str, Any]]]
+) -> Mapping[str, Mapping[str, Mapping[str, List[Mapping[str, Any]]]]]:
+    totals: Dict[str, Dict[str, List[int]]] = {}
+    pairs: Dict[str, Dict[str, Dict[str, List[int]]]] = {}
+    for row in rows:
+        match_id = int(row['match_id'])
+        public_mode = RAW_MODE_TO_PUBLIC[str(row['game_mode'])]
+        for side in ('left', 'right'):
+            hero_names = sorted(
+                {
+                    str(participant['hero_name'])
+                    for participant in lineups.get(match_id, ())
+                    if str(participant['side']) == side
+                    and str(participant['hero_name'])
+                },
+                key=lambda name: (name.casefold(), name),
+            )
+            if not hero_names:
+                continue
+            won = str(row['winner_side']) == side
+            for mode in (public_mode, 'all'):
+                for hero_name in hero_names:
+                    hero_totals = totals.setdefault(hero_name, {}).setdefault(
+                        mode, [0, 0]
+                    )
+                    hero_totals[0] += 1
+                    hero_totals[1] += int(won)
+                    hero_pairs = pairs.setdefault(hero_name, {}).setdefault(mode, {})
+                    for partner_name in hero_names:
+                        if partner_name == hero_name:
+                            continue
+                        pair_totals = hero_pairs.setdefault(partner_name, [0, 0])
+                        pair_totals[0] += 1
+                        pair_totals[1] += int(won)
+
+    values: Dict[str, Dict[str, Mapping[str, List[Mapping[str, Any]]]]] = {}
+    for hero_name, modes in pairs.items():
+        public_modes = _empty_synergy_modes()
+        for mode, partners in modes.items():
+            hero_matches, hero_wins = totals[hero_name][mode]
+            base_win_rate = hero_wins / hero_matches if hero_matches else 0.5
+            eligible = [
+                (partner_name, pair_totals[0], pair_totals[1])
+                for partner_name, pair_totals in partners.items()
+                if pair_totals[0] >= HERO_SYNERGY_MIN_MATCHES
+            ]
+
+            def smoothed(item: Tuple[str, int, int]) -> float:
+                _name, matches, wins = item
+                return (wins + base_win_rate * HERO_SYNERGY_PRIOR_MATCHES) / (
+                    matches + HERO_SYNERGY_PRIOR_MATCHES
+                )
+
+            ranking_limit = min(HERO_SYNERGY_LIMIT, max(1, len(eligible) // 2))
+            best = sorted(
+                eligible,
+                key=lambda item: (
+                    -smoothed(item),
+                    -item[1],
+                    -item[2],
+                    item[0].casefold(),
+                    item[0],
+                ),
+            )[:ranking_limit]
+            best_names = {item[0] for item in best}
+            worst = sorted(
+                (item for item in eligible if item[0] not in best_names),
+                key=lambda item: (
+                    smoothed(item),
+                    -item[1],
+                    item[2],
+                    item[0].casefold(),
+                    item[0],
+                ),
+            )[:ranking_limit]
+            public_modes[mode] = {
+                'best': [
+                    {'name': name, 'matches': matches, 'wins': wins}
+                    for name, matches, wins in best
+                ],
+                'worst': [
+                    {'name': name, 'matches': matches, 'wins': wins}
+                    for name, matches, wins in worst
+                ],
+            }
+        values[hero_name] = public_modes
+    return values
 
 
 def _hero_pool(performance: _Performance) -> List[Mapping[str, Any]]:
@@ -441,9 +847,10 @@ def _room_label(rooms: List[int]) -> str:
 
 
 def _standings_for_rows(
-    rows: List[sqlite3.Row],
+    rows: List[Mapping[str, Any]],
     players: Mapping[int, Mapping[str, Any]],
     aliases: Mapping[int, List[str]],
+    lineups: Mapping[int, List[Mapping[str, Any]]],
     previous_ratings: MutableMapping[Tuple[int, str], _PreviousRating],
     *,
     reset_visible_score: bool,
@@ -453,7 +860,9 @@ def _standings_for_rows(
     for row in rows:
         player_id = int(row['player_id'])
         public_mode = RAW_MODE_TO_PUBLIC[str(row['game_mode'])]
-        result = 'W' if str(row['winner_color']) == 'teal' else 'L'
+        result = (
+            'W' if str(row['winner_side']) == str(row['recorded_player_side']) else 'L'
+        )
         hero_name = str(row['hero_name'])
         kills = None if row['kills'] is None else int(row['kills'])
         deaths = None if row['deaths'] is None else int(row['deaths'])
@@ -501,6 +910,7 @@ def _standings_for_rows(
                 'name': name,
                 'initial': name[:1],
                 'roomLabel': _room_label(list(metadata['rooms'])),
+                'roomIds': list(metadata['rooms']),
                 'aliases': list(aliases.get(player_id, ())),
                 'trend': 0,
                 'form': list((modes['all'].results or [])[-5:]),
@@ -515,11 +925,13 @@ def _standings_for_rows(
             }
         )
 
+    synergies = _hero_synergies(rows, lineups)
     public_heroes = [
         {
             'id': hero_name,
             'name': hero_name,
             'modes': {mode: modes[mode].public_value() for mode in PUBLIC_MODES},
+            'synergies': synergies.get(hero_name, _empty_synergy_modes()),
         }
         for hero_name, modes in sorted(
             hero_modes.items(), key=lambda item: (item[0].casefold(), item[0])
@@ -543,12 +955,16 @@ def build_dashboard_snapshot(
     current_season = _season_for(generated_at)
     players, aliases = _player_metadata(connection)
     rows = _match_rows(connection)
+    lineups = _lineups_by_match(connection, rows)
+    publications = _publications_by_session(connection, rows)
+    publication_parts = _publication_parts(connection, publications)
+    public_matches = _public_matches(rows, lineups, publications, publication_parts)
 
     seasons_by_key: Dict[str, _Season] = {current_season.key: current_season}
-    rows_by_season: Dict[str, List[sqlite3.Row]] = {}
+    rows_by_season: Dict[str, List[Mapping[str, Any]]] = {}
     for row in rows:
         season = _season_for(
-            datetime.fromtimestamp(int(row['started_at']), tz=timezone.utc)
+            datetime.fromtimestamp(int(row['played_at']), tz=timezone.utc)
         )
         seasons_by_key[season.key] = season
         rows_by_season.setdefault(season.key, []).append(row)
@@ -562,17 +978,18 @@ def build_dashboard_snapshot(
             rows_by_season.get(season.key, []),
             players,
             aliases,
+            lineups,
             previous_ratings,
             reset_visible_score=True,
         )
     seasons = list(reversed(chronological_seasons))
     standings['all-time'] = _standings_for_rows(
-        rows, players, aliases, {}, reset_visible_score=False
+        rows, players, aliases, lineups, {}, reset_visible_score=False
     )
     publication_date = generated_at.astimezone(SHANGHAI).date().isoformat()
     source_last_match_id = max((int(row['match_id']) for row in rows), default=0)
     body: Dict[str, Any] = {
-        'schemaVersion': 2,
+        'schemaVersion': 3,
         'publicationDate': publication_date,
         'generatedAt': _utc_iso(generated_at),
         'sourceLastMatchId': source_last_match_id,
@@ -605,6 +1022,7 @@ def build_dashboard_snapshot(
             }
         ],
         'standings': standings,
+        'matches': public_matches,
     }
     content_revision = hashlib.sha256(
         _json_bytes(
@@ -617,6 +1035,7 @@ def build_dashboard_snapshot(
                     'currentSeasonKey',
                     'seasons',
                     'standings',
+                    'matches',
                 )
             }
         )
