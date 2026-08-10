@@ -24,7 +24,6 @@ fi
 application_root=/opt/blrec-dashboard-api
 releases_root="$application_root/releases"
 release="$releases_root/$release_id"
-incoming="$releases_root/.incoming-$release_id"
 current_link="$application_root/current"
 next_link="$application_root/.current-$release_id"
 database_root=/var/lib/blrec-dashboard-api
@@ -39,28 +38,29 @@ fi
 install -d -m 0755 -o root -g root "$application_root" "$releases_root"
 install -d -m 0750 -o blrec-dashboard-api -g blrec-dashboard-api "$database_root"
 
-if [[ -e "$release" || -e "$incoming" ]]; then
+if [[ -e "$release" ]]; then
   echo "API release identifier already exists" >&2
   exit 1
 fi
-install -d -m 0755 -o root -g root "$incoming"
-tar --extract --gzip --file "$archive" --directory "$incoming"
+install -d -m 0755 -o root -g root "$release"
+tar --extract --gzip --file "$archive" --directory "$release"
+chmod 0755 "$release"
 
-test -s "$incoming/runtime-requirements.txt"
-test -d "$incoming/wheelhouse"
-test -d "$incoming/wheels"
-test -s "$incoming/deploy/blrec-dashboard-api.service"
-test -s "$incoming/deploy/vg-api.luwei.host.nginx.conf"
+test -s "$release/runtime-requirements.txt"
+test -d "$release/wheelhouse"
+test -d "$release/wheels"
+test -s "$release/deploy/blrec-dashboard-api.service"
+test -s "$release/deploy/vg-api.luwei.host.nginx.conf"
 
-python3 -m venv "$incoming/venv"
-"$incoming/venv/bin/python" -m pip install \
+python3 -m venv "$release/venv"
+"$release/venv/bin/python" -m pip install \
   --disable-pip-version-check \
   --no-index \
-  --find-links "$incoming/wheelhouse" \
-  --requirement "$incoming/runtime-requirements.txt"
+  --find-links "$release/wheelhouse" \
+  --requirement "$release/runtime-requirements.txt"
 
-publisher_wheels=("$incoming"/wheels/blrec_dashboard_publisher-*.whl)
-api_wheels=("$incoming"/wheels/blrec_dashboard_api-*.whl)
+publisher_wheels=("$release"/wheels/blrec_dashboard_publisher-*.whl)
+api_wheels=("$release"/wheels/blrec_dashboard_api-*.whl)
 if [[ ${#publisher_wheels[@]} != 1 || ! -f "${publisher_wheels[0]}" ]]; then
   echo "Publisher support wheel is missing" >&2
   exit 1
@@ -69,11 +69,10 @@ if [[ ${#api_wheels[@]} != 1 || ! -f "${api_wheels[0]}" ]]; then
   echo "API wheel is missing" >&2
   exit 1
 fi
-"$incoming/venv/bin/python" -m pip install \
+"$release/venv/bin/python" -m pip install \
   --disable-pip-version-check --no-index --no-deps \
   "${publisher_wheels[0]}" "${api_wheels[0]}"
 
-mv "$incoming" "$release"
 chown -R root:root "$release"
 
 verify_unit="/tmp/blrec-dashboard-api-$release_id.service"
@@ -136,6 +135,7 @@ if [[ "$healthy" != "true" ]]; then
     systemctl restart blrec-dashboard-api.service
   else
     systemctl stop blrec-dashboard-api.service
+    unlink "$current_link"
   fi
   if [[ -n "$previous_nginx" ]]; then
     ln -s "$previous_nginx" "$nginx_next"
