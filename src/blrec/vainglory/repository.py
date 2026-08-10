@@ -40,6 +40,9 @@ from .ocr import clean_player_name, normalize_player_name
 from .title_time import current_season_started_at
 from .vision import RecordedPlayer
 
+# MediaLibrary uses this sentinel for an external import without a source room.
+_EXTERNAL_IMPORT_ROOM_ID = 2_147_483_647
+
 
 class VaingloryNotFound(ValueError):
     pass
@@ -5167,7 +5170,8 @@ class VaingloryRepository:
         ).fetchone()
         if session is None:
             return
-        room_id = int(session['room_id'])
+        stored_room_id = int(session['room_id'])
+        room_id = 0 if stored_room_id == _EXTERNAL_IMPORT_ROOM_ID else stored_room_id
         anchor_uid = (
             None
             if session['anchor_uid'] is None or int(session['anchor_uid']) <= 0

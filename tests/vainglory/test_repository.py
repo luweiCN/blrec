@@ -1756,6 +1756,34 @@ async def test_analyzed_session_without_anchor_stays_unassigned(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_external_import_without_room_stays_unassigned(tmp_path: Path) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        video = tmp_path / 'external-import.mp4'
+        video.write_bytes(b'video')
+        await seed_session(database, video)
+        await database.execute(
+            'UPDATE recording_sessions SET room_id=?,broadcast_session_key=?,'
+            "anchor_uid=NULL,anchor_name='' WHERE id=1",
+            (2_147_483_647, 'import:' + 'a' * 32),
+        )
+        repository = VaingloryRepository(database, clock=lambda: 100)
+
+        assert await repository.claim_next() is not None
+        await repository.complete_part(1, (analyzed_match(),))
+
+        assert await repository.list_players() == ()
+        assert await repository.list_player_stats() == ()
+        assert await database.scalar('SELECT COUNT(*) FROM vainglory_player_rooms') == 0
+        assert (
+            await database.scalar('SELECT COUNT(*) FROM vainglory_player_sessions') == 0
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_manages_players_and_aggregates_player_rankings(
     tmp_path: Path,
 ) -> None:
