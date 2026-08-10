@@ -37,13 +37,13 @@
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.68rem;
+    font-size: var(--type-label);
     font-weight: 730;
   }
 
   small {
     color: var(--ink-muted);
-    font-size: 0.53rem;
+    font-size: var(--type-caption);
   }
 
   em {
@@ -81,11 +81,11 @@
 
     strong {
       color: var(--gold);
-      font-size: 0.82rem;
+      font-size: var(--type-body);
     }
 
     small {
-      font-size: 0.56rem;
+      font-size: var(--type-caption);
     }
   }
 }

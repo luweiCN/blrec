@@ -74,7 +74,7 @@ button {
     place-items: center;
     border-radius: var(--radius-sm);
     color: var(--ink-muted);
-    font-size: 0.75rem;
+    font-size: var(--type-secondary);
     font-weight: 690;
     letter-spacing: 0.015em;
     text-decoration: none;
@@ -161,7 +161,7 @@ button {
   small {
     margin-top: 5px;
     color: var(--ink-muted);
-    font-size: 0.56rem;
+    font-size: var(--type-caption);
     font-weight: 720;
     letter-spacing: 0.16em;
   }
@@ -204,7 +204,7 @@ button {
   border-radius: 999px;
   background: oklch(16.5% 0.041 283 / 0.72);
   color: var(--ink-muted);
-  font-size: 0.65rem;
+  font-size: var(--type-label);
   letter-spacing: 0.015em;
   white-space: nowrap;
 
@@ -228,7 +228,7 @@ button {
   & > p:first-child {
     margin: 0;
     color: var(--rose);
-    font-size: 0.68rem;
+    font-size: var(--type-label);
     font-weight: 800;
     letter-spacing: 0.12em;
   }
@@ -278,19 +278,19 @@ footer {
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.78rem;
+    font-size: var(--type-secondary);
   }
 
   p {
     margin: 6px 0 0;
-    font-size: 0.62rem;
+    font-size: var(--type-label);
     line-height: 1.55;
   }
 
   .footer-meta > p {
     margin: 0;
     color: var(--gold);
-    font-size: 0.58rem;
+    font-size: var(--type-caption);
     font-weight: 760;
     letter-spacing: 0.08em;
   }
@@ -304,7 +304,7 @@ footer {
 
   a {
     color: var(--ink-muted);
-    font-size: 0.64rem;
+    font-size: var(--type-label);
     text-underline-offset: 3px;
 
     &:hover {
@@ -367,7 +367,7 @@ footer {
       min-width: 0;
       min-height: 36px;
       padding: 0 3px;
-      font-size: 0.7rem;
+      font-size: var(--type-secondary);
       text-align: center;
 
       &::after {
@@ -411,7 +411,7 @@ footer {
     max-width: 145px;
     padding: 0 8px;
     overflow: hidden;
-    font-size: 0.58rem;
+    font-size: var(--type-caption);
     text-overflow: ellipsis;
   }
 
@@ -432,7 +432,7 @@ footer {
 
 @media (max-width: 360px) {
   .primary-nav a {
-    font-size: 0.65rem;
+    font-size: var(--type-label);
   }
 }
 

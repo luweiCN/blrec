@@ -54,7 +54,7 @@ app-download-guide-page {
 .section-index {
   margin: 0;
   color: var(--cyan);
-  font-size: 0.67rem;
+  font-size: var(--type-label);
   font-weight: 730;
   letter-spacing: 0.045em;
 }
@@ -63,7 +63,7 @@ app-download-guide-page {
   max-width: 760px;
   margin: 22px 0 0;
   color: var(--ink-muted);
-  font-size: 0.94rem;
+  font-size: var(--type-body);
   line-height: 1.8;
   text-wrap: pretty;
 }
@@ -77,7 +77,7 @@ app-download-guide-page {
   span,
   small {
     color: var(--ink-muted);
-    font-size: 0.6rem;
+    font-size: var(--type-label);
   }
 
   span {
@@ -86,7 +86,7 @@ app-download-guide-page {
 
   strong {
     color: var(--gold);
-    font-size: 0.74rem;
+    font-size: var(--type-secondary);
     letter-spacing: 0.08em;
   }
 }
@@ -101,7 +101,7 @@ app-download-guide-page {
     position: relative;
     padding: 18px 1px 16px;
     color: var(--ink-muted);
-    font-size: 0.75rem;
+    font-size: var(--type-secondary);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-decoration: none;
@@ -147,7 +147,7 @@ app-download-guide-page {
   & > p {
     margin: 0 0 16px;
     color: var(--ink-soft);
-    font-size: 0.67rem;
+    font-size: var(--type-label);
     font-weight: 720;
     letter-spacing: 0.06em;
   }
@@ -160,7 +160,7 @@ app-download-guide-page {
       padding: 11px 0;
       border-bottom: 1px solid var(--line-soft);
       color: var(--ink-muted);
-      font-size: 0.67rem;
+      font-size: var(--type-label);
       text-decoration: none;
 
       &:hover {
@@ -174,14 +174,14 @@ app-download-guide-page {
   display: block;
   margin-top: 18px;
   color: var(--gold);
-  font-size: 0.59rem;
+  font-size: var(--type-caption);
   line-height: 1.6;
 }
 
 .guide-content {
   min-width: 0;
   color: var(--ink-muted);
-  font-size: 0.88rem;
+  font-size: var(--type-body);
   line-height: 1.82;
 }
 
@@ -224,7 +224,7 @@ app-download-guide-page {
 
   strong {
     color: var(--ink);
-    font-size: 0.9rem;
+    font-size: var(--type-body);
   }
 
   p {
@@ -255,18 +255,18 @@ app-download-guide-page {
 
   span {
     color: var(--cyan);
-    font-size: 0.54rem;
+    font-size: var(--type-caption);
     font-weight: 760;
   }
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.73rem;
+    font-size: var(--type-secondary);
   }
 
   small {
     color: var(--ink-muted);
-    font-size: 0.56rem;
+    font-size: var(--type-caption);
     line-height: 1.45;
   }
 }
@@ -274,7 +274,7 @@ app-download-guide-page {
 .fine-print {
   margin: 20px 0 0;
   color: var(--ink-muted);
-  font-size: 0.72rem;
+  font-size: var(--type-secondary);
 }
 
 .scope-grid,
@@ -296,7 +296,7 @@ app-download-guide-page {
 
   & > span {
     color: var(--cyan);
-    font-size: 0.6rem;
+    font-size: var(--type-label);
     font-weight: 760;
     letter-spacing: 0.08em;
   }
@@ -350,13 +350,13 @@ app-download-guide-page {
 
   dt {
     color: var(--gold);
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
     font-weight: 730;
   }
 
   dd {
     margin: 4px 0 0;
-    font-size: 0.65rem;
+    font-size: var(--type-label);
   }
 }
 
@@ -375,7 +375,7 @@ app-download-guide-page {
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.76rem;
+    font-size: var(--type-secondary);
   }
 
   p {
@@ -404,12 +404,12 @@ app-download-guide-page {
 
   span {
     color: var(--ink-muted);
-    font-size: 0.65rem;
+    font-size: var(--type-label);
   }
 
   strong {
     color: var(--cyan);
-    font-size: 0.76rem;
+    font-size: var(--type-secondary);
   }
 }
 
@@ -451,13 +451,13 @@ app-download-guide-page {
 
   span {
     color: var(--gold);
-    font-size: 0.6rem;
+    font-size: var(--type-label);
     font-weight: 760;
   }
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.77rem;
+    font-size: var(--type-secondary);
   }
 
   p {
@@ -485,7 +485,7 @@ app-download-guide-page {
     position: relative;
     padding: 18px 34px 18px 0;
     color: var(--ink-soft);
-    font-size: 0.8rem;
+    font-size: var(--type-body);
     font-weight: 700;
     cursor: pointer;
     list-style: none;
@@ -528,13 +528,13 @@ app-download-guide-page {
   p {
     margin: 0 0 2px;
     color: var(--ink);
-    font-size: 0.7rem;
+    font-size: var(--type-secondary);
     font-weight: 740;
   }
 
   a,
   small {
-    font-size: 0.66rem;
+    font-size: var(--type-label);
   }
 
   a {
@@ -565,7 +565,7 @@ app-download-guide-page {
 
   span {
     color: var(--ink-soft);
-    font-size: 0.7rem;
+    font-size: var(--type-secondary);
     font-weight: 740;
   }
 
@@ -578,7 +578,7 @@ app-download-guide-page {
 .source-note {
   margin: 22px 0 0;
   color: var(--ink-muted);
-  font-size: 0.68rem;
+  font-size: var(--type-label);
 
   a {
     color: var(--cyan);
@@ -613,20 +613,20 @@ app-download-guide-page {
   h3 {
     margin: 9px 0 8px;
     color: var(--ink);
-    font-size: 0.94rem;
+    font-size: var(--type-body);
     line-height: 1.4;
   }
 
   p {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
   }
 }
 
 .platform-label,
 .queue-grid span {
   color: var(--cyan);
-  font-size: 0.57rem;
+  font-size: var(--type-caption);
   font-weight: 760;
   letter-spacing: 0.08em;
 }
@@ -641,7 +641,7 @@ app-download-guide-page {
   margin-top: auto;
   padding-top: 18px;
   color: var(--cyan);
-  font-size: 0.68rem;
+  font-size: var(--type-label);
   font-weight: 700;
   text-underline-offset: 3px;
 
@@ -654,7 +654,7 @@ app-download-guide-page {
   display: inline-block;
   margin-top: 24px;
   color: var(--cyan);
-  font-size: 0.72rem;
+  font-size: var(--type-secondary);
   font-weight: 720;
   text-underline-offset: 3px;
 }
@@ -677,7 +677,7 @@ app-download-guide-page {
 
   & > section > span {
     color: var(--cyan);
-    font-size: 0.6rem;
+    font-size: var(--type-label);
     font-weight: 760;
     letter-spacing: 0.06em;
   }
@@ -703,7 +703,7 @@ app-download-guide-page {
   }
 
   p {
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
   }
 }
 
@@ -719,7 +719,7 @@ app-download-guide-page {
     border: 1px solid var(--cyan);
     border-radius: 7px;
     color: var(--cyan);
-    font-size: 0.68rem;
+    font-size: var(--type-label);
     font-weight: 720;
     line-height: 1.45;
     text-decoration: none;
@@ -758,7 +758,7 @@ app-download-guide-page {
 
   strong {
     color: var(--rose);
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
   }
 
   p {
@@ -767,7 +767,7 @@ app-download-guide-page {
 
   code {
     color: var(--ink);
-    font-size: 0.73rem;
+    font-size: var(--type-secondary);
   }
 }
 
@@ -791,7 +791,7 @@ app-download-guide-page {
 
 .code-steps code {
   color: var(--cyan);
-  font-size: 0.74rem;
+  font-size: var(--type-secondary);
 }
 
 .party-code-modes {
@@ -817,7 +817,7 @@ app-download-guide-page {
 
   span {
     color: var(--cyan);
-    font-size: 0.58rem;
+    font-size: var(--type-caption);
     font-weight: 760;
     letter-spacing: 0.07em;
   }
@@ -833,13 +833,13 @@ app-download-guide-page {
 
   code {
     color: var(--cyan);
-    font-size: 0.78rem;
+    font-size: var(--type-secondary);
     overflow-wrap: anywhere;
   }
 
   p {
     margin: 2px 0 0;
-    font-size: 0.7rem;
+    font-size: var(--type-secondary);
   }
 }
 
@@ -861,7 +861,7 @@ app-download-guide-page {
 
 .party-code-threshold-note {
   margin: 14px 0 0;
-  font-size: 0.7rem;
+  font-size: var(--type-secondary);
 
   strong {
     color: var(--ink-soft);
@@ -893,12 +893,12 @@ app-download-guide-page {
 
     strong {
       color: var(--ink);
-      font-size: 0.84rem;
+      font-size: var(--type-body);
     }
 
     small {
       color: var(--ink-muted);
-      font-size: 0.52rem;
+      font-size: var(--type-caption);
       letter-spacing: 0.08em;
     }
   }
@@ -921,13 +921,13 @@ app-download-guide-page {
 
   dt {
     color: var(--ink-soft);
-    font-size: 0.65rem;
+    font-size: var(--type-label);
     font-weight: 720;
   }
 
   dd {
     margin: 0;
-    font-size: 0.67rem;
+    font-size: var(--type-label);
   }
 }
 
@@ -937,7 +937,7 @@ app-download-guide-page {
 
 .queue-grid {
   p {
-    font-size: 0.73rem;
+    font-size: var(--type-secondary);
   }
 }
 
@@ -948,7 +948,7 @@ app-download-guide-page {
 .subsection-title {
   margin: 38px 0 8px;
   color: var(--ink);
-  font-size: 1.05rem;
+  font-size: var(--type-subheading);
 }
 
 .code-guide {
@@ -972,20 +972,20 @@ app-download-guide-page {
 
   span {
     color: var(--gold);
-    font-size: 0.58rem;
+    font-size: var(--type-caption);
     font-weight: 760;
     letter-spacing: 0.08em;
   }
 
   code {
     color: var(--cyan);
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
     overflow-wrap: anywhere;
   }
 
   p {
     margin: 0;
-    font-size: 0.66rem;
+    font-size: var(--type-label);
   }
 }
 
@@ -1009,18 +1009,18 @@ app-download-guide-page {
 
   span {
     color: var(--gold);
-    font-size: 0.6rem;
+    font-size: var(--type-label);
     font-weight: 760;
   }
 
   strong {
     color: var(--ink-soft);
-    font-size: 0.68rem;
+    font-size: var(--type-label);
   }
 
   code {
     color: var(--cyan);
-    font-size: 0.78rem;
+    font-size: var(--type-secondary);
     overflow-wrap: anywhere;
   }
 }
@@ -1156,7 +1156,7 @@ app-download-guide-page {
   }
 
   .guide-lead {
-    font-size: 0.86rem;
+    font-size: var(--type-body);
     line-height: 1.75;
   }
 
@@ -1176,7 +1176,7 @@ app-download-guide-page {
   }
 
   .guide-content {
-    font-size: 0.82rem;
+    font-size: var(--type-body);
   }
 
   .key-statement,

@@ -58,13 +58,13 @@ button {
 
   small {
     color: var(--ink-muted);
-    font-size: 0.58rem;
+    font-size: var(--type-caption);
     white-space: nowrap;
   }
 
   strong {
     color: var(--cyan);
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
     font-weight: 760;
     white-space: nowrap;
   }
@@ -153,12 +153,12 @@ button {
   gap: 4px;
 
   strong {
-    font-size: 0.73rem;
+    font-size: var(--type-secondary);
   }
 
   small {
     color: var(--ink-muted);
-    font-size: 0.57rem;
+    font-size: var(--type-caption);
     line-height: 1.45;
   }
 }

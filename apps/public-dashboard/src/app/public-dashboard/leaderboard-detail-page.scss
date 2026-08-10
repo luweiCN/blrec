@@ -29,7 +29,7 @@ a {
   gap: 9px;
   align-items: center;
   color: var(--ink-muted);
-  font-size: 0.65rem;
+  font-size: var(--type-label);
 
   a {
     color: var(--cyan);
@@ -69,7 +69,7 @@ a {
     max-width: 42rem;
     margin: 12px 0 0;
     color: var(--ink-muted);
-    font-size: 0.84rem;
+    font-size: var(--type-body);
     line-height: 1.7;
     text-wrap: pretty;
   }
@@ -86,12 +86,12 @@ a {
 
   strong {
     color: var(--gold);
-    font-size: 0.71rem;
+    font-size: var(--type-secondary);
   }
 
   span {
     color: var(--ink-muted);
-    font-size: 0.59rem;
+    font-size: var(--type-caption);
   }
 }
 
@@ -112,14 +112,14 @@ a {
   h2 {
     margin: 0;
     color: var(--ink);
-    font-size: 1.12rem;
+    font-size: var(--type-subheading);
     font-weight: 750;
   }
 
   div > p {
     margin: 6px 0 0;
     color: var(--ink-muted);
-    font-size: 0.65rem;
+    font-size: var(--type-label);
   }
 }
 
@@ -137,7 +137,7 @@ a {
 
   & > span {
     color: var(--ink-muted);
-    font-size: 0.61rem;
+    font-size: var(--type-label);
     font-weight: 700;
   }
 
@@ -157,7 +157,7 @@ a {
     background: transparent;
     color: var(--ink-muted);
     cursor: pointer;
-    font-size: 0.67rem;
+    font-size: var(--type-label);
     font-weight: 700;
     white-space: nowrap;
     transition:
@@ -184,7 +184,7 @@ a {
 
   span {
     color: var(--ink-muted);
-    font-size: 0.61rem;
+    font-size: var(--type-label);
     font-weight: 700;
   }
 
@@ -196,7 +196,7 @@ a {
     border-radius: var(--radius-sm);
     background: var(--surface-2);
     color: var(--ink);
-    font-size: 0.74rem;
+    font-size: var(--type-secondary);
 
     &:hover {
       border-color: var(--cyan-strong);
@@ -212,7 +212,7 @@ a {
 .result-status {
   margin: 0 0 12px;
   color: var(--ink-muted);
-  font-size: 0.64rem;
+  font-size: var(--type-label);
   white-space: nowrap;
 }
 
@@ -253,7 +253,7 @@ a {
     border-bottom: 1px solid var(--line-soft);
     background: var(--void);
     color: var(--ink-muted);
-    font-size: 0.6rem;
+    font-size: var(--type-label);
     font-weight: 700;
     letter-spacing: 0.04em;
     text-align: left;
@@ -264,7 +264,7 @@ a {
     padding: 10px 15px;
     border-bottom: 1px solid var(--line-soft);
     color: var(--ink-muted);
-    font-size: 0.74rem;
+    font-size: var(--type-secondary);
   }
 
   tbody tr {
@@ -295,7 +295,7 @@ a {
     display: inline-block;
     min-width: 28px;
     color: var(--ink-soft);
-    font-size: 0.8rem;
+    font-size: var(--type-body);
   }
 }
 
@@ -304,7 +304,7 @@ a {
   width: fit-content;
   margin-top: 3px;
   color: var(--ink-muted);
-  font-size: 0.52rem;
+  font-size: var(--type-caption);
   font-weight: 750;
   line-height: 1;
 
@@ -344,12 +344,12 @@ a {
 
   strong {
     color: var(--ink);
-    font-size: 0.8rem;
+    font-size: var(--type-body);
   }
 
   small {
     color: var(--ink-muted);
-    font-size: 0.57rem;
+    font-size: var(--type-caption);
   }
 
   &:hover strong {
@@ -395,7 +395,7 @@ a {
 
     strong {
       color: var(--ink);
-      font-size: 0.78rem;
+      font-size: var(--type-secondary);
     }
   }
 }
@@ -413,7 +413,7 @@ a {
     border-radius: 3px;
     background: oklch(68% 0.175 351 / 0.09);
     color: var(--rose);
-    font-size: 0.54rem;
+    font-size: var(--type-caption);
     font-weight: 800;
 
     &.win {
@@ -455,7 +455,7 @@ a {
     background: var(--surface-2);
     color: var(--ink-muted);
     cursor: pointer;
-    font-size: 0.67rem;
+    font-size: var(--type-label);
     font-weight: 700;
 
     &:hover:not(:disabled) {

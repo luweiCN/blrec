@@ -134,7 +134,7 @@
         margin-bottom: 6px;
         color: var(--ink-muted);
         content: attr(data-label);
-        font-size: 0.54rem;
+        font-size: var(--type-caption);
         font-weight: 650;
       }
     }
@@ -249,7 +249,7 @@
     }
 
     div > p {
-      font-size: 0.76rem;
+      font-size: var(--type-secondary);
     }
   }
 

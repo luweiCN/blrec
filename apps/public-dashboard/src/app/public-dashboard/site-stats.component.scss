@@ -25,7 +25,7 @@
   h2 {
     margin: 0;
     color: var(--ink);
-    font-size: 0.7rem;
+    font-size: var(--type-secondary);
     font-weight: 720;
     white-space: nowrap;
   }
@@ -60,7 +60,7 @@ dt,
 dd,
 .stats-updated,
 .stats-status {
-  font-size: 0.62rem;
+  font-size: var(--type-label);
 }
 
 dt,
@@ -76,7 +76,7 @@ dd {
 
   strong {
     color: var(--ink);
-    font-size: 0.8rem;
+    font-size: var(--type-body);
     font-weight: 750;
   }
 }
@@ -119,6 +119,6 @@ dd {
 
 @media (max-width: 420px) {
   .stats-updated {
-    font-size: 0.56rem;
+    font-size: var(--type-caption);
   }
 }

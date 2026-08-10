@@ -65,7 +65,7 @@
   }
 
   .hero-intro {
-    font-size: 0.87rem;
+    font-size: var(--type-body);
   }
 
   .summary-strip {
@@ -193,7 +193,7 @@
       }
 
       .podium-name {
-        font-size: 0.9rem;
+        font-size: var(--type-body);
       }
     }
   }
@@ -210,15 +210,15 @@
 
   .podium-name {
     min-width: 0;
-    font-size: 0.72rem;
+    font-size: var(--type-secondary);
   }
 
   .podium-tier-name {
-    font-size: 0.5rem;
+    font-size: var(--type-caption);
   }
 
   .podium-score {
-    font-size: 0.45rem;
+    font-size: var(--type-caption);
   }
 
   .summary-strip {

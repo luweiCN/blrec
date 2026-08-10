@@ -59,7 +59,7 @@ a {
   align-items: center;
   margin: 0 0 22px;
   color: var(--ink-muted);
-  font-size: 0.7rem;
+  font-size: var(--type-secondary);
   font-weight: 650;
   letter-spacing: 0.05em;
 
@@ -91,7 +91,7 @@ a {
   max-width: 35rem;
   margin: 26px 0 0;
   color: var(--ink-soft);
-  font-size: 0.94rem;
+  font-size: var(--type-body);
   line-height: 1.82;
   text-wrap: pretty;
 }
@@ -150,14 +150,14 @@ a {
     div > span,
     .season-id {
       color: var(--ink-muted);
-      font-size: 0.63rem;
+      font-size: var(--type-label);
       font-weight: 650;
       letter-spacing: 0.07em;
     }
 
     div > strong {
       color: var(--ink-soft);
-      font-size: 0.86rem;
+      font-size: var(--type-body);
       letter-spacing: 0.03em;
     }
   }
@@ -213,7 +213,7 @@ a {
 
     .podium-name {
       color: var(--gold);
-      font-size: 1.06rem;
+      font-size: var(--type-subheading);
     }
 
     .podium-tier-name {
@@ -225,7 +225,7 @@ a {
 .podium-rank {
   margin-bottom: 10px;
   color: var(--cyan);
-  font-size: 0.68rem;
+  font-size: var(--type-label);
   font-weight: 800;
   letter-spacing: 0.08em;
 }
@@ -260,7 +260,7 @@ a {
 .podium-name {
   max-width: 100%;
   overflow: hidden;
-  font-size: 0.9rem;
+  font-size: var(--type-body);
   text-overflow: ellipsis;
   transition: color 160ms ease;
   white-space: nowrap;
@@ -271,7 +271,7 @@ a {
   margin-top: 8px;
   overflow: hidden;
   color: var(--ink-soft);
-  font-size: 0.62rem;
+  font-size: var(--type-label);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -279,7 +279,7 @@ a {
 .podium-score {
   margin-top: 3px;
   color: var(--ink-muted);
-  font-size: 0.52rem;
+  font-size: var(--type-caption);
 }
 
 .summary-strip {
@@ -308,7 +308,7 @@ a {
 
   dt {
     color: var(--ink-muted);
-    font-size: 0.64rem;
+    font-size: var(--type-label);
   }
 
   dd {
@@ -323,7 +323,7 @@ a {
 .summary-label {
   span {
     color: var(--cyan);
-    font-size: 0.7rem;
+    font-size: var(--type-secondary);
     font-weight: 740;
     letter-spacing: 0.03em;
   }
@@ -331,14 +331,14 @@ a {
   p {
     margin: 6px 0 0;
     color: var(--ink-muted);
-    font-size: 0.67rem;
+    font-size: var(--type-label);
   }
 }
 
 .snapshot-note {
   margin: 0;
   color: var(--gold);
-  font-size: 0.61rem;
+  font-size: var(--type-label);
   font-weight: 800;
   letter-spacing: 0.06em;
 }
