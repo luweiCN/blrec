@@ -78,6 +78,7 @@ REQUIRED_TABLES = {
     'vainglory_publication_revisions',
     'archive_migration_jobs',
     'archive_migration_items',
+    'dashboard_source_state',
 }
 
 
@@ -99,6 +100,57 @@ async def seed_ready_job(database: BiliUploadDatabase) -> None:
         "created_at,updated_at) "
         "VALUES(1,1,1,'{}','ready','prepared',1,1)"
     )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_source_revision_tracks_only_relevant_changes(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 1
+        )
+
+        await database.execute(
+            "INSERT INTO vainglory_players("
+            "id,name,origin,created_at,updated_at) "
+            "VALUES(1,'主播甲','manual',1,1)"
+        )
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 2
+        )
+
+        await database.execute(
+            "UPDATE vainglory_players SET name='主播乙',updated_at=2 WHERE id=1"
+        )
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 3
+        )
+
+        await database.execute(
+            "INSERT INTO event_journal("
+            "id,event_type,room_id,payload_json,occurred_at) "
+            "VALUES('unrelated','test',1,'{}',1)"
+        )
+        assert (
+            await database.scalar(
+                'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+            )
+            == 3
+        )
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

@@ -386,7 +386,7 @@ def test_trends_are_committed_before_the_manifest(tmp_path: Path) -> None:
     assert 'put-manifest' not in store.events
 
 
-def test_worker_checks_again_after_fifteen_minutes(
+def test_worker_debounces_and_syncs_when_source_revision_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     configuration = publisher._WorkerConfiguration(
@@ -396,22 +396,33 @@ def test_worker_checks_again_after_fifteen_minutes(
         endpoint='https://example.invalid',
         bucket='bucket',
         prefix='data',
-        poll_seconds=15 * 60,
-        retry_seconds=15 * 60,
+        watch_seconds=1,
+        debounce_seconds=2,
+        reconcile_seconds=24 * 60 * 60,
+        retry_seconds=60,
     )
     delays = []
-    monkeypatch.setattr(publisher, '_publish', lambda configuration, now: None)
+    publications = []
+    revisions = iter((10, 10, 11, 11, 11))
+    monkeypatch.setattr(
+        publisher, '_read_source_revision', lambda _database: next(revisions)
+    )
+    monkeypatch.setattr(
+        publisher, '_publish', lambda configuration, now: publications.append(now)
+    )
 
     def stop_after_first_delay(seconds: int) -> None:
         delays.append(seconds)
-        raise RuntimeError('stop worker loop')
+        if delays == [1, 2, 1]:
+            raise KeyboardInterrupt('stop worker loop')
 
     monkeypatch.setattr(publisher.time, 'sleep', stop_after_first_delay)
 
-    with pytest.raises(RuntimeError, match='stop worker loop'):
+    with pytest.raises(KeyboardInterrupt, match='stop worker loop'):
         publisher._worker_loop(configuration)
 
-    assert delays == [15 * 60]
+    assert len(publications) == 2
+    assert delays == [1, 2, 1]
 
 
 def test_worker_can_sync_api_without_republishing_static_json(
@@ -472,8 +483,10 @@ def test_worker_can_sync_api_without_republishing_static_json(
         endpoint='https://example.invalid',
         bucket='bucket',
         prefix='data',
-        poll_seconds=15 * 60,
-        retry_seconds=15 * 60,
+        watch_seconds=1,
+        debounce_seconds=2,
+        reconcile_seconds=24 * 60 * 60,
+        retry_seconds=60,
         api_url='https://vg-api.example',
         publish_static_data=False,
     )

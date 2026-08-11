@@ -7,10 +7,11 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import (
     Any,
@@ -48,8 +49,10 @@ SNAPSHOT_PATH = re.compile(r'snapshots/[a-zA-Z0-9-]+\.json\Z')
 MATCH_IMAGE_PATH = re.compile(
     r'match-images/[0-9]{3,}/[1-9][0-9]*-[0-9a-f]{16}\.webp\Z'
 )
-DEFAULT_RETRY_SECONDS = 15 * 60
-DEFAULT_POLL_SECONDS = 15 * 60
+DEFAULT_RETRY_SECONDS = 60
+DEFAULT_WATCH_SECONDS = 1
+DEFAULT_DEBOUNCE_SECONDS = 2
+DEFAULT_RECONCILE_SECONDS = 24 * 60 * 60
 TREND_MODES = ('all', '3v3', 'brawl', '5v5')
 MAX_TREND_PUBLICATIONS = 30
 
@@ -678,7 +681,9 @@ class _WorkerConfiguration:
     endpoint: str
     bucket: str
     prefix: str
-    poll_seconds: int
+    watch_seconds: int
+    debounce_seconds: int
+    reconcile_seconds: int
     retry_seconds: int
     publish_static_data: bool = True
     api_url: Optional[str] = None
@@ -779,20 +784,64 @@ def _publish(
     return result
 
 
+def _read_source_revision(database: Path) -> Optional[int]:
+    connection = sqlite3.connect(
+        'file:{}?mode=ro'.format(database.expanduser().resolve()), uri=True
+    )
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='dashboard_source_state'"
+        ).fetchone()
+        if table is None:
+            return None
+        row = connection.execute(
+            'SELECT revision FROM dashboard_source_state WHERE singleton_id=1'
+        ).fetchone()
+        if row is None or type(row[0]) is not int or int(row[0]) <= 0:
+            raise DashboardPublishError('排行榜数据源变更标记无效')
+        return int(row[0])
+    finally:
+        connection.close()
+
+
 def _worker_loop(configuration: _WorkerConfiguration) -> None:
+    first_run = True
+    last_revision: Optional[int] = None
+    last_success_at = time.monotonic()
     while True:
-        now = datetime.now(tz=SHANGHAI)
         try:
-            _publish(configuration, now)
+            revision = _read_source_revision(configuration.database)
+            revision_changed = not first_run and revision != last_revision
+            reconciliation_due = (
+                not first_run
+                and time.monotonic() - last_success_at
+                >= configuration.reconcile_seconds
+            )
+            if not first_run and not revision_changed and not reconciliation_due:
+                time.sleep(configuration.watch_seconds)
+                continue
+            if revision_changed:
+                LOGGER.info(
+                    '检测到排行榜数据源变更 revision=%s，等待 %s 秒合并写入',
+                    revision,
+                    configuration.debounce_seconds,
+                )
+                time.sleep(configuration.debounce_seconds)
+                revision = _read_source_revision(configuration.database)
+            _publish(configuration, datetime.now(tz=SHANGHAI))
         except Exception:
             LOGGER.exception('排行榜发布失败，%s 秒后重试', configuration.retry_seconds)
             time.sleep(configuration.retry_seconds)
             continue
-        next_run = datetime.now(tz=SHANGHAI) + timedelta(
-            seconds=configuration.poll_seconds
+        first_run = False
+        last_revision = revision
+        last_success_at = time.monotonic()
+        LOGGER.info(
+            '排行榜数据源已同步 revision=%s；持续监听，最长 %s 秒后校验一次',
+            revision if revision is not None else 'legacy',
+            configuration.reconcile_seconds,
         )
-        LOGGER.info('下次检查时间：%s', next_run.isoformat())
-        time.sleep(configuration.poll_seconds)
 
 
 def _environment_int(name: str, default: int) -> int:
@@ -818,7 +867,7 @@ def _environment_bool(name: str, default: bool) -> bool:
 
 
 def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='定时同步虚荣排行榜数据')
+    parser = argparse.ArgumentParser(description='持续同步虚荣排行榜数据')
     parser.add_argument('--once', action='store_true', help='只检查并发布一次')
     parser.add_argument(
         '--force',
@@ -864,9 +913,23 @@ def _parse_args(arguments: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        '--poll-seconds',
+        '--watch-seconds',
         type=int,
-        default=_environment_int('DASHBOARD_POLL_SECONDS', DEFAULT_POLL_SECONDS),
+        default=_environment_int('DASHBOARD_WATCH_SECONDS', DEFAULT_WATCH_SECONDS),
+    )
+    parser.add_argument(
+        '--debounce-seconds',
+        type=int,
+        default=_environment_int(
+            'DASHBOARD_DEBOUNCE_SECONDS', DEFAULT_DEBOUNCE_SECONDS
+        ),
+    )
+    parser.add_argument(
+        '--reconcile-seconds',
+        type=int,
+        default=_environment_int(
+            'DASHBOARD_RECONCILE_SECONDS', DEFAULT_RECONCILE_SECONDS
+        ),
     )
     parser.add_argument(
         '--retry-seconds',
@@ -883,8 +946,12 @@ def main() -> None:
     )
     logging.getLogger('oss2').setLevel(logging.WARNING)
     arguments = _parse_args()
-    if arguments.poll_seconds <= 0:
-        raise DashboardPublishError('检查间隔必须大于 0')
+    if arguments.watch_seconds <= 0:
+        raise DashboardPublishError('监听间隔必须大于 0')
+    if arguments.debounce_seconds <= 0:
+        raise DashboardPublishError('合并等待时间必须大于 0')
+    if arguments.reconcile_seconds <= 0:
+        raise DashboardPublishError('校验间隔必须大于 0')
     if arguments.retry_seconds <= 0:
         raise DashboardPublishError('重试间隔必须大于 0')
     if arguments.force and not arguments.once:
@@ -900,7 +967,9 @@ def main() -> None:
         endpoint=arguments.endpoint,
         bucket=arguments.bucket,
         prefix=arguments.prefix,
-        poll_seconds=arguments.poll_seconds,
+        watch_seconds=arguments.watch_seconds,
+        debounce_seconds=arguments.debounce_seconds,
+        reconcile_seconds=arguments.reconcile_seconds,
         retry_seconds=arguments.retry_seconds,
         publish_static_data=arguments.publish_static_data,
         api_url=arguments.api_url,

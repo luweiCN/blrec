@@ -38,7 +38,7 @@ GitHub 的生产发布会拒绝上传其中的 `/data/`，只更新页面和静�
 结算图与访问统计仍由各自独立链路维护。
 
 生产环境已将页面、API 与数据同步拆成独立链路。GitHub Actions 分别发布页面
-和 ECS API；NAS worker 每 15 分钟检查 SQLite，内容变化时只向 API 增量写入，
+和 ECS API；NAS worker 每秒读取持久变更版本号，变化后合并 2 秒并只向 API 增量写入，
 并把结算图写入 OSS；工程化配置、权限边界和恢复流程见
 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 

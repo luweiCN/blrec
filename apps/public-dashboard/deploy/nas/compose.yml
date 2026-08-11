@@ -20,8 +20,10 @@ services:
       OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
       OSS_BUCKET: luwei-vainglory
       OSS_PREFIX: data
-      DASHBOARD_POLL_SECONDS: ${DASHBOARD_POLL_SECONDS:-900}
-      DASHBOARD_RETRY_SECONDS: ${DASHBOARD_RETRY_SECONDS:-900}
+      DASHBOARD_WATCH_SECONDS: ${DASHBOARD_WATCH_SECONDS:-1}
+      DASHBOARD_DEBOUNCE_SECONDS: ${DASHBOARD_DEBOUNCE_SECONDS:-2}
+      DASHBOARD_RECONCILE_SECONDS: ${DASHBOARD_RECONCILE_SECONDS:-86400}
+      DASHBOARD_RETRY_SECONDS: ${DASHBOARD_RETRY_SECONDS:-60}
     volumes:
       - ${BLREC_CONFIG_DIR:-/volume1/docker/blrec-next/config}:/cfg:ro
       - ${DASHBOARD_PUBLISHER_STATE_DIR:-/volume1/docker/blrec-next/dashboard-publisher/state}:/state
