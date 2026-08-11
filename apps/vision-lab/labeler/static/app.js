@@ -288,6 +288,16 @@ function candidateResultHeroCountMode(item) {
   return null;
 }
 
+function candidateHeroContextSuggestion(item) {
+  for (const source of item.sources || []) {
+    const value = source.metadata && source.metadata.hero_context_suggestion;
+    if (!value || !CANDIDATE_HERO_SCREEN_TYPES.has(value.screen_type) ||
+        ![3, 5].includes(Number(value.team_size))) continue;
+    return value;
+  }
+  return null;
+}
+
 function candidateDefaultDraft(item) {
   const hasHumanLabels = TRAINING_REVIEW_FIELDS.some(
     (field) => Boolean(item[field.key]));
@@ -359,7 +369,10 @@ function candidateDefaultDraft(item) {
     if (draft.result_panel_label === 'result_panel') {
       draft.hero_layout_label = 'result_page';
     } else {
+      const heroContext = candidateHeroContextSuggestion(item);
+      if (heroContext) draft.hero_layout_label = heroContext.screen_type;
       for (const source of item.sources || []) {
+        if (draft.hero_layout_label) break;
         const metadata = source.metadata || {};
         const screen = metadata.screen_type || metadata.stage_class || '';
         if (['scoreboard', 'death_scoreboard'].includes(screen)) {
@@ -816,7 +829,10 @@ function candidateHeroKnownTeamSize(item) {
   if (selectedMode === '5v5') return 5;
   if (['3v3', 'aram'].includes(selectedMode)) return 3;
   const legacySize = Number(item && item.legacy_hero_team_size);
-  return [3, 5].includes(legacySize) ? legacySize : null;
+  if ([3, 5].includes(legacySize)) return legacySize;
+  const suggestion = candidateHeroContextSuggestion(item || {});
+  const suggestedSize = Number(suggestion && suggestion.team_size);
+  return [3, 5].includes(suggestedSize) ? suggestedSize : null;
 }
 
 function candidateHeroContext(item) {
@@ -1987,10 +2003,10 @@ function renderCandidateLegacyControls(stats, status) {
   const active = status === 'legacy_hero';
   $('#candidate-legacy-filters').classList.toggle('hidden', !active);
   $('#candidate-page-title').textContent = active
-    ? '历史英雄快速补标' : '新模型统一打标';
+    ? '历史英雄快速补标' : '统一打标';
   $('#candidate-page-hint').textContent = active
     ? '以前约 7000 张人工标注会按主播、同一局和画面类型折叠。这里只补每组代表图：同一主播、同类画面、同人数和近似比例只需首次画圆框，后续自动套用并预填英雄；近重复帧不会重复塞进英雄训练集。'
-    : '一张图只看一次：右侧确认对局状态、模式、英雄选择和结算面板，图片下方确认英雄头像来自 HUD、积分板还是结算图。模型结果只是预选，未人工确认的图片不会进入训练集；旧积分板、商店和光栅框会保留，但这里不要求重画。';
+    : 'Worker 新素材、历史通用标注、旧 BP 和关键界面都在这里统一确认。打开图片后会先跑新分类模型；检测到 HUD、积分板或结算图时，再自动执行头像定位、英雄识别和本人位置识别。模型结果只是预选，未人工确认的图片不会进入训练集。';
   if (!active) return;
   const globalStats = stats.legacy_hero || {};
   const filteredStats = stats.legacy_hero_filtered || globalStats;

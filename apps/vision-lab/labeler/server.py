@@ -48,6 +48,7 @@ async def lifespan(_app: FastAPI):
     try:
         conn = db.connect(config.DB_PATH)
         training_review.migrate_legacy_training_reviews(conn)
+        training_review.queue_legacy_pending_reviews(conn)
         conn.execute(
             "UPDATE extraction_jobs SET status='failed', "
             "error=COALESCE(error,'') || '; server restart' "

@@ -129,6 +129,20 @@ class TestModelPrefill(unittest.TestCase):
                     ],
                     'raw_top_conf': 0.91,
                 }
+            if task_id == 'hero_avatar_detector':
+                return {
+                    'task': 'detect',
+                    'found': True,
+                    'detections': [
+                        {
+                            'class': 'hero_avatar',
+                            'conf': 0.9,
+                            'xywh_norm': [x, y, 0.05, 0.08],
+                        }
+                        for x in (0.4, 0.55)
+                        for y in (0.2, 0.4, 0.6)
+                    ],
+                }
             values = {
                 'match_flow': ('match_flow', 0.98),
                 'hero_select': ('not_select', 0.97),
@@ -153,7 +167,7 @@ class TestModelPrefill(unittest.TestCase):
 
         self.assertTrue(result['applied'])
         self.assertTrue(cached['cached'])
-        self.assertEqual(run_artifact.call_count, 4)
+        self.assertEqual(run_artifact.call_count, 5)
         item = db.get_training_review_item(self.conn, self.frame_id)
         self.assertEqual(item['suggestions']['match_flow']['label'], 'match_flow')
         self.assertEqual(item['suggestions']['hero_select']['label'], 'not_select')
@@ -169,7 +183,33 @@ class TestModelPrefill(unittest.TestCase):
         self.assertEqual(
             source['metadata']['suggested_boxes'][0]['type'], 'result_panel'
         )
-        self.assertEqual(len(source['metadata']['model_runs']), 4)
+        self.assertEqual(len(source['metadata']['model_runs']), 5)
+        self.assertEqual(
+            source['metadata']['hero_context_suggestion']['screen_type'], 'result_page'
+        )
+        self.assertEqual(source['metadata']['hero_context_suggestion']['team_size'], 3)
+
+    def test_context_prefers_translucent_scoreboard_over_visible_hud(self):
+        hud = [
+            {'class': 'hero_avatar', 'conf': 0.95, 'xywh_norm': [x, 0.01, 0.05, 0.07]}
+            for x in (0.3, 0.36, 0.42, 0.54, 0.60, 0.66)
+        ]
+        scoreboard = [
+            {'class': 'hero_avatar', 'conf': 0.9, 'xywh_norm': [x, y, 0.05, 0.08]}
+            for x in (0.42, 0.55)
+            for y in (0.25, 0.45, 0.65)
+        ]
+
+        context = model_prefill._infer_hero_context_suggestion(
+            hud + scoreboard, result_found=False
+        )
+        slots = model_prefill._ordered_avatar_slots(
+            hud + scoreboard, screen_type='scoreboard', team_size=3
+        )
+
+        self.assertEqual(context['screen_type'], 'scoreboard')
+        self.assertEqual(context['team_size'], 3)
+        self.assertTrue(all(slot['crop']['y'] >= 0.2 for slot in slots))
 
     def test_hero_prefill_orders_detector_boxes_and_classifies_each_crop(self):
         Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)

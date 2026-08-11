@@ -88,6 +88,95 @@ class TrainingReviewTestCase(unittest.TestCase):
 
 
 class TestLegacyMigration(TrainingReviewTestCase):
+    def test_pending_legacy_entries_join_the_unified_queue_idempotently(self):
+        training_review.migrate_legacy_training_reviews(self.conn)
+        annotation_frame = self.frame(40)
+        bp_frame = self.frame(41)
+        key_frame = self.frame(42)
+        gate_frame = self.frame(43)
+        db.save_annotation(
+            self.conn,
+            annotation_frame,
+            {
+                'content_family': 'vainglory',
+                'game_context': 'in_match',
+                'screen_type': 'gameplay',
+                'game_mode': '3v3',
+            },
+            status='draft',
+        )
+        db.upsert_bp_review_item(
+            self.conn,
+            frame_id=bp_frame,
+            model_version='multi-v2',
+            suggested_label='bp_3v3',
+            suggestion_confidence=0.8,
+            stage_class='pre_match',
+            stage_confidence=0.9,
+            pre_match_confidence=0.9,
+            mode_class='3v3',
+            mode_confidence=0.8,
+            mode_margin=0.7,
+            selection_reason='测试 BP 候选',
+            priority=100,
+            raw_prediction={'task': 'multi'},
+        )
+        db.upsert_key_screen_review_item(
+            self.conn,
+            frame_id=key_frame,
+            model_version='multi-v2',
+            suggested_label='scoreboard',
+            suggestion_confidence=0.85,
+            selection_reason='测试积分板候选',
+            raw_prediction={'task': 'multi'},
+        )
+        db.save_mode_gate_round(
+            self.conn, round_id='round-pending', name='旧光栅', active=True
+        )
+        db.add_mode_gate_round_video(
+            self.conn,
+            round_id='round-pending',
+            video_id=self.video_id,
+            expected_mode='3v3',
+        )
+        db.save_mode_gate_annotation(
+            self.conn,
+            round_id='round-pending',
+            frame_id=gate_frame,
+            evidence='no_evidence',
+            boxes=[],
+        )
+
+        counts = training_review.queue_legacy_pending_reviews(self.conn)
+        repeated = training_review.queue_legacy_pending_reviews(self.conn)
+
+        self.assertEqual(
+            counts,
+            {
+                'legacy_annotations': 1,
+                'bp_candidates': 1,
+                'key_screen_candidates': 1,
+                'mode_gate_candidates': 1,
+            },
+        )
+        self.assertEqual(sum(repeated.values()), 0)
+        items = {
+            item['frame_id']: item
+            for item in db.list_training_review_items(self.conn, status='pending')
+        }
+        self.assertEqual(
+            set(items), {annotation_frame, bp_frame, key_frame, gate_frame}
+        )
+        self.assertEqual(
+            items[bp_frame]['suggestions']['hero_select']['label'], 'select_3v3'
+        )
+        self.assertEqual(
+            items[key_frame]['suggestions']['match_flow']['label'], 'match_flow'
+        )
+        self.assertEqual(
+            items[gate_frame]['suggestions']['match_mode']['label'], 'unreadable'
+        )
+
     def test_old_review_saved_after_migration_is_mirrored_to_unified_truth(self):
         training_review.migrate_legacy_training_reviews(self.conn)
         bp_frame = self.frame(30)

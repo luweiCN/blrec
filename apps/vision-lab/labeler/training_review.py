@@ -354,6 +354,181 @@ def migrate_legacy_training_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
     return counts
 
 
+def queue_legacy_pending_reviews(conn: sqlite3.Connection) -> Dict[str, int]:
+    """把旧入口尚未确认的素材放进统一队列；旧建议不冒充人工真值。"""
+    counts = {
+        'legacy_annotations': 0,
+        'bp_candidates': 0,
+        'key_screen_candidates': 0,
+        'mode_gate_candidates': 0,
+    }
+    annotations = conn.execute(
+        """
+        SELECT annotation.*, frame.frame_path
+        FROM annotations annotation
+        JOIN frames frame ON frame.id = annotation.frame_id
+        WHERE annotation.annotation_status != 'complete'
+        ORDER BY annotation.frame_id
+        """
+    ).fetchall()
+    for row in annotations:
+        counts['legacy_annotations'] += int(
+            db.add_training_review_source(
+                conn,
+                frame_id=int(row['frame_id']),
+                source_type='legacy_annotation_pending',
+                source_id='frame:{}'.format(int(row['frame_id'])),
+                metadata={
+                    'content_family': row['content_family'],
+                    'game_context': row['game_context'],
+                    'screen_type': row['screen_type'],
+                    'game_mode': row['game_mode'],
+                    'legacy_status': row['annotation_status'],
+                },
+                image_path=str(row['frame_path'] or ''),
+            )
+        )
+
+    bp_rows = conn.execute(
+        """
+        SELECT item.*, frame.frame_path
+        FROM bp_review_items item
+        JOIN frames frame ON frame.id = item.frame_id
+        WHERE item.review_status = 'pending'
+        ORDER BY item.frame_id
+        """
+    ).fetchall()
+    bp_labels = {
+        'bp_3v3': 'select_3v3',
+        'bp_aram': 'select_aram',
+        'bp_5v5': 'select_5v5',
+        'not_bp': 'not_select',
+    }
+    for row in bp_rows:
+        select = bp_labels.get(str(row['suggested_label']))
+        suggestions: Dict[str, Any] = {}
+        if select is not None:
+            confidence = float(row['suggestion_confidence'] or 0)
+            suggestions['hero_select'] = {
+                'label': select,
+                'confidence': confidence,
+                'origin': 'legacy_candidate',
+                'reason': str(row['selection_reason'] or '旧 BP 候选'),
+            }
+            if select.startswith('select_'):
+                suggestions['match_flow'] = {
+                    'label': 'not_match_flow',
+                    'confidence': float(row['pre_match_confidence'] or confidence),
+                    'origin': 'legacy_candidate',
+                    'reason': '旧 BP 候选',
+                }
+                suggestions['result_panel'] = {
+                    'label': 'no_result_panel',
+                    'confidence': confidence,
+                    'origin': 'legacy_candidate',
+                    'reason': '旧 BP 候选',
+                }
+        counts['bp_candidates'] += int(
+            db.add_training_review_source(
+                conn,
+                frame_id=int(row['frame_id']),
+                source_type='legacy_bp_candidate',
+                source_id='frame:{}'.format(int(row['frame_id'])),
+                suggestions=suggestions,
+                metadata={
+                    'suggested_label': row['suggested_label'],
+                    'stage_class': row['stage_class'],
+                    'mode_class': row['mode_class'],
+                    'selection_reason': row['selection_reason'],
+                },
+                image_path=str(row['frame_path'] or ''),
+            )
+        )
+
+    key_rows = conn.execute(
+        """
+        SELECT item.*, frame.frame_path
+        FROM key_screen_review_items item
+        JOIN frames frame ON frame.id = item.frame_id
+        WHERE item.review_status = 'pending'
+        ORDER BY item.frame_id
+        """
+    ).fetchall()
+    for row in key_rows:
+        label = str(row['suggested_label'])
+        confidence = float(row['suggestion_confidence'] or 0)
+        suggestions: Dict[str, Any] = {
+            'result_panel': {
+                'label': (
+                    'result_panel' if label == 'result_page' else 'no_result_panel'
+                ),
+                'confidence': confidence,
+                'origin': 'legacy_candidate',
+                'reason': str(row['selection_reason'] or '旧关键界面候选'),
+            }
+        }
+        if label in {'result_page', 'scoreboard'}:
+            suggestions['match_flow'] = {
+                'label': 'match_flow',
+                'confidence': confidence,
+                'origin': 'legacy_candidate',
+                'reason': '旧关键界面候选',
+            }
+        counts['key_screen_candidates'] += int(
+            db.add_training_review_source(
+                conn,
+                frame_id=int(row['frame_id']),
+                source_type='legacy_key_screen_candidate',
+                source_id='frame:{}'.format(int(row['frame_id'])),
+                suggestions=suggestions,
+                metadata={
+                    'screen_type': (
+                        label if label in {'result_page', 'scoreboard'} else ''
+                    ),
+                    'suggested_label': label,
+                    'selection_reason': row['selection_reason'],
+                },
+                image_path=str(row['frame_path'] or ''),
+            )
+        )
+
+    gate_rows = conn.execute(
+        """
+        SELECT annotation.round_id, annotation.frame_id, frame.frame_path
+        FROM mode_gate_annotations annotation
+        JOIN frames frame ON frame.id = annotation.frame_id
+        WHERE annotation.evidence = 'no_evidence'
+        ORDER BY annotation.round_id, annotation.frame_id
+        """
+    ).fetchall()
+    for row in gate_rows:
+        counts['mode_gate_candidates'] += int(
+            db.add_training_review_source(
+                conn,
+                frame_id=int(row['frame_id']),
+                source_type='legacy_mode_gate_candidate',
+                source_id='{}:{}'.format(row['round_id'], int(row['frame_id'])),
+                suggestions={
+                    'match_flow': {
+                        'label': 'match_flow',
+                        'confidence': 1.0,
+                        'origin': 'legacy_candidate',
+                        'reason': '旧光栅标注：本帧看不出模式证据',
+                    },
+                    'match_mode': {
+                        'label': 'unreadable',
+                        'confidence': 1.0,
+                        'origin': 'legacy_candidate',
+                        'reason': '旧光栅标注：本帧看不出模式证据',
+                    },
+                },
+                metadata={'stage_class': 'gameplay', 'evidence': 'no_evidence'},
+                image_path=str(row['frame_path'] or ''),
+            )
+        )
+    return counts
+
+
 def mirror_confirmed_bp_review(
     conn: sqlite3.Connection, frame_id: int
 ) -> Optional[Dict[str, Any]]:

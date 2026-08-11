@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from PIL import Image
 
@@ -124,7 +124,8 @@ def prefill_training_review_item(
     frame_path = Path(str(item['frame_path']))
     if not frame_path.is_file():
         raise FileNotFoundError(frame_path)
-    contexts = _latest_model_contexts(conn, task_ids)
+    requested_tasks = tuple(dict.fromkeys((*task_ids, 'hero_avatar_detector')))
+    contexts = _latest_model_contexts(conn, requested_tasks)
     if not contexts:
         return {'applied': False, 'cached': False, 'models': {}, 'item': item}
     model_runs = {task_id: context['run_id'] for task_id, context in contexts.items()}
@@ -149,6 +150,8 @@ def prefill_training_review_item(
     suggested_boxes = []
     errors: Dict[str, str] = {}
     for task_id, context in contexts.items():
+        if task_id == 'hero_avatar_detector':
+            continue
         try:
             output = inference.run_artifact(
                 context['artifact'], context['metadata'], frame_path, conf_thr=0.25
@@ -192,6 +195,33 @@ def prefill_training_review_item(
                 )
         except Exception as exc:  # noqa: BLE001
             errors[task_id] = str(exc)[:300]
+    hero_context_suggestion = None
+    hero_detector = contexts.get('hero_avatar_detector')
+    if hero_detector is not None:
+        try:
+            hero_output = inference.run_artifact(
+                hero_detector['artifact'],
+                hero_detector['metadata'],
+                frame_path,
+                conf_thr=0.25,
+            )
+            hero_context_suggestion = _infer_hero_context_suggestion(
+                list(hero_output.get('detections') or []),
+                result_found=(
+                    suggestions.get('result_panel', {}).get('label') == 'result_panel'
+                ),
+            )
+            model_outputs.append(
+                {
+                    'task_id': 'hero_avatar_detector',
+                    'run_id': hero_detector['run_id'],
+                    'found': bool(hero_output.get('found')),
+                    'detected': len(hero_output.get('detections') or []),
+                    'hero_context_suggestion': hero_context_suggestion,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors['hero_avatar_detector'] = str(exc)[:300]
     db.add_training_review_source(
         conn,
         frame_id=int(frame_id),
@@ -202,6 +232,7 @@ def prefill_training_review_item(
             'model_runs': model_runs,
             'model_outputs': model_outputs,
             'suggested_boxes': suggested_boxes,
+            'hero_context_suggestion': hero_context_suggestion,
             'errors': errors,
         },
         image_path=str(frame_path),
@@ -215,10 +246,7 @@ def prefill_training_review_item(
     }
 
 
-def _ordered_avatar_slots(
-    detections: List[Dict[str, Any]], *, screen_type: str, team_size: int
-) -> List[Dict[str, Any]]:
-    expected = team_size * 2
+def _usable_avatar_detections(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     usable = []
     for detection in detections:
         xywh = detection.get('xywh_norm')
@@ -245,6 +273,66 @@ def _ordered_avatar_slots(
                 'center_y': y + height / 2,
             }
         )
+    return usable
+
+
+def _avatar_team_size(detected: int) -> int:
+    return 5 if detected > 6 else 3
+
+
+def _hero_context_payload(
+    values: List[Dict[str, Any]], *, screen_type: str
+) -> Dict[str, Any]:
+    team_size = _avatar_team_size(len(values))
+    expected = team_size * 2
+    ranked = sorted(values, key=lambda value: value['confidence'], reverse=True)
+    confidence = sum(
+        value['confidence'] for value in ranked[: min(expected, len(ranked))]
+    ) / min(expected, len(ranked))
+    return {
+        'screen_type': screen_type,
+        'team_size': team_size,
+        'confidence': round(confidence, 4),
+        'detected': len(values),
+        'complete_detection': len(values) >= expected,
+    }
+
+
+def _infer_hero_context_suggestion(
+    detections: List[Dict[str, Any]], *, result_found: bool
+) -> Optional[Dict[str, Any]]:
+    """用头像排列推断 HUD／积分板；不确定时宁可不自动选择。"""
+    usable = _usable_avatar_detections(detections)
+    if len(usable) < 6:
+        return None
+    panel = [value for value in usable if value['center_y'] >= 0.10]
+    top = [value for value in usable if value['center_y'] <= 0.22]
+    if result_found and len(panel) >= 6:
+        return _hero_context_payload(panel, screen_type='result_page')
+    if len(panel) >= 6:
+        panel_y = [value['center_y'] for value in panel]
+        if max(panel_y) - min(panel_y) >= 0.12:
+            return _hero_context_payload(panel, screen_type='scoreboard')
+    if len(top) >= 6:
+        top_y = [value['center_y'] for value in top]
+        if max(top_y) - min(top_y) <= 0.10:
+            return _hero_context_payload(top, screen_type='gameplay_hud')
+    return None
+
+
+def _ordered_avatar_slots(
+    detections: List[Dict[str, Any]], *, screen_type: str, team_size: int
+) -> List[Dict[str, Any]]:
+    expected = team_size * 2
+    usable = _usable_avatar_detections(detections)
+    if screen_type == 'gameplay_hud':
+        top = [value for value in usable if value['center_y'] <= 0.22]
+        if len(top) >= expected:
+            usable = top
+    elif screen_type in {'scoreboard', 'result_page'}:
+        panel = [value for value in usable if value['center_y'] >= 0.10]
+        if len(panel) >= expected:
+            usable = panel
     if len(usable) < expected:
         return []
     if len(usable) > expected:
