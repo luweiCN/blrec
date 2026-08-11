@@ -459,9 +459,9 @@ class PackageRuntime:
     stage_classifier: PackageStageClassifier
     result_panel_detector: OnnxResultPanelDetector
     classifiers: Mapping[str, OnnxClassificationModel]
-    hero_avatar_detector: Optional[OnnxHeroAvatarDetector] = None
-    hero_recognizer: Optional[PackageHeroRecognizer] = None
-    recorded_player_detector: Optional[PackageRecordedPlayerDetector] = None
+    hero_avatar_detector: OnnxHeroAvatarDetector
+    hero_recognizer: PackageHeroRecognizer
+    recorded_player_detector: PackageRecordedPlayerDetector
 
 
 def build_package_runtime(
@@ -490,31 +490,25 @@ def build_package_runtime(
         match_mode=classifiers['match_mode'],
         thresholds=package.runtime.thresholds,
     )
-    hero_avatar_detector = None
-    if 'hero_avatar' in package.models:
-        hero_avatar_detector = OnnxHeroAvatarDetector(
-            package.model('hero_avatar'),
-            confidence_threshold=package.runtime.thresholds['hero_avatar'],
-            providers=providers,
-        )
-    hero_recognizer = None
-    if 'hero_identity' in package.models:
-        identity = OnnxClassificationModel(
-            package.model('hero_identity'), providers=providers
-        )
-        classifiers['hero_identity'] = identity
-        hero_recognizer = PackageHeroRecognizer(
-            identity, threshold=package.runtime.thresholds['hero_identity']
-        )
-    recorded_player_detector = None
-    if 'player_position' in package.models:
-        player = OnnxClassificationModel(
-            package.model('player_position'), providers=providers
-        )
-        classifiers['player_position'] = player
-        recorded_player_detector = PackageRecordedPlayerDetector(
-            player, threshold=package.runtime.thresholds['player_position']
-        )
+    hero_avatar_detector = OnnxHeroAvatarDetector(
+        package.model('hero_avatar'),
+        confidence_threshold=package.runtime.thresholds['hero_avatar'],
+        providers=providers,
+    )
+    identity = OnnxClassificationModel(
+        package.model('hero_identity'), providers=providers
+    )
+    classifiers['hero_identity'] = identity
+    hero_recognizer = PackageHeroRecognizer(
+        identity, threshold=package.runtime.thresholds['hero_identity']
+    )
+    player = OnnxClassificationModel(
+        package.model('player_position'), providers=providers
+    )
+    classifiers['player_position'] = player
+    recorded_player_detector = PackageRecordedPlayerDetector(
+        player, threshold=package.runtime.thresholds['player_position']
+    )
     return PackageRuntime(
         package,
         stage_classifier,

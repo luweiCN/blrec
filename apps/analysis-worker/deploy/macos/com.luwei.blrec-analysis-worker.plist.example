@@ -14,8 +14,6 @@
     <string>__WORKER_TOKEN_FILE__</string>
     <string>--ocr-url</string>
     <string>http://127.0.0.1:18080</string>
-    <string>--fps</string>
-    <string>4</string>
     <string>--execution-provider</string>
     <string>coreml</string>
     <string>--model-package</string>

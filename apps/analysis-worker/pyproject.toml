@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blrec-analysis-worker"
-version = "0.1.1"
+version = "0.1.2"
 description = "Mac analysis worker for BLREC Vainglory recordings"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,11 +24,11 @@ test = ["pytest>=7.4.4,<9.0.0"]
 [project.scripts]
 blrec-analysis-worker = "blrec_analysis_worker.cli:main"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-blrec_analysis_worker = ["models/*.onnx", "heroes/*.jpg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,28 +12,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 from loguru import logger
 
-from blrec.vainglory.analyzer import (
-    AnalyzedMatch,
-    StageFrameClassifier,
-    VaingloryVideoAnalyzer,
-    VideoPart,
-)
+from blrec.vainglory.analyzer import AnalyzedMatch, VaingloryVideoAnalyzer, VideoPart
 from blrec.vainglory.glm_ocr import GlmOcrClient, GlmOcrResultReader
-from blrec.vainglory.hero_recognition import SiftHeroRecognizer, load_hero_references
-from blrec.vainglory.result_detection import (
-    ResultPanelDetector,
-    load_result_panel_detector,
-)
 from blrec.vainglory.sampling import FfmpegSampler
-from blrec.vainglory.stage_classifier import load_stage_classifier
 
 from .model_package import build_package_runtime, load_model_package
 from .remote import AnalysisWorkerClient, RemoteAnalysisWorker, load_worker_token
-from .resources import (
-    hero_reference_directory,
-    result_panel_model_path,
-    stage_classifier_model_path,
-)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,7 +25,6 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest='command', required=True)
     scan = commands.add_parser('scan-file', help='使用独立 Worker 扫描一个本地视频文件')
     scan.add_argument('video', type=Path)
-    scan.add_argument('--fps', type=int, default=4)
     scan.add_argument(
         '--execution-provider', choices=('auto', 'cpu', 'coreml'), default='auto'
     )
@@ -63,7 +46,6 @@ def _parser() -> argparse.ArgumentParser:
     run = commands.add_parser('run', help='从 NAS 领取并处理对局分析任务')
     run.add_argument('--server', default=os.environ.get('BLREC_SERVER_URL', ''))
     run.add_argument('--token-file', type=Path, default=None)
-    run.add_argument('--fps', type=int, default=4)
     run.add_argument(
         '--execution-provider', choices=('auto', 'cpu', 'coreml'), default='auto'
     )
@@ -72,11 +54,6 @@ def _parser() -> argparse.ArgumentParser:
         '--cache-dir', type=Path, default=Path('~/Library/Caches/BLRECAnalysisWorker')
     )
     run.add_argument('--debug-dir', type=Path, default=None)
-    run.add_argument(
-        '--special-anchors',
-        default=os.environ.get('BLREC_SPECIAL_ANCHORS', ''),
-        help='特殊主播名单（逗号分隔）：这些主播用 4 FPS 全量扫描',
-    )
     run.add_argument('--poll-seconds', type=float, default=5)
     run.add_argument('--concurrency', type=int, default=1)
     run.add_argument('--once', action='store_true')
@@ -104,67 +81,34 @@ def _execution_providers(name: str) -> Tuple[str, ...]:
 
 
 def _build_analyzer(
-    *,
-    fps: int,
-    ocr_url: str,
-    providers: Sequence[str],
-    model_package_path: Optional[Path] = None,
+    *, ocr_url: str, providers: Sequence[str], model_package_path: Optional[Path]
 ) -> VaingloryVideoAnalyzer:
-    if fps < 1:
-        raise ValueError('FPS 必须大于 0')
-    runtime = None
-    detector: ResultPanelDetector
-    stage_classifier: StageFrameClassifier
-    if model_package_path is not None:
-        package = load_model_package(model_package_path)
-        runtime = build_package_runtime(package, providers=providers)
-        detector = runtime.result_panel_detector
-        stage_classifier = runtime.stage_classifier
-        sampler = FfmpegSampler(
-            coarse_interval_seconds=max(1, package.runtime.coarse_interval_ms // 1_000),
-            fine_frames_per_second=package.runtime.result_scan_fps,
-            maximum_keyframe_distance_ms=(package.runtime.maximum_keyframe_distance_ms),
+    if model_package_path is None:
+        raise ValueError(
+            '必须通过 --model-package 或 BLREC_VISION_MODEL_PACKAGE 指定已验收模型包'
         )
-        logger.info(
-            '已加载视觉模型包：package_id={} pipeline_version={} models={}',
-            package.package_id,
-            package.pipeline_version,
-            ','.join(sorted(package.models)),
-        )
-    else:
-        legacy_detector = load_result_panel_detector(
-            model_path=result_panel_model_path(), providers=providers
-        )
-        if legacy_detector is None:
-            raise RuntimeError('结算界面模型不存在，不能执行全量扫描')
-        detector = legacy_detector
-        legacy_stage_classifier = load_stage_classifier(
-            model_path=stage_classifier_model_path(), providers=providers
-        )
-        if legacy_stage_classifier is None:
-            raise RuntimeError('阶段分类模型不存在，不能执行级联扫描')
-        stage_classifier = legacy_stage_classifier
-        sampler = FfmpegSampler(fine_frames_per_second=fps)
-        logger.warning('未配置版本化视觉模型包，暂时回退到 legacy multi-v2')
-    references = load_hero_references(hero_reference_directory())
-    hero_recognizer = (
-        runtime.hero_recognizer
-        if runtime is not None and runtime.hero_recognizer is not None
-        else SiftHeroRecognizer(references) if references else None
+    package = load_model_package(model_package_path)
+    runtime = build_package_runtime(package, providers=providers)
+    sampler = FfmpegSampler(
+        coarse_interval_seconds=max(1, package.runtime.coarse_interval_ms // 1_000),
+        fine_frames_per_second=package.runtime.result_scan_fps,
+        maximum_keyframe_distance_ms=package.runtime.maximum_keyframe_distance_ms,
+    )
+    logger.info(
+        '已加载视觉模型包：package_id={} pipeline_version={} models={}',
+        package.package_id,
+        package.pipeline_version,
+        ','.join(sorted(package.models)),
     )
     result_reader = None if not ocr_url else GlmOcrResultReader(GlmOcrClient(ocr_url))
     return VaingloryVideoAnalyzer(
         sampler=sampler,
         result_reader=result_reader,
-        hero_recognizer=hero_recognizer,
-        hero_avatar_detector=(
-            None if runtime is None else runtime.hero_avatar_detector
-        ),
-        recorded_player_detector=(
-            None if runtime is None else runtime.recorded_player_detector
-        ),
-        result_panel_detector=detector,
-        stage_classifier=stage_classifier,
+        hero_recognizer=runtime.hero_recognizer,
+        hero_avatar_detector=runtime.hero_avatar_detector,
+        recorded_player_detector=runtime.recorded_player_detector,
+        result_panel_detector=runtime.result_panel_detector,
+        stage_classifier=runtime.stage_classifier,
     )
 
 
@@ -212,10 +156,7 @@ def _scan_file(arguments: argparse.Namespace) -> int:
     setup_started = time.monotonic()
     providers = _execution_providers(arguments.execution_provider)
     analyzer = _build_analyzer(
-        fps=arguments.fps,
-        ocr_url=ocr_url,
-        providers=providers,
-        model_package_path=arguments.model_package,
+        ocr_url=ocr_url, providers=providers, model_package_path=arguments.model_package
     )
     setup_seconds = time.monotonic() - setup_started
     part = VideoPart(id=0, index=1, path=str(video), title=video.name)
@@ -245,9 +186,8 @@ def _scan_file(arguments: argparse.Namespace) -> int:
         total_seconds / duration_seconds * 60 if duration_seconds else 0
     )
     payload: Dict[str, Any] = {
-        'strategy': 'timeline-v2' if dense.model_package_id else 'legacy-cascade',
+        'strategy': 'timeline-v2',
         'model_package_id': dense.model_package_id,
-        'fps': arguments.fps,
         'execution_providers': list(providers),
         'video': str(video),
         'video_duration_ms': dense.scanned_part.video_duration_ms,
@@ -322,10 +262,7 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
     token = load_worker_token(arguments.token_file)
     providers = _execution_providers(arguments.execution_provider)
     analyzer = _build_analyzer(
-        fps=arguments.fps,
-        ocr_url=ocr_url,
-        providers=providers,
-        model_package_path=arguments.model_package,
+        ocr_url=ocr_url, providers=providers, model_package_path=arguments.model_package
     )
     RemoteAnalysisWorker(
         lambda: AnalysisWorkerClient(server_url, token),
@@ -334,11 +271,6 @@ def _run_remote_worker(arguments: argparse.Namespace) -> int:
         poll_seconds=arguments.poll_seconds,
         concurrency=arguments.concurrency,
         debug_dir=arguments.debug_dir,
-        special_anchors=tuple(
-            item.strip()
-            for item in str(arguments.special_anchors).split(',')
-            if item.strip()
-        ),
     ).run(once=arguments.once)
     return 0
 

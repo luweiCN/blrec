@@ -36,7 +36,7 @@ def _analysis_summary(dense: DenseScanResult) -> Dict[str, Any]:
     sampled_frames = len(dense.timeline_points)
     return {
         'schemaVersion': 1,
-        'pipeline': 'timeline-v2' if dense.model_package_id else 'legacy-cascade',
+        'pipeline': 'timeline-v2',
         'modelPackageId': dense.model_package_id,
         'sampledFrames': sampled_frames,
         'keyframeFrames': dense.keyframe_frames,
@@ -244,7 +244,6 @@ class RemoteAnalysisWorker:
         poll_seconds: float = 5,
         concurrency: int = 1,
         debug_dir: Optional[Path] = None,
-        special_anchors: Sequence[str] = (),
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError('轮询间隔必须为正数')
@@ -257,9 +256,6 @@ class RemoteAnalysisWorker:
         self._concurrency = concurrency
         self._debug_dir = (
             None if debug_dir is None else Path(debug_dir).expanduser().resolve()
-        )
-        self._special_anchors = tuple(
-            anchor.strip() for anchor in special_anchors if anchor.strip()
         )
         self._stop = threading.Event()
 
@@ -452,29 +448,15 @@ class RemoteAnalysisWorker:
                     'matches': [encode_match(matches[0])],
                 }
 
-            anchor_name = str(claim.get('anchorName', '')).strip()
-            dense_mode = bool(anchor_name) and anchor_name in self._special_anchors
-
             def dense_progress(value: float) -> None:
                 heartbeat.update(0.02 + value * 0.68)
 
-            if dense_mode:
-                heartbeat.update(
-                    0.02,
-                    AnalysisStatus(
-                        stage='coarse_scan',
-                        detail='特殊主播：以 4 FPS 全量扫描结算界面',
-                        elapsed_seconds=0,
-                    ),
-                )
-                dense = self._analyzer.scan_part_dense(part, progress=dense_progress)
-            else:
-                dense = self._analyzer.scan_part_cascade(
-                    part,
-                    progress=dense_progress,
-                    status_callback=heartbeat.update_status,
-                    debug_dir=self._debug_dir,
-                )
+            dense = self._analyzer.scan_part_cascade(
+                part,
+                progress=dense_progress,
+                status_callback=heartbeat.update_status,
+                debug_dir=self._debug_dir,
+            )
             heartbeat.update(
                 0.70,
                 AnalysisStatus(

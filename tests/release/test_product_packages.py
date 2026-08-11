@@ -15,7 +15,7 @@ def test_five_products_have_independent_package_roots() -> None:
     assert (APPS / 'public-dashboard/publisher/pyproject.toml').is_file()
 
 
-def test_analysis_worker_owns_its_runtime_and_models() -> None:
+def test_analysis_worker_owns_runtime_but_loads_versioned_model_package() -> None:
     worker = APPS / 'analysis-worker'
     setup = (ROOT / 'setup.cfg').read_text(encoding='utf8').lower()
     pyproject = (worker / 'pyproject.toml').read_text(encoding='utf8').lower()
@@ -30,13 +30,14 @@ def test_analysis_worker_owns_its_runtime_and_models() -> None:
         )
         assert dependency in pyproject
 
-    models = worker / 'src/blrec_analysis_worker/models'
-    assert {item.name for item in models.glob('*.onnx')} == {
-        'multi-v2.onnx',
-        'result-detector-v1.onnx',
-        'result-panel.onnx',
-    }
-    assert len(tuple((worker / 'src/blrec_analysis_worker/heroes').glob('*.jpg'))) == 57
+    package = worker / 'src/blrec_analysis_worker/model_package.py'
+    cli = (worker / 'src/blrec_analysis_worker/cli.py').read_text(encoding='utf8')
+    assert package.is_file()
+    assert not (worker / 'src/blrec_analysis_worker/resources.py').exists()
+    assert 'models/*.onnx' not in pyproject
+    assert 'heroes/*.jpg' not in pyproject
+    assert '必须通过 --model-package' in cli
+    assert 'legacy multi-v2' not in cli
     assert not tuple((ROOT / 'src/blrec/data/vainglory').glob('*.onnx'))
 
 

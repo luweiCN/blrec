@@ -65,7 +65,7 @@ jobs:
       - name: Build Worker packages
         run: python -m build
 
-      - name: Verify packaged resources
+      - name: Verify Worker wheel contains no mutable model weights
         run: |
           python - <<'PY'
           import zipfile
@@ -76,12 +76,9 @@ jobs:
               names = archive.namelist()
           models = {Path(name).name for name in names if name.endswith('.onnx')}
           heroes = [name for name in names if '/heroes/' in name and name.endswith('.jpg')]
-          assert models == {
-              'multi-v2.onnx',
-              'result-detector-v1.onnx',
-              'result-panel.onnx',
-          }, models
-          assert len(heroes) == 57, len(heroes)
+          assert not models, models
+          assert not heroes, heroes
+          assert any(name.endswith('/model_package.py') for name in names), names
           PY
 
       - name: Verify Server source owns no ONNX weights
