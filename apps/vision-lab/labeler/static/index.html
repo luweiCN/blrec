@@ -19,7 +19,7 @@
       <button class="nav-item" data-view="candidates"
               data-candidate-status="needs_review">统一打标</button>
       <button class="nav-item" data-view="candidates"
-              data-candidate-status="legacy_hero">历史英雄补标</button>
+              data-candidate-status="legacy_hero">历史头像训练补齐</button>
       <button class="nav-item" data-view="inspect">数据检查</button>
       <button class="nav-item" data-view="datasets">数据集版本</button>
       <button class="nav-item" data-view="pairs">同局判断</button>
@@ -501,8 +501,8 @@
             <select id="candidate-status-filter">
               <option value="needs_review">待确认／待补齐</option>
               <option value="missing_player">只补本人标记</option>
-              <option value="legacy_hero">历史英雄快速补标</option>
-              <option value="confirmed">已确认</option>
+              <option value="legacy_hero">历史头像训练补齐</option>
+              <option value="confirmed">分类标签已确认</option>
               <option value="skipped">已跳过</option>
               <option value="all">全部</option>
             </select>
@@ -511,7 +511,7 @@
         </div>
         <div id="candidate-legacy-filters"
              class="toolbar candidate-legacy-filters hidden">
-          <strong>历史补标范围</strong>
+          <strong>旧数据头像补齐范围</strong>
           <label>主播
             <select id="candidate-legacy-streamer">
               <option value="">全部主播（连续排列）</option>

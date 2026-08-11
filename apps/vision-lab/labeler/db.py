@@ -2935,6 +2935,9 @@ def _training_review_item_dict(
     item['suggestions'] = suggestions
     item['sources'] = sources
     item['source_count'] = len(sources)
+    item['source_categories'] = sorted(
+        {_training_review_source_category(source['source_type']) for source in sources}
+    )
     item['boxes'] = get_boxes(conn, int(row['frame_id']))
     item['needs_player_hero_review'] = bool(item['needs_player_hero_review'])
     return item
@@ -3123,6 +3126,19 @@ def training_review_result_groups(
         for frame_id in frame_ids:
             result[frame_id] = info
     return result
+
+
+def _training_review_source_category(source_type: Any) -> str:
+    normalized = str(source_type or '')
+    if normalized == 'worker':
+        return 'worker'
+    if normalized == 'result_archive':
+        return 'result_archive'
+    if normalized == 'new_model_prefill':
+        return 'model_prefill'
+    if normalized == 'legacy_annotation' or normalized.startswith('legacy_'):
+        return 'legacy'
+    return 'other'
 
 
 def training_review_duplicate_result_frame_ids(conn: sqlite3.Connection) -> set[int]:
@@ -4271,10 +4287,10 @@ def save_training_review_hero_lineup(
 def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
     duplicates = training_review_duplicate_result_frame_ids(conn)
     item_rows = conn.execute('SELECT * FROM training_review_items').fetchall()
+    visible_rows = [row for row in item_rows if int(row['frame_id']) not in duplicates]
+    visible_ids = {int(row['frame_id']) for row in visible_rows}
     statuses: Dict[str, int] = {}
-    for row in item_rows:
-        if int(row['frame_id']) in duplicates:
-            continue
+    for row in visible_rows:
         status = str(row['review_status'])
         statuses[status] = statuses.get(status, 0) + 1
     labels: Dict[str, Dict[str, int]] = {}
@@ -4286,8 +4302,8 @@ def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         ('result_panel', 'result_panel_label'),
     ):
         counts: Dict[str, int] = {}
-        for row in item_rows:
-            if int(row['frame_id']) in duplicates or row[column] is None:
+        for row in visible_rows:
+            if row[column] is None:
                 continue
             label = str(row[column])
             counts[label] = counts.get(label, 0) + 1
@@ -4312,6 +4328,67 @@ def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         ).fetchall()
         if int(row['frame_id']) not in duplicates
     )
+    categories_by_frame: Dict[int, set[str]] = {}
+    for row in conn.execute(
+        'SELECT frame_id, source_type FROM training_review_sources'
+    ).fetchall():
+        frame_id = int(row['frame_id'])
+        if frame_id not in visible_ids:
+            continue
+        categories_by_frame.setdefault(frame_id, set()).add(
+            _training_review_source_category(row['source_type'])
+        )
+    source_frames = {'legacy': 0, 'worker': 0, 'result_archive': 0, 'other': 0}
+    origin_categories = {'legacy', 'worker', 'result_archive'}
+    for frame_id in visible_ids:
+        categories = categories_by_frame.get(frame_id, set())
+        matched = categories & origin_categories
+        if not matched:
+            source_frames['other'] += 1
+            continue
+        for category in matched:
+            source_frames[category] += 1
+
+    legacy_ids = {
+        frame_id
+        for frame_id, categories in categories_by_frame.items()
+        if 'legacy' in categories
+    }
+    legacy_hero_targets = {
+        int(row['frame_id']): _LEGACY_HERO_SCREEN_TYPES.get(
+            str(row['screen_type'] or '')
+        )
+        for row in conn.execute(
+            'SELECT frame_id, screen_type FROM annotations '
+            "WHERE annotation_status = 'complete'"
+        ).fetchall()
+        if int(row['frame_id']) in legacy_ids
+        and _LEGACY_HERO_SCREEN_TYPES.get(str(row['screen_type'] or '')) is not None
+    }
+    confirmed_lineups = {
+        int(row['frame_id']): str(row['screen_type'])
+        for row in conn.execute(
+            'SELECT frame_id, screen_type FROM training_review_hero_lineups '
+            "WHERE review_status = 'confirmed'"
+        ).fetchall()
+    }
+    legacy_hero_complete = sum(
+        confirmed_lineups.get(frame_id) == target
+        for frame_id, target in legacy_hero_targets.items()
+    )
+    legacy_core_confirmed = sum(
+        str(row['review_status']) == 'confirmed'
+        for row in visible_rows
+        if int(row['frame_id']) in legacy_ids
+    )
+    legacy_data = {
+        'frames': len(legacy_ids),
+        'core_label_confirmed': legacy_core_confirmed,
+        'core_label_needs_review': len(legacy_ids) - legacy_core_confirmed,
+        'hero_eligible': len(legacy_hero_targets),
+        'hero_complete': legacy_hero_complete,
+        'hero_missing': len(legacy_hero_targets) - legacy_hero_complete,
+    }
     return {
         'total': sum(statuses.values()),
         'statuses': statuses,
@@ -4319,4 +4396,6 @@ def training_review_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         'dirty': dirty,
         'conflicts': conflicts,
         'missing_player_hero': missing_player_hero,
+        'source_frames': source_frames,
+        'legacy_data': legacy_data,
     }

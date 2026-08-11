@@ -369,6 +369,19 @@ class TestLegacyMigration(TrainingReviewTestCase):
         self.assertEqual(stats['remaining_groups'], 3)
         self.assertEqual(stats['remaining_frames'], 4)
         self.assertEqual(stats['by_streamer'][0]['streamer'], '测试主播')
+        review_stats = db.training_review_stats(self.conn)
+        self.assertEqual(review_stats['source_frames']['legacy'], 5)
+        self.assertEqual(
+            review_stats['legacy_data'],
+            {
+                'frames': 5,
+                'core_label_confirmed': 5,
+                'core_label_needs_review': 0,
+                'hero_eligible': 4,
+                'hero_complete': 0,
+                'hero_missing': 4,
+            },
+        )
 
         representative = next(
             item for item in gameplay_items if item['legacy_hero_group_size'] == 2
@@ -414,6 +427,9 @@ class TestLegacyMigration(TrainingReviewTestCase):
         )
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]['legacy_hero_group_size'], 1)
+        self.assertEqual(
+            db.training_review_stats(self.conn)['legacy_data']['hero_complete'], 1
+        )
 
 
 class TestTrainingReviewStorage(TrainingReviewTestCase):

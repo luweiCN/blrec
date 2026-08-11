@@ -193,6 +193,14 @@ const CANDIDATE_SUGGESTION_TITLES = {
   result_panel: '结算面板',
 };
 
+const CANDIDATE_SOURCE_LABELS = {
+  legacy: '历史标签迁移',
+  worker: 'Worker 新采样',
+  result_archive: 'NAS 结算归档',
+  model_prefill: '新模型预填',
+  other: '其他本地素材',
+};
+
 const CANDIDATE_HERO_LAYOUTS = {
   gameplay_hud: '游戏中顶部 HUD',
   scoreboard: '积分板',
@@ -230,6 +238,12 @@ const CANDIDATE_HERO_SELECT_VISIBILITY = {
 
 function currentCandidate() {
   return candidateQueue[candidateIndex] || null;
+}
+
+function candidateSourceText(item) {
+  const categories = Array.from(new Set(item && item.source_categories || []));
+  if (!categories.length) return '来源未记录';
+  return categories.map((value) => CANDIDATE_SOURCE_LABELS[value] || value).join('＋');
 }
 
 function candidateSuggestion(item, task) {
@@ -2044,10 +2058,10 @@ function renderCandidateLegacyControls(stats, status) {
   const active = status === 'legacy_hero';
   $('#candidate-legacy-filters').classList.toggle('hidden', !active);
   $('#candidate-page-title').textContent = active
-    ? '历史英雄快速补标' : '统一打标';
+    ? '历史头像训练补齐' : '统一打标';
   $('#candidate-page-hint').textContent = active
-    ? '以前约 7000 张人工标注会按主播、同一局和画面类型折叠。这里只补每组代表图：同一主播、同类画面、同人数和近似比例只需首次画圆框，后续自动套用并预填英雄；近重复帧不会重复塞进英雄训练集。'
-    : 'Worker 新素材、历史通用标注、旧 BP 和关键界面都在这里统一确认。打开图片后会先跑新分类模型；检测到 HUD、积分板或结算图时，再自动执行头像定位、英雄识别和本人位置识别。模型结果只是预选，未人工确认的图片不会进入训练集。';
+    ? '这不是另一套数据，也不是让你把约 7000 张旧图全部重标。系统只从旧图里的 HUD、积分板和结算图按主播、同一局和画面类型折叠出代表组，用来补头像圆框与英雄；只有真正补齐并确认的代表图才进入头像位置、英雄身份和本人位置训练，未画头像的旧图不会被当成“没有头像”的负样本。'
+    : 'Worker 新采样、NAS 历史结算归档和历史标签迁移都在这里统一确认。图片顶部会明确显示来源。分类标签已确认只表示四项分类真值可用，不代表 HUD、积分板或结算图的英雄头像也已补齐；头像训练完整度请看顶部来源统计。';
   if (!active) return;
   const globalStats = stats.legacy_hero || {};
   const filteredStats = stats.legacy_hero_filtered || globalStats;
@@ -2091,10 +2105,16 @@ function renderCandidateProgress() {
 
 function renderCandidateSyncStats(stats) {
   const missingPlayer = stats.missing_player_hero || 0;
+  const sourceFrames = stats.source_frames || {};
+  const legacy = stats.legacy_data || {};
   $('#candidate-sync-state').textContent =
-    `本地 ${stats.total || 0} · 待补齐 ${((stats.statuses || {}).pending || 0) +
+    `本地去重后 ${stats.total || 0} · 来源覆盖：历史标签 ${sourceFrames.legacy || 0}、` +
+    `Worker 新图 ${sourceFrames.worker || 0}、结算归档 ${sourceFrames.result_archive || 0}` +
+    `（同图可有多个来源） · 历史分类可用 ${legacy.core_label_confirmed || 0} · ` +
+    `历史头像训练完整 ${legacy.hero_complete || 0}/${legacy.hero_eligible || 0} · ` +
+    `待补齐 ${((stats.statuses || {}).pending || 0) +
       ((stats.statuses || {}).partial || 0) + missingPlayer}（待补本人 ${missingPlayer}） · ` +
-    `已确认 ${(stats.statuses || {}).confirmed || 0} · ` +
+    `分类标签已确认 ${(stats.statuses || {}).confirmed || 0} · ` +
     `待回传 ${stats.dirty || 0}`;
 }
 
@@ -2150,13 +2170,13 @@ function renderCandidateItem() {
   $('#candidate-meta').textContent =
     `${item.streamer || '未知主播'} / ${item.filename || ''} · ` +
     `${(item.timestamp_ms / 1000).toFixed(1)}s · frame #${item.frame_id} · ` +
-    `${item.source_count || 0} 个来源${legacyMeta}`;
+    `来源：${candidateSourceText(item)}（${item.source_count || 0} 条记录）${legacyMeta}`;
   renderCandidateSuggestions(item);
   renderCandidateChoices();
   $('#btn-candidate-save').disabled = false;
   $('#candidate-save-state').classList.remove('error');
   $('#candidate-save-state').textContent = item.legacy_hero_needs_review
-    ? '旧的流程和模式标签已保留；只需确认头像来源、圆框和英雄'
+    ? '历史分类标签已迁移并保留；这里只补头像来源、圆框、英雄和本人位置'
     : item.needs_player_hero_review
     ? '原标注已保留，请补齐英雄阵容并标出主播本人'
     : item.review_status === 'confirmed'
