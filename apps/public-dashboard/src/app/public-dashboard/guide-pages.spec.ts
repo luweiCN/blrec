@@ -34,8 +34,12 @@ describe('public guide pages', () => {
     expect(page.textContent).toContain('经验量 · 35%');
     expect(page.textContent).toContain('稳定胜率 · 40%');
     expect(page.textContent).toContain('75 分起为“大师”');
-    expect(page.textContent).toContain('RANKING / 04');
-    expect(page.textContent).toContain('更新于 2026-08-10');
+    expect(page.textContent).toContain('RANKING / 05');
+    expect(page.textContent).toContain('更新于 2026-08-11');
+    expect(page.textContent).toContain('新玩家不是被判定为低胜率');
+    expect(page.textContent).toContain('30 场 19 胜 11 负');
+    expect(page.textContent).toContain('为什么同段位、相近胜率');
+    expect(page.textContent).toContain('它不能单独用来判断谁更强');
     expect(page.textContent).toContain('内部评分 × 3 = 排位分');
     expect(page.textContent).toContain('0–3000');
     expect(page.textContent).toContain('不是玩家当年的官方游戏段位');
