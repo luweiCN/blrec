@@ -432,8 +432,10 @@ function candidateSuggestedResultBox(item) {
   const newModelBox = (newModelSource && newModelSource.metadata &&
     newModelSource.metadata.suggested_boxes || []).find((value) =>
     ['result_panel', ''].includes(value.type || value.box_type || ''));
-  if (['pending', 'partial'].includes(item.review_status) && newModelBox) {
-    return {...newModelBox, type: 'result_panel', source: 'new_model'};
+  if (['pending', 'partial'].includes(item.review_status)) {
+    return newModelBox
+      ? {...newModelBox, type: 'result_panel', source: 'new_model'}
+      : null;
   }
   if (item.boxes && item.boxes.result_panel) {
     return {...item.boxes.result_panel, type: 'result_panel', source: 'saved'};
