@@ -179,7 +179,12 @@ def test_mode_conflict_candidates_are_selected_before_regular_samples() -> None:
     assert conflict in capped
 
 
-def test_refined_boundary_frames_feed_the_same_training_candidate_pools() -> None:
+def test_refined_boundary_frames_feed_the_same_training_candidate_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda _frame: b'\xff\xd8candidate\xff\xd9'
+    )
     frame = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
     representative = []
     borderline = []
@@ -263,6 +268,9 @@ def test_cancelled_hero_selection_segment_is_not_scanned_for_results() -> None:
 def test_model_package_cascade_keeps_source_timeline_and_direct_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        analyzer_module, 'jpeg_bytes', lambda _frame: b'\xff\xd8candidate\xff\xd9'
+    )
     frame = RgbFrame(4, 4, b'\x00\x00\x00' * 16)
 
     class Sampler:
