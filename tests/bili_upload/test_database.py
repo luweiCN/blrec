@@ -779,6 +779,76 @@ async def test_sixty_fifth_migration_removes_only_unassigned_fallback_players(
 
 
 @pytest.mark.asyncio
+async def test_sixty_eighth_migration_resets_legacy_archive_claim_quota(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / 'blrec.sqlite3'
+    migration_directory = (
+        Path(__file__).parents[2] / 'src' / 'blrec' / 'bili_upload' / 'migrations'
+    )
+    connection = sqlite3.connect(str(path))
+    try:
+        for version in range(1, 68):
+            connection.executescript(
+                (migration_directory / '{:04d}_initial.sql'.format(version)).read_text(
+                    encoding='utf8'
+                )
+            )
+            connection.execute(
+                'INSERT INTO schema_migrations(version,applied_at) VALUES(?,1)',
+                (version,),
+            )
+        connection.execute(
+            'INSERT INTO bili_accounts('
+            'id,uid,display_name,credential_ciphertext,credential_version,key_id,'
+            'state,created_at,updated_at) '
+            "VALUES(1,42,'existing',X'00',1,'key','active',1,1)"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_archive_syncs('
+            'account_id,state,progress,discovered_count,completed_count,error,'
+            'requested_at,started_at,completed_at,updated_at,quota_day,daily_used,'
+            'discovery_complete) '
+            "VALUES(1,'running',0,1,0,NULL,1,1,NULL,1,'2026-08-11',37,1)"
+        )
+        connection.execute(
+            'INSERT INTO vainglory_archive_imports('
+            'account_id,aid,bvid,title,published_at,session_id,state,progress,'
+            'page_count,completed_page_count,error,created_at,updated_at,quota_day) '
+            "VALUES(1,101,'BV1abcdefgh','旧配额稿件',1,NULL,'queued',0,0,0,"
+            "NULL,1,1,'2026-08-11')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = BiliUploadDatabase(str(path))
+    await database.open()
+    try:
+        sync = await database.fetchone(
+            'SELECT quota_day,daily_used,discovery_complete '
+            'FROM vainglory_archive_syncs '
+            'WHERE account_id=1'
+        )
+        imported = await database.fetchone(
+            'SELECT quota_day FROM vainglory_archive_imports WHERE account_id=1'
+        )
+
+        assert sync is not None and dict(sync) == {
+            'quota_day': None,
+            'daily_used': 0,
+            'discovery_complete': 0,
+        }
+        assert imported is not None and dict(imported) == {'quota_day': None}
+        assert (
+            await database.scalar('SELECT MAX(version) FROM schema_migrations')
+            == database.LATEST_SCHEMA_VERSION
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_media_library_schema_constraints_and_list_index(tmp_path: Path) -> None:
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()

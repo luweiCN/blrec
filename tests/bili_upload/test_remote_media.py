@@ -156,6 +156,35 @@ async def test_uses_existing_local_video_without_queuing_download(
 
 
 @pytest.mark.asyncio
+async def test_force_remote_queues_download_for_logically_deleted_local_video(
+    tmp_path: Path,
+) -> None:
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    downloader = FakeDownloader()
+    try:
+        local = tmp_path / 'deleted-but-present.mp4'
+        local.write_bytes(b'local')
+        await seed_remote_part(database, local)
+        cache = RemoteMediaCache(
+            database,
+            tmp_path,
+            bundle_loader=lambda _account_id: async_value('credential'),
+            downloader=downloader,
+            clock=lambda: 1_000,
+        )
+
+        assert (await cache.request(1)).state == 'local'
+        requested = await cache.request(1, force_remote=True)
+
+        assert requested.state == 'pending'
+        assert await cache.run_once() is True
+        assert len(downloader.calls) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_user_download_promotes_analysis_cache_to_ten_days(
     tmp_path: Path,
 ) -> None:

@@ -1399,8 +1399,9 @@
 >
   <ng-container *nzModalContent>
     <p class="archive-manager-help">
-      选择当前保存迁移后稿件的投稿账号。系统只发现并接入当前赛季的稿件，
-      下载最高画质后逐个分 P 分析，短分 P 也会正常检查结算画面。
+      选择当前保存迁移后稿件的投稿账号。系统优先接入当前赛季，随后继续回溯更早历史稿件；
+      每天按设置数量启动稿件下载，下载最高画质后逐个分 P 分析，短分 P
+      也会正常检查结算画面。
       识别结果会回填到同一个新稿件的简介和置顶评论，分析完成即删除临时视频；
       进程异常退出后会从未完成任务继续。
     </p>
@@ -1435,14 +1436,14 @@
               <span>{{ archiveSyncLabel(sync) }}</span>
               <span *ngIf="sync.operatorPaused">任务已暂停</span>
               <span *ngIf="sync.seasonStartedAt && sync.seasonEndedAt">
-                本轮范围：{{
+                优先赛季：{{
                   sync.seasonStartedAt * 1000 | date: "yyyy-MM-dd"
                 }}
                 至
                 {{ sync.seasonEndedAt * 1000 | date: "yyyy-MM-dd" }}
               </span>
               <span>
-                今日已领取 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个 ·
+                今日已开始下载 {{ sync.dailyUsed }}/{{ sync.dailyLimit }} 个稿件 ·
                 已扫描至第 {{ sync.nextPage - 1 }} 页
               </span>
               <nz-progress
@@ -1454,7 +1455,7 @@
                 *ngIf="sync.error"
                 nzType="error"
                 nzShowIcon
-                nzMessage="历史稿件发现失败，新的下载领取已暂停"
+                nzMessage="历史稿件发现失败，新的下载启动已暂停"
                 [nzDescription]="sync.error"
               ></nz-alert>
             </ng-container>

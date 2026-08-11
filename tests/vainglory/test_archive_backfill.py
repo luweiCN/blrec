@@ -71,9 +71,13 @@ class FakeArchiveReader:
 class FakeRemoteMediaCache:
     def __init__(self) -> None:
         self.requests = []
+        self.force_remote_requests = []
 
-    async def request(self, part_id: int) -> RemoteMediaStatus:
+    async def request(
+        self, part_id: int, *, force_remote: bool = False
+    ) -> RemoteMediaStatus:
         self.requests.append(part_id)
+        self.force_remote_requests.append(force_remote)
         return RemoteMediaStatus(
             part_id=part_id, state='pending', progress=0, remote_available=True
         )
@@ -271,6 +275,7 @@ async def test_retryable_metadata_failure_is_not_counted_as_complete(
         assert int(imported['retryable']) == 1
         assert int(imported['next_retry_at']) > now[0]
         assert (await service.status(1)).completed_count == 0
+        assert (await service.status(1)).daily_used == 0
 
         assert await service.run_once() is False
         now[0] = int(imported['next_retry_at'])
@@ -700,6 +705,32 @@ async def test_history_backfill_pages_lazily_and_honors_pause_and_daily_limit(
                 )
             return ()
 
+        async def viewer_detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            del _bundle, account_id, credential_version
+            suffix = int(bvid[-8:])
+            return {
+                'data': {
+                    'aid': 10_000 + suffix,
+                    'bvid': bvid,
+                    'title': '历史稿件 {}'.format(suffix),
+                    'pages': [
+                        {
+                            'page': 1,
+                            'cid': 20_000 + suffix,
+                            'part': 'P1',
+                            'duration': 600,
+                        }
+                    ],
+                }
+            }
+
     database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
     await database.open()
     try:
@@ -735,6 +766,299 @@ async def test_history_backfill_pages_lazily_and_honors_pause_and_daily_limit(
         limited = await service.status(1)
         assert limited.daily_used == 1
         assert reader.page_calls == [1]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_continues_discovery_before_the_priority_season(tmp_path: Path) -> None:
+    now = [1_786_420_800]
+
+    class HistoryReader:
+        def __init__(self) -> None:
+            self.page_calls = []
+
+        async def list_page(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            status: str,
+            page_number: int,
+            page_size: int,
+        ) -> Tuple[Mapping[str, Any], ...]:
+            del _bundle, account_id, credential_version, status
+            assert page_size == 1
+            self.page_calls.append(page_number)
+            if page_number == 1:
+                return (
+                    {
+                        'Archive': {
+                            'aid': 101,
+                            'bvid': 'BV1current01',
+                            'title': '夏季赛录播',
+                            'pubtime': now[0] - 60,
+                        }
+                    },
+                )
+            if page_number == 2:
+                return (
+                    {
+                        'Archive': {
+                            'aid': 102,
+                            'bvid': 'BV1history01',
+                            'title': '更早历史录播',
+                            'pubtime': 1_700_000_000,
+                        }
+                    },
+                )
+            return ()
+
+        async def viewer_detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            del _bundle, account_id, credential_version
+            return {
+                'data': {
+                    'aid': 101 if bvid == 'BV1current01' else 102,
+                    'bvid': bvid,
+                    'title': '录播',
+                    'pages': [
+                        {
+                            'page': 1,
+                            'cid': 201 if bvid == 'BV1current01' else 202,
+                            'part': 'P1',
+                            'duration': 600,
+                        }
+                    ],
+                }
+            }
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    try:
+        await seed_account(database)
+        reader = HistoryReader()
+        service = ArchiveBackfillService(
+            database,
+            reader,
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=FakeRemoteMediaCache(),
+            clock=lambda: now[0],
+        )
+        service.PAGE_SIZE = 1
+        await service.request(1)
+
+        for expected_page in (1, 2, 3):
+            assert await service.run_once() is True
+            assert reader.page_calls[-1] == expected_page
+            now[0] += service.DISCOVERY_INTERVAL_SECONDS
+
+        discovered = await database.fetchall(
+            'SELECT bvid,state FROM vainglory_archive_imports '
+            'ORDER BY recording_started_at DESC'
+        )
+        assert [(str(row['bvid']), str(row['state'])) for row in discovered] == [
+            ('BV1current01', 'queued'),
+            ('BV1history01', 'queued'),
+        ]
+
+        assert await service.run_once() is True
+        prioritized = await database.fetchall(
+            'SELECT bvid,state FROM vainglory_archive_imports '
+            'ORDER BY recording_started_at DESC'
+        )
+        assert [(str(row['bvid']), str(row['state'])) for row in prioritized] == [
+            ('BV1current01', 'analyzing'),
+            ('BV1history01', 'queued'),
+        ]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_daily_limit_counts_archives_when_their_download_starts(
+    tmp_path: Path,
+) -> None:
+    now = [1_786_420_800]
+
+    class TwoArchiveReader:
+        async def list_page(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            status: str,
+            page_number: int,
+            page_size: int,
+        ) -> Tuple[Mapping[str, Any], ...]:
+            del _bundle, account_id, credential_version, status, page_size
+            if page_number > 1:
+                return ()
+            return tuple(
+                {
+                    'Archive': {
+                        'aid': 101 + index,
+                        'bvid': 'BV1daily{:04d}'.format(index),
+                        'title': '夏季赛录播 {}'.format(index),
+                        'pubtime': now[0] - index - 60,
+                    }
+                }
+                for index in range(2)
+            )
+
+        async def viewer_detail(
+            self,
+            _bundle: object,
+            *,
+            account_id: int,
+            credential_version: int,
+            bvid: str,
+        ) -> Mapping[str, Any]:
+            del _bundle, account_id, credential_version
+            suffix = int(bvid[-4:])
+            return {
+                'data': {
+                    'aid': 101 + suffix,
+                    'bvid': bvid,
+                    'title': '夏季赛录播 {}'.format(suffix),
+                    'pages': [
+                        {
+                            'page': page,
+                            'cid': 1_000 + suffix * 10 + page,
+                            'part': 'P{}'.format(page),
+                            'duration': 600,
+                        }
+                        for page in (1, 2)
+                    ],
+                }
+            }
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    cache = FakeRemoteMediaCache()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            TwoArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=cache,
+            clock=lambda: now[0],
+        )
+        await service.request(1)
+        await service.update_control(1, daily_limit=1)
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        assert (await service.status(1)).daily_used == 0
+        assert cache.requests == []
+
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        first_day = await service.status(1)
+        assert first_day.daily_used == 1
+        assert len(cache.requests) == 2
+        assert cache.force_remote_requests == [True, True]
+        assert await service.run_once() is False
+
+        imports = await database.fetchall(
+            'SELECT state,page_count FROM vainglory_archive_imports '
+            'ORDER BY recording_started_at DESC'
+        )
+        assert [(str(row['state']), int(row['page_count'])) for row in imports] == [
+            ('analyzing', 2),
+            ('queued', 0),
+        ]
+
+        now[0] += 24 * 60 * 60
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        second_day = await service.status(1)
+        assert second_day.daily_used == 1
+        assert second_day.quota_day != first_day.quota_day
+        assert len(cache.requests) == 4
+        assert cache.force_remote_requests == [True, True, True, True]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_logically_deleted_local_residue_forces_archive_download(
+    tmp_path: Path,
+) -> None:
+    class ResidueAwareCache(FakeRemoteMediaCache):
+        async def request(
+            self, part_id: int, *, force_remote: bool = False
+        ) -> RemoteMediaStatus:
+            self.requests.append(part_id)
+            self.force_remote_requests.append(force_remote)
+            return RemoteMediaStatus(
+                part_id=part_id,
+                state='pending' if force_remote else 'local',
+                progress=0,
+                remote_available=force_remote,
+            )
+
+    database = BiliUploadDatabase(str(tmp_path / 'blrec.sqlite3'))
+    await database.open()
+    cache = ResidueAwareCache()
+    try:
+        await seed_account(database)
+        service = ArchiveBackfillService(
+            database,
+            FakeArchiveReader(),
+            bundle_loader=lambda _account_id: async_value(object()),
+            remote_media_cache=cache,
+            clock=lambda: 1_000,
+        )
+        await service.request(1)
+        assert await service.run_once() is True
+        assert await service.run_once() is True
+        part_id = int(
+            await database.scalar(
+                'SELECT recording_part_id FROM vainglory_archive_parts '
+                'ORDER BY page LIMIT 1'
+            )
+        )
+        await database.execute(
+            "UPDATE recording_parts SET final_path='/rec/residue.mp4',"
+            "artifact_state='ready',video_deleted_at=999 WHERE id=?",
+            (part_id,),
+        )
+        await database.execute(
+            'INSERT INTO vainglory_part_jobs('
+            'part_id,session_id,state,request_kind,progress,algorithm_version,'
+            'match_count,error,requested_at,started_at,completed_at,updated_at) '
+            "SELECT id,session_id,'pending','archive',0,15,0,NULL,1000,NULL,NULL,1000 "
+            'FROM recording_parts WHERE id=?',
+            (part_id,),
+        )
+        await database.execute(
+            "UPDATE vainglory_archive_syncs SET state='failed',"
+            "error='历史发现暂时失败' WHERE account_id=1"
+        )
+
+        assert await service.run_once() is True
+
+        assert cache.requests == [part_id]
+        assert cache.force_remote_requests == [True]
+        assert (
+            await database.scalar(
+                'SELECT state FROM vainglory_archive_parts '
+                'WHERE recording_part_id=?',
+                (part_id,),
+            )
+            == 'downloading'
+        )
     finally:
         await database.close()
 
