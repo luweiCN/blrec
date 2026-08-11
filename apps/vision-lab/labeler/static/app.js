@@ -1788,6 +1788,27 @@ function appendCandidateHeroSelectVariant(group) {
     buttons.appendChild(button);
   });
   group.appendChild(buttons);
+  const item = currentCandidate();
+  const selectedVariant = candidateDraft.hero_select_variant;
+  const variantSuggestion = candidateSuggestion(item || {}, 'hero_select_variant');
+  const variantSource = document.createElement('p');
+  variantSource.className = 'hint small';
+  if (variantSuggestion && variantSuggestion.label === selectedVariant &&
+      variantSuggestion.origin === 'new_model_prefill') {
+    variantSource.textContent = `新模型建议 · ${(
+      Number(variantSuggestion.confidence || 0) * 100).toFixed(1)}%`;
+  } else if (item && item.hero_select_variant === selectedVariant &&
+      selectedVariant) {
+    variantSource.textContent = '本图已经人工保存；不是本次模型新判断。';
+  } else if (label === 'select_aram' && selectedVariant === 'random') {
+    variantSource.textContent = '按大乱斗规则预填“随机英雄”；不是独立模型结果。';
+  } else if (candidateCachedReviewLabels().hero_select_variant === selectedVariant &&
+      selectedVariant) {
+    variantSource.textContent = '沿用上一次人工选择的缓存；不是模型结果。';
+  } else {
+    variantSource.textContent = '当前模型尚不判断 BP／盲选，请人工选择。';
+  }
+  group.appendChild(variantSource);
 
   const visibilityHeading = document.createElement('p');
   visibilityHeading.className = 'candidate-subheading';
