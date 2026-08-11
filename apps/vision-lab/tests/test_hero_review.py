@@ -380,18 +380,23 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 ('', self.frame_id),
             )
 
-        def recognize(_path, slots):
-            return [
-                {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
-                for slot in slots
-            ]
+        def recognize(_conn, _path, slots, **_kwargs):
+            return {
+                'complete': True,
+                'slots': [
+                    {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
+                    for slot in slots
+                ],
+                'model_runs': {'hero_identity': 'hero-identity-run'},
+                'player_suggestion': None,
+            }
 
         with (
             mock.patch.object(
                 server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
             ),
             mock.patch.object(
-                server.hero_review, 'recognize_slots', side_effect=recognize
+                server.model_prefill, 'prefill_hero_slots', side_effect=recognize
             ),
         ):
             lineup = server.api_save_training_review_hero_layout(
@@ -444,18 +449,23 @@ class TestHeroReviewStorage(HeroReviewTestCase):
                 "'2026-08-09T12:01:00' WHERE streamer = '测试主播'"
             )
 
-        def recognize(_path, slots):
-            return [
-                {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
-                for slot in slots
-            ]
+        def recognize(_conn, _path, slots, **_kwargs):
+            return {
+                'complete': True,
+                'slots': [
+                    {**slot, 'suggested_label': 'Adagio', 'suggestion_confidence': 0.8}
+                    for slot in slots
+                ],
+                'model_runs': {'hero_identity': 'hero-identity-run'},
+                'player_suggestion': None,
+            }
 
         with (
             mock.patch.object(
                 server, '_conn', side_effect=lambda: db.connect(self.root / 'lab.db')
             ),
             mock.patch.object(
-                server.hero_review, 'recognize_slots', side_effect=recognize
+                server.model_prefill, 'prefill_hero_slots', side_effect=recognize
             ),
         ):
             lineup = server.api_training_review_hero_lineup(

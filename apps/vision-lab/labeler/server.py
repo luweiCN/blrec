@@ -1162,6 +1162,31 @@ def _hero_lineup_payload(
     return payload
 
 
+def _save_new_model_hero_prefill_source(
+    conn: Any,
+    *,
+    frame_id: int,
+    item: Dict[str, Any],
+    screen_type: str,
+    team_size: int,
+    result: Dict[str, Any],
+) -> None:
+    db.add_training_review_source(
+        conn,
+        frame_id=frame_id,
+        source_type='new_model_hero_prefill',
+        source_id=f'frame:{frame_id}',
+        metadata={
+            'screen_type': screen_type,
+            'team_size': team_size,
+            'model_runs': result.get('model_runs') or {},
+            'player_suggestion': result.get('player_suggestion'),
+            'detected': int(result.get('detected') or 0),
+        },
+        image_path=str(item['frame_path']),
+    )
+
+
 @app.get('/api/training-review/heroes')
 def api_training_review_heroes() -> Dict[str, Any]:
     try:
@@ -1269,19 +1294,13 @@ def api_training_review_hero_lineup(
                         method='new-model-cascade-v1',
                         slots=model_result['slots'],
                     )
-                    db.add_training_review_source(
+                    _save_new_model_hero_prefill_source(
                         conn,
                         frame_id=frame_id,
-                        source_type='new_model_hero_prefill',
-                        source_id=f'frame:{frame_id}',
-                        metadata={
-                            'screen_type': inferred_screen,
-                            'team_size': inferred_size,
-                            'model_runs': model_result.get('model_runs') or {},
-                            'player_suggestion': model_result.get('player_suggestion'),
-                            'detected': int(model_result.get('detected') or 0),
-                        },
-                        image_path=str(item['frame_path']),
+                        item=item,
+                        screen_type=inferred_screen,
+                        team_size=inferred_size,
+                        result=model_result,
                     )
                     item = db.get_training_review_item(conn, frame_id) or item
                 finally:
@@ -1319,11 +1338,21 @@ def api_training_review_hero_lineup(
     ):
         return _hero_lineup_payload(existing, item=item)
     try:
-        slots = hero_review.recognize_slots(
-            Path(str(item['frame_path'])), template['slots']
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
+        with _db_lock:
+            conn = _conn()
+            try:
+                model_result = model_prefill.prefill_hero_slots(
+                    conn,
+                    Path(str(item['frame_path'])),
+                    template['slots'],
+                    screen_type=inferred_screen,
+                    team_size=inferred_size,
+                )
+            finally:
+                conn.close()
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HTTPException(422, f'英雄预填失败：{exc}') from exc
+    slots = model_result['slots']
     with _db_lock:
         conn = _conn()
         try:
@@ -1332,9 +1361,23 @@ def api_training_review_hero_lineup(
                 frame_id=frame_id,
                 screen_type=inferred_screen,
                 team_size=inferred_size,
-                method='layout-template+sift-v1',
+                method=(
+                    'layout-template+hero-identity-v1'
+                    if model_result.get('complete')
+                    else 'layout-template+manual-v1'
+                ),
                 slots=slots,
             )
+            if model_result.get('complete'):
+                _save_new_model_hero_prefill_source(
+                    conn,
+                    frame_id=frame_id,
+                    item=item,
+                    screen_type=inferred_screen,
+                    team_size=inferred_size,
+                    result=model_result,
+                )
+                item = db.get_training_review_item(conn, frame_id) or item
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -1385,9 +1428,22 @@ def api_save_training_review_hero_layout(
         for value in raw_slots
         if isinstance(value, dict)
     ]
+    model_result: Optional[Dict[str, Any]] = None
     try:
         if recognize:
-            slots = hero_review.recognize_slots(Path(str(item['frame_path'])), slots)
+            with _db_lock:
+                conn = _conn()
+                try:
+                    model_result = model_prefill.prefill_hero_slots(
+                        conn,
+                        Path(str(item['frame_path'])),
+                        slots,
+                        screen_type=screen_type,
+                        team_size=team_size,
+                    )
+                finally:
+                    conn.close()
+            slots = model_result['slots']
         else:
             existing_slots = {
                 (slot['side'], int(slot['slot'])): slot
@@ -1410,10 +1466,22 @@ def api_save_training_review_hero_layout(
                     screen_type=screen_type,
                     team_size=team_size,
                     method=(
-                        'manual-circle+sift-v1' if recognize else 'manual-circle-v1'
+                        'manual-circle+hero-identity-v1'
+                        if recognize and model_result and model_result.get('complete')
+                        else 'manual-circle-v1'
                     ),
                     slots=slots,
                 )
+                if model_result and model_result.get('complete'):
+                    _save_new_model_hero_prefill_source(
+                        conn,
+                        frame_id=frame_id,
+                        item=item,
+                        screen_type=screen_type,
+                        team_size=team_size,
+                        result=model_result,
+                    )
+                    item = db.get_training_review_item(conn, frame_id) or item
                 if save_template and template_streamer:
                     db.save_training_review_hero_template(
                         conn,
@@ -1432,7 +1500,7 @@ def api_save_training_review_hero_layout(
         finally:
             conn.close()
     lineup['template_saved'] = save_template and bool(template_streamer)
-    return _hero_lineup_payload(lineup)
+    return _hero_lineup_payload(lineup, item=item)
 
 
 @app.get('/api/training-review/items/{frame_id}/heroes/{side}/{slot}/crop')

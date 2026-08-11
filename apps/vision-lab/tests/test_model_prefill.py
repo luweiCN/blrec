@@ -211,6 +211,27 @@ class TestModelPrefill(unittest.TestCase):
         self.assertEqual(context['team_size'], 3)
         self.assertTrue(all(slot['crop']['y'] >= 0.2 for slot in slots))
 
+    def test_context_prefills_none_only_when_detector_found_no_avatar(self):
+        none_context = model_prefill._infer_hero_context_suggestion(
+            [], result_found=False, raw_top_conf=0.08
+        )
+        partial_context = model_prefill._infer_hero_context_suggestion(
+            [
+                {
+                    'class': 'hero_avatar',
+                    'conf': 0.9,
+                    'xywh_norm': [0.4, 0.1, 0.05, 0.08],
+                }
+            ],
+            result_found=False,
+            raw_top_conf=0.9,
+        )
+
+        self.assertEqual(none_context['screen_type'], 'none')
+        self.assertEqual(none_context['confidence'], 0.92)
+        self.assertEqual(partial_context['screen_type'], 'unreadable')
+        self.assertFalse(partial_context['complete_detection'])
+
     def test_hero_prefill_orders_detector_boxes_and_classifies_each_crop(self):
         Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)
         boxes = []
@@ -268,6 +289,54 @@ class TestModelPrefill(unittest.TestCase):
         self.assertEqual(
             result['player_suggestion'],
             {'side': 'right', 'slot': 2, 'confidence': 0.92},
+        )
+
+    def test_known_manual_slots_use_new_identity_model_without_detector(self):
+        Image.new('RGB', (1280, 720), (20, 30, 40)).save(self.image)
+        slots = [
+            {
+                'side': side,
+                'slot': slot,
+                'crop': {
+                    'x': 0.4 if side == 'left' else 0.55,
+                    'y': 0.2 + slot * 0.1,
+                    'w': 0.05,
+                    'h': 0.08,
+                },
+            }
+            for side in ('left', 'right')
+            for slot in range(1, 4)
+        ]
+        heroes = iter(
+            ('adagio', 'alpha', 'ardan', 'baron', 'blackfeather', 'catherine')
+        )
+
+        def prediction(_artifact, metadata, _image, conf_thr=0.25):
+            task_id = metadata['task_id']
+            if task_id == 'hero_identity':
+                return {
+                    'task': 'classify',
+                    'top1': {'class': next(heroes), 'prob': 0.81},
+                }
+            if task_id == 'player_position':
+                return {'task': 'classify', 'top1': {'class': 'left1', 'prob': 0.93}}
+            raise AssertionError(f'不应运行 {task_id}')
+
+        with mock.patch.object(
+            model_prefill.inference, 'run_artifact', side_effect=prediction
+        ) as run_artifact:
+            result = model_prefill.prefill_hero_slots(
+                self.conn, self.image, slots, screen_type='result_page', team_size=3
+            )
+
+        self.assertTrue(result['complete'])
+        self.assertEqual(run_artifact.call_count, 7)
+        self.assertEqual(
+            [slot['suggested_label'] for slot in result['slots']],
+            ['adagio', 'alpha', 'ardan', 'baron', 'blackfeather', 'catherine'],
+        )
+        self.assertEqual(
+            result['player_suggestion'], {'side': 'left', 'slot': 1, 'confidence': 0.93}
         )
 
 

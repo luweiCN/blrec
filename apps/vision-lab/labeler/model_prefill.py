@@ -210,6 +210,7 @@ def prefill_training_review_item(
                 result_found=(
                     suggestions.get('result_panel', {}).get('label') == 'result_panel'
                 ),
+                raw_top_conf=float(hero_output.get('raw_top_conf') or 0),
             )
             model_outputs.append(
                 {
@@ -299,12 +300,28 @@ def _hero_context_payload(
 
 
 def _infer_hero_context_suggestion(
-    detections: List[Dict[str, Any]], *, result_found: bool
-) -> Optional[Dict[str, Any]]:
+    detections: List[Dict[str, Any]], *, result_found: bool, raw_top_conf: float = 0.0
+) -> Dict[str, Any]:
     """用头像排列推断 HUD／积分板；不确定时宁可不自动选择。"""
     usable = _usable_avatar_detections(detections)
+    if not usable:
+        return {
+            'screen_type': 'none',
+            'team_size': None,
+            'confidence': round(max(0.0, min(1.0, 1.0 - raw_top_conf)), 4),
+            'detected': 0,
+            'complete_detection': True,
+        }
     if len(usable) < 6:
-        return None
+        return {
+            'screen_type': 'unreadable',
+            'team_size': None,
+            'confidence': round(
+                sum(value['confidence'] for value in usable) / len(usable), 4
+            ),
+            'detected': len(usable),
+            'complete_detection': False,
+        }
     panel = [value for value in usable if value['center_y'] >= 0.10]
     top = [value for value in usable if value['center_y'] <= 0.22]
     if result_found and len(panel) >= 6:
@@ -317,7 +334,15 @@ def _infer_hero_context_suggestion(
         top_y = [value['center_y'] for value in top]
         if max(top_y) - min(top_y) <= 0.10:
             return _hero_context_payload(top, screen_type='gameplay_hud')
-    return None
+    return {
+        'screen_type': 'unreadable',
+        'team_size': None,
+        'confidence': round(
+            sum(value['confidence'] for value in usable) / len(usable), 4
+        ),
+        'detected': len(usable),
+        'complete_detection': False,
+    }
 
 
 def _ordered_avatar_slots(
@@ -378,6 +403,100 @@ def _crop_to_path(
     image.crop((left, top, right, bottom)).save(destination, format='JPEG', quality=95)
 
 
+def _player_position_suggestion(
+    context: Optional[Dict[str, Any]],
+    frame_path: Path,
+    *,
+    screen_type: str,
+    team_size: int,
+) -> Optional[Dict[str, Any]]:
+    if context is None or screen_type not in {'scoreboard', 'result_page'}:
+        return None
+    prediction = inference.run_artifact(
+        context['artifact'], context['metadata'], frame_path
+    )
+    top1 = prediction.get('top1')
+    if not isinstance(top1, dict):
+        return None
+    label = str(top1.get('class') or '')
+    side = (
+        'left'
+        if label.startswith('left')
+        else 'right' if label.startswith('right') else ''
+    )
+    try:
+        slot = int(label[len(side) :]) if side else 0
+    except ValueError:
+        slot = 0
+    if not side or not 1 <= slot <= team_size:
+        return None
+    return {'side': side, 'slot': slot, 'confidence': float(top1.get('prob') or 0)}
+
+
+def prefill_hero_slots(
+    conn: Any,
+    frame_path: Path,
+    slots: List[Dict[str, Any]],
+    *,
+    screen_type: str,
+    team_size: int,
+) -> Dict[str, Any]:
+    """对已经人工或缓存定位的头像框只运行新英雄身份模型。"""
+    if screen_type not in {'gameplay_hud', 'scoreboard', 'result_page'}:
+        raise ValueError('英雄阵容画面类型无效')
+    if team_size not in {3, 5}:
+        raise ValueError('英雄阵容人数必须是 3 或 5')
+    source = Path(frame_path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    normalized = [
+        {
+            'side': slot.get('side'),
+            'slot': slot.get('slot'),
+            'crop': slot.get('crop'),
+            'suggested_label': '',
+            'suggestion_confidence': 0.0,
+        }
+        for slot in slots
+    ]
+    contexts = _latest_model_contexts(conn, ('hero_identity', 'player_position'))
+    model_runs = {task_id: context['run_id'] for task_id, context in contexts.items()}
+    identity = contexts.get('hero_identity')
+    if identity is None:
+        return {
+            'complete': False,
+            'reason': '没有可用的英雄身份模型',
+            'slots': normalized,
+            'player_suggestion': None,
+            'model_runs': model_runs,
+        }
+    with Image.open(source) as opened:
+        image = opened.convert('RGB')
+    with tempfile.TemporaryDirectory(prefix='vision-lab-hero-identity-') as tmp:
+        temporary = Path(tmp)
+        for index, slot in enumerate(normalized):
+            crop_path = temporary / f'{index}.jpg'
+            _crop_to_path(image, slot['crop'], crop_path)
+            prediction = inference.run_artifact(
+                identity['artifact'], identity['metadata'], crop_path
+            )
+            top1 = prediction.get('top1')
+            if isinstance(top1, dict):
+                slot['suggested_label'] = str(top1.get('class') or '')
+                slot['suggestion_confidence'] = float(top1.get('prob') or 0)
+    return {
+        'complete': True,
+        'slots': normalized,
+        'player_suggestion': _player_position_suggestion(
+            contexts.get('player_position'),
+            source,
+            screen_type=screen_type,
+            team_size=team_size,
+        ),
+        'model_runs': model_runs,
+    }
+
+
 def prefill_hero_lineup(
     conn: Any, frame_path: Path, *, screen_type: str, team_size: int
 ) -> Dict[str, Any]:
@@ -431,30 +550,12 @@ def prefill_hero_lineup(
                 if isinstance(top1, dict):
                     slot['suggested_label'] = str(top1.get('class') or '')
                     slot['suggestion_confidence'] = float(top1.get('prob') or 0)
-    player_suggestion = None
-    player = contexts.get('player_position')
-    if player is not None and screen_type in {'scoreboard', 'result_page'}:
-        prediction = inference.run_artifact(
-            player['artifact'], player['metadata'], source
-        )
-        top1 = prediction.get('top1')
-        if isinstance(top1, dict):
-            label = str(top1.get('class') or '')
-            side = (
-                'left'
-                if label.startswith('left')
-                else 'right' if label.startswith('right') else ''
-            )
-            try:
-                slot = int(label[len(side) :]) if side else 0
-            except ValueError:
-                slot = 0
-            if side and 1 <= slot <= team_size:
-                player_suggestion = {
-                    'side': side,
-                    'slot': slot,
-                    'confidence': float(top1.get('prob') or 0),
-                }
+    player_suggestion = _player_position_suggestion(
+        contexts.get('player_position'),
+        source,
+        screen_type=screen_type,
+        team_size=team_size,
+    )
     return {
         'complete': True,
         'slots': slots,

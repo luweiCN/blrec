@@ -291,7 +291,9 @@ function candidateResultHeroCountMode(item) {
 function candidateHeroContextSuggestion(item) {
   for (const source of item.sources || []) {
     const value = source.metadata && source.metadata.hero_context_suggestion;
-    if (!value || !CANDIDATE_HERO_SCREEN_TYPES.has(value.screen_type) ||
+    if (!value || !Object.prototype.hasOwnProperty.call(
+      CANDIDATE_HERO_LAYOUTS, value.screen_type)) continue;
+    if (CANDIDATE_HERO_SCREEN_TYPES.has(value.screen_type) &&
         ![3, 5].includes(Number(value.team_size))) continue;
     return value;
   }
@@ -425,14 +427,25 @@ function normalizeCandidateHeroSelectVariant(draft) {
 }
 
 function candidateSuggestedResultBox(item) {
+  const newModelSource = (item.sources || []).find(
+    (source) => source.source_type === 'new_model_prefill');
+  const newModelBox = (newModelSource && newModelSource.metadata &&
+    newModelSource.metadata.suggested_boxes || []).find((value) =>
+    ['result_panel', ''].includes(value.type || value.box_type || ''));
+  if (['pending', 'partial'].includes(item.review_status) && newModelBox) {
+    return {...newModelBox, type: 'result_panel', source: 'new_model'};
+  }
   if (item.boxes && item.boxes.result_panel) {
-    return {...item.boxes.result_panel, type: 'result_panel'};
+    return {...item.boxes.result_panel, type: 'result_panel', source: 'saved'};
+  }
+  if (newModelBox) {
+    return {...newModelBox, type: 'result_panel', source: 'new_model'};
   }
   for (const source of item.sources || []) {
     const boxes = source.metadata && source.metadata.suggested_boxes || [];
     const box = boxes.find((value) =>
       ['result_panel', ''].includes(value.type || value.box_type || ''));
-    if (box) return {...box, type: 'result_panel'};
+    if (box) return {...box, type: 'result_panel', source: 'legacy_suggestion'};
   }
   return null;
 }
@@ -614,6 +627,11 @@ function renderCandidateBoxes() {
   candidateBoxes.forEach((box) => {
     const node = document.createElement('div');
     node.className = 'candidate-box result-box';
+    node.title = box.source === 'new_model'
+      ? '新结算模型在本图检测出的结算框'
+      : box.source === 'saved'
+        ? '本图已经保存的结算框'
+        : '历史候选在本图给出的结算框';
     node.style.left = `${box.x * 100}%`;
     node.style.top = `${box.y * 100}%`;
     node.style.width = `${box.w * 100}%`;
