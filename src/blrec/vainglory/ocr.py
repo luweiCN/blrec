@@ -121,6 +121,13 @@ _DEFAULT_NAME_READER = object()
 class TesseractResultReader:
     _REFERENCE_WIDTH = 1920
     _REFERENCE_HEIGHT = 1080
+    _DURATION_REVIEW_MINIMUM_SECONDS = 10 * 60
+    _DURATION_REVIEW_MAXIMUM_SECONDS = 60 * 60
+    _DURATION_RECTS = {
+        3: PixelRect(910, 300, 1030, 344),
+        5: PixelRect(920, 160, 1020, 210),
+    }
+    _DURATION_SEARCH_RECT = PixelRect(780, 80, 1140, 360)
     _ROW_Y = (330, 464, 598)
     _FIVE_PLAYER_ROW_Y = (205, 339, 473, 607, 741)
     _SIDE_X = (('left', 210), ('right', 1110))
@@ -483,7 +490,83 @@ class TesseractResultReader:
                 page_segmentation_mode=6,
             )
         )
-        return merge_result_headers(header_candidates)
+        header = merge_result_headers(header_candidates)
+        observed_durations = tuple(
+            item.duration_seconds
+            for item, _confidence in header_candidates
+            if item.duration_seconds is not None
+        )
+        if (
+            header.duration_seconds is not None
+            and self._DURATION_REVIEW_MINIMUM_SECONDS
+            <= header.duration_seconds
+            <= self._DURATION_REVIEW_MAXIMUM_SECONDS
+            and len(observed_durations) >= 2
+            and len(set(observed_durations)) == 1
+        ):
+            return header
+        focused_duration = self._read_duration_region(
+            frame,
+            rect=self._DURATION_RECTS[team_size],
+            scale=3,
+            page_segmentation_mode=7,
+            viewport=viewport,
+        )
+        search_duration = self._read_duration_region(
+            frame,
+            rect=self._DURATION_SEARCH_RECT,
+            scale=2,
+            page_segmentation_mode=11,
+            viewport=viewport,
+        )
+        logger.info(
+            'Vainglory result duration verification: viewport={} team_size={} '
+            'primary={} focused={} search={} candidates={}',
+            viewport.name,
+            team_size,
+            header.duration_seconds,
+            focused_duration,
+            search_duration,
+            observed_durations,
+        )
+        if focused_duration is None or focused_duration != search_duration:
+            return header
+        return replace(header, duration_seconds=focused_duration)
+
+    def _read_duration_region(
+        self,
+        frame: RgbFrame,
+        *,
+        rect: PixelRect,
+        scale: int,
+        page_segmentation_mode: int,
+        viewport: ViewportTransform,
+    ) -> Optional[int]:
+        duration_frame = self._crop_reference(
+            frame,
+            rect,
+            (rect.right - rect.left) * scale,
+            (rect.bottom - rect.top) * scale,
+            viewport=viewport,
+        )
+        candidates = tuple(
+            (parse_game_timer(value.text), value.confidence)
+            for value in self._read_variants(
+                duration_frame,
+                thresholds=(None, 50, 90),
+                languages='eng',
+                page_segmentation_mode=page_segmentation_mode,
+                whitelist='0123456789:',
+            )
+        )
+        present = tuple(value for value, _confidence in candidates if value is not None)
+        if not present:
+            return None
+        counts = Counter(present)
+        selected = _choose_candidate_value(candidates, None)
+        if selected is None or counts[selected] < 2:
+            return None
+        return selected
 
     def _read_variants(
         self,

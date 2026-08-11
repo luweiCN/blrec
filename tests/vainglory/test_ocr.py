@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from blrec.vainglory.ocr import (
     PlayerStats,
+    TesseractResultReader,
     clean_player_name,
     parse_game_timer,
     parse_player_stats,
@@ -7,6 +10,95 @@ from blrec.vainglory.ocr import (
     resolve_player_stats,
     result_end_reason,
 )
+from blrec.vainglory.vision import RgbFrame
+
+
+def test_read_header_verifies_a_suspicious_duration_two_ways() -> None:
+    class Reader(TesseractResultReader):
+        def __init__(self) -> None:
+            super().__init__(name_reader=None)
+            self.verification_calls = []
+
+        def _read_variants(self, frame: RgbFrame, **options: object) -> tuple:
+            if options.get('whitelist') == '0123456789:':
+                self.verification_calls.append((frame.width, frame.height, options))
+                values = (('12:05', 0.90), ('12:05', 0.93), ('12:05', 0.91))
+            else:
+                values = (
+                    ('', 0.28),
+                    ('12:05', 0.44),
+                    ('| 2:05', 0.50),
+                    ('] 2:05', 0.37),
+                )
+            return tuple(
+                SimpleNamespace(text=text, confidence=confidence)
+                for text, confidence in values
+            )
+
+    reader = Reader()
+    frame = RgbFrame(192, 108, b'\x00\x00\x00' * 192 * 108)
+
+    header = reader.read_header(frame)
+
+    assert header.duration_seconds == 12 * 60 + 5
+    assert [
+        call[2]['page_segmentation_mode'] for call in reader.verification_calls
+    ] == [7, 11]
+
+
+def test_read_header_does_not_recheck_a_consistent_normal_duration() -> None:
+    class Reader(TesseractResultReader):
+        def __init__(self) -> None:
+            super().__init__(name_reader=None)
+
+        def _read_variants(self, _frame: RgbFrame, **options: object) -> tuple:
+            assert options.get('whitelist') is None
+            values = (
+                ('14:38', 0.90),
+                ('14:38', 0.88),
+                ('14:38', 0.86),
+                ('14:38', 0.84),
+            )
+            return tuple(
+                SimpleNamespace(text=text, confidence=confidence)
+                for text, confidence in values
+            )
+
+    frame = RgbFrame(192, 108, b'\x00\x00\x00' * 192 * 108)
+
+    header = Reader().read_header(frame)
+
+    assert header.duration_seconds == 14 * 60 + 38
+
+
+def test_read_header_keeps_the_primary_duration_when_verifiers_disagree() -> None:
+    class Reader(TesseractResultReader):
+        def __init__(self) -> None:
+            super().__init__(name_reader=None)
+
+        def _read_variants(self, _frame: RgbFrame, **options: object) -> tuple:
+            page_mode = options.get('page_segmentation_mode')
+            if page_mode == 7:
+                values = (('12:05', 0.90), ('12:05', 0.93), ('12:05', 0.91))
+            elif page_mode == 11:
+                values = (('13:05', 0.90), ('13:05', 0.93), ('13:05', 0.91))
+            else:
+                values = (
+                    ('2:05', 0.90),
+                    ('2:05', 0.88),
+                    ('2:05', 0.86),
+                    ('2:05', 0.84),
+                )
+            return tuple(
+                SimpleNamespace(text=text, confidence=confidence)
+                for text, confidence in values
+            )
+
+    frame = RgbFrame(192, 108, b'\x00\x00\x00' * 192 * 108)
+
+    header = Reader().read_header(frame)
+
+    assert header.duration_seconds == 2 * 60 + 5
 
 
 def test_parse_chinese_result_header_keeps_reason_separate_from_winner() -> None:
